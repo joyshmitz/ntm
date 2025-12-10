@@ -575,6 +575,38 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "program_name = %q\n", cfg.AgentMail.ProgramName)
 	fmt.Fprintln(w)
 
+	// Write models configuration
+	fmt.Fprintln(w, "[models]")
+	fmt.Fprintln(w, "# Default models when no specifier given")
+	fmt.Fprintf(w, "default_claude = %q\n", cfg.Models.DefaultClaude)
+	fmt.Fprintf(w, "default_codex = %q\n", cfg.Models.DefaultCodex)
+	fmt.Fprintf(w, "default_gemini = %q\n", cfg.Models.DefaultGemini)
+	fmt.Fprintln(w)
+
+	// Write Claude model aliases
+	fmt.Fprintln(w, "[models.claude]")
+	fmt.Fprintln(w, "# Claude model aliases (e.g., --cc=2:opus)")
+	for alias, fullName := range cfg.Models.Claude {
+		fmt.Fprintf(w, "%s = %q\n", alias, fullName)
+	}
+	fmt.Fprintln(w)
+
+	// Write Codex model aliases
+	fmt.Fprintln(w, "[models.codex]")
+	fmt.Fprintln(w, "# Codex model aliases (e.g., --cod=2:max)")
+	for alias, fullName := range cfg.Models.Codex {
+		fmt.Fprintf(w, "%s = %q\n", alias, fullName)
+	}
+	fmt.Fprintln(w)
+
+	// Write Gemini model aliases
+	fmt.Fprintln(w, "[models.gemini]")
+	fmt.Fprintln(w, "# Gemini model aliases (e.g., --gmi=1:flash)")
+	for alias, fullName := range cfg.Models.Gemini {
+		fmt.Fprintf(w, "%s = %q\n", alias, fullName)
+	}
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "# Command Palette entries")
 	fmt.Fprintln(w, "# Add your own prompts here")
 	fmt.Fprintln(w)
