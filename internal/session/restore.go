@@ -128,7 +128,16 @@ func RestoreAgents(sessionName string, state *SessionState, cfg AgentConfig) err
 		}
 
 		// Launch agent
-		cmd := fmt.Sprintf("cd %q && %s", state.WorkDir, agentCmd)
+		safeAgentCmd, err := tmux.SanitizePaneCommand(agentCmd)
+		if err != nil {
+			continue
+		}
+
+		cmd, err := tmux.BuildPaneCommand(state.WorkDir, safeAgentCmd)
+		if err != nil {
+			continue
+		}
+
 		if err := tmux.SendKeys(panes[i].ID, cmd, true); err != nil {
 			// Non-fatal - continue with other agents
 			continue

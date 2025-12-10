@@ -12,15 +12,15 @@ import (
 
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
-	Session     string
-	CCCount     int    // Claude agents
-	CodCount    int    // Codex agents
-	GmiCount    int    // Gemini agents
-	Preset      string // Recipe/preset name
-	NoUserPane  bool   // Don't create user pane
-	WorkingDir  string // Override working directory
-	WaitReady   bool   // Wait for agents to be ready
-	ReadyTimeout int   // Timeout in seconds for ready detection
+	Session      string
+	CCCount      int    // Claude agents
+	CodCount     int    // Codex agents
+	GmiCount     int    // Gemini agents
+	Preset       string // Recipe/preset name
+	NoUserPane   bool   // Don't create user pane
+	WorkingDir   string // Override working directory
+	WaitReady    bool   // Wait for agents to be ready
+	ReadyTimeout int    // Timeout in seconds for ready detection
 }
 
 // SpawnOutput is the structured output for --robot-spawn.
@@ -220,7 +220,20 @@ func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, comman
 	}
 
 	// Launch agent command
-	cmd := fmt.Sprintf("cd %q && %s", dir, command)
+	safeCommand, err := tmux.SanitizePaneCommand(command)
+	if err != nil {
+		agent.Error = fmt.Sprintf("invalid command: %v", err)
+		agent.StartupMs = time.Since(startTime).Milliseconds()
+		return agent
+	}
+
+	cmd, err := tmux.BuildPaneCommand(dir, safeCommand)
+	if err != nil {
+		agent.Error = fmt.Sprintf("building command: %v", err)
+		agent.StartupMs = time.Since(startTime).Milliseconds()
+		return agent
+	}
+
 	if err := tmux.SendKeys(pane.ID, cmd, true); err != nil {
 		agent.Error = fmt.Sprintf("launching: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
@@ -286,10 +299,10 @@ func isAgentReady(output, agentType string) bool {
 		"claude >",
 		"codex>",
 		"gemini>",
-		">>>",      // Python REPL
-		"$ ",       // Shell prompt
-		"% ",       // Zsh prompt
-		"❯",        // Modern prompts
+		">>>", // Python REPL
+		"$ ",  // Shell prompt
+		"% ",  // Zsh prompt
+		"❯",   // Modern prompts
 		"waiting for input",
 		"ready",
 		"how can i help",
