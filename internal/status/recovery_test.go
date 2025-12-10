@@ -345,3 +345,75 @@ func TestRecoveryManager_SendRecoveryPrompt_NoTmux(t *testing.T) {
 		t.Log("SendRecoveryPrompt returned false (skipped)")
 	}
 }
+
+func TestBuildContextAwarePrompt_NoContext(t *testing.T) {
+	basePrompt := "Reread AGENTS.md"
+
+	// Without bead context
+	result := BuildContextAwarePrompt(basePrompt, false)
+	if result != basePrompt {
+		t.Errorf("without bead context, should return base prompt unchanged")
+	}
+}
+
+func TestBuildContextAwarePrompt_WithContext(t *testing.T) {
+	basePrompt := "Reread AGENTS.md"
+
+	// With bead context - this tests the real bv integration
+	result := BuildContextAwarePrompt(basePrompt, true)
+
+	// Should at least contain the base prompt
+	if len(result) < len(basePrompt) {
+		t.Errorf("result should contain at least the base prompt")
+	}
+
+	// If bv is available and we're in a beads project, it should be longer
+	t.Logf("Context-aware prompt length: %d (base: %d)", len(result), len(basePrompt))
+}
+
+func TestGetBeadContext(t *testing.T) {
+	ctx := GetBeadContext()
+
+	// If bv is not installed, ctx should be nil
+	// If bv is installed but not in a beads project, we'll get partial data
+	// If in a beads project, we'll get full data
+
+	if ctx == nil {
+		t.Log("GetBeadContext returned nil (bv not available)")
+	} else {
+		t.Logf("GetBeadContext: bottlenecks=%d, actions=%d, health=%s, drift=%v",
+			len(ctx.TopBottlenecks), len(ctx.NextActions), ctx.HealthStatus, ctx.HasDrift)
+	}
+}
+
+func TestDefaultRecoveryConfig_IncludesBeadContext(t *testing.T) {
+	config := DefaultRecoveryConfig()
+
+	if !config.IncludeBeadContext {
+		t.Error("default config should include bead context")
+	}
+}
+
+func TestRecoveryManager_IncludeBeadContext(t *testing.T) {
+	// With bead context enabled
+	configWithContext := RecoveryConfig{
+		Cooldown:           30 * time.Second,
+		Prompt:             "test prompt",
+		IncludeBeadContext: true,
+	}
+	rm1 := NewRecoveryManager(configWithContext)
+	if !rm1.includeBeadContext {
+		t.Error("should have includeBeadContext true")
+	}
+
+	// Without bead context
+	configNoContext := RecoveryConfig{
+		Cooldown:           30 * time.Second,
+		Prompt:             "test prompt",
+		IncludeBeadContext: false,
+	}
+	rm2 := NewRecoveryManager(configNoContext)
+	if rm2.includeBeadContext {
+		t.Error("should have includeBeadContext false")
+	}
+}

@@ -2,9 +2,11 @@ package status
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -32,31 +34,34 @@ type RecoveryEvent struct {
 
 // RecoveryManager handles sending recovery prompts with cooldown protection.
 type RecoveryManager struct {
-	mu             sync.RWMutex
-	lastRecovery   map[string]time.Time      // paneID -> last recovery time
-	recoveryCount  map[string]int            // paneID -> number of recoveries
-	recoveryEvents []RecoveryEvent           // History of recovery events
-	cooldown       time.Duration
-	prompt         string
-	maxRecoveries  int
-	maxEventAge    time.Duration
+	mu                 sync.RWMutex
+	lastRecovery       map[string]time.Time      // paneID -> last recovery time
+	recoveryCount      map[string]int            // paneID -> number of recoveries
+	recoveryEvents     []RecoveryEvent           // History of recovery events
+	cooldown           time.Duration
+	prompt             string
+	maxRecoveries      int
+	maxEventAge        time.Duration
+	includeBeadContext bool
 }
 
 // RecoveryConfig holds configuration for recovery behavior.
 type RecoveryConfig struct {
-	Cooldown      time.Duration // Minimum time between recovery prompts
-	Prompt        string        // The recovery prompt to send
-	MaxRecoveries int           // Max recoveries per pane before giving up
-	MaxEventAge   time.Duration // How long to keep recovery events
+	Cooldown           time.Duration // Minimum time between recovery prompts
+	Prompt             string        // The recovery prompt to send
+	MaxRecoveries      int           // Max recoveries per pane before giving up
+	MaxEventAge        time.Duration // How long to keep recovery events
+	IncludeBeadContext bool          // Whether to include bead context in prompts
 }
 
 // DefaultRecoveryConfig returns default recovery configuration.
 func DefaultRecoveryConfig() RecoveryConfig {
 	return RecoveryConfig{
-		Cooldown:      DefaultCooldown,
-		Prompt:        DefaultRecoveryPrompt,
-		MaxRecoveries: DefaultMaxRecoveriesPerPane,
-		MaxEventAge:   10 * time.Minute,
+		Cooldown:           DefaultCooldown,
+		Prompt:             DefaultRecoveryPrompt,
+		MaxRecoveries:      DefaultMaxRecoveriesPerPane,
+		MaxEventAge:        10 * time.Minute,
+		IncludeBeadContext: true, // Enable by default
 	}
 }
 
@@ -76,13 +81,14 @@ func NewRecoveryManager(config RecoveryConfig) *RecoveryManager {
 	}
 
 	return &RecoveryManager{
-		lastRecovery:   make(map[string]time.Time),
-		recoveryCount:  make(map[string]int),
-		recoveryEvents: make([]RecoveryEvent, 0),
-		cooldown:       config.Cooldown,
-		prompt:         config.Prompt,
-		maxRecoveries:  config.MaxRecoveries,
-		maxEventAge:    config.MaxEventAge,
+		lastRecovery:       make(map[string]time.Time),
+		recoveryCount:      make(map[string]int),
+		recoveryEvents:     make([]RecoveryEvent, 0),
+		cooldown:           config.Cooldown,
+		prompt:             config.Prompt,
+		maxRecoveries:      config.MaxRecoveries,
+		maxEventAge:        config.MaxEventAge,
+		includeBeadContext: config.IncludeBeadContext,
 	}
 }
 
@@ -139,8 +145,11 @@ func (rm *RecoveryManager) SendRecoveryPromptByID(session string, paneIndex int,
 	// Build target for tmux (session:pane_index)
 	target := fmt.Sprintf("%s:%d", session, paneIndex)
 
+	// Build prompt with optional bead context
+	promptToSend := BuildContextAwarePrompt(rm.prompt, rm.includeBeadContext)
+
 	// Send the recovery prompt
-	if err := tmux.SendKeys(target, rm.prompt, true); err != nil {
+	if err := tmux.SendKeys(target, promptToSend, true); err != nil {
 		return false, fmt.Errorf("failed to send recovery prompt: %w", err)
 	}
 
@@ -248,6 +257,90 @@ func (rm *RecoveryManager) pruneEvents() {
 // makePaneID creates a consistent pane ID.
 func makePaneID(session string, paneIndex int) string {
 	return fmt.Sprintf("%s:%d", session, paneIndex)
+}
+
+// BeadContext contains bead-related context for recovery prompts
+type BeadContext struct {
+	TopBottlenecks    []string // Top bottleneck issue IDs
+	NextActions       []string // Recommended next actions
+	HealthStatus      string   // Project health summary
+	HasDrift          bool     // Whether drift was detected
+}
+
+// BuildContextAwarePrompt creates a recovery prompt that includes bead context
+func BuildContextAwarePrompt(basePrompt string, includeBeadContext bool) string {
+	if !includeBeadContext {
+		return basePrompt
+	}
+
+	ctx := GetBeadContext()
+	if ctx == nil {
+		return basePrompt
+	}
+
+	var sb strings.Builder
+	sb.WriteString(basePrompt)
+
+	// Add bead context
+	sb.WriteString("\n\n# Project Context from Beads\n")
+
+	if len(ctx.TopBottlenecks) > 0 {
+		sb.WriteString("\n## Current Bottlenecks (resolve these to unblock progress):\n")
+		for _, b := range ctx.TopBottlenecks {
+			sb.WriteString(fmt.Sprintf("- %s\n", b))
+		}
+	}
+
+	if len(ctx.NextActions) > 0 {
+		sb.WriteString("\n## Recommended Next Actions:\n")
+		for _, a := range ctx.NextActions {
+			sb.WriteString(fmt.Sprintf("- %s\n", a))
+		}
+	}
+
+	if ctx.HealthStatus != "" {
+		sb.WriteString(fmt.Sprintf("\n## Project Health: %s\n", ctx.HealthStatus))
+	}
+
+	if ctx.HasDrift {
+		sb.WriteString("\n**Warning**: Project has drifted from baseline. Consider running `bv` to review.\n")
+	}
+
+	return sb.String()
+}
+
+// GetBeadContext retrieves current bead context from bv
+func GetBeadContext() *BeadContext {
+	if !bv.IsInstalled() {
+		return nil
+	}
+
+	ctx := &BeadContext{}
+
+	// Get top bottlenecks
+	bottlenecks, err := bv.GetTopBottlenecks(3)
+	if err == nil && len(bottlenecks) > 0 {
+		for _, b := range bottlenecks {
+			ctx.TopBottlenecks = append(ctx.TopBottlenecks, b.ID)
+		}
+	}
+
+	// Get recommended actions
+	actions, err := bv.GetNextActions(3)
+	if err == nil && len(actions) > 0 {
+		for _, a := range actions {
+			ctx.NextActions = append(ctx.NextActions, fmt.Sprintf("[%s] %s", a.IssueID, a.Title))
+		}
+	}
+
+	// Get health summary
+	health, err := bv.GetHealthSummary()
+	if err == nil && health != nil {
+		ctx.HealthStatus = health.DriftStatus.String()
+		ctx.HasDrift = health.DriftStatus == bv.DriftCritical || health.DriftStatus == bv.DriftWarning
+	}
+
+	return ctx
 }
 
 // CompactionRecoveryIntegration combines compaction detection and recovery.
