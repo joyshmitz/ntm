@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/prompt"
 	"github.com/Dicklesworthstone/ntm/internal/templates"
@@ -623,6 +624,11 @@ func runSendInternal(session, prompt string, targets SendTargets, targetCC, targ
 			success, _, _ := hooks.CountResults(results)
 			fmt.Printf("✓ %d post-send hook(s) completed\n", success)
 		}
+	}
+
+	// Emit prompt_send event
+	if delivered > 0 {
+		events.EmitPromptSend(session, delivered, len(prompt), "", buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex), len(hookCtx.AdditionalEnv) > 0)
 	}
 
 	// JSON output mode
