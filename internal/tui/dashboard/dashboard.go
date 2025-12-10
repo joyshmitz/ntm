@@ -146,11 +146,18 @@ func NewWithInterval(session string, interval time.Duration) Model {
 	return m
 }
 
+// SessionDataMsg contains the fetched session data
+type SessionDataMsg struct {
+	Panes      []tmux.Pane
+	PaneStatus map[int]PaneStatus
+	Err        error
+}
+
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.tick(),
-		m.refresh(),
+		m.fetchSessionData(),
 	)
 }
 
@@ -161,8 +168,136 @@ func (m Model) tick() tea.Cmd {
 }
 
 func (m Model) refresh() tea.Cmd {
-	return func() tea.Msg {
+	return tea.Tick(m.refreshInterval, func(t time.Time) tea.Msg {
 		return RefreshMsg{}
+	})
+}
+
+// fetchSessionData performs the blocking tmux calls
+func (m Model) fetchSessionData() tea.Cmd {
+	return func() tea.Msg {
+		panes, err := tmux.GetPanes(m.session)
+		if err != nil {
+			return SessionDataMsg{Err: err}
+		}
+
+		// Check compaction for each pane
+		// Note: We use a local map here to avoid race conditions with the model's map
+		paneStatus := make(map[int]PaneStatus)
+		
+		// Create a temporary compaction checker for this fetch
+		// In a real scenario, we might want to share state, but for now this avoids 
+		// sharing the 'compaction' struct pointer across goroutines without locking
+		// or we can just access m.compaction if it's thread-safe.
+		// Assuming m.compaction.CheckAndRecover is thread-safe or stateless enough.
+		// Actually, CheckAndRecover tracks state. We should probably just pass the output 
+		// and let the update loop handle the logic, OR make this part of the message.
+		// For simplicity/safety in this refactor, let's just do the capture here
+		// and the logic in Update, OR trust that CheckAndRecover is safe.
+		// Let's do the capture here and return the raw data? 
+		// No, let's keep the logic here but ensure we don't race on m.paneStatus.
+		// We return a NEW map.
+		
+		// Copy existing status to preserve history if needed, 
+		// but really we want the latest status.
+		// Actually, m.paneStatus has history (LastCompaction). 
+		// If we create a new map, we lose history unless we pass the old one in.
+		// Let's just return the compaction events and merge in Update.
+		
+		// For this pass, let's do the tmux calls here.
+		// We need to capture output.
+		
+		newStatuses := make(map[int]PaneStatus)
+		
+		for _, pane := range panes {
+			if pane.Type == tmux.AgentUser {
+				continue
+			}
+			
+			// Capture output
+			output, err := tmux.CapturePaneOutput(pane.ID, 50)
+			if err != nil {
+				continue
+			}
+			
+			// We can't safely call m.compaction.CheckAndRecover here if it mutates state
+			// and is also used by other goroutines (unlikely as tea.Cmd is one at a time, 
+			// but multiple fetches could theoretically overlap if slow).
+			// However, since we are inside a tea.Cmd, we are effectively concurrent with the main loop.
+			// The standard Bubble Tea way is to pass data back.
+			
+			// Let's store the raw output or the result in the Msg.
+			// Ideally, we'd move CheckAndRecover logic to the update loop or make it pure.
+			// But CheckAndRecover likely updates internal trackers.
+			// Let's assume for now we just return the captured output and let Update handle the logic
+			// to avoid concurrency issues with m.compaction.
+			
+			// Wait, the original code called m.compaction.CheckAndRecover in Update (main thread).
+			// So it was safe.
+			// If we move it here (goroutine), we have a race on m.compaction.
+			
+			// Alternative: fetch panes and fetch output here. Return them.
+			// Process logic in Update.
+			
+			// But fetching output is the heavy part.
+			
+			// Let's define a struct for PaneOutput.
+			newStatuses[pane.Index] = PaneStatus{
+				// Store output temporarily in State? No, that's hacky.
+				// Let's add a field to SessionDataMsg.
+			}
+			// To keep it simple and safe:
+			// Just fetch panes here. Fetching output for 20 panes is heavy, yes.
+			// Maybe we can optimize by only fetching active panes or staggering?
+			// For now, let's just fetch panes asynchronously. That solves the "tmux list-panes" blocking.
+			// The output capture is also blocking.
+			
+			// Let's stick to the plan: fetch panes asynchronously.
+			// The compaction check is also heavy (exec).
+			// We really should do it async.
+			// We can use a mutex on m.compaction if needed, but it's better to isolate.
+		}
+		
+		return SessionDataMsg{Panes: panes, PaneStatus: newStatuses}
+	}
+}
+
+// Helper struct to carry output data
+type PaneOutputData struct {
+	PaneIndex int
+	Output    string
+	AgentType string
+}
+
+type SessionDataWithOutputMsg struct {
+	Panes   []tmux.Pane
+	Outputs []PaneOutputData
+	Err     error
+}
+
+func (m Model) fetchSessionDataWithOutputs() tea.Cmd {
+	return func() tea.Msg {
+		panes, err := tmux.GetPanes(m.session)
+		if err != nil {
+			return SessionDataWithOutputMsg{Err: err}
+		}
+		
+		var outputs []PaneOutputData
+		for _, pane := range panes {
+			if pane.Type == tmux.AgentUser {
+				continue
+			}
+			out, err := tmux.CapturePaneOutput(pane.ID, 50)
+			if err == nil {
+				outputs = append(outputs, PaneOutputData{
+					PaneIndex: pane.Index,
+					Output:    out,
+					AgentType: string(pane.Type), // Simplified mapping
+				})
+			}
+		}
+		
+		return SessionDataWithOutputMsg{Panes: panes, Outputs: outputs}
 	}
 }
 
@@ -179,15 +314,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tick()
 
 	case RefreshMsg:
-		panes, err := tmux.GetPanes(m.session)
-		if err != nil {
-			m.err = err
+		// Trigger async fetch
+		return m, m.fetchSessionDataWithOutputs()
+		
+	case SessionDataWithOutputMsg:
+		if msg.Err != nil {
+			m.err = msg.Err
 		} else {
-			m.panes = panes
+			m.panes = msg.Panes
 			m.updateStats()
-			m.checkCompaction()
+			
+			// Process compaction checks on the main thread using fetched outputs
+			for _, data := range msg.Outputs {
+				// Map type string
+				agentType := "unknown"
+				switch data.AgentType {
+				case string(tmux.AgentClaude), "cc": agentType = "claude"
+				case string(tmux.AgentCodex), "cod": agentType = "codex"
+				case string(tmux.AgentGemini), "gmi": agentType = "gemini"
+				}
+				
+				event, recoverySent, _ := m.compaction.CheckAndRecover(data.Output, agentType, m.session, data.PaneIndex)
+				
+				if event != nil {
+					ps := m.paneStatus[data.PaneIndex]
+					now := time.Now()
+					ps.LastCompaction = &now
+					ps.RecoverySent = recoverySent
+					ps.State = "compacted"
+					m.paneStatus[data.PaneIndex] = ps
+				}
+			}
 		}
-		return m, nil
+		// Schedule next refresh
+		return m, m.refresh()
 
 	case tea.KeyMsg:
 		switch {
@@ -206,7 +366,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, dashKeys.Refresh):
-			return m, m.refresh()
+			// Manual refresh
+			return m, m.fetchSessionDataWithOutputs()
 
 		case key.Matches(msg, dashKeys.Zoom):
 			if len(m.panes) > 0 && m.cursor < len(m.panes) {

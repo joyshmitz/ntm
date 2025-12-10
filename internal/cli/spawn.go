@@ -256,17 +256,33 @@ func runSpawnAgents(session string, agents []FlatAgent, ccCount, codCount, gmiCo
 			return outputError(fmt.Errorf("setting pane title: %w", err))
 		}
 
-		// Get agent command based on type
-		var agentCmd string
+		// Get agent command template based on type
+		var agentCmdTemplate string
 		switch agent.Type {
 		case AgentTypeClaude:
-			agentCmd = cfg.Agents.Claude
+			agentCmdTemplate = cfg.Agents.Claude
 		case AgentTypeCodex:
-			agentCmd = cfg.Agents.Codex
+			agentCmdTemplate = cfg.Agents.Codex
 		case AgentTypeGemini:
-			agentCmd = cfg.Agents.Gemini
+			agentCmdTemplate = cfg.Agents.Gemini
 		default:
 			continue
+		}
+
+		// Resolve model alias to full model name
+		resolvedModel := ResolveModel(agent.Type, agent.Model)
+
+		// Generate command using template
+		agentCmd, err := cfg.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
+			Model:       resolvedModel,
+			ModelAlias:  agent.Model,
+			SessionName: session,
+			PaneIndex:   agent.Index,
+			AgentType:   string(agent.Type),
+			ProjectDir:  dir,
+		})
+		if err != nil {
+			return outputError(fmt.Errorf("generating command for %s agent: %w", agent.Type, err))
 		}
 
 		cmd := fmt.Sprintf("cd %q && %s", dir, agentCmd)
