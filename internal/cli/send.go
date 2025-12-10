@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/spf13/cobra"
 )
@@ -67,17 +66,9 @@ func runSend(session, prompt string, targetCC, targetCod, targetGmi, targetAll, 
 	if paneIndex >= 0 {
 		for _, p := range panes {
 			if p.Index == paneIndex {
-				// Create history entry
-				entry := history.NewEntry(session, []string{fmt.Sprintf("%d", paneIndex)}, prompt, history.SourceCLI)
-
 				if err := tmux.SendKeys(p.ID, prompt, true); err != nil {
-					entry.SetError(err)
-					_ = history.Append(entry)
 					return err
 				}
-
-				entry.SetSuccess()
-				_ = history.Append(entry)
 				fmt.Printf("Sent to pane %d\n", paneIndex)
 				return nil
 			}
@@ -91,10 +82,6 @@ func runSend(session, prompt string, targetCC, targetCod, targetGmi, targetAll, 
 		// Default: send to all agent panes (skip user panes)
 		skipFirst = true
 	}
-
-	// Track targets for history
-	var targets []string
-	var sendErr error
 
 	count := 0
 	for i, p := range panes {
@@ -126,26 +113,9 @@ func runSend(session, prompt string, targetCC, targetCod, targetGmi, targetAll, 
 		}
 
 		if err := tmux.SendKeys(p.ID, prompt, true); err != nil {
-			sendErr = fmt.Errorf("sending to pane %d: %w", p.Index, err)
-			break
+			return fmt.Errorf("sending to pane %d: %w", p.Index, err)
 		}
-		targets = append(targets, fmt.Sprintf("%d", p.Index))
 		count++
-	}
-
-	// Log to history
-	if len(targets) > 0 || sendErr != nil {
-		entry := history.NewEntry(session, targets, prompt, history.SourceCLI)
-		if sendErr != nil {
-			entry.SetError(sendErr)
-		} else {
-			entry.SetSuccess()
-		}
-		_ = history.Append(entry)
-	}
-
-	if sendErr != nil {
-		return sendErr
 	}
 
 	if count == 0 {
