@@ -68,16 +68,16 @@ func LoadSessionAgent(sessionName, projectKey string) (*SessionAgentInfo, error)
 					configDir = filepath.Join(os.Getenv("HOME"), ".config")
 				}
 				sessionDir := filepath.Join(configDir, "ntm", "sessions", sessionName)
-				entries, _ := os.ReadDir(sessionDir)
-				for _, entry := range entries {
-					if !entry.IsDir() {
-						continue
-					}
-					candidate := filepath.Join(sessionDir, entry.Name(), "agent.json")
-					if candidateData, readErr := os.ReadFile(candidate); readErr == nil {
-						data = candidateData
-						path = candidate
-						break
+				if entries, readErr := os.ReadDir(sessionDir); readErr == nil {
+					for _, entry := range entries {
+						if !entry.IsDir() {
+							continue
+						}
+						candidate := filepath.Join(sessionDir, entry.Name(), "agent.json")
+						if candidateData, readErr := os.ReadFile(candidate); readErr == nil {
+							data = candidateData
+							break
+						}
 					}
 				}
 				// Still not found
@@ -105,7 +105,7 @@ func SaveSessionAgent(sessionName, projectKey string, info *SessionAgentInfo) er
 	path := sessionAgentPath(sessionName, projectKey)
 
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("creating session directory: %w", err)
 	}
 
@@ -114,7 +114,7 @@ func SaveSessionAgent(sessionName, projectKey string, info *SessionAgentInfo) er
 		return fmt.Errorf("marshaling session agent: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing session agent: %w", err)
 	}
 
@@ -237,7 +237,7 @@ func (c *Client) UpdateSessionActivity(ctx context.Context, sessionName string) 
 	}
 
 	// Re-register to update last_active_ts on server
-	_, err = c.RegisterAgent(ctx, RegisterAgentOptions{
+	_, _ = c.RegisterAgent(ctx, RegisterAgentOptions{
 		ProjectKey:      info.ProjectKey,
 		Program:         "ntm",
 		Model:           "coordinator",
