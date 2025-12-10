@@ -103,6 +103,13 @@ Shell Integration:
 			}
 			return
 		}
+		if robotGraph {
+			if err := robot.PrintGraph(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotTail != "" {
 			// Parse pane filter
 			var paneFilter []string
@@ -172,6 +179,7 @@ var (
 	robotTail     string // session name for tail
 	robotLines    int    // number of lines to capture
 	robotPanes    string // comma-separated pane filter
+	robotGraph    bool   // bv insights passthrough
 
 	// Robot-send flags
 	robotSend        string // session name for send
@@ -198,6 +206,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotTail, "robot-tail", "", "Tail pane output for session (JSON)")
 	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Number of lines to capture (used with --robot-tail)")
 	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Comma-separated pane indices to filter (used with --robot-tail/--robot-send)")
+	rootCmd.Flags().BoolVar(&robotGraph, "robot-graph", false, "Output bv graph insights as JSON for AI agents")
 
 	// Robot-send flags for batch messaging
 	rootCmd.Flags().StringVar(&robotSend, "robot-send", "", "Send prompt to panes atomically (JSON output)")
