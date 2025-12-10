@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
+
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -65,6 +67,15 @@ type HistoryListResult struct {
 	Entries    []history.HistoryEntry `json:"entries"`
 	TotalCount int                    `json:"total_count"`
 	Showing    int                    `json:"showing"`
+}
+
+// MarshalJSON ensures new fields remain stable for JSON consumers.
+func (r *HistoryListResult) MarshalJSON() ([]byte, error) {
+	// Alias to avoid recursion
+	type Alias HistoryListResult
+	return json.Marshal(&struct {
+		*Alias
+	}{Alias: (*Alias)(r)})
 }
 
 func (r *HistoryListResult) Text(w io.Writer) error {
@@ -132,10 +143,51 @@ func (r *HistoryListResult) Text(w io.Writer) error {
 }
 
 func (r *HistoryListResult) JSON() interface{} {
-	return r
+	entries := make([]HistoryListEntry, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		entries = append(entries, HistoryListEntry{
+			ID:         e.ID,
+			Timestamp:  e.Timestamp,
+			Session:    e.Session,
+			Targets:    e.Targets,
+			Prompt:     e.Prompt,
+			Source:     string(e.Source),
+			Template:   e.Template,
+			Success:    e.Success,
+			Error:      e.Error,
+			DurationMs: e.DurationMs,
+		})
+	}
+	return struct {
+		Entries    []HistoryListEntry `json:"entries"`
+		TotalCount int                `json:"total_count"`
+		Showing    int                `json:"showing"`
+	}{
+		Entries:    entries,
+		TotalCount: r.TotalCount,
+		Showing:    r.Showing,
+	}
+}
+
+// HistoryListEntry is a pared-down view for JSON output to keep field names stable.
+type HistoryListEntry struct {
+	ID         string    `json:"id"`
+	Timestamp  time.Time `json:"ts"`
+	Session    string    `json:"session"`
+	Targets    []string  `json:"targets"`
+	Prompt     string    `json:"prompt"`
+	Source     string    `json:"source"`
+	Template   string    `json:"template,omitempty"`
+	Success    bool      `json:"success"`
+	Error      string    `json:"error,omitempty"`
+	DurationMs int       `json:"duration_ms,omitempty"`
 }
 
 func runHistoryList(limit int, session, since, search, source string) error {
+	if limit <= 0 {
+		return fmt.Errorf("--limit must be greater than 0")
+	}
+
 	var entries []history.HistoryEntry
 	var err error
 
@@ -150,8 +202,6 @@ func runHistoryList(limit int, session, since, search, source string) error {
 	if err != nil {
 		return err
 	}
-
-	totalCount := len(entries)
 
 	// Apply time filter
 	if since != "" {
@@ -179,6 +229,8 @@ func runHistoryList(limit int, session, since, search, source string) error {
 		}
 		entries = filtered
 	}
+
+	totalCount := len(entries)
 
 	// Apply limit (take last N)
 	showing := len(entries)
