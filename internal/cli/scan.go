@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
+	"github.com/Dicklesworthstone/ntm/internal/watcher"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +29,7 @@ func newScanCmd() *cobra.Command {
 		updateBeads    bool
 		minSeverity    string
 		dryRun         bool
+		watch          bool
 	)
 
 	cmd := &cobra.Command{
@@ -38,9 +40,13 @@ func newScanCmd() *cobra.Command {
 UBS is a meta-scanner that detects bugs, anti-patterns, and security issues
 across multiple languages (Go, JS/TS, Python, Rust, Java, Ruby, Swift, C/C++).
 
+Watch Mode:
+  Use --watch to monitor for file changes and automatically re-scan.
+  This provides instant feedback as you fix issues.
+
 Examples:
   ntm scan                   # Scan current directory
-  ntm scan .                 # Same as above
+  ntm scan --watch           # Watch mode (auto-scan on change)
   ntm scan src/              # Scan specific directory
   ntm scan main.go           # Scan single file
   ntm scan --staged          # Scan only staged files
@@ -80,6 +86,10 @@ Examples:
 				Verbose:     verbose,
 			}
 
+			if watch {
+				return runScanWatch(absPath, opts, createBeads, updateBeads, bridgeCfg)
+			}
+
 			return runScan(absPath, opts, createBeads, updateBeads, bridgeCfg)
 		},
 	}
@@ -92,6 +102,7 @@ Examples:
 	cmd.Flags().IntVar(&timeoutSeconds, "timeout", 120, "Timeout in seconds")
 	cmd.Flags().BoolVar(&stagedOnly, "staged", false, "Scan only staged files")
 	cmd.Flags().BoolVar(&diffOnly, "diff", false, "Scan only modified files")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "Watch for file changes and re-scan")
 
 	// Beads integration flags
 	cmd.Flags().BoolVar(&createBeads, "create-beads", false, "Auto-create beads from scan findings")
@@ -329,19 +340,48 @@ func printBeadsUpdateResults(t theme.Theme, br *scanner.BridgeResult, dryRun boo
 	}
 	fmt.Printf("%s───────────────────────────────────────────────────%s\n", "\033[2m", "\033[0m")
 
-	if br.Created > 0 {
-		if dryRun {
-			fmt.Printf("  Would close:   %s%d%s beads (issues fixed)\n", colorize(t.Success), br.Created, "\033[0m")
-		} else {
-			fmt.Printf("  Closed:        %s%d%s beads (issues fixed)\n", colorize(t.Success), br.Created, "\033[0m")
-		}
-	}
-	if br.Errors > 0 {
-		fmt.Printf("  Errors:        %s%d%s\n", colorize(t.Error), br.Errors, "\033[0m")
-	}
-
 	for _, msg := range br.Messages {
 		fmt.Printf("  %s\n", msg)
 	}
 	fmt.Println()
+}
+
+func runScanWatch(path string, opts scanner.ScanOptions, createBeads, updateBeads bool, bridgeCfg scanner.BridgeConfig) error {
+	// Create watcher with debouncing (500ms)
+	w, err := watcher.New(func(events []watcher.Event) {
+		// Clear screen
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("Change detected, re-scanning %s...\n", path)
+
+		// Run scan
+		// Note: We ignore error here to keep watching
+		if err := runScan(path, opts, createBeads, updateBeads, bridgeCfg); err != nil {
+			fmt.Printf("\nError running scan: %v\n", err)
+		}
+		fmt.Println("\nWaiting for changes... (Ctrl+C to stop)")
+	},
+		watcher.WithDebouncer(watcher.NewDebouncer(500*time.Millisecond)),
+		watcher.WithRecursive(true),
+		watcher.WithEventFilter(watcher.Write|watcher.Create|watcher.Remove|watcher.Rename),
+	)
+
+	if err != nil {
+		return fmt.Errorf("creating watcher: %w", err)
+	}
+	defer w.Close()
+
+	if err := w.Add(path); err != nil {
+		return fmt.Errorf("adding path to watcher: %w", err)
+	}
+
+	// Run initial scan
+	fmt.Print("\033[H\033[2J")
+	fmt.Printf("Initial scan of %s...\n", path)
+	if err := runScan(path, opts, createBeads, updateBeads, bridgeCfg); err != nil {
+		fmt.Printf("\nError running scan: %v\n", err)
+	}
+	fmt.Println("\nWaiting for changes... (Ctrl+C to stop)")
+
+	// Block until interrupt
+	select {}
 }
