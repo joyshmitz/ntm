@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
@@ -19,12 +20,35 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// SpawnOptions configures session creation and agent spawning
+type SpawnOptions struct {
+	Session     string
+	Agents      []FlatAgent
+	CCCount     int
+	CodCount    int
+	GmiCount    int
+	UserPane    bool
+	AutoRestart bool
+	RecipeName  string
+	PersonaMap  map[string]*persona.Persona
+
+	// CASS Context
+	CassContextQuery string
+	NoCassContext    bool
+	Prompt           string
+}
+
 func newSpawnCmd() *cobra.Command {
 	var noUserPane bool
 	var recipeName string
 	var agentSpecs AgentSpecs
 	var personaSpecs PersonaSpecs
 	var autoRestart bool
+	var contextQuery string
+	var noCassContext bool
+	var contextLimit int
+	var contextDays int
+	var prompt string
 
 	cmd := &cobra.Command{
 		Use:   "spawn <session-name>",
@@ -55,6 +79,10 @@ Persona mode:
   Format: --persona=name or --persona=name:count
   Built-in personas: architect, implementer, reviewer, tester, documenter
 
+CASS Context Injection:
+  Automatically finds relevant past sessions and injects context into agents.
+  Use --cass-context="query" to be specific, or rely on prompt/recipe context.
+
 Examples:
   ntm spawn myproject --cc=2 --cod=2           # 2 Claude, 2 Codex + user pane
   ntm spawn myproject --cc=3 --cod=3 --gmi=1   # 3 Claude, 3 Codex, 1 Gemini
@@ -62,11 +90,20 @@ Examples:
   ntm spawn myproject -r full-stack            # Use full-stack recipe
   ntm spawn myproject --cc=2:opus --cc=1:sonnet  # 2 Opus + 1 Sonnet
   ntm spawn myproject --cc=2 --auto-restart    # With auto-restart enabled
-  ntm spawn myproject --persona=architect --persona=implementer:2  # Using personas`,
+  ntm spawn myproject --persona=architect --persona=implementer:2  # Using personas
+  ntm spawn myproject --cc=1 --prompt="fix auth" # Inject context about auth`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionName := args[0]
 			dir := cfg.GetProjectDir(sessionName)
+
+			// Update CASS config from flags
+			if contextLimit > 0 {
+				cfg.CASS.Context.MaxSessions = contextLimit
+			}
+			if contextDays > 0 {
+				cfg.CASS.Context.LookbackDays = contextDays
+			}
 
 			// Handle personas first (they contribute to agentSpecs)
 			// personaMap maps variant name to Persona for system prompt injection
@@ -148,14 +185,29 @@ Examples:
 				// Re-calculate counts
 				ccCount = agentSpecs.ByType(AgentTypeClaude).TotalCount()
 				codCount = agentSpecs.ByType(AgentTypeCodex).TotalCount()
-				gmiCount = agentSpecs.ByType(AgentTypeGemini).TotalCount()
+			gmiCount = agentSpecs.ByType(AgentTypeGemini).TotalCount()
 
 				if !IsJSONOutput() && (ccCount+codCount+gmiCount > 0) {
 					fmt.Printf("Using default configuration: %d cc, %d cod, %d gmi\n", ccCount, codCount, gmiCount)
 				}
 			}
 
-			return runSpawnWithSpecs(sessionName, agentSpecs, ccCount, codCount, gmiCount, !noUserPane, autoRestart, recipeName, personaMap)
+			opts := SpawnOptions{
+				Session:          sessionName,
+				Agents:           agentSpecs.Flatten(),
+				CCCount:          ccCount,
+				CodCount:         codCount,
+				GmiCount:         gmiCount,
+				UserPane:         !noUserPane,
+				AutoRestart:      autoRestart,
+				RecipeName:       recipeName,
+				PersonaMap:       personaMap,
+				CassContextQuery: contextQuery,
+				NoCassContext:    noCassContext,
+				Prompt:           prompt,
+			}
+
+			return spawnSessionLogic(opts)
 		},
 	}
 
@@ -168,31 +220,31 @@ Examples:
 	cmd.Flags().StringVarP(&recipeName, "recipe", "r", "", "use a recipe for agent configuration")
 	cmd.Flags().BoolVar(&autoRestart, "auto-restart", false, "monitor and auto-restart crashed agents")
 
-	return cmd
-}
+	// CASS context flags
+	cmd.Flags().StringVar(&contextQuery, "cass-context", "", "Explicit context query for CASS")
+	cmd.Flags().BoolVar(&noCassContext, "no-cass-context", false, "Disable CASS context injection")
+	cmd.Flags().IntVar(&contextLimit, "cass-context-limit", 0, "Max past sessions to include")
+	cmd.Flags().IntVar(&contextDays, "cass-context-days", 0, "Look back N days")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "Prompt to initialize agents with")
 
-// runSpawnWithSpecs handles agent specs with model-specific pane naming
-func runSpawnWithSpecs(session string, specs AgentSpecs, ccCount, codCount, gmiCount int, userPane, autoRestart bool, recipeName string, personaMap map[string]*persona.Persona) error {
-	// Flatten specs to get individual agents with their models
-	agents := specs.Flatten()
-	return runSpawnAgentsWithRestart(session, agents, ccCount, codCount, gmiCount, userPane, autoRestart, recipeName, personaMap)
+	return cmd
 }
 
 // Backward-compatible helper (no auto-restart)
 func runSpawnAgents(session string, agents []FlatAgent, ccCount, codCount, gmiCount int, userPane bool) error {
-	return runSpawnAgentsWithRestart(session, agents, ccCount, codCount, gmiCount, userPane, false, "", nil)
-}
-
-// runSpawnAgentsWithRestart launches agents with model-specific pane naming and optional auto-restart
-func runSpawnAgentsWithRestart(session string, agents []FlatAgent, ccCount, codCount, gmiCount int, userPane, autoRestart bool, recipeName string, personaMap map[string]*persona.Persona) error {
-	if err := spawnSessionLogic(session, agents, ccCount, codCount, gmiCount, userPane, autoRestart, recipeName, personaMap); err != nil {
-		return err
+	opts := SpawnOptions{
+		Session:  session,
+		Agents:   agents,
+		CCCount:  ccCount,
+		CodCount: codCount,
+		GmiCount: gmiCount,
+		UserPane: userPane,
 	}
-	return tmux.AttachOrSwitch(session)
+	return spawnSessionLogic(opts)
 }
 
 // spawnSessionLogic handles the creation of the session and spawning of agents
-func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gmiCount int, userPane, autoRestart bool, recipeName string, personaMap map[string]*persona.Persona) error {
+func spawnSessionLogic(opts SpawnOptions) error {
 	// Helper for JSON error output
 	outputError := func(err error) error {
 		if IsJSONOutput() {
@@ -206,16 +258,16 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 		return outputError(err)
 	}
 
-	if err := tmux.ValidateSessionName(session); err != nil {
+	if err := tmux.ValidateSessionName(opts.Session); err != nil {
 		return outputError(err)
 	}
 
-	totalAgents := ccCount + codCount + gmiCount
+	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount
 	if totalAgents == 0 {
 		return outputError(fmt.Errorf("no agents specified (use --cc, --cod, or --gmi)"))
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := cfg.GetProjectDir(opts.Session)
 
 	// Initialize hook executor
 	hookExec, err := hooks.NewExecutorFromConfig()
@@ -229,12 +281,12 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 
 	// Build execution context for hooks
 	hookCtx := hooks.ExecutionContext{
-		SessionName: session,
+		SessionName: opts.Session,
 		ProjectDir:  dir,
 		AdditionalEnv: map[string]string{
-			"NTM_AGENT_COUNT_CC":    fmt.Sprintf("%d", ccCount),
-			"NTM_AGENT_COUNT_COD":   fmt.Sprintf("%d", codCount),
-			"NTM_AGENT_COUNT_GMI":   fmt.Sprintf("%d", gmiCount),
+			"NTM_AGENT_COUNT_CC":    fmt.Sprintf("%d", opts.CCCount),
+			"NTM_AGENT_COUNT_COD":   fmt.Sprintf("%d", opts.CodCount),
+			"NTM_AGENT_COUNT_GMI":   fmt.Sprintf("%d", opts.GmiCount),
 			"NTM_AGENT_COUNT_TOTAL": fmt.Sprintf("%d", totalAgents),
 		},
 	}
@@ -273,7 +325,7 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 				return nil
 			}
 			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("creating directory: %w", err)
+				return outputError(fmt.Errorf("creating directory: %w", err))
 			}
 			fmt.Printf("Created %s\n", dir)
 		}
@@ -281,22 +333,22 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 
 	// Calculate total panes needed
 	totalPanes := totalAgents
-	if userPane {
+	if opts.UserPane {
 		totalPanes++
 	}
 
 	// Create or use existing session
-	if !tmux.SessionExists(session) {
+	if !tmux.SessionExists(opts.Session) {
 		if !IsJSONOutput() {
-			fmt.Printf("Creating session '%s' in %s...\n", session, dir)
+			fmt.Printf("Creating session '%s' in %s...\n", opts.Session, dir)
 		}
-		if err := tmux.CreateSession(session, dir); err != nil {
+		if err := tmux.CreateSession(opts.Session, dir); err != nil {
 			return outputError(fmt.Errorf("creating session: %w", err))
 		}
 	}
 
 	// Get current pane count
-	panes, err := tmux.GetPanes(session)
+	panes, err := tmux.GetPanes(opts.Session)
 	if err != nil {
 		return outputError(err)
 	}
@@ -309,27 +361,27 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 			fmt.Printf("Creating %d pane(s) (%d -> %d)...\n", toAdd, existingPanes, totalPanes)
 		}
 		for i := 0; i < toAdd; i++ {
-			if _, err := tmux.SplitWindow(session, dir); err != nil {
+			if _, err := tmux.SplitWindow(opts.Session, dir); err != nil {
 				return outputError(fmt.Errorf("creating pane: %w", err))
 			}
 		}
 	}
 
 	// Get updated pane list
-	panes, err = tmux.GetPanes(session)
+	panes, err = tmux.GetPanes(opts.Session)
 	if err != nil {
 		return outputError(err)
 	}
 
 	// Start assigning agents (skip first pane if user pane)
 	startIdx := 0
-	if userPane {
+	if opts.UserPane {
 		startIdx = 1
 	}
 
 	agentNum := startIdx
 	if !IsJSONOutput() {
-		fmt.Printf("Launching agents: %dx cc, %dx cod, %dx gmi...\n", ccCount, codCount, gmiCount)
+		fmt.Printf("Launching agents: %dx cc, %dx cod, %dx gmi...\n", opts.CCCount, opts.CodCount, opts.GmiCount)
 	}
 
 	// Track launched agents for resilience monitor
@@ -342,8 +394,28 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 	}
 	var launchedAgents []launchedAgent
 
+	// Resolve CASS context if enabled
+	var cassContext string
+	if !opts.NoCassContext && cfg.CASS.Context.Enabled {
+		query := opts.CassContextQuery
+		if query == "" {
+			query = opts.Prompt // Use prompt if available
+		}
+		if query == "" && opts.RecipeName != "" {
+			// Use recipe name as fallback context topic
+			query = opts.RecipeName
+		}
+
+		if query != "" {
+			ctx, err := resolveCassContext(query, cfg.GetProjectDir(opts.Session))
+			if err == nil {
+				cassContext = ctx
+			}
+		}
+	}
+
 	// Launch agents using flattened specs (preserves model info for pane naming)
-	for _, agent := range agents {
+	for _, agent := range opts.Agents {
 		if agentNum >= len(panes) {
 			break
 		}
@@ -351,7 +423,7 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 
 		// Format pane title with optional model variant
 		// Format: {session}__{type}_{index} or {session}__{type}_{index}_{variant}
-		title := FormatPaneName(session, agent.Type, agent.Index, agent.Model)
+		title := tmux.FormatPaneName(opts.Session, string(agent.Type), agent.Index, agent.Model)
 		if err := tmux.SetPaneTitle(pane.ID, title); err != nil {
 			return outputError(fmt.Errorf("setting pane title: %w", err))
 		}
@@ -375,8 +447,8 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 		// Check if this is a persona agent and prepare system prompt
 		var systemPromptFile string
 		var personaName string
-		if personaMap != nil {
-			if p, ok := personaMap[agent.Model]; ok {
+		if opts.PersonaMap != nil {
+			if p, ok := opts.PersonaMap[agent.Model]; ok {
 				personaName = p.Name
 				// Prepare system prompt file
 				promptFile, err := persona.PrepareSystemPrompt(p, dir)
@@ -396,7 +468,7 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 		agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
 			Model:            resolvedModel,
 			ModelAlias:       agent.Model,
-			SessionName:      session,
+			SessionName:      opts.Session,
 			PaneIndex:        agent.Index,
 			AgentType:        string(agent.Type),
 			ProjectDir:       dir,
@@ -421,6 +493,27 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 			return outputError(fmt.Errorf("launching %s agent: %w", agent.Type, err))
 		}
 
+		// Inject CASS context if available
+		if cassContext != "" {
+			// Wait a bit for agent to start
+			time.Sleep(500 * time.Millisecond)
+			if err := tmux.SendKeys(pane.ID, cassContext, true); err != nil {
+				if !IsJSONOutput() {
+					fmt.Printf("⚠ Warning: failed to inject context: %v\n", err)
+				}
+			}
+		}
+
+		// Inject user prompt if provided
+		if opts.Prompt != "" {
+			time.Sleep(200 * time.Millisecond)
+			if err := tmux.SendKeys(pane.ID, opts.Prompt, true); err != nil {
+				if !IsJSONOutput() {
+					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", err)
+				}
+			}
+		}
+
 		// Track for resilience monitor
 		launchedAgents = append(launchedAgents, launchedAgent{
 			paneID:    pane.ID,
@@ -434,7 +527,7 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 	}
 
 	// Get final pane list for output
-	finalPanes, _ := tmux.GetPanes(session)
+	finalPanes, _ := tmux.GetPanes(opts.Session)
 
 	// JSON output mode
 	if IsJSONOutput() {
@@ -466,7 +559,7 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 
 		return output.PrintJSON(output.SpawnResponse{
 			TimestampedResponse: output.NewTimestamped(),
-			Session:             session,
+			Session:             opts.Session,
 			Created:             true, // spawn always creates or reuses
 			WorkingDirectory:    dir,
 			Panes:               paneResponses,
@@ -477,11 +570,11 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 	fmt.Printf("✓ Launched %d agent(s)\n", totalAgents)
 
 	// Emit session_create event
-	events.EmitSessionCreate(session, ccCount, codCount, gmiCount, dir, recipeName)
+	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, dir, opts.RecipeName)
 
 	// Emit agent_spawn events for each agent
 	for _, agent := range launchedAgents {
-		events.Emit(events.EventAgentSpawn, session, events.AgentSpawnData{
+		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,
 			Model:     agent.model,
 			PaneIndex: agent.paneIndex,
@@ -523,8 +616,8 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 	}
 
 	// Start resilience monitor if auto-restart is enabled
-	if autoRestart || cfg.Resilience.AutoRestart {
-		monitor := resilience.NewMonitor(session, dir, cfg)
+	if opts.AutoRestart || cfg.Resilience.AutoRestart {
+		monitor := resilience.NewMonitor(opts.Session, dir, cfg)
 		for _, agent := range launchedAgents {
 			monitor.RegisterAgent(agent.paneID, agent.paneIndex, agent.agentType, agent.model, agent.command)
 		}
@@ -537,9 +630,57 @@ func spawnSessionLogic(session string, agents []FlatAgent, ccCount, codCount, gm
 	}
 
 	// Register session as Agent Mail agent (non-blocking)
-	registerSessionAgent(session, dir)
+	registerSessionAgent(opts.Session, dir)
 
 	return nil
+}
+
+func resolveCassContext(query, dir string) (string, error) {
+	client := cass.NewClient()
+	if !client.IsInstalled() {
+		return "", fmt.Errorf("cass not installed")
+	}
+
+	// Search
+	limit := cfg.CASS.Context.MaxSessions
+	if limit <= 0 {
+		limit = 3
+	}
+
+	since := fmt.Sprintf("%dd", cfg.CASS.Context.LookbackDays)
+	if cfg.CASS.Context.LookbackDays <= 0 {
+		since = "30d"
+	}
+
+	resp, err := client.Search(context.Background(), cass.SearchOptions{
+		Query:     query,
+		Workspace: dir,
+		Limit:     limit,
+		Since:     since,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Hits) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Relevant Past Sessions (from CASS)\n\n")
+	for _, hit := range resp.Hits {
+		ts := ""
+		if hit.CreatedAt != nil {
+			ts = time.Unix(*hit.CreatedAt, 0).Format("2006-01-02")
+		}
+		sb.WriteString(fmt.Sprintf("- **%s** (%s, %s)\n", hit.Title, hit.Agent, ts))
+		if hit.Snippet != "" {
+			sb.WriteString(fmt.Sprintf("  %s\n", strings.TrimSpace(hit.Snippet)))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String(), nil
 }
 
 // registerSessionAgent registers the session with Agent Mail.

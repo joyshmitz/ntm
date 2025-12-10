@@ -62,8 +62,13 @@ func TestSpawnSessionLogic(t *testing.T) {
 	}
 
 	// Execute spawn
-	// spawnSessionLogic(session, agents, ccCount, codCount, gmiCount, userPane, autoRestart, recipeName, personaMap)
-	err = spawnSessionLogic(sessionName, agents, 1, 0, 0, true, false, "", nil)
+	opts := SpawnOptions{
+		Session:  sessionName,
+		Agents:   agents,
+		CCCount:  1,
+		UserPane: true,
+	}
+	err = spawnSessionLogic(opts)
 	if err != nil {
 		t.Fatalf("spawnSessionLogic failed: %v", err)
 	}

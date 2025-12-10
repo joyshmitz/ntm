@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/history"
@@ -34,6 +35,23 @@ type SendResult struct {
 }
 
 const fileChangeScanDelay = 5 * time.Second
+
+// SendOptions configures the send operation
+type SendOptions struct {
+	Session        string
+	Prompt         string
+	Targets        SendTargets
+	TargetAll      bool
+	SkipFirst      bool
+	PaneIndex      int
+	TemplateName   string
+	Tags           []string
+
+	// CASS check options
+	CassCheck      bool
+	CassSimilarity float64
+	CassCheckDays  int
+}
 
 // SendTarget represents a send target with optional variant filter.
 // Used for --cc:opus style flags where variant filters to specific model/persona.
@@ -163,6 +181,10 @@ func newSendCmd() *cobra.Command {
 	var templateName string
 	var templateVars []string
 	var tags []string
+	var cassCheck bool
+	var noCassCheck bool
+	var cassSimilarity float64
+	var cassCheckDays int
 
 	cmd := &cobra.Command{
 		Use:   "send <session> [prompt]",
@@ -190,6 +212,10 @@ with headers and code fences. Supports line ranges: path:10-50, path:10-, path:-
 
 When using --file or stdin, use --prefix and --suffix to wrap the content.
 
+Duplicate Detection:
+By default, checks CASS for similar past sessions to avoid duplicate work.
+Use --no-cass-check to skip.
+
 Examples:
   ntm send myproject "fix the linting errors"           # All agents
   ntm send myproject --cc "review the changes"          # All Claude agents
@@ -212,9 +238,22 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
 
+			opts := SendOptions{
+				Session:        session,
+				Targets:        targets,
+				TargetAll:      targetAll,
+				SkipFirst:      skipFirst,
+				PaneIndex:      paneIndex,
+				Tags:           tags,
+				CassCheck:      cassCheck && !noCassCheck,
+				CassSimilarity: cassSimilarity,
+				CassCheckDays:  cassCheckDays,
+			}
+
 			// Handle template-based prompts
 			if templateName != "" {
-				return runSendWithTemplate(session, templateName, templateVars, promptFile, contextFiles, targets, targetAll, skipFirst, paneIndex, tags)
+				opts.TemplateName = templateName
+				return runSendWithTemplate(templateVars, promptFile, contextFiles, opts)
 			}
 
 			promptText, err := getPromptContent(args[1:], promptFile, prefix, suffix)
@@ -239,7 +278,8 @@ Examples:
 				}
 			}
 
-			return runSendWithTargets(session, promptText, targets, targetAll, skipFirst, paneIndex, "", tags)
+			opts.Prompt = promptText
+			return runSendWithTargets(opts)
 		},
 	}
 
@@ -257,6 +297,12 @@ Examples:
 	cmd.Flags().StringVarP(&templateName, "template", "t", "", "use a named prompt template (see 'ntm template list')")
 	cmd.Flags().StringArrayVar(&templateVars, "var", nil, "template variable in key=value format (repeatable)")
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "filter by tag (OR logic)")
+
+	// CASS check flags
+	cmd.Flags().BoolVar(&cassCheck, "cass-check", true, "Check for duplicate work in CASS")
+	cmd.Flags().BoolVar(&noCassCheck, "no-cass-check", false, "Skip CASS duplicate check")
+	cmd.Flags().Float64Var(&cassSimilarity, "cass-similarity", 0.7, "Similarity threshold for duplicate detection")
+	cmd.Flags().IntVar(&cassCheckDays, "cass-check-days", 7, "Look back N days for duplicates")
 
 	return cmd
 }
@@ -338,12 +384,12 @@ func buildPrompt(content, prefix, suffix string) string {
 }
 
 // runSendWithTemplate handles template-based prompt generation and sending.
-func runSendWithTemplate(session, templateName string, templateVars []string, promptFile string, contextFiles []string, targets SendTargets, targetAll, skipFirst bool, paneIndex int, tags []string) error {
+func runSendWithTemplate(templateVars []string, promptFile string, contextFiles []string, opts SendOptions) error {
 	// Load the template
 	loader := templates.NewLoader()
-	tmpl, err := loader.Load(templateName)
+	tmpl, err := loader.Load(opts.TemplateName)
 	if err != nil {
-		return fmt.Errorf("loading template '%s': %w", templateName, err)
+		return fmt.Errorf("loading template '%s': %w", opts.TemplateName, err)
 	}
 
 	// Parse template variables from --var flags
@@ -359,7 +405,7 @@ func runSendWithTemplate(session, templateName string, templateVars []string, pr
 	// Build execution context
 	ctx := templates.ExecutionContext{
 		Variables: vars,
-		Session:   session,
+		Session:   opts.Session,
 	}
 
 	// Read file content if --file specified (used as {{file}} variable)
@@ -394,21 +440,32 @@ func runSendWithTemplate(session, templateName string, templateVars []string, pr
 		}
 	}
 
-	return runSendWithTargets(session, promptText, targets, targetAll, skipFirst, paneIndex, templateName, tags)
+	opts.Prompt = promptText
+	return runSendWithTargets(opts)
 }
 
 // runSendWithTargets sends prompts using the new SendTargets filtering
-func runSendWithTargets(session, prompt string, targets SendTargets, targetAll, skipFirst bool, paneIndex int, templateName string, tags []string) error {
-	// Convert to the old signature for backwards compatibility
+func runSendWithTargets(opts SendOptions) error {
+	return runSendInternal(opts)
+}
+
+func runSendInternal(opts SendOptions) error {
+	session := opts.Session
+	prompt := opts.Prompt
+	templateName := opts.TemplateName
+	targets := opts.Targets
+	targetAll := opts.TargetAll
+	skipFirst := opts.SkipFirst
+	paneIndex := opts.PaneIndex
+	tags := opts.Tags
+
+	// Convert to the old signature for backwards compatibility if needed locally
 	targetCC := targets.HasTargetsForType(AgentTypeClaude)
 	targetCod := targets.HasTargetsForType(AgentTypeCodex)
 	targetGmi := targets.HasTargetsForType(AgentTypeGemini)
 
-	return runSendInternal(session, prompt, templateName, targets, targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex, tags)
-}
-
-func runSendInternal(session, prompt, templateName string, targets SendTargets, targetCC, targetCod, targetGmi, targetAll, skipFirst bool, paneIndex int, tags []string) error {
 	start := time.Now()
+    // ... existing logic starts here ...
 	var (
 		histTargets []int
 		histErr     error
@@ -443,9 +500,35 @@ func runSendInternal(session, prompt, templateName string, targets SendTargets, 
 		return err
 	}
 
+	// CASS Duplicate Detection
+	if opts.CassCheck {
+		if err := checkCassDuplicates(session, prompt, opts.CassSimilarity, opts.CassCheckDays); err != nil {
+			// If check returns error, it means we should stop (e.g. duplicates found and user said no)
+			// Or actual error?
+			// If actual error (e.g. CASS not found), we should probably warn and proceed?
+			// If duplicate found and user said No, we return nil (aborted) or error?
+			// Let's assume checkCassDuplicates handles UI/logic and returns error if we should stop.
+			if err.Error() == "aborted by user" {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			// For other errors (e.g. CASS unavailable), we might want to log and proceed?
+			// The requirement says "Graceful when CASS unavailable".
+			if strings.Contains(err.Error(), "cass not installed") || strings.Contains(err.Error(), "connection refused") {
+				// Warn and proceed
+				if !jsonOutput {
+					fmt.Printf("Warning: CASS duplicate check failed: %v\n", err)
+				}
+			} else {
+				return outputError(err)
+			}
+		}
+	}
+
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
 	}
+    // ... rest of logic ...
 
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' not found", session))
@@ -937,4 +1020,43 @@ func boolToStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func checkCassDuplicates(session, prompt string, threshold float64, days int) error {
+	client := cass.NewClient()
+	if !client.IsInstalled() {
+		return fmt.Errorf("cass not installed")
+	}
+
+	// Get workspace from session
+	dir := cfg.GetProjectDir(session)
+
+	since := fmt.Sprintf("%dd", days)
+
+	res, err := client.CheckDuplicates(context.Background(), prompt, dir, since, threshold)
+	if err != nil {
+		return err
+	}
+
+	if res.DuplicatesFound {
+		if jsonOutput {
+			return fmt.Errorf("duplicates found in CASS: %d similar sessions", len(res.SimilarSessions))
+		}
+
+		// Interactive mode
+		fmt.Printf("\n%s⚠ Similar work found in past sessions:%s\n", "\033[33m", "\033[0m")
+		for i, hit := range res.SimilarSessions {
+			fmt.Printf("  %d. \"%s\" (%s, %s)\n", i+1, hit.Title, hit.Agent, hit.SourcePath)
+			if hit.Snippet != "" {
+				fmt.Printf("     Preview: %s\n", strings.TrimSpace(hit.Snippet))
+			}
+			fmt.Println()
+		}
+
+		if !confirm("Continue anyway?") {
+			return fmt.Errorf("aborted by user")
+		}
+	}
+
+	return nil
 }

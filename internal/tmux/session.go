@@ -536,6 +536,15 @@ func (c *Client) SendKeys(target, keys string, enter bool) error {
 	return nil
 }
 
+// FormatPaneName formats a pane title according to NTM convention
+func FormatPaneName(session string, agentType string, index int, variant string) string {
+	base := fmt.Sprintf("%s__%s_%d", session, agentType, index)
+	if variant != "" {
+		return fmt.Sprintf("%s_%s", base, variant)
+	}
+	return base
+}
+
 // SendKeys sends keys to a pane (default client)
 func SendKeys(target, keys string, enter bool) error {
 	return DefaultClient.SendKeys(target, keys, enter)
