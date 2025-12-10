@@ -137,12 +137,33 @@ type SessionListItem struct {
 // StatusResponse is the output format for status command
 type StatusResponse struct {
 	TimestampedResponse
-	Session          string              `json:"session"`
-	Exists           bool                `json:"exists"`
-	Attached         bool                `json:"attached"`
-	WorkingDirectory string              `json:"working_directory"`
-	Panes            []PaneResponse      `json:"panes"`
-	AgentCounts      AgentCountsResponse `json:"agent_counts"`
+	Session          string               `json:"session"`
+	Exists           bool                 `json:"exists"`
+	Attached         bool                 `json:"attached"`
+	WorkingDirectory string               `json:"working_directory"`
+	Panes            []PaneResponse       `json:"panes"`
+	AgentCounts      AgentCountsResponse  `json:"agent_counts"`
+	AgentMail        *AgentMailStatus     `json:"agent_mail,omitempty"`
+}
+
+// AgentMailStatus represents Agent Mail integration status for a session
+type AgentMailStatus struct {
+	Available    bool                    `json:"available"`
+	Connected    bool                    `json:"connected"`
+	ServerURL    string                  `json:"server_url,omitempty"`
+	UnreadCount  int                     `json:"unread_count,omitempty"`
+	UrgentCount  int                     `json:"urgent_count,omitempty"`
+	ActiveLocks  int                     `json:"active_locks,omitempty"`
+	Reservations []FileReservationInfo   `json:"reservations,omitempty"`
+}
+
+// FileReservationInfo represents a file reservation summary
+type FileReservationInfo struct {
+	PathPattern string `json:"path_pattern"`
+	AgentName   string `json:"agent_name"`
+	Exclusive   bool   `json:"exclusive"`
+	Reason      string `json:"reason,omitempty"`
+	ExpiresIn   string `json:"expires_in,omitempty"`
 }
 
 // DepsResponse is the output format for deps command
