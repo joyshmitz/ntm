@@ -13,8 +13,12 @@ import (
 )
 
 // paneNameRegex matches the NTM pane naming convention:
-// session__type_index or session__type_index_variant
-var paneNameRegex = regexp.MustCompile(`^.+__(\w+)_\d+(?:_([A-Za-z0-9._/@:+-]+))?$`)
+// session__type_index or session__type_index_variant, optionally with tags [tag1,tag2]
+// Examples:
+//   session__cc_1
+//   session__cc_1[frontend]
+//   session__cc_1_opus[backend,api]
+var paneNameRegex = regexp.MustCompile(`^.+__(\w+)_\d+(?:_([A-Za-z0-9._/@:+-]+))?(?:\[([^\]]*)\])?$`)
 
 // AgentType represents the type of AI agent
 type AgentType string
@@ -32,7 +36,8 @@ type Pane struct {
 	Index   int
 	Title   string
 	Type    AgentType
-	Variant string // Model alias or persona name (from pane title)
+	Variant string   // Model alias or persona name (from pane title)
+	Tags    []string // User-defined tags (from pane title, e.g., [frontend,api])
 	Command string
 	Width   int
 	Height  int
@@ -49,28 +54,56 @@ type Session struct {
 	Created   string
 }
 
-// parseAgentFromTitle extracts agent type and variant from a pane title.
-// Title format: {session}__{type}_{index} or {session}__{type}_{index}_{variant}
-// Returns AgentUser and empty variant if title doesn't match NTM format.
-func parseAgentFromTitle(title string) (AgentType, string) {
+// parseAgentFromTitle extracts agent type, variant, and tags from a pane title.
+// Title format: {session}__{type}_{index}[tags] or {session}__{type}_{index}_{variant}[tags]
+// Returns AgentUser, empty variant, and nil tags if title doesn't match NTM format.
+func parseAgentFromTitle(title string) (AgentType, string, []string) {
 	matches := paneNameRegex.FindStringSubmatch(title)
 	if matches == nil {
 		// Not an NTM-formatted title, default to user
-		return AgentUser, ""
+		return AgentUser, "", nil
 	}
 
 	// matches[1] = type (cc, cod, gmi)
 	// matches[2] = variant (may be empty)
+	// matches[3] = tags string (may be empty)
 	agentType := AgentType(matches[1])
 	variant := matches[2]
+	tags := parseTags(matches[3])
 
 	// Validate agent type
 	switch agentType {
 	case AgentClaude, AgentCodex, AgentGemini:
-		return agentType, variant
+		return agentType, variant, tags
 	default:
-		return AgentUser, ""
+		return AgentUser, "", nil
 	}
+}
+
+// parseTags parses a comma-separated tag string into a slice.
+// Returns nil for empty input.
+func parseTags(tagStr string) []string {
+	if tagStr == "" {
+		return nil
+	}
+	parts := strings.Split(tagStr, ",")
+	var tags []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			tags = append(tags, p)
+		}
+	}
+	return tags
+}
+
+// FormatTags formats tags as a bracket-enclosed string for pane titles.
+// Returns empty string if no tags.
+func FormatTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(tags, ",") + "]"
 }
 
 // IsInstalled checks if tmux is available
@@ -231,7 +264,7 @@ func GetPanes(session string) ([]Pane, error) {
 
 		// Parse pane title using regex to extract type and variant
 		// Format: {session}__{type}_{index} or {session}__{type}_{index}_{variant}
-		pane.Type, pane.Variant = parseAgentFromTitle(pane.Title)
+		pane.Type, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
 
 		panes = append(panes, pane)
 	}
@@ -303,6 +336,133 @@ func SplitWindow(session string, directory string) (string, error) {
 // SetPaneTitle sets the title of a pane
 func SetPaneTitle(paneID, title string) error {
 	return runSilent("select-pane", "-t", paneID, "-T", title)
+}
+
+// GetPaneTitle returns the title of a pane
+func GetPaneTitle(paneID string) (string, error) {
+	return run("display-message", "-p", "-t", paneID, "#{pane_title}")
+}
+
+// GetPaneTags returns the tags for a pane parsed from its title.
+// Returns nil if no tags are found.
+func GetPaneTags(paneID string) ([]string, error) {
+	title, err := GetPaneTitle(paneID)
+	if err != nil {
+		return nil, err
+	}
+	_, _, tags := parseAgentFromTitle(title)
+	return tags, nil
+}
+
+// SetPaneTags sets the tags for a pane by updating its title.
+// Tags are appended to the title in the format [tag1,tag2,...].
+// This replaces any existing tags on the pane.
+func SetPaneTags(paneID string, tags []string) error {
+	title, err := GetPaneTitle(paneID)
+	if err != nil {
+		return err
+	}
+
+	// Strip existing tags from title
+	baseTitle := stripTags(title)
+	newTitle := baseTitle + FormatTags(tags)
+
+	return SetPaneTitle(paneID, newTitle)
+}
+
+// AddPaneTags adds tags to a pane without removing existing ones.
+// Duplicate tags are not added.
+func AddPaneTags(paneID string, newTags []string) error {
+	existing, err := GetPaneTags(paneID)
+	if err != nil {
+		return err
+	}
+
+	// Build set of existing tags
+	tagSet := make(map[string]bool)
+	for _, t := range existing {
+		tagSet[t] = true
+	}
+
+	// Add new tags
+	for _, t := range newTags {
+		if !tagSet[t] {
+			existing = append(existing, t)
+			tagSet[t] = true
+		}
+	}
+
+	return SetPaneTags(paneID, existing)
+}
+
+// RemovePaneTags removes specific tags from a pane.
+func RemovePaneTags(paneID string, tagsToRemove []string) error {
+	existing, err := GetPaneTags(paneID)
+	if err != nil {
+		return err
+	}
+
+	// Build set of tags to remove
+	removeSet := make(map[string]bool)
+	for _, t := range tagsToRemove {
+		removeSet[t] = true
+	}
+
+	// Filter out removed tags
+	var filtered []string
+	for _, t := range existing {
+		if !removeSet[t] {
+			filtered = append(filtered, t)
+		}
+	}
+
+	return SetPaneTags(paneID, filtered)
+}
+
+// HasPaneTag returns true if the pane has the specified tag.
+func HasPaneTag(paneID, tag string) (bool, error) {
+	tags, err := GetPaneTags(paneID)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tags {
+		if t == tag {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasAnyPaneTag returns true if the pane has any of the specified tags (OR logic).
+func HasAnyPaneTag(paneID string, tags []string) (bool, error) {
+	paneTags, err := GetPaneTags(paneID)
+	if err != nil {
+		return false, err
+	}
+	tagSet := make(map[string]bool)
+	for _, t := range paneTags {
+		tagSet[t] = true
+	}
+	for _, t := range tags {
+		if tagSet[t] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// stripTags removes the [tags] suffix from a pane title.
+func stripTags(title string) string {
+	// Find last '[' that's followed by any characters and ']' at end
+	idx := strings.LastIndex(title, "[")
+	if idx == -1 {
+		return title
+	}
+	// Check if it ends with ']'
+	if strings.HasSuffix(title, "]") && idx < len(title)-1 {
+		return title[:idx]
+	}
+	return title
 }
 
 // SendKeys sends keys to a pane
@@ -497,8 +657,8 @@ func GetPanesWithActivity(session string) ([]PaneActivity, error) {
 			Active:  active,
 		}
 
-		// Parse pane title using regex to extract type and variant
-		pane.Type, pane.Variant = parseAgentFromTitle(pane.Title)
+		// Parse pane title using regex to extract type, variant, and tags
+		pane.Type, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
 
 		panes = append(panes, PaneActivity{
 			Pane:         pane,

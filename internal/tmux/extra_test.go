@@ -106,22 +106,125 @@ func TestParseAgentFromTitle_EdgeCases(t *testing.T) {
 		title       string
 		wantType    AgentType
 		wantVariant string
+		wantTags    []string
 	}{
-		{"invalid_format", AgentUser, ""},
-		{"session__invalid_1", AgentUser, ""}, // valid regex but invalid type
-		{"session__cc_1", AgentClaude, ""},
-		{"session__cc_1_variant", AgentClaude, "variant"},
-		{"session__cod_2_gpt4", AgentCodex, "gpt4"},
+		{"invalid_format", AgentUser, "", nil},
+		{"session__invalid_1", AgentUser, "", nil}, // valid regex but invalid type
+		{"session__cc_1", AgentClaude, "", nil},
+		{"session__cc_1_variant", AgentClaude, "variant", nil},
+		{"session__cod_2_gpt4", AgentCodex, "gpt4", nil},
+		// With tags
+		{"session__cc_1[frontend]", AgentClaude, "", []string{"frontend"}},
+		{"session__cc_1[frontend,backend]", AgentClaude, "", []string{"frontend", "backend"}},
+		{"session__cc_1_opus[api,urgent]", AgentClaude, "opus", []string{"api", "urgent"}},
+		{"session__cod_1[]", AgentCodex, "", nil}, // empty tags
+		{"session__gmi_1[test]", AgentGemini, "", []string{"test"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.title, func(t *testing.T) {
-			gotType, gotVariant := parseAgentFromTitle(tt.title)
+			gotType, gotVariant, gotTags := parseAgentFromTitle(tt.title)
 			if gotType != tt.wantType {
 				t.Errorf("parseAgentFromTitle() type = %v, want %v", gotType, tt.wantType)
 			}
 			if gotVariant != tt.wantVariant {
 				t.Errorf("parseAgentFromTitle() variant = %q, want %q", gotVariant, tt.wantVariant)
+			}
+			if len(gotTags) != len(tt.wantTags) {
+				t.Errorf("parseAgentFromTitle() tags = %v, want %v", gotTags, tt.wantTags)
+			} else {
+				for i := range gotTags {
+					if gotTags[i] != tt.wantTags[i] {
+						t.Errorf("parseAgentFromTitle() tags[%d] = %q, want %q", i, gotTags[i], tt.wantTags[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestFormatTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		tags []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"frontend"}, "[frontend]"},
+		{[]string{"frontend", "backend"}, "[frontend,backend]"},
+		{[]string{"api", "urgent", "test"}, "[api,urgent,test]"},
+	}
+
+	for _, tt := range tests {
+		name := "nil"
+		if tt.tags != nil {
+			name = FormatTags(tt.tags)
+			if name == "" {
+				name = "empty"
+			}
+		}
+		t.Run(name, func(t *testing.T) {
+			got := FormatTags(tt.tags)
+			if got != tt.want {
+				t.Errorf("FormatTags(%v) = %q, want %q", tt.tags, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"session__cc_1", "session__cc_1"},
+		{"session__cc_1[frontend]", "session__cc_1"},
+		{"session__cc_1_opus[backend,api]", "session__cc_1_opus"},
+		{"session__cc_1[]", "session__cc_1"},
+		{"title_with[brackets]_in_middle[tags]", "title_with[brackets]_in_middle"},
+		{"no_tags_at_all", "no_tags_at_all"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := stripTags(tt.input)
+			if got != tt.want {
+				t.Errorf("stripTags(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"", nil},
+		{"frontend", []string{"frontend"}},
+		{"frontend,backend", []string{"frontend", "backend"}},
+		{"api, urgent, test", []string{"api", "urgent", "test"}}, // with spaces
+		{",empty,", []string{"empty"}},                           // leading/trailing commas
+	}
+
+	for _, tt := range tests {
+		name := tt.input
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			got := parseTags(tt.input)
+			if len(got) != len(tt.want) {
+				t.Errorf("parseTags(%q) = %v, want %v", tt.input, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseTags(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
 			}
 		})
 	}
