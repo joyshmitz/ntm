@@ -283,10 +283,10 @@ func runStatus(session string) error {
 		}
 
 		// Pane info with status
-		fmt.Printf("  %s%s%s %s%s%s %-18s%s %s│%s %s%-10s%s %s│%s %s%-8s%s\n",
+		fmt.Printf("  %s%s %s%s %-18s%s %s│%s %s%-10s%s %s│%s %s%-8s%s\n",
 			num,
 			stateIcon,
-			stateColor, typeColor, typeIcon, p.Title, reset,
+			typeColor, typeIcon, p.Title, reset,
 			surface, reset,
 			subtext, p.Command, reset,
 			surface, reset,

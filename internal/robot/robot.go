@@ -81,10 +81,23 @@ type StatusSummary struct {
 
 // PlanOutput provides an execution plan for what can be done
 type PlanOutput struct {
-	GeneratedAt   time.Time    `json:"generated_at"`
-	Recommendation string      `json:"recommendation"`
-	Actions       []PlanAction `json:"actions"`
-	Warnings      []string     `json:"warnings,omitempty"`
+	GeneratedAt    time.Time          `json:"generated_at"`
+	Recommendation string             `json:"recommendation"`
+	Actions        []PlanAction       `json:"actions"`
+	BeadActions    []BeadAction       `json:"bead_actions,omitempty"`
+	Warnings       []string           `json:"warnings,omitempty"`
+}
+
+// BeadAction represents a recommended action based on bead priority analysis
+type BeadAction struct {
+	BeadID     string   `json:"bead_id"`
+	Title      string   `json:"title"`
+	Priority   int      `json:"priority"`
+	Impact     float64  `json:"impact_score"`
+	Reasoning  []string `json:"reasoning"`
+	Command    string   `json:"command"`              // e.g., "bd update ntm-xyz --status in_progress"
+	IsReady    bool     `json:"is_ready"`             // true if no blockers
+	BlockedBy  []string `json:"blocked_by,omitempty"` // blocking bead IDs
 }
 
 // PlanAction is a suggested action
