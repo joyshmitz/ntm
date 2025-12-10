@@ -9,6 +9,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
+	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
 	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/charmbracelet/bubbles/key"
@@ -517,21 +518,21 @@ func (m Model) viewCommandPhase() string {
 	// Calculate layout dimensions with responsive breakpoints
 	// Inspired by beads_viewer's adaptive layout system
 	const (
-		splitViewThreshold = 90   // Minimum width to show split view
-		minColumnWidth     = 35   // Minimum column width
-		maxListWidth       = 70   // Maximum list width
-		maxPreviewWidth    = 100  // Maximum preview width
+		minColumnWidth  = 35  // Minimum column width
+		maxListWidth    = 70  // Maximum list width
+		maxPreviewWidth = 100 // Maximum preview width
 	)
 
+	tier := layout.TierForWidth(m.width)
 	layoutMode := styles.GetLayoutMode(m.width)
-	showSplitView := m.width >= splitViewThreshold
+	showSplitView := tier >= layout.TierSplit
 
 	var listWidth, previewWidth int
 	if !showSplitView {
 		// Narrow display: full width for list only
 		listWidth = m.width - 4
 		previewWidth = 0
-	} else if layoutMode == styles.LayoutUltraWide {
+	} else if tier == layout.TierUltra || layoutMode == styles.LayoutUltraWide {
 		// Ultra-wide: generous proportions with max limits
 		listWidth = m.width * 35 / 100 // 35% for list
 		if listWidth > maxListWidth {
@@ -541,10 +542,10 @@ func (m Model) viewCommandPhase() string {
 		if previewWidth > maxPreviewWidth {
 			previewWidth = maxPreviewWidth
 		}
-	} else if layoutMode == styles.LayoutSpacious {
-		// Wide display: 40/60 split
+	} else if tier >= layout.TierWide || layoutMode == styles.LayoutSpacious {
+		// Wide display: ~40/60 split
 		listWidth = m.width * 40 / 100
-		previewWidth = m.width * 55 / 100
+		previewWidth = m.width - listWidth - 8
 	} else {
 		// Standard display: 50/50 split
 		listWidth = m.width/2 - 2
@@ -601,8 +602,8 @@ func (m Model) viewCommandPhase() string {
 	listBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Surface2).
-		Width(listWidth - 2).
-		Height(m.height - 14).
+		Width(listWidth-2).
+		Height(m.height-14).
 		Padding(1, 1)
 
 	var columns string
@@ -614,8 +615,8 @@ func (m Model) viewCommandPhase() string {
 		previewBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(t.Blue).
-			Width(previewWidth - 2).
-			Height(m.height - 14).
+			Width(previewWidth-2).
+			Height(m.height-14).
 			Padding(1, 1)
 
 		// Join columns horizontally
