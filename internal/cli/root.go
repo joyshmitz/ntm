@@ -329,7 +329,15 @@ Shell Integration:
 }
 
 func Execute() error {
-	return rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		// If not in JSON mode, print the error to stderr
+		// (SilenceErrors is set to true to handle JSON mode properly)
+		if !jsonOutput {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
+		return err
+	}
+	return nil
 }
 
 // goVersion returns the current Go runtime version.
@@ -531,6 +539,8 @@ func init() {
 		newGrepCmd(),
 		newExtractCmd(),
 		newDiffCmd(),
+		newChangesCmd(),
+		newConflictsCmd(),
 
 		// Session persistence
 		newCheckpointCmd(),
