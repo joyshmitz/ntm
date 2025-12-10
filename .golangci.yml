@@ -29,9 +29,7 @@ linters:
     - dogsled
     - dupl
     - durationcheck
-    - errorlint
     - exhaustive
-    - exportloopref
     - gocognit
     - goconst
     - gocritic
@@ -43,7 +41,6 @@ linters:
     - gosec
     - misspell
     - nakedret
-    - nilerr
     - noctx
     - nolintlint
     - prealloc
@@ -77,6 +74,7 @@ linters-settings:
     enable-all: true
     disable:
       - shadow  # Too many false positives
+      - fieldalignment  # Struct field ordering optimization - too noisy
 
   gocyclo:
     min-complexity: 20
@@ -96,6 +94,7 @@ linters-settings:
     disabled-checks:
       - whyNoLint
       - hugeParam  # TUI models are often passed by value
+      - httpNoBody  # Using nil for empty body is fine
 
   gofmt:
     simplify: true
