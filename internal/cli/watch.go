@@ -187,20 +187,20 @@ func watchLoop(ctx context.Context, session string, opts watchOptions, t theme.T
 
 		// Process each pane
 		for _, pane := range filteredPanes {
-			paneID := fmt.Sprintf("%s:%d", session, pane.Index)
+			paneKey := pane.ID
 
 			// Initialize state if needed
-			if paneStates[paneID] == nil {
-				paneStates[paneID] = &paneState{}
+			if paneStates[paneKey] == nil {
+				paneStates[paneKey] = &paneState{}
 			}
-			state := paneStates[paneID]
+			state := paneStates[paneKey]
 
 			// Capture output
 			lines := opts.tailLines
 			if !firstRun {
 				lines = 100 // Capture more to find diff
 			}
-			output, err := tmux.CapturePaneOutput(paneID, lines)
+			output, err := tmux.CapturePaneOutput(pane.ID, lines)
 			if err != nil {
 				if opts.activityOnly {
 					continue
