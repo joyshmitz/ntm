@@ -233,53 +233,14 @@ scoops:
     license: MIT
     skip_upload: auto
 
-# Docker/Container images
-dockers:
-  - image_templates:
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-amd64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--pull"
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.description=Named Tmux Manager"
-      - "--label=org.opencontainers.image.url=https://github.com/Dicklesworthstone/ntm"
-      - "--label=org.opencontainers.image.source=https://github.com/Dicklesworthstone/ntm"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-    skip_push: auto
-
-  - image_templates:
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-arm64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--pull"
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.description=Named Tmux Manager"
-      - "--label=org.opencontainers.image.url=https://github.com/Dicklesworthstone/ntm"
-      - "--label=org.opencontainers.image.source=https://github.com/Dicklesworthstone/ntm"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-    goarch: arm64
-    skip_push: auto
-
-docker_manifests:
-  - name_template: "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}"
-    image_templates:
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-amd64"
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-arm64"
-    skip_push: auto
-
-  - name_template: "ghcr.io/dicklesworthstone/ntm:latest"
-    image_templates:
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-amd64"
-      - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-arm64"
-    skip_push: auto
+# Docker/Container images - disabled for now due to build context issues
+# TODO: Re-enable after fixing Dockerfile to work with GoReleaser's build context
+# dockers:
+#   - image_templates:
+#       - "ghcr.io/dicklesworthstone/ntm:{{ .Tag }}-amd64"
+#     dockerfile: Dockerfile
+#     use: buildx
+#     skip_push: auto
 
 # Software Bill of Materials
 sboms:
