@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -96,15 +95,15 @@ func (g *Generator) checkAgentStates() []Alert {
 			if err != nil {
 				// If we can't capture, the pane may have crashed
 				alerts = append(alerts, Alert{
-					ID:        generateAlertID(AlertAgentCrashed, sess.Name, pane.ID),
-					Type:      AlertAgentCrashed,
-					Severity:  SeverityError,
-					Message:   fmt.Sprintf("Cannot capture output from pane %s (may have crashed)", pane.ID),
-					Session:   sess.Name,
-					Pane:      pane.ID,
-					CreatedAt: time.Now(),
+					ID:         generateAlertID(AlertAgentCrashed, sess.Name, pane.ID),
+					Type:       AlertAgentCrashed,
+					Severity:   SeverityError,
+					Message:    fmt.Sprintf("Cannot capture output from pane %s (may have crashed)", pane.ID),
+					Session:    sess.Name,
+					Pane:       pane.ID,
+					CreatedAt:  time.Now(),
 					LastSeenAt: time.Now(),
-					Count:     1,
+					Count:      1,
 				})
 				continue
 			}
@@ -140,16 +139,16 @@ func (g *Generator) detectErrorState(session string, pane tmux.Pane, lines []str
 		for _, ep := range errorPatterns {
 			if ep.pattern.MatchString(line) {
 				return &Alert{
-					ID:        generateAlertID(AlertAgentError, session, pane.ID),
-					Type:      AlertAgentError,
-					Severity:  ep.severity,
-					Message:   ep.msg,
-					Session:   session,
-					Pane:      pane.ID,
-					Context:   map[string]interface{}{"matched_line": truncateString(line, 200)},
-					CreatedAt: time.Now(),
+					ID:         generateAlertID(AlertAgentError, session, pane.ID),
+					Type:       AlertAgentError,
+					Severity:   ep.severity,
+					Message:    ep.msg,
+					Session:    session,
+					Pane:       pane.ID,
+					Context:    map[string]interface{}{"matched_line": truncateString(line, 200)},
+					CreatedAt:  time.Now(),
 					LastSeenAt: time.Now(),
-					Count:     1,
+					Count:      1,
 				}
 			}
 		}
@@ -169,16 +168,16 @@ func (g *Generator) detectRateLimit(session string, pane tmux.Pane, lines []stri
 		for _, pattern := range rateLimitPatterns {
 			if pattern.MatchString(line) {
 				return &Alert{
-					ID:        generateAlertID(AlertRateLimit, session, pane.ID),
-					Type:      AlertRateLimit,
-					Severity:  SeverityWarning,
-					Message:   "Rate limiting detected",
-					Session:   session,
-					Pane:      pane.ID,
-					Context:   map[string]interface{}{"matched_line": truncateString(line, 200)},
-					CreatedAt: time.Now(),
+					ID:         generateAlertID(AlertRateLimit, session, pane.ID),
+					Type:       AlertRateLimit,
+					Severity:   SeverityWarning,
+					Message:    "Rate limiting detected",
+					Session:    session,
+					Pane:       pane.ID,
+					Context:    map[string]interface{}{"matched_line": truncateString(line, 200)},
+					CreatedAt:  time.Now(),
 					LastSeenAt: time.Now(),
-					Count:     1,
+					Count:      1,
 				}
 			}
 		}
@@ -187,54 +186,9 @@ func (g *Generator) detectRateLimit(session string, pane tmux.Pane, lines []stri
 	return nil
 }
 
-// checkDiskSpace verifies available disk space
-func (g *Generator) checkDiskSpace() *Alert {
-	var stat syscall.Statfs_t
-
-	// Check space on project directory if configured, otherwise root
-	checkPath := "/"
-	if g.config.ProjectsDir != "" {
-		checkPath = g.config.ProjectsDir
-	}
-
-	err := syscall.Statfs(checkPath, &stat)
-	if err != nil {
-		// If project dir check fails (e.g. doesn't exist), fallback to root
-		if checkPath != "/" {
-			err = syscall.Statfs("/", &stat)
-		}
-		if err != nil {
-			return nil
-		}
-	}
-
-	// Calculate free space in GB
-	freeGB := float64(stat.Bavail*uint64(stat.Bsize)) / (1024 * 1024 * 1024)
-
-	if freeGB < g.config.DiskLowThresholdGB {
-		severity := SeverityWarning
-		if freeGB < 1.0 {
-			severity = SeverityCritical
-		}
-
-		return &Alert{
-			ID:       generateAlertID(AlertDiskLow, "", ""),
-			Type:     AlertDiskLow,
-			Severity: severity,
-			Message:  fmt.Sprintf("Low disk space: %.1f GB remaining on %s", freeGB, checkPath),
-			Context: map[string]interface{}{
-				"free_gb":      freeGB,
-				"threshold_gb": g.config.DiskLowThresholdGB,
-				"path":         checkPath,
-			},
-			CreatedAt:  time.Now(),
-			LastSeenAt: time.Now(),
-			Count:      1,
-		}
-	}
-
-	return nil
-}
+// checkDiskSpace is implemented in platform-specific files:
+// - generator_unix.go for Unix systems
+// - (stub implementation returns nil on unsupported platforms)
 
 // checkBeadState analyzes beads for stale in-progress items and dependency cycles
 func (g *Generator) checkBeadState() []Alert {
@@ -284,10 +238,10 @@ func (g *Generator) checkStaleBeads() []Alert {
 				Message:  fmt.Sprintf("Bead %s has been in_progress for >%d hours without update", bead.ID, g.config.BeadStaleHours),
 				BeadID:   bead.ID,
 				Context: map[string]interface{}{
-					"title":           bead.Title,
-					"assignee":        bead.Assignee,
-					"last_updated":    bead.UpdatedAt.Format(time.RFC3339),
-					"hours_since":     int(now.Sub(bead.UpdatedAt).Hours()),
+					"title":        bead.Title,
+					"assignee":     bead.Assignee,
+					"last_updated": bead.UpdatedAt.Format(time.RFC3339),
+					"hours_since":  int(now.Sub(bead.UpdatedAt).Hours()),
 				},
 				CreatedAt:  time.Now(),
 				LastSeenAt: time.Now(),

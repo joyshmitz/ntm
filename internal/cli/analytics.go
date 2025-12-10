@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -234,10 +233,16 @@ func aggregateStats(eventList []events.Event, days int, since string, cutoff tim
 			stats.TotalTokensEst += tokenEst
 
 			// Update per-type stats based on target_types
+			// When a prompt is sent to multiple agent types, divide the tokens
+			// proportionally to avoid over-counting in the per-agent breakdown
 			if targetTypes, ok := event.Data["target_types"].(string); ok {
 				targets := parseTargetTypes(targetTypes)
-				for _, t := range targets {
-					updateAgentStats(stats.AgentBreakdown, t, 0, 1, tokenEst)
+				if len(targets) > 0 {
+					// Divide tokens among targets to avoid overcounting
+					tokensPerTarget := tokenEst / len(targets)
+					for _, t := range targets {
+						updateAgentStats(stats.AgentBreakdown, t, 0, 1, tokensPerTarget)
+					}
 				}
 			}
 
@@ -451,15 +456,6 @@ func outputStatsText(stats AnalyticsStats, showSessions bool) error {
 	}
 
 	return nil
-}
-
-// Helper to get events log path
-func getEventsLogPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "ntm", "analytics", "events.jsonl")
 }
 
 // formatTokenCount formats a token count with K/M suffixes for readability.
