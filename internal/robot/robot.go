@@ -465,28 +465,6 @@ func PrintPlan() error {
 	return encodeJSON(plan)
 }
 
-// PrintRecipes outputs available session recipes for AI agents.
-// Includes builtin, user (~/.config/ntm/recipes.toml), and project (.ntm/recipes.toml) sources.
-func PrintRecipes() error {
-	loader := recipe.NewLoader()
-	recipes, err := loader.LoadAll()
-	if err != nil {
-		return err
-	}
-
-	payload := struct {
-		GeneratedAt time.Time       `json:"generated_at"`
-		Count       int             `json:"count"`
-		Recipes     []recipe.Recipe `json:"recipes"`
-	}{
-		GeneratedAt: time.Now().UTC(),
-		Count:       len(recipes),
-		Recipes:     recipes,
-	}
-
-	return encodeJSON(payload)
-}
-
 // getBeadRecommendations returns recommended bead actions from bv priority analysis
 func getBeadRecommendations(limit int) ([]BeadAction, []string) {
 	var actions []BeadAction
@@ -1558,6 +1536,72 @@ func PrintAlertsDetailed(includeResolved bool) error {
 				DurationMs: a.Duration().Milliseconds(),
 				Count:      a.Count,
 			}
+		}
+	}
+
+	return encodeJSON(output)
+}
+
+// RecipeInfo represents a recipe in JSON output
+type RecipeInfo struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Source      string            `json:"source"` // builtin, user, project
+	TotalAgents int               `json:"total_agents"`
+	Agents      []RecipeAgentInfo `json:"agents"`
+}
+
+// RecipeAgentInfo represents an agent specification in a recipe
+type RecipeAgentInfo struct {
+	Type    string `json:"type"` // cc, cod, gmi
+	Count   int    `json:"count"`
+	Model   string `json:"model,omitempty"`
+	Persona string `json:"persona,omitempty"`
+}
+
+// RecipesOutput is the structured output for --robot-recipes
+type RecipesOutput struct {
+	GeneratedAt time.Time    `json:"generated_at"`
+	Count       int          `json:"count"`
+	Recipes     []RecipeInfo `json:"recipes"`
+}
+
+// PrintRecipes outputs available recipes as JSON for AI orchestrators
+func PrintRecipes() error {
+	loader := recipe.NewLoader()
+	recipes, err := loader.LoadAll()
+	if err != nil {
+		// Return empty list on error
+		return encodeJSON(RecipesOutput{
+			GeneratedAt: time.Now().UTC(),
+			Count:       0,
+			Recipes:     []RecipeInfo{},
+		})
+	}
+
+	output := RecipesOutput{
+		GeneratedAt: time.Now().UTC(),
+		Count:       len(recipes),
+		Recipes:     make([]RecipeInfo, len(recipes)),
+	}
+
+	for i, r := range recipes {
+		agents := make([]RecipeAgentInfo, len(r.Agents))
+		for j, a := range r.Agents {
+			agents[j] = RecipeAgentInfo{
+				Type:    a.Type,
+				Count:   a.Count,
+				Model:   a.Model,
+				Persona: a.Persona,
+			}
+		}
+
+		output.Recipes[i] = RecipeInfo{
+			Name:        r.Name,
+			Description: r.Description,
+			Source:      r.Source,
+			TotalAgents: r.TotalAgents(),
+			Agents:      agents,
 		}
 	}
 
