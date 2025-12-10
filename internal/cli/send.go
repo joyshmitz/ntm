@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/spf13/cobra"
 )
@@ -78,6 +81,54 @@ func runSend(session, prompt string, targetCC, targetCod, targetGmi, targetAll, 
 
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' not found", session))
+	}
+
+	// Initialize hook executor
+	hookExec, err := hooks.NewExecutorFromConfig()
+	if err != nil {
+		// Log warning but continue - hooks are optional
+		if !jsonOutput {
+			fmt.Printf("⚠ Could not load hooks config: %v\n", err)
+		}
+		hookExec = hooks.NewExecutor(nil) // Use empty config
+	}
+
+	// Build target description for hook environment
+	targetDesc := buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex)
+
+	// Build execution context for hooks
+	hookCtx := hooks.ExecutionContext{
+		SessionName: session,
+		ProjectDir:  getSessionWorkingDir(session),
+		Message:     prompt,
+		AdditionalEnv: map[string]string{
+			"NTM_SEND_TARGETS":    targetDesc,
+			"NTM_TARGET_CC":       boolToStr(targetCC),
+			"NTM_TARGET_COD":      boolToStr(targetCod),
+			"NTM_TARGET_GMI":      boolToStr(targetGmi),
+			"NTM_TARGET_ALL":      boolToStr(targetAll),
+			"NTM_PANE_INDEX":      fmt.Sprintf("%d", paneIndex),
+		},
+	}
+
+	// Run pre-send hooks
+	if hookExec.HasHooksForEvent(hooks.EventPreSend) {
+		if !jsonOutput {
+			fmt.Println("Running pre-send hooks...")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPreSend, hookCtx)
+		cancel()
+		if err != nil {
+			return outputError(fmt.Errorf("pre-send hook failed: %w", err))
+		}
+		if hooks.AnyFailed(results) {
+			return outputError(fmt.Errorf("pre-send hook failed: %w", hooks.AllErrors(results)))
+		}
+		if !jsonOutput {
+			success, _, _ := hooks.CountResults(results)
+			fmt.Printf("✓ %d pre-send hook(s) completed\n", success)
+		}
 	}
 
 	panes, err := tmux.GetPanes(session)
@@ -178,6 +229,35 @@ func runSend(session, prompt string, targetCC, targetCod, targetGmi, targetAll, 
 			}
 		} else {
 			delivered++
+		}
+	}
+
+	// Update hook context with delivery results
+	hookCtx.AdditionalEnv["NTM_DELIVERED_COUNT"] = fmt.Sprintf("%d", delivered)
+	hookCtx.AdditionalEnv["NTM_FAILED_COUNT"] = fmt.Sprintf("%d", failed)
+	hookCtx.AdditionalEnv["NTM_TARGET_PANES"] = fmt.Sprintf("%v", targets)
+
+	// Run post-send hooks
+	if hookExec.HasHooksForEvent(hooks.EventPostSend) {
+		if !jsonOutput {
+			fmt.Println("Running post-send hooks...")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		results, postErr := hookExec.RunHooksForEvent(ctx, hooks.EventPostSend, hookCtx)
+		cancel()
+		if postErr != nil {
+			// Log error but don't fail (send already succeeded)
+			if !jsonOutput {
+				fmt.Printf("⚠ Post-send hook error: %v\n", postErr)
+			}
+		} else if hooks.AnyFailed(results) {
+			// Log failures but don't fail (send already succeeded)
+			if !jsonOutput {
+				fmt.Printf("⚠ Post-send hook failed: %v\n", hooks.AllErrors(results))
+			}
+		} else if !jsonOutput {
+			success, _, _ := hooks.CountResults(results)
+			fmt.Printf("✓ %d post-send hook(s) completed\n", success)
 		}
 	}
 
@@ -308,4 +388,49 @@ func truncatePrompt(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// buildTargetDescription creates a human-readable description of send targets
+func buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst bool, paneIndex int) string {
+	if paneIndex >= 0 {
+		return fmt.Sprintf("pane:%d", paneIndex)
+	}
+	if targetAll {
+		return "all"
+	}
+
+	var targets []string
+	if targetCC {
+		targets = append(targets, "cc")
+	}
+	if targetCod {
+		targets = append(targets, "cod")
+	}
+	if targetGmi {
+		targets = append(targets, "gmi")
+	}
+
+	if len(targets) == 0 {
+		if skipFirst {
+			return "agents"
+		}
+		return "all-agents"
+	}
+	return strings.Join(targets, ",")
+}
+
+// getSessionWorkingDir returns the working directory for a session
+func getSessionWorkingDir(session string) string {
+	if cfg != nil {
+		return cfg.GetProjectDir(session)
+	}
+	return ""
+}
+
+// boolToStr converts a boolean to "true" or "false" string
+func boolToStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }

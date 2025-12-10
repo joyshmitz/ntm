@@ -657,6 +657,208 @@ Provide a brief status update:
 
 ---
 
+## Command Hooks
+
+NTM supports pre- and post-command hooks that run custom scripts before and after key operations. This enables automation, logging, notifications, and integration with external tools.
+
+### Hook Configuration
+
+Hooks are defined in `~/.config/ntm/hooks.toml` (or in the main `config.toml` under `[[command_hooks]]`):
+
+```toml
+# ~/.config/ntm/hooks.toml
+
+# Pre-spawn hook: runs before agents are spawned
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo 'Starting new session'"
+name = "log-spawn-start"
+description = "Log when a session starts"
+
+# Post-spawn hook: runs after agents are spawned
+[[command_hooks]]
+event = "post-spawn"
+command = "notify-send 'NTM' 'Agents spawned for $NTM_SESSION'"
+name = "desktop-notify"
+description = "Send desktop notification"
+
+# Pre-send hook: runs before prompts are sent
+[[command_hooks]]
+event = "pre-send"
+command = "echo \"$(date): Sending to $NTM_SEND_TARGETS\" >> ~/.ntm-send.log"
+name = "log-sends"
+description = "Log all send commands"
+
+# Post-send hook: runs after prompts are delivered
+[[command_hooks]]
+event = "post-send"
+command = "/path/to/my-webhook.sh"
+name = "webhook"
+timeout = "10s"
+continue_on_error = true
+```
+
+### Available Events
+
+| Event | When It Runs | Use Cases |
+|-------|--------------|-----------|
+| `pre-spawn` | Before creating session/agents | Validation, setup, cleanup |
+| `post-spawn` | After agents are launched | Notifications, logging, auto-send initial prompts |
+| `pre-send` | Before sending prompts | Logging, rate limiting, prompt validation |
+| `post-send` | After prompts delivered | Webhooks, analytics, notifications |
+| `pre-add` | Before adding agents | Validation |
+| `post-add` | After adding agents | Notifications |
+| `pre-create` | Before creating session | Validation |
+| `post-create` | After creating session | Setup |
+| `pre-shutdown` | Before killing session | Cleanup, backup |
+| `post-shutdown` | After killing session | Cleanup |
+
+### Hook Options
+
+```toml
+[[command_hooks]]
+event = "post-send"              # Required: which event triggers this hook
+command = "./my-script.sh"       # Required: shell command to execute
+
+# Optional settings
+name = "my-hook"                 # Identifier for logging
+description = "What this does"   # Documentation
+timeout = "30s"                  # Max execution time (default: 30s, max: 10m)
+enabled = true                   # Set to false to disable without removing
+continue_on_error = false        # If true, NTM continues even if hook fails
+workdir = "${PROJECT}"           # Working directory (supports variables)
+
+# Custom environment variables
+[command_hooks.env]
+MY_VAR = "custom_value"
+```
+
+### Environment Variables
+
+All hooks have access to these environment variables:
+
+| Variable | Description | Available In |
+|----------|-------------|--------------|
+| `NTM_SESSION` | Session name | All events |
+| `NTM_PROJECT_DIR` | Project directory path | All events |
+| `NTM_HOOK_EVENT` | Event name (e.g., "pre-send") | All events |
+| `NTM_HOOK_NAME` | Hook name (if specified) | All events |
+| `NTM_PANE` | Pane identifier | Pane-specific events |
+| `NTM_MESSAGE` | Prompt being sent (truncated to 1000 chars) | Send events |
+| `NTM_SEND_TARGETS` | Target description (e.g., "cc", "all", "agents") | Send events |
+| `NTM_TARGET_CC` | "true" if targeting Claude | Send events |
+| `NTM_TARGET_COD` | "true" if targeting Codex | Send events |
+| `NTM_TARGET_GMI` | "true" if targeting Gemini | Send events |
+| `NTM_TARGET_ALL` | "true" if targeting all panes | Send events |
+| `NTM_PANE_INDEX` | Specific pane index (-1 if not specified) | Send events |
+| `NTM_DELIVERED_COUNT` | Number of successful deliveries | Post-send only |
+| `NTM_FAILED_COUNT` | Number of failed deliveries | Post-send only |
+| `NTM_TARGET_PANES` | List of targeted pane indices | Post-send only |
+| `NTM_AGENT_COUNT_CC` | Number of Claude agents | Spawn events |
+| `NTM_AGENT_COUNT_COD` | Number of Codex agents | Spawn events |
+| `NTM_AGENT_COUNT_GMI` | Number of Gemini agents | Spawn events |
+| `NTM_AGENT_COUNT_TOTAL` | Total number of agents | Spawn events |
+
+### Example Hooks
+
+**Log all sends to a file:**
+
+```toml
+[[command_hooks]]
+event = "pre-send"
+name = "send-logger"
+command = '''
+echo "$(date -Iseconds) | Session: $NTM_SESSION | Targets: $NTM_SEND_TARGETS" >> ~/.ntm/send.log
+echo "Message: $NTM_MESSAGE" >> ~/.ntm/send.log
+echo "---" >> ~/.ntm/send.log
+'''
+```
+
+**Desktop notification on spawn:**
+
+```toml
+[[command_hooks]]
+event = "post-spawn"
+name = "spawn-notify"
+command = "notify-send 'NTM' 'Session $NTM_SESSION ready with $NTM_AGENT_COUNT_TOTAL agents'"
+```
+
+**Webhook integration:**
+
+```toml
+[[command_hooks]]
+event = "post-send"
+name = "slack-webhook"
+timeout = "5s"
+continue_on_error = true
+command = '''
+curl -s -X POST "$SLACK_WEBHOOK_URL" \
+  -H 'Content-type: application/json' \
+  -d "{\"text\": \"NTM: Sent prompt to $NTM_SEND_TARGETS in $NTM_SESSION\"}"
+'''
+
+[command_hooks.env]
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."
+```
+
+**Validate prompts before sending:**
+
+```toml
+[[command_hooks]]
+event = "pre-send"
+name = "prompt-validator"
+command = '''
+# Block empty prompts
+if [ -z "$NTM_MESSAGE" ]; then
+  echo "Error: Empty prompt not allowed" >&2
+  exit 1
+fi
+
+# Block prompts containing sensitive patterns
+if echo "$NTM_MESSAGE" | grep -qiE "(password|secret|api.?key)"; then
+  echo "Warning: Prompt may contain sensitive data" >&2
+  exit 1
+fi
+'''
+```
+
+**Auto-save outputs before shutdown:**
+
+```toml
+[[command_hooks]]
+event = "pre-shutdown"
+name = "auto-backup"
+command = '''
+mkdir -p ~/.ntm/backups
+ntm save "$NTM_SESSION" -o ~/.ntm/backups 2>/dev/null || true
+'''
+continue_on_error = true
+```
+
+### Hook Behavior
+
+**Pre-hooks:**
+- Run before the command executes
+- If a pre-hook fails (non-zero exit), the command is aborted
+- Set `continue_on_error = true` to run the command even if hook fails
+
+**Post-hooks:**
+- Run after the command completes
+- Failures are logged but don't fail the overall command
+- Useful for notifications and cleanup
+
+**Timeouts:**
+- Default: 30 seconds
+- Maximum: 10 minutes
+- Hooks that exceed timeout are killed
+
+**Execution:**
+- Hooks run in a shell (`sh -c "command"`)
+- Working directory defaults to project directory
+- Standard output and errors are captured and displayed
+
+---
+
 ## Themes & Icons
 
 ### Color Themes
