@@ -192,7 +192,16 @@ func runAdd(session string, specs AgentSpecs) error {
 			return outputError(fmt.Errorf("generating command for Claude agent: %w", err))
 		}
 
-		cmd := fmt.Sprintf("cd %q && %s", dir, agentCmd)
+		safeAgentCmd, err := tmux.SanitizePaneCommand(agentCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("invalid Claude agent command: %w", err))
+		}
+
+		cmd, err := tmux.BuildPaneCommand(dir, safeAgentCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("building Claude agent command: %w", err))
+		}
+
 		if err := tmux.SendKeys(paneID, cmd, true); err != nil {
 			return outputError(fmt.Errorf("launching agent: %w", err))
 		}
@@ -233,7 +242,16 @@ func runAdd(session string, specs AgentSpecs) error {
 			return outputError(fmt.Errorf("generating command for Codex agent: %w", err))
 		}
 
-		cmd := fmt.Sprintf("cd %q && %s", dir, codexCmd)
+		safeCodexCmd, err := tmux.SanitizePaneCommand(codexCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("invalid Codex agent command: %w", err))
+		}
+
+		cmd, err := tmux.BuildPaneCommand(dir, safeCodexCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("building Codex agent command: %w", err))
+		}
+
 		if err := tmux.SendKeys(paneID, cmd, true); err != nil {
 			return outputError(fmt.Errorf("launching agent: %w", err))
 		}
@@ -274,7 +292,16 @@ func runAdd(session string, specs AgentSpecs) error {
 			return outputError(fmt.Errorf("generating command for Gemini agent: %w", err))
 		}
 
-		cmd := fmt.Sprintf("cd %q && %s", dir, geminiCmd)
+		safeGeminiCmd, err := tmux.SanitizePaneCommand(geminiCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("invalid Gemini agent command: %w", err))
+		}
+
+		cmd, err := tmux.BuildPaneCommand(dir, safeGeminiCmd)
+		if err != nil {
+			return outputError(fmt.Errorf("building Gemini agent command: %w", err))
+		}
+
 		if err := tmux.SendKeys(paneID, cmd, true); err != nil {
 			return outputError(fmt.Errorf("launching agent: %w", err))
 		}
