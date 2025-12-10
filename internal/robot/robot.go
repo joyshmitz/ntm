@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
@@ -954,4 +955,57 @@ func RecordStateChange(changeType tracker.ChangeType, session, pane string, deta
 // GetStateTracker returns the global state tracker for direct access.
 func GetStateTracker() *tracker.StateTracker {
 	return stateTracker
+}
+
+// GraphOutput provides project graph analysis from bv
+type GraphOutput struct {
+	GeneratedAt time.Time                  `json:"generated_at"`
+	Available   bool                       `json:"available"`
+	Error       string                     `json:"error,omitempty"`
+	Insights    *bv.InsightsResponse       `json:"insights,omitempty"`
+	Priority    *bv.PriorityResponse       `json:"priority,omitempty"`
+	Health      *bv.HealthSummary          `json:"health,omitempty"`
+}
+
+// PrintGraph outputs bv graph insights for AI consumption
+func PrintGraph() error {
+	output := GraphOutput{
+		GeneratedAt: time.Now().UTC(),
+		Available:   bv.IsInstalled(),
+	}
+
+	if !bv.IsInstalled() {
+		output.Error = "bv (beads_viewer) is not installed"
+		return encodeJSON(output)
+	}
+
+	// Get insights (bottlenecks, keystones, etc.)
+	insights, err := bv.GetInsights()
+	if err != nil {
+		output.Error = fmt.Sprintf("failed to get insights: %v", err)
+	} else {
+		output.Insights = insights
+	}
+
+	// Get priority recommendations
+	priority, err := bv.GetPriority()
+	if err != nil {
+		if output.Error == "" {
+			output.Error = fmt.Sprintf("failed to get priority: %v", err)
+		}
+	} else {
+		output.Priority = priority
+	}
+
+	// Get health summary
+	health, err := bv.GetHealthSummary()
+	if err != nil {
+		if output.Error == "" {
+			output.Error = fmt.Sprintf("failed to get health: %v", err)
+		}
+	} else {
+		output.Health = health
+	}
+
+	return encodeJSON(output)
 }
