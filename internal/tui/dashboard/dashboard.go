@@ -23,6 +23,12 @@ type DashboardTickMsg time.Time
 // RefreshMsg triggers a refresh of session data
 type RefreshMsg struct{}
 
+// StatusUpdateMsg is sent when status detection completes
+type StatusUpdateMsg struct {
+	Statuses []status.AgentStatus
+	Time     time.Time
+}
+
 // Model is the session dashboard model
 type Model struct {
 	session    string
@@ -49,6 +55,16 @@ type Model struct {
 
 	// Per-pane status tracking
 	paneStatus map[int]PaneStatus
+
+	// Live status detection
+	detector       *status.UnifiedDetector
+	agentStatuses  map[string]status.AgentStatus // keyed by pane ID
+	lastRefresh    time.Time
+	refreshPaused  bool
+	refreshCount   int
+
+	// Auto-refresh configuration
+	refreshInterval time.Duration
 }
 
 // PaneStatus tracks the status of a pane including compaction state
@@ -67,6 +83,7 @@ type KeyMap struct {
 	Zoom    key.Binding
 	Send    key.Binding
 	Refresh key.Binding
+	Pause   key.Binding
 	Quit    key.Binding
 	Num1    key.Binding
 	Num2    key.Binding
@@ -79,6 +96,9 @@ type KeyMap struct {
 	Num9    key.Binding
 }
 
+// DefaultRefreshInterval is the default auto-refresh interval
+const DefaultRefreshInterval = 2 * time.Second
+
 var dashKeys = KeyMap{
 	Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 	Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
@@ -87,6 +107,7 @@ var dashKeys = KeyMap{
 	Zoom:    key.NewBinding(key.WithKeys("z", "enter"), key.WithHelp("z/enter", "zoom")),
 	Send:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "send prompt")),
 	Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+	Pause:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause/resume auto-refresh")),
 	Quit:    key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit")),
 	Num1:    key.NewBinding(key.WithKeys("1")),
 	Num2:    key.NewBinding(key.WithKeys("2")),
@@ -105,14 +126,24 @@ func New(session string) Model {
 	ic := icons.Current()
 
 	return Model{
-		session:    session,
-		width:      80,
-		height:     24,
-		theme:      t,
-		icons:      ic,
-		compaction: status.NewCompactionRecoveryIntegrationDefault(),
-		paneStatus: make(map[int]PaneStatus),
+		session:         session,
+		width:           80,
+		height:          24,
+		theme:           t,
+		icons:           ic,
+		compaction:      status.NewCompactionRecoveryIntegrationDefault(),
+		paneStatus:      make(map[int]PaneStatus),
+		detector:        status.NewDetector(),
+		agentStatuses:   make(map[string]status.AgentStatus),
+		refreshInterval: DefaultRefreshInterval,
 	}
+}
+
+// NewWithInterval creates a dashboard with custom refresh interval
+func NewWithInterval(session string, interval time.Duration) Model {
+	m := New(session)
+	m.refreshInterval = interval
+	return m
 }
 
 // Init implements tea.Model

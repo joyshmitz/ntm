@@ -19,6 +19,7 @@ type Config struct {
 	Palette      []PaletteCmd    `toml:"palette"`
 	Tmux         TmuxConfig      `toml:"tmux"`
 	AgentMail    AgentMailConfig `toml:"agent_mail"`
+	Models       ModelsConfig    `toml:"models"`
 }
 
 // AgentConfig defines the commands for each agent type
@@ -50,6 +51,80 @@ type AgentMailConfig struct {
 	Token        string `toml:"token"`         // Bearer token
 	AutoRegister bool   `toml:"auto_register"` // Auto-register sessions as agents
 	ProgramName  string `toml:"program_name"`  // Program identifier for registration
+}
+
+// ModelsConfig holds model alias configuration for each agent type
+type ModelsConfig struct {
+	DefaultClaude string            `toml:"default_claude"` // Default model for Claude
+	DefaultCodex  string            `toml:"default_codex"`  // Default model for Codex
+	DefaultGemini string            `toml:"default_gemini"` // Default model for Gemini
+	Claude        map[string]string `toml:"claude"`         // Claude model aliases
+	Codex         map[string]string `toml:"codex"`          // Codex model aliases
+	Gemini        map[string]string `toml:"gemini"`         // Gemini model aliases
+}
+
+// DefaultModels returns the default model configuration with sensible aliases
+func DefaultModels() ModelsConfig {
+	return ModelsConfig{
+		DefaultClaude: "claude-sonnet-4-20250514",
+		DefaultCodex:  "gpt-4",
+		DefaultGemini: "gemini-2.0-flash",
+		Claude: map[string]string{
+			"opus":      "claude-opus-4-20250514",
+			"sonnet":    "claude-sonnet-4-20250514",
+			"haiku":     "claude-haiku-3-20240307",
+			"architect": "claude-opus-4-20250514",
+			"fast":      "claude-sonnet-4-20250514",
+		},
+		Codex: map[string]string{
+			"gpt4":  "gpt-4",
+			"o1":    "o1",
+			"turbo": "gpt-4-turbo",
+			"max":   "gpt-5.1-codex-max",
+		},
+		Gemini: map[string]string{
+			"pro":   "gemini-pro",
+			"flash": "gemini-2.0-flash",
+			"ultra": "gemini-ultra",
+		},
+	}
+}
+
+// GetModelName resolves a model alias to its full model name.
+// Returns the alias itself if no mapping is found.
+func (m *ModelsConfig) GetModelName(agentType, alias string) string {
+	if alias == "" {
+		// Return default if no alias specified
+		switch strings.ToLower(agentType) {
+		case "claude", "cc":
+			return m.DefaultClaude
+		case "codex", "cod":
+			return m.DefaultCodex
+		case "gemini", "gmi":
+			return m.DefaultGemini
+		}
+		return ""
+	}
+
+	// Check agent-specific aliases
+	var aliases map[string]string
+	switch strings.ToLower(agentType) {
+	case "claude", "cc":
+		aliases = m.Claude
+	case "codex", "cod":
+		aliases = m.Codex
+	case "gemini", "gmi":
+		aliases = m.Gemini
+	}
+
+	if aliases != nil {
+		if fullName, ok := aliases[strings.ToLower(alias)]; ok {
+			return fullName
+		}
+	}
+
+	// Return the alias as-is (assume it's a full model name)
+	return alias
 }
 
 // DefaultPath returns the default config file path
@@ -204,6 +279,7 @@ func Default() *Config {
 			AutoRegister: true,
 			ProgramName:  "ntm",
 		},
+		Models: DefaultModels(),
 	}
 
 	// Try to load palette from markdown file

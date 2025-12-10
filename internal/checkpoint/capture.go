@@ -1,0 +1,386 @@
+package checkpoint
+
+import (
+	"bytes"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
+)
+
+// Capturer handles capturing session state for checkpoints.
+type Capturer struct {
+	storage *Storage
+}
+
+// NewCapturer creates a new Capturer with the default storage.
+func NewCapturer() *Capturer {
+	return &Capturer{
+		storage: NewStorage(),
+	}
+}
+
+// NewCapturerWithStorage creates a Capturer with a custom storage.
+func NewCapturerWithStorage(storage *Storage) *Capturer {
+	return &Capturer{
+		storage: storage,
+	}
+}
+
+// Create creates a new checkpoint for the given session.
+func (c *Capturer) Create(sessionName, name string, opts ...CheckpointOption) (*Checkpoint, error) {
+	options := defaultOptions()
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	// Check session exists
+	if !tmux.SessionExists(sessionName) {
+		return nil, fmt.Errorf("session %q does not exist", sessionName)
+	}
+
+	// Generate checkpoint ID
+	checkpointID := GenerateID(name)
+
+	// Get working directory from session
+	workingDir, err := getSessionDir(sessionName)
+	if err != nil {
+		workingDir = ""
+	}
+
+	// Capture session state
+	sessionState, err := c.captureSessionState(sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("capturing session state: %w", err)
+	}
+
+	// Create checkpoint structure
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        name,
+		Description: options.description,
+		SessionName: sessionName,
+		WorkingDir:  workingDir,
+		CreatedAt:   time.Now(),
+		Session:     sessionState,
+		PaneCount:   len(sessionState.Panes),
+	}
+
+	// Save checkpoint first so directory exists
+	if err := c.storage.Save(cp); err != nil {
+		return nil, fmt.Errorf("saving checkpoint: %w", err)
+	}
+
+	// Capture pane scrollback
+	if err := c.captureScrollback(cp, options.scrollbackLines); err != nil {
+		// Non-fatal, continue
+		fmt.Printf("Warning: failed to capture some scrollback: %v\n", err)
+	}
+
+	// Capture git state if enabled and in a git repo
+	if options.captureGit && workingDir != "" {
+		gitState, err := c.captureGitState(workingDir, sessionName, checkpointID)
+		if err == nil {
+			cp.Git = gitState
+		}
+	}
+
+	// Save updated checkpoint with all state
+	if err := c.storage.Save(cp); err != nil {
+		return nil, fmt.Errorf("saving final checkpoint: %w", err)
+	}
+
+	return cp, nil
+}
+
+// captureSessionState captures the current state of a tmux session.
+func (c *Capturer) captureSessionState(sessionName string) (SessionState, error) {
+	panes, err := tmux.GetPanes(sessionName)
+	if err != nil {
+		return SessionState{}, fmt.Errorf("getting panes: %w", err)
+	}
+
+	var paneStates []PaneState
+	activeIndex := 0
+
+	for _, p := range panes {
+		state := FromTmuxPane(p)
+		if p.Active {
+			activeIndex = p.Index
+		}
+		paneStates = append(paneStates, state)
+	}
+
+	// Get layout string
+	layout, _ := getSessionLayout(sessionName)
+
+	return SessionState{
+		Panes:           paneStates,
+		Layout:          layout,
+		ActivePaneIndex: activeIndex,
+	}, nil
+}
+
+// captureScrollback captures scrollback content from all panes.
+func (c *Capturer) captureScrollback(cp *Checkpoint, lines int) error {
+	for i := range cp.Session.Panes {
+		pane := &cp.Session.Panes[i]
+
+		// Get pane ID for capture
+		paneID := fmt.Sprintf("%s:%d", cp.SessionName, pane.Index)
+		content, err := tmux.CapturePaneOutput(paneID, lines)
+		if err != nil {
+			continue // Skip panes that fail
+		}
+
+		// Save scrollback
+		relativePath, err := c.storage.SaveScrollback(cp.SessionName, cp.ID, pane.Index, content)
+		if err != nil {
+			continue
+		}
+
+		pane.ScrollbackFile = relativePath
+		pane.ScrollbackLines = countLines(content)
+	}
+
+	return nil
+}
+
+// captureGitState captures the git repository state.
+func (c *Capturer) captureGitState(workingDir, sessionName, checkpointID string) (GitState, error) {
+	state := GitState{}
+
+	// Check if it's a git repository
+	if !isGitRepo(workingDir) {
+		return state, nil
+	}
+
+	// Get current branch
+	branch, err := gitCommand(workingDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil {
+		state.Branch = strings.TrimSpace(branch)
+	}
+
+	// Get current commit
+	commit, err := gitCommand(workingDir, "rev-parse", "HEAD")
+	if err == nil {
+		state.Commit = strings.TrimSpace(commit)
+	}
+
+	// Get status counts
+	status, err := gitCommand(workingDir, "status", "--porcelain")
+	if err == nil {
+		state.StagedCount, state.UnstagedCount, state.UntrackedCount = parseGitStatus(status)
+		state.IsDirty = (state.StagedCount + state.UnstagedCount + state.UntrackedCount) > 0
+	}
+
+	// Save git status text
+	statusText, _ := gitCommand(workingDir, "status")
+	if statusText != "" {
+		c.storage.SaveGitStatus(sessionName, checkpointID, statusText)
+	}
+
+	// Capture uncommitted changes as patch
+	if state.IsDirty {
+		// Get diff of tracked changes (both staged and unstaged)
+		patch, err := gitCommand(workingDir, "diff", "HEAD")
+		if err == nil && patch != "" {
+			if err := c.storage.SaveGitPatch(sessionName, checkpointID, patch); err == nil {
+				state.PatchFile = GitPatchFile
+			}
+		}
+	}
+
+	return state, nil
+}
+
+// getSessionDir gets the working directory for a session.
+func getSessionDir(sessionName string) (string, error) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{pane_current_path}")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// getSessionLayout gets the tmux layout string for a session.
+func getSessionLayout(sessionName string) (string, error) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{window_layout}")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// isGitRepo checks if a directory is a git repository.
+func isGitRepo(dir string) bool {
+	gitDir := filepath.Join(dir, ".git")
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-dir")
+	return cmd.Run() == nil || fileExists(gitDir)
+}
+
+// gitCommand runs a git command in the specified directory.
+func gitCommand(dir string, args ...string) (string, error) {
+	allArgs := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", allArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
+// parseGitStatus parses git status --porcelain output.
+func parseGitStatus(status string) (staged, unstaged, untracked int) {
+	lines := strings.Split(strings.TrimSpace(status), "\n")
+	for _, line := range lines {
+		if len(line) < 2 {
+			continue
+		}
+		// First char is index status, second is worktree status
+		indexStatus := line[0]
+		worktreeStatus := line[1]
+
+		switch {
+		case line[0:2] == "??":
+			untracked++
+		case indexStatus != ' ' && indexStatus != '?':
+			staged++
+		}
+
+		if worktreeStatus != ' ' && worktreeStatus != '?' && indexStatus != '?' {
+			unstaged++
+		}
+	}
+	return
+}
+
+// countLines counts the number of lines in a string.
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// fileExists checks if a path exists.
+func fileExists(path string) bool {
+	_, err := exec.Command("test", "-e", path).Output()
+	return err == nil
+}
+
+// FindByPattern finds checkpoints matching a pattern (prefix match or exact).
+func (c *Capturer) FindByPattern(sessionName, pattern string) ([]*Checkpoint, error) {
+	all, err := c.storage.List(sessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []*Checkpoint
+	for _, cp := range all {
+		// Match by ID prefix or name
+		if strings.HasPrefix(cp.ID, pattern) ||
+			strings.EqualFold(cp.Name, pattern) ||
+			matchWildcard(cp.Name, pattern) {
+			matches = append(matches, cp)
+		}
+	}
+
+	return matches, nil
+}
+
+// matchWildcard performs simple wildcard matching (* only).
+func matchWildcard(s, pattern string) bool {
+	if !strings.Contains(pattern, "*") {
+		return strings.EqualFold(s, pattern)
+	}
+
+	// Convert to regex
+	regexPattern := "(?i)^" + regexp.QuoteMeta(pattern) + "$"
+	regexPattern = strings.ReplaceAll(regexPattern, `\*`, ".*")
+
+	matched, _ := regexp.MatchString(regexPattern, s)
+	return matched
+}
+
+// GetLatest returns the most recent checkpoint for a session.
+func (c *Capturer) GetLatest(sessionName string) (*Checkpoint, error) {
+	return c.storage.GetLatest(sessionName)
+}
+
+// List returns all checkpoints for a session.
+func (c *Capturer) List(sessionName string) ([]*Checkpoint, error) {
+	return c.storage.List(sessionName)
+}
+
+// GetByIndex returns the Nth most recent checkpoint (1-indexed, 1 = latest).
+func (c *Capturer) GetByIndex(sessionName string, index int) (*Checkpoint, error) {
+	checkpoints, err := c.storage.List(sessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	if index < 1 || index > len(checkpoints) {
+		return nil, fmt.Errorf("checkpoint index %d out of range (1-%d)", index, len(checkpoints))
+	}
+
+	return checkpoints[index-1], nil
+}
+
+// ParseCheckpointRef parses a checkpoint reference which can be:
+// - A checkpoint ID (timestamp-name)
+// - A checkpoint name
+// - "~N" for Nth most recent (e.g., "~1" = latest, "~2" = second latest)
+// - "last" or "latest" for the most recent
+func (c *Capturer) ParseCheckpointRef(sessionName, ref string) (*Checkpoint, error) {
+	ref = strings.TrimSpace(ref)
+
+	// Handle special keywords
+	switch strings.ToLower(ref) {
+	case "last", "latest", "~1", "~":
+		return c.GetLatest(sessionName)
+	}
+
+	// Handle ~N notation
+	if strings.HasPrefix(ref, "~") {
+		indexStr := strings.TrimPrefix(ref, "~")
+		index, err := strconv.Atoi(indexStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid checkpoint reference: %s", ref)
+		}
+		return c.GetByIndex(sessionName, index)
+	}
+
+	// Try exact match by ID
+	if c.storage.Exists(sessionName, ref) {
+		return c.storage.Load(sessionName, ref)
+	}
+
+	// Try pattern match
+	matches, err := c.FindByPattern(sessionName, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("no checkpoint found matching: %s", ref)
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, fmt.Errorf("ambiguous checkpoint reference %q matches %d checkpoints", ref, len(matches))
+	}
+}

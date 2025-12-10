@@ -361,92 +361,100 @@ func TestStatusResponse_NeedsAction(t *testing.T) {
 	}
 }
 
-func TestScanResult_Methods(t *testing.T) {
-	// Test TotalIssues
-	result := &ScanResult{
-		Totals: ScanTotals{
-			Critical: 2,
-			Warning:  5,
-			Info:     10,
+func TestViewResponse(t *testing.T) {
+	resp := ViewResponse{
+		SourcePath: "/path/to/session.jsonl",
+		Agent:      "claude-code",
+		Workspace:  "myproject",
+		Title:      "Debug session",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+			{Role: "assistant", Content: "Hi there!"},
 		},
 	}
 
-	if got := result.TotalIssues(); got != 17 {
-		t.Errorf("TotalIssues() = %d, want 17", got)
+	if resp.Agent != "claude-code" {
+		t.Errorf("Agent = %q, want %q", resp.Agent, "claude-code")
 	}
-
-	// Test IsHealthy
-	if result.IsHealthy() {
-		t.Error("IsHealthy() should be false with critical issues")
-	}
-
-	healthyResult := &ScanResult{
-		Totals: ScanTotals{Critical: 0, Warning: 0, Info: 5},
-	}
-	if !healthyResult.IsHealthy() {
-		t.Error("IsHealthy() should be true with no critical/warning")
-	}
-
-	// Test HasCritical/HasWarning
-	if !result.HasCritical() {
-		t.Error("HasCritical() should be true")
-	}
-	if !result.HasWarning() {
-		t.Error("HasWarning() should be true")
+	if len(resp.Messages) != 2 {
+		t.Errorf("len(Messages) = %d, want 2", len(resp.Messages))
 	}
 }
 
-func TestScanResult_FilterBySeverity(t *testing.T) {
-	result := &ScanResult{
-		Findings: []Finding{
-			{File: "a.go", Severity: SeverityCritical},
-			{File: "b.go", Severity: SeverityWarning},
-			{File: "c.go", Severity: SeverityCritical},
-			{File: "d.go", Severity: SeverityInfo},
+func TestExpandResponse(t *testing.T) {
+	resp := ExpandResponse{
+		SourcePath:    "/path/to/session.jsonl",
+		CenterLine:    42,
+		ContextBefore: 5,
+		ContextAfter:  5,
+		Messages: []Message{
+			{Role: "user", Content: "What's wrong?"},
 		},
 	}
 
-	critical := result.FilterBySeverity(SeverityCritical)
-	if len(critical) != 2 {
-		t.Errorf("FilterBySeverity(Critical) returned %d, want 2", len(critical))
-	}
-
-	warning := result.FilterBySeverity(SeverityWarning)
-	if len(warning) != 1 {
-		t.Errorf("FilterBySeverity(Warning) returned %d, want 1", len(warning))
+	if resp.CenterLine != 42 {
+		t.Errorf("CenterLine = %d, want 42", resp.CenterLine)
 	}
 }
 
-func TestScanResult_FilterByFile(t *testing.T) {
-	result := &ScanResult{
-		Findings: []Finding{
-			{File: "src/main.go", Line: 10},
-			{File: "src/util.go", Line: 20},
-			{File: "src/main.go", Line: 30},
+func TestTimelineResponse(t *testing.T) {
+	resp := TimelineResponse{
+		Entries: []TimelineEntry{
+			{Timestamp: 1702200000, Agent: "claude-code", MessageCount: 10},
+			{Timestamp: 1702300000, Agent: "codex", MessageCount: 5},
 		},
+		Count: 2,
 	}
 
-	mainFindings := result.FilterByFile("src/main.go")
-	if len(mainFindings) != 2 {
-		t.Errorf("FilterByFile returned %d, want 2", len(mainFindings))
+	if resp.Count != 2 {
+		t.Errorf("Count = %d, want 2", resp.Count)
 	}
-
-	otherFindings := result.FilterByFile("nonexistent.go")
-	if len(otherFindings) != 0 {
-		t.Errorf("FilterByFile returned %d, want 0", len(otherFindings))
+	if len(resp.Entries) != 2 {
+		t.Errorf("len(Entries) = %d, want 2", len(resp.Entries))
 	}
 }
 
-func TestDBInfo_SizeMB(t *testing.T) {
-	db := DBInfo{SizeBytes: 20 * 1024 * 1024} // 20 MB
-	if got := db.SizeMB(); got != 20.0 {
-		t.Errorf("SizeMB() = %v, want 20.0", got)
+func TestAggregations(t *testing.T) {
+	agg := Aggregations{
+		ByAgent: []AgentCount{
+			{Agent: "claude-code", Count: 50},
+			{Agent: "codex", Count: 30},
+		},
+		ByWorkspace: []WorkspaceCount{
+			{Workspace: "frontend", Count: 40},
+			{Workspace: "backend", Count: 40},
+		},
+		TotalSessions: 80,
+	}
+
+	if len(agg.ByAgent) != 2 {
+		t.Errorf("len(ByAgent) = %d, want 2", len(agg.ByAgent))
+	}
+	if agg.TotalSessions != 80 {
+		t.Errorf("TotalSessions = %d, want 80", agg.TotalSessions)
 	}
 }
 
-func TestSearchOptions_Defaults(t *testing.T) {
-	opts := DefaultOptions()
-	if opts.Timeout != 60*time.Second {
-		t.Errorf("expected default timeout 60s, got %v", opts.Timeout)
+func TestDateRange(t *testing.T) {
+	dr := DateRange{
+		Earliest: "2024-01-01",
+		Latest:   "2024-12-31",
+	}
+
+	if dr.Earliest != "2024-01-01" {
+		t.Errorf("Earliest = %q, want %q", dr.Earliest, "2024-01-01")
+	}
+}
+
+func TestLimits(t *testing.T) {
+	limits := Limits{
+		MaxQueryLength:       1000,
+		MaxResults:           100,
+		MaxConcurrentQueries: 10,
+		RateLimitPerMinute:   60,
+	}
+
+	if limits.MaxResults != 100 {
+		t.Errorf("MaxResults = %d, want 100", limits.MaxResults)
 	}
 }

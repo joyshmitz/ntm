@@ -247,6 +247,7 @@ func init() {
 		newViewCmd(),
 		newZoomCmd(),
 		newDashboardCmd(),
+		newWatchCmd(),
 
 		// Output management
 		newCopyCmd(),
