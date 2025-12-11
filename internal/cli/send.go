@@ -51,6 +51,9 @@ type SendOptions struct {
 	CassCheck      bool
 	CassSimilarity float64
 	CassCheckDays  int
+
+	// Hooks
+	NoHooks bool
 }
 
 // SendTarget represents a send target with optional variant filter.
@@ -185,55 +188,56 @@ func newSendCmd() *cobra.Command {
 	var noCassCheck bool
 	var cassSimilarity float64
 	var cassCheckDays int
+	var noHooks bool
 
 	cmd := &cobra.Command{
 		Use:   "send <session> [prompt]",
 		Short: "Send a prompt to agent panes",
 		Long: `Send a prompt or command to agent panes in a session.
 
-By default, sends to all agent panes. Use flags to target specific types.
-Use --cc=variant to filter by model or persona (e.g., --cc=opus, --cc=architect).
-Use --tag to filter by user-defined tags.
+		By default, sends to all agent panes. Use flags to target specific types.
+		Use --cc=variant to filter by model or persona (e.g., --cc=opus, --cc=architect).
+		Use --tag to filter by user-defined tags.
 
-Prompt can be provided as:
-  - Command line argument (traditional)
-  - From a file using --file
-  - From stdin when piped/redirected
-  - From a template using --template
+		Prompt can be provided as:
+		  - Command line argument (traditional)
+		  - From a file using --file
+		  - From stdin when piped/redirected
+		  - From a template using --template
 
-Template Usage:
-Use --template (-t) to use a named prompt template with variable substitution.
-Templates support {{variable}} placeholders and {{#var}}...{{/var}} conditionals.
-See 'ntm template list' for available templates.
+		Template Usage:
+		Use --template (-t) to use a named prompt template with variable substitution.
+		Templates support {{variable}} placeholders and {{#var}}...{{/var}} conditionals.
+		See 'ntm template list' for available templates.
 
-File Context Injection:
-Use --context (-c) to include file contents in the prompt. Files are prepended
-with headers and code fences. Supports line ranges: path:10-50, path:10-, path:-50
+		File Context Injection:
+		Use --context (-c) to include file contents in the prompt. Files are prepended
+		with headers and code fences. Supports line ranges: path:10-50, path:10-, path:-50
 
-When using --file or stdin, use --prefix and --suffix to wrap the content.
+		When using --file or stdin, use --prefix and --suffix to wrap the content.
 
-Duplicate Detection:
-By default, checks CASS for similar past sessions to avoid duplicate work.
-Use --no-cass-check to skip.
+		Duplicate Detection:
+		By default, checks CASS for similar past sessions to avoid duplicate work.
+		Use --no-cass-check to skip.
 
-Examples:
-  ntm send myproject "fix the linting errors"           # All agents
-  ntm send myproject --cc "review the changes"          # All Claude agents
-  ntm send myproject --cc=opus "review the changes"     # Only Claude Opus agents
-  ntm send myproject --tag=frontend "update ui"         # Agents with 'frontend' tag
-  ntm send myproject --cod --gmi "run the tests"        # Codex and Gemini
-  ntm send myproject --all "git status"                 # All panes
-  ntm send myproject --pane=2 "specific pane"           # Specific pane
-  ntm send myproject --skip-first "restart"             # Skip user pane
-  ntm send myproject --json "run tests"                 # JSON output
-  ntm send myproject --file prompts/review.md           # From file
-  cat error.log | ntm send myproject --cc               # From stdin
-  git diff | ntm send myproject --all --prefix "Review these changes:"  # Stdin with prefix
-  ntm send myproject -c src/auth.py "Refactor this"     # With file context
-  ntm send myproject -c src/api.go:10-50 "Review lines" # With line range
-  ntm send myproject -c a.go -c b.go "Compare these"    # Multiple files
-  ntm send myproject -t code_review --file src/main.go  # Template with file
-  ntm send myproject -t fix --var issue="null pointer" --file src/app.go  # Template with vars`,
+		Examples:
+		  ntm send myproject "fix the linting errors"           # All agents
+		  ntm send myproject --cc "review the changes"          # All Claude agents
+		  ntm send myproject --cc=opus "review the changes"     # Only Claude Opus agents
+		  ntm send myproject --tag=frontend "update ui"         # Agents with 'frontend' tag
+		  ntm send myproject --cod --gmi "run the tests"        # Codex and Gemini
+		  ntm send myproject --all "git status"                 # All panes
+		  ntm send myproject --pane=2 "specific pane"           # Specific pane
+		  ntm send myproject --skip-first "restart"             # Skip user pane
+		  ntm send myproject --json "run tests"                 # JSON output
+		  ntm send myproject --file prompts/review.md           # From file
+		  cat error.log | ntm send myproject --cc               # From stdin
+		  git diff | ntm send myproject --all --prefix "Review these changes:"  # Stdin with prefix
+		  ntm send myproject -c src/auth.py "Refactor this"     # With file context
+		  ntm send myproject -c src/api.go:10-50 "Review lines" # With line range
+		  ntm send myproject -c a.go -c b.go "Compare these"    # Multiple files
+		  ntm send myproject -t code_review --file src/main.go  # Template with file
+		  ntm send myproject -t fix --var issue="null pointer" --file src/app.go  # Template with vars`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
@@ -248,6 +252,7 @@ Examples:
 				CassCheck:      cassCheck && !noCassCheck,
 				CassSimilarity: cassSimilarity,
 				CassCheckDays:  cassCheckDays,
+				NoHooks:        noHooks,
 			}
 
 			// Handle template-based prompts
@@ -303,6 +308,7 @@ Examples:
 	cmd.Flags().BoolVar(&noCassCheck, "no-cass-check", false, "Skip CASS duplicate check")
 	cmd.Flags().Float64Var(&cassSimilarity, "cass-similarity", 0.7, "Similarity threshold for duplicate detection")
 	cmd.Flags().IntVar(&cassCheckDays, "cass-check-days", 7, "Look back N days for duplicates")
+	cmd.Flags().BoolVar(&noHooks, "no-hooks", false, "Disable command hooks")
 
 	return cmd
 }
@@ -464,13 +470,17 @@ func runSendInternal(opts SendOptions) error {
 	targetCod := targets.HasTargetsForType(AgentTypeCodex)
 	targetGmi := targets.HasTargetsForType(AgentTypeGemini)
 
-	start := time.Now()
-    // ... existing logic starts here ...
+	// Helper for JSON error output
 	var (
 		histTargets []int
 		histErr     error
 		histSuccess bool
 	)
+	
+	// Start time tracking for history
+	start := time.Now()
+
+	// Defer history logic
 	defer func() {
 		entry := history.NewEntry(session, intsToStrings(histTargets), prompt, history.SourceCLI)
 		entry.Template = templateName
@@ -483,7 +493,6 @@ func runSendInternal(opts SendOptions) error {
 		_ = history.Append(entry)
 	}()
 
-	// Helper for JSON error output
 	outputError := func(err error) error {
 		histErr = err
 		if jsonOutput {
@@ -503,19 +512,11 @@ func runSendInternal(opts SendOptions) error {
 	// CASS Duplicate Detection
 	if opts.CassCheck {
 		if err := checkCassDuplicates(session, prompt, opts.CassSimilarity, opts.CassCheckDays); err != nil {
-			// If check returns error, it means we should stop (e.g. duplicates found and user said no)
-			// Or actual error?
-			// If actual error (e.g. CASS not found), we should probably warn and proceed?
-			// If duplicate found and user said No, we return nil (aborted) or error?
-			// Let's assume checkCassDuplicates handles UI/logic and returns error if we should stop.
 			if err.Error() == "aborted by user" {
 				fmt.Println("Aborted.")
 				return nil
 			}
-			// For other errors (e.g. CASS unavailable), we might want to log and proceed?
-			// The requirement says "Graceful when CASS unavailable".
 			if strings.Contains(err.Error(), "cass not installed") || strings.Contains(err.Error(), "connection refused") {
-				// Warn and proceed
 				if !jsonOutput {
 					fmt.Printf("Warning: CASS duplicate check failed: %v\n", err)
 				}
@@ -528,20 +529,23 @@ func runSendInternal(opts SendOptions) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
 	}
-    // ... rest of logic ...
 
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' not found", session))
 	}
 
 	// Initialize hook executor
-	hookExec, err := hooks.NewExecutorFromConfig()
-	if err != nil {
-		// Log warning but continue - hooks are optional
-		if !jsonOutput {
-			fmt.Printf("⚠ Could not load hooks config: %v\n", err)
+	var hookExec *hooks.Executor
+	if !opts.NoHooks {
+		var err error
+		hookExec, err = hooks.NewExecutorFromConfig()
+		if err != nil {
+			// Log warning but continue - hooks are optional
+			if !jsonOutput {
+				fmt.Printf("⚠ Could not load hooks config: %v\n", err)
+			}
+			hookExec = hooks.NewExecutor(nil) // Use empty config
 		}
-		hookExec = hooks.NewExecutor(nil) // Use empty config
 	}
 
 	// Build target description for hook environment
@@ -575,7 +579,7 @@ func runSendInternal(opts SendOptions) error {
 	}
 
 	// Run pre-send hooks
-	if hookExec.HasHooksForEvent(hooks.EventPreSend) {
+	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPreSend) {
 		if !jsonOutput {
 			fmt.Println("Running pre-send hooks...")
 		}
@@ -659,19 +663,20 @@ func runSendInternal(opts SendOptions) error {
 				delivered++
 				histSuccess = true
 
-				if jsonOutput {
-					result := SendResult{
-						Success:       true,
-						Session:       session,
-						PromptPreview: truncatePrompt(prompt, 50),
-						Targets:       targetPanes,
-						Delivered:     delivered,
-						Failed:        failed,
+					if jsonOutput {
+						result := SendResult{
+							Success:       true,
+							Session:       session,
+							PromptPreview: truncatePrompt(prompt, 50),
+							Targets:       targetPanes,
+							Delivered:     delivered,
+							Failed:        failed,
+						}
+						return json.NewEncoder(os.Stdout).Encode(result)
 					}
-					return json.NewEncoder(os.Stdout).Encode(result)
-				}
-				fmt.Printf("Sent to pane %d\n", paneIndex)
-				return nil
+					fmt.Printf("Sent to pane %d\n", paneIndex)
+					return nil
+
 			}
 		}
 		return outputError(fmt.Errorf("pane %d not found", paneIndex))
@@ -755,7 +760,7 @@ func runSendInternal(opts SendOptions) error {
 	}
 
 	// Run post-send hooks
-	if hookExec.HasHooksForEvent(hooks.EventPostSend) {
+	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPostSend) {
 		if !jsonOutput {
 			fmt.Println("Running post-send hooks...")
 		}
@@ -880,6 +885,7 @@ func runInterrupt(session string, tags []string) error {
 func newKillCmd() *cobra.Command {
 	var force bool
 	var tags []string
+	var noHooks bool
 
 	cmd := &cobra.Command{
 		Use:   "kill <session>",
@@ -892,23 +898,65 @@ Examples:
   ntm kill myproject --tag=ui  # Kill only panes with 'ui' tag`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runKill(args[0], force, tags)
+			return runKill(args[0], force, tags, noHooks)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation")
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "filter panes to kill by tag (if used, only matching panes are killed)")
+	cmd.Flags().BoolVar(&noHooks, "no-hooks", false, "Disable command hooks")
 
 	return cmd
 }
 
-func runKill(session string, force bool, tags []string) error {
+func runKill(session string, force bool, tags []string, noHooks bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)
+	}
+
+	dir := cfg.GetProjectDir(session)
+
+	// Initialize hook executor
+	var hookExec *hooks.Executor
+	if !noHooks {
+		var err error
+		hookExec, err = hooks.NewExecutorFromConfig()
+		if err != nil {
+			if !jsonOutput {
+				fmt.Printf("⚠ Could not load hooks config: %v\n", err)
+			}
+			hookExec = hooks.NewExecutor(nil)
+		}
+	}
+
+	// Build hook context
+	hookCtx := hooks.ExecutionContext{
+		SessionName: session,
+		ProjectDir:  dir,
+		AdditionalEnv: map[string]string{
+			"NTM_FORCE_KILL": boolToStr(force),
+			"NTM_KILL_TAGS":  strings.Join(tags, ","),
+		},
+	}
+
+	// Run pre-kill hooks
+	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPreKill) {
+		if !jsonOutput {
+			fmt.Println("Running pre-kill hooks...")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPreKill, hookCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("pre-kill hook failed: %w", err)
+		}
+		if hooks.AnyFailed(results) {
+			return fmt.Errorf("pre-kill hook failed: %w", hooks.AllErrors(results))
+		}
 	}
 
 	// If tags are provided, kill specific panes
@@ -963,6 +1011,27 @@ func runKill(session string, force bool, tags []string) error {
 	}
 
 	fmt.Printf("Killed session '%s'\n", session)
+	
+	// Post-kill hooks?
+	// The session is gone, but we can still run hooks in context of what was killed.
+	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPostKill) {
+		if !jsonOutput {
+			fmt.Println("Running post-kill hooks...")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPostKill, hookCtx)
+		cancel()
+		if err != nil {
+			if !jsonOutput {
+				fmt.Printf("⚠ Post-kill hook error: %v\n", err)
+			}
+		} else if hooks.AnyFailed(results) {
+			if !jsonOutput {
+				fmt.Printf("⚠ Post-kill hook failed: %v\n", hooks.AllErrors(results))
+			}
+		}
+	}
+
 	return nil
 }
 
