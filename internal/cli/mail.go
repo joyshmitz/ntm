@@ -7,8 +7,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -56,11 +59,24 @@ func newMailSendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "send <session> [message]",
 		Short: "Send Human Overseer message to agents",
-		Long: `Send a Human Overseer message via Agent Mail.
+		Long: `Send a Human Overseer message to agents via Agent Mail.
+
+This uses the Agent Mail Human Overseer functionality, which:
+  - Sends from the special "HumanOverseer" identity
+  - Bypasses contact policies (humans can always reach any agent)
+  - Auto-inject a preamble telling agents to prioritize your instructions
+  - Marks all messages as high importance
 
 Recipients must be Agent Mail agent names (e.g., "GreenCastle", "BlueLake").
-Use --all to broadcast to all registered agents. If no body is provided, $EDITOR
-opens for composition.`,
+Use --all to send to all registered agents in the project.
+
+If no message body is provided, opens $EDITOR for composition.
+
+Examples:
+  ntm mail send myproject --to GreenCastle "Please review the API changes"
+  ntm mail send myproject --all "Stop current work and checkpoint"
+  ntm mail send myproject --to BlueLake --to RedStone --thread FEAT-123 "Status update"
+  ntm mail send myproject --all --file ./instructions.md`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
@@ -72,19 +88,19 @@ opens for composition.`,
 				if err != nil {
 					return fmt.Errorf("reading file: %w", err)
 				}
-				body = string(content)
+			body = string(content)
 			} else if len(args) > 1 {
-				body = strings.Join(args[1:], " ")
+			body = strings.Join(args[1:], " ")
 			} else {
 				// Open editor for message composition
 				composedBody, composedSubject, err := openEditorForMessage(subject)
 				if err != nil {
 					return fmt.Errorf("composing message: %w", err)
 				}
-				body = composedBody
-				if subject == "" && composedSubject != "" {
-					subject = composedSubject
-				}
+			body = composedBody
+			if subject == "" && composedSubject != "" {
+				subject = composedSubject
+			}
 			}
 
 			// Validate body is not empty
@@ -305,7 +321,7 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 		}
 	}
 
-	// Get project key
+	// Get project key (current working directory)
 	projectKey, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -330,12 +346,13 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 	// Resolve recipients
 	var recipients []string
 	if all {
-		// Get all registered agents
+		// Get all registered agents in the project
 		agents, err := client.ListProjectAgents(ctx, projectKey)
 		if err != nil {
 			return fmt.Errorf("listing agents: %w", err)
 		}
 		for _, agent := range agents {
+			// Skip the HumanOverseer itself
 			if agent.Name != "HumanOverseer" {
 				recipients = append(recipients, agent.Name)
 			}
@@ -351,12 +368,12 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 		return fmt.Errorf("no recipients specified (use --to <agent-name> or --all)")
 	}
 
-	// Auto-generate subject
+	// Auto-generate subject if not provided
 	if subject == "" {
 		subject = truncateSubject(body, 60)
 	}
 
-	// Derive project slug
+	// Derive project slug for the HTTP endpoint
 	projectSlug := agentmail.ProjectSlugFromPath(projectKey)
 	if project.Slug != "" {
 		projectSlug = project.Slug // Use server-provided slug if available
@@ -403,8 +420,103 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 
 // resolveRecipients resolves recipient specifiers to agent names.
 func resolveRecipients(session string, to []string, all, targetCC, targetCod, targetGmi bool) ([]string, error) {
-	// ... (simplified or full logic if needed)
-	return nil, nil
+	var recipients []string
+
+	// Get panes for resolution
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return nil, fmt.Errorf("getting panes: %w", err)
+	}
+
+	// Build pane map for resolution
+	paneMap := make(map[string]tmux.Pane) // e.g., "cc_1" -> pane
+	for _, p := range panes {
+		// Generate pane identifier based on type
+		var prefix string
+		switch p.Type {
+		case tmux.AgentClaude:
+			prefix = "cc"
+		case tmux.AgentCodex:
+			prefix = "cod"
+		case tmux.AgentGemini:
+			prefix = "gmi"
+		default:
+			prefix = "user"
+		}
+		id := fmt.Sprintf("%s_%d", prefix, p.Index)
+		paneMap[id] = p
+	}
+
+	// Process --all flag
+	if all {
+		for _, p := range panes {
+			if p.Type != tmux.AgentUser {
+				name := resolveAgentName(p)
+				if name != "" {
+					recipients = append(recipients, name)
+				}
+			}
+		}
+	}
+
+	// Process type filters
+	if targetCC {
+		for _, p := range panes {
+			if p.Type == tmux.AgentClaude {
+				name := resolveAgentName(p)
+				if name != "" {
+					recipients = append(recipients, name)
+				}
+			}
+		}
+	}
+	if targetCod {
+		for _, p := range panes {
+			if p.Type == tmux.AgentCodex {
+				name := resolveAgentName(p)
+				if name != "" {
+					recipients = append(recipients, name)
+				}
+			}
+		}
+	}
+	if targetGmi {
+		for _, p := range panes {
+			if p.Type == tmux.AgentGemini {
+				name := resolveAgentName(p)
+				if name != "" {
+					recipients = append(recipients, name)
+				}
+			}
+		}
+	}
+
+	// Process --to recipients
+	for _, recipient := range to {
+		// Check if it's a pane identifier
+		if p, ok := paneMap[recipient]; ok {
+			name := resolveAgentName(p)
+			if name != "" {
+				recipients = append(recipients, name)
+			}
+		} else {
+			// Assume it's an agent name
+			recipients = append(recipients, recipient)
+		}
+	}
+
+	// Deduplicate
+	seen := make(map[string]bool)
+	unique := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		if !seen[r] {
+			seen[r] = true
+		
+unique = append(unique, r)
+		}
+	}
+
+	return unique, nil
 }
 
 // resolveAgentName tries to get the agent name from a pane.
@@ -475,22 +587,26 @@ func encodeJSONResult(w io.Writer, v interface{}) error {
 }
 
 // openEditorForMessage opens $EDITOR for message composition.
+// Returns the body and subject (parsed from first line if it's a heading).
 func openEditorForMessage(existingSubject string) (body string, subject string, err error) {
+	// Get editor
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		editor = os.Getenv("VISUAL")
 	}
 	if editor == "" {
-		editor = "nano"
+		editor = "nano" // fallback
 	}
 
+	// Create temp file with template
 	tmpFile, err := os.CreateTemp("", "ntm-mail-*.md")
 	if err != nil {
 		return "", "", fmt.Errorf("creating temp file: %w", err)
 	}
-	mpPath := tmpFile.Name()
-	defer os.Remove(mpPath)
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
 
+	// Write template
 	template := "# Subject\n\n<!-- Write your message below. First line starting with # becomes the subject. -->\n\n"
 	if existingSubject != "" {
 		template = fmt.Sprintf("# %s\n\n<!-- Edit your message below. -->\n\n", existingSubject)
@@ -501,8 +617,9 @@ func openEditorForMessage(existingSubject string) (body string, subject string, 
 	}
 	tmpFile.Close()
 
+	// Open editor
 	editorCmd, editorArgs := parseEditorCommand(editor)
-	args := append(editorArgs, mpPath)
+	args := append(editorArgs, tmpPath)
 	cmd := exec.Command(editorCmd, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -512,33 +629,254 @@ func openEditorForMessage(existingSubject string) (body string, subject string, 
 		return "", "", fmt.Errorf("running editor: %w", err)
 	}
 
-	content, err := os.ReadFile(mpPath)
+	// Read composed message
+	content, err := os.ReadFile(tmpPath)
 	if err != nil {
 		return "", "", fmt.Errorf("reading composed message: %w", err)
 	}
 
+	// Parse content
 	lines := strings.Split(string(content), "\n")
 	var bodyLines []string
 	subject = ""
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+
+		// Skip HTML comments
+		if strings.HasPrefix(trimmed, "<!--") && strings.HasSuffix(trimmed, "-->") {
+			continue
+		}
 		if strings.HasPrefix(trimmed, "<!--") || strings.HasSuffix(trimmed, "-->") {
 			continue
 		}
+
+		// Extract subject from first heading
 		if subject == "" && strings.HasPrefix(trimmed, "#") {
+			// Remove heading markers
 			subject = strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
 			if subject == "Subject" {
-				subject = ""
+				subject = "" // Placeholder wasn't changed
 			}
 			continue
 		}
+
+		// Skip leading empty lines before body
 		if len(bodyLines) == 0 && trimmed == "" {
 			continue
 		}
+
 		bodyLines = append(bodyLines, lines[i])
 	}
 
 	body = strings.TrimSpace(strings.Join(bodyLines, "\n"))
 	return body, subject, nil
+}
+
+
+
+func newMailInboxCmd() *cobra.Command {
+	var (
+		agent         string
+		urgent        bool
+		sessionAgents bool
+		jsonFormat    bool
+		limit         int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "inbox [session]",
+		Short: "Show aggregate project inbox",
+		Long: `Display an aggregate inbox view showing messages across ALL agents in the project.
+
+		This gives visibility into all agent-to-agent communication.
+
+		Examples:
+		  ntm mail inbox myproject
+		  ntm mail inbox myproject --urgent
+		  ntm mail inbox myproject --agent cc_1`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var session string
+			if len(args) > 0 {
+				session = args[0]
+			}
+			return runMailInbox(cmd, session, sessionAgents, agent, urgent, limit, jsonFormat)
+		},
+	}
+
+	cmd.Flags().StringVar(&agent, "agent", "", "Filter by specific agent name")
+	cmd.Flags().BoolVar(&urgent, "urgent", false, "Show only urgent messages")
+	cmd.Flags().BoolVar(&sessionAgents, "session-agents", false, "Filter to agents currently in session")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Max messages to show")
+	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output in JSON format")
+
+	return cmd
+}
+
+type aggregatedMessage struct {
+	ID          int       `json:"id"`
+	Subject     string    `json:"subject"`
+	From        string    `json:"from"`
+	CreatedTS   time.Time `json:"created_ts"`
+	Importance  string    `json:"importance"`
+	AckRequired bool      `json:"ack_required"`
+	Kind        string    `json:"kind"`
+	BodyMD      string    `json:"body_md,omitempty"` // truncated for display
+	Recipients  []string  `json:"recipients"`
+}
+
+func runMailInbox(cmd *cobra.Command, session string, sessionAgents bool, agentFilter string, urgent bool, limit int, jsonFmt bool) error {
+	projectKey, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if !client.IsAvailable() {
+		return fmt.Errorf("agent mail server not available")
+	}
+
+	// List all agents in project
+	agents, err := client.ListProjectAgents(ctx, projectKey)
+	if err != nil {
+		return fmt.Errorf("listing agents: %w", err)
+	}
+
+	var targetAgents []string
+	if agentFilter != "" {
+		targetAgents = []string{agentFilter}
+	} else {
+		for _, a := range agents {
+			if a.Name != "HumanOverseer" {
+				targetAgents = append(targetAgents, a.Name)
+			}
+		}
+	}
+
+	// Filter by session agents if requested
+	if sessionAgents {
+		if session == "" {
+			if tmux.InTmux() {
+				session = tmux.GetCurrentSession()
+			} else {
+				return fmt.Errorf("session name required for --session-agents")
+			}
+		}
+		panes, err := tmux.GetPanes(session)
+		if err != nil {
+			return fmt.Errorf("getting session panes: %w", err)
+		}
+		
+		sessionAgentSet := make(map[string]bool)
+		for _, p := range panes {
+			name := resolveAgentName(p)
+			if name != "" {
+				sessionAgentSet[name] = true
+			}
+		}
+		
+		var filteredAgents []string
+		for _, name := range targetAgents {
+			if sessionAgentSet[name] {
+				filteredAgents = append(filteredAgents, name)
+			}
+		}
+		targetAgents = filteredAgents
+		
+		if len(targetAgents) == 0 {
+			return fmt.Errorf("no agents found in session '%s'", session)
+		}
+	}
+
+	// Collect messages
+	var allMessages []*aggregatedMessage
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	messageMap := make(map[int]*aggregatedMessage)
+
+	for _, agentName := range targetAgents {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			msgs, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+				ProjectKey: projectKey,
+				AgentName:  name,
+				UrgentOnly: urgent,
+				Limit:      limit,
+			})
+			if err == nil {
+				mu.Lock()
+				for _, msg := range msgs {
+					agg, exists := messageMap[msg.ID]
+					if !exists {
+						agg = &aggregatedMessage{
+							ID:          msg.ID,
+							Subject:     msg.Subject,
+							From:        msg.From,
+							CreatedTS:   msg.CreatedTS,
+							Importance:  msg.Importance,
+							AckRequired: msg.AckRequired,
+							Kind:        msg.Kind,
+							BodyMD:      msg.BodyMD,
+							Recipients:  []string{},
+						}
+						messageMap[msg.ID] = agg
+						allMessages = append(allMessages, agg)
+					}
+					// Add recipient if not present
+					hasRecipient := false
+					for _, r := range agg.Recipients {
+						if r == name {
+							hasRecipient = true
+							break
+						}
+					}
+					if !hasRecipient {
+						agg.Recipients = append(agg.Recipients, name)
+						}
+				}
+				mu.Unlock()
+			}
+		}(agentName)
+	}
+	wg.Wait()
+
+	// Sort by time descending
+	sort.Slice(allMessages, func(i, j int) bool {
+		return allMessages[i].CreatedTS.After(allMessages[j].CreatedTS)
+	})
+
+	if IsJSONOutput() || jsonFmt {
+		return encodeJSONResult(mailJSONWriter(cmd), allMessages)
+	}
+
+	if len(allMessages) == 0 {
+		fmt.Println("No messages found.")
+		return nil
+	}
+
+	fmt.Printf("Inbox for project %s (%d messages)\n", filepath.Base(projectKey), len(allMessages))
+	for _, m := range allMessages {
+		prefix := " "
+		if m.Importance == "high" || m.Importance == "urgent" {
+			prefix = "!"
+		}
+		recipients := strings.Join(m.Recipients, ", ")
+		if len(recipients) > 30 {
+			recipients = recipients[:27] + "..."
+		}
+		
+		fmt.Printf("%s [%s] #%d %s -> %s: %s\n", 
+			prefix, 
+			m.CreatedTS.Format("15:04"), 
+			m.ID, 
+			m.From, 
+			recipients, 
+			m.Subject)
+	}
+
+	return nil
 }

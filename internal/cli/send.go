@@ -1055,8 +1055,9 @@ func warnConflictsLater(session, workDir string) {
 
 	rawConflicts := tracker.DetectConflictsRecent(conflictLookback)
 	var conflicts []struct {
-		Path   string
-		Agents []string
+		Path     string
+		Agents   []string
+		Severity string
 	}
 
 	for _, rc := range rawConflicts {
@@ -1078,9 +1079,10 @@ func warnConflictsLater(session, workDir string) {
 				agents = append(agents, a)
 			}
 			conflicts = append(conflicts, struct {
-				Path   string
-				Agents []string
-			}{rc.Path, agents})
+				Path     string
+				Agents   []string
+				Severity string
+			}{rc.Path, agents, rc.Severity})
 		}
 	}
 
