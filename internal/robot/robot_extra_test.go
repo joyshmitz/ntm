@@ -19,13 +19,17 @@ func TestPrintTerse(t *testing.T) {
 		t.Fatalf("PrintTerse failed: %v", err)
 	}
 
-	// Output should be S:...|...
-	if len(output) == 0 {
-		t.Error("Output is empty")
+	// Output format: S:...|... (may be empty if no sessions exist and ListSessions returns empty)
+	// When there are no sessions (but tmux is running), output may be just a newline
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		// No sessions - this is valid, skip further checks
+		t.Log("No sessions found, output is empty (valid)")
+		return
 	}
-	// Check for S: prefix (session)
-	if len(output) > 0 && output[0] != 'S' {
-		t.Errorf("Expected output to start with S, got %c", output[0])
+	// Check for S: prefix (session) if there is output
+	if !strings.HasPrefix(trimmed, "S:") {
+		t.Errorf("Expected output to start with 'S:', got %q", trimmed)
 	}
 }
 

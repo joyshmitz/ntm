@@ -10,8 +10,7 @@ func TestEstimateTokens(t *testing.T) {
 		{"", 0},
 		{"hello world", 3},          // 11 chars * 10 / 35 = 3
 		{"short", 1},                // 5 * 10 / 35 = 1
-		{"longer sentence here", 6}, // 20 * 10 / 35 = 5.7 -> 5? No, int(5.7) = 5.
-		// Wait, 20 * 10 = 200 / 35 = 5.71
+		{"longer sentence here", 5}, // 20 * 10 / 35 = 200 / 35 = 5 (integer division)
 	}
 
 	for _, tt := range tests {

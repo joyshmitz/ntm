@@ -9,8 +9,8 @@ import (
 
 func TestAllCommandEvents(t *testing.T) {
 	events := AllCommandEvents()
-	if len(events) != 10 {
-		t.Errorf("expected 10 command events, got %d", len(events))
+	if len(events) != 12 {
+		t.Errorf("expected 12 command events, got %d", len(events))
 	}
 
 	// Check that expected events are present
@@ -19,6 +19,7 @@ func TestAllCommandEvents(t *testing.T) {
 		EventPreSend, EventPostSend,
 		EventPreAdd, EventPostAdd,
 		EventPreCreate, EventPostCreate,
+		EventPreKill, EventPostKill,
 		EventPreShutdown, EventPostShutdown,
 	}
 	for _, e := range expected {
@@ -48,6 +49,8 @@ func TestIsValidCommandEvent(t *testing.T) {
 		{"post-add", true},
 		{"pre-create", true},
 		{"post-create", true},
+		{"pre-kill", true},
+		{"post-kill", true},
 		{"pre-shutdown", true},
 		{"post-shutdown", true},
 		{"invalid", false},

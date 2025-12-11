@@ -82,8 +82,12 @@ gemini = "/bin/true"
 	}
 
 	// Send a command to cc panes and verify it lands.
+	// Use --no-cass-check to skip CASS duplicate detection (may not be available in all test environments).
+	// Use --no-hooks to skip hook loading (may not be configured in test environments).
+	// Note: Use "--cc=" (with empty value) to ensure the prompt is parsed as positional argument,
+	// not as the value for --cc. With IsBoolFlag=true, "--cc value" is ambiguous.
 	const marker = "INTEGRATION_CC_OK"
-	testutil.AssertCommandSuccess(t, logger, "ntm", "send", "--config", configPath, session, "--cc", "echo "+marker)
+	testutil.AssertCommandSuccess(t, logger, "ntm", "send", "--config", configPath, "--no-cass-check", "--no-hooks", session, "--cc=", "echo "+marker)
 
 	testutil.AssertEventually(t, logger, 5*time.Second, 150*time.Millisecond, "cc pane receives send payload", func() bool {
 		out, err := tmux.CapturePaneOutput(ccPaneID, 200)
