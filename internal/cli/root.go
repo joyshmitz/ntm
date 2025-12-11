@@ -147,6 +147,13 @@ Shell Integration:
 			}
 			return
 		}
+		if robotDashboard {
+			if err := robot.PrintDashboard(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotMail {
 			projectKey, _ := os.Getwd()
 			if err := robot.PrintMail(projectKey); err != nil {
@@ -400,6 +407,7 @@ var (
 	robotPanes     string // comma-separated pane filter
 	robotGraph     bool   // bv insights passthrough
 	robotBeadLimit int    // limit for ready/in-progress beads in snapshot
+	robotDashboard bool   // dashboard summary output
 
 	// Robot-send flags
 	robotSend        string // session name for send
@@ -490,6 +498,7 @@ func init() {
 	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Number of lines to capture (used with --robot-tail)")
 	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Comma-separated pane indices to filter (used with --robot-tail/--robot-send)")
 	rootCmd.Flags().BoolVar(&robotGraph, "robot-graph", false, "Output bv graph insights as JSON for AI agents")
+	rootCmd.Flags().BoolVar(&robotDashboard, "robot-dashboard", false, "Output dashboard summary as JSON for AI agents")
 	rootCmd.Flags().IntVar(&robotBeadLimit, "bead-limit", 5, "Limit for ready/in-progress beads in snapshot (used with --robot-snapshot)")
 
 	// Robot-send flags for batch messaging

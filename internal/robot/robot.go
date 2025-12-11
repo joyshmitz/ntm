@@ -2009,10 +2009,16 @@ func buildCorrelationGraph() *GraphCorrelation {
 				}
 			}
 		}
+		}
+		return corr
 	}
-
-	return corr
-}
+	
+	// paneRef is a lightweight mapping for associating Agent Mail identities to tmux panes.
+	type paneRef struct {
+		session string
+		pane    string
+		variant string
+	}
 
 // appendUnique adds a value if absent.
 func appendUnique(list []string, value string) []string {
