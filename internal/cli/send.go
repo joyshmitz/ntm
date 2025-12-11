@@ -1054,35 +1054,20 @@ func warnConflictsLater(session, workDir string) {
 	time.Sleep(conflictWarningDelay)
 
 	rawConflicts := tracker.DetectConflictsRecent(conflictLookback)
-	var conflicts []struct {
-		Path     string
-		Agents   []string
-		Severity string
-	}
+	var conflicts []tracker.Conflict
 
 	for _, rc := range rawConflicts {
-		// Filter for session and collect agents
+		// Filter for session
 		relevant := false
-		agentSet := make(map[string]bool)
 		for _, ch := range rc.Changes {
 			if ch.Session == session {
 				relevant = true
-			}
-			for _, a := range ch.Agents {
-				agentSet[a] = true
+				break
 			}
 		}
 
 		if relevant {
-			var agents []string
-			for a := range agentSet {
-				agents = append(agents, a)
-			}
-			conflicts = append(conflicts, struct {
-				Path     string
-				Agents   []string
-				Severity string
-			}{rc.Path, agents, rc.Severity})
+			conflicts = append(conflicts, rc)
 		}
 	}
 
