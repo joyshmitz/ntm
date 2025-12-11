@@ -12,6 +12,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tokens"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
+	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -48,6 +49,7 @@ func (m Model) fetchMetricsCmd() tea.Cmd {
 	return func() tea.Msg {
 		var totalTokens int
 		var totalCost float64
+		var agentMetrics []panels.AgentMetric
 
 		for _, p := range panes {
 			// Skip user panes
@@ -61,18 +63,37 @@ func (m Model) fetchMetricsCmd() tea.Cmd {
 				continue
 			}
 
+			// Estimate
+			modelName := "gpt-4" // default
+			if p.Variant != "" {
+				modelName = p.Variant
+			}
+
 			tokensCount := tokens.EstimateTokens(out)
+			usage := tokens.GetUsageInfo(out, modelName)
+
 			totalTokens += tokensCount
 
 			// Rough cost calculation (very approximate placeholders)
 			// $10 per 1M tokens input (blended)
 			cost := float64(tokensCount) / 1_000_000.0 * 10.0
 			totalCost += cost
+
+			agentMetrics = append(agentMetrics, panels.AgentMetric{
+				Name:       p.Title,
+				Type:       string(p.Type),
+				Tokens:     tokensCount,
+				Cost:       cost,
+				ContextPct: usage.UsagePercent,
+			})
 		}
 
 		return MetricsUpdateMsg{
-			TotalTokens: totalTokens,
-			CostEst:     totalCost,
+			Data: panels.MetricsData{
+				TotalTokens: totalTokens,
+				TotalCost:   totalCost,
+				Agents:      agentMetrics,
+			},
 		}
 	}
 }

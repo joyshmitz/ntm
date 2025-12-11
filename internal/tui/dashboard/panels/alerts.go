@@ -105,7 +105,7 @@ func (m *AlertsPanel) View() string {
 
 	// Render alerts (Critical > Warning > Info)
 	count := 0
-	
+
 	renderList := func(list []alerts.Alert, color lipgloss.Color, icon string) {
 		for _, a := range list {
 			if count >= availableLines {

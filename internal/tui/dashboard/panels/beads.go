@@ -96,7 +96,7 @@ func (m *BeadsPanel) View() string {
 	// In Progress Section
 	if len(m.summary.InProgressList) > 0 {
 		content.WriteString(lipgloss.NewStyle().Foreground(t.Blue).Bold(true).Padding(0, 1).Render("In Progress") + "\n")
-		
+
 		for i, b := range m.summary.InProgressList {
 			if i >= halfHeight-1 {
 				break
@@ -105,12 +105,12 @@ func (m *BeadsPanel) View() string {
 			if b.Assignee != "" {
 				assignee = fmt.Sprintf(" (@%s)", b.Assignee)
 			}
-			
+
 			titleWidth := m.width - 10 - len(assignee)
 			if titleWidth < 10 {
 				titleWidth = 10
 			}
-			
+
 			title := layout.TruncateRunes(b.Title, titleWidth, "…")
 			line := fmt.Sprintf("  %s %s%s", b.ID, title, assignee)
 			content.WriteString(lipgloss.NewStyle().Foreground(t.Text).Render(line) + "\n")
@@ -121,12 +121,12 @@ func (m *BeadsPanel) View() string {
 	// Ready Section
 	if len(m.ready) > 0 {
 		content.WriteString(lipgloss.NewStyle().Foreground(t.Green).Bold(true).Padding(0, 1).Render("Ready / Backlog") + "\n")
-		
+
 		for i, b := range m.ready {
 			if i >= halfHeight-1 {
 				break
 			}
-			
+
 			prio := b.Priority
 			prioStyle := lipgloss.NewStyle().Foreground(t.Overlay)
 			if prio == "P0" {
@@ -134,12 +134,12 @@ func (m *BeadsPanel) View() string {
 			} else if prio == "P1" {
 				prioStyle = prioStyle.Foreground(t.Yellow)
 			}
-			
+
 			titleWidth := m.width - 14
 			if titleWidth < 10 {
 				titleWidth = 10
 			}
-			
+
 			title := layout.TruncateRunes(b.Title, titleWidth, "…")
 			line := fmt.Sprintf("  %s %s %s", prioStyle.Render(fmt.Sprintf("% -3s", prio)), b.ID, title)
 			content.WriteString(lipgloss.NewStyle().Foreground(t.Text).Render(line) + "\n")

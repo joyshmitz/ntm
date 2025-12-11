@@ -91,9 +91,8 @@ type AlertsUpdateMsg struct {
 
 // MetricsUpdateMsg is sent when session metrics are updated
 type MetricsUpdateMsg struct {
-	TotalTokens int
-	CostEst     float64
-	Err         error
+	Data panels.MetricsData
+	Err  error
 }
 
 // HistoryUpdateMsg is sent when command history is fetched
@@ -122,6 +121,8 @@ const (
 	PanelDetail
 	PanelBeads
 	PanelAlerts
+	PanelMetrics
+	PanelHistory
 	PanelSidebar
 	PanelCount // Total number of focusable panels
 )
@@ -202,8 +203,10 @@ type Model struct {
 	cassSearch     components.CassSearchModel
 
 	// Panels
-	beadsPanel  *panels.BeadsPanel
-	alertsPanel *panels.AlertsPanel
+	beadsPanel   *panels.BeadsPanel
+	alertsPanel  *panels.AlertsPanel
+	metricsPanel *panels.MetricsPanel
+	historyPanel *panels.HistoryPanel
 
 	// Data for new panels
 	beadsSummary  bv.BeadsSummary
@@ -338,8 +341,10 @@ func New(session string) Model {
 				return CassSelectMsg{Hit: hit}
 			}
 		}),
-		beadsPanel:  panels.NewBeadsPanel(),
-		alertsPanel: panels.NewAlertsPanel(),
+		beadsPanel:   panels.NewBeadsPanel(),
+		alertsPanel:  panels.NewAlertsPanel(),
+		metricsPanel: panels.NewMetricsPanel(),
+		historyPanel: panels.NewHistoryPanel(),
 	}
 
 	// Initialize last-fetch timestamps to start cadence after the initial fetches from Init.
@@ -654,14 +659,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MetricsUpdateMsg:
 		if msg.Err == nil {
-			m.metricsTokens = msg.TotalTokens
-			m.metricsCost = msg.CostEst
+			m.metricsTokens = msg.Data.TotalTokens
+			m.metricsCost = msg.Data.TotalCost
+			m.metricsPanel.SetData(msg.Data)
 		}
 		return m, nil
 
 	case HistoryUpdateMsg:
 		if msg.Err == nil {
 			m.cmdHistory = msg.Entries
+			m.historyPanel.SetEntries(msg.Entries)
 		}
 		return m, nil
 
@@ -1782,6 +1789,26 @@ func (m Model) renderBeadsPanel(width, height int) string {
 func (m Model) renderAlertsPanel(width, height int) string {
 	m.alertsPanel.SetSize(width, height)
 	return m.alertsPanel.View()
+}
+
+func (m Model) renderMetricsPanel(width, height int) string {
+	m.metricsPanel.SetSize(width, height)
+	if m.focusedPanel == PanelMetrics {
+		m.metricsPanel.Focus()
+	} else {
+		m.metricsPanel.Blur()
+	}
+	return m.metricsPanel.View()
+}
+
+func (m Model) renderHistoryPanel(width, height int) string {
+	m.historyPanel.SetSize(width, height)
+	if m.focusedPanel == PanelHistory {
+		m.historyPanel.Focus()
+	} else {
+		m.historyPanel.Blur()
+	}
+	return m.historyPanel.View()
 }
 
 // renderPaneList renders a compact list of panes with status indicators
