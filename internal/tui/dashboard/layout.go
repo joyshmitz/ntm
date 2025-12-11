@@ -192,21 +192,16 @@ func RenderSparkline(value float64, width int) string {
 
 // RenderMiniBar renders a colored mini progress bar with semantic colors
 func RenderMiniBar(value float64, width int, t theme.Theme) string {
-	sparkline := RenderSparkline(value, width)
-
-	// Color based on value threshold
-	var color lipgloss.Color
-	if value >= 0.80 {
-		color = t.Red // Critical
-	} else if value >= 0.60 {
-		color = t.Yellow // Warning
-	} else if value >= 0.40 {
-		color = t.Blue // Info
-	} else {
-		color = t.Green // Good
+	palette := styles.MiniBarPalette{
+		Low:        t.Green,
+		Mid:        t.Blue,   // info band (~40-59%)
+		MidHigh:    t.Yellow, // warning band (~60-79%)
+		High:       t.Red,    // critical (>=80%)
+		Empty:      t.Surface1,
+		FilledChar: "█",
+		EmptyChar:  "░",
 	}
-
-	return lipgloss.NewStyle().Foreground(color).Render(sparkline)
+	return styles.MiniBar(value, width, palette)
 }
 
 // RenderContextMiniBar renders context usage with warning indicator

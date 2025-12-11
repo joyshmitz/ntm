@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -107,9 +108,9 @@ type Model struct {
 	healthMessage string
 
 	// UBS scan status
-	scanStatus   string              // "clean", "warning", "critical", "unavailable"
-	scanTotals   scanner.ScanTotals  // Scan result totals
-	scanDuration time.Duration       // How long the scan took
+	scanStatus   string             // "clean", "warning", "critical", "unavailable"
+	scanTotals   scanner.ScanTotals // Scan result totals
+	scanDuration time.Duration      // How long the scan took
 
 	// Layout tier (narrow/split/wide/ultra)
 	tier layout.Tier
@@ -235,7 +236,7 @@ func New(session string) Model {
 			}
 		}),
 	}
-	
+
 	m.initRenderer(40)
 	return m
 }
@@ -768,15 +769,16 @@ func (m Model) View() string {
 		emptyStyle := lipgloss.NewStyle().Foreground(t.Overlay).Italic(true)
 		b.WriteString("  " + emptyStyle.Render("No panes found in session") + "\n")
 	} else {
-		// On wide terminals (≥110 cols), use split view: list + detail panel
-		// On narrow terminals, use the traditional card grid
-		if m.tier >= layout.TierSplit {
-			splitView := m.renderSplitView()
-			b.WriteString(splitView + "\n")
-		} else {
-			// Render pane cards in a grid
-			paneGrid := m.renderPaneGrid()
-			b.WriteString(paneGrid + "\n")
+		// Responsive layout selection
+		switch {
+		case m.tier >= layout.TierMega:
+			b.WriteString(m.renderMegaLayout() + "\n")
+		case m.tier >= layout.TierUltra:
+			b.WriteString(m.renderUltraLayout() + "\n")
+		case m.tier >= layout.TierSplit:
+			b.WriteString(m.renderSplitView() + "\n")
+		default:
+			b.WriteString(m.renderPaneGrid() + "\n")
 		}
 	}
 
@@ -1313,10 +1315,150 @@ func (m Model) renderSplitView() string {
 	return "  " + lipgloss.JoinHorizontal(lipgloss.Top, listPanel, detailPanel)
 }
 
+// renderUltraLayout renders a three-panel layout: Agents | Detail | Sidebar
+func (m Model) renderUltraLayout() string {
+	t := m.theme
+	leftWidth, centerWidth, rightWidth := layout.UltraProportions(m.width)
+
+	contentHeight := m.height - 14
+	if contentHeight < 5 {
+		contentHeight = 5
+	}
+
+	listContent := m.renderPaneList(leftWidth - 4)
+	listPanel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Surface1).
+		Width(leftWidth).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(listContent)
+
+	detailContent := m.renderPaneDetail(centerWidth - 4)
+	detailPanel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Pink).
+		Width(centerWidth).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(detailContent)
+
+	sidebarContent := m.renderSidebar(rightWidth - 4)
+	sidebarPanel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Lavender).
+		Width(rightWidth).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(sidebarContent)
+
+	return "  " + lipgloss.JoinHorizontal(lipgloss.Top, listPanel, detailPanel, sidebarPanel)
+}
+
+func (m Model) renderSidebar(width int) string {
+	t := m.theme
+	var lines []string
+
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Text).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderBottom(true).
+		BorderForeground(t.Surface1).
+		Width(width).
+		Padding(0, 1)
+
+	lines = append(lines, headerStyle.Render("Activity & Locks"))
+	lines = append(lines, "")
+
+	if len(m.agentMailLockInfo) > 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.Lavender).Bold(true).Render("Active Locks"))
+		for _, lock := range m.agentMailLockInfo {
+			lines = append(lines, fmt.Sprintf("🔒 %s", layout.TruncateRunes(lock.PathPattern, width-4, "...")))
+			lines = append(lines, lipgloss.NewStyle().Foreground(t.Subtext).Render(fmt.Sprintf("  by %s (%s)", lock.AgentName, lock.ExpiresIn)))
+		}
+		lines = append(lines, "")
+	} else {
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.Overlay).Italic(true).Render("No active locks"))
+		lines = append(lines, "")
+	}
+
+	// Scan status
+	if m.scanStatus != "" && m.scanStatus != "unavailable" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(t.Blue).Bold(true).Render("Scan Status"))
+		lines = append(lines, m.renderScanBadge())
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// renderMegaLayout renders a five-panel layout: Agents | Detail | Beads | Alerts | Activity
+func (m Model) renderMegaLayout() string {
+	t := m.theme
+	p1, p2, p3, p4, p5 := layout.MegaProportions(m.width)
+
+	contentHeight := m.height - 14
+	if contentHeight < 5 {
+		contentHeight = 5
+	}
+
+	panel1 := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Surface1).
+		Width(p1).Height(contentHeight).MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(m.renderPaneList(p1 - 2))
+
+	panel2 := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Pink).
+		Width(p2).Height(contentHeight).MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(m.renderPaneDetail(p2 - 2))
+
+	panel3 := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Green).
+		Width(p3).Height(contentHeight).MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(m.renderBeadsPanel(p3 - 2))
+
+	panel4 := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Red).
+		Width(p4).Height(contentHeight).MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(m.renderAlertsPanel(p4 - 2))
+
+	panel5 := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Lavender).
+		Width(p5).Height(contentHeight).MaxHeight(contentHeight).
+		Padding(0, 1).
+		Render(m.renderSidebar(p5 - 2))
+
+	return "  " + lipgloss.JoinHorizontal(lipgloss.Top, panel1, panel2, panel3, panel4, panel5)
+}
+
+func (m Model) renderBeadsPanel(width int) string {
+	return "Beads Panel\n(Coming Soon)"
+}
+
+func (m Model) renderAlertsPanel(width int) string {
+	return "Alerts Panel\n(Coming Soon)"
+}
+
 // renderPaneList renders a compact list of panes with status indicators
 func (m Model) renderPaneList(width int) string {
 	t := m.theme
 	var lines []string
+
+	ranks := m.computeContextRanks()
+
+	showRank := m.tier >= layout.TierWide
 
 	// Header row
 	headerStyle := lipgloss.NewStyle().
@@ -1329,9 +1471,17 @@ func (m Model) renderPaneList(width int) string {
 
 	// Column headers vary by tier
 	if m.tier >= layout.TierUltra {
-		lines = append(lines, headerStyle.Render("  #  T  S  TITLE                    CTX   MODEL      CMD"))
+		if showRank {
+			lines = append(lines, headerStyle.Render("  #  T  S  R  TITLE                   CTX   MODEL      CMD"))
+		} else {
+			lines = append(lines, headerStyle.Render("  #  T  S  TITLE                      CTX   MODEL      CMD"))
+		}
 	} else if m.tier >= layout.TierWide {
-		lines = append(lines, headerStyle.Render("  #  T  S  TITLE                    CTX   MODEL"))
+		if showRank {
+			lines = append(lines, headerStyle.Render("  #  T  S  R  TITLE                   CTX   MODEL"))
+		} else {
+			lines = append(lines, headerStyle.Render("  #  T  S  TITLE                      CTX   MODEL"))
+		}
 	} else {
 		lines = append(lines, headerStyle.Render("  #  T  S  TITLE"))
 	}
@@ -1339,18 +1489,51 @@ func (m Model) renderPaneList(width int) string {
 	// Pane rows
 	for i, p := range m.panes {
 		isSelected := i == m.cursor
-		row := m.renderPaneRow(p, i, isSelected, width)
+		row := m.renderPaneRow(p, ranks[p.Index], isSelected, width)
 		lines = append(lines, row)
 	}
 
 	return strings.Join(lines, "\n")
 }
 
+// computeContextRanks returns a 1-based rank per pane index based on context usage (desc).
+// Ties share the same rank.
+func (m Model) computeContextRanks() map[int]int {
+	type pair struct {
+		idx int
+		pct float64
+	}
+
+	var pairs []pair
+	for _, p := range m.panes {
+		if ps, ok := m.paneStatus[p.Index]; ok {
+			pairs = append(pairs, pair{idx: p.Index, pct: ps.ContextPercent})
+		}
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].pct > pairs[j].pct
+	})
+
+	ranks := make(map[int]int, len(pairs))
+	prevPct := -1.0
+	currentRank := 0
+	for i, pr := range pairs {
+		if prevPct < 0 || pr.pct < prevPct {
+			currentRank = i + 1
+			prevPct = pr.pct
+		}
+		ranks[pr.idx] = currentRank
+	}
+	return ranks
+}
+
 // renderPaneRow renders a single pane as a table row
-func (m Model) renderPaneRow(p tmux.Pane, _ int, selected bool, width int) string {
+func (m Model) renderPaneRow(p tmux.Pane, rank int, selected bool, width int) string {
 	t := m.theme
 	ic := m.icons
 	var parts []string
+	showRank := m.tier >= layout.TierWide
 
 	// Selection indicator
 	if selected {
@@ -1408,8 +1591,25 @@ func (m Model) renderPaneRow(p tmux.Pane, _ int, selected bool, width int) strin
 	}
 	parts = append(parts, statusStyle.Render(statusIcon))
 
+	// Rank badge (context usage rank)
+	if showRank {
+		if rank > 0 {
+			badge := styles.RankBadge(rank, styles.BadgeOptions{
+				Style:    styles.BadgeStyleCompact,
+				Bold:     true,
+				ShowIcon: rank <= 3,
+			})
+			parts = append(parts, badge)
+		} else {
+			parts = append(parts, "     ")
+		}
+	}
+
 	// Title (flexible width based on available columns)
-	baseSpaces := 6 // approx separators + selection/index/icon/status
+	baseSpaces := 10 // separators + selection/index/icon/status
+	if showRank {
+		baseSpaces += 6 // rank badge + spacer
+	}
 	fixedAfterTitle := 0
 	if m.tier >= layout.TierWide {
 		fixedAfterTitle += 6 /*ctx*/ + 1
@@ -1438,7 +1638,7 @@ func (m Model) renderPaneRow(p tmux.Pane, _ int, selected bool, width int) strin
 		if ctxPct > 1 {
 			ctxPct = 1
 		}
-		bar := renderMiniSparkline(ctxPct, 6, t)
+		bar := RenderMiniBar(ctxPct, 6, t)
 		parts = append(parts, bar)
 	} else if m.tier >= layout.TierWide {
 		parts = append(parts, "      ") // placeholder
@@ -1569,6 +1769,17 @@ func (m Model) renderPaneDetail(width int) string {
 			ps.ContextTokens, ps.ContextLimit, ps.ContextPercent,
 		)))
 		lines = append(lines, "")
+
+		// Legend for thresholds (kept compact and ASCII-safe)
+		legend := lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			lipgloss.NewStyle().Foreground(t.Green).Render("green<40%"),
+			lipgloss.NewStyle().Foreground(t.Blue).Render("  blue<60%"),
+			lipgloss.NewStyle().Foreground(t.Yellow).Render("  yellow<80%"),
+			lipgloss.NewStyle().Foreground(t.Red).Render("  red≥80%"),
+		)
+		lines = append(lines, "  "+legend)
+		lines = append(lines, "")
 	}
 
 	// Status section
@@ -1650,7 +1861,7 @@ func (m Model) renderPaneDetail(width int) string {
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(t.Lavender).Render("Recent Output"))
 		lines = append(lines, "")
-		
+
 		rendered, err := m.renderer.Render(status.LastOutput)
 		if err == nil {
 			lines = append(lines, rendered)
@@ -1660,35 +1871,6 @@ func (m Model) renderPaneDetail(width int) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// renderMiniSparkline renders a compact sparkline bar for table rows
-func renderMiniSparkline(value float64, width int, t theme.Theme) string {
-	if value < 0 {
-		value = 0
-	}
-	if value > 1 {
-		value = 1
-	}
-
-	filled := int(value * float64(width))
-	empty := width - filled
-
-	// Color based on value
-	var barColor lipgloss.Color
-	if value >= 0.80 {
-		barColor = t.Red
-	} else if value >= 0.60 {
-		barColor = t.Yellow
-	} else {
-		barColor = t.Green
-	}
-
-	filledStyle := lipgloss.NewStyle().Foreground(barColor)
-	emptyStyle := lipgloss.NewStyle().Foreground(t.Surface1)
-
-	return filledStyle.Render(strings.Repeat("█", filled)) +
-		emptyStyle.Render(strings.Repeat("░", empty))
 }
 
 // Run starts the dashboard

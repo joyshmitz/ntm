@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -109,6 +110,77 @@ func TestPaneListColumnsByWidthTiers(t *testing.T) {
 
 			if w := lipgloss.Width(row); w != 60 {
 				t.Fatalf("width %d: rendered row width = %d, want 60", tc.width, w)
+			}
+		})
+	}
+}
+
+func TestPaneRowSelectionStyling_NoWrapAcrossWidths(t *testing.T) {
+	t.Parallel()
+
+	widths := []int{80, 120, 160, 200}
+	for _, w := range widths {
+		w := w
+		t.Run(fmt.Sprintf("width_%d", w), func(t *testing.T) {
+			t.Parallel()
+
+			m := newTestModel(w)
+			m.cursor = 0 // selected row
+
+			row := m.renderPaneRow(m.panes[0], 0, true, 60)
+			clean := status.StripANSI(row)
+
+			if lipgloss.Width(clean) != 60 {
+				t.Fatalf("width %d: row width = %d, want 60", w, lipgloss.Width(clean))
+			}
+
+			if strings.Contains(clean, "\n") {
+				t.Fatalf("width %d: row contained unexpected newline", w)
+			}
+		})
+	}
+}
+
+func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		width        int
+		expectList   bool
+		expectDetail bool
+	}{
+		{width: 120, expectList: true, expectDetail: true},
+		{width: 160, expectList: true, expectDetail: true},
+		{width: 200, expectList: true, expectDetail: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(fmt.Sprintf("width_%d", tc.width), func(t *testing.T) {
+			t.Parallel()
+
+			m := newTestModel(tc.width)
+			m.height = 30
+			if m.tier < layout.TierSplit {
+				t.Skip("split view not used below split threshold")
+			}
+			out := m.renderSplitView()
+			plain := status.StripANSI(out)
+
+			// Ensure we always render the list panel
+			if !strings.Contains(plain, "TITLE") {
+				t.Fatalf("width %d: expected list header 'TITLE' in split view", tc.width)
+			}
+
+			if tc.expectDetail {
+				if !strings.Contains(plain, "Context Usage") && m.tier >= layout.TierWide {
+					t.Fatalf("width %d: expected detail pane content (Context Usage) at wide tier", tc.width)
+				}
+			} else {
+				// For narrow widths we shouldn't render split view; ensure single-panel fallback
+				if strings.Contains(plain, "Context Usage") && tc.width < layout.SplitViewThreshold {
+					t.Fatalf("width %d: unexpected detail content for narrow layout", tc.width)
+				}
 			}
 		})
 	}

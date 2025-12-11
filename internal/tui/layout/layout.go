@@ -1,9 +1,9 @@
 package layout
 
 // Width tiers are shared across TUI surfaces so behavior stays predictable on
-// narrow laptops, wide displays, and ultra‑wide monitors. These thresholds are
-// aligned with the design tokens in internal/tui/styles/tokens.go to avoid the
-// previous drift between layout, palette, and style breakpoints.
+// narrow laptops, wide displays, ultra‑wide, and now mega‑wide monitors. These
+// thresholds are aligned with the design tokens in internal/tui/styles/tokens.go
+// to avoid the previous drift between layout, palette, and style breakpoints.
 //
 // Tier semantics (consumer guidance):
 //   - SplitView: switch from stacked → split list/detail layouts
@@ -16,6 +16,7 @@ const (
 	SplitViewThreshold     = 120
 	WideViewThreshold      = 200
 	UltraWideViewThreshold = 240
+	MegaWideViewThreshold  = 320
 )
 
 // Surface guidance (rationale, not enforced):
@@ -31,22 +32,27 @@ const (
 //   TierSplit  (120-199): split list/detail; primary metadata only; conservative padding.
 //   TierWide   (200-239): enable secondary metadata columns (age/comments/locks/model); richer
 //                        preview styling and wider gutters.
-//   TierUltra  (>=240):   tertiary metadata (labels/variants), widest gutters, extra padding for
+//   TierUltra  (240-319): tertiary metadata (labels/variants), widest gutters, extra padding for
 //                        markdown/detail panes to avoid wrap when showing side info.
+//   TierMega   (>=320):   mega layouts (5-panel), richest gutters, ample padding for cockpit views.
 
 // Tier describes the current width bucket.
 type Tier int
 
 const (
-	TierNarrow Tier = iota
-	TierSplit
-	TierWide
-	TierUltra
+	TierNarrow Tier = 0
+	TierSplit  Tier = 1
+	TierWide   Tier = 2
+	// Tier value 3 intentionally unused to preserve legacy ordering gaps.
+	TierUltra Tier = 4
+	TierMega  Tier = 5
 )
 
 // TierForWidth maps a terminal width to a tier.
 func TierForWidth(width int) Tier {
 	switch {
+	case width >= MegaWideViewThreshold:
+		return TierMega
 	case width >= UltraWideViewThreshold:
 		return TierUltra
 	case width >= WideViewThreshold:
@@ -87,5 +93,40 @@ func SplitProportions(total int) (left int, right int) {
 	}
 	left = int(float64(avail) * 0.4)
 	right = avail - left
+	return
+}
+
+// UltraProportions returns left/center/right widths for 3-panel layout (25/50/25).
+func UltraProportions(total int) (left, center, right int) {
+	if total < UltraWideViewThreshold {
+		return 0, total, 0
+	}
+	// Budget 6 cols for borders/padding (2 per panel)
+	avail := total - 6
+	if avail < 10 {
+		return 0, total, 0
+	}
+	left = int(float64(avail) * 0.25)
+	right = int(float64(avail) * 0.25)
+	center = avail - left - right
+	return
+}
+
+// MegaProportions returns widths for 5-panel layout (18/28/20/17/17).
+func MegaProportions(total int) (p1, p2, p3, p4, p5 int) {
+	if total < MegaWideViewThreshold {
+		return 0, total, 0, 0, 0
+	}
+	// Budget 10 cols for borders/padding (2 per panel)
+	avail := total - 10
+	if avail < 10 {
+		return 0, total, 0, 0, 0
+	}
+
+	p1 = int(float64(avail) * 0.18)
+	p2 = int(float64(avail) * 0.28)
+	p3 = int(float64(avail) * 0.20)
+	p4 = int(float64(avail) * 0.17)
+	p5 = avail - p1 - p2 - p3 - p4
 	return
 }
