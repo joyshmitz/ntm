@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { NtmClient } from './ntmClient';
+import { NtmDashboard } from './dashboard';
 
 export function activate(context: vscode.ExtensionContext) {
 	const client = new NtmClient();
@@ -75,7 +76,11 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-	context.subscriptions.push(dispStatus, dispSpawn, dispOpenPalette);
+    let dispDashboard = vscode.commands.registerCommand('ntm.dashboard', () => {
+        NtmDashboard.createOrShow(context.extensionUri, client);
+    });
+
+	context.subscriptions.push(dispStatus, dispSpawn, dispOpenPalette, dispDashboard);
 }
 
 function pickPrimarySession(status: ReturnType<NtmClient['getStatus']> extends Promise<infer T> ? T : never) {

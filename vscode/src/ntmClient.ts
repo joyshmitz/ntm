@@ -9,6 +9,23 @@ export interface RobotStatus {
     };
     sessions: SessionInfo[];
     summary: StatusSummary;
+    beads?: BeadsStatus;
+    agent_mail?: AgentMailStatus;
+}
+
+export interface BeadsStatus {
+    available: boolean;
+    total: number;
+    open: number;
+    in_progress: number;
+    blocked: number;
+    ready: number;
+    closed: number;
+}
+
+export interface AgentMailStatus {
+    available: boolean;
+    server_url?: string;
 }
 
 export interface SessionInfo {

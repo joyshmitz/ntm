@@ -17,7 +17,8 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:ntm.spawn",
-    "onCommand:ntm.showStatus"
+    "onCommand:ntm.showStatus",
+    "onCommand:ntm.openPalette"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -41,6 +42,14 @@
       {
         "command": "ntm.openTerminal",
         "title": "NTM: Open Terminal (Attach)"
+      },
+      {
+        "command": "ntm.openPalette",
+        "title": "NTM: Open Command Palette"
+      },
+      {
+        "command": "ntm.dashboard",
+        "title": "NTM: Open Dashboard"
       }
     ],
     "configuration": {
