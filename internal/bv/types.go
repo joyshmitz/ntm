@@ -9,6 +9,12 @@ type InsightsResponse struct {
 	Keystones   []NodeScore `json:"Keystones,omitempty"`
 	Hubs        []NodeScore `json:"Hubs,omitempty"`
 	Authorities []NodeScore `json:"Authorities,omitempty"`
+	Cycles      []Cycle     `json:"Cycles,omitempty"`
+}
+
+// Cycle represents a dependency cycle
+type Cycle struct {
+	Nodes []string `json:"nodes"`
 }
 
 // NodeScore represents a node with its metric score
@@ -134,7 +140,8 @@ type BeadPreview struct {
 
 // BeadInProgress represents an in-progress bead with assignee
 type BeadInProgress struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Assignee string `json:"assignee,omitempty"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Assignee  string    `json:"assignee,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }

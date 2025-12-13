@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ErrNotInstalled indicates bv is not available
@@ -25,19 +26,15 @@ func IsInstalled() bool {
 	return err == nil
 }
 
-// WorkDir is the working directory for bv commands.
-// If empty, uses current directory.
-var WorkDir string
-
 // run executes bv with given args and returns stdout
-func run(args ...string) (string, error) {
+func run(dir string, args ...string) (string, error) {
 	if !IsInstalled() {
 		return "", ErrNotInstalled
 	}
 
 	cmd := exec.Command("bv", args...)
-	if WorkDir != "" {
-		cmd.Dir = WorkDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -57,8 +54,8 @@ func run(args ...string) (string, error) {
 }
 
 // GetInsights returns graph analysis insights (bottlenecks, keystones, etc.)
-func GetInsights() (*InsightsResponse, error) {
-	output, err := run("-robot-insights")
+func GetInsights(dir string) (*InsightsResponse, error) {
+	output, err := run(dir, "-robot-insights")
 	if err != nil {
 		return nil, err
 	}
@@ -72,8 +69,8 @@ func GetInsights() (*InsightsResponse, error) {
 }
 
 // GetPriority returns priority recommendations
-func GetPriority() (*PriorityResponse, error) {
-	output, err := run("-robot-priority")
+func GetPriority(dir string) (*PriorityResponse, error) {
+	output, err := run(dir, "-robot-priority")
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +84,8 @@ func GetPriority() (*PriorityResponse, error) {
 }
 
 // GetPlan returns a parallel execution plan
-func GetPlan() (*PlanResponse, error) {
-	output, err := run("-robot-plan")
+func GetPlan(dir string) (*PlanResponse, error) {
+	output, err := run(dir, "-robot-plan")
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +99,8 @@ func GetPlan() (*PlanResponse, error) {
 }
 
 // GetRecipes returns available recipes
-func GetRecipes() (*RecipesResponse, error) {
-	output, err := run("-robot-recipes")
+func GetRecipes(dir string) (*RecipesResponse, error) {
+	output, err := run(dir, "-robot-recipes")
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +115,7 @@ func GetRecipes() (*RecipesResponse, error) {
 
 // CheckDrift checks project drift from baseline
 // Returns DriftResult with status and message
-func CheckDrift() DriftResult {
+func CheckDrift(dir string) DriftResult {
 	if !IsInstalled() {
 		return DriftResult{
 			Status:  DriftNoBaseline,
@@ -127,8 +124,8 @@ func CheckDrift() DriftResult {
 	}
 
 	cmd := exec.Command("bv", "-check-drift")
-	if WorkDir != "" {
-		cmd.Dir = WorkDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -185,8 +182,8 @@ func CheckDrift() DriftResult {
 }
 
 // GetTopBottlenecks returns the top N bottleneck issues
-func GetTopBottlenecks(n int) ([]NodeScore, error) {
-	insights, err := GetInsights()
+func GetTopBottlenecks(dir string, n int) ([]NodeScore, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -200,8 +197,8 @@ func GetTopBottlenecks(n int) ([]NodeScore, error) {
 }
 
 // GetNextActions returns recommended next actions based on priority analysis
-func GetNextActions(n int) ([]PriorityRecommendation, error) {
-	priority, err := GetPriority()
+func GetNextActions(dir string, n int) ([]PriorityRecommendation, error) {
+	priority, err := GetPriority(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -215,8 +212,8 @@ func GetNextActions(n int) ([]PriorityRecommendation, error) {
 }
 
 // GetParallelTracks returns available parallel work tracks
-func GetParallelTracks() ([]Track, error) {
-	plan, err := GetPlan()
+func GetParallelTracks(dir string) ([]Track, error) {
+	plan, err := GetPlan(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -225,8 +222,8 @@ func GetParallelTracks() ([]Track, error) {
 }
 
 // IsBottleneck checks if an issue ID is in the bottleneck list
-func IsBottleneck(issueID string) (bool, float64, error) {
-	insights, err := GetInsights()
+func IsBottleneck(dir, issueID string) (bool, float64, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return false, 0, err
 	}
@@ -241,8 +238,8 @@ func IsBottleneck(issueID string) (bool, float64, error) {
 }
 
 // IsKeystone checks if an issue ID is in the keystone list
-func IsKeystone(issueID string) (bool, float64, error) {
-	insights, err := GetInsights()
+func IsKeystone(dir, issueID string) (bool, float64, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return false, 0, err
 	}
@@ -257,8 +254,8 @@ func IsKeystone(issueID string) (bool, float64, error) {
 }
 
 // IsHub checks if an issue ID is in the hub list (HITS algorithm)
-func IsHub(issueID string) (bool, float64, error) {
-	insights, err := GetInsights()
+func IsHub(dir, issueID string) (bool, float64, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return false, 0, err
 	}
@@ -273,8 +270,8 @@ func IsHub(issueID string) (bool, float64, error) {
 }
 
 // IsAuthority checks if an issue ID is in the authority list (HITS algorithm)
-func IsAuthority(issueID string) (bool, float64, error) {
-	insights, err := GetInsights()
+func IsAuthority(dir, issueID string) (bool, float64, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return false, 0, err
 	}
@@ -303,8 +300,8 @@ type GraphPosition struct {
 }
 
 // GetGraphPosition returns the full graph position context for an issue
-func GetGraphPosition(issueID string) (*GraphPosition, error) {
-	insights, err := GetInsights()
+func GetGraphPosition(dir, issueID string) (*GraphPosition, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -380,8 +377,8 @@ func generatePositionSummary(pos *GraphPosition) string {
 }
 
 // GetGraphPositionsBatch returns graph positions for multiple issues efficiently
-func GetGraphPositionsBatch(issueIDs []string) (map[string]*GraphPosition, error) {
-	insights, err := GetInsights()
+func GetGraphPositionsBatch(dir string, issueIDs []string) (map[string]*GraphPosition, error) {
+	insights, err := GetInsights(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -445,16 +442,16 @@ type HealthSummary struct {
 }
 
 // GetHealthSummary returns a quick project health check
-func GetHealthSummary() (*HealthSummary, error) {
+func GetHealthSummary(dir string) (*HealthSummary, error) {
 	summary := &HealthSummary{}
 
 	// Check drift
-	drift := CheckDrift()
+	drift := CheckDrift(dir)
 	summary.DriftStatus = drift.Status
 	summary.DriftMessage = drift.Message
 
 	// Get bottlenecks
-	bottlenecks, err := GetTopBottlenecks(5)
+	bottlenecks, err := GetTopBottlenecks(dir, 5)
 	if err != nil {
 		// Non-fatal, just skip bottleneck info
 		return summary, nil
@@ -493,11 +490,11 @@ type DependencyContext struct {
 }
 
 // GetDependencyContext returns dependency/blocker context from bd
-func GetDependencyContext(n int) (*DependencyContext, error) {
+func GetDependencyContext(dir string, n int) (*DependencyContext, error) {
 	ctx := &DependencyContext{}
 
 	// Get stats
-	statsOutput, err := runBd("stats", "--json")
+	statsOutput, err := runBd(dir, "stats", "--json")
 	if err == nil {
 		var stats struct {
 			BlockedIssues int `json:"blocked_issues"`
@@ -510,7 +507,7 @@ func GetDependencyContext(n int) (*DependencyContext, error) {
 	}
 
 	// Get in-progress tasks
-	inProgressOutput, err := runBd("list", "--status=in_progress", "--json")
+	inProgressOutput, err := runBd(dir, "list", "--status=in_progress", "--json")
 	if err == nil {
 		var inProgress []struct {
 			ID              string `json:"id"`
@@ -532,7 +529,7 @@ func GetDependencyContext(n int) (*DependencyContext, error) {
 	}
 
 	// Get blocked tasks (what is blocking progress)
-	blockedOutput, err := runBd("blocked", "--json")
+	blockedOutput, err := runBd(dir, "blocked", "--json")
 	if err == nil {
 		var blocked []struct {
 			ID             string   `json:"id"`
@@ -558,10 +555,10 @@ func GetDependencyContext(n int) (*DependencyContext, error) {
 }
 
 // runBd executes bd with given args and returns stdout
-func runBd(args ...string) (string, error) {
+func runBd(dir string, args ...string) (string, error) {
 	cmd := exec.Command("bd", args...)
-	if WorkDir != "" {
-		cmd.Dir = WorkDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -582,13 +579,13 @@ func IsBdInstalled() bool {
 }
 
 // GetBeadsSummary attempts to get bead statistics from bd command
-func GetBeadsSummary(limit int) *BeadsSummary {
+func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	result := &BeadsSummary{}
 
-	// Check if .beads directory exists relative to WorkDir
+	// Check if .beads directory exists relative to dir
 	beadsDir := ".beads"
-	if WorkDir != "" {
-		beadsDir = filepath.Join(WorkDir, ".beads")
+	if dir != "" {
+		beadsDir = filepath.Join(dir, ".beads")
 	}
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		result.Available = false
@@ -596,15 +593,15 @@ func GetBeadsSummary(limit int) *BeadsSummary {
 		return result
 	}
 
-	// Get project path (WorkDir or CWD)
-	if WorkDir != "" {
-		result.Project = WorkDir
+	// Get project path (dir or CWD)
+	if dir != "" {
+		result.Project = dir
 	} else if cwd, err := os.Getwd(); err == nil {
 		result.Project = cwd
 	}
 
 	// Try to run bd stats --json to get summary
-	statsOutput, err := runBd("stats", "--json")
+	statsOutput, err := runBd(dir, "stats", "--json")
 	if err != nil {
 		result.Available = false
 		result.Reason = fmt.Sprintf("bd stats failed: %v", err)
@@ -635,19 +632,19 @@ func GetBeadsSummary(limit int) *BeadsSummary {
 	result.Closed = stats.ClosedIssues
 
 	// Get ready preview (top N ready issues sorted by priority)
-	result.ReadyPreview = GetReadyPreview(limit)
+	result.ReadyPreview = GetReadyPreview(dir, limit)
 
 	// Get in-progress list
-	result.InProgressList = GetInProgressList(limit)
+	result.InProgressList = GetInProgressList(dir, limit)
 
 	return result
 }
 
 // GetReadyPreview returns top N ready beads sorted by priority
-func GetReadyPreview(limit int) []BeadPreview {
+func GetReadyPreview(dir string, limit int) []BeadPreview {
 	var previews []BeadPreview
 
-	output, err := runBd("ready", "--json")
+	output, err := runBd(dir, "ready", "--json")
 	if err != nil {
 		return previews
 	}
@@ -677,18 +674,19 @@ func GetReadyPreview(limit int) []BeadPreview {
 }
 
 // GetInProgressList returns in-progress beads with assignees
-func GetInProgressList(limit int) []BeadInProgress {
+func GetInProgressList(dir string, limit int) []BeadInProgress {
 	var items []BeadInProgress
 
-	output, err := runBd("list", "--status=in_progress", "--json")
+	output, err := runBd(dir, "list", "--status=in_progress", "--json")
 	if err != nil {
 		return items
 	}
 
 	var issues []struct {
-		ID       string `json:"id"`
-		Title    string `json:"title"`
-		Assignee string `json:"assignee"`
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Assignee  string    `json:"assignee"`
+		UpdatedAt time.Time `json:"updated_at"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil {
 		return items
@@ -700,9 +698,10 @@ func GetInProgressList(limit int) []BeadInProgress {
 			break
 		}
 		items = append(items, BeadInProgress{
-			ID:       issue.ID,
-			Title:    issue.Title,
-			Assignee: issue.Assignee,
+			ID:        issue.ID,
+			Title:     issue.Title,
+			Assignee:  issue.Assignee,
+			UpdatedAt: issue.UpdatedAt,
 		})
 	}
 

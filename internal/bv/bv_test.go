@@ -3,19 +3,20 @@ package bv
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func init() {
-	// Find project root (walk up until we find .beads)
+// getProjectRoot finds the project root by looking for .beads directory
+func getProjectRoot() string {
 	dir, _ := os.Getwd()
 	for dir != "/" {
 		if _, err := os.Stat(filepath.Join(dir, ".beads")); err == nil {
-			WorkDir = dir
-			break
+			return dir
 		}
 		dir = filepath.Dir(dir)
 	}
+	return ""
 }
 
 func TestIsInstalled(t *testing.T) {
@@ -51,7 +52,18 @@ func TestCheckDrift(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	result := CheckDrift()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found (no .beads)")
+	}
+
+	result := CheckDrift(root)
+
+	// Handle case where flag is not supported by installed version
+	if strings.Contains(result.Message, "flag provided but not defined") {
+		t.Skipf("bv does not support -check-drift: %s", result.Message)
+	}
+
 	t.Logf("Drift status: %s, message: %s", result.Status, result.Message)
 
 	// Status should be one of the defined values
@@ -68,7 +80,12 @@ func TestGetInsights(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	insights, err := GetInsights()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	insights, err := GetInsights(root)
 	if err != nil {
 		t.Fatalf("GetInsights() error: %v", err)
 	}
@@ -88,7 +105,12 @@ func TestGetPriority(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	priority, err := GetPriority()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	priority, err := GetPriority(root)
 	if err != nil {
 		t.Fatalf("GetPriority() error: %v", err)
 	}
@@ -111,7 +133,12 @@ func TestGetPlan(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	plan, err := GetPlan()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	plan, err := GetPlan(root)
 	if err != nil {
 		t.Fatalf("GetPlan() error: %v", err)
 	}
@@ -134,7 +161,12 @@ func TestGetRecipes(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	recipes, err := GetRecipes()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	recipes, err := GetRecipes(root)
 	if err != nil {
 		t.Fatalf("GetRecipes() error: %v", err)
 	}
@@ -162,7 +194,12 @@ func TestGetTopBottlenecks(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	bottlenecks, err := GetTopBottlenecks(3)
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	bottlenecks, err := GetTopBottlenecks(root, 3)
 	if err != nil {
 		t.Fatalf("GetTopBottlenecks() error: %v", err)
 	}
@@ -179,7 +216,12 @@ func TestGetNextActions(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	actions, err := GetNextActions(5)
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	actions, err := GetNextActions(root, 5)
 	if err != nil {
 		t.Fatalf("GetNextActions() error: %v", err)
 	}
@@ -196,7 +238,12 @@ func TestGetParallelTracks(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	tracks, err := GetParallelTracks()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	tracks, err := GetParallelTracks(root)
 	if err != nil {
 		t.Fatalf("GetParallelTracks() error: %v", err)
 	}
@@ -209,8 +256,13 @@ func TestIsBottleneck(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Test with a likely non-existent ID
-	isBottle, score, err := IsBottleneck("nonexistent-issue-xyz")
+	isBottle, score, err := IsBottleneck(root, "nonexistent-issue-xyz")
 	if err != nil {
 		t.Fatalf("IsBottleneck() error: %v", err)
 	}
@@ -228,7 +280,12 @@ func TestGetHealthSummary(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	summary, err := GetHealthSummary()
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	summary, err := GetHealthSummary(root)
 	if err != nil {
 		t.Fatalf("GetHealthSummary() error: %v", err)
 	}
@@ -253,8 +310,13 @@ func TestIsKeystone(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Test with a likely non-existent ID
-	isKey, score, err := IsKeystone("nonexistent-issue-xyz")
+	isKey, score, err := IsKeystone(root, "nonexistent-issue-xyz")
 	if err != nil {
 		t.Fatalf("IsKeystone() error: %v", err)
 	}
@@ -272,8 +334,13 @@ func TestIsHub(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Test with a likely non-existent ID
-	isHub, score, err := IsHub("nonexistent-issue-xyz")
+	isHub, score, err := IsHub(root, "nonexistent-issue-xyz")
 	if err != nil {
 		t.Fatalf("IsHub() error: %v", err)
 	}
@@ -291,8 +358,13 @@ func TestIsAuthority(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Test with a likely non-existent ID
-	isAuth, score, err := IsAuthority("nonexistent-issue-xyz")
+	isAuth, score, err := IsAuthority(root, "nonexistent-issue-xyz")
 	if err != nil {
 		t.Fatalf("IsAuthority() error: %v", err)
 	}
@@ -310,9 +382,14 @@ func TestGetGraphPosition(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Test with a known issue ID (one that exists in the project)
 	// First, get a bottleneck to use as a test case
-	bottlenecks, err := GetTopBottlenecks(1)
+	bottlenecks, err := GetTopBottlenecks(root, 1)
 	if err != nil {
 		t.Skipf("Could not get bottlenecks: %v", err)
 	}
@@ -322,7 +399,7 @@ func TestGetGraphPosition(t *testing.T) {
 	}
 
 	testID := bottlenecks[0].ID
-	pos, err := GetGraphPosition(testID)
+	pos, err := GetGraphPosition(root, testID)
 	if err != nil {
 		t.Fatalf("GetGraphPosition() error: %v", err)
 	}
@@ -348,7 +425,12 @@ func TestGetGraphPositionNonExistent(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
-	pos, err := GetGraphPosition("nonexistent-issue-xyz")
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
+	pos, err := GetGraphPosition(root, "nonexistent-issue-xyz")
 	if err != nil {
 		t.Fatalf("GetGraphPosition() error: %v", err)
 	}
@@ -367,8 +449,13 @@ func TestGetGraphPositionsBatch(t *testing.T) {
 		t.Skip("bv not installed")
 	}
 
+	root := getProjectRoot()
+	if root == "" {
+		t.Skip("Project root not found")
+	}
+
 	// Get some real IDs to test with
-	bottlenecks, err := GetTopBottlenecks(2)
+	bottlenecks, err := GetTopBottlenecks(root, 2)
 	if err != nil {
 		t.Skipf("Could not get bottlenecks: %v", err)
 	}
@@ -380,7 +467,7 @@ func TestGetGraphPositionsBatch(t *testing.T) {
 	// Add a fake ID too
 	ids = append(ids, "fake-id-xyz")
 
-	positions, err := GetGraphPositionsBatch(ids)
+	positions, err := GetGraphPositionsBatch(root, ids)
 	if err != nil {
 		t.Fatalf("GetGraphPositionsBatch() error: %v", err)
 	}
