@@ -1,6 +1,9 @@
 package palette
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -9,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -494,6 +498,73 @@ func TestViewCommandPhase(t *testing.T) {
 	}
 }
 
+func TestHelpOverlayToggle(t *testing.T) {
+	m := New("test-session", testCommands)
+
+	// Open help overlay with '?'
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = newModel.(Model)
+	if !m.showHelp {
+		t.Fatal("Expected showHelp to be true after pressing '?'")
+	}
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "Palette Shortcuts") && !strings.Contains(view, "Keyboard Shortcuts") {
+		t.Fatalf("Expected help overlay view to include title, got: %q", view)
+	}
+
+	// While help is open, other keys should not quit.
+	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = newModel.(Model)
+	if m.quitting {
+		t.Fatal("Expected palette not to quit when help overlay is open")
+	}
+	if !m.showHelp {
+		t.Fatal("Expected help overlay to remain open after non-close key")
+	}
+
+	// Close help overlay with Esc
+	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = newModel.(Model)
+	if m.showHelp {
+		t.Fatal("Expected showHelp to be false after pressing Esc")
+	}
+}
+
+func TestPreviewShowsTargetSummaryAndPromptMetadata(t *testing.T) {
+	m := New("test-session", testCommands)
+	m.paneCountsKnown = true
+	m.paneCounts = paneCounts{totalAgents: 7, claude: 3, codex: 2, gemini: 2}
+
+	out := stripANSI(m.renderPreview(80))
+	if !strings.Contains(out, "Targets:") {
+		t.Fatalf("Expected preview to include target summary, got: %q", out)
+	}
+	if !strings.Contains(out, "all 7") || !strings.Contains(out, "cc 3") || !strings.Contains(out, "cod 2") || !strings.Contains(out, "gmi 2") {
+		t.Fatalf("Expected target badges with counts, got: %q", out)
+	}
+	if !strings.Contains(out, "lines") || !strings.Contains(out, "chars") {
+		t.Fatalf("Expected preview to include prompt metadata (lines/chars), got: %q", out)
+	}
+	if !strings.Contains(out, "key:") {
+		t.Fatalf("Expected preview to include key metadata, got: %q", out)
+	}
+}
+
+func TestPreviewSafetyNudgesIncludeDestructive(t *testing.T) {
+	commands := []config.PaletteCmd{
+		{Key: "danger", Label: "Danger", Category: "Quick Actions", Prompt: "Run `git reset --hard` then `rm -rf`"},
+	}
+	m := New("test-session", commands)
+	m.paneCountsKnown = true
+	m.paneCounts = paneCounts{totalAgents: 1}
+
+	out := stripANSI(m.renderPreview(80))
+	if !strings.Contains(strings.ToLower(out), "destructive") {
+		t.Fatalf("Expected destructive nudge badge, got: %q", out)
+	}
+}
+
 func TestViewTargetPhase(t *testing.T) {
 	m := New("test-session", testCommands)
 	m.phase = PhaseTarget
@@ -507,6 +578,35 @@ func TestViewTargetPhase(t *testing.T) {
 	if !strings.Contains(view, "Target") && !strings.Contains(view, "All Agents") {
 		t.Log("Target phase view:", view)
 		// May not contain text if rendering is complex
+	}
+}
+
+func TestTargetPhaseShowsSamplePanesWhenWide(t *testing.T) {
+	m := New("test-session", testCommands)
+	m.phase = PhaseTarget
+	m.selected = &testCommands[0]
+	m.paneCountsKnown = true
+	m.paneCounts = paneCounts{
+		totalAgents:   3,
+		claude:        1,
+		codex:         1,
+		gemini:        1,
+		allSamples:    []string{"test-session__cc_1", "test-session__cod_1", "test-session__gmi_1"},
+		claudeSamples: []string{"test-session__cc_1"},
+		codexSamples:  []string{"test-session__cod_1"},
+		geminiSamples: []string{"test-session__gmi_1"},
+	}
+
+	// Wide terminal enables sample pane rendering.
+	newModel, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
+	m = newModel.(Model)
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "All Agents") || !strings.Contains(view, "(3)") {
+		t.Fatalf("Expected target selector to include counts for All Agents, got: %q", view)
+	}
+	if !strings.Contains(view, "e.g.") || !strings.Contains(view, "test-session__cc_1") {
+		t.Fatalf("Expected target selector to include sample pane titles, got: %q", view)
 	}
 }
 
@@ -780,6 +880,107 @@ func TestRunSessionSelectorSingleSession(t *testing.T) {
 	}
 }
 
+func TestVisualOrderPinnedThenRecents(t *testing.T) {
+	m := NewWithOptions("test-session", testCommands, Options{
+		PaletteState: config.PaletteState{
+			Pinned:    []string{"docs"},
+			Favorites: []string{"review"},
+		},
+	})
+
+	// Simulate loaded recents (most-recent-first)
+	m.recents = []string{"test", "fix"}
+	m.buildVisualOrder()
+
+	// Expected order: pinned (docs), recents (test, fix), then remaining categories (refactor, review)
+	want := []int{3, 1, 0, 2, 4}
+	if !reflect.DeepEqual(m.visualOrder, want) {
+		t.Fatalf("Unexpected visualOrder:\nwant %v\ngot  %v", want, m.visualOrder)
+	}
+
+	out := stripANSI(m.renderCommandList(80))
+	if !strings.Contains(out, "Pinned") {
+		t.Fatalf("Expected command list to include 'Pinned' header:\n%s", out)
+	}
+	if !strings.Contains(out, "Recent") {
+		t.Fatalf("Expected command list to include 'Recent' header:\n%s", out)
+	}
+}
+
+func TestTogglePinAndFavoritePersistsPaletteState(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("theme = \"mocha\"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	m := NewWithOptions("test-session", testCommands, Options{
+		PaletteStatePath: cfgPath,
+	})
+
+	// Pin the first command ("fix")
+	newModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = newModel.(Model)
+	if cmd == nil {
+		t.Fatalf("Expected save cmd for Ctrl+P when PaletteStatePath is set")
+	}
+
+	msg := cmd()
+	if saved, ok := msg.(paletteStateSavedMsg); ok && saved.err != nil {
+		t.Fatalf("Unexpected save error: %v", saved.err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "[palette_state]") {
+		t.Fatalf("Expected config to include [palette_state] table:\n%s", text)
+	}
+	if !strings.Contains(text, "\"fix\"") {
+		t.Fatalf("Expected pinned/favorite key to be persisted:\n%s", text)
+	}
+}
+
+func TestFetchRecentsFromHistory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	e1 := history.NewEntry("test-session", []string{"1"}, "Fix the bug", history.SourcePalette)
+	e1.Template = "fix"
+	if err := history.Append(e1); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+
+	e2 := history.NewEntry("test-session", []string{"1"}, "Run all tests", history.SourcePalette)
+	e2.Template = "test"
+	if err := history.Append(e2); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+
+	e3 := history.NewEntry("test-session", []string{"1"}, "Fix the bug", history.SourcePalette)
+	e3.Template = "fix"
+	if err := history.Append(e3); err != nil {
+		t.Fatalf("append history: %v", err)
+	}
+
+	m := New("test-session", testCommands)
+	cmd := m.fetchRecents()
+	if cmd == nil {
+		t.Fatalf("Expected fetchRecents cmd")
+	}
+	msg := cmd()
+	newModel, _ := m.Update(msg)
+	m = newModel.(Model)
+
+	// Most-recent-first unique keys.
+	want := []string{"fix", "test"}
+	if !reflect.DeepEqual(m.recents, want) {
+		t.Fatalf("Unexpected recents:\nwant %v\ngot  %v", want, m.recents)
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════
 // KeyMap Tests
 // ═══════════════════════════════════════════════════════════════
@@ -800,6 +1001,14 @@ func TestKeyMapBindings(t *testing.T) {
 
 	if !key.Matches(tea.KeyMsg{Type: tea.KeyEsc}, keys.Back) {
 		t.Error("Esc key should match Back")
+	}
+
+	if !key.Matches(tea.KeyMsg{Type: tea.KeyCtrlP}, keys.TogglePin) {
+		t.Error("Ctrl+P should match TogglePin")
+	}
+
+	if !key.Matches(tea.KeyMsg{Type: tea.KeyCtrlF}, keys.ToggleFavorite) {
+		t.Error("Ctrl+F should match ToggleFavorite")
 	}
 }
 

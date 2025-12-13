@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -83,7 +84,31 @@ func runPalette(session string) error {
 	}
 
 	// Create and run the TUI palette
-	model := palette.New(session, cfg.Palette)
+	statePath := ""
+	// Prefer persisting palette state in project config when available (shareable via git),
+	// otherwise fall back to the active global config file.
+	if cwd, err := os.Getwd(); err == nil {
+		if projectDir, _, err := config.FindProjectConfig(cwd); err == nil && projectDir != "" {
+			projectCfg := filepath.Join(projectDir, ".ntm", "config.toml")
+			if _, err := os.Stat(projectCfg); err == nil {
+				statePath = projectCfg
+			}
+		}
+	}
+	if statePath == "" {
+		cfgPath := cfgFile
+		if cfgPath == "" {
+			cfgPath = config.DefaultPath()
+		}
+		if _, err := os.Stat(cfgPath); err == nil {
+			statePath = cfgPath
+		}
+	}
+
+	model := palette.NewWithOptions(session, cfg.Palette, palette.Options{
+		PaletteState:     cfg.PaletteState,
+		PaletteStatePath: statePath,
+	})
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	// Watch config/palette for live reloads while the palette is open
