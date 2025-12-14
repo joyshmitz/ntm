@@ -660,7 +660,7 @@ Provide a brief status update:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NTM_PROJECTS_BASE` | `~/Developer` (macOS) or `/data/projects` (Linux) | Base directory for all projects |
-| `NTM_THEME` | `auto` | Color theme: `auto` (detect light/dark), or `mocha`, `macchiato`, `nord`, `latte` |
+| `NTM_THEME` | `auto` | Color theme: `auto` (detect light/dark), `mocha`, `macchiato`, `nord`, `latte`, or `plain` (no-color) |
 | `NTM_ICONS` | auto-detect | Icon set: `nerd`, `unicode`, `ascii` |
 | `NTM_USE_ICONS` | auto-detect | Force icons: `1` (on) or `0` (off) |
 | `NERD_FONTS` | auto-detect | Nerd Fonts available: `1` or `0` |
@@ -882,6 +882,7 @@ NTM uses the Catppuccin color palette by default, with support for multiple them
 | `macchiato` | Darker variant with more contrast |
 | `latte` | Light variant for light terminals |
 | `nord` | Arctic-inspired, cooler tones |
+| `plain` | No-color theme (uses terminal defaults; best for low-color terminals) |
 
 Set via environment variable:
 
@@ -932,6 +933,7 @@ Disable colors (respects the `NO_COLOR` standard, with an NTM override):
 export NO_COLOR=1        # Any value disables colors
 export NTM_NO_COLOR=1    # NTM-specific no-color toggle
 export NTM_NO_COLOR=0    # Force colors ON (even if NO_COLOR is set)
+export NTM_THEME=plain   # Explicit no-color theme (escape hatch)
 ```
 
 ### Wide/High-Resolution Displays
@@ -1008,7 +1010,7 @@ ntm copy myapi --cc --output out.txt
 - No sessions exist: `ntm spawn <name>`
 - Icons drift/misaligned gutters: `export NTM_ICONS=ascii`
 - Too much motion/flicker: `export NTM_REDUCE_MOTION=1`
-- Need plain output / low-color terminal: `export NO_COLOR=1` (or `export NTM_NO_COLOR=1`)
+- Need plain output / low-color terminal: `export NTM_THEME=plain` (or `export NO_COLOR=1`)
 - Copy complains about non-interactive mode: pass a session explicitly (e.g. `ntm copy myapi --cc`)
 
 ### Starting a New Project
