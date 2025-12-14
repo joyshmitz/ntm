@@ -31,11 +31,14 @@ var codexStatusPatterns = struct {
 
 // parseCodexUsage parses Codex usage output
 // TODO: Update patterns after researching actual Codex CLI output
-func parseCodexUsage(info *QuotaInfo, output string) error {
+func parseCodexUsage(info *QuotaInfo, output string) (bool, error) {
+	found := false
+
 	// Parse usage percentage
 	if match := codexUsagePatterns.Usage.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.SessionUsage = val
+			found = true
 		}
 	}
 
@@ -43,13 +46,17 @@ func parseCodexUsage(info *QuotaInfo, output string) error {
 	if match := codexUsagePatterns.Limit.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.WeeklyUsage = val
+			found = true
 		}
 	}
 
 	// Check for rate limiting
-	info.IsLimited = codexUsagePatterns.Limited.MatchString(output)
+	if codexUsagePatterns.Limited.MatchString(output) {
+		info.IsLimited = true
+		found = true
+	}
 
-	return nil
+	return found, nil
 }
 
 // parseCodexStatus parses Codex status output

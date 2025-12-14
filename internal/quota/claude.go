@@ -52,11 +52,14 @@ var claudeStatusPatterns = struct {
 }
 
 // parseClaudeUsage parses Claude's /usage command output
-func parseClaudeUsage(info *QuotaInfo, output string) error {
+func parseClaudeUsage(info *QuotaInfo, output string) (bool, error) {
+	found := false
+
 	// Parse session usage
 	if match := claudeUsagePatterns.Session.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.SessionUsage = val
+			found = true
 		}
 	}
 
@@ -64,6 +67,7 @@ func parseClaudeUsage(info *QuotaInfo, output string) error {
 	if match := claudeUsagePatterns.Weekly.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.WeeklyUsage = val
+			found = true
 		}
 	}
 
@@ -71,6 +75,7 @@ func parseClaudeUsage(info *QuotaInfo, output string) error {
 	if match := claudeUsagePatterns.Period.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.PeriodUsage = val
+			found = true
 		}
 	}
 
@@ -78,6 +83,7 @@ func parseClaudeUsage(info *QuotaInfo, output string) error {
 	if match := claudeUsagePatterns.Sonnet.FindStringSubmatch(output); len(match) > 1 {
 		if val, err := strconv.ParseFloat(match[1], 64); err == nil {
 			info.SonnetUsage = val
+			found = true
 		}
 	}
 
@@ -85,12 +91,16 @@ func parseClaudeUsage(info *QuotaInfo, output string) error {
 	if match := claudeUsagePatterns.Reset.FindStringSubmatch(output); len(match) > 1 {
 		info.ResetString = strings.TrimSpace(match[1])
 		info.ResetTime = parseResetTime(info.ResetString)
+		found = true
 	}
 
 	// Check for rate limiting
-	info.IsLimited = claudeUsagePatterns.Limited.MatchString(output)
+	if claudeUsagePatterns.Limited.MatchString(output) {
+		info.IsLimited = true
+		found = true
+	}
 
-	return nil
+	return found, nil
 }
 
 // parseClaudeStatus parses Claude's /status command output
@@ -186,7 +196,7 @@ type ClaudeQuota struct {
 // ParseClaudeUsageString parses raw /usage output and returns structured data
 func ParseClaudeUsageString(output string) *ClaudeQuota {
 	info := &QuotaInfo{}
-	parseClaudeUsage(info, output)
+	_, _ = parseClaudeUsage(info, output)
 	parseClaudeStatus(info, output)
 
 	return &ClaudeQuota{

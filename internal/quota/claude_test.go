@@ -93,7 +93,7 @@ Resets in 3 hours`,
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			info := &QuotaInfo{}
-			err := parseClaudeUsage(info, tt.input)
+			_, err := parseClaudeUsage(info, tt.input)
 			if err != nil {
 				t.Errorf("parseClaudeUsage() error = %v", err)
 				return
@@ -324,7 +324,7 @@ func TestParseLimitedIndicators(t *testing.T) {
 		}
 		t.Run(fmt.Sprintf("%d_%s", i, name), func(t *testing.T) {
 			info := &QuotaInfo{}
-			parseClaudeUsage(info, input)
+			_, _ = parseClaudeUsage(info, input)
 
 			if !info.IsLimited {
 				t.Errorf("Expected IsLimited=true for input containing limited indicator")

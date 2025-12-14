@@ -71,27 +71,65 @@ func (f *PTYFetcher) FetchQuota(ctx context.Context, paneID string, provider Pro
 		return info, nil
 	}
 
-	// Wait for output with context timeout
-	usageOutput, err := f.waitForNewOutput(ctx, paneID, initialOutput, captureLines, timeout)
-	if err != nil {
-		info.Error = fmt.Sprintf("failed to capture usage output: %v", err)
-		return info, nil
-	}
+	// Poll for output that contains usage data
+	deadline := time.Now().Add(timeout)
+	currentOutput := initialOutput
+	var lastErr error
 
-	// Parse usage output based on provider
-	if err := parseUsageOutput(info, usageOutput, provider); err != nil {
-		info.Error = fmt.Sprintf("failed to parse usage: %v", err)
-	}
-	info.RawOutput = usageOutput
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 
-	// Optionally fetch status for additional info
-	statusOutput, err := f.fetchStatus(ctx, paneID, cmds.StatusCmd, captureLines, timeout)
-	if err == nil && statusOutput != "" {
-		parseStatusOutput(info, statusOutput, provider)
-		info.RawOutput += "\n---\n" + statusOutput
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			info.Error = fmt.Sprintf("context cancelled")
+			return info, nil
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				if lastErr != nil {
+					info.Error = lastErr.Error()
+				} else {
+					info.Error = "timeout waiting for usage data"
+				}
+				return info, nil
+			}
 
-	return info, nil
+			// Capture output
+			output, err := tmux.CapturePaneOutput(paneID, captureLines)
+			if err != nil {
+				lastErr = fmt.Errorf("capture failed: %w", err)
+				continue
+			}
+
+			// If output changed, try to parse
+			if output != currentOutput {
+				currentOutput = output
+
+				// Attempt to slice content after the command echo to avoid stale data
+				relevantOutput := output
+				// Use LastIndex to find the most recent command execution
+				if idx := strings.LastIndex(output, cmds.UsageCmd); idx != -1 {
+					relevantOutput = output[idx+len(cmds.UsageCmd):]
+				}
+
+				found, err := parseUsageOutput(info, relevantOutput, provider)
+				if err != nil {
+					lastErr = err
+				}
+				if found {
+					info.RawOutput = relevantOutput
+					// Optionally fetch status for additional info
+					statusOutput, err := f.fetchStatus(ctx, paneID, cmds.StatusCmd, captureLines, 2*time.Second)
+					if err == nil && statusOutput != "" {
+						parseStatusOutput(info, statusOutput, provider)
+						info.RawOutput += "\n---\n" + statusOutput
+					}
+					info.Error = "" // Clear any previous error
+					return info, nil
+				}
+			}
+		}
+	}
 }
 
 // waitForNewOutput polls until new output appears after the initial capture
@@ -115,12 +153,8 @@ func (f *PTYFetcher) waitForNewOutput(ctx context.Context, paneID, initialOutput
 			}
 
 			// Check if output has changed
-			if output != initialOutput && len(output) > len(initialOutput) {
-				// Return the new portion
-				newPart := strings.TrimPrefix(output, initialOutput)
-				if newPart != "" {
-					return strings.TrimSpace(newPart), nil
-				}
+			if output != initialOutput {
+				return output, nil
 			}
 		}
 	}
@@ -129,10 +163,10 @@ func (f *PTYFetcher) waitForNewOutput(ctx context.Context, paneID, initialOutput
 // fetchStatus sends a status command and captures output
 func (f *PTYFetcher) fetchStatus(ctx context.Context, paneID, statusCmd string, lines int, timeout time.Duration) (string, error) {
 	// Don't send if status command is same as usage command
-	cmds := providerCommands[ProviderClaude]
-	if statusCmd == cmds.UsageCmd {
-		return "", nil
-	}
+	// Note: We need to check the specific provider's commands, but we don't have provider here.
+	// However, this logic was slightly flawed in original code (checked ProviderClaude only).
+	// For now, we assume caller handles deduplication or we check against known duplicates.
+	// But simply checking output change is safe.
 
 	initialOutput, err := tmux.CapturePaneOutput(paneID, lines)
 	if err != nil {
@@ -143,11 +177,21 @@ func (f *PTYFetcher) fetchStatus(ctx context.Context, paneID, statusCmd string, 
 		return "", err
 	}
 
-	return f.waitForNewOutput(ctx, paneID, initialOutput, lines, timeout)
+	// Wait for any change
+	output, err := f.waitForNewOutput(ctx, paneID, initialOutput, lines, timeout)
+	if err != nil {
+		return "", err
+	}
+
+	// Slice after command
+	if idx := strings.LastIndex(output, statusCmd); idx != -1 {
+		return output[idx+len(statusCmd):], nil
+	}
+	return output, nil
 }
 
 // parseUsageOutput routes to provider-specific parsers
-func parseUsageOutput(info *QuotaInfo, output string, provider Provider) error {
+func parseUsageOutput(info *QuotaInfo, output string, provider Provider) (bool, error) {
 	switch provider {
 	case ProviderClaude:
 		return parseClaudeUsage(info, output)
@@ -156,7 +200,7 @@ func parseUsageOutput(info *QuotaInfo, output string, provider Provider) error {
 	case ProviderGemini:
 		return parseGeminiUsage(info, output)
 	default:
-		return fmt.Errorf("no parser for provider: %s", provider)
+		return false, fmt.Errorf("no parser for provider: %s", provider)
 	}
 }
 
