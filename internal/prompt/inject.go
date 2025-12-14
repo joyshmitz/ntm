@@ -126,23 +126,31 @@ func InjectFiles(specs []FileSpec, prompt string) (string, error) {
 	totalSize := 0
 
 	for _, spec := range specs {
-		// Check file size first
+		// Check file size first (if no line range)
 		info, err := os.Stat(spec.Path)
 		if err != nil {
 			return "", fmt.Errorf("stat %s: %w", spec.Path, err)
 		}
-		if info.Size() > MaxFileSize {
-			return "", fmt.Errorf("file %s is too large (%d bytes > %d limit)", spec.Path, info.Size(), MaxFileSize)
-		}
 
-		// Enforce global limit (using file size as heuristic to avoid reading if already over)
-		if totalSize+int(info.Size()) > MaxTotalInjectionSize {
-			return "", fmt.Errorf("total injection size exceeds limit (%d bytes)", MaxTotalInjectionSize)
+		hasRange := spec.StartLine > 0 || spec.EndLine > 0
+
+		if !hasRange {
+			if info.Size() > MaxFileSize {
+				return "", fmt.Errorf("file %s is too large (%d bytes > %d limit)", spec.Path, info.Size(), MaxFileSize)
+			}
+			// Enforce global limit (heuristic)
+			if totalSize+int(info.Size()) > MaxTotalInjectionSize {
+				return "", fmt.Errorf("total injection size exceeds limit (%d bytes)", MaxTotalInjectionSize)
+			}
 		}
 
 		content, err := readFileRange(spec)
 		if err != nil {
 			return "", fmt.Errorf("failed to read %s: %w", spec.Path, err)
+		}
+
+		if len(content) > MaxFileSize {
+			return "", fmt.Errorf("content from %s is too large (%d bytes > %d limit)", spec.Path, len(content), MaxFileSize)
 		}
 
 		totalSize += len(content)
@@ -215,7 +223,11 @@ func readFileRange(spec FileSpec) (string, error) {
 			if !first {
 				sb.WriteString("\n")
 			}
-			sb.WriteString(scanner.Text())
+			text := scanner.Text()
+			if sb.Len()+len(text)+1 > MaxFileSize {
+				return "", fmt.Errorf("content exceeds limit of %d bytes", MaxFileSize)
+			}
+			sb.WriteString(text)
 			first = false
 		}
 	}
