@@ -15,7 +15,7 @@ func TestRotateCmdValidation(t *testing.T) {
 		{
 			name:      "missing session and not in tmux",
 			args:      []string{},
-			wantError: "session name required when not in tmux",
+			wantError: "session",
 		},
 		{
 			name:      "missing pane index",

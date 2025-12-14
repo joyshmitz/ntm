@@ -3,11 +3,11 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -121,25 +121,18 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 
 	// Determine session name
 	if sessionName == "" {
-		if tmux.InTmux() {
-			sessionName = tmux.GetCurrentSession()
-		} else {
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
+		res, err := ResolveSession("", os.Stdout)
+		if err != nil {
+			if IsJSONOutput() {
+				return output.PrintJSON(output.NewError(err.Error()))
 			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found")
-			}
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil
-			}
-			sessionName = selected
+			return err
 		}
+		if res.Session == "" {
+			return nil
+		}
+		res.ExplainIfInferred(os.Stderr)
+		sessionName = res.Session
 	}
 
 	if !tmux.SessionExists(sessionName) {
@@ -350,6 +343,9 @@ func runSessionsDelete(name string, force bool) error {
 	}
 
 	if !force {
+		if IsJSONOutput() {
+			return output.PrintJSON(output.NewError("confirmation required (use --force)"))
+		}
 		fmt.Printf("Delete saved session '%s'? [y/N]: ", name)
 		var response string
 		fmt.Scanln(&response)
@@ -488,12 +484,18 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 	}
 
 	// Optionally launch agents
+	var launchErr error
 	agentCount := 0
 	if launchAgents {
-		// For now, just count the agents - actual launch would need config access
+		if cfg != nil {
+			cmds := session.AgentCommands{
+				Claude: cfg.Agents.Claude,
+				Codex:  cfg.Agents.Codex,
+				Gemini: cfg.Agents.Gemini,
+			}
+			launchErr = session.RestoreAgents(restoredName, state, cmds)
+		}
 		agentCount = state.Agents.Total()
-		// Note: Full agent launch implementation would go here
-		// session.RestoreAgents(restoredName, state, agentConfig)
 	}
 
 	result := &SessionsRestoreResult{
@@ -503,6 +505,10 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 		State:      state,
 		AgentCount: agentCount,
 		GitWarning: gitWarning,
+	}
+
+	if launchErr != nil {
+		result.Error = fmt.Sprintf("restored session but failed to launch agents: %v", launchErr)
 	}
 
 	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {

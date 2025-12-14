@@ -2,11 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard"
 )
@@ -36,40 +36,25 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runDashboard(session)
+			return runDashboard(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 		},
 	}
 }
 
-func runDashboard(session string) error {
+func runDashboard(w io.Writer, errW io.Writer, session string) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
 
-	// Determine target session
-	if session == "" {
-		if tmux.InTmux() {
-			session = tmux.GetCurrentSession()
-		} else {
-			// Show session selector
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found. Create one with: ntm spawn <name>")
-			}
-
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil // User cancelled
-			}
-			session = selected
-		}
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(errW)
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)

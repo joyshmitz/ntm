@@ -157,7 +157,22 @@ Shell Integration:
 		}
 		if robotMail {
 			projectKey, _ := os.Getwd()
-			if err := robot.PrintMail(projectKey); err != nil {
+			sessionName := ""
+			if len(args) > 0 {
+				sessionName = args[0]
+			} else if tmux.IsInstalled() {
+				// Best-effort: infer a session when running inside tmux or when cwd matches
+				// a project dir. Robot mode must never prompt.
+				if res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: true}); err == nil && res.Session != "" {
+					sessionName = res.Session
+				}
+			}
+
+			if sessionName != "" && cfg != nil {
+				projectKey = cfg.GetProjectDir(sessionName)
+			}
+
+			if err := robot.PrintMail(sessionName, projectKey); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

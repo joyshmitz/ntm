@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -81,29 +80,15 @@ func runSave(w io.Writer, session, outputDir string, lines int, filter AgentFilt
 
 	// Determine target session
 	if session == "" {
-		if tmux.InTmux() {
-			session = tmux.GetCurrentSession()
-		} else {
-			if !IsInteractive(w) {
-				return fmt.Errorf("non-interactive environment: session name is required")
-			}
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found")
-			}
-
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil
-			}
-			session = selected
+		res, err := ResolveSession("", w)
+		if err != nil {
+			return err
 		}
+		if res.Session == "" {
+			return nil
+		}
+		res.ExplainIfInferred(os.Stderr)
+		session = res.Session
 	}
 
 	if !tmux.SessionExists(session) {

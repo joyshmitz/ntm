@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -46,14 +45,15 @@ func (r *GrepResult) Text(w io.Writer) error {
 	}
 
 	// Group matches by pane for cleaner output
-	lastPane := ""
+	lastKey := ""
 	for i, m := range r.Matches {
 		// Print pane header when pane changes
-		if m.Pane != lastPane {
+		key := m.Session + "/" + m.Pane
+		if key != lastKey {
 			if i > 0 {
 				fmt.Fprintln(w, "--")
 			}
-			lastPane = m.Pane
+			lastKey = key
 		}
 
 		// Print context before (if any)
@@ -63,14 +63,14 @@ func (r *GrepResult) Text(w io.Writer) error {
 				lineNum := m.Line - contextBefore + j
 				if lineNum > 0 {
 					fmt.Fprintf(w, "%s%s/%s:%d-%s %s\n",
-						colorize(t.Surface1), r.Session, m.Pane, lineNum, colorize(t.Text), m.Context[j])
+						colorize(t.Surface1), m.Session, m.Pane, lineNum, colorize(t.Text), m.Context[j])
 				}
 			}
 		}
 
 		// Print matching line with highlighting
 		fmt.Fprintf(w, "%s%s/%s:%d:%s %s\n",
-			colorize(t.Blue), r.Session, m.Pane, m.Line, colorize(t.Text),
+			colorize(t.Blue), m.Session, m.Pane, m.Line, colorize(t.Text),
 			highlightMatch(m.Content, r.Pattern, t))
 
 		// Print context after (if any)
@@ -79,7 +79,7 @@ func (r *GrepResult) Text(w io.Writer) error {
 			for j := contextBefore; j < len(m.Context); j++ {
 				lineNum := m.Line + j - contextBefore + 1
 				fmt.Fprintf(w, "%s%s/%s:%d-%s %s\n",
-					colorize(t.Surface1), r.Session, m.Pane, lineNum, colorize(t.Text), m.Context[j])
+					colorize(t.Surface1), m.Session, m.Pane, lineNum, colorize(t.Text), m.Context[j])
 			}
 		}
 	}
@@ -141,13 +141,13 @@ Examples:
 			}
 
 			filter := AgentFilter{
-				All:    allFlag,
 				Claude: ccFlag,
 				Codex:  codFlag,
 				Gemini: gmiFlag,
 			}
 
 			opts := GrepOptions{
+				AllSessions:     allFlag,
 				CaseInsensitive: caseInsensitive,
 				InvertMatch:     invertMatch,
 				ContextLines:    context,
@@ -179,6 +179,7 @@ Examples:
 
 // GrepOptions contains options for the grep operation
 type GrepOptions struct {
+	AllSessions     bool
 	CaseInsensitive bool
 	InvertMatch     bool
 	ContextLines    int
@@ -206,8 +207,7 @@ func runGrep(pattern, session string, opts GrepOptions) error {
 
 	// Determine target session(s)
 	var sessions []string
-	if opts.Filter.All || session == "" {
-		// Search all sessions
+	if opts.AllSessions {
 		sessionList, err := tmux.ListSessions()
 		if err != nil {
 			return err
@@ -219,28 +219,15 @@ func runGrep(pattern, session string, opts GrepOptions) error {
 			sessions = append(sessions, s.Name)
 		}
 	} else {
-		if session == "" {
-			if tmux.InTmux() {
-				session = tmux.GetCurrentSession()
-			} else {
-				sessionList, err := tmux.ListSessions()
-				if err != nil {
-					return err
-				}
-				if len(sessionList) == 0 {
-					return fmt.Errorf("no tmux sessions found")
-				}
-
-				selected, err := palette.RunSessionSelector(sessionList)
-				if err != nil {
-					return err
-				}
-				if selected == "" {
-					return nil
-				}
-				session = selected
-			}
+		res, err := ResolveSession(session, os.Stdout)
+		if err != nil {
+			return err
 		}
+		if res.Session == "" {
+			return nil
+		}
+		res.ExplainIfInferred(os.Stderr)
+		session = res.Session
 
 		if !tmux.SessionExists(session) {
 			return fmt.Errorf("session '%s' not found", session)
@@ -263,12 +250,11 @@ func runGrep(pattern, session string, opts GrepOptions) error {
 
 		for _, pane := range panes {
 			// Apply agent filter
-			if !opts.Filter.IsEmpty() && !opts.Filter.Matches(pane.Type) {
-				continue
-			}
-
-			// Skip user pane unless explicitly included
-			if pane.Type == tmux.AgentUser && !opts.Filter.All {
+			if opts.Filter.IsEmpty() {
+				if pane.Type == tmux.AgentUser {
+					continue
+				}
+			} else if !opts.Filter.Matches(pane.Type) {
 				continue
 			}
 
@@ -333,6 +319,9 @@ func runGrep(pattern, session string, opts GrepOptions) error {
 		TotalLines: totalLines,
 		MatchCount: len(allMatches),
 		PaneCount:  panesSearched,
+	}
+	if opts.AllSessions {
+		result.Session = "<all>"
 	}
 
 	// Handle list-only mode

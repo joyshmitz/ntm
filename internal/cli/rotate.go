@@ -38,15 +38,24 @@ Examples:
   ntm rotate myproject --pane=0 --account=backup1@gmail.com`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := tmux.EnsureInstalled(); err != nil {
+				return err
+			}
+
 			var session string
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				if !tmux.InTmux() {
-					return fmt.Errorf("session name required when not in tmux")
-				}
-				session = tmux.GetCurrentSession()
 			}
+
+			res, err := ResolveSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+			session = res.Session
 
 			if allLimited {
 				return rotateAllLimited(session, targetAccount, dryRun)

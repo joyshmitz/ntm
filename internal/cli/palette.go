@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -34,45 +35,25 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runPalette(session)
+			return runPalette(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 		},
 	}
 }
 
-func runPalette(session string) error {
+func runPalette(w io.Writer, errW io.Writer, session string) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
 
-	// Auto-detect session if not specified
-	if session == "" {
-		session = tmux.GetCurrentSession()
-		if session == "" {
-			// Not in tmux, show enhanced session selector
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found - create one with 'ntm spawn'")
-			}
-
-			if len(sessions) == 1 {
-				session = sessions[0].Name
-			} else {
-				// Use session selector
-				selected, err := palette.RunSessionSelector(sessions)
-				if err != nil {
-					return err
-				}
-				if selected == "" {
-					return nil // User cancelled
-				}
-				session = selected
-			}
-		}
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(errW)
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)

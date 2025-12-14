@@ -250,19 +250,6 @@ Examples:
 	return cmd
 }
 
-// Backward-compatible helper (no auto-restart)
-func runSpawnAgents(session string, agents []FlatAgent, ccCount, codCount, gmiCount int, userPane bool) error {
-	opts := SpawnOptions{
-		Session:  session,
-		Agents:   agents,
-		CCCount:  ccCount,
-		CodCount: codCount,
-		GmiCount: gmiCount,
-		UserPane: userPane,
-	}
-	return spawnSessionLogic(opts)
-}
-
 // spawnSessionLogic handles the creation of the session and spawning of agents
 func spawnSessionLogic(opts SpawnOptions) error {
 	// Helper for JSON error output

@@ -13,7 +13,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -109,30 +108,15 @@ func runWatch(session string, opts watchOptions) error {
 		return err
 	}
 
-	// Determine target session
-	if session == "" {
-		if tmux.InTmux() {
-			session = tmux.GetCurrentSession()
-		} else {
-			// Show session selector
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found. Create one with: ntm spawn <name>")
-			}
-
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil // User cancelled
-			}
-			session = selected
-		}
+	res, err := ResolveSession(session, os.Stdout)
+	if err != nil {
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(os.Stderr)
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func newHealthCmd() *cobra.Command {
@@ -38,19 +39,21 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 	if len(args) > 0 {
 		session = args[0]
-	} else {
-		// Try to get current session if in tmux
-		sessions, err := listSessionsForHealth()
-		if err != nil || len(sessions) == 0 {
-			return fmt.Errorf("please specify a session name")
-		}
-		// Use first session if only one, otherwise prompt
-		if len(sessions) == 1 {
-			session = sessions[0]
-		} else {
-			return fmt.Errorf("multiple sessions available, please specify: %s", strings.Join(sessions, ", "))
-		}
 	}
+
+	if err := tmux.EnsureInstalled(); err != nil {
+		return err
+	}
+
+	res, err := ResolveSession(session, cmd.OutOrStdout())
+	if err != nil {
+		return err
+	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(cmd.ErrOrStderr())
+	session = res.Session
 
 	// Perform health check
 	result, err := health.CheckSession(session)
@@ -73,14 +76,6 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	}
 
 	return renderHealthTUI(result)
-}
-
-func listSessionsForHealth() ([]string, error) {
-	// Simple implementation - just list session names
-	cmd := newListCmd()
-	// We'd need to extract session list, but for now just return error
-	_ = cmd
-	return nil, fmt.Errorf("no session specified")
 }
 
 func outputHealthJSON(result *health.SessionHealth, err error) error {

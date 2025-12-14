@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -45,36 +45,17 @@ func runView(w io.Writer, session string) error {
 		return err
 	}
 
-	interactive := IsInteractive(w)
 	t := theme.Current()
 
-	// Determine target session
-	if session == "" {
-		if !interactive {
-			return fmt.Errorf("non-interactive environment: session name is required for view")
-		}
-		if tmux.InTmux() {
-			session = tmux.GetCurrentSession()
-		} else {
-			// Show session selector
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found")
-			}
-
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil // User cancelled
-			}
-			session = selected
-		}
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(os.Stderr)
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)

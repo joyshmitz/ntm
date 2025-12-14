@@ -196,11 +196,17 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	// Filter to session agents if requested
 	if sessionAgents {
 		if session == "" {
-			if tmux.InTmux() {
-				session = tmux.GetCurrentSession()
-			} else {
-				return fmt.Errorf("session name required for --session-agents")
+			res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: jsonFmt})
+			if err != nil {
+				return err
 			}
+			if res.Session == "" {
+				return nil
+			}
+			if !jsonFmt {
+				res.ExplainIfInferred(cmd.ErrOrStderr())
+			}
+			session = res.Session
 		}
 		panes, err := tmux.GetPanes(session)
 		if err != nil {

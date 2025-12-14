@@ -14,14 +14,13 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/clipboard"
 	"github.com/Dicklesworthstone/ntm/internal/codeblock"
 	"github.com/Dicklesworthstone/ntm/internal/output"
-	"github.com/Dicklesworthstone/ntm/internal/palette"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 func newCopyCmd() *cobra.Command {
 	var (
-		lines    int
+		last     int
 		pattern  string
 		allFlag  bool
 		ccFlag   bool
@@ -39,7 +38,7 @@ func newCopyCmd() *cobra.Command {
 		Short:   "Copy pane output to clipboard",
 		Long: `Copy the output from one or more panes to the system clipboard.
 
-By default, captures the last 1000 lines from each pane.
+By default, captures the last 1000 lines from the selected pane.
 Use filters to target specific agent types.
 
 Examples:
@@ -72,7 +71,7 @@ Examples:
 			}
 
 			options := CopyOptions{
-				Lines:    lines,
+				Last:     last,
 				Pattern:  pattern,
 				Code:     codeFlag,
 				Headers:  headers,
@@ -81,16 +80,11 @@ Examples:
 				PaneSpec: paneSelector,
 			}
 
-			clip, err := clipboard.New()
-			if err != nil {
-				return fmt.Errorf("failed to init clipboard: %w", err)
-			}
-
-			return runCopy(cmd.OutOrStdout(), clip, session, filter, options)
+			return runCopy(cmd.OutOrStdout(), session, filter, options)
 		},
 	}
 
-	cmd.Flags().IntVarP(&lines, "lines", "l", 1000, "Number of lines to capture")
+	cmd.Flags().IntVarP(&last, "last", "l", 1000, "Number of most recent lines to capture")
 	cmd.Flags().StringVarP(&pattern, "pattern", "p", "", "Regex pattern to filter lines")
 	cmd.Flags().BoolVar(&codeFlag, "code", false, "Copy only code blocks")
 	cmd.Flags().BoolVar(&headers, "headers", false, "Include pane headers (defaults off when --code is set)")
@@ -134,7 +128,7 @@ func (f AgentFilter) Matches(agentType tmux.AgentType) bool {
 
 // CopyOptions defines options for the copy command
 type CopyOptions struct {
-	Lines    int
+	Last     int
 	Pattern  string
 	Code     bool
 	Headers  bool
@@ -144,7 +138,8 @@ type CopyOptions struct {
 }
 
 type copyResult struct {
-	Sources     []string `json:"sources"`
+	Source      string   `json:"source"`
+	Panes       []string `json:"panes"`
 	Lines       int      `json:"lines"`
 	Bytes       int      `json:"bytes"`
 	Destination string   `json:"destination"`
@@ -153,38 +148,28 @@ type copyResult struct {
 	OutputPath  string   `json:"output_path,omitempty"`
 }
 
-func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter AgentFilter, opts CopyOptions) error {
+func runCopy(w io.Writer, session string, filter AgentFilter, opts CopyOptions) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
+	}
+
+	if opts.Last <= 0 {
+		return fmt.Errorf("--last must be positive")
 	}
 
 	t := theme.Current()
 
 	// Determine target session
 	if session == "" {
-		if tmux.InTmux() {
-			session = tmux.GetCurrentSession()
-		} else {
-			if !IsInteractive(w) {
-				return fmt.Errorf("non-interactive environment: session name is required")
-			}
-			sessions, err := tmux.ListSessions()
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				return fmt.Errorf("no tmux sessions found")
-			}
-
-			selected, err := palette.RunSessionSelector(sessions)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				return nil
-			}
-			session = selected
+		res, err := ResolveSession("", w)
+		if err != nil {
+			return err
 		}
+		if res.Session == "" {
+			return nil
+		}
+		res.ExplainIfInferred(os.Stderr)
+		session = res.Session
 	}
 
 	if !tmux.SessionExists(session) {
@@ -241,9 +226,9 @@ func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter Agent
 
 	// Capture output from all target panes
 	var outputs []string
-	var sourceLabels []string
+	var paneLabels []string
 	for _, p := range targetPanes {
-		output, err := tmux.CapturePaneOutput(p.ID, opts.Lines)
+		output, err := tmux.CapturePaneOutput(p.ID, opts.Last)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to capture pane %d: %v\n", p.Index, err)
 			continue
@@ -266,7 +251,7 @@ func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter Agent
 		} else {
 			outputs = append(outputs, output)
 		}
-		sourceLabels = append(sourceLabels, fmt.Sprintf("%s:%d", session, p.Index))
+		paneLabels = append(paneLabels, fmt.Sprintf("%s:%d", session, p.Index))
 	}
 
 	if len(outputs) == 0 {
@@ -275,8 +260,12 @@ func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter Agent
 
 	combined := strings.Join(outputs, "\n")
 
-	lineCount := strings.Count(combined, "\n")
-	bytesCount := len([]byte(combined))
+	trimmed := strings.TrimRight(combined, "\n")
+	lineCount := 0
+	if trimmed != "" {
+		lineCount = strings.Count(trimmed, "\n") + 1
+	}
+	bytesCount := len(combined)
 
 	destination := "clipboard"
 	if opts.Output != "" {
@@ -300,8 +289,14 @@ func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter Agent
 		}
 	}
 
+	source := session
+	if opts.PaneSpec != "" {
+		source = fmt.Sprintf("%s:%s", session, opts.PaneSpec)
+	}
+
 	result := copyResult{
-		Sources:     sourceLabels,
+		Source:      source,
+		Panes:       paneLabels,
 		Lines:       lineCount,
 		Bytes:       bytesCount,
 		Destination: destination,
@@ -322,7 +317,7 @@ func runCopy(w io.Writer, clip clipboard.Clipboard, session string, filter Agent
 			targetLabel = fmt.Sprintf("file (%s)", opts.Output)
 		}
 		fmt.Fprintf(w, "%s✓%s Copied %d lines from %d pane(s) to %s\n",
-			colorize(t.Success), colorize(t.Text), lineCount, len(sourceLabels), targetLabel)
+			colorize(t.Success), colorize(t.Text), lineCount, len(paneLabels), targetLabel)
 		return nil
 	})
 }

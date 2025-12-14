@@ -197,6 +197,8 @@ func runHistoryList(limit int, session, since, search, source string) error {
 		entries, err = history.ReadForSession(session)
 	} else if search != "" {
 		entries, err = history.Search(search)
+	} else if since == "" && source == "" {
+		entries, err = history.ReadRecent(limit)
 	} else {
 		entries, err = history.ReadAll()
 	}

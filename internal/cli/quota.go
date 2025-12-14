@@ -29,13 +29,18 @@ Examples:
 			var session string
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				if !tmux.InTmux() {
-					return fmt.Errorf("session name required when not in tmux")
-				}
-				session = tmux.GetCurrentSession()
 			}
 
+			res, err := ResolveSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+
+			session = res.Session
 			return runQuota(session)
 		},
 	}
