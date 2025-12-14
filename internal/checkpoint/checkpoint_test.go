@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestGenerateID(t *testing.T) {
@@ -225,17 +227,17 @@ func TestStorage_SaveScrollback(t *testing.T) {
 
 	// Save scrollback
 	content := "Line 1\nLine 2\nLine 3\n"
-	relativePath, err := storage.SaveScrollback(sessionName, checkpointID, 0, content)
+	relativePath, err := storage.SaveScrollback(sessionName, checkpointID, "%0", content)
 	if err != nil {
 		t.Fatalf("SaveScrollback() failed: %v", err)
 	}
 
-	if relativePath != "panes/pane_0.txt" {
-		t.Errorf("relativePath = %q, want %q", relativePath, "panes/pane_0.txt")
+	if relativePath != "panes/pane__0.txt" {
+		t.Errorf("relativePath = %q, want %q", relativePath, "panes/pane__0.txt")
 	}
 
 	// Load scrollback
-	loaded, err := storage.LoadScrollback(sessionName, checkpointID, 0)
+	loaded, err := storage.LoadScrollback(sessionName, checkpointID, "%0")
 	if err != nil {
 		t.Fatalf("LoadScrollback() failed: %v", err)
 	}
@@ -423,4 +425,383 @@ func TestMatchWildcard(t *testing.T) {
 // Helper function
 func containsSubstring(s, substr string) bool {
 	return filepath.Base(s) == substr || len(s) >= len(substr) && s[len(s)-len(substr):] == substr
+}
+
+func TestStorage_ListAll(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+
+	// Create checkpoints for multiple sessions
+	sessions := []string{"project-a", "project-b"}
+	for _, sessionName := range sessions {
+		for i := 0; i < 2; i++ {
+			cp := &Checkpoint{
+				ID:          GenerateID("backup" + string(rune('A'+i))),
+				Name:        "backup" + string(rune('A'+i)),
+				SessionName: sessionName,
+				CreatedAt:   time.Now().Add(time.Duration(-i) * time.Hour),
+				Session:     SessionState{Panes: []PaneState{}},
+			}
+			if err := storage.Save(cp); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+		}
+	}
+
+	// List all checkpoints
+	all, err := storage.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() failed: %v", err)
+	}
+
+	if len(all) != 4 {
+		t.Errorf("len(ListAll()) = %d, want 4", len(all))
+	}
+
+	// Verify sorted by newest first
+	for i := 1; i < len(all); i++ {
+		if all[i].CreatedAt.After(all[i-1].CreatedAt) {
+			t.Errorf("ListAll not sorted by newest first")
+		}
+	}
+}
+
+func TestStorage_ListAll_NoDir(t *testing.T) {
+	storage := NewStorageWithDir("/nonexistent/path")
+
+	all, err := storage.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() should not error for nonexistent dir: %v", err)
+	}
+	if all != nil && len(all) != 0 {
+		t.Errorf("ListAll() should return nil/empty for nonexistent dir")
+	}
+}
+
+func TestStorage_Delete(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-test"
+
+	// Create a checkpoint
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// Verify it exists
+	if !storage.Exists(sessionName, checkpointID) {
+		t.Fatal("Checkpoint should exist after save")
+	}
+
+	// Delete it
+	if err := storage.Delete(sessionName, checkpointID); err != nil {
+		t.Fatalf("Delete() failed: %v", err)
+	}
+
+	// Verify it's gone
+	if storage.Exists(sessionName, checkpointID) {
+		t.Error("Checkpoint should not exist after delete")
+	}
+}
+
+func TestStorage_Exists(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+
+	// Non-existent checkpoint
+	if storage.Exists("nosession", "nocheckpoint") {
+		t.Error("Exists() should return false for non-existent checkpoint")
+	}
+
+	// Create a checkpoint
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-test"
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// Now it should exist
+	if !storage.Exists(sessionName, checkpointID) {
+		t.Error("Exists() should return true for existing checkpoint")
+	}
+}
+
+func TestStorage_SaveGitPatch(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-test"
+
+	// Create checkpoint first
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// Save empty patch should be no-op
+	if err := storage.SaveGitPatch(sessionName, checkpointID, ""); err != nil {
+		t.Errorf("SaveGitPatch() with empty patch should succeed: %v", err)
+	}
+
+	// Save actual patch
+	patch := "diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+	if err := storage.SaveGitPatch(sessionName, checkpointID, patch); err != nil {
+		t.Fatalf("SaveGitPatch() failed: %v", err)
+	}
+
+	// Verify patch was saved
+	patchPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitPatchFile)
+	data, err := os.ReadFile(patchPath)
+	if err != nil {
+		t.Fatalf("Failed to read patch file: %v", err)
+	}
+	if string(data) != patch {
+		t.Errorf("Patch content mismatch: got %q, want %q", string(data), patch)
+	}
+}
+
+func TestStorage_LoadGitPatch(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-test"
+
+	// Create checkpoint
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// Load non-existent patch should return empty string
+	patch, err := storage.LoadGitPatch(sessionName, checkpointID)
+	if err != nil {
+		t.Errorf("LoadGitPatch() should not error for missing patch: %v", err)
+	}
+	if patch != "" {
+		t.Errorf("LoadGitPatch() should return empty for missing patch, got %q", patch)
+	}
+
+	// Save and load patch
+	expectedPatch := "diff --git a/file.go b/file.go\n"
+	if err := storage.SaveGitPatch(sessionName, checkpointID, expectedPatch); err != nil {
+		t.Fatalf("SaveGitPatch() failed: %v", err)
+	}
+
+	loaded, err := storage.LoadGitPatch(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitPatch() failed: %v", err)
+	}
+	if loaded != expectedPatch {
+		t.Errorf("LoadGitPatch() = %q, want %q", loaded, expectedPatch)
+	}
+}
+
+func TestStorage_SaveGitStatus(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-test"
+
+	// Create checkpoint
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	// Save git status
+	status := "M  file.go\n?? newfile.go"
+	if err := storage.SaveGitStatus(sessionName, checkpointID, status); err != nil {
+		t.Fatalf("SaveGitStatus() failed: %v", err)
+	}
+
+	// Verify status was saved
+	statusPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitStatusFile)
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("Failed to read status file: %v", err)
+	}
+	if string(data) != status {
+		t.Errorf("Status content mismatch: got %q, want %q", string(data), status)
+	}
+}
+
+func TestCheckpoint_Summary(t *testing.T) {
+	cp := &Checkpoint{
+		ID:   "20251210-120000-backup",
+		Name: "backup",
+	}
+
+	summary := cp.Summary()
+	expected := "backup (20251210-120000-backup)"
+	if summary != expected {
+		t.Errorf("Summary() = %q, want %q", summary, expected)
+	}
+}
+
+func TestFromTmuxPane(t *testing.T) {
+	pane := tmux.Pane{
+		Index:   0,
+		ID:      "%0",
+		Title:   "test-pane",
+		Type:    tmux.AgentClaude,
+		Command: "claude",
+		Width:   120,
+		Height:  40,
+	}
+
+	state := FromTmuxPane(pane)
+
+	if state.Index != 0 {
+		t.Errorf("Index = %d, want 0", state.Index)
+	}
+	if state.ID != "%0" {
+		t.Errorf("ID = %q, want %%0", state.ID)
+	}
+	if state.Title != "test-pane" {
+		t.Errorf("Title = %q, want test-pane", state.Title)
+	}
+	if state.AgentType != string(tmux.AgentClaude) {
+		t.Errorf("AgentType = %q, want %s", state.AgentType, tmux.AgentClaude)
+	}
+	if state.Command != "claude" {
+		t.Errorf("Command = %q, want claude", state.Command)
+	}
+	if state.Width != 120 {
+		t.Errorf("Width = %d, want 120", state.Width)
+	}
+	if state.Height != 40 {
+		t.Errorf("Height = %d, want 40", state.Height)
+	}
+}
+
+func TestCheckpointOptions(t *testing.T) {
+	// Test default options
+	opts := defaultOptions()
+	if !opts.captureGit {
+		t.Error("defaultOptions().captureGit should be true")
+	}
+	if opts.scrollbackLines != 1000 {
+		t.Errorf("defaultOptions().scrollbackLines = %d, want 1000", opts.scrollbackLines)
+	}
+	if opts.description != "" {
+		t.Errorf("defaultOptions().description should be empty")
+	}
+
+	// Test WithDescription
+	opts = checkpointOptions{}
+	WithDescription("test description")(&opts)
+	if opts.description != "test description" {
+		t.Errorf("WithDescription failed: got %q", opts.description)
+	}
+
+	// Test WithGitCapture
+	opts = checkpointOptions{captureGit: true}
+	WithGitCapture(false)(&opts)
+	if opts.captureGit {
+		t.Error("WithGitCapture(false) should set captureGit to false")
+	}
+	WithGitCapture(true)(&opts)
+	if !opts.captureGit {
+		t.Error("WithGitCapture(true) should set captureGit to true")
+	}
+
+	// Test WithScrollbackLines
+	opts = checkpointOptions{}
+	WithScrollbackLines(5000)(&opts)
+	if opts.scrollbackLines != 5000 {
+		t.Errorf("WithScrollbackLines(5000) = %d, want 5000", opts.scrollbackLines)
+	}
+}
+
+func TestStorage_List_NonexistentSession(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+
+	// List checkpoints for non-existent session
+	list, err := storage.List("nonexistent")
+	if err != nil {
+		t.Fatalf("List() should not error for non-existent session: %v", err)
+	}
+	if list != nil && len(list) != 0 {
+		t.Error("List() should return nil/empty for non-existent session")
+	}
+}
+
+func TestNewStorage(t *testing.T) {
+	storage := NewStorage()
+	if storage.BaseDir == "" {
+		t.Error("NewStorage() should set BaseDir")
+	}
+	// Should end with the default checkpoint dir
+	if !filepath.IsAbs(storage.BaseDir) {
+		t.Error("NewStorage().BaseDir should be an absolute path")
+	}
 }
