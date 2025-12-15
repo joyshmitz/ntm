@@ -793,9 +793,10 @@ func RenderTableHeader(dims LayoutDimensions, t theme.Theme) string {
 		BorderForeground(t.Surface1)
 
 	var parts []string
+	parts = append(parts, " ") // Border indicator placeholder (matches row's "▌")
 	parts = append(parts, " ") // Selection column
 	parts = append(parts, headerStyle.Width(2).Render("#"))
-	parts = append(parts, headerStyle.Width(2).Render("T"))
+	parts = append(parts, headerStyle.Width(1).Render("T")) // Width(1) to match row's icon
 
 	if dims.ShowStatusCol {
 		parts = append(parts, headerStyle.Width(1).Render("S"))
