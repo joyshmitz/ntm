@@ -97,3 +97,118 @@ gemini = "/bin/true"
 		return strings.Contains(out, marker)
 	})
 }
+
+// TestCLIAddCommand verifies that ntm add correctly adds new panes to an existing session.
+func TestCLIAddCommand(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+	testutil.RequireTmux(t)
+
+	logger := testutil.NewTestLogger(t, t.TempDir())
+
+	// Create config with stubbed agent binaries
+	projectsBase := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configContents := fmt.Sprintf(`projects_base = "%s"
+
+[agents]
+claude = "/bin/true"
+codex = "/bin/true"
+gemini = "/bin/true"
+`, projectsBase)
+	if err := os.WriteFile(configPath, []byte(configContents), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	t.Setenv("NTM_PROJECTS_BASE", projectsBase)
+
+	// Create session with 1 Claude agent (user + 1 cc = 2 panes)
+	session := testutil.CreateTestSession(t, logger, testutil.SessionConfig{
+		Agents: testutil.AgentConfig{
+			Claude: 1,
+		},
+		WorkDir:   projectsBase,
+		ExtraArgs: []string{"--config", configPath},
+	})
+	testutil.AssertSessionExists(t, logger, session)
+
+	// Verify initial pane count (user + cc = 2)
+	initialCount, err := testutil.GetSessionPaneCount(session)
+	if err != nil {
+		t.Fatalf("failed to get initial pane count: %v", err)
+	}
+	if initialCount != 2 {
+		t.Fatalf("expected 2 initial panes (user + cc), got %d", initialCount)
+	}
+	logger.Log("Initial pane count: %d", initialCount)
+
+	// Add another Claude agent
+	logger.LogSection("Adding Claude Agent")
+	testutil.AssertCommandSuccess(t, logger, "ntm", "add", "--config", configPath, session, "--cc=1")
+
+	// Wait for pane to be added
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify pane count increased to 3 (user + 2 cc)
+	testutil.AssertPaneCount(t, logger, session, 3)
+
+	// Add a Codex agent
+	logger.LogSection("Adding Codex Agent")
+	testutil.AssertCommandSuccess(t, logger, "ntm", "add", "--config", configPath, session, "--cod=1")
+
+	// Wait for pane to be added
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify pane count is now 4 (user + 2 cc + 1 cod)
+	testutil.AssertPaneCount(t, logger, session, 4)
+}
+
+// TestCLIKillCommand verifies that ntm kill correctly destroys a session.
+func TestCLIKillCommand(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+	testutil.RequireTmux(t)
+
+	logger := testutil.NewTestLogger(t, t.TempDir())
+
+	// Create config with stubbed agent binaries
+	projectsBase := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configContents := fmt.Sprintf(`projects_base = "%s"
+
+[agents]
+claude = "/bin/true"
+codex = "/bin/true"
+gemini = "/bin/true"
+`, projectsBase)
+	if err := os.WriteFile(configPath, []byte(configContents), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+
+	t.Setenv("NTM_PROJECTS_BASE", projectsBase)
+
+	// Create a unique session name for this test to avoid cleanup conflicts
+	sessionName := fmt.Sprintf("ntm_kill_test_%d", time.Now().UnixNano())
+	projectDir := filepath.Join(projectsBase, sessionName)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project directory: %v", err)
+	}
+
+	// Spawn the session directly (not using CreateTestSession to avoid auto-cleanup)
+	logger.LogSection("Creating Session for Kill Test")
+	testutil.AssertCommandSuccess(t, logger, "ntm", "spawn", sessionName, "--json", "--cc=1", "--config", configPath)
+
+	// Wait for session to initialize
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify session exists
+	testutil.AssertSessionExists(t, logger, sessionName)
+
+	// Kill the session
+	logger.LogSection("Killing Session")
+	testutil.AssertCommandSuccess(t, logger, "ntm", "kill", "-f", sessionName)
+
+	// Wait for session to be destroyed
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify session no longer exists
+	testutil.AssertSessionNotExists(t, logger, sessionName)
+}
