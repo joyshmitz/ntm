@@ -196,16 +196,35 @@ func (c *Capturer) captureGitState(workingDir, sessionName, checkpointID string)
 			fmt.Fprintf(os.Stderr, "Warning: %d untracked file(s) will not be captured in git patch (only staged/unstaged tracked changes)\n", state.UntrackedCount)
 		}
 
-		// Get diff of tracked changes (both staged and unstaged)
-		patch, err := gitCommand(workingDir, "diff", "HEAD")
-		if err == nil && patch != "" {
-			if err := c.storage.SaveGitPatch(sessionName, checkpointID, patch); err == nil {
+		// Stream diff of tracked changes (both staged and unstaged) to file
+		patchPath := c.storage.GitPatchPath(sessionName, checkpointID)
+		if err := streamGitCommand(workingDir, patchPath, "diff", "HEAD"); err == nil {
+			// Check if file is non-empty
+			if info, err := os.Stat(patchPath); err == nil && info.Size() > 0 {
 				state.PatchFile = GitPatchFile
+			} else {
+				os.Remove(patchPath) // Clean up empty file
 			}
 		}
 	}
 
 	return state, nil
+}
+
+// streamGitCommand runs a git command and streams stdout to a file.
+func streamGitCommand(dir, outputFile string, args ...string) error {
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	allArgs := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", allArgs...)
+	cmd.Stdout = f
+	// stderr is ignored for now, similar to original gitCommand behavior for diff
+	
+	return cmd.Run()
 }
 
 // getSessionDir gets the working directory for a session.
