@@ -330,3 +330,85 @@ func TestRankBadge(t *testing.T) {
 		})
 	}
 }
+
+func TestFixedWidthBadge(t *testing.T) {
+	tests := []struct {
+		name       string
+		text       string
+		fixedWidth int
+		wantWidth  int
+	}{
+		{"short_text_padded", "opus", 8, 8},
+		{"exact_width", "gemini-2", 8, 8},
+		{"long_text_truncated", "very-long-model-name", 8, 8},
+		{"single_char", "x", 8, 8},
+		{"empty_string", "", 8, 8},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ModelBadge(tt.text, BadgeOptions{
+				Style:      BadgeStyleCompact,
+				ShowIcon:   false,
+				FixedWidth: tt.fixedWidth,
+			})
+			got := lipgloss.Width(result)
+			if got != tt.wantWidth {
+				t.Errorf("ModelBadge(%q, FixedWidth=%d) width = %d, want %d",
+					tt.text, tt.fixedWidth, got, tt.wantWidth)
+			}
+		})
+	}
+}
+
+func TestTruncateBadgeText(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		maxLen  int
+		want    string
+	}{
+		{"short_no_truncate", "opus", 8, "opus"},
+		{"exact_length", "12345678", 8, "12345678"},
+		{"truncate_with_ellipsis", "very-long-name", 8, "very-lo…"},
+		{"empty_string", "", 8, ""},
+		{"single_char_limit", "hello", 1, "…"},
+		{"zero_limit", "hello", 0, ""},
+		{"unicode_string", "日本語テスト", 4, "日本語…"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateBadgeText(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncateBadgeText(%q, %d) = %q, want %q",
+					tt.input, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelBadgeWidthConstant(t *testing.T) {
+	// Verify the constant is a reasonable value
+	if ModelBadgeWidth < 4 || ModelBadgeWidth > 12 {
+		t.Errorf("ModelBadgeWidth = %d, expected between 4 and 12", ModelBadgeWidth)
+	}
+
+	// Verify different model variants render to the same width
+	variants := []string{"opus", "sonnet", "haiku", "gpt-4o", "gemini-1.5", "claude-3-sonnet"}
+	widths := make(map[int]bool)
+
+	for _, v := range variants {
+		badge := ModelBadge(v, BadgeOptions{
+			Style:      BadgeStyleCompact,
+			ShowIcon:   false,
+			FixedWidth: ModelBadgeWidth,
+		})
+		w := lipgloss.Width(badge)
+		widths[w] = true
+	}
+
+	if len(widths) != 1 {
+		t.Errorf("ModelBadge with FixedWidth produced inconsistent widths: %v", widths)
+	}
+}

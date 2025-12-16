@@ -537,17 +537,14 @@ func RenderPaneRow(row PaneTableRow, dims LayoutDimensions, t theme.Theme) strin
 
 	if dims.ShowModelCol && modelVariant != "" {
 		badge := styles.ModelBadge(modelVariant, styles.BadgeOptions{
-			Style:    styles.BadgeStyleCompact,
-			Bold:     false,
-			ShowIcon: false,
+			Style:      styles.BadgeStyleCompact,
+			Bold:       false,
+			ShowIcon:   false,
+			FixedWidth: styles.ModelBadgeWidth,
 		})
-		// Ensure fixed width alignment
-		if lipgloss.Width(badge) < 8 {
-			badge = badge + strings.Repeat(" ", 8-lipgloss.Width(badge))
-		}
 		parts = append(parts, badge)
 	} else if dims.ShowModelCol {
-		parts = append(parts, strings.Repeat(" ", 8))
+		parts = append(parts, strings.Repeat(" ", styles.ModelBadgeWidth))
 	}
 
 	// Command (ultrawide only)

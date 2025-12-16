@@ -23,11 +23,22 @@ const (
 	BadgeStylePill
 )
 
+// Badge width constants for consistent alignment
+const (
+	// ModelBadgeWidth is the fixed width for model badges (e.g., "opus", "sonnet")
+	ModelBadgeWidth = 8
+	// PriorityBadgeWidth is the fixed width for priority badges (e.g., "P0", "P1")
+	PriorityBadgeWidth = 3
+	// StatusBadgeWidth is the fixed width for status badges (e.g., "◐ working")
+	StatusBadgeWidth = 10
+)
+
 // BadgeOptions configures badge rendering
 type BadgeOptions struct {
-	Style    BadgeStyle
-	Bold     bool
-	ShowIcon bool
+	Style      BadgeStyle
+	Bold       bool
+	ShowIcon   bool
+	FixedWidth int // If > 0, badge is truncated/padded to this width
 }
 
 // MedalPalette defines standard medal colors for rank badges.
@@ -663,7 +674,28 @@ func renderBadge(text string, bgColor, fgColor lipgloss.Color, opt BadgeOptions)
 		style = style.Padding(0, 1)
 	}
 
+	// Handle fixed width: truncate if needed and set width for padding
+	if opt.FixedWidth > 0 {
+		text = truncateBadgeText(text, opt.FixedWidth)
+		style = style.Width(opt.FixedWidth)
+	}
+
 	return style.Render(text)
+}
+
+// truncateBadgeText truncates text to maxLen runes, adding ellipsis if needed
+func truncateBadgeText(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen == 1 {
+		return "…"
+	}
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // BadgeGroup renders multiple badges in a horizontal group
