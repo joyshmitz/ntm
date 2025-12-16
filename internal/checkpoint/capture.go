@@ -3,7 +3,6 @@ package checkpoint
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,13 +80,15 @@ func (c *Capturer) Create(sessionName, name string, opts ...CheckpointOption) (*
 	// Capture pane scrollback
 	if err := c.captureScrollback(cp, options.scrollbackLines); err != nil {
 		// Non-fatal, continue
-		log.Printf("checkpoint: failed to capture some scrollback: %v", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to capture some scrollback: %v\n", err)
 	}
 
 	// Capture git state if enabled and in a git repo
 	if options.captureGit && workingDir != "" {
 		gitState, err := c.captureGitState(workingDir, sessionName, checkpointID)
-		if err == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to capture git state: %v\n", err)
+		} else {
 			cp.Git = gitState
 		}
 	}
@@ -121,7 +122,7 @@ func (c *Capturer) captureSessionState(sessionName string) (SessionState, error)
 	// Get layout string
 	layout, err := getSessionLayout(sessionName)
 	if err != nil {
-		log.Printf("checkpoint: failed to capture session layout: %v", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to capture session layout: %v\n", err)
 	}
 
 	return SessionState{
@@ -167,22 +168,25 @@ func (c *Capturer) captureGitState(workingDir, sessionName, checkpointID string)
 
 	// Get current branch
 	branch, err := gitCommand(workingDir, "rev-parse", "--abbrev-ref", "HEAD")
-	if err == nil {
-		state.Branch = strings.TrimSpace(branch)
+	if err != nil {
+		return state, fmt.Errorf("getting git branch: %w", err)
 	}
+	state.Branch = strings.TrimSpace(branch)
 
 	// Get current commit
 	commit, err := gitCommand(workingDir, "rev-parse", "HEAD")
-	if err == nil {
-		state.Commit = strings.TrimSpace(commit)
+	if err != nil {
+		return state, fmt.Errorf("getting git commit: %w", err)
 	}
+	state.Commit = strings.TrimSpace(commit)
 
 	// Get status counts
 	status, err := gitCommand(workingDir, "status", "--porcelain")
-	if err == nil {
-		state.StagedCount, state.UnstagedCount, state.UntrackedCount = parseGitStatus(status)
-		state.IsDirty = (state.StagedCount + state.UnstagedCount + state.UntrackedCount) > 0
+	if err != nil {
+		return state, fmt.Errorf("getting git status: %w", err)
 	}
+	state.StagedCount, state.UnstagedCount, state.UntrackedCount = parseGitStatus(status)
+	state.IsDirty = (state.StagedCount + state.UnstagedCount + state.UntrackedCount) > 0
 
 	// Save git status text
 	statusText, _ := gitCommand(workingDir, "status")
@@ -194,40 +198,22 @@ func (c *Capturer) captureGitState(workingDir, sessionName, checkpointID string)
 	if state.IsDirty {
 		// Warn about untracked files if any
 		if state.UntrackedCount > 0 {
-			log.Printf("checkpoint: %d untracked file(s) will not be captured in git patch (only staged/unstaged tracked changes)", state.UntrackedCount)
+			fmt.Fprintf(os.Stderr, "Warning: %d untracked file(s) will not be captured in git patch (only staged/unstaged tracked changes)\n", state.UntrackedCount)
 		}
 
-		// Stream diff of tracked changes (both staged and unstaged) to file
-		patchPath := c.storage.GitPatchPath(sessionName, checkpointID)
-		if err := streamGitCommand(workingDir, patchPath, "diff", "HEAD"); err == nil {
-			// Check if file is non-empty
-			if info, err := os.Stat(patchPath); err == nil && info.Size() > 0 {
+		// Get diff of tracked changes (both staged and unstaged)
+		patch, err := gitCommand(workingDir, "diff", "HEAD")
+		if err != nil {
+			return state, fmt.Errorf("getting git diff: %w", err)
+		}
+		if patch != "" {
+			if err := c.storage.SaveGitPatch(sessionName, checkpointID, patch); err == nil {
 				state.PatchFile = GitPatchFile
-			} else {
-				os.Remove(patchPath) // Clean up empty file
 			}
-		} else {
-			os.Remove(patchPath) // Clean up failed capture
 		}
 	}
 
 	return state, nil
-}
-
-// streamGitCommand runs a git command and streams stdout to a file.
-func streamGitCommand(dir, outputFile string, args ...string) error {
-	f, err := os.Create(outputFile)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	allArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", allArgs...)
-	cmd.Stdout = f
-	// stderr is ignored for now, similar to original gitCommand behavior for diff
-
-	return cmd.Run()
 }
 
 // getSessionDir gets the working directory for a session.
