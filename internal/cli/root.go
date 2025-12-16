@@ -219,6 +219,35 @@ Shell Integration:
 			}
 			return
 		}
+		if robotTokens {
+			opts := robot.TokensOptions{
+				Days:      robotTokensDays,
+				Since:     robotTokensSince,
+				GroupBy:   robotTokensGroupBy,
+				Session:   robotTokensSession,
+				AgentType: robotTokensAgent,
+			}
+			if err := robot.PrintTokens(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotHistory != "" {
+			opts := robot.HistoryOptions{
+				Session:   robotHistory,
+				Pane:      robotHistoryPane,
+				AgentType: robotHistoryType,
+				Last:      robotHistoryLast,
+				Since:     robotHistorySince,
+				Stats:     robotHistoryStats,
+			}
+			if err := robot.PrintHistory(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotTail != "" {
 			// Parse pane filter
 			var paneFilter []string
@@ -591,6 +620,22 @@ var (
 	cassWorkspace     string // filter by workspace
 	cassSince         string // filter by time
 	cassLimit         int    // max results
+
+	// Robot-tokens flags for token usage analysis
+	robotTokens        bool   // token usage output
+	robotTokensDays    int    // number of days to analyze
+	robotTokensSince   string // ISO8601 timestamp to analyze since
+	robotTokensGroupBy string // grouping: agent, model, day, week, month
+	robotTokensSession string // filter to specific session
+	robotTokensAgent   string // filter to specific agent type
+
+	// Robot-history flags for command history tracking
+	robotHistory      string // session name for history query
+	robotHistoryPane  string // filter by pane ID
+	robotHistoryType  string // filter by agent type
+	robotHistoryLast  int    // last N entries
+	robotHistorySince string // time-based filter
+	robotHistoryStats bool   // show statistics instead of entries
 )
 
 func init() {
@@ -697,6 +742,22 @@ func init() {
 	rootCmd.Flags().StringVar(&cassWorkspace, "cass-workspace", "", "Filter CASS by workspace/project path. Example: --cass-workspace=/path/to/project")
 	rootCmd.Flags().StringVar(&cassSince, "cass-since", "", "Filter CASS by recency: 1d, 7d, 30d, etc. Example: --cass-since=7d")
 	rootCmd.Flags().IntVar(&cassLimit, "cass-limit", 10, "Max CASS results to return. Example: --cass-limit=20")
+
+	// Robot-tokens flags for token usage analysis
+	rootCmd.Flags().BoolVar(&robotTokens, "robot-tokens", false, "Get token usage statistics (JSON). Group by agent, model, or time period")
+	rootCmd.Flags().IntVar(&robotTokensDays, "tokens-days", 30, "Days to analyze. Optional with --robot-tokens. Example: --tokens-days=7")
+	rootCmd.Flags().StringVar(&robotTokensSince, "tokens-since", "", "Analyze since date (ISO8601 or YYYY-MM-DD). Optional with --robot-tokens")
+	rootCmd.Flags().StringVar(&robotTokensGroupBy, "tokens-group-by", "agent", "Grouping: agent, model, day, week, month. Optional with --robot-tokens")
+	rootCmd.Flags().StringVar(&robotTokensSession, "tokens-session", "", "Filter to session. Optional with --robot-tokens. Example: --tokens-session=myproject")
+	rootCmd.Flags().StringVar(&robotTokensAgent, "tokens-agent", "", "Filter to agent type. Optional with --robot-tokens. Example: --tokens-agent=claude")
+
+	// Robot-history flags for command history tracking
+	rootCmd.Flags().StringVar(&robotHistory, "robot-history", "", "Get command history for a session (JSON). Required: SESSION. Example: ntm --robot-history=myproject")
+	rootCmd.Flags().StringVar(&robotHistoryPane, "history-pane", "", "Filter by pane ID. Optional with --robot-history. Example: --history-pane=0.1")
+	rootCmd.Flags().StringVar(&robotHistoryType, "history-type", "", "Filter by agent type. Optional with --robot-history. Example: --history-type=claude")
+	rootCmd.Flags().IntVar(&robotHistoryLast, "history-last", 0, "Show last N entries. Optional with --robot-history. Example: --history-last=10")
+	rootCmd.Flags().StringVar(&robotHistorySince, "history-since", "", "Show entries since time (1h, 30m, 2d, or ISO8601). Optional with --robot-history")
+	rootCmd.Flags().BoolVar(&robotHistoryStats, "history-stats", false, "Show statistics instead of entries. Optional with --robot-history")
 
 	// Sync version info with robot package
 	robot.Version = Version

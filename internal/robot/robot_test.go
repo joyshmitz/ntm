@@ -2130,3 +2130,392 @@ func TestAssignOutputJSON(t *testing.T) {
 		t.Errorf("IdleAgents mismatch: got %d, want 1", result.Summary.IdleAgents)
 	}
 }
+
+// ====================
+// Token Functions Tests
+// ====================
+
+func TestParseAgentTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{"claude cc", "cc", []string{"claude"}},
+		{"claude full", "claude", []string{"claude"}},
+		{"codex cod", "cod", []string{"codex"}},
+		{"codex full", "codex", []string{"codex"}},
+		{"gemini gmi", "gmi", []string{"gemini"}},
+		{"gemini full", "gemini", []string{"gemini"}},
+		{"multiple", "cc,cod,gmi", []string{"claude", "codex", "gemini"}},
+		{"all agents", "all", []string{"claude", "codex", "gemini"}},
+		{"agents keyword", "agents", []string{"claude", "codex", "gemini"}},
+		{"cursor", "cursor", []string{"cursor"}},
+		{"windsurf", "windsurf", []string{"windsurf"}},
+		{"aider", "aider", []string{"aider"}},
+		{"mixed case", "CC,CODEX", []string{"claude", "codex"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseAgentTypes(tt.input)
+			if len(result) != len(tt.expected) {
+				t.Errorf("parseAgentTypes(%q) returned %d items, want %d", tt.input, len(result), len(tt.expected))
+				return
+			}
+			for i, v := range result {
+				if v != tt.expected[i] {
+					t.Errorf("parseAgentTypes(%q)[%d] = %q, want %q", tt.input, i, v, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFormatTimeKey(t *testing.T) {
+	// Test date: December 16, 2025 (week 51)
+	testTime := time.Date(2025, 12, 16, 14, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		groupBy  string
+		expected string
+	}{
+		{"day", "day", "2025-12-16"},
+		{"week", "week", "2025-W51"},
+		{"month", "month", "2025-12"},
+		{"default", "unknown", "2025-12-16"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatTimeKey(testTime, tt.groupBy)
+			if result != tt.expected {
+				t.Errorf("formatTimeKey(%v, %q) = %q, want %q", testTime, tt.groupBy, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatPeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		days     int
+		since    string
+		expected string
+	}{
+		{"30 days", 30, "", "Last 30 days"},
+		{"7 days", 7, "", "Last 7 days"},
+		{"since date", 0, "2025-12-01", "Since 2025-12-01"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatPeriod(tt.days, tt.since)
+			if result != tt.expected {
+				t.Errorf("formatPeriod(%d, %q) = %q, want %q", tt.days, tt.since, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatTokens(t *testing.T) {
+	tests := []struct {
+		tokens   int
+		expected string
+	}{
+		{0, "0"},
+		{500, "500"},
+		{999, "999"},
+		{1000, "1.0K"},
+		{1500, "1.5K"},
+		{50000, "50.0K"},
+		{999999, "1000.0K"},
+		{1000000, "1.0M"},
+		{1500000, "1.5M"},
+		{10000000, "10.0M"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d tokens", tt.tokens), func(t *testing.T) {
+			result := formatTokens(tt.tokens)
+			if result != tt.expected {
+				t.Errorf("formatTokens(%d) = %q, want %q", tt.tokens, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTokensOutputJSON(t *testing.T) {
+	output := TokensOutput{
+		RobotResponse:   NewRobotResponse(true),
+		Period:          "Last 7 days",
+		GeneratedAt:     time.Date(2025, 12, 16, 12, 0, 0, 0, time.UTC),
+		GroupBy:         "agent",
+		TotalTokens:     150000,
+		TotalPrompts:    50,
+		TotalCharacters: 500000,
+		Breakdown: []TokenBreakdown{
+			{Key: "claude", Tokens: 100000, Prompts: 30, Characters: 350000, Percentage: 66.67},
+			{Key: "codex", Tokens: 50000, Prompts: 20, Characters: 150000, Percentage: 33.33},
+		},
+		AgentStats: map[string]AgentTokenStats{
+			"claude": {Spawned: 3, Prompts: 30, Tokens: 100000, Characters: 350000},
+			"codex":  {Spawned: 2, Prompts: 20, Tokens: 50000, Characters: 150000},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var result TokensOutput
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if result.Period != output.Period {
+		t.Errorf("Period mismatch: got %q, want %q", result.Period, output.Period)
+	}
+	if result.TotalTokens != output.TotalTokens {
+		t.Errorf("TotalTokens mismatch: got %d, want %d", result.TotalTokens, output.TotalTokens)
+	}
+	if len(result.Breakdown) != 2 {
+		t.Errorf("Breakdown count mismatch: got %d, want 2", len(result.Breakdown))
+	}
+	if result.Breakdown[0].Key != "claude" {
+		t.Errorf("Breakdown[0].Key mismatch: got %q, want %q", result.Breakdown[0].Key, "claude")
+	}
+	if result.AgentStats["claude"].Tokens != 100000 {
+		t.Errorf("AgentStats[claude].Tokens mismatch: got %d, want 100000", result.AgentStats["claude"].Tokens)
+	}
+}
+
+func TestParseSinceTime(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name     string
+		input    string
+		wantErr  bool
+		validate func(t *testing.T, result time.Time)
+	}{
+		{"duration 1h", "1h", false, func(t *testing.T, result time.Time) {
+			expected := now.Add(-time.Hour)
+			if result.Sub(expected) > time.Second {
+				t.Errorf("Expected ~%v ago, got %v", time.Hour, now.Sub(result))
+			}
+		}},
+		{"duration 30m", "30m", false, func(t *testing.T, result time.Time) {
+			expected := now.Add(-30 * time.Minute)
+			if result.Sub(expected) > time.Second {
+				t.Errorf("Expected ~30m ago, got %v", now.Sub(result))
+			}
+		}},
+		{"duration 2d", "2d", false, func(t *testing.T, result time.Time) {
+			expected := now.Add(-48 * time.Hour)
+			if result.Sub(expected) > time.Second {
+				t.Errorf("Expected ~48h ago, got %v", now.Sub(result))
+			}
+		}},
+		{"date only", "2025-12-01", false, func(t *testing.T, result time.Time) {
+			if result.Year() != 2025 || result.Month() != 12 || result.Day() != 1 {
+				t.Errorf("Expected 2025-12-01, got %v", result)
+			}
+		}},
+		{"RFC3339", "2025-12-15T10:30:00Z", false, func(t *testing.T, result time.Time) {
+			if result.Hour() != 10 || result.Minute() != 30 {
+				t.Errorf("Expected 10:30, got %v", result)
+			}
+		}},
+		{"invalid", "not-a-date", true, nil},
+		{"empty", "", true, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseSinceTime(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Expected error for %q, got none", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("Unexpected error for %q: %v", tt.input, err)
+				return
+			}
+			if tt.validate != nil {
+				tt.validate(t, result)
+			}
+		})
+	}
+}
+
+func TestGenerateHistoryHints(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    HistoryOutput
+		opts      HistoryOptions
+		checkFunc func(*testing.T, *HistoryAgentHints)
+	}{
+		{
+			name: "no history",
+			output: HistoryOutput{
+				Total:    0,
+				Filtered: 0,
+			},
+			opts: HistoryOptions{Session: "test"},
+			checkFunc: func(t *testing.T, hints *HistoryAgentHints) {
+				if !strings.Contains(hints.Summary, "No command history") {
+					t.Errorf("Summary should mention no history: %q", hints.Summary)
+				}
+			},
+		},
+		{
+			name: "with entries",
+			output: HistoryOutput{
+				Total:    50,
+				Filtered: 10,
+			},
+			opts: HistoryOptions{Session: "myproject"},
+			checkFunc: func(t *testing.T, hints *HistoryAgentHints) {
+				if !strings.Contains(hints.Summary, "10 of 50") {
+					t.Errorf("Summary should show counts: %q", hints.Summary)
+				}
+			},
+		},
+		{
+			name: "large history warning",
+			output: HistoryOutput{
+				Total:    1500,
+				Filtered: 1500,
+			},
+			opts: HistoryOptions{Session: "bigproject"},
+			checkFunc: func(t *testing.T, hints *HistoryAgentHints) {
+				hasWarning := false
+				for _, w := range hints.Warnings {
+					if strings.Contains(w, "Large history") {
+						hasWarning = true
+						break
+					}
+				}
+				if !hasWarning {
+					t.Errorf("Should have large history warning")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hints := generateHistoryHints(tt.output, tt.opts)
+			if hints == nil {
+				t.Fatal("generateHistoryHints returned nil")
+			}
+			tt.checkFunc(t, hints)
+			if len(hints.SuggestedCommands) == 0 {
+				t.Error("SuggestedCommands should not be empty")
+			}
+		})
+	}
+}
+
+func TestGenerateTokenHints(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     TokensOutput
+		checkFunc  func(*testing.T, *TokensAgentHints)
+	}{
+		{
+			name: "no tokens",
+			output: TokensOutput{
+				TotalTokens:  0,
+				TotalPrompts: 0,
+				Breakdown:    []TokenBreakdown{},
+			},
+			checkFunc: func(t *testing.T, hints *TokensAgentHints) {
+				if !strings.Contains(hints.Summary, "No token usage") {
+					t.Errorf("Summary should mention no tokens: %q", hints.Summary)
+				}
+			},
+		},
+		{
+			name: "with tokens",
+			output: TokensOutput{
+				TotalTokens:  50000,
+				TotalPrompts: 20,
+				Breakdown: []TokenBreakdown{
+					{Key: "claude", Tokens: 50000, Percentage: 100},
+				},
+			},
+			checkFunc: func(t *testing.T, hints *TokensAgentHints) {
+				if !strings.Contains(hints.Summary, "50.0K") {
+					t.Errorf("Summary should contain token count: %q", hints.Summary)
+				}
+				if !strings.Contains(hints.Summary, "claude") {
+					t.Errorf("Summary should contain top consumer: %q", hints.Summary)
+				}
+			},
+		},
+		{
+			name: "high usage warning",
+			output: TokensOutput{
+				TotalTokens:  1500000,
+				TotalPrompts: 100,
+				Breakdown: []TokenBreakdown{
+					{Key: "claude", Tokens: 1500000, Percentage: 100},
+				},
+			},
+			checkFunc: func(t *testing.T, hints *TokensAgentHints) {
+				hasWarning := false
+				for _, w := range hints.Warnings {
+					if strings.Contains(w, "High token usage") {
+						hasWarning = true
+						break
+					}
+				}
+				if !hasWarning {
+					t.Errorf("Should have high usage warning")
+				}
+			},
+		},
+		{
+			name: "imbalanced usage warning",
+			output: TokensOutput{
+				TotalTokens:  54000,
+				TotalPrompts: 30,
+				Breakdown:    []TokenBreakdown{},
+				AgentStats: map[string]AgentTokenStats{
+					"claude": {Tokens: 50000},
+					"codex":  {Tokens: 4000}, // 50000/4000 = 12.5x ratio (> 10)
+				},
+			},
+			checkFunc: func(t *testing.T, hints *TokensAgentHints) {
+				hasWarning := false
+				for _, w := range hints.Warnings {
+					if strings.Contains(w, "imbalanced") {
+						hasWarning = true
+						break
+					}
+				}
+				if !hasWarning {
+					t.Errorf("Should have imbalanced usage warning")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hints := generateTokenHints(tt.output)
+			if hints == nil {
+				t.Fatal("generateTokenHints returned nil")
+			}
+			tt.checkFunc(t, hints)
+			if len(hints.SuggestedCommands) == 0 {
+				t.Error("SuggestedCommands should not be empty")
+			}
+		})
+	}
+}
