@@ -94,7 +94,7 @@ func (f *ClaudeAuthFlow) SendContinuation(paneID, prompt string) error {
 	time.Sleep(500 * time.Millisecond)
 
 	// Send continuation prompt
-	return tmux.SendKeys(paneID, prompt, true)
+	return tmux.PasteKeys(paneID, prompt, true)
 }
 
 // claudeLoginURLRegex matches the Claude login URL

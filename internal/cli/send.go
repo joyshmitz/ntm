@@ -639,8 +639,7 @@ func runSendInternal(opts SendOptions) error {
 			if p.Index == paneIndex {
 				targetPanes = append(targetPanes, paneIndex)
 				histTargets = targetPanes
-				if err := tmux.SendKeys(p.ID, prompt, true); err != nil {
-					failed++
+				                if err := tmux.PasteKeys(p.ID, prompt, true); err != nil {					failed++
 					histErr = err
 					if jsonOutput {
 						result := SendResult{
@@ -733,8 +732,7 @@ func runSendInternal(opts SendOptions) error {
 		}
 
 		targetPanes = append(targetPanes, p.Index)
-		if err := tmux.SendKeys(p.ID, prompt, true); err != nil {
-			failed++
+		                if err := tmux.PasteKeys(p.ID, prompt, true); err != nil {			failed++
 			histErr = err
 			if !jsonOutput {
 				return fmt.Errorf("sending to pane %d: %w", p.Index, err)

@@ -425,7 +425,7 @@ func runAdd(opts AddOptions) error {
 		if cassContext != "" {
 			// Wait a bit for agent to start
 			time.Sleep(500 * time.Millisecond)
-			if err := tmux.SendKeys(paneID, cassContext, true); err != nil {
+			if err := tmux.PasteKeys(paneID, cassContext, true); err != nil {
 				if !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to inject context: %v\n", err)
 				}
@@ -435,7 +435,7 @@ func runAdd(opts AddOptions) error {
 		// Inject user prompt if provided
 		if opts.Prompt != "" {
 			time.Sleep(200 * time.Millisecond)
-			if err := tmux.SendKeys(paneID, opts.Prompt, true); err != nil {
+			if err := tmux.PasteKeys(paneID, opts.Prompt, true); err != nil {
 				if !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", err)
 				}

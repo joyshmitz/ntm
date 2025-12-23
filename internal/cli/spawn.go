@@ -576,7 +576,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		if cassContext != "" {
 			// Wait a bit for agent to start
 			time.Sleep(500 * time.Millisecond)
-			if err := tmux.SendKeys(pane.ID, cassContext, true); err != nil {
+			if err := tmux.PasteKeys(pane.ID, cassContext, true); err != nil {
 				if !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to inject context: %v\n", err)
 				}
@@ -586,7 +586,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		// Inject user prompt if provided
 		if opts.Prompt != "" {
 			time.Sleep(200 * time.Millisecond)
-			if err := tmux.SendKeys(pane.ID, opts.Prompt, true); err != nil {
+			if err := tmux.PasteKeys(pane.ID, opts.Prompt, true); err != nil {
 				if !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", err)
 				}

@@ -20,7 +20,8 @@ import (
 //	session__cc_1
 //	session__cc_1[frontend]
 //	session__cc_1_opus[backend,api]
-var paneNameRegex = regexp.MustCompile(`^.+__(\w+)_\d+(?:_([A-Za-z0-9._/@:+-]+))?(?:\[([^\]]*)\])?$`)
+//  session__custom-agent_1  (plugins can have dashes)
+var paneNameRegex = regexp.MustCompile(`^.+__([\w-]+)_\d+(?:_([A-Za-z0-9._/@:+-]+))?(?:\[([^\]]*)\])?$`)
 
 // AgentType represents the type of AI agent
 type AgentType string
@@ -657,6 +658,32 @@ func (c *Client) SendKeys(target, keys string, enter bool) error {
 	return nil
 }
 
+// PasteKeys sends keys to a pane wrapped in bracketed paste sequences.
+// This ensures multiline text is pasted as a single block without triggering execution.
+func (c *Client) PasteKeys(target, keys string, enter bool) error {
+	// Start bracketed paste: \e[200~
+	// We send "Escape" key then literal "[200~"
+	if err := c.RunSilent("send-keys", "-t", target, "Escape", "[200~"); err != nil {
+		return err
+	}
+
+	// Send content literally using SendKeys (reusing its chunking logic)
+	// We pass false for enter because we handle it at the end
+	if err := c.SendKeys(target, keys, false); err != nil {
+		return err
+	}
+
+	// End bracketed paste: \e[201~
+	if err := c.RunSilent("send-keys", "-t", target, "Escape", "[201~"); err != nil {
+		return err
+	}
+
+	if enter {
+		return c.RunSilent("send-keys", "-t", target, "C-m")
+	}
+	return nil
+}
+
 // FormatPaneName formats a pane title according to NTM convention
 func FormatPaneName(session string, agentType string, index int, variant string) string {
 	base := fmt.Sprintf("%s__%s_%d", session, agentType, index)
@@ -669,6 +696,11 @@ func FormatPaneName(session string, agentType string, index int, variant string)
 // SendKeys sends keys to a pane (default client)
 func SendKeys(target, keys string, enter bool) error {
 	return DefaultClient.SendKeys(target, keys, enter)
+}
+
+// PasteKeys sends keys to a pane wrapped in bracketed paste sequences (default client).
+func PasteKeys(target, keys string, enter bool) error {
+	return DefaultClient.PasteKeys(target, keys, enter)
 }
 
 // SendInterrupt sends Ctrl+C to a pane

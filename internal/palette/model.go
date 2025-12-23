@@ -744,7 +744,7 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 		}
 
 		if shouldSend {
-			if err := tmux.SendKeys(p.ID, prompt, true); err != nil {
+			if err := tmux.PasteKeys(p.ID, prompt, true); err != nil {
 				m.err = err
 				m.recordHistory(targetPanes, start, err)
 				return *m, tea.Quit
