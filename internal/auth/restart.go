@@ -170,6 +170,17 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 		return fmt.Errorf("generating command: %w", err)
 	}
 
+	// Sanitize and build proper shell command with cd
+	safeAgentCmd, err := tmux.SanitizePaneCommand(agentCmd)
+	if err != nil {
+		return fmt.Errorf("invalid agent command: %w", err)
+	}
+
+	cmd, err := tmux.BuildPaneCommand(ctx.ProjectDir, safeAgentCmd)
+	if err != nil {
+		return fmt.Errorf("building pane command: %w", err)
+	}
+
 	// For now, just run the agent command
-	return tmux.SendKeys(ctx.PaneID, agentCmd, true)
+	return tmux.SendKeys(ctx.PaneID, cmd, true)
 }
