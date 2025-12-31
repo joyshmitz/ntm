@@ -80,7 +80,7 @@ func runPersonasList(filterAgent, filterTag string) error {
 	})
 
 	// Apply filters
-	var filtered []*persona.Persona
+	filtered := make([]*persona.Persona, 0, len(personas))
 	for _, p := range personas {
 		// Agent type filter
 		if filterAgent != "" {
@@ -108,13 +108,18 @@ func runPersonasList(filterAgent, filterTag string) error {
 	}
 
 	if jsonOutput {
+		// Ensure profile sets is never null in JSON output
+		sets := registry.ListSets()
+		if sets == nil {
+			sets = []*persona.PersonaSet{}
+		}
 		// Include both personas and profile sets in JSON output
 		output := struct {
 			Personas    []*persona.Persona    `json:"personas"`
 			ProfileSets []*persona.PersonaSet `json:"profile_sets"`
 		}{
 			Personas:    filtered,
-			ProfileSets: registry.ListSets(),
+			ProfileSets: sets,
 		}
 		return json.NewEncoder(os.Stdout).Encode(output)
 	}
@@ -139,18 +144,13 @@ func runPersonasList(filterAgent, filterTag string) error {
 
 	// Print personas
 	for _, p := range filtered {
-		desc := p.Description
-		if len(desc) > 35 {
-			desc = desc[:32] + "..."
-		}
+		desc := truncateRunes(p.Description, 32, "...")
 
 		model := p.Model
 		if model == "" {
 			model = "(default)"
 		}
-		if len(model) > 8 {
-			model = model[:5] + ".."
-		}
+		model = truncateRunes(model, 6, "..")
 
 		fmt.Printf("%-14s %-8s %-8s %s\n",
 			p.Name,
@@ -172,10 +172,7 @@ func runPersonasList(filterAgent, filterTag string) error {
 			return sets[i].Name < sets[j].Name
 		})
 		for _, s := range sets {
-			members := strings.Join(s.Personas, ", ")
-			if len(members) > 40 {
-				members = members[:37] + "..."
-			}
+			members := truncateRunes(strings.Join(s.Personas, ", "), 37, "...")
 			desc := s.Description
 			if desc == "" {
 				desc = members
@@ -354,6 +351,16 @@ func valueOrDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// truncateRunes truncates a string to maxRunes runes plus suffix.
+// This is UTF-8 safe unlike byte slicing.
+func truncateRunes(s string, maxRunes int, suffix string) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + suffix
 }
 
 // newProfilesCmd creates an alias for 'personas' command as 'profiles'
