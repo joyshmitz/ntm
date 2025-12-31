@@ -212,13 +212,17 @@ func (c *Compactor) EvaluateCompactionResult(before, after *ContextEstimate) *Co
 	reduction := before.UsagePercent - after.UsagePercent
 	result.TokensReclaimed = before.TokensUsed - after.TokensUsed
 
-	if reduction >= c.minReduction {
+	// minReduction is a decimal (e.g., 0.10 for 10%), but UsagePercent is 0-100
+	// Convert minReduction to percentage points for comparison
+	minReductionPercent := c.minReduction * 100
+
+	if reduction >= minReductionPercent {
 		result.Success = true
 	} else if result.TokensReclaimed > 0 {
 		// Some tokens reclaimed but not enough
 		result.Success = false
 		result.Error = fmt.Sprintf("insufficient reduction: %.1f%% (need %.1f%%)",
-			reduction*100, c.minReduction*100)
+			reduction, minReductionPercent)
 	} else {
 		result.Success = false
 		result.Error = "no reduction achieved"
@@ -290,7 +294,8 @@ func (r *CompactionResult) FormatForDisplay() string {
 	}
 
 	sb.WriteString(fmt.Sprintf("  Method: %s\n", r.Method))
-	sb.WriteString(fmt.Sprintf("  Usage: %.1f%% → %.1f%%\n", r.UsageBefore*100, r.UsageAfter*100))
+	// UsageBefore/UsageAfter are already 0-100 percentages from ContextEstimate.UsagePercent
+	sb.WriteString(fmt.Sprintf("  Usage: %.1f%% → %.1f%%\n", r.UsageBefore, r.UsageAfter))
 	sb.WriteString(fmt.Sprintf("  Tokens reclaimed: %d\n", r.TokensReclaimed))
 	sb.WriteString(fmt.Sprintf("  Duration: %s\n", r.Duration.Round(time.Millisecond)))
 

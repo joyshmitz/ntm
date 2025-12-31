@@ -195,12 +195,12 @@ func TestEvaluateCompactionResult(t *testing.T) {
 			before: &ContextEstimate{
 				TokensUsed:   150000,
 				ContextLimit: 200000,
-				UsagePercent: 0.75,
+				UsagePercent: 75.0, // 75% - UsagePercent is 0-100 scale
 			},
 			after: &ContextEstimate{
 				TokensUsed:   100000,
 				ContextLimit: 200000,
-				UsagePercent: 0.50,
+				UsagePercent: 50.0, // 50% - 25 percentage point reduction
 			},
 			wantSuccess: true,
 		},
@@ -209,12 +209,12 @@ func TestEvaluateCompactionResult(t *testing.T) {
 			before: &ContextEstimate{
 				TokensUsed:   150000,
 				ContextLimit: 200000,
-				UsagePercent: 0.75,
+				UsagePercent: 75.0,
 			},
 			after: &ContextEstimate{
 				TokensUsed:   145000,
 				ContextLimit: 200000,
-				UsagePercent: 0.725,
+				UsagePercent: 72.5, // Only 2.5 percentage point reduction < 10% minimum
 			},
 			wantSuccess: false,
 		},
@@ -223,12 +223,12 @@ func TestEvaluateCompactionResult(t *testing.T) {
 			before: &ContextEstimate{
 				TokensUsed:   150000,
 				ContextLimit: 200000,
-				UsagePercent: 0.75,
+				UsagePercent: 75.0,
 			},
 			after: &ContextEstimate{
 				TokensUsed:   155000,
 				ContextLimit: 200000,
-				UsagePercent: 0.775,
+				UsagePercent: 77.5, // Actually increased
 			},
 			wantSuccess: false,
 		},
@@ -346,8 +346,8 @@ func TestFormatCompactionResult(t *testing.T) {
 		TokensBefore:    150000,
 		TokensAfter:     100000,
 		TokensReclaimed: 50000,
-		UsageBefore:     0.75,
-		UsageAfter:      0.50,
+		UsageBefore:     75.0, // UsagePercent is 0-100 scale
+		UsageAfter:      50.0,
 		Duration:        5 * time.Second,
 	}
 
