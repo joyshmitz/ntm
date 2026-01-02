@@ -16,7 +16,6 @@ import (
 const (
 	rotationHistoryDir  = "rotation_history"
 	rotationHistoryFile = "rotations.jsonl"
-	defaultMaxRecords   = 10000
 )
 
 var (
@@ -76,12 +75,15 @@ func NewRotationHistoryStoreWithPath(path string) *RotationHistoryStore {
 
 // defaultRotationHistoryPath returns the path to the rotation history file.
 // Uses XDG_DATA_HOME if set, otherwise ~/.local/share/ntm/rotation_history/rotations.jsonl
+// Falls back to temp directory if home directory is unavailable.
 func defaultRotationHistoryPath() string {
 	dataDir := os.Getenv("XDG_DATA_HOME")
 	if dataDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return filepath.Join(rotationHistoryDir, rotationHistoryFile)
+			// Fallback to temp directory to ensure absolute path
+			// (relative paths would fragment history across working directories)
+			return filepath.Join(os.TempDir(), "ntm", rotationHistoryDir, rotationHistoryFile)
 		}
 		dataDir = filepath.Join(home, ".local", "share")
 	}
