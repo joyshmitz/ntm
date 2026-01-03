@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -987,7 +986,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 			if err == nil {
 				cmd := exec.Command(exe, "internal-monitor", opts.Session)
 				// Detach from terminal so it survives when ntm spawn exits
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+				setDetachedProcess(cmd)
 				if err := cmd.Start(); err != nil {
 					if !IsJSONOutput() {
 						output.PrintWarningf("Failed to start resilience monitor: %v", err)
