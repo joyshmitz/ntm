@@ -314,6 +314,32 @@ func TestAutoThemeFallsBackToDarkOnPanic(t *testing.T) {
 	}
 }
 
+func TestDetectDarkBackgroundSkipsOSCOverSSH(t *testing.T) {
+	// Test that SSH sessions skip OSC queries and default to dark theme
+	t.Run("SSH_CONNECTION triggers dark default", func(t *testing.T) {
+		t.Setenv("SSH_CONNECTION", "192.168.1.1 12345 192.168.1.2 22")
+		t.Setenv("SSH_TTY", "")
+		t.Setenv("NTM_THEME", "")
+		resetAutoTheme()
+
+		// detectDarkBackground should return true (dark) when SSH_CONNECTION is set
+		if !detectDarkBackground() {
+			t.Error("detectDarkBackground should return true (dark) over SSH")
+		}
+	})
+
+	t.Run("SSH_TTY triggers dark default", func(t *testing.T) {
+		t.Setenv("SSH_CONNECTION", "")
+		t.Setenv("SSH_TTY", "/dev/pts/0")
+		t.Setenv("NTM_THEME", "")
+		resetAutoTheme()
+
+		if !detectDarkBackground() {
+			t.Error("detectDarkBackground should return true (dark) when SSH_TTY is set")
+		}
+	})
+}
+
 func TestNewStylesPlainTheme(t *testing.T) {
 	// Test that Plain theme produces styles with proper guard rails
 	s := NewStyles(Plain)
