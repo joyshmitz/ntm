@@ -12,6 +12,13 @@ func mustGetwd() string {
 	return wd
 }
 
+// hostname returns the current machine's hostname.
+// Useful for multi-machine setups to identify which host an agent runs on.
+func hostname() string {
+	h, _ := os.Hostname()
+	return h
+}
+
 // capitalize returns the string with its first letter uppercased.
 // For simple ASCII strings; use golang.org/x/text/cases for full Unicode support.
 func capitalize(s string) string {

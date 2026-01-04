@@ -3,7 +3,9 @@
 package robot
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -278,4 +280,12 @@ func generateDescription(name string) string {
 	}
 
 	return desc
+}
+
+// outputSchemaJSON encodes value as pretty-printed JSON to stdout.
+// Useful for schema generation and debugging robot output formats.
+func outputSchemaJSON(v interface{}) error {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(v)
 }
