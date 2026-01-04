@@ -167,7 +167,6 @@ func TestMaxRestartBackoff(t *testing.T) {
 
 		// With MaxRestarts=2, restarts will be 1, 2, then 3 (when it stops)
 		// restarts > maxRestarts means no more restarts will happen
-		t.Logf("Poll: restarts=%d, state=%v, maxRestarts=%d", restarts, state, s.maxRestarts)
 		if restarts > int(s.maxRestarts) {
 			break
 		}
