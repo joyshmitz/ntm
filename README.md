@@ -417,6 +417,50 @@ svnt myproject -o ~/logs   # Save all outputs to ~/logs
 svnt myproject --cod       # Save only Codex pane outputs
 ```
 
+### Monitoring & Analysis
+
+| Command | Alias | Arguments | Description |
+|---------|-------|-----------|-------------|
+| `ntm activity` | | `[session] [--cc\|--cod\|--gmi] [-w] [--interval MS]` | Show real-time agent activity states |
+| `ntm health` | | `[session] [--json]` | Check agent health status |
+| `ntm watch` | `w` | `[session] [--cc\|--cod\|--gmi] [--activity] [--tail N]` | Stream agent output in real-time |
+| `ntm extract` | | `<session> [pane] [--lang=X] [--copy] [--apply]` | Extract code blocks from output |
+| `ntm diff` | | `<session> <pane1> <pane2> [--unified] [--code-only]` | Compare outputs from two panes |
+| `ntm grep` | | `<pattern> [session] [-i] [-C N] [--cc\|--cod\|--gmi]` | Search pane output with regex |
+| `ntm analytics` | | `[--days N] [--since DATE] [--format X] [--sessions]` | View session analytics and statistics |
+| `ntm locks` | | `<session> [--all-agents] [--json]` | Show active file reservations |
+
+**Examples:**
+
+```bash
+ntm activity myproject --watch        # Real-time activity monitoring
+ntm health myproject                  # Check all agent health
+ntm watch myproject --cc              # Stream Claude agent output
+ntm extract myproject --lang=go       # Extract Go code blocks
+ntm diff myproject cc_1 cod_1         # Compare Claude vs Codex output
+ntm grep 'error' myproject -C 3       # Search with context
+ntm analytics --days 7                # Last 7 days statistics
+ntm locks myproject --all-agents      # All project file reservations
+```
+
+### Checkpoints
+
+| Command | Arguments | Description |
+|---------|-----------|-------------|
+| `ntm checkpoint save` | `<session> [-m "desc"] [--scrollback=N] [--no-git]` | Create session checkpoint |
+| `ntm checkpoint list` | `[session] [--json]` | List checkpoints |
+| `ntm checkpoint show` | `<session> <id> [--json]` | Show checkpoint details |
+| `ntm checkpoint delete` | `<session> <id> [-f]` | Delete a checkpoint |
+
+**Examples:**
+
+```bash
+ntm checkpoint save myproject -m "Before refactor"
+ntm checkpoint list myproject
+ntm checkpoint show myproject 20251210-143052
+ntm checkpoint delete myproject 20251210-143052 -f
+```
+
 ### Command Palette & Dashboard
 
 | Command | Alias | Arguments | Description |
@@ -1181,6 +1225,15 @@ cooldown_seconds = 30
 max_recoveries_per_pane = 5
 include_bead_context = true   # Include project state from bv
 ```
+
+**Detection Patterns by Agent Type:**
+
+| Agent | Detection Patterns |
+|-------|-------------------|
+| **Claude** | "Conversation compacted", "ran out of context", "This conversation is getting long" |
+| **Codex** | "context limit reached", "history cleared", "Context was truncated" |
+| **Gemini** | "context window exceeded", "conversation reset", "history was compacted" |
+| **Generic** | "continuing from summary", "previous context was summarized", "I've lost some context" |
 
 **With Bead Context Enabled:**
 
@@ -2004,6 +2057,322 @@ retention_days = 30        # Delete logs older than this
 
 ---
 
+## Agent Monitoring
+
+NTM provides comprehensive real-time monitoring of agent states, health, and output through dedicated commands.
+
+### Activity States
+
+The `ntm activity` command displays real-time activity states for all agents in a session:
+
+```bash
+# Show activity for all agents
+ntm activity myproject
+
+# Filter by agent type
+ntm activity myproject --cc          # Only Claude agents
+ntm activity myproject --cod         # Only Codex agents
+ntm activity myproject --gmi         # Only Gemini agents
+
+# Watch mode (auto-refresh)
+ntm activity myproject --watch
+ntm activity myproject -w --interval 1000   # Refresh every 1s
+
+# JSON output for scripting
+ntm activity myproject --json
+```
+
+**Activity States:**
+
+| State | Icon | Color | Description |
+|-------|------|-------|-------------|
+| WAITING | ● | Green | Agent is idle, ready for work |
+| GENERATING | ▶ | Blue | Agent is actively producing output |
+| THINKING | ◐ | Yellow | Agent is processing (no output yet) |
+| ERROR | ✗ | Red | Agent encountered an error |
+| STALLED | ◯ | Red | Agent stopped unexpectedly |
+
+**Output Fields:**
+
+- **Pane**: The pane index within the session
+- **Agent**: Agent type (claude, codex, gemini)
+- **State**: Current activity state
+- **Velocity**: Output rate in characters/second
+- **Duration**: Time in current state
+
+### Health Checking
+
+The `ntm health` command provides a comprehensive health assessment:
+
+```bash
+# Check all agents
+ntm health myproject
+
+# JSON output
+ntm health myproject --json
+```
+
+**Health Indicators:**
+
+| Status | Description |
+|--------|-------------|
+| OK | Agent is healthy and responsive |
+| WARN | Potential issues detected (stale, slow) |
+| ERROR | Agent has crashed or is unresponsive |
+
+**Detected Issues:**
+- Rate limit detection
+- Process crashes
+- Memory pressure
+- Stale output (no activity for extended periods)
+
+The command exits with appropriate codes for scripting:
+- Exit 0: All healthy
+- Exit 1: Warnings detected
+- Exit 2: Errors detected
+
+### Output Streaming
+
+The `ntm watch` command streams agent output without attaching to the tmux session:
+
+```bash
+# Stream all panes
+ntm watch myproject
+
+# Filter by agent type
+ntm watch myproject --cc          # Only Claude agents
+ntm watch myproject --cod         # Only Codex agents
+
+# Only show new output (no initial tail)
+ntm watch myproject --activity
+
+# Customize tail and polling
+ntm watch myproject --tail 50 --interval 500
+
+# Disable timestamps
+ntm watch myproject --no-timestamps
+```
+
+**File Watcher Mode:**
+
+Trigger commands in agents when files change:
+
+```bash
+# Run tests when Go files change
+ntm watch myproject --pattern="*.go" --command="go test ./..."
+
+# Rebuild on source changes
+ntm watch myproject --pattern="src/*.ts" --command="npm run build"
+
+# Watch specific agent type
+ntm watch myproject --cc --pattern="*.py" --command="pytest"
+```
+
+The file watcher automatically ignores common directories like `.git`, `node_modules`, `dist`, `vendor`, and `__pycache__`.
+
+---
+
+## Output Analysis
+
+NTM includes tools for analyzing, searching, and extracting content from agent output.
+
+### Code Block Extraction
+
+The `ntm extract` command parses code blocks from agent output:
+
+```bash
+# Extract from all panes
+ntm extract myproject
+
+# Extract from specific pane
+ntm extract myproject cc_1
+
+# From most recently active pane
+ntm extract myproject --last
+
+# Filter by language
+ntm extract myproject --lang=python
+ntm extract myproject --lang=go
+
+# Copy to clipboard
+ntm extract myproject --copy
+ntm extract myproject --copy -s 1    # Copy specific block (1-indexed)
+
+# Apply code to detected files
+ntm extract myproject --apply
+
+# JSON output
+ntm extract myproject --json
+```
+
+**Features:**
+- Parses markdown fenced code blocks from agent output
+- Detects file paths from context (comments, headers)
+- Identifies new files vs. updates to existing files
+- Interactive apply mode with confirmation prompts
+- Warns about risky paths (absolute or escaping current directory)
+
+### Output Comparison
+
+The `ntm diff` command compares outputs from different agents:
+
+```bash
+# Compare two panes by title
+ntm diff myproject cc_1 cod_1
+
+# Compare by pane index
+ntm diff myproject 1 2
+
+# Unified diff format
+ntm diff myproject cc_1 cod_1 --unified
+
+# Compare only extracted code blocks
+ntm diff myproject cc_1 cod_1 --code-only
+
+# JSON output
+ntm diff myproject cc_1 cod_1 --json
+```
+
+**Output Includes:**
+- Line count comparison
+- Similarity percentage
+- Unified diff (with `--unified`)
+
+This is useful for comparing how different agents (Claude vs. Codex) approach the same problem.
+
+### Pane Search
+
+The `ntm grep` command searches across all pane output buffers with regex support:
+
+```bash
+# Search all panes in a session
+ntm grep 'error' myproject
+
+# Case insensitive
+ntm grep 'TODO' myproject -i
+
+# Show context lines
+ntm grep 'function' myproject -C 3     # 3 lines before and after
+ntm grep 'error' myproject -B 2 -A 5   # 2 before, 5 after
+
+# Filter by agent type
+ntm grep 'error' myproject --cc        # Only Claude panes
+ntm grep 'pattern' myproject --cod     # Only Codex panes
+
+# Search all sessions
+ntm grep 'pattern' --all
+
+# List matching panes only
+ntm grep 'error' myproject -l
+
+# Limit search depth
+ntm grep 'pattern' myproject -n 100    # Search last 100 lines per pane
+
+# Invert match
+ntm grep 'success' myproject -v        # Show non-matching lines
+
+# JSON output
+ntm grep 'error' myproject --json
+```
+
+**Regex Support:**
+
+The search uses Go's regex syntax:
+- `'error.*timeout'` - Error followed by timeout
+- `'def\s+\w+'` - Python function definitions
+- `'(?i)warning'` - Case insensitive
+
+---
+
+## Session Analytics
+
+The `ntm analytics` command provides aggregated statistics from session events:
+
+```bash
+# Last 30 days summary
+ntm analytics
+
+# Last 7 days
+ntm analytics --days 7
+
+# Since specific date
+ntm analytics --since 2025-01-01
+
+# Include per-session breakdown
+ntm analytics --sessions
+
+# Output formats
+ntm analytics --format json
+ntm analytics --format csv
+```
+
+**Statistics Include:**
+- Total sessions created
+- Agent counts by type (Claude, Codex, Gemini)
+- Prompts sent and character counts
+- Estimated token usage
+- Error occurrences by type
+
+**Example Output:**
+
+```
+NTM Analytics - Last 30 days
+========================================
+
+Summary:
+  Sessions:     47
+  Agents:       142
+  Prompts:      1,847
+  Characters:   2,341,892
+  Tokens (est): 668.2K
+
+Agent Breakdown:
+  Claude:
+    Spawned:      89
+    Prompts:      1,102
+    Tokens (est): 412.5K
+  Codex:
+    Spawned:      38
+    Prompts:      512
+    Tokens (est): 178.2K
+  Gemini:
+    Spawned:      15
+    Prompts:      233
+    Tokens (est): 77.5K
+
+Errors: 3
+  rate_limit: 2
+  timeout: 1
+```
+
+---
+
+## File Reservations
+
+When using Agent Mail for multi-agent coordination, NTM can display active file reservations:
+
+```bash
+# Show session's file reservations
+ntm locks myproject
+
+# Show all project reservations (all agents)
+ntm locks myproject --all-agents
+
+# JSON output
+ntm locks myproject --json
+```
+
+**Output Fields:**
+- Path pattern (glob supported)
+- Agent holding the reservation
+- Lock type (Exclusive or Shared)
+- Time remaining until expiration
+- Reason for the reservation
+
+File reservations prevent conflicts when multiple agents work on the same codebase by signaling intent to modify specific files.
+
+---
+
 ## Performance Profiler
 
 NTM includes a built-in profiler for measuring startup performance and command execution times.
@@ -2436,6 +2805,89 @@ Pipelines use topological sorting to resolve dependencies:
 
 ---
 
+## Session Checkpoints
+
+Checkpoints capture the complete state of a tmux session at a point in time, enabling rollback and recovery.
+
+### Creating Checkpoints
+
+```bash
+# Create a checkpoint
+ntm checkpoint save myproject
+
+# With description
+ntm checkpoint save myproject -m "Before major refactor"
+
+# Custom scrollback depth
+ntm checkpoint save myproject --scrollback=500
+
+# Skip git state capture
+ntm checkpoint save myproject --no-git
+```
+
+**Captured Data:**
+- Pane layout and configuration
+- Agent types and commands
+- Scrollback buffer content (configurable depth)
+- Git repository state (branch, commit, uncommitted changes)
+- Working directory
+
+### Listing Checkpoints
+
+```bash
+# List all checkpoints across sessions
+ntm checkpoint list
+
+# List checkpoints for a specific session
+ntm checkpoint list myproject
+
+# JSON output
+ntm checkpoint list --json
+```
+
+### Viewing Checkpoint Details
+
+```bash
+ntm checkpoint show myproject 20251210-143052
+ntm checkpoint show myproject 20251210-143052 --json
+```
+
+**Displayed Information:**
+- Creation timestamp
+- Pane count and agent types
+- Git branch and commit
+- Dirty status (staged/unstaged/untracked counts)
+- Description (if provided)
+
+### Deleting Checkpoints
+
+```bash
+# Interactive deletion
+ntm checkpoint delete myproject 20251210-143052
+
+# Force delete without confirmation
+ntm checkpoint delete myproject 20251210-143052 --force
+```
+
+### Auto-Checkpoints
+
+NTM automatically creates checkpoints before risky operations:
+- Broadcasting prompts to multiple agents
+- Adding or removing agents from a session
+- Spawning new sessions with agent configurations
+- Operations flagged as potentially destructive
+
+This provides automatic rollback points without manual intervention.
+
+### Storage Location
+
+Checkpoints are stored in `~/.local/share/ntm/checkpoints/` organized by session name. Each checkpoint includes:
+- `checkpoint.json` - Metadata and session configuration
+- `panes/*.txt` - Scrollback content for each pane
+- `git.patch` - Uncommitted changes (if any)
+
+---
+
 ## Session Persistence
 
 Save and restore complete session state, including agent configurations, prompts, and context.
@@ -2529,6 +2981,425 @@ recipes:
       - command: git push origin staging
       - command: ntm send ${session} --cc "Monitor deployment logs"
 ```
+
+---
+
+## Prompt Templates
+
+NTM includes a built-in template system for common prompting patterns, reducing repetitive typing and ensuring consistent agent interactions.
+
+### Built-in Templates
+
+| Template | Description |
+|----------|-------------|
+| `code_review` | Review code for quality, bugs, performance, and security issues |
+| `explain` | Walk through code with control flow analysis |
+| `refactor` | Improve structure, naming conventions, and simplification |
+| `test` | Generate comprehensive test coverage |
+| `document` | Add documentation (JSDoc, GoDoc, docstring styles) |
+| `fix` | Fix specific issues with root cause analysis |
+| `implement` | Implement features or functions from specifications |
+| `optimize` | Optimize for time complexity, memory, or both |
+
+### Using Templates
+
+```bash
+# Use a template with ntm send
+ntm send myproject --cc --template code_review
+
+# With custom variables
+ntm send myproject --cc --template fix --var issue="null pointer exception"
+
+# List available templates
+ntm templates list
+
+# Show template content
+ntm templates show code_review
+```
+
+### Variable Substitution
+
+Templates support variable substitution with defaults:
+
+```
+Review {{file|main.go}} for {{focus|all issues}}
+```
+
+**Built-in Variables:**
+- `{{cwd}}` - Current working directory
+- `{{date}}` - Current date (YYYY-MM-DD)
+- `{{time}}` - Current time (HH:MM:SS)
+- `{{session}}` - Active session name
+- `{{clipboard}}` - Clipboard contents (if available)
+
+### Conditional Sections
+
+Templates support Mustache-style conditionals:
+
+```
+{{#has_tests}}
+Also update the test file at {{test_file}}.
+{{/has_tests}}
+```
+
+### Template Sources
+
+Templates are loaded from three locations (later sources override earlier):
+
+1. **Built-in**: Compiled into NTM
+2. **User**: `~/.config/ntm/templates/`
+3. **Project**: `.ntm/templates/`
+
+### Custom Templates
+
+Create custom templates in `~/.config/ntm/templates/my-template.txt`:
+
+```
+You are reviewing {{language|Go}} code.
+
+Focus on:
+- Error handling
+- Edge cases
+- Performance implications
+
+{{#context}}
+Additional context: {{context}}
+{{/context}}
+```
+
+---
+
+## Agent Resilience
+
+NTM monitors agent health and can automatically recover from crashes, rate limits, and other failures.
+
+### Auto-Restart
+
+When enabled, NTM automatically restarts crashed agents:
+
+```toml
+[resilience]
+auto_restart = true            # Enable auto-restart (opt-in)
+max_restarts = 3               # Max restarts before giving up
+restart_delay_seconds = 30     # Delay between restart attempts
+health_check_seconds = 10      # Health check interval
+notify_on_crash = true         # Desktop notification on crash
+notify_on_max_restarts = true  # Notify when max restarts exceeded
+```
+
+### Rate Limit Detection
+
+NTM detects rate limit messages and can trigger account rotation:
+
+```toml
+[resilience.rate_limit]
+detect = true                  # Enable rate limit detection
+notify = true                  # Notify when rate limited
+auto_rotate = false            # Trigger account rotation
+patterns = [                   # Custom detection patterns
+  "rate limit exceeded",
+  "too many requests"
+]
+```
+
+### Health Monitoring
+
+Each agent tracks:
+- Restart count since session start
+- Current health status (healthy, warning, error)
+- Rate limit state
+- Last activity timestamp
+
+View health status:
+
+```bash
+ntm health myproject           # Check all agent health
+ntm health myproject --json    # Programmatic access
+```
+
+---
+
+## Notification System
+
+NTM can send notifications for important events through multiple channels.
+
+### Event Types
+
+| Event | Description |
+|-------|-------------|
+| `agent.error` | Agent entered error state |
+| `agent.crashed` | Agent process exited unexpectedly |
+| `agent.restarted` | Agent was automatically restarted |
+| `agent.idle` | Agent waiting for input |
+| `agent.rate_limit` | Rate limit detected |
+| `rotation.needed` | Account rotation recommended |
+| `session.created` | New session spawned |
+| `session.killed` | Session terminated |
+| `health.degraded` | Overall health dropped |
+
+### Notification Channels
+
+**Desktop Notifications:**
+
+```toml
+[notifications]
+enabled = true
+channels = ["desktop"]
+
+[notifications.desktop]
+enabled = true
+# Uses osascript on macOS, notify-send on Linux
+```
+
+**Webhook:**
+
+```toml
+[notifications.webhook]
+enabled = true
+url = "https://hooks.slack.com/services/..."
+method = "POST"
+template = '''
+{
+  "text": "NTM: {{.Type}} - {{.Message}}"
+}
+'''
+```
+
+**Shell Command:**
+
+```toml
+[notifications.shell]
+enabled = true
+command = "my-notifier"
+# Receives JSON on stdin with event details
+# Environment: NTM_EVENT_TYPE, NTM_EVENT_MESSAGE, NTM_SESSION
+```
+
+**Log File:**
+
+```toml
+[notifications.log]
+enabled = true
+path = "~/.config/ntm/notifications.log"
+# Append-only logging of all events
+```
+
+### Event Filtering
+
+```toml
+[notifications]
+events = ["agent.crashed", "agent.rate_limit", "health.degraded"]
+# Only receive notifications for these events
+```
+
+---
+
+## Token Estimation
+
+NTM estimates token usage to help manage context windows and prevent exhaustion.
+
+### Content-Aware Estimation
+
+Token estimation varies by content type:
+
+| Content Type | Chars/Token | Rationale |
+|--------------|-------------|-----------|
+| Code | 2.8 | More punctuation, operators |
+| JSON | 3.0 | Structured, repetitive |
+| Markdown | 3.5 | Mixed content |
+| Prose | 4.0 | Natural language |
+
+### Context Limits
+
+Built-in limits for popular models:
+
+| Model | Context Limit |
+|-------|---------------|
+| Claude (Opus/Sonnet/Haiku) | 200,000 tokens |
+| GPT-4 / GPT-4o | 128,000 tokens |
+| Gemini (Pro/Flash/Ultra) | 1,000,000 tokens |
+
+### Usage Monitoring
+
+```bash
+# View context usage for all agents
+ntm --robot-context=myproject
+
+# JSON output for automation
+ntm --robot-context=myproject --json
+```
+
+### Overhead Estimation
+
+System prompts and conversation history add overhead:
+
+| Factor | Multiplier |
+|--------|------------|
+| System prompt | 1.2x |
+| Conversation history | 1.5x |
+| Tool usage | 2.0x |
+
+---
+
+## Account Rotation
+
+For high-volume usage, NTM supports rotating between multiple accounts to avoid rate limits.
+
+### Configuration
+
+```toml
+[rotation]
+enabled = true
+prefer_restart = true          # Restart agent vs in-pane reauth
+auto_open_browser = false      # Auto-open auth URLs
+auto_trigger = false           # Automatic rotation on rate limit
+continuation_prompt = "Continue where you left off. Previous context..."
+
+[[rotation.accounts]]
+provider = "claude"
+email = "primary@example.com"
+alias = "main"
+priority = 1                   # Lower = higher priority
+
+[[rotation.accounts]]
+provider = "claude"
+email = "backup@example.com"
+alias = "backup"
+priority = 2
+```
+
+### Provider-Specific Authentication
+
+| Provider | Method | Notes |
+|----------|--------|-------|
+| Claude | In-pane `/login` | Browser-based OAuth |
+| Codex | Restart-based | Requires process restart |
+| Gemini | In-pane `/auth` | Google OAuth |
+
+### Manual Rotation
+
+```bash
+# Trigger rotation for a session
+ntm rotate myproject
+
+# Rotate specific agent type
+ntm rotate myproject --cc
+
+# Check rotation status
+ntm --robot-quota=myproject
+```
+
+### Thresholds
+
+```toml
+[rotation.thresholds]
+warning_percent = 80           # Warn at 80% quota usage
+critical_percent = 95          # Force rotate at 95%
+restart_if_tokens_above = 100000
+restart_if_session_hours = 8   # Rotate after 8 hours
+```
+
+---
+
+## Prompt Context Injection
+
+Inject file contents directly into prompts for quick context sharing.
+
+### Basic Usage
+
+```bash
+# Inject a file into the prompt
+ntm send myproject --cc --files "main.go" "Review this code"
+
+# Multiple files
+ntm send myproject --cc --files "main.go,handler.go" "Review these files"
+```
+
+### Line Range Selection
+
+Select specific lines from files:
+
+```bash
+# Lines 10-50
+ntm send myproject --cc --files "main.go:10-50" "Focus on this function"
+
+# From line 100 to end
+ntm send myproject --cc --files "main.go:100-" "Check the rest of the file"
+
+# First 50 lines only
+ntm send myproject --cc --files "main.go:-50" "Review the header"
+```
+
+### Size Limits
+
+- **Per-file limit**: 1MB (prevents accidental large file injection)
+- **Total injection limit**: 10MB
+- **Binary detection**: Automatically skips binary files
+
+### Format
+
+Injected files appear with code fence headers:
+
+```
+=== File: main.go (lines 10-50) ===
+```go
+func main() {
+    // ...
+}
+```
+
+Your prompt text here...
+```
+
+---
+
+## Design Principles
+
+NTM is built around six core invariants that guide all design decisions.
+
+### 1. No Silent Data Loss
+
+Destructive commands require explicit approval:
+- `git reset --hard`, `rm -rf`, `git push --force` are blocked by default
+- Force-release of file reservations requires SLB (two-person) approval
+- All destructive actions are logged with audit trails
+
+### 2. Graceful Degradation
+
+Missing dependencies don't crash NTM:
+- Optional tools (bv, cass, cm) fallback with warnings
+- Features degrade gracefully when unavailable
+- Clear error messages explain what's missing
+
+### 3. Idempotent Orchestration
+
+Retry-safe operations:
+- Spawning an existing session is safe (attaches instead)
+- Reserving already-held files is safe
+- Assigning work already assigned is safe
+- Sending duplicate messages is safe
+
+### 4. Recoverable State
+
+Session state survives crashes:
+- Tmux sessions persist independently of NTM
+- Checkpoints capture full state for recovery
+- Git state tracking enables rollback
+
+### 5. Auditable Actions
+
+All critical operations are logged:
+- Event log with timestamps and correlation IDs
+- Git-committed `.beads/` state
+- Notification history
+
+### 6. Safe-by-Default
+
+Dangerous features are opt-in:
+- Auto-restart disabled by default
+- Account rotation disabled by default
+- Force operations require explicit flags
+- Policy engine gates destructive commands
 
 ---
 
