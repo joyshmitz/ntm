@@ -1205,6 +1205,265 @@ func (ht *HealthTracker) filterTimestampsInWindow(timestamps []time.Time, window
 }
 
 // =============================================================================
+// Rate Limit Backoff (ntm-1ir2)
+// =============================================================================
+//
+// Implements exponential backoff for rate-limited agents:
+// - Base: 30 seconds
+// - Multiplier: 2^n (where n = consecutive rate limits)
+// - Max: 5 minutes
+// - Clears after backoff expires and agent is healthy
+
+const (
+	// BackoffBase is the initial backoff duration
+	BackoffBase = 30 * time.Second
+	// BackoffMax is the maximum backoff duration
+	BackoffMax = 5 * time.Minute
+	// BackoffMultiplier is the exponential multiplier
+	BackoffMultiplier = 2
+)
+
+// RateLimitBackoff tracks backoff state for a single agent
+type RateLimitBackoff struct {
+	PaneID           string    `json:"pane_id"`
+	BackoffCount     int       `json:"backoff_count"`      // n in 30s * 2^n
+	BackoffEndsAt    time.Time `json:"backoff_ends_at"`
+	LastRateLimitAt  time.Time `json:"last_rate_limit_at"`
+	TotalRateLimits  int       `json:"total_rate_limits"`  // lifetime count
+}
+
+// BackoffManager manages rate limit backoffs for all agents in a session
+type BackoffManager struct {
+	mu       sync.RWMutex
+	backoffs map[string]*RateLimitBackoff // keyed by pane ID
+	session  string
+}
+
+// NewBackoffManager creates a new backoff manager for a session
+func NewBackoffManager(session string) *BackoffManager {
+	return &BackoffManager{
+		backoffs: make(map[string]*RateLimitBackoff),
+		session:  session,
+	}
+}
+
+// RecordRateLimit records a rate limit hit and starts/extends backoff
+func (bm *BackoffManager) RecordRateLimit(paneID string) time.Duration {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	now := time.Now()
+	backoff, exists := bm.backoffs[paneID]
+
+	if !exists {
+		backoff = &RateLimitBackoff{
+			PaneID:          paneID,
+			BackoffCount:    0,
+			TotalRateLimits: 0,
+		}
+		bm.backoffs[paneID] = backoff
+	}
+
+	// If already in backoff, increment the count (escalate)
+	if now.Before(backoff.BackoffEndsAt) {
+		backoff.BackoffCount++
+	} else {
+		// First rate limit or backoff expired - start fresh
+		backoff.BackoffCount = 0
+	}
+
+	backoff.LastRateLimitAt = now
+	backoff.TotalRateLimits++
+
+	// Calculate backoff duration: 30s * 2^n, capped at 5 minutes
+	duration := calculateBackoffDuration(backoff.BackoffCount)
+	backoff.BackoffEndsAt = now.Add(duration)
+
+	return duration
+}
+
+// calculateBackoffDuration calculates the backoff duration for a given count
+func calculateBackoffDuration(count int) time.Duration {
+	// 30s * 2^n
+	duration := BackoffBase
+	for i := 0; i < count; i++ {
+		duration *= BackoffMultiplier
+		if duration > BackoffMax {
+			return BackoffMax
+		}
+	}
+	return duration
+}
+
+// IsInBackoff returns true if the agent is currently in backoff
+func (bm *BackoffManager) IsInBackoff(paneID string) bool {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	backoff, exists := bm.backoffs[paneID]
+	if !exists {
+		return false
+	}
+
+	return time.Now().Before(backoff.BackoffEndsAt)
+}
+
+// GetBackoffRemaining returns the time remaining in backoff (0 if not in backoff)
+func (bm *BackoffManager) GetBackoffRemaining(paneID string) time.Duration {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	backoff, exists := bm.backoffs[paneID]
+	if !exists {
+		return 0
+	}
+
+	remaining := time.Until(backoff.BackoffEndsAt)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// GetBackoff returns the backoff state for an agent (nil if none)
+func (bm *BackoffManager) GetBackoff(paneID string) *RateLimitBackoff {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	backoff, exists := bm.backoffs[paneID]
+	if !exists {
+		return nil
+	}
+
+	// Return a copy
+	copy := *backoff
+	return &copy
+}
+
+// ClearBackoff clears the backoff state for an agent (e.g., after recovery)
+func (bm *BackoffManager) ClearBackoff(paneID string) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	delete(bm.backoffs, paneID)
+}
+
+// ClearExpiredBackoffs removes all expired backoffs
+func (bm *BackoffManager) ClearExpiredBackoffs() int {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	now := time.Now()
+	cleared := 0
+
+	for paneID, backoff := range bm.backoffs {
+		if now.After(backoff.BackoffEndsAt) {
+			delete(bm.backoffs, paneID)
+			cleared++
+		}
+	}
+
+	return cleared
+}
+
+// GetAllBackoffs returns all active backoffs
+func (bm *BackoffManager) GetAllBackoffs() map[string]*RateLimitBackoff {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	now := time.Now()
+	result := make(map[string]*RateLimitBackoff)
+
+	for paneID, backoff := range bm.backoffs {
+		if now.Before(backoff.BackoffEndsAt) {
+			copy := *backoff
+			result[paneID] = &copy
+		}
+	}
+
+	return result
+}
+
+// GetRateLimitCount returns the total rate limit count for an agent
+func (bm *BackoffManager) GetRateLimitCount(paneID string) int {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	backoff, exists := bm.backoffs[paneID]
+	if !exists {
+		return 0
+	}
+
+	return backoff.TotalRateLimits
+}
+
+// =============================================================================
+// Global Backoff Manager Registry
+// =============================================================================
+
+var (
+	backoffManagerRegistry   = make(map[string]*BackoffManager)
+	backoffManagerRegistryMu sync.RWMutex
+)
+
+// GetBackoffManager returns the backoff manager for a session, creating if needed
+func GetBackoffManager(session string) *BackoffManager {
+	backoffManagerRegistryMu.RLock()
+	manager, ok := backoffManagerRegistry[session]
+	backoffManagerRegistryMu.RUnlock()
+
+	if ok {
+		return manager
+	}
+
+	backoffManagerRegistryMu.Lock()
+	defer backoffManagerRegistryMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if manager, ok = backoffManagerRegistry[session]; ok {
+		return manager
+	}
+
+	manager = NewBackoffManager(session)
+	backoffManagerRegistry[session] = manager
+	return manager
+}
+
+// ClearBackoffManager removes the backoff manager for a session
+func ClearBackoffManager(session string) {
+	backoffManagerRegistryMu.Lock()
+	defer backoffManagerRegistryMu.Unlock()
+	delete(backoffManagerRegistry, session)
+}
+
+// =============================================================================
+// Integration: Check Rate Limit Before Send
+// =============================================================================
+
+// CheckSendAllowed checks if sending to an agent is allowed (not in backoff)
+// Returns: allowed, backoffRemaining, rateLimitCount
+func CheckSendAllowed(session, paneID string) (bool, time.Duration, int) {
+	manager := GetBackoffManager(session)
+
+	remaining := manager.GetBackoffRemaining(paneID)
+	count := manager.GetRateLimitCount(paneID)
+
+	return remaining == 0, remaining, count
+}
+
+// RecordAgentRateLimit records a rate limit for an agent and returns backoff duration
+func RecordAgentRateLimit(session, paneID string) time.Duration {
+	manager := GetBackoffManager(session)
+	return manager.RecordRateLimit(paneID)
+}
+
+// ClearAgentBackoff clears backoff state for an agent after recovery
+func ClearAgentBackoff(session, paneID string) {
+	manager := GetBackoffManager(session)
+	manager.ClearBackoff(paneID)
+}
+
+// =============================================================================
 // Global Health Tracker Registry
 // =============================================================================
 //
