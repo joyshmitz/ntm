@@ -56,40 +56,42 @@ This plan outlines strategic improvements to elevate **NTM** from a capable powe
 ## Table of Contents
 
 ### Part I: Foundation
-1. [What is NTM?](#what-is-ntm)
-2. [The Dicklesworthstone Stack (Complete Ecosystem)](#the-dicklesworthstone-stack-complete-ecosystem)
-3. [The Agentic Coding Flywheel](#the-agentic-coding-flywheel)
-4. [Current Integration Status](#current-integration-status)
+1. [Design Invariants, Non-Goals, and Risks](#design-invariants-non-goals-and-risks)
+2. [What is NTM?](#what-is-ntm)
+3. [The Dicklesworthstone Stack (Complete Ecosystem)](#the-dicklesworthstone-stack-complete-ecosystem)
+4. [The Agentic Coding Flywheel](#the-agentic-coding-flywheel)
+5. [Current Integration Status](#current-integration-status)
 
 ### Part II: CRITICAL - Tier 0 Integrations (Zero Usage, Maximum Impact)
-5. [CRITICAL: Agent Mail Macros](#critical-agent-mail-macros)
-6. [CRITICAL: File Reservation Lifecycle](#critical-file-reservation-lifecycle)
-7. [CRITICAL: BV Mega-Commands](#critical-bv-mega-commands)
-8. [CRITICAL: CM Server Mode](#critical-cm-server-mode)
-9. [CRITICAL: Destructive Command Protection](#critical-destructive-command-protection)
-10. [CRITICAL: Session Coordinator Intelligence](#critical-session-coordinator-intelligence)
-11. [CRITICAL: BD Message Integration](#critical-bd-message-integration)
-12. [CRITICAL: BD Daemon Mode](#critical-bd-daemon-mode)
+6. [CRITICAL: Agent Mail Macros](#critical-agent-mail-macros)
+7. [CRITICAL: File Reservation Lifecycle](#critical-file-reservation-lifecycle)
+8. [CRITICAL: BV Mega-Commands](#critical-bv-mega-commands)
+9. [CRITICAL: CM Server Mode](#critical-cm-server-mode)
+10. [CRITICAL: Destructive Command Protection](#critical-destructive-command-protection)
+11. [CRITICAL: Session Coordinator Intelligence](#critical-session-coordinator-intelligence)
+12. [CRITICAL: BD Message Integration](#critical-bd-message-integration)
+13. [CRITICAL: BD Daemon Mode](#critical-bd-daemon-mode)
 
 ### Part III: Underexplored Integrations (Tier 1)
-13. [UNDEREXPLORED: bv Robot Modes (Detailed)](#underexplored-bv-beads-viewer-robot-modes)
-14. [UNDEREXPLORED: CASS Historical Context Injection](#underexplored-cass-historical-context-injection)
-15. [UNDEREXPLORED: s2p Context Preparation](#underexplored-s2p-source-to-prompt-context-preparation)
-16. [UNDEREXPLORED: UBS Dashboard & Notifications](#underexplored-ubs-dashboard--agent-notifications)
+14. [UNDEREXPLORED: bv Robot Modes (Detailed)](#underexplored-bv-beads-viewer-robot-modes)
+15. [UNDEREXPLORED: CASS Historical Context Injection](#underexplored-cass-historical-context-injection)
+16. [HIGH-LEVERAGE: Workspace Isolation via Git Worktrees](#high-leverage-workspace-isolation-via-git-worktrees)
+17. [UNDEREXPLORED: s2p Context Preparation](#underexplored-s2p-source-to-prompt-context-preparation)
+18. [UNDEREXPLORED: UBS Dashboard & Notifications](#underexplored-ubs-dashboard--agent-notifications)
 
 ### Part IV: Existing Planned Integrations (Tier 2-3)
-17. [Existing: CAAM (Account Manager)](#existing-integration-caam-coding-agent-account-manager)
-18. [Existing: CM (Memory System)](#existing-integration-cass-memory-system-cm)
-19. [Existing: SLB (Safety Guardrails)](#existing-integration-slb-safety-guardrails)
-20. [Existing: MCP Agent Mail](#existing-integration-mcp-agent-mail)
+19. [Existing: CAAM (Account Manager)](#existing-integration-caam-coding-agent-account-manager)
+20. [Existing: CM (Memory System)](#existing-integration-cass-memory-system-cm)
+21. [Existing: SLB (Safety Guardrails)](#existing-integration-slb-safety-guardrails)
+22. [Existing: MCP Agent Mail](#existing-integration-mcp-agent-mail)
 
 ### Part V: Planning & Implementation
-21. [Ecosystem Discovery](#ecosystem-discovery-additional-tools)
-22. [Priority Matrix](#priority-matrix)
-23. [Unified Architecture](#unified-architecture)
-24. [Web Dashboard](#web-dashboard)
-25. [Implementation Roadmap](#implementation-roadmap)
-26. [Success Metrics](#success-metrics)
+23. [Ecosystem Discovery](#ecosystem-discovery-additional-tools)
+24. [Foundations: Durable State + Event Log](#foundations-durable-state--event-log)
+25. [Priority Matrix](#priority-matrix)
+26. [Implementation Roadmap](#implementation-roadmap)
+27. [Success Metrics](#success-metrics)
+28. [Test Strategy](#test-strategy-required-for-reliability)
 
 ---
 
@@ -869,13 +871,16 @@ type StaleReservationMonitor struct {
     checkInterval time.Duration
     staleTimeout  time.Duration
     policyChecker *policy.Checker
+    eventLog      *events.Log
 }
 
-func NewStaleReservationMonitor(session string) *StaleReservationMonitor {
+func NewStaleReservationMonitor(session string, policyChecker *policy.Checker, eventLog *events.Log) *StaleReservationMonitor {
     return &StaleReservationMonitor{
         session:       session,
         checkInterval: 5 * time.Minute,
         staleTimeout:  30 * time.Minute,
+        policyChecker: policyChecker,
+        eventLog:      eventLog,
     }
 }
 
@@ -913,20 +918,61 @@ func (m *StaleReservationMonitor) checkForStaleReservations(ctx context.Context)
         inactiveFor := time.Since(agent.LastActiveTS)
 
         if inactiveFor > m.staleTimeout {
-            log.Printf("Agent %s inactive for %v, force-releasing reservation %d",
-                res.AgentName, inactiveFor, res.ID)
+            // Check policy before force-releasing (approval_required by default)
+            approval, err := m.policyChecker.CheckApproval(ctx, policy.ApprovalRequest{
+                Action:        "force_release",
+                Resource:      fmt.Sprintf("reservation:%d", res.ID),
+                Reason:        fmt.Sprintf("Agent %s inactive for %v", res.AgentName, inactiveFor),
+                CorrelationID: res.CorrelationID,
+            })
+            if err != nil {
+                log.Printf("Policy check failed for reservation %d: %v", res.ID, err)
+                continue
+            }
 
-            // Force release
-            err := agentmail.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
+            if !approval.Granted {
+                // Log pending approval request for human review
+                m.eventLog.Append(events.Event{
+                    Type: "approval.pending",
+                    Data: map[string]interface{}{
+                        "action":         "force_release",
+                        "reservation_id": res.ID,
+                        "agent":          res.AgentName,
+                        "inactive_for":   inactiveFor.String(),
+                        "reason":         approval.DenialReason,
+                    },
+                })
+                log.Printf("Force-release of reservation %d requires approval (run: ntm approve %s)",
+                    res.ID, approval.ApprovalToken)
+                continue
+            }
+
+            log.Printf("Agent %s inactive for %v, force-releasing reservation %d (approved by: %s)",
+                res.AgentName, inactiveFor, res.ID, approval.ApprovedBy)
+
+            // Force release with audit trail
+            err = agentmail.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
                 ProjectKey:     projectPath,
-                AgentName:      "NTM-Coordinator", // System agent
+                AgentName:      "NTM-Coordinator",
                 ReservationID:  res.ID,
                 NotifyPrevious: true,
-                Note:           fmt.Sprintf("Auto-released: agent inactive for %v", inactiveFor),
+                Note:           fmt.Sprintf("Auto-released: agent inactive for %v (approved by: %s)", inactiveFor, approval.ApprovedBy),
             })
             if err != nil {
                 log.Printf("Failed to force-release: %v", err)
+                continue
             }
+
+            // Log successful force-release
+            m.eventLog.Append(events.Event{
+                Type: "reservation.force_released",
+                Data: map[string]interface{}{
+                    "reservation_id": res.ID,
+                    "agent":          res.AgentName,
+                    "approved_by":    approval.ApprovedBy,
+                    "correlation_id": res.CorrelationID,
+                },
+            })
         }
     }
 }
@@ -2620,11 +2666,19 @@ type BDDaemon struct {
     cmd       *exec.Cmd
     port      int
     isRunning bool
+    autoPush  bool  // Disabled by default; requires policy approval
 }
 
-func NewBDDaemon() *BDDaemon {
+type BDDaemonOptions struct {
+    AutoCommit bool
+    AutoPush   bool  // DANGEROUS: requires policy.yaml permission + approval
+    Interval   time.Duration
+}
+
+func NewBDDaemon(opts BDDaemonOptions) *BDDaemon {
     return &BDDaemon{
-        port: 8766,
+        port:     8766,
+        autoPush: opts.AutoPush,
     }
 }
 
@@ -2633,15 +2687,22 @@ func (d *BDDaemon) Start(ctx context.Context) error {
         return nil
     }
 
-    d.cmd = exec.CommandContext(ctx, "bd", "daemon",
+    args := []string{
+        "daemon",
         "--start",
         "--auto-commit",
-        "--auto-push",
         "--interval", "5s",
         "--health",
         "--metrics",
         "--json",
-    )
+    }
+
+    // --auto-push is policy-gated and disabled by default (see .ntm/policy.yaml)
+    if d.autoPush {
+        args = append(args, "--auto-push")
+    }
+
+    d.cmd = exec.CommandContext(ctx, "bd", args...)
 
     if err := d.cmd.Start(); err != nil {
         return err
@@ -2693,7 +2754,12 @@ func (d *BDDaemon) Metrics() (*DaemonMetrics, error) {
 func spawnSession(ctx context.Context, opts SpawnOptions) (*Session, error) {
     // 1. Start BD daemon if not running
     if opts.BDDaemon {
-        bdDaemon := bd.NewBDDaemon()
+        // AutoPush is disabled by default; only enable if explicitly approved
+        bdDaemon := bd.NewBDDaemon(bd.BDDaemonOptions{
+            AutoCommit: true,
+            AutoPush:   opts.AllowAutoPush && policyAllows("auto_push"),
+            Interval:   5 * time.Second,
+        })
         if err := bdDaemon.Start(ctx); err != nil {
             log.Printf("Warning: Failed to start BD daemon: %v", err)
         }
@@ -2754,8 +2820,24 @@ CASS indexes **50K+ sessions** across **11 different agent types** with sub-60ms
 ```go
 // internal/context/historical.go
 
+// CASSMatch represents a single search result from CASS
+type CASSMatch struct {
+    SessionID   string    `json:"session_id"`
+    AgentType   string    `json:"agent_type"`
+    Timestamp   time.Time `json:"timestamp"`
+    Score       float64   `json:"score"`
+    Snippet     string    `json:"snippet"`
+    FilesEdited []string  `json:"files_edited,omitempty"`
+}
+
+// HistoricalContext contains CASS search results
+type HistoricalContext struct {
+    Query   string      `json:"query"`
+    Matches []CASSMatch `json:"matches"`
+}
+
 // searchHistoricalContext searches CASS for relevant past sessions
-func searchHistoricalContext(task string, limit int) (*HistoricalContext, error) {
+func searchHistoricalContext(task string, limit int) ([]CASSMatch, error) {
     cmd := exec.Command("cass", "search",
         "--query", task,
         "--limit", fmt.Sprintf("%d", limit),
@@ -2766,14 +2848,14 @@ func searchHistoricalContext(task string, limit int) (*HistoricalContext, error)
     out, err := cmd.Output()
     if err != nil {
         log.Printf("CASS search failed (continuing without history): %v", err)
-        return &HistoricalContext{Query: task}, nil
+        return nil, nil  // Graceful degradation
     }
 
     var ctx HistoricalContext
     if err := json.Unmarshal(out, &ctx); err != nil {
         return nil, err
     }
-    return &ctx, nil
+    return ctx.Matches, nil
 }
 
 // Revision: Context Pack builder composes CASS + CM + bv + s2p
@@ -2798,6 +2880,31 @@ type ContextPack struct {
     RenderedPrompt string          `json:"rendered_prompt"`
 }
 
+// truncateToTokenBudget truncates data to fit within a token budget
+func truncateToTokenBudget(data interface{}, maxTokens int) interface{} {
+    jsonBytes, _ := json.Marshal(data)
+    currentTokens := len(jsonBytes) / 4  // ~4 chars per token
+
+    if currentTokens <= maxTokens {
+        return data
+    }
+
+    // For slices, progressively remove elements from the end
+    switch v := data.(type) {
+    case []CASSMatch:
+        for len(v) > 0 && estimateTokens(v) > maxTokens {
+            v = v[:len(v)-1]
+        }
+        return v
+    case []cm.Rule:
+        for len(v) > 0 && estimateTokens(v) > maxTokens {
+            v = v[:len(v)-1]
+        }
+        return v
+    }
+    return data
+}
+
 // BuildContextPack composes all context sources into a single artifact
 func BuildContextPack(ctx context.Context, task string, beadID string, agentType string) (*ContextPack, error) {
     pack := &ContextPack{
@@ -2815,27 +2922,51 @@ func BuildContextPack(ctx context.Context, task string, beadID string, agentType
     }
     budget := budgets[agentType]
 
-    // 1) BV triage/impact (10% of budget)
-    pack.Triage, _ = bv.GetTriage(ctx)
+    // Budget allocation per component
+    triageBudget := budget * 10 / 100   // 10%
+    cmBudget := budget * 5 / 100        // 5%
+    cassBudget := budget * 15 / 100     // 15%
+    s2pBudget := budget * 70 / 100      // 70%
 
-    // 2) CM rules via daemon (5% of budget)
-    if cmClient != nil {
-        result, _ := cmClient.GetContext(ctx, task)
-        pack.CMRules = result.RelevantBullets
+    // 1) BV triage/impact (10% of budget, truncated if needed)
+    triage, _ := bv.GetTriage(ctx)
+    if triage != nil {
+        pack.Triage = truncateToTokenBudget(triage, triageBudget).(*bv.TriageResult)
     }
 
-    // 3) CASS history - hybrid search (15% of budget)
-    pack.CASSHistory, _ = searchHistoricalContext(task, 5)
+    // 2) CM rules via daemon (5% of budget, truncated if needed)
+    if cmClient != nil {
+        result, _ := cmClient.GetContext(ctx, task)
+        if result != nil {
+            pack.CMRules = truncateToTokenBudget(result.RelevantBullets, cmBudget).([]cm.Rule)
+        }
+    }
 
-    // 4) S2P file context (remaining budget)
+    // 3) CASS history - hybrid search (15% of budget, limited results)
+    maxCASSResults := cassBudget / 500  // ~500 tokens per match estimate
+    if maxCASSResults < 1 {
+        maxCASSResults = 1
+    }
+    pack.CASSHistory, _ = searchHistoricalContext(task, maxCASSResults)
+
+    // 4) S2P file context (remaining 70% budget, enforced by s2p)
     files := predictAffectedFiles(bv.BeadPreview{ID: beadID, Title: task})
-    pack.S2PContext, _ = prepareContext(files, budget*70/100)
+    pack.S2PContext, _ = prepareContext(files, s2pBudget)
 
     // 5) Render via per-agent template
     pack.RenderedPrompt = renderContextTemplate(pack, agentType)
     pack.TokenCount = estimateTokens(pack.RenderedPrompt)
 
-    // 6) Cache by (repo_rev, beadID, agentType)
+    // 6) Validate total doesn't exceed budget (final safety check)
+    if pack.TokenCount > budget {
+        log.Printf("Warning: ContextPack exceeds budget (%d > %d), truncating S2P", pack.TokenCount, budget)
+        excess := pack.TokenCount - budget
+        pack.S2PContext = truncateString(pack.S2PContext, len(pack.S2PContext) - excess*4)
+        pack.RenderedPrompt = renderContextTemplate(pack, agentType)
+        pack.TokenCount = estimateTokens(pack.RenderedPrompt)
+    }
+
+    // 7) Cache by (repo_rev, beadID, agentType)
     cacheContextPack(pack)
 
     return pack, nil
@@ -3197,36 +3328,36 @@ These foundational components make all Tier 0 integrations faster and safer to i
   - tmux version and configuration
   - PATH wrapper status
 
-### Phase 0: Critical Tier 0 (Week 1)
+### Phase 0: Critical Tier 0 (Highest Priority)
 
-**Day 1-2: Agent Mail Macros**
+**Agent Mail Macros**
 - [ ] Implement `macro_start_session` wrapper
 - [ ] Implement `macro_prepare_thread` wrapper
 - [ ] Update spawn workflow to use macros
 - [ ] Test one-call vs multi-call performance
 
-**Day 2-3: BV Mega-Commands**
+**BV Mega-Commands**
 - [ ] Implement `-robot-triage` integration
 - [ ] Replace 4-call pattern with 1-call
 - [ ] Add `-robot-markdown` for token savings
 - [ ] Update assign workflow
 
-**Day 3-4: Destructive Command Protection**
+**Destructive Command Protection**
 - [ ] Create safety hook script
 - [ ] Implement auto-install during spawn
 - [ ] Add blocked command logging
 - [ ] Test with common destructive patterns
 
-**Day 4-5: File Reservation Lifecycle**
+**File Reservation Lifecycle**
 - [ ] Implement reserve-before-assign
 - [ ] Implement release-after-complete
-- [ ] Implement force-release for stale
+- [ ] Implement force-release for stale (with approval workflow)
 - [ ] Add pre-commit guard installation
 
-### Phase 1: Remaining Tier 0 (Week 2)
+### Phase 1: Remaining Tier 0 (High Priority)
 
 **CM Server Mode**
-- [ ] Implement daemon launcher
+- [ ] Implement daemon launcher (via Supervisor)
 - [ ] Create HTTP client
 - [ ] Add outcome feedback
 - [ ] Test performance improvement
@@ -3235,22 +3366,23 @@ These foundational components make all Tier 0 integrations faster and safer to i
 - [ ] Implement active monitoring
 - [ ] Add digest generation
 - [ ] Implement conflict resolution
-- [ ] Add work assignment
+- [ ] Add work assignment with score-based scheduling
 
 **BD Integration**
 - [ ] Implement BD message client
-- [ ] Implement BD daemon control
-- [ ] Add unified messaging
+- [ ] Implement BD daemon control (via Supervisor)
+- [ ] Add unified messaging with deduplication
 - [ ] Auto-start daemon on spawn
 
-### Phase 2: Tier 1 Integrations (Weeks 3-4)
+### Phase 2: Tier 1 Integrations
 
 - [ ] CASS historical context injection
-- [ ] s2p context preparation
+- [ ] s2p context preparation with token budgets
 - [ ] UBS agent notifications
 - [ ] Remaining BV robot modes
+- [ ] Git worktree isolation (optional, high-leverage)
 
-### Phase 3: Tier 2-3 Integrations (Month 2)
+### Phase 3: Tier 2-3 Integrations
 
 - [ ] CAAM account management
 - [ ] CM memory rule injection
@@ -3355,18 +3487,25 @@ Fake binaries in `testdata/faketools/` that simulate tool behavior:
 ```bash
 # testdata/faketools/bv - Fake bv for testing
 #!/bin/bash
-case "$1" in
-    "-robot-triage")
+
+# Handle combined arguments properly
+ALL_ARGS="$*"
+
+case "$ALL_ARGS" in
+    *"-robot-triage"*)
         cat testdata/fixtures/bv_triage_response.json
         ;;
-    "-robot-triage" | "--json")
-        cat testdata/fixtures/bv_triage_response.json
+    *"-robot-markdown"*)
+        cat testdata/fixtures/bv_markdown_response.md
         ;;
-    "--version")
+    *"-robot-alerts"*)
+        cat testdata/fixtures/bv_alerts_response.json
+        ;;
+    "--version"|"-v")
         echo "bv version 0.31.0 (fake)"
         ;;
     *)
-        echo "Unknown command: $*" >&2
+        echo "Unknown command: $ALL_ARGS" >&2
         exit 1
         ;;
 esac
@@ -3477,7 +3616,7 @@ func TestApprovalWorkflow(t *testing.T) {
 
 ---
 
-*Document generated: 2025-01-03*
+*Document generated: 2026-01-03*
 *NTM Version: v1.3.0*
 *Ecosystem: Dicklesworthstone Stack v1.0*
 *Research depth: Tier 0 Critical Discovery + Architectural Review*
