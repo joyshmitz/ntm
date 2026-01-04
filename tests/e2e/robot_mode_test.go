@@ -482,11 +482,14 @@ claude = "bash"
 	_, _ = logger.Exec("ntm", "--config", configPath, "spawn", session, "--cc=1", "--safety")
 	time.Sleep(500 * time.Millisecond)
 
+	// Verify session was created
+	testutil.AssertSessionExists(t, logger, session)
+
 	// Test robot-send
 	marker := fmt.Sprintf("ROBOT_SEND_MARKER_%d", time.Now().UnixNano())
 	logger.LogSection("robot-send")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath,
-		"--robot-send", session, "--msg", fmt.Sprintf("echo %s", marker), "--cc")
+		"--robot-send", session, "--msg", fmt.Sprintf("echo %s", marker), "--type=cc")
 	logger.Log("robot-send output: %s", string(out))
 
 	var sendPayload struct {
@@ -586,6 +589,9 @@ claude = "bash"
 	logger.LogSection("spawn session for interrupt test")
 	_, _ = logger.Exec("ntm", "--config", configPath, "spawn", session, "--cc=1", "--safety")
 	time.Sleep(500 * time.Millisecond)
+
+	// Verify session was created
+	testutil.AssertSessionExists(t, logger, session)
 
 	// Test robot-interrupt
 	logger.LogSection("robot-interrupt")
