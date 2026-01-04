@@ -175,7 +175,7 @@ func (rm *RecoveryManager) SendRecoveryPromptByID(session string, paneIndex int,
 			Session:     session,
 			PaneIndex:   paneIndex,
 			SentAt:      now,
-			Prompt:      rm.prompt,
+			Prompt:      prompt,
 			TriggerText: triggerText,
 		})
 		rm.pruneEvents()

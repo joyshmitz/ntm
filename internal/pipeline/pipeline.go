@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -31,7 +32,7 @@ func Execute(ctx context.Context, p Pipeline) error {
 	detector := status.NewDetector()
 
 	for i, stage := range p.Stages {
-		fmt.Printf("Stage %d/%d [%s]: %s\n", i+1, len(p.Stages), stage.AgentType, truncate(stage.Prompt, 50))
+		log.Printf("Stage %d/%d [%s]: %s", i+1, len(p.Stages), stage.AgentType, truncate(stage.Prompt, 50))
 
 		// 1. Find a suitable pane
 		paneID, err := findPaneForStage(p.Session, stage.AgentType, stage.Model)
@@ -68,11 +69,11 @@ func Execute(ctx context.Context, p Pipeline) error {
 		time.Sleep(2 * time.Second)
 
 		// 5. Wait for idle state
-		fmt.Printf("  Waiting for agent...")
+		log.Printf("  Waiting for agent...")
 		if err := waitForIdle(ctx, detector, paneID); err != nil {
 			return fmt.Errorf("stage %d waiting for completion: %w", i+1, err)
 		}
-		fmt.Println(" Done.")
+		log.Printf("  Done.")
 
 		// 6. Capture output
 		// We capture a larger buffer to ensure we get the full response.

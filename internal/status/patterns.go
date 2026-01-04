@@ -3,6 +3,7 @@ package status
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // ansiEscapeRegex matches ANSI escape sequences for stripping
@@ -21,6 +22,9 @@ type PromptPattern struct {
 	// Description explains what this pattern matches (for debugging)
 	Description string
 }
+
+// promptPatternsMu protects promptPatterns from concurrent access.
+var promptPatternsMu sync.RWMutex
 
 // promptPatterns contains all known prompt patterns for agent types
 var promptPatterns = []PromptPattern{
@@ -71,6 +75,9 @@ func IsPromptLine(line string, agentType string) bool {
 	}
 
 	// Try agent-specific patterns first, then generic ones
+	promptPatternsMu.RLock()
+	defer promptPatternsMu.RUnlock()
+
 	for _, p := range promptPatterns {
 		// Skip patterns for other agent types
 		if p.AgentType != "" && p.AgentType != agentType {
@@ -167,12 +174,16 @@ func GetLastNonEmptyLine(output string) string {
 	return ""
 }
 
-// AddPromptPattern allows adding custom prompt patterns at runtime
+// AddPromptPattern allows adding custom prompt patterns at runtime.
+// It is thread-safe and can be called concurrently with detection functions.
 func AddPromptPattern(agentType string, pattern string, description string) error {
 	regex, err := regexp.Compile(pattern)
 	if err != nil {
 		return err
 	}
+
+	promptPatternsMu.Lock()
+	defer promptPatternsMu.Unlock()
 
 	promptPatterns = append(promptPatterns, PromptPattern{
 		AgentType:   agentType,

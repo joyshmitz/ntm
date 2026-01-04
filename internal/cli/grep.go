@@ -362,11 +362,11 @@ func outputMatchingPanes(panes map[string]bool) error {
 
 // highlightMatch highlights the matched portion in the line
 func highlightMatch(line, pattern string, t theme.Theme) string {
-	// Simple highlighting - wrap matches in color codes
-	re, err := regexp.Compile("(?i)(" + regexp.QuoteMeta(pattern) + ")")
+	// Try raw pattern first (matches what the search actually uses)
+	re, err := regexp.Compile("(?i)(" + pattern + ")")
 	if err != nil {
-		// If pattern is complex regex, try direct compile
-		re, err = regexp.Compile("(?i)(" + pattern + ")")
+		// If pattern fails to compile as regex, use escaped literal
+		re, err = regexp.Compile("(?i)(" + regexp.QuoteMeta(pattern) + ")")
 		if err != nil {
 			return line // Can't highlight, return as-is
 		}
