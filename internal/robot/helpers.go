@@ -11,8 +11,3 @@ func mustGetwd() string {
 	}
 	return wd
 }
-
-func hostname() string {
-	h, _ := os.Hostname()
-	return h
-}

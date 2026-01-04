@@ -3,9 +3,7 @@
 package robot
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -280,11 +278,4 @@ func generateDescription(name string) string {
 	}
 
 	return desc
-}
-
-// outputJSON encodes value as pretty-printed JSON to stdout.
-func outputSchemaJSON(v interface{}) error {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(v)
 }
