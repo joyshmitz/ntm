@@ -2130,6 +2130,408 @@ retention_days = 90        # Delete entries older than this
 
 ---
 
+## Work Distribution
+
+NTM integrates with bv (Beads Viewer) to provide intelligent work distribution based on dependency graph analysis. The `ntm work` commands help you prioritize tasks, identify bottlenecks, and distribute work effectively across agents.
+
+### Triage Analysis
+
+Get a complete triage analysis with prioritized recommendations:
+
+```bash
+ntm work triage              # Full triage with recommendations
+ntm work triage --by-label   # Group by label/domain
+ntm work triage --by-track   # Group by execution track
+ntm work triage --quick      # Show only quick wins
+ntm work triage --health     # Include project health metrics
+ntm work triage --json       # Machine-readable output
+```
+
+The triage analysis includes:
+- **Recommendations**: Ranked actionable items with impact scores
+- **Quick Wins**: Low-effort, high-impact items to tackle first
+- **Bottlenecks**: Issues blocking the most downstream work
+- **Project Health**: Status distributions, graph metrics
+
+### Alerts
+
+Monitor for drift and proactive issues:
+
+```bash
+ntm work alerts                      # All alerts
+ntm work alerts --critical-only      # Only critical alerts
+ntm work alerts --type=stale_issue   # Filter by type
+ntm work alerts --label=backend      # Filter by label
+```
+
+Alert types include:
+- **Stale Issues**: Items untouched for too long
+- **Priority Drift**: Urgency mismatches vs. actual impact
+- **Blocking Cascades**: Single issues blocking many others
+- **Cycle Detection**: Circular dependencies that need breaking
+
+### Semantic Search
+
+Search across issues and their context:
+
+```bash
+ntm work search "JWT authentication"  # Semantic search
+ntm work search "rate limiting" -n 20 # Limit results
+ntm work search "API" --label=backend # Filter by label
+```
+
+### Impact Analysis
+
+Analyze the impact of specific files or changes:
+
+```bash
+ntm work impact src/api/*.go          # Impact of API files
+ntm work impact --show-graph          # Include dependency visualization
+```
+
+### Next Action
+
+Get the single best next action:
+
+```bash
+ntm work next                         # Top recommendation + claim command
+ntm work next --json                  # Machine-readable
+```
+
+This returns the highest-impact, unblocked item with a ready-to-run `bd update` command to claim it.
+
+---
+
+## Safety System
+
+NTM includes a safety system that blocks or warns about dangerous commands that could cause data loss or other irreversible damage. This is particularly important when AI agents are running autonomously.
+
+### Protected Commands
+
+The safety system recognizes dangerous patterns including:
+
+| Pattern | Risk | Action |
+|---------|------|--------|
+| `git reset --hard` | Loses uncommitted changes | Block |
+| `git push --force` | Overwrites remote history | Block |
+| `rm -rf /` | Catastrophic deletion | Block |
+| `git clean -fd` | Deletes untracked files | Approval required |
+| `DROP TABLE` | Database destruction | Block |
+
+### Status and Configuration
+
+```bash
+ntm safety status              # Show protection status
+ntm safety blocked             # View blocked command history
+ntm safety blocked --hours=24  # Blocked commands in last 24h
+ntm safety check "git reset --hard HEAD~1"  # Test a command
+```
+
+### Installation
+
+Install safety wrappers and hooks:
+
+```bash
+ntm safety install             # Install git wrapper + Claude hook
+ntm safety install --force     # Overwrite existing
+ntm safety uninstall           # Remove all safety components
+```
+
+When installed, the safety system:
+1. **Git Wrapper**: Intercepts dangerous git commands before execution
+2. **Claude Hook**: Integrates with Claude Code's PreToolUse hooks
+3. **Policy Engine**: Evaluates commands against configurable rules
+
+### Custom Policy
+
+Create a custom policy in `~/.ntm/policy.yaml`:
+
+```yaml
+rules:
+  - pattern: "rm -rf ${HOME}"
+    action: block
+    reason: "Prevents accidental home directory deletion"
+
+  - pattern: "git push.*--force"
+    action: approval
+    reason: "Force push requires explicit confirmation"
+
+  - pattern: "npm publish"
+    action: approval
+    reason: "Publishing requires review"
+```
+
+Actions:
+- **block**: Immediately reject the command
+- **approval**: Require explicit confirmation
+- **warn**: Log a warning but allow execution
+- **allow**: Explicitly permit (overrides default rules)
+
+### Policy Management
+
+```bash
+ntm policy show                # Display current policy
+ntm policy show --all          # Include default rules
+ntm policy validate            # Check policy syntax
+ntm policy reset               # Reset to defaults
+ntm policy edit                # Open in $EDITOR
+```
+
+---
+
+## Configuration Management
+
+NTM provides commands for inspecting and managing your configuration.
+
+### Viewing Configuration
+
+```bash
+ntm config show                # Display effective configuration
+ntm config show --json         # JSON output
+```
+
+### Comparing with Defaults
+
+See what you've customized:
+
+```bash
+ntm config diff                # Show differences from defaults
+ntm config diff --json         # Machine-readable diff
+```
+
+Example output:
+```
+Configuration differences from defaults:
+
+  projects_base: ~/Developer (default: /data/projects)
+  tmux.default_panes: 12 (default: 10)
+  context_rotation.warning_threshold: 0.85 (default: 0.8)
+```
+
+### Validation
+
+Check your configuration for errors:
+
+```bash
+ntm config validate            # Validate current config
+ntm config validate --json     # Machine-readable output
+```
+
+Validation checks:
+- Syntax errors in TOML
+- Invalid threshold values (e.g., > 1.0 for percentages)
+- Missing required fields
+- Path existence for critical directories
+- Agent command validity
+
+### Getting Specific Values
+
+Retrieve individual configuration values:
+
+```bash
+ntm config get projects_base                    # Get single value
+ntm config get context_rotation.warning_threshold
+ntm config get agents.claude                    # Get agent command
+ntm config get --json                           # All config as JSON
+```
+
+### Editing Configuration
+
+```bash
+ntm config edit                # Open in $EDITOR
+```
+
+### Reset to Defaults
+
+```bash
+ntm config reset               # Requires --confirm
+ntm config reset --confirm     # Actually reset
+```
+
+---
+
+## Pipeline Workflows
+
+NTM supports YAML-defined workflows for complex multi-step operations. Pipelines can orchestrate agents, run commands, and manage dependencies.
+
+### Defining a Pipeline
+
+Create `.ntm/pipelines/` or use built-in pipelines:
+
+```yaml
+# .ntm/pipelines/review.yaml
+name: code-review
+description: Comprehensive code review workflow
+
+variables:
+  branch: main
+
+steps:
+  - id: fetch
+    name: Fetch latest changes
+    command: git fetch origin ${branch}
+
+  - id: analyze
+    name: Static analysis
+    command: ubs .
+    continue_on_error: true
+
+  - id: review
+    name: AI code review
+    agent: claude
+    prompt: |
+      Review the changes in this branch. Focus on:
+      1. Security vulnerabilities
+      2. Performance issues
+      3. Code quality
+    depends_on: [fetch, analyze]
+
+  - id: tests
+    name: Run tests
+    command: go test ./...
+    parallel: true
+    depends_on: [fetch]
+
+  - id: summary
+    name: Generate summary
+    agent: claude
+    prompt: "Summarize the review findings and test results."
+    depends_on: [review, tests]
+```
+
+### Running Pipelines
+
+```bash
+ntm pipeline run review                    # Run the review pipeline
+ntm pipeline run review --dry-run          # Show what would happen
+ntm pipeline run review --var branch=dev   # Override variables
+ntm pipeline run review --stage=analyze    # Run specific stage only
+```
+
+### Pipeline Commands
+
+```bash
+ntm pipeline list                          # List available pipelines
+ntm pipeline status                        # Show running pipelines
+ntm pipeline status --watch                # Live status updates
+ntm pipeline cancel <run-id>               # Cancel a running pipeline
+```
+
+### Step Types
+
+| Type | Description |
+|------|-------------|
+| `command` | Shell command execution |
+| `agent` | Send prompt to AI agent |
+| `parallel` | Run steps in parallel |
+| `loop` | Iterate over items |
+| `conditional` | Execute based on condition |
+
+### Dependency Resolution
+
+Pipelines use topological sorting to resolve dependencies:
+- Steps with `depends_on` wait for dependencies
+- Independent steps can run in parallel
+- Cycle detection prevents infinite loops
+
+---
+
+## Session Persistence
+
+Save and restore complete session state, including agent configurations, prompts, and context.
+
+### Saving Sessions
+
+```bash
+ntm sessions save myproject                # Save current state
+ntm sessions save myproject --name="pre-refactor"  # Named snapshot
+ntm sessions save myproject --include-history      # Include prompt history
+```
+
+Saved state includes:
+- Agent pane configuration (types, counts)
+- Current working directories
+- Recent prompts (optional)
+- Checkpoint references
+- Custom metadata
+
+### Listing Saved Sessions
+
+```bash
+ntm sessions list                          # List all saved sessions
+ntm sessions list --json                   # Machine-readable
+```
+
+### Viewing Session Details
+
+```bash
+ntm sessions show myproject                # Show latest save
+ntm sessions show myproject --name="pre-refactor"  # Specific snapshot
+```
+
+### Restoring Sessions
+
+```bash
+ntm sessions restore myproject             # Restore latest
+ntm sessions restore myproject --name="pre-refactor"  # Specific snapshot
+ntm sessions restore myproject --dry-run   # Preview what would happen
+```
+
+### Deleting Saved Sessions
+
+```bash
+ntm sessions delete myproject --name="old-snapshot"
+ntm sessions delete myproject --all --force  # Delete all snapshots
+```
+
+---
+
+## Recipes
+
+Recipes are predefined operation sequences for common tasks. They combine multiple NTM commands into a single workflow.
+
+### Available Recipes
+
+```bash
+ntm recipes list                           # List all recipes
+ntm recipes list --category=setup          # Filter by category
+ntm recipes show morning-standup           # Show recipe details
+```
+
+### Built-in Recipes
+
+| Recipe | Description |
+|--------|-------------|
+| `morning-standup` | Start day: sync git, triage work, spawn agents |
+| `code-review` | Full review cycle: analyze, review, test |
+| `context-recovery` | Recover from compaction: re-read AGENTS.md, get beads context |
+| `end-of-day` | Save state, commit changes, push, kill session |
+| `fresh-start` | Kill session, clean state, respawn |
+
+### Running Recipes
+
+```bash
+ntm recipes run morning-standup myproject
+ntm recipes run code-review myproject --dry-run
+```
+
+### Custom Recipes
+
+Define custom recipes in `~/.config/ntm/recipes.yaml`:
+
+```yaml
+recipes:
+  - name: my-deploy
+    description: Deploy to staging
+    category: deployment
+    steps:
+      - command: ntm send ${session} --all "Stop current work, we're deploying"
+      - command: git push origin staging
+      - command: ntm send ${session} --cc "Monitor deployment logs"
+```
+
+---
+
 ## Troubleshooting
 
 ### "tmux not found"

@@ -325,7 +325,7 @@ func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-// truncateString truncates a string to maxLen chars with ellipsis, respecting UTF-8 boundaries.
+// truncateString truncates a string to maxLen bytes with ellipsis, respecting UTF-8 boundaries.
 func truncateString(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
@@ -336,12 +336,15 @@ func truncateString(s string, maxLen int) string {
 	if maxLen <= 3 {
 		return "..."[:maxLen]
 	}
-	// Find first rune boundary at or after maxLen-3 bytes
+	// Find the last rune boundary that allows for "..." suffix within maxLen bytes.
 	targetLen := maxLen - 3
+	prevI := 0
 	for i := range s {
-		if i >= targetLen {
-			return s[:i] + "..."
+		if i > targetLen {
+			return s[:prevI] + "..."
 		}
+		prevI = i
 	}
-	return s
+	// All rune starts fit within targetLen
+	return s[:prevI] + "..."
 }

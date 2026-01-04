@@ -168,7 +168,7 @@ func (g *SummaryGenerator) GenerateFallbackSummary(
 	for i := len(recentOutput) - maxOutputs; i < len(recentOutput); i++ {
 		out := recentOutput[i]
 		if len(out) > 500 {
-			out = out[:500] + "..."
+			out = truncateAtRuneBoundary(out, 500) + "..."
 		}
 		sb.WriteString(fmt.Sprintf("```\n%s\n```\n\n", out))
 	}
@@ -358,7 +358,7 @@ func extractLastTask(text string) string {
 		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
 			task := strings.TrimSpace(matches[1])
 			if len(task) > 200 {
-				task = task[:200] + "..."
+				task = truncateAtRuneBoundary(task, 200) + "..."
 			}
 			return task
 		}
@@ -375,17 +375,34 @@ func truncateToTokens(text string, maxTokens int) string {
 		return text
 	}
 
-	// Try to truncate at a sentence boundary
-	truncated := text[:maxChars]
+	// Try to truncate at a sentence boundary, respecting UTF-8
+	truncated := truncateAtRuneBoundary(text, maxChars)
 	lastPeriod := strings.LastIndex(truncated, ".")
 	lastNewline := strings.LastIndex(truncated, "\n")
 
-	cutPoint := maxChars
-	if lastPeriod > maxChars*3/4 {
+	cutPoint := len(truncated)
+	if lastPeriod > cutPoint*3/4 {
 		cutPoint = lastPeriod + 1
-	} else if lastNewline > maxChars*3/4 {
+	} else if lastNewline > cutPoint*3/4 {
 		cutPoint = lastNewline + 1
 	}
 
 	return text[:cutPoint] + "\n\n[Summary truncated due to token limit]"
+}
+
+// truncateAtRuneBoundary truncates a string to at most maxBytes bytes,
+// ensuring the result ends at a valid UTF-8 rune boundary.
+func truncateAtRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Find the last rune boundary at or before maxBytes
+	lastValid := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		lastValid = i
+	}
+	return s[:lastValid]
 }

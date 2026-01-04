@@ -306,12 +306,21 @@ func getNewContent(initial, current string) string {
 	return current[len(initial):]
 }
 
-// truncateForMatch truncates message to first line or first 50 chars for matching
+// truncateForMatch truncates message to first line or first 50 bytes for matching,
+// respecting UTF-8 boundaries.
 func truncateForMatch(message string) string {
 	lines := strings.SplitN(message, "\n", 2)
 	msg := lines[0]
 	if len(msg) > 50 {
-		msg = msg[:50]
+		// Find the last rune boundary at or before 50 bytes
+		lastValid := 0
+		for i := range msg {
+			if i > 50 {
+				break
+			}
+			lastValid = i
+		}
+		msg = msg[:lastValid]
 	}
 	return msg
 }
