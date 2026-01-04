@@ -238,6 +238,11 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionAgents handles /api/sessions/{id}/agents.
 func (s *Server) handleSessionAgents(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if s.stateStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "state store not available")
+		return
+	}
+
 	agents, err := s.stateStore.ListAgents(sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
