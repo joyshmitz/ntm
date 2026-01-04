@@ -3,7 +3,13 @@ package output
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // Text outputs plain text to the formatter's writer
@@ -153,4 +159,202 @@ func Pluralize(count int, singular, plural string) string {
 // CountStr returns "N item(s)" string
 func CountStr(count int, singular, plural string) string {
 	return fmt.Sprintf("%d %s", count, Pluralize(count, singular, plural))
+}
+
+// StyledTable provides a styled table with lipgloss rendering.
+// Uses theme colors for headers, borders, and status badges.
+type StyledTable struct {
+	writer   io.Writer
+	headers  []string
+	rows     [][]string
+	widths   []int
+	useColor bool
+	footer   string
+
+	// Style options
+	ShowBorder bool
+	Compact    bool
+}
+
+// NewStyledTable creates a new styled table for stdout.
+func NewStyledTable(headers ...string) *StyledTable {
+	return NewStyledTableWriter(os.Stdout, headers...)
+}
+
+// NewStyledTableWriter creates a styled table with a custom writer.
+func NewStyledTableWriter(w io.Writer, headers ...string) *StyledTable {
+	useColor := false
+	if f, ok := w.(*os.File); ok {
+		useColor = term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == ""
+	}
+
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+
+	return &StyledTable{
+		writer:     w,
+		headers:    headers,
+		rows:       [][]string{},
+		widths:     widths,
+		useColor:   useColor,
+		ShowBorder: false,
+		Compact:    false,
+	}
+}
+
+// AddRow adds a row to the styled table.
+func (t *StyledTable) AddRow(cols ...string) *StyledTable {
+	for i, c := range cols {
+		if i < len(t.widths) && len(c) > t.widths[i] {
+			t.widths[i] = len(c)
+		}
+	}
+	t.rows = append(t.rows, cols)
+	return t
+}
+
+// WithFooter adds a footer message below the table.
+func (t *StyledTable) WithFooter(footer string) *StyledTable {
+	t.footer = footer
+	return t
+}
+
+// WithBorder enables border rendering.
+func (t *StyledTable) WithBorder(show bool) *StyledTable {
+	t.ShowBorder = show
+	return t
+}
+
+// Render outputs the styled table.
+func (t *StyledTable) Render() {
+	if len(t.headers) == 0 {
+		return
+	}
+
+	th := theme.Current()
+
+	// Calculate padding between columns
+	padding := "  "
+	if t.Compact {
+		padding = " "
+	}
+
+	// Build format strings for each column
+	formats := make([]string, len(t.widths))
+	for i, w := range t.widths {
+		formats[i] = fmt.Sprintf("%%-%ds", w)
+	}
+
+	// Header styles
+	headerStyle := lipgloss.NewStyle()
+	if t.useColor {
+		headerStyle = lipgloss.NewStyle().
+			Foreground(th.Text).
+			Bold(true)
+	}
+
+	sepStyle := lipgloss.NewStyle()
+	if t.useColor {
+		sepStyle = lipgloss.NewStyle().Foreground(th.Surface2)
+	}
+
+	// Render header
+	var headerParts []string
+	for i, h := range t.headers {
+		cell := fmt.Sprintf(formats[i], h)
+		if t.useColor {
+			cell = headerStyle.Render(cell)
+		}
+		headerParts = append(headerParts, cell)
+	}
+	fmt.Fprintf(t.writer, "  %s\n", strings.Join(headerParts, padding))
+
+	// Render separator
+	var sepParts []string
+	for _, w := range t.widths {
+		sep := strings.Repeat("─", w)
+		if t.useColor {
+			sep = sepStyle.Render(sep)
+		}
+		sepParts = append(sepParts, sep)
+	}
+	fmt.Fprintf(t.writer, "  %s\n", strings.Join(sepParts, padding))
+
+	// Render rows
+	for _, row := range t.rows {
+		var rowParts []string
+		for i := range t.headers {
+			var cell string
+			if i < len(row) {
+				cell = fmt.Sprintf(formats[i], row[i])
+			} else {
+				cell = fmt.Sprintf(formats[i], "")
+			}
+			rowParts = append(rowParts, cell)
+		}
+		fmt.Fprintf(t.writer, "  %s\n", strings.Join(rowParts, padding))
+	}
+
+	// Render footer if present
+	if t.footer != "" {
+		fmt.Fprintln(t.writer)
+		if t.useColor {
+			footerStyle := lipgloss.NewStyle().Foreground(th.Subtext)
+			fmt.Fprintln(t.writer, footerStyle.Render(t.footer))
+		} else {
+			fmt.Fprintln(t.writer, t.footer)
+		}
+	}
+}
+
+// RowCount returns the number of data rows.
+func (t *StyledTable) RowCount() int {
+	return len(t.rows)
+}
+
+// StatusBadge returns a styled status indicator.
+// Common statuses: "active", "idle", "busy", "error", "warning"
+func StatusBadge(status string) string {
+	th := theme.Current()
+
+	var color lipgloss.Color
+	switch strings.ToLower(status) {
+	case "active", "running", "ok", "ready":
+		color = th.Green
+	case "idle", "waiting", "pending":
+		color = th.Yellow
+	case "busy", "working", "processing":
+		color = th.Blue
+	case "error", "failed", "stopped":
+		color = th.Error
+	case "warning", "warn":
+		color = th.Warning
+	default:
+		color = th.Overlay
+	}
+
+	style := lipgloss.NewStyle().Foreground(color)
+	return style.Render(status)
+}
+
+// AgentBadge returns a styled agent type badge with consistent colors.
+func AgentBadge(agentType string) string {
+	th := theme.Current()
+
+	var color lipgloss.Color
+	switch strings.ToLower(agentType) {
+	case "claude", "cc":
+		color = th.Mauve // Purple for Claude
+	case "codex", "cod":
+		color = th.Green // Green for Codex
+	case "gemini", "gmi":
+		color = th.Blue // Blue for Gemini
+	default:
+		color = th.Overlay
+	}
+
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	return style.Render(agentType)
 }

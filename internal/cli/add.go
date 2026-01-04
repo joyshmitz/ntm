@@ -482,5 +482,8 @@ func runAdd(opts AddOptions) error {
 	}
 
 	fmt.Printf("✓ Added %d agent(s) (total %d panes now)\n", totalAgents, len(panes)+totalAgents)
+
+	// Show "What's next?" suggestions
+	output.SuccessFooter(output.AddSuggestions(session, totalAgents)...)
 	return nil
 }

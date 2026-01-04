@@ -18,6 +18,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
+	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/prompt"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/templates"
@@ -907,6 +908,8 @@ func runSendInternal(opts SendOptions) error {
 		if failed > 0 && histErr == nil {
 			histErr = fmt.Errorf("%d pane(s) failed", failed)
 		}
+		// Show "What's next?" suggestions
+		output.SuccessFooter(output.SendSuggestions(session)...)
 	}
 
 	return nil

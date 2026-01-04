@@ -271,3 +271,54 @@ func PaneNotFoundError(session string, index int) *CLIError {
 		WithCode("PANE_NOT_FOUND").
 		WithHint(HintPaneNotFound)
 }
+
+// NoSessionsError creates a no sessions found error with hint
+func NoSessionsError() *CLIError {
+	return NewCLIError("no tmux sessions found").
+		WithCode("NO_SESSIONS").
+		WithHint(HintNoSessions)
+}
+
+// AgentTypeError creates an unknown agent type error with hint
+func AgentTypeError(agentType string) *CLIError {
+	return NewCLIError(fmt.Sprintf("unknown agent type: %s", agentType)).
+		WithCode("UNKNOWN_AGENT_TYPE").
+		WithHint("Valid types: claude (cc), codex (cod), gemini (gmi)")
+}
+
+// PersonaNotFoundError creates a persona not found error with hint
+func PersonaNotFoundError(name string) *CLIError {
+	return NewCLIError(fmt.Sprintf("persona '%s' not found", name)).
+		WithCode("PERSONA_NOT_FOUND").
+		WithHint("Run 'ntm personas list' to see available personas")
+}
+
+// CheckpointNotFoundError creates a checkpoint not found error with hint
+func CheckpointNotFoundError(id, session string) *CLIError {
+	return NewCLIError(fmt.Sprintf("checkpoint '%s' not found in session '%s'", id, session)).
+		WithCode("CHECKPOINT_NOT_FOUND").
+		WithHint("Run 'ntm checkpoint list <session>' to see available checkpoints")
+}
+
+// ConfigLoadError creates a config load error with hint
+func ConfigLoadError(cause string) *CLIError {
+	return NewCLIError("failed to load configuration").
+		WithCode("CONFIG_ERROR").
+		WithCause(cause).
+		WithHint(HintConfigInvalid)
+}
+
+// MultipleSessions creates an ambiguous session error with hint
+func MultipleSessions(sessions []string) *CLIError {
+	return NewCLIError("multiple sessions found, please specify one").
+		WithCode("MULTIPLE_SESSIONS").
+		WithCause(fmt.Sprintf("found sessions: %s", strings.Join(sessions, ", "))).
+		WithHint(HintSessionInference)
+}
+
+// InvalidFlagError creates an invalid flag value error with hint
+func InvalidFlagError(flag, value, expected string) *CLIError {
+	return NewCLIError(fmt.Sprintf("invalid value for --%s: %s", flag, value)).
+		WithCode("INVALID_FLAG").
+		WithHint(fmt.Sprintf("Expected: %s", expected))
+}
