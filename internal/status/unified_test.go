@@ -82,6 +82,24 @@ func TestTruncateOutput(t *testing.T) {
 			maxLen:   10,
 			expected: "",
 		},
+		{
+			name:     "unicode respects rune boundary",
+			input:    "A世界Hello", // 12 bytes: A(1) + 世(3) + 界(3) + Hello(5)
+			maxLen:   8,
+			expected: "界Hello", // Must not cut in middle of 世
+		},
+		{
+			name:     "unicode at exact boundary",
+			input:    "世界",   // 6 bytes: 世(3) + 界(3)
+			maxLen:   3,
+			expected: "界", // Returns last 3-byte character
+		},
+		{
+			name:     "unicode all cut",
+			input:    "世界",
+			maxLen:   1, // Can't fit any character
+			expected: "", // All characters are 3 bytes, none fits
+		},
 	}
 
 	for _, tt := range tests {

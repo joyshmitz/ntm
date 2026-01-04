@@ -203,13 +203,26 @@ func (d *UnifiedDetector) DetectAllContext(ctx context.Context, session string) 
 	return statuses, nil
 }
 
-// truncateOutput returns the last n characters of output
+// truncateOutput returns the last n bytes of output, respecting UTF-8 boundaries.
+// If maxLen falls in the middle of a multi-byte rune, it advances to the next
+// valid rune boundary to avoid producing invalid UTF-8.
 func truncateOutput(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[len(s)-maxLen:]
+
+	// Start position for the tail
+	start := len(s) - maxLen
+
+	// If start is in the middle of a UTF-8 rune, advance to the next rune boundary.
+	// UTF-8 continuation bytes have the form 10xxxxxx (0x80-0xBF).
+	// We need to find the next byte that is NOT a continuation byte.
+	for start < len(s) && s[start]&0xC0 == 0x80 {
+		start++
+	}
+
+	return s[start:]
 }
 
 // GetStateSummary returns a summary of states for a set of statuses
