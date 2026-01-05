@@ -76,6 +76,12 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+// DB returns the underlying database connection for direct access.
+// Use with caution - prefer using Store methods when possible.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Tx represents a transaction.
 type Tx struct {
 	tx *sql.Tx

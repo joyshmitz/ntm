@@ -1259,6 +1259,7 @@ func init() {
 		newActivityCmd(),
 		newHistoryCmd(),
 		newAnalyticsCmd(),
+		newMetricsCmd(),
 		newWorkCmd(),
 
 		// Internal commands
