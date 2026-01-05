@@ -1644,3 +1644,215 @@ func TestRobotReplayDryRunFlag(t *testing.T) {
 		t.Errorf("expected success=false for nonexistent history ID even in dry run")
 	}
 }
+
+// =============================================================================
+// --robot-palette tests (ntm-yyvm: E2E test with category and search filters)
+// =============================================================================
+
+func TestRobotPaletteBasic(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLoggerStdout(t)
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette")
+
+	var payload struct {
+		Success    bool     `json:"success"`
+		Timestamp  string   `json:"timestamp"`
+		Session    string   `json:"session,omitempty"`
+		Commands   []struct {
+			Key      string `json:"key"`
+			Label    string `json:"label"`
+			Category string `json:"category"`
+			Prompt   string `json:"prompt"`
+		} `json:"commands"`
+		Favorites  []string `json:"favorites"`
+		Pinned     []string `json:"pinned"`
+		Recent     []struct {
+			Key     string `json:"key"`
+			UsedAt  string `json:"used_at"`
+			Session string `json:"session"`
+			Success bool   `json:"success"`
+		} `json:"recent"`
+		Categories []string    `json:"categories"`
+		AgentHints *struct {
+			Summary string   `json:"summary"`
+			Notes   []string `json:"notes,omitempty"`
+		} `json:"_agent_hints,omitempty"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v\nOutput: %s", err, string(out))
+	}
+
+	if !payload.Success {
+		t.Errorf("expected success=true")
+	}
+	// Commands should be an array (may be empty if no palette configured)
+	if payload.Commands == nil {
+		t.Errorf("commands should be an array, not nil")
+	}
+	// Favorites and Recent should be arrays
+	if payload.Favorites == nil {
+		t.Errorf("favorites should be an array, not nil")
+	}
+	if payload.Recent == nil {
+		t.Errorf("recent should be an array, not nil")
+	}
+	if payload.Categories == nil {
+		t.Errorf("categories should be an array, not nil")
+	}
+}
+
+func TestRobotPaletteCategoryFilter(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLoggerStdout(t)
+	// Test with a category filter - may or may not find commands
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette", "--palette-category=quick")
+
+	var payload struct {
+		Success  bool `json:"success"`
+		Commands []struct {
+			Category string `json:"category"`
+		} `json:"commands"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if !payload.Success {
+		t.Errorf("expected success=true")
+	}
+	// If there are commands, they should all match the category filter
+	for _, cmd := range payload.Commands {
+		if cmd.Category != "quick" {
+			t.Errorf("expected category='quick', got %q", cmd.Category)
+		}
+	}
+}
+
+func TestRobotPaletteSearchFilter(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLoggerStdout(t)
+	// Test with a search filter
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette", "--palette-search=test")
+
+	var payload struct {
+		Success  bool `json:"success"`
+		Commands []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		} `json:"commands"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if !payload.Success {
+		t.Errorf("expected success=true")
+	}
+	// If there are commands, they should match the search term in key or label
+	for _, cmd := range payload.Commands {
+		keyMatch := strings.Contains(strings.ToLower(cmd.Key), "test")
+		labelMatch := strings.Contains(strings.ToLower(cmd.Label), "test")
+		if !keyMatch && !labelMatch {
+			t.Errorf("command %q/%q doesn't match search term 'test'", cmd.Key, cmd.Label)
+		}
+	}
+}
+
+func TestRobotPaletteSessionFilter(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+	testutil.RequireTmux(t)
+
+	sessionName := fmt.Sprintf("ntm-test-palette-%d", time.Now().UnixNano())
+	createCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName)
+	if err := createCmd.Run(); err != nil {
+		t.Skipf("Could not create test session: %v", err)
+	}
+	defer func() {
+		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	}()
+
+	logger := testutil.NewTestLoggerStdout(t)
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette", "--palette-session="+sessionName)
+
+	var payload struct {
+		Success bool   `json:"success"`
+		Session string `json:"session"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if !payload.Success {
+		t.Errorf("expected success=true")
+	}
+	if payload.Session != sessionName {
+		t.Errorf("expected session=%q, got %q", sessionName, payload.Session)
+	}
+}
+
+func TestRobotPaletteAgentHints(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLoggerStdout(t)
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette")
+
+	var payload struct {
+		AgentHints *struct {
+			Summary string   `json:"summary"`
+			Notes   []string `json:"notes,omitempty"`
+		} `json:"_agent_hints,omitempty"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if payload.AgentHints == nil {
+		t.Errorf("expected _agent_hints to be present")
+	} else if payload.AgentHints.Summary == "" {
+		t.Errorf("expected _agent_hints.summary to be non-empty")
+	}
+}
+
+func TestRobotPaletteCombinedFilters(t *testing.T) {
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLoggerStdout(t)
+	// Test with both category and search filters
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--robot-palette", "--palette-category=quick", "--palette-search=fix")
+
+	var payload struct {
+		Success  bool `json:"success"`
+		Commands []struct {
+			Key      string `json:"key"`
+			Label    string `json:"label"`
+			Category string `json:"category"`
+		} `json:"commands"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if !payload.Success {
+		t.Errorf("expected success=true")
+	}
+	// If there are commands, they should match both filters
+	for _, cmd := range payload.Commands {
+		if cmd.Category != "quick" {
+			t.Errorf("expected category='quick', got %q", cmd.Category)
+		}
+		keyMatch := strings.Contains(strings.ToLower(cmd.Key), "fix")
+		labelMatch := strings.Contains(strings.ToLower(cmd.Label), "fix")
+		if !keyMatch && !labelMatch {
+			t.Errorf("command %q/%q doesn't match search term 'fix'", cmd.Key, cmd.Label)
+		}
+	}
+}
