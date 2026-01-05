@@ -45,6 +45,188 @@ type GitHubAsset struct {
 	ContentType        string `json:"content_type"`
 }
 
+// assetInfo contains parsed information about a release asset
+type assetInfo struct {
+	Name      string `json:"name"`
+	OS        string `json:"os,omitempty"`
+	Arch      string `json:"arch,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Extension string `json:"extension,omitempty"`
+	Match     string `json:"match"` // "exact", "close", "none"
+	Reason    string `json:"reason,omitempty"`
+}
+
+// upgradeError provides structured diagnostic information when asset lookup fails
+type upgradeError struct {
+	Platform        string      `json:"platform"`
+	Convention      string      `json:"convention"`
+	TriedNames      []string    `json:"tried_names"`
+	AvailableAssets []assetInfo `json:"available_assets"`
+	ReleaseURL      string      `json:"release_url"`
+	ClosestMatch    *assetInfo  `json:"closest_match,omitempty"`
+}
+
+// Error implements the error interface with a styled diagnostic output
+func (e *upgradeError) Error() string {
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa"))
+
+	var sb strings.Builder
+
+	// Header box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#f38ba8")).
+		Padding(0, 1).
+		Width(66)
+
+	headerContent := fmt.Sprintf("%s\n\n", errorStyle.Render("Upgrade Asset Lookup Failed"))
+	headerContent += fmt.Sprintf("  Platform:      %s\n", e.Platform)
+	headerContent += fmt.Sprintf("  Convention:    %s\n", e.Convention)
+	headerContent += fmt.Sprintf("  Tried:         %s", e.TriedNames[0])
+	for _, name := range e.TriedNames[1:] {
+		headerContent += fmt.Sprintf("\n                 %s", name)
+	}
+	headerContent += fmt.Sprintf("\n  Found:         %s", errorStyle.Render("[none matching]"))
+
+	sb.WriteString(boxStyle.Render(headerContent))
+	sb.WriteString("\n\n")
+
+	// Available assets with annotations
+	sb.WriteString("Available release assets:\n")
+	for _, asset := range e.AvailableAssets {
+		var marker, suffix string
+		switch asset.Match {
+		case "close":
+			marker = warnStyle.Render("≈")
+			suffix = warnStyle.Render(" ← closest match")
+		default:
+			marker = dimStyle.Render("✗")
+		}
+		platformInfo := ""
+		if asset.OS != "" && asset.Arch != "" {
+			platformInfo = fmt.Sprintf(" (%s/%s)", asset.OS, asset.Arch)
+		}
+		sb.WriteString(fmt.Sprintf("  %s %s%s%s\n", marker, asset.Name, dimStyle.Render(platformInfo), suffix))
+	}
+	sb.WriteString("\n")
+
+	// Troubleshooting hints
+	sb.WriteString(hintStyle.Render("This usually indicates a naming convention mismatch between:"))
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  • %s (how assets are built)\n", dimStyle.Render(".goreleaser.yaml")))
+	sb.WriteString(fmt.Sprintf("  • %s (how assets are found)\n", dimStyle.Render("internal/cli/upgrade.go")))
+	sb.WriteString("\n")
+
+	sb.WriteString(hintStyle.Render("To diagnose:"))
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  1. Run: %s\n", dimStyle.Render("go test -v -run TestUpgradeAssetNaming ./internal/cli/")))
+	sb.WriteString(fmt.Sprintf("  2. Check: %s\n", dimStyle.Render(e.ReleaseURL)))
+	sb.WriteString("  3. Compare asset names against expected patterns above\n")
+	sb.WriteString("\n")
+
+	// Self-service links
+	sb.WriteString(hintStyle.Render("Resources:"))
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  • Releases: %s\n", dimStyle.Render("https://github.com/Dicklesworthstone/ntm/releases")))
+	sb.WriteString(fmt.Sprintf("  • Report issue: %s\n", dimStyle.Render("https://github.com/Dicklesworthstone/ntm/issues/new")))
+
+	return sb.String()
+}
+
+// JSON returns a machine-readable JSON representation of the error
+func (e *upgradeError) JSON() string {
+	data, _ := json.MarshalIndent(e, "", "  ")
+	return string(data)
+}
+
+// parseAssetInfo extracts OS/arch information from an asset name
+func parseAssetInfo(name, targetOS, targetArch, targetVersion string) assetInfo {
+	info := assetInfo{Name: name, Match: "none"}
+
+	// Common extensions
+	ext := ""
+	for _, suffix := range []string{".tar.gz", ".zip", ".exe"} {
+		if strings.HasSuffix(name, suffix) {
+			ext = suffix
+			break
+		}
+	}
+	info.Extension = ext
+
+	// Parse ntm_VERSION_OS_ARCH.ext or ntm_OS_ARCH patterns
+	baseName := strings.TrimSuffix(name, ext)
+	parts := strings.Split(baseName, "_")
+
+	if len(parts) >= 3 && parts[0] == "ntm" {
+		// Could be ntm_VERSION_OS_ARCH or ntm_OS_ARCH
+		if len(parts) == 4 {
+			// ntm_VERSION_OS_ARCH
+			info.Version = parts[1]
+			info.OS = parts[2]
+			info.Arch = parts[3]
+		} else if len(parts) == 3 {
+			// ntm_OS_ARCH (no version)
+			info.OS = parts[1]
+			info.Arch = parts[2]
+		}
+	}
+
+	// Determine match quality
+	if info.OS == targetOS {
+		if info.Arch == targetArch {
+			// Exact architecture match
+			info.Match = "exact"
+		} else if targetArch == "all" && (info.Arch == "arm64" || info.Arch == "amd64") {
+			// We want universal ("all"), but found specific arch - close match
+			info.Match = "close"
+			info.Reason = fmt.Sprintf("same OS, specific arch (got %s, want universal)", info.Arch)
+		} else if info.Arch == "all" {
+			// We want specific arch, but found universal - close match (universal should work)
+			info.Match = "close"
+			info.Reason = fmt.Sprintf("same OS, universal binary available (got all, want %s)", targetArch)
+		} else if info.Arch == "amd64" || info.Arch == "arm64" {
+			// Different specific arch - close match for same OS
+			info.Match = "close"
+			info.Reason = fmt.Sprintf("same OS, different arch (got %s, want %s)", info.Arch, targetArch)
+		}
+	}
+
+	return info
+}
+
+// newUpgradeError creates a structured upgrade error with diagnostic information
+func newUpgradeError(targetOS, targetArch, version string, triedNames []string, assets []GitHubAsset, releaseURL string) *upgradeError {
+	// Determine target arch (darwin uses "all" for universal binaries)
+	displayArch := targetArch
+	if targetOS == "darwin" {
+		displayArch = "all"
+	}
+
+	err := &upgradeError{
+		Platform:   fmt.Sprintf("%s/%s", targetOS, targetArch),
+		Convention: "ntm_{version}_{os}_{arch}.tar.gz",
+		TriedNames: triedNames,
+		ReleaseURL: releaseURL,
+	}
+
+	// Parse and annotate available assets
+	for _, asset := range assets {
+		info := parseAssetInfo(asset.Name, targetOS, displayArch, version)
+		err.AvailableAssets = append(err.AvailableAssets, info)
+
+		// Track closest match
+		if info.Match == "close" && err.ClosestMatch == nil {
+			infoCopy := info
+			err.ClosestMatch = &infoCopy
+		}
+	}
+
+	return err
+}
+
 func newUpgradeCmd() *cobra.Command {
 	var checkOnly bool
 	var force bool
@@ -176,8 +358,15 @@ func runUpgrade(checkOnly, force, yes bool) error {
 	}
 
 	if asset == nil {
-		return fmt.Errorf("no suitable release asset found for %s/%s\nExpected: %s or %s\nAvailable assets: %v",
-			runtime.GOOS, runtime.GOARCH, archiveAssetName, binaryAssetName, getAssetNames(release.Assets))
+		triedNames := []string{archiveAssetName, binaryAssetName}
+		return newUpgradeError(
+			runtime.GOOS,
+			runtime.GOARCH,
+			latestVersion,
+			triedNames,
+			release.Assets,
+			release.HTMLURL,
+		)
 	}
 
 	fmt.Printf("  Download: %s (%s)\n", asset.Name, formatSize(asset.Size))
@@ -321,15 +510,6 @@ func getArchiveAssetName(version string) string {
 		ext = "zip"
 	}
 	return fmt.Sprintf("ntm_%s_%s_%s.%s", version, runtime.GOOS, arch, ext)
-}
-
-// getAssetNames returns a list of asset names for debugging
-func getAssetNames(assets []GitHubAsset) []string {
-	names := make([]string, len(assets))
-	for i, a := range assets {
-		names[i] = a.Name
-	}
-	return names
 }
 
 // downloadFile downloads a file with progress indication

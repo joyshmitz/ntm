@@ -661,12 +661,12 @@ func TestUpgradeAssetNamingContract(t *testing.T) {
 	// 1. GoReleaser config changed and upgrade.go needs updating, or
 	// 2. upgrade.go changed and broke compatibility with GoReleaser output
 	tests := []struct {
-		name            string
-		goos            string
-		goarch          string
-		version         string
-		wantArchive     string
-		wantBinaryName  string
+		name           string
+		goos           string
+		goarch         string
+		version        string
+		wantArchive    string
+		wantBinaryName string
 	}{
 		// macOS uses universal binary "all" instead of specific arch
 		{
@@ -793,6 +793,153 @@ func TestUpgradeAssetNamingConsistency(t *testing.T) {
 
 	// Log for debugging
 	t.Logf("Current platform produces: binary=%q, archive=%q", realBinary, realArchive)
+}
+
+// TestParseAssetInfo tests asset name parsing for upgrade error diagnostics
+func TestParseAssetInfo(t *testing.T) {
+	tests := []struct {
+		name          string
+		assetName     string
+		targetOS      string
+		targetArch    string
+		targetVersion string
+		wantOS        string
+		wantArch      string
+		wantVersion   string
+		wantMatch     string
+	}{
+		{
+			name:          "exact_match_darwin_all",
+			assetName:     "ntm_1.4.1_darwin_all.tar.gz",
+			targetOS:      "darwin",
+			targetArch:    "all",
+			targetVersion: "1.4.1",
+			wantOS:        "darwin",
+			wantArch:      "all",
+			wantVersion:   "1.4.1",
+			wantMatch:     "exact",
+		},
+		{
+			name:          "close_match_darwin_amd64_for_all",
+			assetName:     "ntm_1.4.1_darwin_amd64.tar.gz",
+			targetOS:      "darwin",
+			targetArch:    "all",
+			targetVersion: "1.4.1",
+			wantOS:        "darwin",
+			wantArch:      "amd64",
+			wantVersion:   "1.4.1",
+			wantMatch:     "close",
+		},
+		{
+			name:          "no_match_wrong_os",
+			assetName:     "ntm_1.4.1_linux_amd64.tar.gz",
+			targetOS:      "darwin",
+			targetArch:    "all",
+			targetVersion: "1.4.1",
+			wantOS:        "linux",
+			wantArch:      "amd64",
+			wantVersion:   "1.4.1",
+			wantMatch:     "none",
+		},
+		{
+			name:          "windows_zip",
+			assetName:     "ntm_1.4.1_windows_amd64.zip",
+			targetOS:      "windows",
+			targetArch:    "amd64",
+			targetVersion: "1.4.1",
+			wantOS:        "windows",
+			wantArch:      "amd64",
+			wantVersion:   "1.4.1",
+			wantMatch:     "exact",
+		},
+		{
+			name:          "non_ntm_asset",
+			assetName:     "checksums.txt",
+			targetOS:      "darwin",
+			targetArch:    "all",
+			targetVersion: "1.4.1",
+			wantOS:        "",
+			wantArch:      "",
+			wantVersion:   "",
+			wantMatch:     "none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := parseAssetInfo(tt.assetName, tt.targetOS, tt.targetArch, tt.targetVersion)
+
+			if info.OS != tt.wantOS {
+				t.Errorf("OS = %q, want %q", info.OS, tt.wantOS)
+			}
+			if info.Arch != tt.wantArch {
+				t.Errorf("Arch = %q, want %q", info.Arch, tt.wantArch)
+			}
+			if info.Version != tt.wantVersion {
+				t.Errorf("Version = %q, want %q", info.Version, tt.wantVersion)
+			}
+			if info.Match != tt.wantMatch {
+				t.Errorf("Match = %q, want %q", info.Match, tt.wantMatch)
+			}
+		})
+	}
+}
+
+// TestUpgradeErrorFormat tests the structured upgrade error output
+func TestUpgradeErrorFormat(t *testing.T) {
+	assets := []GitHubAsset{
+		{Name: "ntm_1.4.1_linux_amd64.tar.gz"},
+		{Name: "ntm_1.4.1_linux_arm64.tar.gz"},
+		{Name: "ntm_1.4.1_darwin_amd64.tar.gz"},
+		{Name: "checksums.txt"},
+	}
+
+	triedNames := []string{
+		"ntm_1.4.1_darwin_all.tar.gz",
+		"ntm_darwin_all",
+	}
+
+	err := newUpgradeError(
+		"darwin",
+		"arm64",
+		"1.4.1",
+		triedNames,
+		assets,
+		"https://github.com/Dicklesworthstone/ntm/releases/tag/v1.4.1",
+	)
+
+	errStr := err.Error()
+
+	// Verify key components are present
+	checks := []string{
+		"darwin/arm64",                          // Platform
+		"ntm_{version}_{os}_{arch}.tar.gz",      // Convention
+		"ntm_1.4.1_darwin_all.tar.gz",           // Tried name
+		"ntm_darwin_all",                        // Tried name
+		".goreleaser.yaml",                      // Troubleshooting hint
+		"internal/cli/upgrade.go",               // Troubleshooting hint
+		"TestUpgradeAssetNaming",                // Test command
+		"https://github.com/Dicklesworthstone/", // Links
+		"closest match",                         // Asset annotation
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(errStr, check) {
+			t.Errorf("Error output missing expected text: %q", check)
+		}
+	}
+
+	// Verify JSON output
+	jsonStr := err.JSON()
+	if !strings.Contains(jsonStr, `"platform": "darwin/arm64"`) {
+		t.Error("JSON output missing platform field")
+	}
+	if !strings.Contains(jsonStr, `"closest_match"`) {
+		t.Error("JSON output missing closest_match field")
+	}
+
+	// Log for debugging
+	t.Logf("Error output:\n%s", errStr)
 }
 
 // TestCreateCmdRequiresName tests create command requires session name
