@@ -683,8 +683,9 @@ func (pw *progressWriter) displayProgress() {
 
 // finish clears the progress line and prepares for the checkmark
 func (pw *progressWriter) finish() {
-	if pw.isTTY && pw.total > 0 {
+	if pw.isTTY {
 		// Clear the progress line and reset cursor
+		// Works for both known total (full progress) and unknown total (just bytes)
 		fmt.Printf("\r  Downloading... ")
 	}
 }
