@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1215,4 +1216,123 @@ func TestMultipleSubcommands(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVerifyUpgrade tests the post-upgrade binary verification logic
+func TestVerifyUpgrade(t *testing.T) {
+	tests := []struct {
+		name            string
+		expectedVersion string
+		actualOutput    string
+		shouldFail      bool
+	}{
+		{
+			name:            "exact match",
+			expectedVersion: "1.4.1",
+			actualOutput:    "1.4.1",
+			shouldFail:      false,
+		},
+		{
+			name:            "match with v prefix in expected",
+			expectedVersion: "v1.4.1",
+			actualOutput:    "1.4.1",
+			shouldFail:      false,
+		},
+		{
+			name:            "match with v prefix in actual",
+			expectedVersion: "1.4.1",
+			actualOutput:    "v1.4.1",
+			shouldFail:      false,
+		},
+		{
+			name:            "mismatch major version",
+			expectedVersion: "2.0.0",
+			actualOutput:    "1.4.1",
+			shouldFail:      true,
+		},
+		{
+			name:            "mismatch minor version",
+			expectedVersion: "1.5.0",
+			actualOutput:    "1.4.1",
+			shouldFail:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Test version comparison logic directly
+			normalizedExpected := normalizeVersion(tc.expectedVersion)
+			normalizedActual := normalizeVersion(tc.actualOutput)
+
+			// Simulate the verification logic
+			matches := normalizedActual == normalizedExpected ||
+				strings.Contains(tc.actualOutput, normalizedExpected)
+
+			if tc.shouldFail && matches {
+				t.Errorf("Expected version check to fail for expected=%s actual=%s",
+					tc.expectedVersion, tc.actualOutput)
+			}
+			if !tc.shouldFail && !matches {
+				t.Errorf("Expected version check to pass for expected=%s actual=%s",
+					tc.expectedVersion, tc.actualOutput)
+			}
+		})
+	}
+}
+
+// TestRestoreBackup tests the backup restoration logic
+func TestRestoreBackup(t *testing.T) {
+	// Create a temp directory for test files
+	tempDir, err := os.MkdirTemp("", "ntm-restore-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Run("successful restore", func(t *testing.T) {
+		currentPath := filepath.Join(tempDir, "ntm-current")
+		backupPath := currentPath + ".old"
+
+		// Create "broken" current binary
+		if err := os.WriteFile(currentPath, []byte("broken"), 0755); err != nil {
+			t.Fatalf("Failed to create current file: %v", err)
+		}
+
+		// Create "working" backup
+		if err := os.WriteFile(backupPath, []byte("working"), 0755); err != nil {
+			t.Fatalf("Failed to create backup file: %v", err)
+		}
+
+		// Restore
+		if err := restoreBackup(currentPath, backupPath); err != nil {
+			t.Fatalf("restoreBackup failed: %v", err)
+		}
+
+		// Verify current has backup content
+		content, err := os.ReadFile(currentPath)
+		if err != nil {
+			t.Fatalf("Failed to read restored file: %v", err)
+		}
+		if string(content) != "working" {
+			t.Errorf("Restored content mismatch: got %q, want %q", string(content), "working")
+		}
+
+		// Verify backup was removed (renamed to current)
+		if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+			t.Error("Backup file should not exist after restore")
+		}
+	})
+
+	t.Run("backup not found", func(t *testing.T) {
+		currentPath := filepath.Join(tempDir, "ntm-nonexistent")
+		backupPath := currentPath + ".old"
+
+		err := restoreBackup(currentPath, backupPath)
+		if err == nil {
+			t.Error("Expected error when backup doesn't exist")
+		}
+		if !strings.Contains(err.Error(), "backup file not found") {
+			t.Errorf("Unexpected error message: %v", err)
+		}
+	})
 }

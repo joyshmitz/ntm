@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -448,6 +449,51 @@ func runUpgrade(checkOnly, force, yes bool) error {
 	}
 	fmt.Println(successStyle.Render("✓"))
 
+	// Verify the new binary works correctly
+	backupPath := execPath + ".old"
+	fmt.Print("  Verifying... ")
+	if err := verifyUpgrade(execPath, latestVersion); err != nil {
+		fmt.Println(errorStyle.Render("✗"))
+		fmt.Println()
+		fmt.Printf("  %s %s\n", warnStyle.Render("⚠ Verification failed:"), err)
+		fmt.Println()
+		fmt.Println(dimStyle.Render("  The new binary may be corrupted or incompatible."))
+
+		// Check if backup exists for rollback
+		if _, backupErr := os.Stat(backupPath); backupErr == nil {
+			fmt.Print(warnStyle.Render("  Restore previous version? [Y/n] "))
+			reader := bufio.NewReader(os.Stdin)
+			response, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				// On read error, default to restore for safety
+				response = "y"
+			}
+			response = strings.TrimSpace(strings.ToLower(response))
+			if response == "" || response == "y" || response == "yes" {
+				if restoreErr := restoreBackup(execPath, backupPath); restoreErr != nil {
+					fmt.Printf("  %s Failed to restore: %s\n", errorStyle.Render("✗"), restoreErr)
+					return fmt.Errorf("upgrade verification failed and rollback failed: %w", restoreErr)
+				}
+				fmt.Println(successStyle.Render("  ✓ Previous version restored"))
+				fmt.Println()
+				fmt.Println(dimStyle.Render("  Please report this issue:"))
+				fmt.Println(dimStyle.Render("  https://github.com/Dicklesworthstone/ntm/issues"))
+				return fmt.Errorf("upgrade rolled back due to verification failure")
+			}
+			// User chose not to restore - warn them
+			fmt.Println()
+			fmt.Println(warnStyle.Render("  ⚠ Keeping potentially broken binary. Backup available at:"))
+			fmt.Println(dimStyle.Render("    " + backupPath))
+		} else {
+			fmt.Println(errorStyle.Render("  No backup available for rollback."))
+		}
+		return fmt.Errorf("upgrade verification failed: %w", err)
+	}
+	fmt.Println(successStyle.Render("✓"))
+
+	// Verification passed - safe to remove backup
+	os.Remove(backupPath)
+
 	fmt.Println()
 	fmt.Println(successStyle.Render("  ✓ Successfully upgraded to " + latestVersion + "!"))
 	fmt.Println()
@@ -737,10 +783,61 @@ func replaceBinary(newBinaryPath, currentBinaryPath string) error {
 		return fmt.Errorf("failed to install new binary: %w", err)
 	}
 
-	// Success! Remove backup (or leave it? Usually nice to clean up)
-	// We'll leave it for manual recovery in extreme cases, or remove it?
-	// Let's remove it to keep clean.
-	os.Remove(backupPath)
+	// Success! Keep backup until verification completes.
+	// The backup will be removed after verifyUpgrade succeeds.
+	return nil
+}
+
+// verifyUpgrade runs the new binary with "version --short" and verifies
+// it returns the expected version. This catches corrupted downloads,
+// wrong-architecture binaries (e.g., x64 on ARM without Rosetta),
+// and other GoReleaser misconfigurations.
+//
+// If verification fails, the caller should offer to restore from backup.
+func verifyUpgrade(binaryPath, expectedVersion string) error {
+	// Run the new binary with version flag
+	cmd := exec.Command(binaryPath, "version", "--short")
+	output, err := cmd.Output()
+	if err != nil {
+		// Check if it's an exec error (binary won't run at all)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return fmt.Errorf("new binary exited with code %d: %s", exitErr.ExitCode(), string(exitErr.Stderr))
+		}
+		return fmt.Errorf("failed to run new binary: %w", err)
+	}
+
+	// Parse the version from output
+	actualVersion := strings.TrimSpace(string(output))
+
+	// Normalize both versions for comparison
+	normalizedExpected := normalizeVersion(expectedVersion)
+	normalizedActual := normalizeVersion(actualVersion)
+
+	// Check if the actual version matches expected
+	// Use flexible matching: actual should contain expected or be equal when normalized
+	if normalizedActual != normalizedExpected && !strings.Contains(actualVersion, normalizedExpected) {
+		return fmt.Errorf("version mismatch: expected %s, got %s", expectedVersion, actualVersion)
+	}
+
+	return nil
+}
+
+// restoreBackup restores the previous binary from backup
+func restoreBackup(currentPath, backupPath string) error {
+	// Check if backup exists
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("backup file not found at %s", backupPath)
+	}
+
+	// Remove the failed new binary
+	if err := os.Remove(currentPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove new binary: %w", err)
+	}
+
+	// Restore backup
+	if err := os.Rename(backupPath, currentPath); err != nil {
+		return fmt.Errorf("failed to restore backup: %w", err)
+	}
 
 	return nil
 }
