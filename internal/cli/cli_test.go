@@ -866,6 +866,28 @@ func TestParseAssetInfo(t *testing.T) {
 			wantVersion:   "",
 			wantMatch:     "none",
 		},
+		{
+			name:          "close_match_armv7_for_arm64",
+			assetName:     "ntm_1.4.1_linux_armv7.tar.gz",
+			targetOS:      "linux",
+			targetArch:    "arm64",
+			targetVersion: "1.4.1",
+			wantOS:        "linux",
+			wantArch:      "armv7",
+			wantVersion:   "1.4.1",
+			wantMatch:     "close",
+		},
+		{
+			name:          "exact_match_armv7",
+			assetName:     "ntm_1.4.1_linux_armv7.tar.gz",
+			targetOS:      "linux",
+			targetArch:    "armv7",
+			targetVersion: "1.4.1",
+			wantOS:        "linux",
+			wantArch:      "armv7",
+			wantVersion:   "1.4.1",
+			wantMatch:     "exact",
+		},
 	}
 
 	for _, tt := range tests {

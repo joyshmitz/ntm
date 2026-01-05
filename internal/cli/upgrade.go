@@ -191,8 +191,8 @@ func parseAssetInfo(name, targetOS, targetArch, targetVersion string) assetInfo 
 			// We want specific arch, but found universal - close match (universal should work)
 			info.Match = "close"
 			info.Reason = fmt.Sprintf("same OS, universal binary available (got all, want %s)", targetArch)
-		} else if info.Arch == "amd64" || info.Arch == "arm64" {
-			// Different specific arch - close match for same OS
+		} else if info.Arch != "" {
+			// Different specific arch - close match for same OS (includes armv7, etc.)
 			info.Match = "close"
 			info.Reason = fmt.Sprintf("same OS, different arch (got %s, want %s)", info.Arch, targetArch)
 		}
