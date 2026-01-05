@@ -524,6 +524,128 @@ func TestUpgradeCmdHelp(t *testing.T) {
 	}
 }
 
+// TestGetAssetName tests the asset name generation for different platforms
+func TestGetAssetName(t *testing.T) {
+	// Note: This tests the actual runtime values, so results depend on where tests run
+	name := getAssetName()
+
+	// Must start with ntm_
+	if !strings.HasPrefix(name, "ntm_") {
+		t.Errorf("getAssetName() = %q, want prefix 'ntm_'", name)
+	}
+
+	// Must contain underscore separators (not dashes)
+	parts := strings.Split(name, "_")
+	if len(parts) != 3 {
+		t.Errorf("getAssetName() = %q, want 3 parts separated by underscore", name)
+	}
+}
+
+// TestGetArchiveAssetName tests archive asset name generation
+func TestGetArchiveAssetName(t *testing.T) {
+	tests := []struct {
+		version  string
+		wantPre  string
+		wantPost string
+	}{
+		{"1.4.1", "ntm_1.4.1_", ".tar.gz"},
+		{"2.0.0", "ntm_2.0.0_", ".tar.gz"},
+		{"0.1.0-beta", "ntm_0.1.0-beta_", ".tar.gz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			name := getArchiveAssetName(tt.version)
+
+			if !strings.HasPrefix(name, tt.wantPre) {
+				t.Errorf("getArchiveAssetName(%q) = %q, want prefix %q", tt.version, name, tt.wantPre)
+			}
+			if !strings.HasSuffix(name, tt.wantPost) {
+				t.Errorf("getArchiveAssetName(%q) = %q, want suffix %q", tt.version, name, tt.wantPost)
+			}
+		})
+	}
+}
+
+// TestVersionComparison tests the version comparison logic
+func TestVersionComparison(t *testing.T) {
+	tests := []struct {
+		current   string
+		latest    string
+		wantNewer bool
+	}{
+		{"1.0.0", "1.1.0", true},
+		{"1.0.0", "1.0.1", true},
+		{"1.0.0", "2.0.0", true},
+		{"1.0.0", "1.0.0", false},
+		{"1.1.0", "1.0.0", false},
+		{"2.0.0", "1.9.9", false},
+		{"dev", "1.0.0", true},
+		{"", "1.0.0", true},
+		{"v1.0.0", "v1.1.0", true},
+		{"1.0", "1.0.1", true},
+		{"1.0.0-beta", "1.0.0", false}, // normalizeVersion strips suffix, so they're equal
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.current+"_vs_"+tt.latest, func(t *testing.T) {
+			got := isNewerVersion(tt.current, tt.latest)
+			if got != tt.wantNewer {
+				t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.wantNewer)
+			}
+		})
+	}
+}
+
+// TestNormalizeVersion tests version normalization
+func TestNormalizeVersion(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"v1.0.0", "1.0.0"},
+		{"1.0.0", "1.0.0"},
+		{"1.0.0-beta", "1.0.0"},
+		{"1.0.0+build", "1.0.0"},
+		{"v2.1.3-rc1", "2.1.3"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := normalizeVersion(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeVersion(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatSize tests the size formatting function
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{16219443, "15.5 MB"},
+		{1073741824, "1.0 GB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := formatSize(tt.bytes)
+			if got != tt.want {
+				t.Errorf("formatSize(%d) = %q, want %q", tt.bytes, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCreateCmdRequiresName tests create command requires session name
 func TestCreateCmdRequiresName(t *testing.T) {
 	resetFlags()
