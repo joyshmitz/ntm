@@ -837,3 +837,64 @@ func TestParseError_Error(t *testing.T) {
 		}
 	}
 }
+
+func TestIsValidPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "valid simple path",
+			path: "workflow.yaml",
+			want: true,
+		},
+		{
+			name: "valid path with directory",
+			path: "workflows/myworkflow.yaml",
+			want: true,
+		},
+		{
+			name: "valid absolute path",
+			path: "/home/user/workflows/myworkflow.yaml",
+			want: true,
+		},
+		{
+			name: "valid path with spaces",
+			path: "my workflow.yaml",
+			want: true,
+		},
+		{
+			name: "empty path",
+			path: "",
+			want: false,
+		},
+		{
+			name: "path with null byte",
+			path: "workflow\x00.yaml",
+			want: false,
+		},
+		{
+			name: "path with null byte at start",
+			path: "\x00workflow.yaml",
+			want: false,
+		},
+		{
+			name: "path with null byte at end",
+			path: "workflow.yaml\x00",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isValidPath(tt.path)
+			if got != tt.want {
+				t.Errorf("isValidPath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}

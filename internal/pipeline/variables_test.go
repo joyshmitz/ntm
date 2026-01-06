@@ -605,3 +605,48 @@ func TestExtractJSONBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestSubstitutionError_Error(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		err     SubstitutionError
+		wantMsg string
+	}{
+		{
+			name: "simple variable",
+			err: SubstitutionError{
+				VarRef:  "myvar",
+				Message: "variable not defined",
+			},
+			wantMsg: "variable substitution error for 'myvar': variable not defined",
+		},
+		{
+			name: "nested variable",
+			err: SubstitutionError{
+				VarRef:  "steps.step1.output",
+				Message: "step not executed",
+			},
+			wantMsg: "variable substitution error for 'steps.step1.output': step not executed",
+		},
+		{
+			name: "env variable",
+			err: SubstitutionError{
+				VarRef:  "env.MY_VAR",
+				Message: "environment variable not set",
+			},
+			wantMsg: "variable substitution error for 'env.MY_VAR': environment variable not set",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.err.Error()
+			if got != tt.wantMsg {
+				t.Errorf("SubstitutionError.Error() = %q, want %q", got, tt.wantMsg)
+			}
+		})
+	}
+}
