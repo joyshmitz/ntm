@@ -517,11 +517,15 @@ Examples:
 			if jsonOutput {
 				finalState, err := executor.Resume(ctx, workflow, state, nil)
 				if err != nil {
+					status := "unknown"
+					if finalState != nil {
+						status = string(finalState.Status)
+					}
 					result := map[string]interface{}{
 						"success":  false,
 						"error":    err.Error(),
 						"run_id":   runID,
-						"status":   string(finalState.Status),
+						"status":   status,
 						"workflow": workflow.Name,
 						"session":  session,
 					}

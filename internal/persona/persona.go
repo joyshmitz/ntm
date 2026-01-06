@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+var nameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Persona defines the configuration for an agent persona.
 type Persona struct {
@@ -70,6 +73,9 @@ func (p *Persona) AgentTypeFlag() string {
 func (p *Persona) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("persona name is required")
+	}
+	if !nameRegex.MatchString(p.Name) {
+		return fmt.Errorf("persona name %q contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)", p.Name)
 	}
 	if p.AgentType == "" {
 		return fmt.Errorf("persona %q: agent_type is required", p.Name)
