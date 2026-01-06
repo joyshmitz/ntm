@@ -1182,7 +1182,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "url = %q\n", cfg.AgentMail.URL)
 	if cfg.AgentMail.Token != "" {
 		// Mask token in output for security
-		fmt.Fprintf(w, "token = \"********\"\n")
+		fmt.Fprintf(w, "token = \"********\"  # Token is masked. Set AGENT_MAIL_TOKEN env var or edit this file to update.\n")
 	} else {
 		fmt.Fprintln(w, "# token = \"\"  # Or set AGENT_MAIL_TOKEN env var")
 	}

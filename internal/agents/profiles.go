@@ -478,18 +478,24 @@ func (pm *ProfileMatcher) RecordCompletion(agentType AgentType, success bool, du
 	profile.Performance.TasksCompleted++
 
 	// Exponential moving average for success rate
-	alpha := 0.1
+	const alphaSuccess = 0.1
 	if success {
-		profile.Performance.SuccessRate = alpha + (1-alpha)*profile.Performance.SuccessRate
+		profile.Performance.SuccessRate = alphaSuccess + (1-alphaSuccess)*profile.Performance.SuccessRate
 	} else {
-		profile.Performance.SuccessRate = (1 - alpha) * profile.Performance.SuccessRate
+		profile.Performance.SuccessRate = (1 - alphaSuccess) * profile.Performance.SuccessRate
 	}
 
-	// Running average for completion time
+	// Exponential moving average for completion time
+	// Use alpha=0.2 (20% weight to new sample) to smooth out volatility while staying responsive
+	const alphaDuration = 0.2
 	if profile.Performance.AvgCompletionTime == 0 {
 		profile.Performance.AvgCompletionTime = duration
 	} else {
-		profile.Performance.AvgCompletionTime = (profile.Performance.AvgCompletionTime + duration) / 2
+		// Calculate using float64 for precision then convert back
+		newVal := float64(duration)
+		oldVal := float64(profile.Performance.AvgCompletionTime)
+		avg := alphaDuration*newVal + (1-alphaDuration)*oldVal
+		profile.Performance.AvgCompletionTime = time.Duration(avg)
 	}
 
 	profile.Performance.LastUpdated = time.Now()
