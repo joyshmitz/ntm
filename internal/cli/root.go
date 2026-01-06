@@ -1216,6 +1216,7 @@ func init() {
 		newWaitCmd(),
 		newMailCmd(),
 		newPluginsCmd(),
+		newAgentsCmd(),
 
 		// Session navigation
 		newAttachCmd(),
