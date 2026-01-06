@@ -183,8 +183,9 @@ func runValidation(all, fix bool) error {
 		report.Summary.FilesChecked++
 		report.Summary.ErrorCount += len(result.Errors)
 		report.Summary.WarningCount += len(result.Warnings)
-		for _, e := range result.Errors {
-			if e.Fixable {
+		// Count fixable warnings (Fixable is only set on warnings, not errors)
+		for _, w := range result.Warnings {
+			if w.Fixable {
 				report.Summary.FixableCount++
 			}
 		}
@@ -297,12 +298,20 @@ func validateAgentExecutables(cfg *config.Config, result *ValidationResult) {
 		if cmd == "" {
 			continue
 		}
-		// Extract the executable from the command
+		// Extract the executable from the command, skipping env var assignments
 		parts := strings.Fields(cmd)
-		if len(parts) == 0 {
+		exe := ""
+		for _, part := range parts {
+			// Skip environment variable assignments (e.g., NODE_OPTIONS="...")
+			if strings.Contains(part, "=") {
+				continue
+			}
+			exe = part
+			break
+		}
+		if exe == "" {
 			continue
 		}
-		exe := parts[0]
 
 		// Check if executable exists
 		_, err := exec.LookPath(exe)
