@@ -1,7 +1,10 @@
 package robot
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractKeywords(t *testing.T) {
@@ -1002,6 +1005,358 @@ func TestFormatAge(t *testing.T) {
 	result := formatAge("/some/path/without/date.jsonl")
 	if result != "" {
 		t.Errorf("formatAge() for no-date path = %q, want empty", result)
+	}
+}
+
+func TestFormatAge_AllBranches(t *testing.T) {
+	// Use UTC to match how extractSessionDate parses dates
+	now := time.Now().UTC()
+
+	// Helper to create path with specific date
+	pathForDate := func(d time.Time) string {
+		return fmt.Sprintf("/path/%d/%02d/%02d/session.jsonl", d.Year(), d.Month(), d.Day())
+	}
+
+	// Test the branch coverage by checking output format, not exact values
+	// The exact values depend on time-of-day relative to UTC midnight
+	tests := []struct {
+		name        string
+		daysBack    int
+		validOutput []string // any of these substrings is acceptable
+	}{
+		{
+			name:        "recent (today or 1 day)",
+			daysBack:    0,
+			validOutput: []string{"today", "1 day ago"}, // Depends on UTC time
+		},
+		{
+			name:        "few days ago",
+			daysBack:    3,
+			validOutput: []string{"days ago", "1 week ago"}, // 3-4 days
+		},
+		{
+			name:        "about a week ago",
+			daysBack:    8,
+			validOutput: []string{"week ago", "weeks ago"},
+		},
+		{
+			name:        "two weeks ago",
+			daysBack:    15,
+			validOutput: []string{"weeks ago"},
+		},
+		{
+			name:        "about a month ago",
+			daysBack:    32,
+			validOutput: []string{"month ago", "months ago"},
+		},
+		{
+			name:        "several months ago",
+			daysBack:    100,
+			validOutput: []string{"months ago"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			date := now.AddDate(0, 0, -tt.daysBack)
+			path := pathForDate(date)
+			result := formatAge(path)
+
+			// Check if any valid output matches
+			matched := false
+			for _, valid := range tt.validOutput {
+				if containsString(result, valid) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Errorf("formatAge(%q) = %q, want one of %v", path, result, tt.validOutput)
+			}
+		})
+	}
+}
+
+func TestFilterResults_AgeFiltering(t *testing.T) {
+	now := time.Now()
+	recent := now.AddDate(0, 0, -5)   // 5 days ago
+	old := now.AddDate(0, 0, -60)     // 60 days ago
+
+	recentPath := fmt.Sprintf("/path/%d/%02d/%02d/recent.jsonl", recent.Year(), recent.Month(), recent.Day())
+	oldPath := fmt.Sprintf("/path/%d/%02d/%02d/old.jsonl", old.Year(), old.Month(), old.Day())
+
+	hits := []CASSHit{
+		{SourcePath: recentPath, Agent: "claude"},
+		{SourcePath: oldPath, Agent: "codex"},
+	}
+
+	config := FilterConfig{
+		MinRelevance: 0.0,
+		MaxItems:     10,
+		MaxAgeDays:   30, // Filter out results older than 30 days
+	}
+
+	result := FilterResults(hits, config)
+
+	if result.FilteredCount != 1 {
+		t.Errorf("FilterResults() FilteredCount = %d, want 1 (old session should be filtered)", result.FilteredCount)
+	}
+	if result.RemovedByAge != 1 {
+		t.Errorf("FilterResults() RemovedByAge = %d, want 1", result.RemovedByAge)
+	}
+}
+
+func TestFilterResults_RecencyBoost(t *testing.T) {
+	now := time.Now()
+	today := now
+	weekAgo := now.AddDate(0, 0, -7)
+
+	todayPath := fmt.Sprintf("/path/%d/%02d/%02d/today.jsonl", today.Year(), today.Month(), today.Day())
+	weekAgoPath := fmt.Sprintf("/path/%d/%02d/%02d/weekago.jsonl", weekAgo.Year(), weekAgo.Month(), weekAgo.Day())
+
+	hits := []CASSHit{
+		// Week-ago hit comes first in original order
+		{SourcePath: weekAgoPath, Agent: "claude"},
+		{SourcePath: todayPath, Agent: "codex"},
+	}
+
+	config := FilterConfig{
+		MinRelevance:  0.0,
+		MaxItems:      10,
+		MaxAgeDays:    30,
+		RecencyBoost:  0.3, // Boost recent results
+	}
+
+	result := FilterResults(hits, config)
+
+	if len(result.Hits) != 2 {
+		t.Fatalf("FilterResults() len(Hits) = %d, want 2", len(result.Hits))
+	}
+
+	// Today's hit should have higher recency bonus
+	var todayHit, weekAgoHit *ScoredHit
+	for i := range result.Hits {
+		if containsString(result.Hits[i].SourcePath, "today") {
+			todayHit = &result.Hits[i]
+		} else {
+			weekAgoHit = &result.Hits[i]
+		}
+	}
+
+	if todayHit == nil || weekAgoHit == nil {
+		t.Fatal("Expected to find both hits")
+	}
+
+	if todayHit.ScoreDetail.RecencyBonus <= weekAgoHit.ScoreDetail.RecencyBonus {
+		t.Errorf("Today's hit should have higher recency bonus: today=%f, weekAgo=%f",
+			todayHit.ScoreDetail.RecencyBonus, weekAgoHit.ScoreDetail.RecencyBonus)
+	}
+}
+
+func TestFilterResults_WithCASSScore(t *testing.T) {
+	// Test that CASS-provided scores are used as base score
+	hits := []CASSHit{
+		{SourcePath: "/path/session1.jsonl", Agent: "claude", Score: 0.9},
+		{SourcePath: "/path/session2.jsonl", Agent: "codex", Score: 0.5},
+	}
+
+	config := FilterConfig{
+		MinRelevance: 0.0,
+		MaxItems:     10,
+		MaxAgeDays:   0, // Disable age filtering
+	}
+
+	result := FilterResults(hits, config)
+
+	if len(result.Hits) != 2 {
+		t.Fatalf("FilterResults() len(Hits) = %d, want 2", len(result.Hits))
+	}
+
+	// First hit should have higher base score from CASS
+	if result.Hits[0].ScoreDetail.BaseScore < result.Hits[1].ScoreDetail.BaseScore {
+		t.Errorf("Higher CASS score should result in higher base score")
+	}
+}
+
+func TestTruncateToTokens_LineBoundary(t *testing.T) {
+	// Create content that's definitely longer than budget
+	// Each line is ~20 chars, we need more than 40 chars (10 tokens * 4)
+	content := "Line 1 with some content here\nLine 2 with more content\nLine 3 extra text\nLine 4 additional\nLine 5 final line\n"
+
+	// 10 tokens * 4 chars = 40 chars max - this content is ~100+ chars
+	result := truncateToTokens(content, 10)
+
+	// Should truncate at a line boundary and include truncation notice
+	if !containsString(result, "truncated") {
+		t.Errorf("truncateToTokens() should include truncation notice, got: %q (len=%d)", result, len(result))
+	}
+}
+
+func TestTruncateToTokens_ShortContent(t *testing.T) {
+	// Test that short content is not truncated
+	content := "Short content"
+	result := truncateToTokens(content, 100)
+
+	if result != content {
+		t.Errorf("truncateToTokens() should not modify short content: got %q, want %q", result, content)
+	}
+}
+
+func TestTruncateToTokens_NoGoodLineBreak(t *testing.T) {
+	// Test truncation when there's no good line break in first half
+	content := strings.Repeat("a", 100)
+
+	result := truncateToTokens(content, 10) // 40 chars
+
+	if !containsString(result, "truncated") {
+		t.Error("truncateToTokens() should include truncation notice")
+	}
+}
+
+func TestQueryCASS_CASSNotAvailable(t *testing.T) {
+	// Test behavior when CASS is not available
+	// We can't easily mock exec.LookPath, but we can test the disabled config path
+	config := CASSConfig{
+		Enabled: false,
+	}
+
+	result := QueryCASS("test prompt", config)
+
+	if !result.Success {
+		t.Error("QueryCASS with disabled config should succeed")
+	}
+	if len(result.Hits) != 0 {
+		t.Error("QueryCASS with disabled config should return no hits")
+	}
+}
+
+func TestQueryCASS_KeywordExtraction(t *testing.T) {
+	config := DefaultCASSConfig()
+	// Intentionally use a prompt that will generate keywords but CASS won't be available
+	result := QueryCASS("implement authentication handler for database", config)
+
+	// Regardless of CASS availability, keywords should be extracted
+	if len(result.Keywords) == 0 {
+		t.Error("QueryCASS should extract keywords from prompt")
+	}
+
+	// Check some expected keywords
+	found := make(map[string]bool)
+	for _, k := range result.Keywords {
+		found[k] = true
+	}
+
+	// "implement" might be filtered as stop word, but these should be present
+	expectedKeywords := []string{"authentication", "handler", "database"}
+	for _, expected := range expectedKeywords {
+		if !found[expected] {
+			t.Errorf("QueryCASS keywords should include %q, got %v", expected, result.Keywords)
+		}
+	}
+}
+
+func TestQueryAndFilterCASS_Disabled(t *testing.T) {
+	queryConfig := CASSConfig{
+		Enabled: false,
+	}
+	filterConfig := DefaultFilterConfig()
+
+	queryResult, filterResult := QueryAndFilterCASS("test prompt", queryConfig, filterConfig)
+
+	if !queryResult.Success {
+		t.Error("QueryAndFilterCASS with disabled config should succeed")
+	}
+	if len(queryResult.Hits) != 0 {
+		t.Error("QueryAndFilterCASS with disabled config should return no hits")
+	}
+	if filterResult.OriginalCount != 0 {
+		t.Errorf("FilterResult.OriginalCount = %d, want 0", filterResult.OriginalCount)
+	}
+}
+
+func TestQueryAndFilterCASS_EmptyKeywords(t *testing.T) {
+	queryConfig := DefaultCASSConfig()
+	filterConfig := DefaultFilterConfig()
+
+	// Empty prompt should still work
+	queryResult, filterResult := QueryAndFilterCASS("", queryConfig, filterConfig)
+
+	if !queryResult.Success {
+		t.Error("QueryAndFilterCASS with empty prompt should succeed")
+	}
+	// No keywords means no CASS query, so no hits
+	if len(queryResult.Hits) != 0 {
+		t.Error("QueryAndFilterCASS with empty prompt should return no hits")
+	}
+	if filterResult.OriginalCount != 0 {
+		t.Errorf("FilterResult.OriginalCount = %d, want 0", filterResult.OriginalCount)
+	}
+}
+
+func TestInjectContextFromQuery_Disabled(t *testing.T) {
+	queryConfig := CASSConfig{
+		Enabled: false,
+	}
+	filterConfig := DefaultFilterConfig()
+	injectConfig := DefaultInjectConfig()
+
+	injectResult, queryResult, filterResult := InjectContextFromQuery(
+		"test prompt",
+		queryConfig,
+		filterConfig,
+		injectConfig,
+	)
+
+	// Should succeed but with no injection
+	if !injectResult.Success {
+		t.Errorf("InjectContextFromQuery with disabled config should succeed, got error: %s", injectResult.Error)
+	}
+	if !queryResult.Success {
+		t.Errorf("QueryResult should succeed, got error: %s", queryResult.Error)
+	}
+	if filterResult.OriginalCount != 0 {
+		t.Errorf("FilterResult.OriginalCount = %d, want 0", filterResult.OriginalCount)
+	}
+	if injectResult.Metadata.ItemsInjected != 0 {
+		t.Errorf("ItemsInjected = %d, want 0", injectResult.Metadata.ItemsInjected)
+	}
+}
+
+func TestInjectContextFromQuery_WithPrompt(t *testing.T) {
+	queryConfig := DefaultCASSConfig()
+	filterConfig := DefaultFilterConfig()
+	injectConfig := DefaultInjectConfig()
+
+	// This will attempt to query CASS but likely won't find anything
+	// The test verifies the function handles this gracefully
+	injectResult, queryResult, filterResult := InjectContextFromQuery(
+		"how do I implement authentication",
+		queryConfig,
+		filterConfig,
+		injectConfig,
+	)
+
+	// Keywords should be extracted
+	if len(queryResult.Keywords) == 0 {
+		t.Error("Should extract keywords from prompt")
+	}
+
+	// If CASS isn't available, Success will be true with no hits
+	// If CASS is available but no results, Success will be true with no hits
+	if !queryResult.Success && queryResult.Error != "" {
+		// CASS query failed - that's acceptable in test environment
+		if !containsString(injectResult.Error, "CASS query failed") {
+			t.Errorf("Expected CASS query failed error, got: %s", injectResult.Error)
+		}
+	} else {
+		// Query succeeded, result should be valid
+		if injectResult.ModifiedPrompt == "" {
+			t.Error("ModifiedPrompt should not be empty")
+		}
+		// ItemsFound should match filter's original count
+		if injectResult.Metadata.ItemsFound != filterResult.OriginalCount {
+			t.Errorf("ItemsFound = %d, want %d", injectResult.Metadata.ItemsFound, filterResult.OriginalCount)
+		}
 	}
 }
 

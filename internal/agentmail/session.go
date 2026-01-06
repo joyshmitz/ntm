@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // SessionAgentInfo tracks the registered agent identity for a session.
@@ -81,27 +83,9 @@ func LoadSessionAgent(sessionName, projectKey string) (*SessionAgentInfo, error)
 				if !os.IsNotExist(err) {
 					return nil, fmt.Errorf("reading session agent: %w", err)
 				}
-				// Search for any project-scoped agent.json under the session dir
-				sessionDir := filepath.Join(getSessionsBaseDir(), sessionName)
-				if entries, readErr := os.ReadDir(sessionDir); readErr == nil {
-					for _, entry := range entries {
-						if !entry.IsDir() {
-							continue
-						}
-						candidate := filepath.Join(sessionDir, entry.Name(), "agent.json")
-						if candidateData, readErr := os.ReadFile(candidate); readErr == nil {
-							data = candidateData
-							break
-						}
-					}
-				}
-				// Still not found
-				if data == nil {
-					return nil, nil
-				}
+				// Not found
+				return nil, nil
 			}
-			// Note: path variable is not used after this point - data was found either
-			// via legacyPath read or subdirectory search
 		} else {
 			return nil, fmt.Errorf("reading session agent: %w", err)
 		}
@@ -130,34 +114,9 @@ func SaveSessionAgent(sessionName, projectKey string, info *SessionAgentInfo) er
 		return fmt.Errorf("marshaling session agent: %w", err)
 	}
 
-	// Write to temp file first
-	tmpFile, err := os.CreateTemp(dir, "agent.json.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	// Ensure cleanup on error
-	defer func() {
-		_ = tmpFile.Close()
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err = tmpFile.Write(data); err != nil {
+	// Atomic write with restrictive permissions (0600) since it may contain sensitive info
+	if err := util.AtomicWriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing session agent: %w", err)
-	}
-	if err = tmpFile.Sync(); err != nil {
-		return fmt.Errorf("syncing temp file: %w", err)
-	}
-	if err = tmpFile.Close(); err != nil {
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-
-	// Atomic rename
-	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("renaming session agent file: %w", err)
 	}
 
 	return nil
@@ -249,6 +208,11 @@ func (c *Client) UpdateSessionActivity(ctx context.Context, sessionName, project
 	}
 	if info == nil {
 		return nil // No agent registered
+	}
+
+	// Verify project ownership if projectKey provided
+	if projectKey != "" && info.ProjectKey != projectKey {
+		return nil // Not our agent (silent skip)
 	}
 
 	// Update local timestamp
