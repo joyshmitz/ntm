@@ -200,3 +200,301 @@ func TestFormatAssignmentMessage(t *testing.T) {
 		t.Error("expected bd show instruction in message")
 	}
 }
+
+func TestDefaultScoreConfig(t *testing.T) {
+	config := DefaultScoreConfig()
+
+	if !config.PreferCriticalPath {
+		t.Error("expected PreferCriticalPath to be true by default")
+	}
+	if !config.PenalizeFileOverlap {
+		t.Error("expected PenalizeFileOverlap to be true by default")
+	}
+	if !config.UseAgentProfiles {
+		t.Error("expected UseAgentProfiles to be true by default")
+	}
+	if !config.BudgetAware {
+		t.Error("expected BudgetAware to be true by default")
+	}
+	if config.ContextThreshold != 0.8 {
+		t.Errorf("expected ContextThreshold 0.8, got %f", config.ContextThreshold)
+	}
+}
+
+func TestEstimateTaskComplexity(t *testing.T) {
+	tests := []struct {
+		name     string
+		rec      *bv.TriageRecommendation
+		expected float64
+		minExp   float64
+		maxExp   float64
+	}{
+		{
+			name:   "epic is complex",
+			rec:    &bv.TriageRecommendation{Type: "epic", Priority: 2},
+			minExp: 0.7,
+			maxExp: 1.0,
+		},
+		{
+			name:   "chore is simple",
+			rec:    &bv.TriageRecommendation{Type: "chore", Priority: 2},
+			minExp: 0.0,
+			maxExp: 0.4,
+		},
+		{
+			name:   "feature is moderately complex",
+			rec:    &bv.TriageRecommendation{Type: "feature", Priority: 2},
+			minExp: 0.6,
+			maxExp: 0.8,
+		},
+		{
+			name:   "epic with many unblocks is very complex",
+			rec:    &bv.TriageRecommendation{Type: "epic", Priority: 2, UnblocksIDs: []string{"a", "b", "c", "d", "e"}},
+			minExp: 0.9,
+			maxExp: 1.0,
+		},
+		{
+			name:   "critical bug is simpler",
+			rec:    &bv.TriageRecommendation{Type: "bug", Priority: 0},
+			minExp: 0.3,
+			maxExp: 0.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			complexity := estimateTaskComplexity(tt.rec)
+			if complexity < tt.minExp || complexity > tt.maxExp {
+				t.Errorf("expected complexity in [%f, %f], got %f", tt.minExp, tt.maxExp, complexity)
+			}
+		})
+	}
+}
+
+func TestComputeAgentTypeBonus(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		rec       *bv.TriageRecommendation
+		wantSign  string // "positive", "negative", "zero"
+	}{
+		{
+			name:      "claude on epic gets bonus",
+			agentType: "cc",
+			rec:       &bv.TriageRecommendation{Type: "epic", Priority: 2},
+			wantSign:  "positive",
+		},
+		{
+			name:      "claude on chore gets penalty",
+			agentType: "claude",
+			rec:       &bv.TriageRecommendation{Type: "chore", Priority: 2},
+			wantSign:  "negative",
+		},
+		{
+			name:      "codex on chore gets bonus",
+			agentType: "cod",
+			rec:       &bv.TriageRecommendation{Type: "chore", Priority: 2},
+			wantSign:  "positive",
+		},
+		{
+			name:      "codex on epic gets penalty",
+			agentType: "codex",
+			rec:       &bv.TriageRecommendation{Type: "epic", Priority: 2},
+			wantSign:  "negative",
+		},
+		{
+			name:      "gemini on medium task neutral or small bonus",
+			agentType: "gmi",
+			rec:       &bv.TriageRecommendation{Type: "task", Priority: 2},
+			wantSign:  "zero", // task is medium complexity
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bonus := computeAgentTypeBonus(tt.agentType, tt.rec)
+			switch tt.wantSign {
+			case "positive":
+				if bonus <= 0 {
+					t.Errorf("expected positive bonus, got %f", bonus)
+				}
+			case "negative":
+				if bonus >= 0 {
+					t.Errorf("expected negative bonus, got %f", bonus)
+				}
+			case "zero":
+				if bonus < -0.05 || bonus > 0.1 {
+					t.Errorf("expected near-zero bonus, got %f", bonus)
+				}
+			}
+		})
+	}
+}
+
+func TestComputeContextPenalty(t *testing.T) {
+	tests := []struct {
+		name         string
+		contextUsage float64
+		threshold    float64
+		wantZero     bool
+	}{
+		{"below threshold", 0.5, 0.8, true},
+		{"at threshold", 0.8, 0.8, true},
+		{"above threshold", 0.9, 0.8, false},
+		{"way above threshold", 0.95, 0.8, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			penalty := computeContextPenalty(tt.contextUsage, tt.threshold)
+			if tt.wantZero && penalty != 0 {
+				t.Errorf("expected zero penalty, got %f", penalty)
+			}
+			if !tt.wantZero && penalty <= 0 {
+				t.Errorf("expected positive penalty, got %f", penalty)
+			}
+		})
+	}
+}
+
+func TestComputeFileOverlapPenalty(t *testing.T) {
+	tests := []struct {
+		name         string
+		agent        *AgentState
+		reservations map[string][]string
+		wantZero     bool
+	}{
+		{
+			name:         "no reservations",
+			agent:        &AgentState{PaneID: "%0"},
+			reservations: nil,
+			wantZero:     true,
+		},
+		{
+			name:         "agent with reservations",
+			agent:        &AgentState{PaneID: "%0", Reservations: []string{"a.go", "b.go", "c.go"}},
+			reservations: nil,
+			wantZero:     false,
+		},
+		{
+			name:         "reservations in map",
+			agent:        &AgentState{PaneID: "%0"},
+			reservations: map[string][]string{"%0": {"x.go"}},
+			wantZero:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			penalty := computeFileOverlapPenalty(tt.agent, tt.reservations)
+			if tt.wantZero && penalty != 0 {
+				t.Errorf("expected zero penalty, got %f", penalty)
+			}
+			if !tt.wantZero && penalty <= 0 {
+				t.Errorf("expected positive penalty, got %f", penalty)
+			}
+		})
+	}
+}
+
+func TestScoreAndSelectAssignments(t *testing.T) {
+	agents := []*AgentState{
+		{PaneID: "%1", AgentType: "cc", ContextUsage: 0.3, Status: robot.StateWaiting},
+		{PaneID: "%2", AgentType: "cod", ContextUsage: 0.5, Status: robot.StateWaiting},
+	}
+
+	triage := &bv.TriageResponse{
+		Triage: bv.TriageData{
+			Recommendations: []bv.TriageRecommendation{
+				{ID: "ntm-001", Title: "Epic task", Type: "epic", Status: "open", Priority: 2, Score: 0.8},
+				{ID: "ntm-002", Title: "Quick fix", Type: "chore", Status: "open", Priority: 2, Score: 0.6},
+				{ID: "ntm-003", Title: "Blocked", Type: "task", Status: "blocked", Priority: 2, Score: 0.9},
+			},
+		},
+	}
+
+	config := DefaultScoreConfig()
+	results := ScoreAndSelectAssignments(agents, triage, config, nil)
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 assignments, got %d", len(results))
+	}
+
+	// Verify each agent got exactly one task
+	agentTasks := make(map[string]string)
+	for _, r := range results {
+		if existing, ok := agentTasks[r.Agent.PaneID]; ok {
+			t.Errorf("agent %s assigned twice: %s and %s", r.Agent.PaneID, existing, r.Assignment.BeadID)
+		}
+		agentTasks[r.Agent.PaneID] = r.Assignment.BeadID
+	}
+
+	// Verify blocked task not assigned
+	for _, r := range results {
+		if r.Assignment.BeadID == "ntm-003" {
+			t.Error("blocked task should not be assigned")
+		}
+	}
+}
+
+func TestScoreAndSelectAssignmentsEmpty(t *testing.T) {
+	// Empty agents
+	result := ScoreAndSelectAssignments(nil, &bv.TriageResponse{}, DefaultScoreConfig(), nil)
+	if result != nil {
+		t.Error("expected nil for empty agents")
+	}
+
+	// Empty triage
+	agents := []*AgentState{{PaneID: "%0", AgentType: "cc"}}
+	result = ScoreAndSelectAssignments(agents, nil, DefaultScoreConfig(), nil)
+	if result != nil {
+		t.Error("expected nil for nil triage")
+	}
+
+	// Empty recommendations
+	result = ScoreAndSelectAssignments(agents, &bv.TriageResponse{}, DefaultScoreConfig(), nil)
+	if result != nil {
+		t.Error("expected nil for empty recommendations")
+	}
+}
+
+func TestComputeCriticalPathBonus(t *testing.T) {
+	tests := []struct {
+		name      string
+		breakdown *bv.ScoreBreakdown
+		wantZero  bool
+	}{
+		{
+			name:      "low pagerank",
+			breakdown: &bv.ScoreBreakdown{Pagerank: 0.01, BlockerRatio: 0.01},
+			wantZero:  true,
+		},
+		{
+			name:      "high pagerank",
+			breakdown: &bv.ScoreBreakdown{Pagerank: 0.1, BlockerRatio: 0.01},
+			wantZero:  false,
+		},
+		{
+			name:      "high blocker ratio",
+			breakdown: &bv.ScoreBreakdown{Pagerank: 0.01, BlockerRatio: 0.1},
+			wantZero:  false,
+		},
+		{
+			name:      "high time to impact",
+			breakdown: &bv.ScoreBreakdown{Pagerank: 0.01, BlockerRatio: 0.01, TimeToImpact: 0.06},
+			wantZero:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bonus := computeCriticalPathBonus(tt.breakdown)
+			if tt.wantZero && bonus != 0 {
+				t.Errorf("expected zero bonus, got %f", bonus)
+			}
+			if !tt.wantZero && bonus <= 0 {
+				t.Errorf("expected positive bonus, got %f", bonus)
+			}
+		})
+	}
+}

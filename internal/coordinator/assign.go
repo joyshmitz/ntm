@@ -32,20 +32,20 @@ func DefaultScoreConfig() ScoreConfig {
 
 // ScoredAssignment pairs an assignment with its computed score breakdown.
 type ScoredAssignment struct {
-	Assignment      *WorkAssignment
-	Recommendation  *bv.TriageRecommendation
-	Agent           *AgentState
-	TotalScore      float64
-	ScoreBreakdown  AssignmentScoreBreakdown
+	Assignment     *WorkAssignment
+	Recommendation *bv.TriageRecommendation
+	Agent          *AgentState
+	TotalScore     float64
+	ScoreBreakdown AssignmentScoreBreakdown
 }
 
 // AssignmentScoreBreakdown shows how the score was computed.
 type AssignmentScoreBreakdown struct {
-	BaseScore         float64 `json:"base_score"`          // From bv triage score
-	AgentTypeBonus    float64 `json:"agent_type_bonus"`    // Bonus for agent-task match
-	CriticalPathBonus float64 `json:"critical_path_bonus"` // Bonus for critical path items
+	BaseScore          float64 `json:"base_score"`           // From bv triage score
+	AgentTypeBonus     float64 `json:"agent_type_bonus"`     // Bonus for agent-task match
+	CriticalPathBonus  float64 `json:"critical_path_bonus"`  // Bonus for critical path items
 	FileOverlapPenalty float64 `json:"file_overlap_penalty"` // Penalty for file conflicts
-	ContextPenalty    float64 `json:"context_penalty"`     // Penalty for high context usage
+	ContextPenalty     float64 `json:"context_penalty"`      // Penalty for high context usage
 }
 
 // WorkAssignment represents a work assignment to an agent.
@@ -297,4 +297,254 @@ func (c *SessionCoordinator) SuggestAssignment(ctx context.Context, paneID strin
 
 	assignment, _ := c.findBestMatch(agent, triage.Triage.Recommendations)
 	return assignment, nil
+}
+
+// ScoreAndSelectAssignments computes optimal agent-task pairings using multi-factor scoring.
+// It returns a list of scored assignments sorted by total score (highest first).
+func ScoreAndSelectAssignments(
+	idleAgents []*AgentState,
+	triage *bv.TriageResponse,
+	config ScoreConfig,
+	existingReservations map[string][]string, // agent -> reserved file patterns
+) []ScoredAssignment {
+	if len(idleAgents) == 0 || triage == nil || len(triage.Triage.Recommendations) == 0 {
+		return nil
+	}
+
+	var candidates []ScoredAssignment
+
+	// Score all possible agent-task combinations
+	for _, agent := range idleAgents {
+		for i := range triage.Triage.Recommendations {
+			rec := &triage.Triage.Recommendations[i]
+
+			// Skip blocked items
+			if rec.Status == "blocked" {
+				continue
+			}
+
+			scored := scoreAssignment(agent, rec, config, existingReservations)
+			if scored.TotalScore > 0 {
+				candidates = append(candidates, scored)
+			}
+		}
+	}
+
+	// Sort by total score (highest first)
+	sortScoredAssignments(candidates)
+
+	// Select non-conflicting assignments (each agent gets at most one task)
+	var selected []ScoredAssignment
+	assignedAgents := make(map[string]bool)
+	assignedTasks := make(map[string]bool)
+
+	for _, candidate := range candidates {
+		agentID := candidate.Agent.PaneID
+		taskID := candidate.Recommendation.ID
+
+		if assignedAgents[agentID] || assignedTasks[taskID] {
+			continue
+		}
+
+		selected = append(selected, candidate)
+		assignedAgents[agentID] = true
+		assignedTasks[taskID] = true
+	}
+
+	return selected
+}
+
+// sortScoredAssignments sorts assignments by total score (highest first).
+func sortScoredAssignments(candidates []ScoredAssignment) {
+	for i := 0; i < len(candidates)-1; i++ {
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[j].TotalScore > candidates[i].TotalScore {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		}
+	}
+}
+
+// scoreAssignment computes the score for a single agent-task pairing.
+func scoreAssignment(
+	agent *AgentState,
+	rec *bv.TriageRecommendation,
+	config ScoreConfig,
+	existingReservations map[string][]string,
+) ScoredAssignment {
+	breakdown := AssignmentScoreBreakdown{
+		BaseScore: rec.Score,
+	}
+
+	// Agent type matching
+	if config.UseAgentProfiles {
+		breakdown.AgentTypeBonus = computeAgentTypeBonus(agent.AgentType, rec)
+	}
+
+	// Critical path bonus
+	if config.PreferCriticalPath && rec.Breakdown != nil {
+		breakdown.CriticalPathBonus = computeCriticalPathBonus(rec.Breakdown)
+	}
+
+	// File overlap penalty
+	if config.PenalizeFileOverlap && existingReservations != nil {
+		breakdown.FileOverlapPenalty = computeFileOverlapPenalty(agent, existingReservations)
+	}
+
+	// Context/budget penalty
+	if config.BudgetAware {
+		threshold := config.ContextThreshold
+		if threshold == 0 {
+			threshold = 0.8
+		}
+		breakdown.ContextPenalty = computeContextPenalty(agent.ContextUsage, threshold)
+	}
+
+	totalScore := breakdown.BaseScore +
+		breakdown.AgentTypeBonus +
+		breakdown.CriticalPathBonus -
+		breakdown.FileOverlapPenalty -
+		breakdown.ContextPenalty
+
+	return ScoredAssignment{
+		Assignment: &WorkAssignment{
+			BeadID:        rec.ID,
+			BeadTitle:     rec.Title,
+			AgentPaneID:   agent.PaneID,
+			AgentMailName: agent.AgentMailName,
+			AgentType:     agent.AgentType,
+			AssignedAt:    time.Now(),
+			Priority:      rec.Priority,
+			Score:         totalScore,
+		},
+		Recommendation: rec,
+		Agent:          agent,
+		TotalScore:     totalScore,
+		ScoreBreakdown: breakdown,
+	}
+}
+
+// computeAgentTypeBonus returns a bonus based on agent-task compatibility.
+// Claude (cc) is better for complex tasks (epics, features), Codex (cod) for quick fixes.
+func computeAgentTypeBonus(agentType string, rec *bv.TriageRecommendation) float64 {
+	taskComplexity := estimateTaskComplexity(rec)
+
+	switch agentType {
+	case "cc", "claude":
+		// Claude excels at complex, multi-step work
+		if taskComplexity >= 0.7 {
+			return 0.15 // 15% bonus for complex tasks
+		} else if taskComplexity <= 0.3 {
+			return -0.05 // Small penalty for simple tasks (overkill)
+		}
+	case "cod", "codex":
+		// Codex is great for quick, focused fixes
+		if taskComplexity <= 0.3 {
+			return 0.15 // 15% bonus for simple tasks
+		} else if taskComplexity >= 0.7 {
+			return -0.1 // Penalty for complex tasks
+		}
+	case "gmi", "gemini":
+		// Gemini is balanced
+		if taskComplexity >= 0.4 && taskComplexity <= 0.6 {
+			return 0.05 // Small bonus for medium complexity
+		}
+	}
+
+	return 0
+}
+
+// estimateTaskComplexity returns a 0-1 score based on task characteristics.
+func estimateTaskComplexity(rec *bv.TriageRecommendation) float64 {
+	complexity := 0.5 // Start with medium
+
+	// Task type affects complexity
+	switch rec.Type {
+	case "epic":
+		complexity += 0.3
+	case "feature":
+		complexity += 0.2
+	case "bug":
+		complexity += 0.0 // Varies
+	case "task":
+		complexity -= 0.1
+	case "chore":
+		complexity -= 0.2
+	}
+
+	// Priority affects perceived complexity (urgent items often simpler)
+	if rec.Priority == 0 {
+		complexity -= 0.1 // Critical items often need quick fixes
+	} else if rec.Priority >= 3 {
+		complexity += 0.1 // Backlog items often bigger
+	}
+
+	// Number of items unblocked indicates scope
+	if len(rec.UnblocksIDs) >= 5 {
+		complexity += 0.15
+	} else if len(rec.UnblocksIDs) >= 3 {
+		complexity += 0.1
+	}
+
+	// Clamp to 0-1
+	if complexity < 0 {
+		complexity = 0
+	} else if complexity > 1 {
+		complexity = 1
+	}
+
+	return complexity
+}
+
+// computeCriticalPathBonus gives bonus for items with high graph centrality.
+func computeCriticalPathBonus(breakdown *bv.ScoreBreakdown) float64 {
+	bonus := 0.0
+
+	// High PageRank means central to the project
+	if breakdown.Pagerank > 0.05 {
+		bonus += breakdown.Pagerank * 2 // Up to ~0.15 bonus
+	}
+
+	// High blocker ratio means it unblocks many things
+	if breakdown.BlockerRatio > 0.05 {
+		bonus += breakdown.BlockerRatio * 1.5
+	}
+
+	// Time-to-impact indicates depth in critical path
+	if breakdown.TimeToImpact > 0.04 {
+		bonus += 0.05
+	}
+
+	return bonus
+}
+
+// computeFileOverlapPenalty penalizes agents who already have many file reservations.
+func computeFileOverlapPenalty(agent *AgentState, reservations map[string][]string) float64 {
+	agentReservations := reservations[agent.PaneID]
+	if len(agentReservations) == 0 {
+		agentReservations = agent.Reservations
+	}
+
+	// Penalty increases with number of reservations
+	// This encourages spreading work across agents
+	count := len(agentReservations)
+	if count == 0 {
+		return 0
+	} else if count <= 2 {
+		return 0.05
+	} else if count <= 5 {
+		return 0.1
+	}
+	return 0.2
+}
+
+// computeContextPenalty penalizes agents with high context window usage.
+func computeContextPenalty(contextUsage float64, threshold float64) float64 {
+	if contextUsage <= threshold {
+		return 0
+	}
+
+	// Linear penalty above threshold
+	excess := contextUsage - threshold
+	return excess * 0.5 // 50% penalty per 10% over threshold
 }
