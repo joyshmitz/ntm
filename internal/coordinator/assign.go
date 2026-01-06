@@ -546,8 +546,8 @@ func computeContextPenalty(contextUsage float64, threshold float64) float64 {
 		return 0
 	}
 
-	// Linear penalty above threshold: 50% of the excess amount
-	// e.g., 10% over threshold → 5% penalty; 20% over → 10% penalty
+	// Linear penalty above threshold, normalized to score scale (0-1)
+	// e.g., 10% over threshold → 0.05 penalty; 20% over → 0.10 penalty
 	excess := contextUsage - threshold
-	return excess * 0.5
+	return (excess / 100) * 0.5
 }

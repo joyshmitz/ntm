@@ -338,10 +338,10 @@ func TestComputeContextPenalty(t *testing.T) {
 		threshold    float64
 		wantZero     bool
 	}{
-		{"below threshold", 0.5, 0.8, true},
-		{"at threshold", 0.8, 0.8, true},
-		{"above threshold", 0.9, 0.8, false},
-		{"way above threshold", 0.95, 0.8, false},
+		{"below threshold", 50, 80, true},
+		{"at threshold", 80, 80, true},
+		{"above threshold", 90, 80, false},
+		{"way above threshold", 95, 80, false},
 	}
 
 	for _, tt := range tests {
@@ -355,6 +355,21 @@ func TestComputeContextPenalty(t *testing.T) {
 			}
 		})
 	}
+
+	// Verify penalty values are reasonable (normalized to 0-1 scale)
+	t.Run("penalty values are reasonable", func(t *testing.T) {
+		// 10% over threshold (90% usage, 80% threshold)
+		penalty10 := computeContextPenalty(90, 80)
+		if penalty10 < 0.04 || penalty10 > 0.06 {
+			t.Errorf("10%% over threshold should give ~0.05 penalty, got %f", penalty10)
+		}
+
+		// 20% over threshold (100% usage, 80% threshold)
+		penalty20 := computeContextPenalty(100, 80)
+		if penalty20 < 0.09 || penalty20 > 0.11 {
+			t.Errorf("20%% over threshold should give ~0.10 penalty, got %f", penalty20)
+		}
+	})
 }
 
 func TestComputeFileOverlapPenalty(t *testing.T) {
