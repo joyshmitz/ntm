@@ -109,6 +109,7 @@ func DefaultPolicy() *Policy {
 		},
 		// Allowed patterns checked FIRST - explicitly safe commands
 		Allowed: []Rule{
+			{Pattern: `git\s+push\s+.*--force-with-lease`, Reason: "Force with lease is safer than force push"},
 			{Pattern: `git\s+reset\s+--soft`, Reason: "Soft reset preserves changes"},
 			{Pattern: `git\s+reset\s+HEAD~?\d*$`, Reason: "Mixed reset preserves working directory"},
 		},
@@ -116,9 +117,10 @@ func DefaultPolicy() *Policy {
 		Blocked: []Rule{
 			{Pattern: `git\s+reset\s+--hard`, Reason: "Hard reset loses uncommitted changes"},
 			{Pattern: `git\s+clean\s+-fd`, Reason: "Removes untracked files permanently"},
-			// Use strict boundaries to avoid matching --force-with-lease
-			{Pattern: `git\s+push\s+.*(\s|^)--force(\s|$)`, Reason: "Force push can overwrite remote history"},
-			{Pattern: `git\s+push\s+.*(\s|^)-f(\s|$)`, Reason: "Force push can overwrite remote history"},
+			// Match --force followed by space or end-of-string (not --force-with-lease)
+			// The allowed pattern for --force-with-lease takes precedence
+			{Pattern: `git\s+push\s+.*--force(\s|$)`, Reason: "Force push can overwrite remote history"},
+			{Pattern: `git\s+push\s+(.*\s)?-f(\s|$)`, Reason: "Force push can overwrite remote history"},
 			{Pattern: `rm\s+-rf\s+/$`, Reason: "Recursive delete of root is catastrophic"},
 			{Pattern: `rm\s+-rf\s+~`, Reason: "Recursive delete of home directory"},
 			{Pattern: `rm\s+-rf\s+\*`, Reason: "Recursive delete of everything in current directory"},
