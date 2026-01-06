@@ -222,3 +222,321 @@ func TestInitProjectConfigForce(t *testing.T) {
 		t.Fatalf("expected palette.md to be preserved when force=true")
 	}
 }
+
+func TestFindProjectConfig(t *testing.T) {
+	// Create temp directory hierarchy: /tmp/root/sub1/sub2
+	tmpDir := t.TempDir()
+	rootDir := filepath.Join(tmpDir, "root")
+	sub1Dir := filepath.Join(rootDir, "sub1")
+	sub2Dir := filepath.Join(sub1Dir, "sub2")
+
+	if err := os.MkdirAll(sub2Dir, 0755); err != nil {
+		t.Fatalf("creating directory hierarchy: %v", err)
+	}
+
+	// Create .ntm/config.toml at root level
+	ntmDir := filepath.Join(rootDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("creating .ntm directory: %v", err)
+	}
+
+	configContent := `[defaults]
+agents = { cc = 3, cod = 2 }
+
+[agents]
+claude = "claude --project test"
+`
+	configPath := filepath.Join(ntmDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	t.Run("finds config from same directory", func(t *testing.T) {
+		foundDir, cfg, err := FindProjectConfig(rootDir)
+		if err != nil {
+			t.Fatalf("FindProjectConfig failed: %v", err)
+		}
+		if foundDir != rootDir {
+			t.Errorf("expected foundDir=%s, got=%s", rootDir, foundDir)
+		}
+		if cfg == nil {
+			t.Fatal("expected config to be non-nil")
+		}
+		if cfg.Agents.Claude != "claude --project test" {
+			t.Errorf("expected claude command to be set, got=%s", cfg.Agents.Claude)
+		}
+	})
+
+	t.Run("finds config from nested directory", func(t *testing.T) {
+		foundDir, cfg, err := FindProjectConfig(sub2Dir)
+		if err != nil {
+			t.Fatalf("FindProjectConfig failed: %v", err)
+		}
+		if foundDir != rootDir {
+			t.Errorf("expected foundDir=%s, got=%s", rootDir, foundDir)
+		}
+		if cfg == nil {
+			t.Fatal("expected config to be non-nil")
+		}
+		if cfg.Defaults.Agents["cc"] != 3 {
+			t.Errorf("expected cc=3, got=%d", cfg.Defaults.Agents["cc"])
+		}
+	})
+
+	t.Run("returns nil when no config exists", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		foundDir, cfg, err := FindProjectConfig(emptyDir)
+		if err != nil {
+			t.Fatalf("FindProjectConfig failed: %v", err)
+		}
+		if foundDir != "" {
+			t.Errorf("expected empty foundDir, got=%s", foundDir)
+		}
+		if cfg != nil {
+			t.Error("expected config to be nil")
+		}
+	})
+}
+
+func TestLoadMerged(t *testing.T) {
+	// Create temp dirs for global and project configs
+	globalDir := t.TempDir()
+	projectDir := t.TempDir()
+
+	// Create global config
+	globalConfigPath := filepath.Join(globalDir, "config.toml")
+	globalContent := `[agents]
+claude = "claude --global"
+codex = "codex --global"
+
+[layout]
+default_layout = "global-layout"
+`
+	if err := os.WriteFile(globalConfigPath, []byte(globalContent), 0644); err != nil {
+		t.Fatalf("writing global config: %v", err)
+	}
+
+	// Create project config
+	ntmDir := filepath.Join(projectDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("creating .ntm directory: %v", err)
+	}
+
+	projectContent := `[defaults]
+agents = { cc = 4, cod = 1 }
+
+[agents]
+claude = "claude --project-override"
+`
+	projectConfigPath := filepath.Join(ntmDir, "config.toml")
+	if err := os.WriteFile(projectConfigPath, []byte(projectContent), 0644); err != nil {
+		t.Fatalf("writing project config: %v", err)
+	}
+
+	t.Run("merges global and project config", func(t *testing.T) {
+		cfg, err := LoadMerged(projectDir, globalConfigPath)
+		if err != nil {
+			t.Fatalf("LoadMerged failed: %v", err)
+		}
+
+		// Project should override claude
+		if cfg.Agents.Claude != "claude --project-override" {
+			t.Errorf("expected project claude override, got=%s", cfg.Agents.Claude)
+		}
+
+		// Global codex should be preserved
+		if cfg.Agents.Codex != "codex --global" {
+			t.Errorf("expected global codex, got=%s", cfg.Agents.Codex)
+		}
+
+		// Project defaults should be set
+		if cfg.ProjectDefaults["cc"] != 4 {
+			t.Errorf("expected cc=4, got=%d", cfg.ProjectDefaults["cc"])
+		}
+	})
+
+	t.Run("uses defaults when global config missing", func(t *testing.T) {
+		cfg, err := LoadMerged(projectDir, filepath.Join(globalDir, "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("LoadMerged failed: %v", err)
+		}
+		// Should still merge project config
+		if cfg.Agents.Claude != "claude --project-override" {
+			t.Errorf("expected project claude override even without global, got=%s", cfg.Agents.Claude)
+		}
+	})
+
+	t.Run("returns error for invalid project config", func(t *testing.T) {
+		badProjectDir := t.TempDir()
+		badNtmDir := filepath.Join(badProjectDir, ".ntm")
+		os.MkdirAll(badNtmDir, 0755)
+		os.WriteFile(filepath.Join(badNtmDir, "config.toml"), []byte("invalid { toml"), 0644)
+
+		_, err := LoadMerged(badProjectDir, globalConfigPath)
+		if err == nil {
+			t.Fatal("expected error for invalid project config")
+		}
+		if !strings.Contains(err.Error(), "project config") {
+			t.Errorf("expected error to mention project config, got=%v", err)
+		}
+	})
+}
+
+func TestMergeConfig(t *testing.T) {
+	t.Run("project overrides global agents", func(t *testing.T) {
+		global := &Config{
+			Agents: AgentConfig{
+				Claude: "claude-global",
+				Codex:  "codex-global",
+				Gemini: "gemini-global",
+			},
+		}
+		project := &ProjectConfig{
+			Agents: AgentConfig{
+				Claude: "claude-project",
+			},
+		}
+
+		result := MergeConfig(global, project, "/project")
+		if result.Agents.Claude != "claude-project" {
+			t.Errorf("expected claude-project, got=%s", result.Agents.Claude)
+		}
+		if result.Agents.Codex != "codex-global" {
+			t.Errorf("expected codex-global to be preserved, got=%s", result.Agents.Codex)
+		}
+		if result.Agents.Gemini != "gemini-global" {
+			t.Errorf("expected gemini-global to be preserved, got=%s", result.Agents.Gemini)
+		}
+	})
+
+	t.Run("project defaults override global defaults", func(t *testing.T) {
+		global := &Config{
+			ProjectDefaults: map[string]int{"cc": 1, "cod": 1},
+		}
+		project := &ProjectConfig{
+			Defaults: ProjectDefaults{
+				Agents: map[string]int{"cc": 5},
+			},
+		}
+
+		result := MergeConfig(global, project, "/project")
+		if result.ProjectDefaults["cc"] != 5 {
+			t.Errorf("expected cc=5, got=%d", result.ProjectDefaults["cc"])
+		}
+	})
+
+	t.Run("ignores unsafe palette paths", func(t *testing.T) {
+		global := &Config{}
+		project := &ProjectConfig{
+			Palette: ProjectPalette{
+				File: "../../../etc/passwd",
+			},
+		}
+
+		// Should not panic or error, just ignore
+		result := MergeConfig(global, project, "/project")
+		if len(result.Palette) != 0 {
+			t.Errorf("expected empty palette for unsafe path, got=%d commands", len(result.Palette))
+		}
+	})
+
+	t.Run("merges palette state with project taking precedence", func(t *testing.T) {
+		global := &Config{
+			PaletteState: PaletteState{
+				Pinned:    []string{"global-pin1", "shared-pin"},
+				Favorites: []string{"global-fav"},
+			},
+		}
+		project := &ProjectConfig{
+			PaletteState: PaletteState{
+				Pinned:    []string{"project-pin", "shared-pin"},
+				Favorites: []string{"project-fav"},
+			},
+		}
+
+		result := MergeConfig(global, project, "/project")
+
+		// Project pins should come first, then unique global pins
+		if len(result.PaletteState.Pinned) != 3 {
+			t.Errorf("expected 3 pinned items, got=%d", len(result.PaletteState.Pinned))
+		}
+		if result.PaletteState.Pinned[0] != "project-pin" {
+			t.Errorf("expected project-pin first, got=%s", result.PaletteState.Pinned[0])
+		}
+
+		// Favorites should follow same precedence
+		if len(result.PaletteState.Favorites) != 2 {
+			t.Errorf("expected 2 favorites, got=%d", len(result.PaletteState.Favorites))
+		}
+		if result.PaletteState.Favorites[0] != "project-fav" {
+			t.Errorf("expected project-fav first, got=%s", result.PaletteState.Favorites[0])
+		}
+	})
+}
+
+func TestMergeStringListPreferFirst(t *testing.T) {
+	tests := []struct {
+		name      string
+		primary   []string
+		secondary []string
+		expected  []string
+	}{
+		{
+			name:      "empty both",
+			primary:   nil,
+			secondary: nil,
+			expected:  nil,
+		},
+		{
+			name:      "primary only",
+			primary:   []string{"a", "b"},
+			secondary: nil,
+			expected:  []string{"a", "b"},
+		},
+		{
+			name:      "secondary only",
+			primary:   nil,
+			secondary: []string{"x", "y"},
+			expected:  []string{"x", "y"},
+		},
+		{
+			name:      "primary takes precedence on duplicates",
+			primary:   []string{"a", "b"},
+			secondary: []string{"b", "c"},
+			expected:  []string{"a", "b", "c"},
+		},
+		{
+			name:      "trims whitespace",
+			primary:   []string{" a ", "  b"},
+			secondary: []string{"c  "},
+			expected:  []string{"a", "b", "c"},
+		},
+		{
+			name:      "filters empty strings",
+			primary:   []string{"a", "", "b"},
+			secondary: []string{"", "c"},
+			expected:  []string{"a", "b", "c"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mergeStringListPreferFirst(tt.primary, tt.secondary)
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("expected nil, got=%v", result)
+				}
+				return
+			}
+			if len(result) != len(tt.expected) {
+				t.Errorf("expected len=%d, got=%d", len(tt.expected), len(result))
+				return
+			}
+			for i := range tt.expected {
+				if result[i] != tt.expected[i] {
+					t.Errorf("at index %d: expected=%s, got=%s", i, tt.expected[i], result[i])
+				}
+			}
+		})
+	}
+}
