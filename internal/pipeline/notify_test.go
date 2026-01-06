@@ -482,10 +482,3 @@ func TestNotifyNoChannels(t *testing.T) {
 		t.Errorf("expected no error for empty channels, got %v", err)
 	}
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
