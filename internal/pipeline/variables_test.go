@@ -518,6 +518,228 @@ func TestNavigateNested(t *testing.T) {
 	}
 }
 
+func TestNavigateNested_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   interface{}
+		parts   []string
+		want    interface{}
+		wantErr bool
+	}{
+		{
+			name:    "nil value",
+			value:   nil,
+			parts:   []string{"foo"},
+			wantErr: true,
+		},
+		{
+			name: "map[interface{}]interface{} - YAML style",
+			value: map[interface{}]interface{}{
+				"key1": "value1",
+				"key2": map[interface{}]interface{}{
+					"nested": "nestedvalue",
+				},
+			},
+			parts: []string{"key1"},
+			want:  "value1",
+		},
+		{
+			name: "map[interface{}]interface{} - nested",
+			value: map[interface{}]interface{}{
+				"outer": map[interface{}]interface{}{
+					"inner": "deep",
+				},
+			},
+			parts: []string{"outer", "inner"},
+			want:  "deep",
+		},
+		{
+			name: "map[interface{}]interface{} - missing key",
+			value: map[interface{}]interface{}{
+				"key1": "value1",
+			},
+			parts:   []string{"missing"},
+			wantErr: true,
+		},
+		{
+			name:  "[]string array",
+			value: []string{"alpha", "beta", "gamma"},
+			parts: []string{"1"},
+			want:  "beta",
+		},
+		{
+			name:    "[]string array - out of bounds",
+			value:   []string{"alpha", "beta"},
+			parts:   []string{"5"},
+			wantErr: true,
+		},
+		{
+			name:    "[]string array - invalid index",
+			value:   []string{"alpha", "beta"},
+			parts:   []string{"abc"},
+			wantErr: true,
+		},
+		{
+			name:    "[]string array - negative index",
+			value:   []string{"alpha", "beta"},
+			parts:   []string{"-1"},
+			wantErr: true,
+		},
+		{
+			name:    "[]interface{} array - negative index",
+			value:   []interface{}{"a", "b"},
+			parts:   []string{"-1"},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported type (struct)",
+			value:   struct{ Field string }{"value"},
+			parts:   []string{"Field"},
+			wantErr: true,
+		},
+		{
+			name:    "access field on string",
+			value:   "just a string",
+			parts:   []string{"field"},
+			wantErr: true,
+		},
+		{
+			name:  "empty parts returns original",
+			value: "original",
+			parts: []string{},
+			want:  "original",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := navigateNested(tt.value, tt.parts)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("navigateNested() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("navigateNested() unexpected error: %v", err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("navigateNested() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{
+			name:  "nil",
+			value: nil,
+			want:  "",
+		},
+		{
+			name:  "string",
+			value: "hello world",
+			want:  "hello world",
+		},
+		{
+			name:  "bool true",
+			value: true,
+			want:  "true",
+		},
+		{
+			name:  "bool false",
+			value: false,
+			want:  "false",
+		},
+		{
+			name:  "int positive",
+			value: 42,
+			want:  "42",
+		},
+		{
+			name:  "int negative",
+			value: -10,
+			want:  "-10",
+		},
+		{
+			name:  "int zero",
+			value: 0,
+			want:  "0",
+		},
+		{
+			name:  "int64",
+			value: int64(9223372036854775807),
+			want:  "9223372036854775807",
+		},
+		{
+			name:  "float64 integer-like",
+			value: 42.0,
+			want:  "42",
+		},
+		{
+			name:  "float64 with decimals",
+			value: 3.14159,
+			want:  "3.14159",
+		},
+		{
+			name:  "[]byte",
+			value: []byte("byte slice"),
+			want:  "byte slice",
+		},
+		{
+			name:  "map - JSON marshaled",
+			value: map[string]string{"key": "value"},
+			want:  `{"key":"value"}`,
+		},
+		{
+			name:  "slice - JSON marshaled",
+			value: []int{1, 2, 3},
+			want:  "[1,2,3]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatValue(tt.value)
+			if got != tt.want {
+				t.Errorf("formatValue(%v) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatValue_TimeTypes(t *testing.T) {
+	// Time tests aren't parallel because they use fixed time values
+
+	// Test time.Time
+	testTime := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+	got := formatValue(testTime)
+	want := "2025-06-15T10:30:00Z"
+	if got != want {
+		t.Errorf("formatValue(time.Time) = %q, want %q", got, want)
+	}
+
+	// Test time.Duration
+	duration := 5*time.Hour + 30*time.Minute + 15*time.Second
+	got = formatValue(duration)
+	want = "5h30m15s"
+	if got != want {
+		t.Errorf("formatValue(time.Duration) = %q, want %q", got, want)
+	}
+}
+
 func TestStoreStepOutput(t *testing.T) {
 	state := &ExecutionState{}
 

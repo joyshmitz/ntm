@@ -275,10 +275,24 @@ func TestConditionEvaluator_NumericErrors(t *testing.T) {
 	sub := NewSubstitutor(state, "test-session", "test-workflow")
 	evaluator := NewConditionEvaluator(sub)
 
-	// Numeric comparison with non-numeric values should error
-	_, err := evaluator.Evaluate("${vars.text} > 10")
-	if err == nil {
-		t.Error("Expected error for non-numeric comparison")
+	// Test all numeric comparison operators with non-numeric values
+	tests := []struct {
+		name      string
+		condition string
+	}{
+		{"greater than", "${vars.text} > 10"},
+		{"less than", "${vars.text} < 10"},
+		{"greater equal", "${vars.text} >= 10"},
+		{"less equal", "${vars.text} <= 10"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := evaluator.Evaluate(tt.condition)
+			if err == nil {
+				t.Errorf("Expected error for non-numeric %s comparison", tt.name)
+			}
+		})
 	}
 }
 
