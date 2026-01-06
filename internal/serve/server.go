@@ -81,7 +81,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:         fmt.Sprintf("%s:%d", s.host, s.port),
 		Handler:      corsMiddleware(loggingMiddleware(mux)),
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0, // Disabled to support long-lived SSE streams at /events
 		IdleTimeout:  60 * time.Second,
 	}
 

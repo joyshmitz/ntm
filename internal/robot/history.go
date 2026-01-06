@@ -103,15 +103,9 @@ func PrintHistory(opts HistoryOptions) error {
 		return encodeJSON(output)
 	}
 
-	// Get entries
-	var entries []history.HistoryEntry
-	var err error
-
-	if opts.Session != "" {
-		entries, err = history.ReadForSession(opts.Session)
-	} else {
-		entries, err = history.ReadAll()
-	}
+	// Get entries for the session
+	// Note: opts.Session is guaranteed non-empty (checked at line 44)
+	entries, err := history.ReadForSession(opts.Session)
 
 	if err != nil {
 		return RobotError(
