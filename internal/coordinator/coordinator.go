@@ -105,6 +105,7 @@ const (
 	EventConflictResolved CoordinatorEventType = "conflict_resolved"
 	EventWorkAssigned     CoordinatorEventType = "work_assigned"
 	EventDigestSent       CoordinatorEventType = "digest_sent"
+	EventDigestFailed     CoordinatorEventType = "digest_failed"
 )
 
 // CoordinatorEvent represents an event from the coordinator.
@@ -334,7 +335,17 @@ func (c *SessionCoordinator) digestLoop() {
 			return
 		case <-ticker.C:
 			if err := c.SendDigest(c.ctx); err != nil {
-				// Log error but continue
+				// Emit event for observability - don't stop the loop
+				select {
+				case c.events <- CoordinatorEvent{
+					Type:      EventDigestFailed,
+					Timestamp: time.Now(),
+					Details: map[string]any{
+						"error": err.Error(),
+					},
+				}:
+				default:
+				}
 			}
 		}
 	}
