@@ -29,9 +29,10 @@ TMP_DIRS=()
 cleanup_tmp_dirs() {
     local dir
     for dir in "${TMP_DIRS[@]:-}"; do
-        # Use || true to prevent exit code 1 when TMP_DIRS is empty
-        # (empty string causes [ -n "" ] to fail, which propagates due to set -e)
-        [ -n "$dir" ] && rm -rf "$dir" || true
+        # Use if statement to avoid set -e triggering on empty dir check
+        if [ -n "$dir" ]; then
+            rm -rf "$dir"
+        fi
     done
 }
 
