@@ -446,6 +446,7 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 		}
 
 		// Validate path doesn't escape checkpoint directory (path traversal protection)
+		// First pass: textual validation before creating directories
 		if !isPathWithinDir(cpDir, name) {
 			return nil, fmt.Errorf("invalid path in archive (path traversal attempt): %s", name)
 		}
@@ -454,7 +455,14 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory for %s: %w", name, err)
 		}
-		if err := os.WriteFile(destPath, data, 0644); err != nil {
+
+		// Second pass: symlink-safe validation after directories are created (TOCTOU protection)
+		resolvedPath, err := isPathWithinDirResolved(cpDir, name)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path in archive (symlink escape): %s", name)
+		}
+
+		if err := os.WriteFile(resolvedPath, data, 0644); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", name, err)
 		}
 	}
@@ -562,6 +570,7 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 		}
 
 		// Validate path doesn't escape checkpoint directory (path traversal protection)
+		// First pass: textual validation before creating directories
 		if !isPathWithinDir(cpDir, name) {
 			return nil, fmt.Errorf("invalid path in archive (path traversal attempt): %s", name)
 		}
@@ -570,7 +579,14 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory for %s: %w", name, err)
 		}
-		if err := os.WriteFile(destPath, data, 0644); err != nil {
+
+		// Second pass: symlink-safe validation after directories are created (TOCTOU protection)
+		resolvedPath, err := isPathWithinDirResolved(cpDir, name)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path in archive (symlink escape): %s", name)
+		}
+
+		if err := os.WriteFile(resolvedPath, data, 0644); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", name, err)
 		}
 	}
@@ -645,4 +661,48 @@ func isPathWithinDir(baseDir, targetPath string) bool {
 
 	// If the relative path starts with "..", it's outside the base
 	return !strings.HasPrefix(rel, "..")
+}
+
+// isPathWithinDirResolved validates a path after resolving symlinks to prevent TOCTOU attacks.
+// Returns the resolved absolute path if valid, or an error if the path escapes the base directory.
+func isPathWithinDirResolved(baseDir, targetPath string) (string, error) {
+	// First do textual validation (fast path)
+	if !isPathWithinDir(baseDir, targetPath) {
+		return "", fmt.Errorf("path escapes base directory: %s", targetPath)
+	}
+
+	// Resolve symlinks in the base directory to get canonical path
+	resolvedBase, err := filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		// If base doesn't exist yet, fall back to Clean
+		resolvedBase = filepath.Clean(baseDir)
+	}
+
+	// Build the full path
+	fullPath := filepath.Join(resolvedBase, targetPath)
+
+	// For the target, resolve parent directories but not the final component
+	// (since we're about to create it). This catches symlink attacks in intermediate dirs.
+	parentDir := filepath.Dir(fullPath)
+
+	// Try to resolve symlinks in the parent path (if it exists)
+	resolvedParent, err := filepath.EvalSymlinks(parentDir)
+	if err == nil {
+		// Verify the resolved parent is still within base
+		relParent, err := filepath.Rel(resolvedBase, resolvedParent)
+		if err != nil || strings.HasPrefix(relParent, "..") {
+			return "", fmt.Errorf("symlink escape detected in path: %s", targetPath)
+		}
+		// Reconstruct full path with resolved parent
+		fullPath = filepath.Join(resolvedParent, filepath.Base(fullPath))
+	}
+
+	// Final validation: clean path must be within resolved base
+	cleanPath := filepath.Clean(fullPath)
+	rel, err := filepath.Rel(resolvedBase, cleanPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("resolved path escapes base directory: %s", targetPath)
+	}
+
+	return cleanPath, nil
 }

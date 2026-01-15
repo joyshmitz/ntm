@@ -28,6 +28,9 @@ type handlerEntry struct {
 	handler EventHandler
 }
 
+// DefaultMaxConcurrentHandlers limits goroutine spawning to prevent resource exhaustion
+const DefaultMaxConcurrentHandlers = 100
+
 // EventBus provides a centralized pub/sub system for NTM events
 type EventBus struct {
 	subscribers map[string][]handlerEntry
@@ -36,6 +39,7 @@ type EventBus struct {
 	history     *ring.Ring
 	historySize int
 	historyMu   sync.RWMutex
+	handlerSem  chan struct{} // semaphore to limit concurrent handlers
 }
 
 // NewEventBus creates a new event bus with the specified history size
@@ -47,6 +51,7 @@ func NewEventBus(historySize int) *EventBus {
 		subscribers: make(map[string][]handlerEntry),
 		history:     ring.New(historySize),
 		historySize: historySize,
+		handlerSem:  make(chan struct{}, DefaultMaxConcurrentHandlers),
 	}
 }
 
@@ -71,8 +76,9 @@ func (b *EventBus) Subscribe(eventType string, handler EventHandler) Unsubscribe
 		for i, h := range handlers {
 			if h.id == id {
 				// Remove handler by replacing with last and truncating
-				handlers[i] = handlers[len(handlers)-1]
-				b.subscribers[eventType] = handlers[:len(handlers)-1]
+				n := len(handlers)
+				handlers[i] = handlers[n-1]
+				b.subscribers[eventType] = handlers[:n-1]
 				return
 			}
 		}
@@ -100,10 +106,17 @@ func (b *EventBus) Publish(event BusEvent) {
 	entries = append(entries, b.subscribers["*"]...)
 	b.mu.RUnlock()
 
-	// Call handlers outside of lock
+	// Call handlers outside of lock with bounded concurrency
 	for _, entry := range entries {
+		// Acquire semaphore slot (blocks if at capacity to apply backpressure)
+		b.handlerSem <- struct{}{}
+
 		// Run handler in goroutine for non-blocking publish
 		go func(h EventHandler) {
+			defer func() {
+				// Release semaphore slot
+				<-b.handlerSem
+			}()
 			defer func() {
 				// Recover from panics in event handlers to prevent crashes
 				_ = recover()
@@ -129,12 +142,19 @@ func (b *EventBus) PublishSync(event BusEvent) {
 	entries = append(entries, b.subscribers["*"]...)
 	b.mu.RUnlock()
 
-	// Call handlers synchronously
+	// Call handlers synchronously with bounded concurrency
 	var wg sync.WaitGroup
 	for _, entry := range entries {
+		// Acquire semaphore slot (blocks if at capacity to apply backpressure)
+		b.handlerSem <- struct{}{}
+
 		wg.Add(1)
 		go func(h EventHandler) {
 			defer wg.Done()
+			defer func() {
+				// Release semaphore slot
+				<-b.handlerSem
+			}()
 			defer func() {
 				// Recover from panics in event handlers to prevent crashes
 				_ = recover()

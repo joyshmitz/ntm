@@ -288,6 +288,7 @@ func (s *Supervisor) Shutdown() error {
 }
 
 // Status returns the status of all managed daemons.
+// Returns deep copies to prevent data races with slice fields.
 func (s *Supervisor) Status() map[string]*ManagedDaemon {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -295,8 +296,22 @@ func (s *Supervisor) Status() map[string]*ManagedDaemon {
 	result := make(map[string]*ManagedDaemon, len(s.daemons))
 	for name, d := range s.daemons {
 		d.mu.RLock()
+		// Deep copy slice fields to prevent data races
+		specCopy := d.Spec
+		if d.Spec.Args != nil {
+			specCopy.Args = make([]string, len(d.Spec.Args))
+			copy(specCopy.Args, d.Spec.Args)
+		}
+		if d.Spec.HealthCmd != nil {
+			specCopy.HealthCmd = make([]string, len(d.Spec.HealthCmd))
+			copy(specCopy.HealthCmd, d.Spec.HealthCmd)
+		}
+		if d.Spec.Env != nil {
+			specCopy.Env = make([]string, len(d.Spec.Env))
+			copy(specCopy.Env, d.Spec.Env)
+		}
 		result[name] = &ManagedDaemon{
-			Spec:       d.Spec,
+			Spec:       specCopy,
 			State:      d.State,
 			PID:        d.PID,
 			Port:       d.Port,

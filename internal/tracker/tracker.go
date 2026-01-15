@@ -776,6 +776,12 @@ func (s *FileChangeStore) All() []RecordedFileChange {
 // GlobalFileChanges is the shared change store.
 var GlobalFileChanges = NewFileChangeStore(500)
 
+// MaxConcurrentFileRecords limits pending RecordFileChanges goroutines to prevent unbounded growth
+const MaxConcurrentFileRecords = 50
+
+// fileRecordSem limits concurrent RecordFileChanges operations
+var fileRecordSem = make(chan struct{}, MaxConcurrentFileRecords)
+
 // RecordedChangesSince returns file changes after the provided timestamp.
 func RecordedChangesSince(ts time.Time) []RecordedFileChange {
 	return GlobalFileChanges.Since(ts)
@@ -788,12 +794,31 @@ func RecordedChanges() []RecordedFileChange {
 
 // RecordFileChanges captures and stores file changes after a delay.
 // It is best-effort and meant to attribute changes to targeted agents.
+// Uses bounded concurrency to prevent goroutine accumulation.
 func RecordFileChanges(session, root string, agents []string, before map[string]FileState, delay time.Duration) {
 	if root == "" || len(before) == 0 {
 		return
 	}
 
+	// Try to acquire semaphore slot; drop request if at capacity (best-effort)
+	select {
+	case fileRecordSem <- struct{}{}:
+		// Got slot, proceed
+	default:
+		// At capacity, silently drop this recording request
+		return
+	}
+
 	go func() {
+		defer func() {
+			// Release semaphore slot
+			<-fileRecordSem
+		}()
+		defer func() {
+			// Recover from panics - this is best-effort code that shouldn't crash the program
+			_ = recover()
+		}()
+
 		time.Sleep(delay)
 
 		after, err := SnapshotDirectory(root, DefaultSnapshotOptions(root))
