@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/cm"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/gemini"
@@ -118,6 +120,89 @@ type SpawnOptions struct {
 	// Stagger configuration for thundering herd prevention
 	Stagger        time.Duration // Delay between agent prompt delivery
 	StaggerEnabled bool          // True if --stagger flag was provided
+}
+
+// RecoveryContext holds all the information needed to help an agent recover
+// from a previous session, including beads, messages, and procedural memories.
+type RecoveryContext struct {
+	// Checkpoint contains checkpoint info for recovery
+	Checkpoint *RecoveryCheckpoint `json:"checkpoint,omitempty"`
+	// Beads contains in-progress beads from BV
+	Beads []RecoveryBead `json:"beads,omitempty"`
+	// CompletedBeads contains recently completed beads for context
+	CompletedBeads []RecoveryBead `json:"completed_beads,omitempty"`
+	// BlockedBeads contains blocked beads for awareness
+	BlockedBeads []RecoveryBead `json:"blocked_beads,omitempty"`
+	// Messages contains recent Agent Mail messages
+	Messages []RecoveryMessage `json:"messages,omitempty"`
+	// CMMemories contains procedural memories from CM
+	CMMemories *RecoveryCMMemories `json:"cm_memories,omitempty"`
+	// FileReservations contains files currently reserved by this session
+	FileReservations []string `json:"file_reservations,omitempty"`
+	// Sessions contains past sessions for recovery context
+	Sessions []RecoverySession `json:"sessions,omitempty"`
+	// Summary is a human-readable summary of the recovery context
+	Summary string `json:"summary,omitempty"`
+	// TokenCount is an estimate of the total token count
+	TokenCount int `json:"token_count,omitempty"`
+	// Error contains error info if recovery was partial
+	Error *RecoveryError `json:"error,omitempty"`
+}
+
+// RecoveryError represents an error during recovery context building.
+type RecoveryError struct {
+	Code        string   `json:"code"`
+	Message     string   `json:"message"`
+	Component   string   `json:"component"` // Which component failed
+	Recoverable bool     `json:"recoverable"`
+	Details     []string `json:"details,omitempty"`
+}
+
+// RecoveryCheckpoint represents checkpoint info for recovery.
+type RecoveryCheckpoint struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	PaneCount   int       `json:"pane_count"`
+	HasGitPatch bool      `json:"has_git_patch"`
+}
+
+// RecoverySession represents a previous session for recovery.
+type RecoverySession struct {
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	AgentType string    `json:"agent_type"`
+}
+
+// RecoveryBead represents a bead in recovery context
+type RecoveryBead struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Assignee string `json:"assignee,omitempty"`
+}
+
+// RecoveryMessage represents an Agent Mail message in recovery context
+type RecoveryMessage struct {
+	ID         int       `json:"id"`
+	From       string    `json:"from"`
+	Subject    string    `json:"subject"`
+	Body       string    `json:"body,omitempty"`
+	Importance string    `json:"importance,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// RecoveryCMMemories contains procedural memories from CASS Memory (CM)
+type RecoveryCMMemories struct {
+	Rules        []RecoveryCMRule `json:"rules,omitempty"`
+	AntiPatterns []RecoveryCMRule `json:"anti_patterns,omitempty"`
+}
+
+// RecoveryCMRule represents a rule from CM playbook
+type RecoveryCMRule struct {
+	ID       string `json:"id"`
+	Content  string `json:"content"`
+	Category string `json:"category,omitempty"`
 }
 
 func newSpawnCmd() *cobra.Command {
@@ -631,6 +716,20 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		}
 	}
 
+	// Build recovery context if enabled (smart session recovery)
+	var recoveryPrompt string
+	if cfg.SessionRecovery.Enabled && cfg.SessionRecovery.AutoInjectOnSpawn {
+		ctx, cancelCtx := context.WithTimeout(context.Background(), 5*time.Second)
+		rc, err := buildRecoveryContext(ctx, opts.Session, dir, cfg.SessionRecovery)
+		cancelCtx()
+		if err == nil && rc != nil {
+			recoveryPrompt = FormatRecoveryPrompt(rc)
+			if !IsJSONOutput() && recoveryPrompt != "" {
+				fmt.Println("✓ Recovery context prepared for session")
+			}
+		}
+	}
+
 	// Launch agents using flattened specs (preserves model info for pane naming)
 	for _, agent := range opts.Agents {
 		if agentNum >= len(panes) {
@@ -808,6 +907,17 @@ func spawnSessionLogic(opts SpawnOptions) error {
 				if err := tmux.SendKeys(paneID, cassContext, true); err != nil {
 					if !IsJSONOutput() {
 						fmt.Printf("⚠ Warning: failed to inject context for agent %d: %v\n", idx, err)
+					}
+				}
+			}
+
+			// Inject recovery prompt if available (smart session recovery)
+			if recoveryPrompt != "" {
+				// Small delay to let agent initialize
+				time.Sleep(300 * time.Millisecond)
+				if err := tmux.SendKeys(paneID, recoveryPrompt, true); err != nil {
+					if !IsJSONOutput() {
+						fmt.Printf("⚠ Warning: failed to inject recovery context for agent %d: %v\n", idx, err)
 					}
 				}
 			}
@@ -1124,4 +1234,580 @@ func registerSessionAgent(sessionName, workingDir string) {
 	if info != nil && !IsJSONOutput() {
 		output.PrintInfof("Registered with Agent Mail as %s", info.AgentName)
 	}
+}
+
+// getMemoryContext retrieves and formats CM (CASS Memory) memories for agent spawn.
+// Returns a formatted markdown string with project-specific rules and anti-patterns
+// from past sessions. Returns empty string if CM is unavailable or disabled.
+//
+// This function implements graceful degradation - CM unavailability does not
+// cause spawn to fail, it simply returns an empty string.
+func getMemoryContext(projectName, task string) string {
+	// Check if memory integration is enabled in config
+	if cfg == nil || !cfg.SessionRecovery.IncludeCMMemories {
+		return ""
+	}
+
+	// Create CM CLI client
+	cmClient := cm.NewCLIClient()
+
+	// Check if CM is installed
+	if !cmClient.IsInstalled() {
+		return ""
+	}
+
+	// Determine the query task
+	queryTask := task
+	if queryTask == "" {
+		queryTask = projectName
+	}
+
+	// Query CM for context with limits from config
+	maxRules := 10   // Default limit for rules
+	maxSnippets := 3 // Default limit for history snippets
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := cmClient.GetRecoveryContext(ctx, queryTask, maxRules, maxSnippets)
+	if err != nil {
+		// Log warning but don't fail - graceful degradation
+		if !IsJSONOutput() {
+			output.PrintWarningf("CM context retrieval failed: %v", err)
+		}
+		return ""
+	}
+
+	if result == nil {
+		return ""
+	}
+
+	// Format the result as markdown with the specified structure
+	return formatMemoryContext(result)
+}
+
+// formatMemoryContext formats CM context result into the standard recovery format.
+// Output format:
+//
+//	# Project Memory from Past Sessions
+//
+//	## Key Rules for This Project
+//	- [b-8f3a2c] Always use structured logging with log/slog
+//
+//	## Anti-Patterns to Avoid
+//	- [b-7d3e8c] Don't add backwards-compatibility shims
+func formatMemoryContext(result *cm.CLIContextResponse) string {
+	if result == nil {
+		return ""
+	}
+
+	// Check if there's anything to format
+	if len(result.RelevantBullets) == 0 && len(result.AntiPatterns) == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+
+	buf.WriteString("# Project Memory from Past Sessions\n\n")
+
+	if len(result.RelevantBullets) > 0 {
+		buf.WriteString("## Key Rules for This Project\n")
+		for _, rule := range result.RelevantBullets {
+			buf.WriteString(fmt.Sprintf("- [%s] %s\n", rule.ID, rule.Content))
+		}
+		buf.WriteString("\n")
+	}
+
+	if len(result.AntiPatterns) > 0 {
+		buf.WriteString("## Anti-Patterns to Avoid\n")
+		for _, pattern := range result.AntiPatterns {
+			buf.WriteString(fmt.Sprintf("- [%s] %s\n", pattern.ID, pattern.Content))
+		}
+		buf.WriteString("\n")
+	}
+
+	return buf.String()
+}
+
+// buildRecoveryContext builds the full recovery context for session recovery.
+// It gathers information from BV (beads), Agent Mail (messages), and CM (memories).
+func buildRecoveryContext(ctx context.Context, sessionName, workingDir string, recoveryCfg config.SessionRecoveryConfig) (*RecoveryContext, error) {
+	if !recoveryCfg.Enabled {
+		return nil, nil
+	}
+
+	rc := &RecoveryContext{}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []string
+
+	// Load beads if enabled
+	if recoveryCfg.IncludeBeadsContext {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			beads, completed, blocked, err := loadRecoveryBeads(workingDir)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("beads: %v", err))
+			} else {
+				rc.Beads = beads
+				rc.CompletedBeads = completed
+				rc.BlockedBeads = blocked
+			}
+		}()
+	}
+
+	// Load Agent Mail messages if enabled
+	if recoveryCfg.IncludeAgentMail {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msgs, reservations, err := loadRecoveryMessages(ctx, sessionName, workingDir)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("agent mail: %v", err))
+			} else {
+				rc.Messages = msgs
+				rc.FileReservations = reservations
+			}
+		}()
+	}
+
+	// Load CM memories if enabled
+	if recoveryCfg.IncludeCMMemories {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			memories, err := loadRecoveryCMMemories(ctx, workingDir)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("cm memories: %v", err))
+			} else {
+				rc.CMMemories = memories
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Estimate tokens and truncate if needed
+	rc.TokenCount = estimateRecoveryTokens(rc)
+	if recoveryCfg.MaxRecoveryTokens > 0 && rc.TokenCount > recoveryCfg.MaxRecoveryTokens {
+		truncateRecoveryContext(rc, recoveryCfg.MaxRecoveryTokens)
+	}
+
+	// Generate summary
+	rc.Summary = generateRecoverySummary(rc)
+
+	// Record any errors for diagnostic purposes
+	if len(errs) > 0 {
+		rc.Error = &RecoveryError{
+			Code:        "PARTIAL_RECOVERY",
+			Message:     "Some recovery sources unavailable",
+			Recoverable: true,
+			Details:     errs,
+		}
+		if !IsJSONOutput() {
+			for _, e := range errs {
+				output.PrintWarningf("Recovery context: %s", e)
+			}
+		}
+	}
+
+	return rc, nil
+}
+
+// loadRecoveryBeads loads in-progress, completed, and blocked beads from BV.
+func loadRecoveryBeads(workingDir string) (inProgress, completed, blocked []RecoveryBead, err error) {
+	const limit = 10 // reasonable limit for recovery context
+
+	// Get in-progress beads
+	ipList := bv.GetInProgressList(workingDir, limit)
+	for _, b := range ipList {
+		inProgress = append(inProgress, RecoveryBead{
+			ID:       b.ID,
+			Title:    b.Title,
+			Assignee: b.Assignee,
+		})
+	}
+
+	// Get recently completed beads
+	completedList := bv.GetRecentlyCompletedList(workingDir, limit)
+	for _, b := range completedList {
+		completed = append(completed, RecoveryBead{
+			ID:    b.ID,
+			Title: b.Title,
+		})
+	}
+
+	// Get blocked beads
+	blockedList := bv.GetBlockedList(workingDir, limit)
+	for _, b := range blockedList {
+		blocked = append(blocked, RecoveryBead{
+			ID:    b.ID,
+			Title: b.Title,
+		})
+	}
+
+	return inProgress, completed, blocked, nil
+}
+
+// loadRecoveryMessages loads recent Agent Mail messages and file reservations.
+func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) ([]RecoveryMessage, []string, error) {
+	var opts []agentmail.Option
+	if cfg != nil {
+		if cfg.AgentMail.URL != "" {
+			opts = append(opts, agentmail.WithBaseURL(cfg.AgentMail.URL))
+		}
+		if cfg.AgentMail.Token != "" {
+			opts = append(opts, agentmail.WithToken(cfg.AgentMail.Token))
+		}
+	}
+	client := agentmail.NewClient(opts...)
+
+	if !client.IsAvailable() {
+		return nil, nil, nil // Graceful degradation
+	}
+
+	// Fetch inbox
+	inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+		ProjectKey:    workingDir,
+		AgentName:     sessionName,
+		Limit:         10,
+		IncludeBodies: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch inbox: %w", err)
+	}
+
+	var msgs []RecoveryMessage
+	for _, m := range inbox {
+		msgs = append(msgs, RecoveryMessage{
+			ID:         m.ID,
+			From:       m.From,
+			Subject:    m.Subject,
+			Body:       m.BodyMD,
+			Importance: m.Importance,
+			CreatedAt:  m.CreatedTS,
+		})
+	}
+
+	// Fetch file reservations
+	reservations, err := client.ListReservations(ctx, workingDir, sessionName, false)
+	if err != nil {
+		// Non-fatal, return messages only
+		return msgs, nil, nil
+	}
+
+	var paths []string
+	for _, r := range reservations {
+		paths = append(paths, r.PathPattern)
+	}
+
+	return msgs, paths, nil
+}
+
+// loadRecoveryCMMemories loads procedural memories from CM.
+func loadRecoveryCMMemories(ctx context.Context, workingDir string) (*RecoveryCMMemories, error) {
+	client := cm.NewCLIClient()
+	if !client.IsInstalled() {
+		return nil, nil // Graceful degradation
+	}
+
+	// Get recovery context with reasonable limits
+	projectName := filepath.Base(workingDir)
+	result, err := client.GetRecoveryContext(ctx, projectName, 10, 3)
+	if err != nil {
+		return nil, fmt.Errorf("get recovery context: %w", err)
+	}
+	if result == nil {
+		return nil, nil
+	}
+
+	memories := &RecoveryCMMemories{}
+	for _, r := range result.RelevantBullets {
+		memories.Rules = append(memories.Rules, RecoveryCMRule{
+			ID:       r.ID,
+			Content:  r.Content,
+			Category: r.Category,
+		})
+	}
+	for _, r := range result.AntiPatterns {
+		memories.AntiPatterns = append(memories.AntiPatterns, RecoveryCMRule{
+			ID:       r.ID,
+			Content:  r.Content,
+			Category: r.Category,
+		})
+	}
+
+	return memories, nil
+}
+
+// estimateRecoveryTokens estimates the token count of a recovery context.
+// Uses a simple heuristic: ~4 characters per token.
+func estimateRecoveryTokens(rc *RecoveryContext) int {
+	if rc == nil {
+		return 0
+	}
+
+	chars := 0
+
+	// Count beads
+	for _, b := range rc.Beads {
+		chars += len(b.ID) + len(b.Title) + len(b.Assignee)
+	}
+	for _, b := range rc.CompletedBeads {
+		chars += len(b.ID) + len(b.Title) + len(b.Assignee)
+	}
+	for _, b := range rc.BlockedBeads {
+		chars += len(b.ID) + len(b.Title) + len(b.Assignee)
+	}
+
+	// Count messages
+	for _, m := range rc.Messages {
+		chars += len(m.From) + len(m.Subject) + len(m.Body)
+	}
+
+	// Count CM memories
+	if rc.CMMemories != nil {
+		for _, r := range rc.CMMemories.Rules {
+			chars += len(r.ID) + len(r.Content) + len(r.Category)
+		}
+		for _, r := range rc.CMMemories.AntiPatterns {
+			chars += len(r.ID) + len(r.Content) + len(r.Category)
+		}
+	}
+
+	// Count file reservations
+	for _, f := range rc.FileReservations {
+		chars += len(f)
+	}
+
+	// Add overhead for formatting
+	chars += 500
+
+	return chars / 4
+}
+
+// truncateRecoveryContext truncates the context to fit within maxTokens.
+func truncateRecoveryContext(rc *RecoveryContext, maxTokens int) {
+	if rc == nil {
+		return
+	}
+
+	// Priority order for keeping content:
+	// 1. In-progress beads (most important)
+	// 2. Recent messages (important for coordination)
+	// 3. File reservations (important for conflicts)
+	// 4. CM memories (can be regenerated)
+	// 5. Completed/blocked beads (nice to have)
+
+	// Start by removing lowest priority items
+	if estimateRecoveryTokens(rc) > maxTokens {
+		rc.CompletedBeads = nil
+		rc.BlockedBeads = nil
+	}
+
+	if estimateRecoveryTokens(rc) > maxTokens {
+		rc.CMMemories = nil
+	}
+
+	if estimateRecoveryTokens(rc) > maxTokens && len(rc.Messages) > 5 {
+		rc.Messages = rc.Messages[:5]
+	}
+
+	if estimateRecoveryTokens(rc) > maxTokens && len(rc.Messages) > 2 {
+		rc.Messages = rc.Messages[:2]
+	}
+
+	rc.TokenCount = estimateRecoveryTokens(rc)
+}
+
+// generateRecoverySummary generates a human-readable summary of the recovery context.
+func generateRecoverySummary(rc *RecoveryContext) string {
+	if rc == nil {
+		return ""
+	}
+
+	var parts []string
+
+	if len(rc.Beads) > 0 {
+		parts = append(parts, fmt.Sprintf("%d in-progress bead(s)", len(rc.Beads)))
+	}
+	if len(rc.Messages) > 0 {
+		parts = append(parts, fmt.Sprintf("%d unread message(s)", len(rc.Messages)))
+	}
+	if len(rc.FileReservations) > 0 {
+		parts = append(parts, fmt.Sprintf("%d file reservation(s)", len(rc.FileReservations)))
+	}
+	if rc.CMMemories != nil && (len(rc.CMMemories.Rules) > 0 || len(rc.CMMemories.AntiPatterns) > 0) {
+		parts = append(parts, fmt.Sprintf("%d procedural memories", len(rc.CMMemories.Rules)+len(rc.CMMemories.AntiPatterns)))
+	}
+
+	if len(parts) == 0 {
+		return "No recovery context available"
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+// FormatRecoveryPrompt formats the full recovery context as a prompt injection.
+// This combines beads, Agent Mail messages, file reservations, and CM memories
+// into a single markdown section for agent injection.
+func FormatRecoveryPrompt(rc *RecoveryContext) string {
+	if rc == nil {
+		return ""
+	}
+
+	// Check if there's any meaningful content
+	hasMeaningfulContent := len(rc.Beads) > 0 ||
+		len(rc.CompletedBeads) > 0 ||
+		len(rc.BlockedBeads) > 0 ||
+		len(rc.Messages) > 0 ||
+		len(rc.FileReservations) > 0 ||
+		(rc.CMMemories != nil && (len(rc.CMMemories.Rules) > 0 || len(rc.CMMemories.AntiPatterns) > 0)) ||
+		rc.Checkpoint != nil
+
+	if !hasMeaningfulContent {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Session Recovery Context\n\n")
+
+	// Your Previous Work section
+	if rc.Checkpoint != nil || len(rc.Beads) > 0 || len(rc.FileReservations) > 0 {
+		sb.WriteString("## Your Previous Work\n")
+
+		if len(rc.Beads) > 0 {
+			sb.WriteString(fmt.Sprintf("- You were working on: [%s] %s\n", rc.Beads[0].ID, rc.Beads[0].Title))
+		}
+
+		if rc.Checkpoint != nil {
+			sb.WriteString(fmt.Sprintf("- Last checkpoint: %s — %s\n",
+				rc.Checkpoint.CreatedAt.Format("2006-01-02 15:04"),
+				rc.Checkpoint.Description))
+			if rc.Checkpoint.HasGitPatch {
+				sb.WriteString("- Uncommitted changes: preserved in checkpoint\n")
+			}
+		}
+
+		if len(rc.FileReservations) > 0 {
+			sb.WriteString("- Files you were editing: ")
+			sb.WriteString(strings.Join(rc.FileReservations, ", "))
+			sb.WriteString("\n")
+		}
+
+		sb.WriteString("\n")
+	}
+
+	// Recent Messages section
+	if len(rc.Messages) > 0 {
+		sb.WriteString("## Recent Messages\n")
+		for _, msg := range rc.Messages {
+			sb.WriteString(fmt.Sprintf("\n### From %s: %s\n", msg.From, msg.Subject))
+			if msg.Body != "" {
+				sb.WriteString(msg.Body)
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Key Decisions from CM
+	if rc.CMMemories != nil && len(rc.CMMemories.Rules) > 0 {
+		sb.WriteString("## Key Decisions Made\n")
+		for _, rule := range rc.CMMemories.Rules {
+			sb.WriteString(fmt.Sprintf("- %s\n", rule.Content))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Current Task Status
+	if len(rc.Beads) > 0 || len(rc.CompletedBeads) > 0 || len(rc.BlockedBeads) > 0 {
+		sb.WriteString("## Current Task Status\n")
+
+		for _, bead := range rc.CompletedBeads {
+			sb.WriteString(fmt.Sprintf("- [x] Completed: [%s] %s\n", bead.ID, bead.Title))
+		}
+
+		for _, bead := range rc.Beads {
+			sb.WriteString(fmt.Sprintf("- [ ] In progress: [%s] %s\n", bead.ID, bead.Title))
+		}
+
+		for _, bead := range rc.BlockedBeads {
+			sb.WriteString(fmt.Sprintf("- [ ] Blocked: [%s] %s\n", bead.ID, bead.Title))
+		}
+
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Reread AGENTS.md and continue from where you left off.\n")
+
+	return sb.String()
+	}
+
+	// Blocked beads
+	if len(rc.BlockedBeads) > 0 {
+		sb.WriteString("### Blocked Beads\n")
+		for _, b := range rc.BlockedBeads {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", b.ID, b.Title))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Agent Mail messages
+	if len(rc.Messages) > 0 {
+		sb.WriteString("### Recent Agent Mail Messages\n")
+		for _, m := range rc.Messages {
+			importance := ""
+			if m.Importance != "" && m.Importance != "normal" {
+				importance = fmt.Sprintf(" [%s]", strings.ToUpper(m.Importance))
+			}
+			sb.WriteString(fmt.Sprintf("- **From %s%s:** %s\n", m.From, importance, m.Subject))
+			if m.Body != "" {
+				body := m.Body
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  > %s\n", strings.ReplaceAll(body, "\n", "\n  > ")))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// File reservations
+	if len(rc.FileReservations) > 0 {
+		sb.WriteString("### Active File Reservations\n")
+		sb.WriteString("These files are currently reserved by this session:\n")
+		for _, f := range rc.FileReservations {
+			sb.WriteString(fmt.Sprintf("- `%s`\n", f))
+		}
+		sb.WriteString("\n")
+	}
+
+	// CM memories
+	if rc.CMMemories != nil {
+		if len(rc.CMMemories.Rules) > 0 {
+			sb.WriteString("### Procedural Memories (Rules)\n")
+			for _, r := range rc.CMMemories.Rules {
+				sb.WriteString(fmt.Sprintf("- [%s] %s\n", r.ID, r.Content))
+			}
+			sb.WriteString("\n")
+		}
+		if len(rc.CMMemories.AntiPatterns) > 0 {
+			sb.WriteString("### Anti-Patterns to Avoid\n")
+			for _, r := range rc.CMMemories.AntiPatterns {
+				sb.WriteString(fmt.Sprintf("- [%s] %s\n", r.ID, r.Content))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	sb.WriteString("</session-recovery-context>\n")
+	return sb.String()
 }

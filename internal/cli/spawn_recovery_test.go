@@ -15,6 +15,9 @@ import (
 func TestRecoveryContext_EstimateTokens(t *testing.T) {
 	t.Log("RECOVERY_TEST: TestRecoveryContext_EstimateTokens | Testing token estimation accuracy")
 
+	// Note: estimateRecoveryTokens adds 500 chars (~125 tokens) overhead for formatting
+	const overhead = 125
+
 	tests := []struct {
 		name      string
 		rc        *RecoveryContext
@@ -24,8 +27,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 		{
 			name:      "empty context",
 			rc:        &RecoveryContext{},
-			minTokens: 0,
-			maxTokens: 10,
+			minTokens: overhead,
+			maxTokens: overhead + 10,
 		},
 		{
 			name: "checkpoint only",
@@ -35,8 +38,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 					Description: "A test checkpoint for session recovery",
 				},
 			},
-			minTokens: 10,
-			maxTokens: 50,
+			minTokens: overhead,
+			maxTokens: overhead + 50,
 		},
 		{
 			name: "with messages",
@@ -54,8 +57,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 					},
 				},
 			},
-			minTokens: 30,
-			maxTokens: 100,
+			minTokens: overhead + 30,
+			maxTokens: overhead + 100,
 		},
 		{
 			name: "with beads",
@@ -66,8 +69,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 					{ID: "bd-789", Title: "Implement dashboard feature", Assignee: ""},
 				},
 			},
-			minTokens: 15,
-			maxTokens: 60,
+			minTokens: overhead + 15,
+			maxTokens: overhead + 60,
 		},
 		{
 			name: "with completed and blocked beads",
@@ -82,8 +85,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 					{ID: "bd-003", Title: "Blocked task"},
 				},
 			},
-			minTokens: 15,
-			maxTokens: 80,
+			minTokens: overhead + 15,
+			maxTokens: overhead + 80,
 		},
 		{
 			name: "full context",
@@ -103,8 +106,8 @@ func TestRecoveryContext_EstimateTokens(t *testing.T) {
 					"internal/cli/spawn_test.go",
 				},
 			},
-			minTokens: 40,
-			maxTokens: 150,
+			minTokens: overhead + 40,
+			maxTokens: overhead + 80,
 		},
 	}
 
@@ -180,12 +183,12 @@ func TestRecoveryContext_Truncate(t *testing.T) {
 			t.Logf("RECOVERY_TEST: %s | Initial tokens: %d | Max: %d",
 				tt.name, tt.rc.TokenCount, tt.maxTokens)
 
-			result := truncateRecoveryContext(tt.rc, tt.maxTokens)
+			truncateRecoveryContext(tt.rc, tt.maxTokens)
 
 			t.Logf("RECOVERY_TEST: %s | After truncation: tokens=%d messages=%d beads=%d",
-				tt.name, result.TokenCount, len(result.Messages), len(result.Beads))
+				tt.name, tt.rc.TokenCount, len(tt.rc.Messages), len(tt.rc.Beads))
 
-			tt.checkFunc(t, result)
+			tt.checkFunc(t, tt.rc)
 		})
 	}
 }
@@ -325,7 +328,7 @@ func TestRecoveryContext_BuildWithDisabled(t *testing.T) {
 	t.Log("RECOVERY_TEST: TestRecoveryContext_BuildWithDisabled | Testing disabled recovery")
 
 	ctx := context.Background()
-	recoveryCfg := config.RecoveryConfig{
+	recoveryCfg := config.SessionRecoveryConfig{
 		Enabled: false,
 	}
 
@@ -349,17 +352,14 @@ func TestRecoveryContext_BuildGracefulDegradation(t *testing.T) {
 	defer cancel()
 
 	// Config that enables all services but uses non-existent paths/services
-	recoveryCfg := config.RecoveryConfig{
+	recoveryCfg := config.SessionRecoveryConfig{
 		Enabled:            true,
-		UseCheckpoints:     true,
-		UseAgentMail:       true,
-		UseBV:              true,
-		UseCM:              true,
-		MaxMailMessages:    5,
-		MaxBeads:           5,
-		MaxCMMemories:      3,
-		MaxTokens:          3000,
-		CheckpointAgeHours: 24,
+		IncludeAgentMail:   true,
+		IncludeBeadsContext: true,
+		IncludeCMMemories:  true,
+		MaxRecoveryTokens:  3000,
+		AutoInjectOnSpawn:  true,
+		StaleThresholdHours: 24,
 	}
 
 	// Use a non-existent session/project to trigger graceful fallbacks
@@ -416,18 +416,18 @@ func TestRecoveryContext_TokenBudgetEnforced(t *testing.T) {
 
 	// Apply truncation with a small budget
 	maxTokens := 500
-	result := truncateRecoveryContext(rc, maxTokens)
+	truncateRecoveryContext(rc, maxTokens)
 
 	t.Logf("RECOVERY_TEST: After truncation | tokens=%d messages=%d beads=%d",
-		result.TokenCount, len(result.Messages), len(result.Beads))
+		rc.TokenCount, len(rc.Messages), len(rc.Beads))
 
 	// Token count should be reduced
-	if result.TokenCount > maxTokens*2 { // Allow some overage due to estimation
-		t.Errorf("token count %d significantly exceeds budget %d", result.TokenCount, maxTokens)
+	if rc.TokenCount > maxTokens*2 { // Allow some overage due to estimation
+		t.Errorf("token count %d significantly exceeds budget %d", rc.TokenCount, maxTokens)
 	}
 
 	// Checkpoint should be preserved (highest priority)
-	if result.Checkpoint == nil {
+	if rc.Checkpoint == nil {
 		t.Error("checkpoint should be preserved even during truncation")
 	}
 }
