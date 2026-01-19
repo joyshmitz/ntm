@@ -196,6 +196,7 @@ const (
 	PanelDetail
 	PanelBeads
 	PanelAlerts
+	PanelConflicts // File reservation conflicts panel
 	PanelMetrics
 	PanelHistory
 	PanelSidebar
@@ -596,6 +597,9 @@ func New(session, projectDir string) Model {
 	m.lastSpawnFetch = now
 
 	applyDashboardEnvOverrides(&m)
+
+	// Set up conflict action handler for the conflicts panel
+	m.conflictsPanel.SetActionHandler(m.handleConflictAction)
 
 	// Setup config watcher
 	m.configSub = make(chan *config.Config, 1)
@@ -2106,7 +2110,12 @@ func (m *Model) cycleFocus(dir int) {
 	var visiblePanes []PanelID
 	switch {
 	case m.tier >= layout.TierMega:
-		visiblePanes = []PanelID{PanelPaneList, PanelDetail, PanelBeads, PanelAlerts, PanelSidebar}
+		// Use PanelConflicts instead of PanelAlerts when conflicts are present
+		if m.conflictsPanel.HasConflicts() {
+			visiblePanes = []PanelID{PanelPaneList, PanelDetail, PanelBeads, PanelConflicts, PanelSidebar}
+		} else {
+			visiblePanes = []PanelID{PanelPaneList, PanelDetail, PanelBeads, PanelAlerts, PanelSidebar}
+		}
 	case m.tier >= layout.TierUltra:
 		visiblePanes = []PanelID{PanelPaneList, PanelDetail, PanelSidebar}
 	case m.tier >= layout.TierSplit:
@@ -3868,6 +3877,11 @@ func (m Model) renderMegaLayout() string {
 		alertsBorder = t.Primary
 	}
 
+	conflictsBorder := t.Red
+	if m.focusedPanel == PanelConflicts {
+		conflictsBorder = t.Primary
+	}
+
 	sidebarBorder := t.Lavender
 	if m.focusedPanel == PanelSidebar {
 		sidebarBorder = t.Primary
@@ -3894,12 +3908,23 @@ func (m Model) renderMegaLayout() string {
 		Padding(0, 1).
 		Render(m.renderBeadsPanel(p3Inner, contentHeight-2))
 
-	panel4 := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(alertsBorder).
-		Width(p4).Height(contentHeight).MaxHeight(contentHeight).
-		Padding(0, 1).
-		Render(m.renderAlertsPanel(p4Inner, contentHeight-2))
+	// Show conflicts panel instead of alerts when there are active conflicts
+	var panel4 string
+	if m.conflictsPanel.HasConflicts() {
+		panel4 = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(conflictsBorder).
+			Width(p4).Height(contentHeight).MaxHeight(contentHeight).
+			Padding(0, 1).
+			Render(m.renderConflictsPanel(p4Inner, contentHeight-2))
+	} else {
+		panel4 = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(alertsBorder).
+			Width(p4).Height(contentHeight).MaxHeight(contentHeight).
+			Padding(0, 1).
+			Render(m.renderAlertsPanel(p4Inner, contentHeight-2))
+	}
 
 	panel5 := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -3924,6 +3949,16 @@ func (m Model) renderAlertsPanel(width, height int) string {
 		m.alertsPanel.Blur()
 	}
 	return m.alertsPanel.View()
+}
+
+func (m Model) renderConflictsPanel(width, height int) string {
+	m.conflictsPanel.SetSize(width, height)
+	if m.focusedPanel == PanelConflicts {
+		m.conflictsPanel.Focus()
+	} else {
+		m.conflictsPanel.Blur()
+	}
+	return m.conflictsPanel.View()
 }
 
 func (m Model) renderSpawnPanel(width, height int) string {
@@ -4293,6 +4328,112 @@ func (m Model) mergeRoutingIntoMetrics(data panels.MetricsData, scores map[strin
 	}
 
 	return data
+}
+
+// handleConflictAction handles user actions on file reservation conflicts.
+// It integrates with Agent Mail to send messages or force-release reservations.
+func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watcher.ConflictAction) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get project key from project directory or current working directory
+	projectKey := m.projectDir
+	if projectKey == "" {
+		var err error
+		projectKey, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get project directory: %w", err)
+		}
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+
+	switch action {
+	case watcher.ConflictActionWait:
+		// Wait action: nothing to do, user will wait for reservation to expire
+		log.Printf("[ConflictAction] Waiting for reservation to expire: %s (held by %v)", conflict.Path, conflict.Holders)
+		return nil
+
+	case watcher.ConflictActionRequest:
+		// Request action: send a message to the holder requesting handoff
+		if len(conflict.Holders) == 0 {
+			return fmt.Errorf("no holders to request handoff from")
+		}
+
+		// Register ourselves if not already registered
+		agentName := m.session + "_dashboard"
+		_, err := client.RegisterAgent(ctx, agentmail.RegisterAgentOptions{
+			ProjectKey:      projectKey,
+			Program:         "ntm-dashboard",
+			Model:           "local",
+			Name:            agentName,
+			TaskDescription: "Dashboard conflict resolution",
+		})
+		if err != nil {
+			log.Printf("[ConflictAction] Warning: could not register agent for messaging: %v", err)
+			// Continue anyway - the agent might already be registered
+		}
+
+		// Send handoff request to each holder
+		for _, holder := range conflict.Holders {
+			subject := fmt.Sprintf("Handoff Request: %s", conflict.Path)
+			body := fmt.Sprintf("**File Handoff Request**\n\n"+
+				"Agent `%s` needs to edit the file:\n"+
+				"```\n%s\n```\n\n"+
+				"You currently hold the reservation for this file.\n"+
+				"Please release the reservation when you're done editing, or confirm you're still actively working on it.\n\n"+
+				"*Sent via NTM Dashboard conflict resolution*",
+				conflict.RequestorAgent, conflict.Path)
+
+			_, err := client.SendMessage(ctx, agentmail.SendMessageOptions{
+				ProjectKey:  projectKey,
+				SenderName:  agentName,
+				To:          []string{holder},
+				Subject:     subject,
+				BodyMD:      body,
+				Importance:  "high",
+				AckRequired: true,
+			})
+			if err != nil {
+				log.Printf("[ConflictAction] Failed to send handoff request to %s: %v", holder, err)
+				return fmt.Errorf("failed to send handoff request to %s: %w", holder, err)
+			}
+			log.Printf("[ConflictAction] Sent handoff request to %s for %s", holder, conflict.Path)
+		}
+		return nil
+
+	case watcher.ConflictActionForce:
+		// Force action: force-release the reservation via Agent Mail
+		if len(conflict.HolderReservationIDs) == 0 {
+			return fmt.Errorf("no reservation IDs available for force-release")
+		}
+
+		// Force-release each reservation
+		for _, reservationID := range conflict.HolderReservationIDs {
+			agentName := m.session + "_dashboard"
+			result, err := client.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
+				ProjectKey:     projectKey,
+				AgentName:      agentName,
+				ReservationID:  reservationID,
+				Note:           fmt.Sprintf("Force-released by %s via NTM dashboard", conflict.RequestorAgent),
+				NotifyPrevious: true,
+			})
+			if err != nil {
+				log.Printf("[ConflictAction] Failed to force-release reservation %d: %v", reservationID, err)
+				return fmt.Errorf("failed to force-release reservation %d: %w", reservationID, err)
+			}
+			log.Printf("[ConflictAction] Force-released reservation %d: success=%v", reservationID, result.Success)
+		}
+		return nil
+
+	case watcher.ConflictActionDismiss:
+		// Dismiss action: just remove the notification (handled by the panel)
+		log.Printf("[ConflictAction] Dismissed conflict notification: %s", conflict.Path)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown conflict action: %v", action)
+	}
 }
 
 // Run starts the dashboard
