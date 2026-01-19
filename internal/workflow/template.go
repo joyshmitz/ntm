@@ -11,14 +11,15 @@ import (
 
 // WorkflowTemplate defines a multi-agent workflow pattern.
 type WorkflowTemplate struct {
-	Name         string            `toml:"name"`
-	Description  string            `toml:"description"`
-	Agents       []WorkflowAgent   `toml:"agents"`
-	Coordination CoordinationType  `toml:"coordination"`
-	Flow         *FlowConfig       `toml:"flow,omitempty"`
-	Routing      map[string]string `toml:"routing,omitempty"`
-	Prompts      []SetupPrompt     `toml:"prompts,omitempty"`
-	ErrorHandling *ErrorConfig     `toml:"error_handling,omitempty"`
+	Name          string            `toml:"name"`
+	Description   string            `toml:"description"`
+	Agents        []WorkflowAgent   `toml:"agents"`
+	Coordination  CoordinationType  `toml:"coordination"`
+	Flow          *FlowConfig       `toml:"flow,omitempty"`
+	Routing       map[string]string `toml:"routing,omitempty"`
+	Prompts       []SetupPrompt     `toml:"prompts,omitempty"`
+	ErrorHandling *ErrorConfig      `toml:"error_handling,omitempty"`
+	Source        string            `toml:"-"` // "builtin", "user", "project" - set at load time
 }
 
 // WorkflowAgent defines an agent role within a workflow.

@@ -1377,6 +1377,7 @@ func init() {
 
 		// Configuration management
 		newRecipesCmd(),
+		newWorkflowsCmd(),
 		newPersonasCmd(),
 		newTemplateCmd(),
 		newMonitorCmd(),
