@@ -931,7 +931,7 @@ type ntmPaneInfo struct {
 	Variant   string
 }
 
-var ntmPaneTitleRE = regexp.MustCompile(`^.+__([a-zA-Z0-9]+)_(\d+)(?:_([A-Za-z0-9._/@:+-]+))?(?:\[[^\]]*\])?$`)
+var ntmPaneTitleRE = regexp.MustCompile(`^.+__([a-zA-Z0-9_-]+)_(\d+)(?:_([A-Za-z0-9._/@:+-]+))?(?:\[[^\]]*\])?$`)
 
 func parseNTMPanes(panes []tmux.Pane) map[string][]ntmPaneInfo {
 	out := make(map[string][]ntmPaneInfo)
