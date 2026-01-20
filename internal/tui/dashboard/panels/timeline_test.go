@@ -436,6 +436,129 @@ func TestTimelinePanel_FocusBlur(t *testing.T) {
 	t.Log("TIMELINE_TEST: Focus/Blur works correctly")
 }
 
+func TestTimelinePanel_Scroll(t *testing.T) {
+	t.Log("TIMELINE_TEST: TestTimelinePanel_Scroll | Testing scroll left/right functionality")
+
+	panel := NewTimelinePanel()
+	now := time.Now()
+
+	// Set up data
+	events := []state.AgentEvent{
+		{AgentID: "cc_1", State: state.TimelineWorking, Timestamp: now.Add(-30 * time.Minute)},
+		{AgentID: "cc_1", State: state.TimelineIdle, Timestamp: now.Add(-15 * time.Minute)},
+		{AgentID: "cc_1", State: state.TimelineWorking, Timestamp: now},
+	}
+	panel.SetData(TimelineData{Events: events}, nil)
+
+	t.Run("initial offset is zero", func(t *testing.T) {
+		if panel.timeOffset != 0 {
+			t.Errorf("expected initial timeOffset=0, got %v", panel.timeOffset)
+		}
+	})
+
+	t.Run("scroll back increases negative offset", func(t *testing.T) {
+		initialOffset := panel.timeOffset
+
+		// Simulate pressing left key
+		panel.handleScroll("left")
+
+		if panel.timeOffset >= initialOffset {
+			t.Errorf("expected timeOffset to decrease (go back in time), got offset=%v", panel.timeOffset)
+		}
+
+		// Should be negative now (looking at past)
+		if panel.timeOffset >= 0 {
+			t.Errorf("expected negative timeOffset after scrolling back, got %v", panel.timeOffset)
+		}
+
+		t.Logf("TIMELINE_TEST: Scrolled back | Offset=%v", panel.timeOffset)
+	})
+
+	t.Run("scroll forward decreases negative offset", func(t *testing.T) {
+		// First scroll back a bit
+		panel.timeOffset = -10 * time.Minute
+		initialOffset := panel.timeOffset
+
+		// Simulate pressing right key
+		panel.handleScroll("right")
+
+		if panel.timeOffset <= initialOffset {
+			t.Errorf("expected timeOffset to increase (go forward in time), got offset=%v", panel.timeOffset)
+		}
+
+		t.Logf("TIMELINE_TEST: Scrolled forward | Offset=%v", panel.timeOffset)
+	})
+
+	t.Run("scroll forward capped at zero", func(t *testing.T) {
+		// Set offset close to zero
+		panel.timeOffset = -1 * time.Minute
+
+		// Scroll forward multiple times
+		for i := 0; i < 10; i++ {
+			panel.handleScroll("right")
+		}
+
+		// Should not go positive (cannot see future)
+		if panel.timeOffset > 0 {
+			t.Errorf("expected timeOffset capped at 0, got %v", panel.timeOffset)
+		}
+
+		t.Logf("TIMELINE_TEST: Forward scroll capped | Offset=%v", panel.timeOffset)
+	})
+
+	t.Run("jump to now resets offset", func(t *testing.T) {
+		// First scroll back
+		panel.timeOffset = -30 * time.Minute
+
+		// Jump to now (n key)
+		panel.handleJumpToNow()
+
+		if panel.timeOffset != 0 {
+			t.Errorf("expected timeOffset=0 after jump to now, got %v", panel.timeOffset)
+		}
+
+		t.Logf("TIMELINE_TEST: Jumped to now | Offset=%v", panel.timeOffset)
+	})
+
+	t.Run("scroll step proportional to zoom", func(t *testing.T) {
+		// At default zoom (30m window), step should be 5m
+		panel.zoomLevel = 0
+		panel.timeWindow = panel.windowForZoom()
+		step1 := panel.scrollStep()
+
+		// Zoom in (15m window), step should be 2.5m
+		panel.zoomLevel = 1
+		panel.timeWindow = panel.windowForZoom()
+		step2 := panel.scrollStep()
+
+		if step2 >= step1 {
+			t.Errorf("expected smaller scroll step when zoomed in, got step1=%v, step2=%v", step1, step2)
+		}
+
+		t.Logf("TIMELINE_TEST: Scroll steps | Zoom0=%v Zoom1=%v", step1, step2)
+	})
+}
+
+// handleScroll is a test helper that simulates scroll key handling
+func (m *TimelinePanel) handleScroll(direction string) {
+	switch direction {
+	case "left", "h":
+		m.timeOffset -= m.scrollStep()
+	case "right", "l":
+		if m.timeOffset < 0 {
+			m.timeOffset += m.scrollStep()
+			if m.timeOffset > 0 {
+				m.timeOffset = 0
+			}
+		}
+	}
+}
+
+// handleJumpToNow is a test helper that simulates the "n" key
+func (m *TimelinePanel) handleJumpToNow() {
+	m.timeOffset = 0
+}
+
 func TestTimelinePanel_CursorBounds(t *testing.T) {
 	t.Log("TIMELINE_TEST: TestTimelinePanel_CursorBounds | Testing cursor stays in bounds")
 

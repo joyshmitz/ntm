@@ -506,6 +506,196 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestRecordEvent_RepeatedStates verifies that repeated state transitions are stored
+// individually without compression. This documents the current behavior where each event
+// is stored even if the state doesn't change, which is useful for tracking activity
+// timestamps even when state remains the same.
+func TestRecordEvent_RepeatedStates(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	now := time.Now()
+
+	// Record multiple events with the same state
+	for i := 0; i < 5; i++ {
+		tracker.RecordEvent(AgentEvent{
+			AgentID:   "cc_1",
+			AgentType: AgentTypeClaude,
+			SessionID: "test-session",
+			State:     TimelineWorking,
+			Timestamp: now.Add(time.Duration(i) * time.Minute),
+			Details:   map[string]string{"iteration": string(rune('0' + i))},
+		})
+	}
+
+	events := tracker.GetEventsForAgent("cc_1", time.Time{})
+
+	// Current behavior: All events are stored (no compression)
+	if len(events) != 5 {
+		t.Errorf("expected 5 events (no compression), got %d", len(events))
+	}
+
+	// Verify PreviousState is set correctly even for same-state transitions
+	for i, event := range events {
+		if i == 0 {
+			// First event has no previous state
+			if event.PreviousState != "" {
+				t.Errorf("event[0]: expected empty PreviousState, got %s", event.PreviousState)
+			}
+		} else {
+			// Subsequent events should have previous state set
+			if event.PreviousState != TimelineWorking {
+				t.Errorf("event[%d]: expected PreviousState=working, got %s", i, event.PreviousState)
+			}
+		}
+		// All events should have state=working
+		if event.State != TimelineWorking {
+			t.Errorf("event[%d]: expected State=working, got %s", i, event.State)
+		}
+	}
+
+	// Verify durations are computed even for same-state transitions
+	for i, event := range events {
+		if i == 0 {
+			if event.Duration != 0 {
+				t.Errorf("event[0]: expected Duration=0, got %v", event.Duration)
+			}
+		} else {
+			expectedDuration := time.Minute
+			if event.Duration != expectedDuration {
+				t.Errorf("event[%d]: expected Duration=%v, got %v", i, expectedDuration, event.Duration)
+			}
+		}
+	}
+}
+
+// TestRecordEvent_StateTransitionDetails verifies that state transitions are recorded
+// with proper details and triggers.
+func TestRecordEvent_StateTransitionDetails(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	t.Run("with details and trigger", func(t *testing.T) {
+		event := tracker.RecordEvent(AgentEvent{
+			AgentID:   "cc_1",
+			State:     TimelineWorking,
+			Details:   map[string]string{"task": "code review", "file": "main.go"},
+			Trigger:   "user_command",
+		})
+
+		if event.Details["task"] != "code review" {
+			t.Errorf("expected details[task]='code review', got %s", event.Details["task"])
+		}
+		if event.Details["file"] != "main.go" {
+			t.Errorf("expected details[file]='main.go', got %s", event.Details["file"])
+		}
+		if event.Trigger != "user_command" {
+			t.Errorf("expected trigger='user_command', got %s", event.Trigger)
+		}
+	})
+
+	t.Run("nil details safe", func(t *testing.T) {
+		event := tracker.RecordEvent(AgentEvent{
+			AgentID: "cc_2",
+			State:   TimelineIdle,
+			Details: nil,
+		})
+
+		if event.Details != nil {
+			t.Errorf("expected nil details to remain nil, got %v", event.Details)
+		}
+	})
+}
+
+// TestGetEventsInTimeRange tests filtering events by time range with various edge cases.
+func TestGetEventsInTimeRange(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	now := time.Now()
+
+	// Create events at specific timestamps
+	timestamps := []time.Duration{
+		-10 * time.Minute,
+		-5 * time.Minute,
+		-2 * time.Minute,
+		-1 * time.Minute,
+		0,
+	}
+
+	for i, offset := range timestamps {
+		tracker.RecordEvent(AgentEvent{
+			AgentID:   "cc_1",
+			State:     TimelineState([]string{"idle", "working", "waiting", "working", "idle"}[i]),
+			Timestamp: now.Add(offset),
+		})
+	}
+
+	t.Run("exact boundary match", func(t *testing.T) {
+		// Get events since exactly -5 minutes
+		events := tracker.GetEvents(now.Add(-5 * time.Minute))
+		if len(events) != 4 {
+			t.Errorf("expected 4 events at boundary, got %d", len(events))
+		}
+	})
+
+	t.Run("just after boundary", func(t *testing.T) {
+		// Get events since just after -5 minutes
+		events := tracker.GetEvents(now.Add(-5*time.Minute + time.Millisecond))
+		if len(events) != 3 {
+			t.Errorf("expected 3 events after boundary, got %d", len(events))
+		}
+	})
+
+	t.Run("future timestamp returns none", func(t *testing.T) {
+		events := tracker.GetEvents(now.Add(time.Hour))
+		if len(events) != 0 {
+			t.Errorf("expected 0 events for future timestamp, got %d", len(events))
+		}
+	})
+}
+
+// TestConcurrentCallbackSafety verifies that callbacks are called safely without deadlock.
+func TestConcurrentCallbackSafety(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	var callbackCount int
+	var mu sync.Mutex
+
+	// Register a callback that also reads from the tracker
+	tracker.OnStateChange(func(event AgentEvent) {
+		mu.Lock()
+		callbackCount++
+		mu.Unlock()
+
+		// This should not deadlock - callbacks are called after releasing lock
+		_ = tracker.GetCurrentState(event.AgentID)
+		_ = tracker.Stats()
+	})
+
+	// Record events concurrently
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			tracker.RecordEvent(AgentEvent{
+				AgentID: "cc_" + string(rune('0'+id)),
+				State:   TimelineWorking,
+			})
+		}(i)
+	}
+
+	wg.Wait()
+
+	mu.Lock()
+	if callbackCount != 10 {
+		t.Errorf("expected 10 callback invocations, got %d", callbackCount)
+	}
+	mu.Unlock()
+}
+
 func BenchmarkRecordEvent(b *testing.B) {
 	tracker := NewTimelineTracker(&TimelineConfig{
 		MaxEventsPerAgent: 10000,
