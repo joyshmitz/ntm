@@ -774,12 +774,6 @@ func marshalAssignOutput(output *robot.AssignOutput) ([]byte, error) {
 	return json.MarshalIndent(output, "", "  ")
 }
 
-// runDirectPaneAssignment handles direct assignment to a specific pane (bd-3nde)
-// This is a stub for future implementation
-func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) error {
-	return fmt.Errorf("direct pane assignment (--pane) not yet implemented")
-}
-
 // runAssignJSON handles JSON output for the assign command
 func runAssignJSON(opts *AssignCommandOptions) error {
 	assignOutput, err := getAssignOutputEnhanced(opts)
