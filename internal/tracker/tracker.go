@@ -534,7 +534,15 @@ func SnapshotGit(root string, opts SnapshotOptions) (map[string]FileState, error
 		// Stat the file to get metadata
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			// File might have been deleted or moved
+			// If file is deleted, os.Stat fails.
+			// If status indicates deletion, preserve it so we can detect it later.
+			if strings.Contains(status, "D") {
+				snap[fullPath] = FileState{
+					ModTime:   time.Time{}, // Zero time
+					Size:      0,
+					GitStatus: strings.TrimSpace(status),
+				}
+			}
 			continue
 		}
 		if info.IsDir() {
@@ -633,6 +641,16 @@ func DetectFileChanges(before, after map[string]FileState) []FileChange {
 			// We treat this as Modified.
 			changeType := FileAdded
 
+			// If git says it's Deleted ("D"), it's a deletion of a previously clean file
+			if strings.Contains(afterState.GitStatus, "D") {
+				changes = append(changes, FileChange{
+					Path:  path,
+					Type:  FileDeleted,
+					After: &afterState,
+				})
+				continue
+			}
+
 			// Heuristic: If git says it's Modified ("M"), treat as Modified even if missing from Before.
 			if afterState.GitStatus == "M" || afterState.GitStatus == "MM" {
 				changeType = FileModified
@@ -642,6 +660,18 @@ func DetectFileChanges(before, after map[string]FileState) []FileChange {
 				Path:  path,
 				Type:  changeType,
 				After: &afterState,
+			})
+			continue
+		}
+
+		// Check for deletion if it existed in 'before' (dirty) and is now marked deleted in 'after'
+		if strings.Contains(afterState.GitStatus, "D") {
+			b := beforeState
+			changes = append(changes, FileChange{
+				Path:   path,
+				Type:   FileDeleted,
+				Before: &b,
+				After:  &afterState,
 			})
 			continue
 		}

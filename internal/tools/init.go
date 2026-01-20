@@ -37,4 +37,7 @@ func init() {
 
 	// Register MS adapter (Meta Skill - skill search and suggestion)
 	Register(NewMSAdapter())
+
+	// Register XF adapter (X Find - X/Twitter archive search)
+	Register(NewXFAdapter())
 }

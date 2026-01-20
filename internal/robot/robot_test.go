@@ -22,13 +22,20 @@ func captureStdout(t *testing.T, f func() error) (string, error) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	// Read in a separate goroutine to prevent deadlock if output exceeds pipe buffer
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = buf.ReadFrom(r)
+		close(done)
+	}()
+
 	err := f()
 
 	w.Close()
 	os.Stdout = old
+	<-done // Wait for reading to complete
 
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	return buf.String(), err
 }
 
