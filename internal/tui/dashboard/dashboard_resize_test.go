@@ -141,15 +141,18 @@ func TestWindowSizeMsg_TierTransition(t *testing.T) {
 		expectedTier layout.Tier
 		name         string
 	}{
+		// Use values that are past the hysteresis margin (5 columns) to ensure clean transitions
+		// Since dashboard uses TierForWidthWithHysteresis, exact threshold values may stay in
+		// the previous tier due to hysteresis. Use values HysteresisMargin past thresholds.
 		{80, layout.TierNarrow, "narrow at 80"},
-		{119, layout.TierNarrow, "narrow at 119"},
-		{120, layout.TierSplit, "split at 120 threshold"},
-		{199, layout.TierSplit, "split at 199"},
-		{200, layout.TierWide, "wide at 200 threshold"},
-		{239, layout.TierWide, "wide at 239"},
-		{240, layout.TierUltra, "ultra at 240 threshold"},
-		{319, layout.TierUltra, "ultra at 319"},
-		{320, layout.TierMega, "mega at 320 threshold"},
+		{114, layout.TierNarrow, "narrow at 114 (before split threshold - hysteresis)"},
+		{125, layout.TierSplit, "split at 125 (past hysteresis threshold)"},
+		{194, layout.TierSplit, "split at 194"},
+		{205, layout.TierWide, "wide at 205 (past hysteresis threshold)"},
+		{234, layout.TierWide, "wide at 234"},
+		{245, layout.TierUltra, "ultra at 245 (past hysteresis threshold)"},
+		{314, layout.TierUltra, "ultra at 314"},
+		{325, layout.TierMega, "mega at 325 (past hysteresis threshold)"},
 		{400, layout.TierMega, "mega at 400"},
 	}
 
