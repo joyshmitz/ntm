@@ -598,8 +598,26 @@ func stripTags(title string) string {
 	return title
 }
 
-// SendKeys sends keys to a pane
+// Default delays before sending Enter key (milliseconds)
+const (
+	// DefaultEnterDelay is for AI agent TUIs (Claude, Codex, Gemini) which have
+	// their own input buffering and process pasted text quickly.
+	DefaultEnterDelay = 50 * time.Millisecond
+
+	// ShellEnterDelay is for shell panes (bash, zsh, etc.) which may need more
+	// time to process pasted text before receiving Enter. Shell input handling
+	// can vary based on readline, prompt configuration, and system load.
+	ShellEnterDelay = 150 * time.Millisecond
+)
+
+// SendKeys sends keys to a pane with the default Enter delay (50ms for agent TUIs)
 func (c *Client) SendKeys(target, keys string, enter bool) error {
+	return c.SendKeysWithDelay(target, keys, enter, DefaultEnterDelay)
+}
+
+// SendKeysWithDelay sends keys to a pane with a configurable delay before Enter.
+// Use ShellEnterDelay for shell panes (bash, zsh) or DefaultEnterDelay for agent TUIs.
+func (c *Client) SendKeysWithDelay(target, keys string, enter bool, enterDelay time.Duration) error {
 	// Send large payloads in chunks to avoid ARG_MAX limits or tmux buffer issues
 	const chunkSize = 4096
 
@@ -633,9 +651,10 @@ func (c *Client) SendKeys(target, keys string, enter bool) error {
 	}
 
 	if enter {
-		// Brief delay before Enter to ensure agent CLIs (Codex, Gemini) have time to
-		// process the pasted text. Without this, Enter can be lost due to input buffering.
-		time.Sleep(50 * time.Millisecond)
+		// Delay before Enter to ensure the target has time to process the pasted text.
+		// Without this, Enter can be lost due to input buffering.
+		// Agent TUIs (Codex, Gemini) need ~50ms; shells may need 150ms or more.
+		time.Sleep(enterDelay)
 		// Use "Enter" instead of "C-m" (Ctrl+M) because some TUIs (e.g., Codex)
 		// distinguish between the Enter key and the carriage return control character.
 		return c.RunSilent("send-keys", "-t", target, "Enter")
@@ -655,6 +674,11 @@ func FormatPaneName(session string, agentType string, index int, variant string)
 // SendKeys sends keys to a pane (default client)
 func SendKeys(target, keys string, enter bool) error {
 	return DefaultClient.SendKeys(target, keys, enter)
+}
+
+// SendKeysWithDelay sends keys to a pane with a configurable Enter delay (default client)
+func SendKeysWithDelay(target, keys string, enter bool, enterDelay time.Duration) error {
+	return DefaultClient.SendKeysWithDelay(target, keys, enter, enterDelay)
 }
 
 // PasteKeys pastes content to a pane using tmux's paste mechanism.

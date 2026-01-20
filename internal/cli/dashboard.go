@@ -14,7 +14,6 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
-	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -96,9 +95,159 @@ Examples:
 	return cmd
 }
 
+// shouldUsePlainMode checks if plain text mode should be used based on environment
+func shouldUsePlainMode() bool {
+	return os.Getenv("CI") != "" || os.Getenv("TERM") == "dumb" || os.Getenv("NO_COLOR") != ""
+}
+
+// isTUIDebugEnabled checks if TUI debug mode is enabled
+func isTUIDebugEnabled() bool {
+	return os.Getenv("NTM_TUI_DEBUG") == "1"
+}
+
+// runDashboardJSON outputs dashboard data in JSON format
+func runDashboardJSON(w io.Writer, errW io.Writer, session string) error {
+	if err := tmux.EnsureInstalled(); err != nil {
+		return err
+	}
+
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
+	}
+	if res.Session == "" {
+		// Output empty JSON for no session
+		fmt.Fprintln(w, "{}")
+		return nil
+	}
+	session = res.Session
+
+	if !tmux.SessionExists(session) {
+		return fmt.Errorf("session '%s' not found", session)
+	}
+
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return fmt.Errorf("failed to get panes: %w", err)
+	}
+
+	// Build JSON structure
+	type PaneInfo struct {
+		ID      string   `json:"id"`
+		Index   int      `json:"index"`
+		Type    string   `json:"type"`
+		Variant string   `json:"variant,omitempty"`
+		Tags    []string `json:"tags,omitempty"`
+		Command string   `json:"command,omitempty"`
+		Width   int      `json:"width"`
+		Height  int      `json:"height"`
+		Active  bool     `json:"active"`
+	}
+
+	type DashboardOutput struct {
+		Session    string         `json:"session"`
+		PaneCount  int            `json:"pane_count"`
+		AgentCount map[string]int `json:"agent_counts"`
+		Panes      []PaneInfo     `json:"panes"`
+	}
+
+	counts := make(map[string]int)
+	paneInfos := make([]PaneInfo, 0, len(panes))
+	for _, p := range panes {
+		agentType := string(p.Type)
+		counts[agentType]++
+		paneInfos = append(paneInfos, PaneInfo{
+			ID:      p.ID,
+			Index:   p.Index,
+			Type:    agentType,
+			Variant: p.Variant,
+			Tags:    p.Tags,
+			Command: p.Command,
+			Width:   p.Width,
+			Height:  p.Height,
+			Active:  p.Active,
+		})
+	}
+
+	out := DashboardOutput{
+		Session:    session,
+		PaneCount:  len(panes),
+		AgentCount: counts,
+		Panes:      paneInfos,
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// runDashboardPlain outputs dashboard data in plain text
+func runDashboardPlain(w io.Writer, errW io.Writer, session string) error {
+	if err := tmux.EnsureInstalled(); err != nil {
+		return err
+	}
+
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
+	}
+	if res.Session == "" {
+		return nil
+	}
+	session = res.Session
+
+	if !tmux.SessionExists(session) {
+		return fmt.Errorf("session '%s' not found", session)
+	}
+
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return fmt.Errorf("failed to get panes: %w", err)
+	}
+
+	// Count agents by type
+	counts := make(map[string]int)
+	for _, p := range panes {
+		counts[string(p.Type)]++
+	}
+
+	// Header
+	fmt.Fprintf(w, "Session: %s\n", session)
+	fmt.Fprintf(w, "Panes: %d\n", len(panes))
+	fmt.Fprintf(w, "Agents: Claude=%d Codex=%d Gemini=%d Other=%d\n",
+		counts["cc"], counts["cod"], counts["gmi"],
+		counts["user"]+counts["cursor"]+counts["windsurf"]+counts["aider"])
+	fmt.Fprintln(w, strings.Repeat("-", 60))
+
+	// Pane details
+	for _, p := range panes {
+		status := "idle"
+		if p.Active {
+			status = "active"
+		}
+		tags := ""
+		if len(p.Tags) > 0 {
+			tags = " [" + strings.Join(p.Tags, ",") + "]"
+		}
+		variant := ""
+		if p.Variant != "" {
+			variant = " (" + p.Variant + ")"
+		}
+		fmt.Fprintf(w, "[%s] %s%s%s - %s (%dx%d)\n",
+			p.Type, p.Title, variant, tags, status, p.Width, p.Height)
+	}
+
+	return nil
+}
+
 func runDashboard(w io.Writer, errW io.Writer, session string, debug bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
+	}
+
+	// Enable debug mode via environment variable if --debug flag is set
+	if debug {
+		os.Setenv("NTM_TUI_DEBUG", "1")
 	}
 
 	res, err := ResolveSession(session, w)

@@ -146,6 +146,17 @@ var Registry = map[string]CommandInfo{
 			"ntm version --short",
 		},
 	},
+	"level": {
+		Name:        "level",
+		Tier:        TierApprentice,
+		Category:    CategoryUtilities,
+		Description: "View and change CLI proficiency tier",
+		Examples: []string{
+			"ntm level",
+			"ntm level up",
+			"ntm level master",
+		},
+	},
 
 	// ═══════════════════════════════════════════════════════════════
 	// TIER 2 (JOURNEYMAN) - Full standard commands

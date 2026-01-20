@@ -60,6 +60,9 @@ type Handoff struct {
 	TokensUsed int     `yaml:"tokens_used,omitempty"`
 	TokensMax  int     `yaml:"tokens_max,omitempty"`
 	TokensPct  float64 `yaml:"tokens_pct,omitempty"`
+
+	// File reservation transfer instructions (optional)
+	ReservationTransfer *ReservationTransfer `yaml:"reservation_transfer,omitempty"`
 }
 
 // TaskRecord represents a completed task with associated file changes.
@@ -73,6 +76,24 @@ type FileChanges struct {
 	Created  []string `yaml:"created,omitempty"`
 	Modified []string `yaml:"modified,omitempty"`
 	Deleted  []string `yaml:"deleted,omitempty"`
+}
+
+// ReservationTransfer describes how to transfer file reservations to a new session.
+type ReservationTransfer struct {
+	FromAgent          string                `yaml:"from_agent,omitempty"`
+	ProjectKey         string                `yaml:"project_key,omitempty"`
+	TTLSeconds         int                   `yaml:"ttl_seconds,omitempty"`
+	GracePeriodSeconds int                   `yaml:"grace_period_seconds,omitempty"`
+	CreatedAt          time.Time             `yaml:"created_at,omitempty"`
+	Reservations       []ReservationSnapshot `yaml:"reservations,omitempty"`
+}
+
+// ReservationSnapshot captures a single reservation for transfer.
+type ReservationSnapshot struct {
+	PathPattern string    `yaml:"path_pattern"`
+	Exclusive   bool      `yaml:"exclusive,omitempty"`
+	Reason      string    `yaml:"reason,omitempty"`
+	ExpiresAt   time.Time `yaml:"expires_at,omitempty"`
 }
 
 // New creates a new Handoff with defaults populated.

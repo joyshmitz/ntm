@@ -113,11 +113,15 @@ func runSummary(args []string, sinceStr, format string) error {
 
 	// Generate summary
 	wd, _ := os.Getwd()
-	detector := robot.NewConflictDetector(&robot.ConflictDetectorConfig{
-		RepoPath: wd,
+	summary, err := robot.SummarizeSession(robot.SessionSummaryOptions{
+		Session:   session,
+		Since:     since,
+		RepoPath:  wd,
+		AgentData: agentData,
 	})
-	generator := robot.NewSessionSummaryGenerator(detector, nil)
-	summary := generator.GenerateSummary(session, since, agentData)
+	if err != nil {
+		return err
+	}
 
 	// Output
 	if IsJSONOutput() || format == "json" {

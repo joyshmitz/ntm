@@ -32,11 +32,15 @@ const (
 	ToolJFP  ToolName = "jfp"  // JeffreysPrompts CLI - prompt library
 	ToolDCG  ToolName = "dcg"  // Destructive Command Guard - blocks dangerous commands
 	ToolSLB  ToolName = "slb"  // Simultaneous Launch Button - two-person authorization
+	ToolACFS ToolName = "acfs" // Agentic Coding Flywheel Setup - system configuration
+	ToolRU   ToolName = "ru"   // Repo Updater - multi-repo sync and management
+	ToolMS   ToolName = "ms"   // Meta Skill - skill search and suggestion
+	ToolXF   ToolName = "xf"   // X Find - X/Twitter archive search
 )
 
 // AllTools returns a list of all supported tools
 func AllTools() []ToolName {
-	return []ToolName{ToolBV, ToolBD, ToolAM, ToolCM, ToolCASS, ToolS2P, ToolJFP, ToolDCG, ToolSLB}
+	return []ToolName{ToolBV, ToolBD, ToolAM, ToolCM, ToolCASS, ToolS2P, ToolJFP, ToolDCG, ToolSLB, ToolACFS, ToolRU, ToolMS, ToolXF}
 }
 
 // HealthStatus represents the health state of a tool

@@ -28,4 +28,13 @@ func init() {
 
 	// Register SLB adapter (Simultaneous Launch Button - two-person authorization)
 	Register(NewSLBAdapter())
+
+	// Register ACFS adapter (Agentic Coding Flywheel Setup - system configuration)
+	Register(NewACFSAdapter())
+
+	// Register RU adapter (Repo Updater - multi-repo sync and management)
+	Register(NewRUAdapter())
+
+	// Register MS adapter (Meta Skill - skill search and suggestion)
+	Register(NewMSAdapter())
 }

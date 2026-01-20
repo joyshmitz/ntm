@@ -1774,6 +1774,75 @@ claude = "bash"
 	logger.Log("[E2E-ROBOT-SEND-ADVANCED] All advanced filtering tests completed")
 }
 
+// TestRobotRestartPane tests the --robot-restart-pane flag.
+func TestRobotRestartPane(t *testing.T) {
+	testutil.RequireE2E(t)
+	testutil.RequireTmux(t)
+	testutil.RequireNTMBinary(t)
+
+	logger := testutil.NewTestLogger(t, t.TempDir())
+
+	session := fmt.Sprintf("robot_restart_%d", time.Now().UnixNano())
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, session)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.toml")
+	configContent := fmt.Sprintf(`
+projects_base = %q
+
+[agents]
+claude = "bash"
+`, projectsBase)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", session).Run()
+	})
+
+	// Spawn session
+	logger.LogSection("spawn session for restart test")
+	_, _ = logger.Exec("ntm", "--config", configPath, "spawn", session, "--cc=1")
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify session was created
+	testutil.AssertSessionExists(t, logger, session)
+
+	// Test robot-restart-pane
+	logger.LogSection("robot-restart-pane")
+	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath,
+		"--robot-restart-pane", session, "--type=claude")
+	logger.Log("robot-restart-pane output: %s", string(out))
+
+	var payload struct {
+		Session   string   `json:"session"`
+		Restarted []string `json:"restarted"`
+		Failed    []struct {
+			Pane   string `json:"pane"`
+			Reason string `json:"reason"`
+		} `json:"failed"`
+	}
+
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("invalid robot-restart-pane JSON: %v", err)
+	}
+
+	if payload.Session != session {
+		t.Errorf("session = %q, want %q", payload.Session, session)
+	}
+	if len(payload.Restarted) != 1 {
+		t.Errorf("restarted count = %d, want 1", len(payload.Restarted))
+	}
+	if len(payload.Failed) > 0 {
+		t.Errorf("failed count = %d, want 0", len(payload.Failed))
+	}
+}
+
 // Skip tests if ntm binary is missing.
 func TestMain(m *testing.M) {
 	if _, err := exec.LookPath("ntm"); err != nil {

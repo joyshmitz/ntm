@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 )
 
@@ -185,9 +186,27 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		agentName := ""
+		if sessionName != "" && sessionName != "general" {
+			if info, err := agentmail.LoadSessionAgent(sessionName, projectDir); err == nil && info != nil {
+				agentName = info.AgentName
+			} else {
+				// Fallback to session name for reservation lookups when no registry exists.
+				agentName = sessionName
+			}
+		}
+
+		transferTTLSeconds := 0
+		if cfg != nil && cfg.FileReservation.DefaultTTLMin > 0 {
+			transferTTLSeconds = cfg.FileReservation.DefaultTTLMin * 60
+		}
+
 		opts := handoff.GenerateHandoffOptions{
-			SessionName: sessionName,
-			ProjectKey:  projectDir,
+			SessionName:          sessionName,
+			ProjectKey:           projectDir,
+			AgentName:            agentName,
+			TransferTTLSeconds:   transferTTLSeconds,
+			TransferGraceSeconds: 2,
 		}
 		h, err = generator.GenerateHandoff(ctx, opts)
 		if err != nil {
@@ -243,13 +262,13 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 
 	if jsonFormat {
 		return outputHandoffJSON(cmd, map[string]interface{}{
-			"success":     true,
-			"path":        path,
-			"session":     h.Session,
-			"goal":        h.Goal,
-			"now":         h.Now,
-			"status":      h.Status,
-			"file_count":  h.TotalFileChanges(),
+			"success":       true,
+			"path":          path,
+			"session":       h.Session,
+			"goal":          h.Goal,
+			"now":           h.Now,
+			"status":        h.Status,
+			"file_count":    h.TotalFileChanges(),
 			"blocker_count": len(h.Blockers),
 		})
 	}

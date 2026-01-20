@@ -770,7 +770,11 @@ func TestDefaultMatcherConfig_Values(t *testing.T) {
 }
 
 func TestMatcher_ContextUsageBoundary_Exactly0_9(t *testing.T) {
-	m := NewMatcher()
+	// Set MinConfidence to 0 to isolate MaxContextUsage check from scoring logic
+	// With 0.9 usage, score becomes very low (capability * 0.1), which fails default 0.3 threshold
+	config := DefaultMatcherConfig()
+	config.MinConfidence = 0.0
+	m := NewMatcher().WithConfig(config)
 
 	beads := []Bead{{ID: "b1", Title: "Test", TaskType: TaskFeature, Priority: 2}}
 

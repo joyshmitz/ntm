@@ -19,6 +19,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/gemini"
+	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
@@ -161,6 +162,8 @@ type RecoveryContext struct {
 	CMMemories *RecoveryCMMemories `json:"cm_memories,omitempty"`
 	// FileReservations contains files currently reserved by this session
 	FileReservations []string `json:"file_reservations,omitempty"`
+	// ReservationTransfer contains results from attempting to transfer reservations
+	ReservationTransfer *handoff.ReservationTransferResult `json:"reservation_transfer,omitempty"`
 	// Sessions contains past sessions for recovery context
 	Sessions []RecoverySession `json:"sessions,omitempty"`
 	// Summary is a human-readable summary of the recovery context
@@ -1063,7 +1066,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		// Parallelize post-launch setup and prompt delivery
 		// This prevents sequential blocking and ensures correct ordering (Context -> Prompt)
 		setupWg.Add(1)
-		
+
 		// Capture vars for closure
 		pID := pane.ID
 		pTitle := title
@@ -1834,7 +1837,7 @@ func buildRecoveryContext(ctx context.Context, sessionName, workingDir string, r
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			msgs, reservations, err := loadRecoveryMessages(ctx, sessionName, workingDir)
+			msgs, reservations, transfer, err := loadRecoveryMessages(ctx, sessionName, workingDir)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -1842,6 +1845,7 @@ func buildRecoveryContext(ctx context.Context, sessionName, workingDir string, r
 			} else {
 				rc.Messages = msgs
 				rc.FileReservations = reservations
+				rc.ReservationTransfer = transfer
 			}
 		}()
 	}
@@ -1944,31 +1948,33 @@ func loadRecoveryBeads(workingDir string) (inProgress, completed, blocked []Reco
 }
 
 // loadRecoveryMessages loads recent Agent Mail messages and file reservations.
-func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) ([]RecoveryMessage, []string, error) {
-	var opts []agentmail.Option
-	if cfg != nil {
-		if cfg.AgentMail.URL != "" {
-			opts = append(opts, agentmail.WithBaseURL(cfg.AgentMail.URL))
-		}
-		if cfg.AgentMail.Token != "" {
-			opts = append(opts, agentmail.WithToken(cfg.AgentMail.Token))
-		}
-	}
-	client := agentmail.NewClient(opts...)
+func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) ([]RecoveryMessage, []string, *handoff.ReservationTransferResult, error) {
+	client := newAgentMailClient(workingDir)
 
 	if !client.IsAvailable() {
-		return nil, nil, nil // Graceful degradation
+		return nil, nil, nil, nil // Graceful degradation
 	}
+
+	agentName := resolveRecoveryAgentName(sessionName, workingDir)
 
 	// Fetch inbox
 	inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
 		ProjectKey:    workingDir,
-		AgentName:     sessionName,
+		AgentName:     agentName,
 		Limit:         10,
 		IncludeBodies: true,
 	})
+	if err != nil && agentName != sessionName {
+		// Fallback to session name if registry agent fails
+		inbox, err = client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+			ProjectKey:    workingDir,
+			AgentName:     sessionName,
+			Limit:         10,
+			IncludeBodies: true,
+		})
+	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch inbox: %w", err)
+		return nil, nil, nil, fmt.Errorf("fetch inbox: %w", err)
 	}
 
 	var msgs []RecoveryMessage
@@ -1983,19 +1989,86 @@ func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) (
 		})
 	}
 
+	// Attempt reservation transfer using latest handoff, if available.
+	transferResult, transferErr := attemptReservationTransfer(ctx, client, sessionName, workingDir)
+	if transferErr != nil && !IsJSONOutput() {
+		output.PrintWarningf("Reservation transfer: %v", transferErr)
+	}
+
 	// Fetch file reservations
-	reservations, err := client.ListReservations(ctx, workingDir, sessionName, false)
+	reservations, err := client.ListReservations(ctx, workingDir, agentName, false)
+	if err != nil && agentName != sessionName {
+		// Fallback to session name for reservation lookup
+		reservations, err = client.ListReservations(ctx, workingDir, sessionName, false)
+	}
 	if err != nil {
 		// Non-fatal, return messages only
-		return msgs, nil, nil
+		return msgs, nil, transferResult, nil
 	}
 
+	paths := reservationPaths(reservations)
+	if transferResult != nil && transferResult.Success && len(transferResult.GrantedPaths) > 0 {
+		paths = transferResult.GrantedPaths
+	}
+
+	return msgs, paths, transferResult, nil
+}
+
+func resolveRecoveryAgentName(sessionName, workingDir string) string {
+	info, err := agentmail.LoadSessionAgent(sessionName, workingDir)
+	if err == nil && info != nil && info.AgentName != "" {
+		return info.AgentName
+	}
+	return sessionName
+}
+
+func reservationPaths(reservations []agentmail.FileReservation) []string {
 	var paths []string
 	for _, r := range reservations {
-		paths = append(paths, r.PathPattern)
+		if r.PathPattern != "" {
+			paths = append(paths, r.PathPattern)
+		}
+	}
+	return paths
+}
+
+func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, sessionName, workingDir string) (*handoff.ReservationTransferResult, error) {
+	reader := handoff.NewReader(workingDir)
+	h, _, err := reader.FindLatest(sessionName)
+	if err != nil || h == nil || h.ReservationTransfer == nil {
+		return nil, nil
 	}
 
-	return msgs, paths, nil
+	transfer := h.ReservationTransfer
+	if transfer.FromAgent == "" || len(transfer.Reservations) == 0 {
+		return nil, nil
+	}
+
+	projectKey := transfer.ProjectKey
+	if projectKey == "" {
+		projectKey = workingDir
+	}
+
+	ttlSeconds := transfer.TTLSeconds
+	if ttlSeconds <= 0 && cfg != nil && cfg.FileReservation.DefaultTTLMin > 0 {
+		ttlSeconds = cfg.FileReservation.DefaultTTLMin * 60
+	}
+
+	grace := time.Duration(transfer.GracePeriodSeconds) * time.Second
+	opts := handoff.TransferReservationsOptions{
+		ProjectKey:   projectKey,
+		FromAgent:    transfer.FromAgent,
+		ToAgent:      sessionName,
+		Reservations: transfer.Reservations,
+		TTLSeconds:   ttlSeconds,
+		GracePeriod:  grace,
+	}
+
+	result, err := handoff.TransferReservations(ctx, client, opts)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // loadRecoveryCMMemories loads procedural memories from CM.
@@ -2100,6 +2173,20 @@ func estimateRecoveryTokens(rc *RecoveryContext) int {
 		chars += len(f)
 	}
 
+	// Count reservation transfer info
+	if rc.ReservationTransfer != nil {
+		chars += len(rc.ReservationTransfer.FromAgent) + len(rc.ReservationTransfer.ToAgent) + len(rc.ReservationTransfer.Error)
+		for _, p := range rc.ReservationTransfer.RequestedPaths {
+			chars += len(p)
+		}
+		for _, c := range rc.ReservationTransfer.Conflicts {
+			chars += len(c.Path)
+			for _, h := range c.Holders {
+				chars += len(h)
+			}
+		}
+	}
+
 	// Add overhead for formatting
 	chars += 500
 
@@ -2156,6 +2243,13 @@ func generateRecoverySummary(rc *RecoveryContext) string {
 	}
 	if len(rc.FileReservations) > 0 {
 		parts = append(parts, fmt.Sprintf("%d file reservation(s)", len(rc.FileReservations)))
+	}
+	if rc.ReservationTransfer != nil {
+		if rc.ReservationTransfer.Success {
+			parts = append(parts, fmt.Sprintf("reservations transferred (%d paths)", len(rc.ReservationTransfer.GrantedPaths)))
+		} else if len(rc.ReservationTransfer.Conflicts) > 0 {
+			parts = append(parts, fmt.Sprintf("reservation conflicts (%d)", len(rc.ReservationTransfer.Conflicts)))
+		}
 	}
 	if rc.CMMemories != nil && (len(rc.CMMemories.Rules) > 0 || len(rc.CMMemories.AntiPatterns) > 0) {
 		parts = append(parts, fmt.Sprintf("%d procedural memories", len(rc.CMMemories.Rules)+len(rc.CMMemories.AntiPatterns)))
@@ -2226,6 +2320,15 @@ func FormatRecoveryPrompt(rc *RecoveryContext, agentType AgentType) string {
 			sb.WriteString("- Files you were editing: ")
 			sb.WriteString(strings.Join(rc.FileReservations, ", "))
 			sb.WriteString("\n")
+		}
+		if rc.ReservationTransfer != nil {
+			if rc.ReservationTransfer.Success {
+				sb.WriteString(fmt.Sprintf("- Reservation transfer: succeeded (%d paths)\n", len(rc.ReservationTransfer.GrantedPaths)))
+			} else if len(rc.ReservationTransfer.Conflicts) > 0 {
+				sb.WriteString(fmt.Sprintf("- Reservation transfer: conflicts (%d)\n", len(rc.ReservationTransfer.Conflicts)))
+			} else if rc.ReservationTransfer.Error != "" {
+				sb.WriteString("- Reservation transfer: failed\n")
+			}
 		}
 
 		sb.WriteString("\n")

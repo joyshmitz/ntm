@@ -553,3 +553,238 @@ func TestEstimatorInterfaces(t *testing.T) {
 		}
 	}
 }
+
+// TestThresholdDetection_50_75_90 tests alert trigger logic at specific thresholds.
+func TestThresholdDetection_50_75_90(t *testing.T) {
+	t.Parallel()
+
+	// Note: CumulativeTokenEstimator applies 0.7 compaction discount
+	// So to get 60% reported usage, we need 60/0.7 = ~86% raw tokens
+	tests := []struct {
+		name            string
+		rawTokenPercent float64 // Token percentage before 0.7 discount
+		warnAt          float64
+		rotateAt        float64
+		expectWarn      bool
+		expectRotate    bool
+	}{
+		{"35% raw (24.5% reported) below 60% warn", 35.0, 60.0, 80.0, false, false},
+		{"90% raw (63% reported) above 60% warn", 90.0, 60.0, 80.0, true, false},
+		{"115% raw (80.5% reported) at 80% rotate", 115.0, 60.0, 80.0, true, true},
+		{"130% raw (91% reported) above 80% rotate", 130.0, 60.0, 80.0, true, true},
+		{"70% raw (49% reported) below custom 50% warn", 70.0, 50.0, 75.0, false, false},
+		{"75% raw (52.5% reported) above custom 50% warn", 75.0, 50.0, 75.0, true, false},
+		{"110% raw (77% reported) above custom 75% rotate", 110.0, 50.0, 75.0, true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := MonitorConfig{
+				WarningThreshold: tt.warnAt,
+				RotateThreshold:  tt.rotateAt,
+				TokensPerMessage: 1000,
+			}
+			monitor := NewContextMonitor(config)
+
+			// Register agent and set up state
+			monitor.RegisterAgent("test-agent", "pane-1", "claude-opus-4")
+
+			// claude-opus-4 has 200000 context limit
+			// Set raw tokens that after 0.7 discount will give target usage
+			state := monitor.GetState("test-agent")
+			rawTokens := int64(tt.rawTokenPercent / 100.0 * 200000)
+			state.cumulativeInputTokens = rawTokens / 2
+			state.cumulativeOutputTokens = rawTokens / 2
+
+			// Get estimate to log actual usage
+			estimate := monitor.GetEstimate("test-agent")
+			actualUsage := float64(0)
+			if estimate != nil {
+				actualUsage = estimate.UsagePercent
+			}
+			t.Logf("CONTEXT_TEST: %s | RawTokens=%.1f%% | ActualUsage=%.1f%% | WarnAt=%.1f%% | RotateAt=%.1f%%",
+				tt.name, tt.rawTokenPercent, actualUsage, tt.warnAt, tt.rotateAt)
+
+			// Get agents above threshold
+			agents := monitor.AgentsAboveThreshold(tt.warnAt)
+
+			gotWarn := false
+			gotRotate := false
+			for _, info := range agents {
+				if info.AgentID == "test-agent" {
+					gotWarn = info.NeedsWarn
+					gotRotate = info.NeedsRotate
+				}
+			}
+
+			if tt.expectWarn && len(agents) == 0 {
+				t.Errorf("expected agent in threshold list at %.1f%% raw usage", tt.rawTokenPercent)
+			}
+
+			if gotWarn != tt.expectWarn {
+				t.Errorf("NeedsWarn = %v, want %v", gotWarn, tt.expectWarn)
+			}
+			if gotRotate != tt.expectRotate {
+				t.Errorf("NeedsRotate = %v, want %v", gotRotate, tt.expectRotate)
+			}
+		})
+	}
+}
+
+// TestAlertTriggerLogic tests the alert trigger conditions.
+func TestAlertTriggerLogic(t *testing.T) {
+	t.Parallel()
+
+	config := MonitorConfig{
+		WarningThreshold: 60.0,
+		RotateThreshold:  80.0,
+		TokensPerMessage: 1000,
+	}
+	monitor := NewContextMonitor(config)
+
+	// Create multiple agents with different usage levels
+	// Note: CumulativeTokenEstimator applies 0.7 compaction discount
+	// So we need to set raw tokens = target / 0.7 to achieve target usage
+	// e.g., for 60% target, we need 60/0.7 = ~86% raw = 171k tokens
+	agentConfigs := []struct {
+		id     string
+		tokens int64 // Raw tokens (before 0.7 discount)
+	}{
+		{"low-usage", 50000},     // 50k * 0.7 / 200k = 17.5%
+		{"medium-usage", 180000}, // 180k * 0.7 / 200k = 63%
+		{"high-usage", 240000},   // 240k * 0.7 / 200k = 84%
+		{"critical-usage", 280000}, // 280k * 0.7 / 200k = 98%
+	}
+
+	for _, ac := range agentConfigs {
+		monitor.RegisterAgent(ac.id, "pane-"+ac.id, "claude-opus-4")
+		state := monitor.GetState(ac.id)
+		state.cumulativeInputTokens = ac.tokens / 2
+		state.cumulativeOutputTokens = ac.tokens / 2
+	}
+
+	t.Logf("CONTEXT_TEST: AlertTriggerLogic | Agents=%d | WarnThreshold=60%% | RotateThreshold=80%%",
+		len(agentConfigs))
+
+	// Test at warning threshold
+	warningAgents := monitor.AgentsAboveThreshold(60.0)
+	if len(warningAgents) < 3 {
+		t.Errorf("expected at least 3 agents above 60%% threshold, got %d", len(warningAgents))
+	}
+
+	// Verify low-usage agent is not in warning list
+	for _, agent := range warningAgents {
+		if agent.AgentID == "low-usage" {
+			t.Error("low-usage agent should not be in warning list")
+		}
+	}
+
+	// Test at rotation threshold
+	rotateAgents := monitor.AgentsAboveThreshold(80.0)
+	if len(rotateAgents) < 2 {
+		t.Errorf("expected at least 2 agents above 80%% threshold, got %d", len(rotateAgents))
+	}
+
+	// Verify rotation flags
+	for _, agent := range rotateAgents {
+		if !agent.NeedsRotate {
+			t.Errorf("agent %s at rotation threshold should have NeedsRotate=true", agent.AgentID)
+		}
+	}
+}
+
+// TestDebouncingBehavior tests that estimates are cached and debounced appropriately.
+func TestDebouncingBehavior(t *testing.T) {
+	t.Parallel()
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("test-agent", "pane-1", "claude-opus-4")
+
+	// Record initial messages
+	for i := 0; i < 10; i++ {
+		monitor.RecordMessage("test-agent", 500, 500)
+	}
+
+	// Get first estimate
+	estimate1 := monitor.GetEstimate("test-agent")
+	if estimate1 == nil {
+		t.Fatal("first estimate should not be nil")
+	}
+
+	t.Logf("CONTEXT_TEST: DebouncingBehavior | FirstEstimate=%d tokens | Method=%s",
+		estimate1.TokensUsed, estimate1.Method)
+
+	// Simulate robot mode update
+	robotOutput := `{"context_used": 25000, "context_limit": 200000}`
+	monitor.UpdateFromRobotMode("test-agent", robotOutput)
+
+	// Get estimate immediately after robot mode update
+	estimate2 := monitor.GetEstimate("test-agent")
+	if estimate2 == nil {
+		t.Fatal("estimate after robot mode should not be nil")
+	}
+
+	// Robot mode estimate should be used (higher confidence)
+	if estimate2.Method != MethodRobotMode {
+		t.Errorf("expected MethodRobotMode after update, got %s", estimate2.Method)
+	}
+
+	if estimate2.TokensUsed != 25000 {
+		t.Errorf("robot mode estimate should report 25000 tokens, got %d", estimate2.TokensUsed)
+	}
+
+	t.Logf("CONTEXT_TEST: DebouncingBehavior | AfterRobotMode=%d tokens | Method=%s | Confidence=%.2f",
+		estimate2.TokensUsed, estimate2.Method, estimate2.Confidence)
+
+	// Verify robot mode has highest confidence
+	if estimate2.Confidence < 0.90 {
+		t.Errorf("robot mode should have high confidence (>=0.90), got %.2f", estimate2.Confidence)
+	}
+}
+
+// TestMultipleAgentTracking tests concurrent tracking of multiple agents.
+func TestMultipleAgentTracking(t *testing.T) {
+	t.Parallel()
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+
+	// Register diverse agents
+	agents := []struct {
+		id    string
+		model string
+		limit int64
+	}{
+		{"claude-agent", "claude-opus-4", 200000},
+		{"gpt-agent", "gpt-4", 128000},
+		{"gemini-agent", "gemini-2.0-flash", 1000000},
+	}
+
+	for _, a := range agents {
+		monitor.RegisterAgent(a.id, "pane-"+a.id, a.model)
+		monitor.RecordMessage(a.id, 5000, 5000)
+	}
+
+	t.Logf("CONTEXT_TEST: MultipleAgentTracking | Agents=%d", len(agents))
+
+	// Verify all estimates are available
+	allEstimates := monitor.GetAllEstimates()
+	if len(allEstimates) != len(agents) {
+		t.Errorf("expected %d estimates, got %d", len(agents), len(allEstimates))
+	}
+
+	// Verify each agent has appropriate context limit
+	for _, a := range agents {
+		estimate := allEstimates[a.id]
+		if estimate == nil {
+			t.Errorf("missing estimate for agent %s", a.id)
+			continue
+		}
+		if estimate.ContextLimit != a.limit {
+			t.Errorf("agent %s: ContextLimit = %d, want %d", a.id, estimate.ContextLimit, a.limit)
+		}
+		t.Logf("CONTEXT_TEST: Agent=%s | Model=%s | Limit=%d | Usage=%.1f%%",
+			a.id, a.model, estimate.ContextLimit, estimate.UsagePercent)
+	}
+}

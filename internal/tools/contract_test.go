@@ -91,6 +91,123 @@ func TestJFPAdapterVersionParsing(t *testing.T) {
 	}
 }
 
+// TestSLBAdapterVersionParsing tests SLB version string parsing
+func TestSLBAdapterVersionParsing(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Version
+		wantErr bool
+	}{
+		{
+			input: "slb 0.1.0\n  commit:  cc17518fe7d699363f4bcb48670ed4a3bbc71127\n  built:   2025-12-25T03:35:46Z",
+			want:  Version{Major: 0, Minor: 1, Patch: 0, Raw: "slb 0.1.0\n  commit:  cc17518fe7d699363f4bcb48670ed4a3bbc71127\n  built:   2025-12-25T03:35:46Z"},
+		},
+		{
+			input: "slb 1.2.3",
+			want:  Version{Major: 1, Minor: 2, Patch: 3, Raw: "slb 1.2.3"},
+		},
+		{
+			input: "slb 0.0.1\n  commit:  abc123",
+			want:  Version{Major: 0, Minor: 0, Patch: 1, Raw: "slb 0.0.1\n  commit:  abc123"},
+		},
+		{
+			input: "no version",
+			want:  Version{Raw: "no version"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseSLBVersion(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseSLBVersion() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got.Major != tt.want.Major || got.Minor != tt.want.Minor || got.Patch != tt.want.Patch {
+				t.Errorf("parseSLBVersion() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestACFSAdapterVersionParsing tests ACFS version string parsing
+func TestACFSAdapterVersionParsing(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Version
+		wantErr bool
+	}{
+		{
+			input: "0.1.0",
+			want:  Version{Major: 0, Minor: 1, Patch: 0, Raw: "0.1.0"},
+		},
+		{
+			input: "1.2.3",
+			want:  Version{Major: 1, Minor: 2, Patch: 3, Raw: "1.2.3"},
+		},
+		{
+			input: "2.0.0-beta",
+			want:  Version{Major: 2, Minor: 0, Patch: 0, Raw: "2.0.0-beta"},
+		},
+		{
+			input: "no version",
+			want:  Version{Raw: "no version"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseACFSVersion(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseACFSVersion() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got.Major != tt.want.Major || got.Minor != tt.want.Minor || got.Patch != tt.want.Patch {
+				t.Errorf("parseACFSVersion() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMSAdapterVersionParsing tests MS version string parsing
+func TestMSAdapterVersionParsing(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Version
+		wantErr bool
+	}{
+		{
+			input: "ms 0.1.0",
+			want:  Version{Major: 0, Minor: 1, Patch: 0, Raw: "0.1.0"},
+		},
+		{
+			input: "0.2.5",
+			want:  Version{Major: 0, Minor: 2, Patch: 5, Raw: "0.2.5"},
+		},
+		{
+			input: "ms 1.0.0-beta",
+			want:  Version{Major: 1, Minor: 0, Patch: 0, Raw: "1.0.0-beta"},
+		},
+		{
+			input: "no version",
+			want:  Version{Raw: "no version"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseMSVersion(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseMSVersion() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got.Major != tt.want.Major || got.Minor != tt.want.Minor || got.Patch != tt.want.Patch {
+				t.Errorf("parseMSVersion() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestJFPAdapterWithFakeTools tests the JFP adapter with fake tools
 func TestJFPAdapterWithFakeTools(t *testing.T) {
 	cleanup := withFakeTools(t)
@@ -502,6 +619,10 @@ func TestAllAdaptersHaveConsistentInterface(t *testing.T) {
 		{"s2p", NewS2PAdapter()},
 		{"am", NewAMAdapter()},
 		{"jfp", NewJFPAdapter()},
+		{"dcg", NewDCGAdapter()},
+		{"slb", NewSLBAdapter()},
+		{"acfs", NewACFSAdapter()},
+		{"ms", NewMSAdapter()},
 	}
 
 	ctx := context.Background()

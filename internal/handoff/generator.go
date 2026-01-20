@@ -548,6 +548,12 @@ type GenerateHandoffOptions struct {
 
 	// AgentMailClient is an optional pre-configured Agent Mail client
 	AgentMailClient *agentmail.Client
+
+	// TransferTTLSeconds refreshes reservation TTL when preparing transfer instructions.
+	TransferTTLSeconds int
+
+	// TransferGraceSeconds adds a retry grace period during transfer (seconds).
+	TransferGraceSeconds int
 }
 
 // GenerateHandoff creates a complete handoff with BV and Agent Mail integration.
@@ -567,8 +573,8 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 	// Create base handoff
 	h := New(opts.SessionName)
 
-	// Set agent info
-	h.SetAgentInfo("", opts.AgentType, opts.PaneID)
+	// Set agent info (AgentID is optional)
+	h.SetAgentInfo(opts.AgentName, opts.AgentType, opts.PaneID)
 
 	// Set token info if provided
 	if opts.TokensMax > 0 {
@@ -760,7 +766,10 @@ func (g *Generator) enrichWithAgentMail(ctx context.Context, h *Handoff, opts Ge
 		g.logger.Warn("failed to fetch file reservations", "error", err)
 		// Non-fatal
 	} else if len(reservations) > 0 {
-		h.AddFinding("file_reservations", strings.Join(reservations, "; "))
+		h.AddFinding("file_reservations", strings.Join(formatReservationSummary(reservations), "; "))
+		if opts.AgentName != "" {
+			h.ReservationTransfer = buildReservationTransfer(opts, projectKey, reservations)
+		}
 	}
 
 	g.logger.Debug("enriched with Agent Mail",
@@ -811,12 +820,15 @@ func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail
 }
 
 // fetchFileReservations retrieves active file reservations.
-func (g *Generator) fetchFileReservations(ctx context.Context, client *agentmail.Client, projectKey, agentName string) ([]string, error) {
+func (g *Generator) fetchFileReservations(ctx context.Context, client *agentmail.Client, projectKey, agentName string) ([]agentmail.FileReservation, error) {
 	reservations, err := client.ListReservations(ctx, projectKey, agentName, false)
 	if err != nil {
 		return nil, err
 	}
+	return reservations, nil
+}
 
+func formatReservationSummary(reservations []agentmail.FileReservation) []string {
 	var result []string
 	now := time.Now()
 
@@ -842,5 +854,27 @@ func (g *Generator) fetchFileReservations(ctx context.Context, client *agentmail
 		result = append(result, entry)
 	}
 
-	return result, nil
+	return result
+}
+
+func buildReservationTransfer(opts GenerateHandoffOptions, projectKey string, reservations []agentmail.FileReservation) *ReservationTransfer {
+	if len(reservations) == 0 || opts.AgentName == "" {
+		return nil
+	}
+	transfer := &ReservationTransfer{
+		FromAgent:          opts.AgentName,
+		ProjectKey:         projectKey,
+		TTLSeconds:         opts.TransferTTLSeconds,
+		GracePeriodSeconds: opts.TransferGraceSeconds,
+		CreatedAt:          time.Now(),
+	}
+	for _, r := range reservations {
+		transfer.Reservations = append(transfer.Reservations, ReservationSnapshot{
+			PathPattern: r.PathPattern,
+			Exclusive:   r.Exclusive,
+			Reason:      r.Reason,
+			ExpiresAt:   r.ExpiresTS,
+		})
+	}
+	return transfer
 }

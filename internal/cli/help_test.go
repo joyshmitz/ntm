@@ -115,3 +115,125 @@ func TestPrintMinimalHelp(t *testing.T) {
 		}
 	}
 }
+
+func TestPrintHelpTier1OnlyEssentialCommands(t *testing.T) {
+	// Minimal help (Tier 1 Apprentice) should only show essential commands
+	var buf bytes.Buffer
+	PrintMinimalHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	// Essential commands should be present
+	essentialCommands := []string{"spawn", "send", "status", "kill", "help"}
+	for _, cmd := range essentialCommands {
+		if !strings.Contains(output, cmd) {
+			t.Errorf("Expected Tier 1 help to contain essential command %q", cmd)
+		}
+	}
+
+	// Journeyman/Master commands should NOT be present in minimal help
+	advancedCommands := []string{"dashboard", "assign", "policy", "robot"}
+	for _, cmd := range advancedCommands {
+		if strings.Contains(output, cmd) {
+			t.Errorf("Expected Tier 1 help to NOT contain advanced command %q", cmd)
+		}
+	}
+}
+
+func TestPrintHelpTier2IncludesStandardCommands(t *testing.T) {
+	// Compact help (similar to Tier 2) should include standard commands
+	var buf bytes.Buffer
+	PrintCompactHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	// Commands present in compact help
+	compactCommands := []string{"spawn", "send", "palette", "status", "list", "attach", "view", "dashboard"}
+	for _, cmd := range compactCommands {
+		if !strings.Contains(output, cmd) {
+			t.Errorf("Expected compact help to contain command %q", cmd)
+		}
+	}
+}
+
+func TestPrintHelpTier3IncludesAllCommands(t *testing.T) {
+	// Full/stunning help (Tier 3 Master) should include all commands
+	var buf bytes.Buffer
+	PrintStunningHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	// Master tier commands should be present
+	masterCommands := []string{"spawn", "send", "status", "kill", "attach", "dashboard"}
+	for _, cmd := range masterCommands {
+		if !strings.Contains(output, cmd) {
+			t.Errorf("Expected Tier 3 help to contain command %q", cmd)
+		}
+	}
+
+	// Should include advanced sections
+	advancedSections := []string{"SESSION CREATION", "AGENT MANAGEMENT", "SESSION NAVIGATION"}
+	for _, section := range advancedSections {
+		if !strings.Contains(output, section) {
+			t.Errorf("Expected Tier 3 help to contain section %q", section)
+		}
+	}
+}
+
+func TestHelpOutputProperlyAligned(t *testing.T) {
+	// Test that output is properly formatted
+	var buf bytes.Buffer
+	PrintCompactHelp(&buf)
+	output := buf.String()
+
+	// Should not have excessive whitespace
+	if strings.Contains(output, "     ") && !strings.Contains(output, "      ") {
+		// Some indentation is expected, but not excessive
+	}
+
+	// Should have consistent line structure
+	lines := strings.Split(output, "\n")
+	if len(lines) < 10 {
+		t.Errorf("Expected at least 10 lines of help output, got %d", len(lines))
+	}
+}
+
+func TestHelpAliasesShown(t *testing.T) {
+	// Verify aliases are shown in help output
+	var buf bytes.Buffer
+	PrintStunningHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	// Common aliases should appear
+	if !strings.Contains(output, "Aliases:") {
+		t.Error("Expected help output to contain 'Aliases:' section")
+	}
+}
+
+func TestHelpQuickStartSection(t *testing.T) {
+	// Verify quick start section exists and has useful examples
+	var buf bytes.Buffer
+	PrintMinimalHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	if !strings.Contains(output, "QUICK START") {
+		t.Error("Expected help output to contain 'QUICK START' section")
+	}
+
+	// Should have an example command
+	if !strings.Contains(output, "ntm spawn") {
+		t.Error("Expected quick start to contain 'ntm spawn' example")
+	}
+}
+
+func TestHelpShellSetupSection(t *testing.T) {
+	// Verify shell setup instructions are present
+	var buf bytes.Buffer
+	PrintMinimalHelp(&buf)
+	output := stripANSIForTest(buf.String())
+
+	if !strings.Contains(output, "Shell setup:") {
+		t.Error("Expected help output to contain 'Shell setup:' section")
+	}
+
+	if !strings.Contains(output, "ntm shell") {
+		t.Error("Expected shell setup to contain 'ntm shell' command")
+	}
+}

@@ -2339,7 +2339,16 @@ func PrintSend(opts SendOptions) error {
 			time.Sleep(time.Duration(opts.DelayMs) * time.Millisecond)
 		}
 
-		err := tmux.SendKeys(pane.ID, messageToSend, true)
+		// Determine appropriate Enter delay based on pane type.
+		// User/shell panes need a longer delay than AI agent TUIs because
+		// shells (bash, zsh) have different input buffering behavior.
+		enterDelay := tmux.DefaultEnterDelay
+		agentType := detectAgentType(pane.Title)
+		if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
+			enterDelay = tmux.ShellEnterDelay
+		}
+
+		err := tmux.SendKeysWithDelay(pane.ID, messageToSend, true, enterDelay)
 		if err != nil {
 			output.Failed = append(output.Failed, SendError{
 				Pane:  paneKey,

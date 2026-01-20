@@ -20,6 +20,7 @@ type Config struct {
 	ProjectsBase    string                `toml:"projects_base"`
 	Theme           string                `toml:"theme"`        // UI Theme (mocha, macchiato, nord, latte, auto)
 	PaletteFile     string                `toml:"palette_file"` // Path to command_palette.md (optional)
+	SuggestionsEnabled bool              `toml:"suggestions_enabled"` // Show contextual CLI suggestions
 	Agents          AgentConfig           `toml:"agents"`
 	Palette         []PaletteCmd          `toml:"palette"`
 	PaletteState    PaletteState          `toml:"palette_state"`
@@ -39,7 +40,8 @@ type Config struct {
 	ContextRotation ContextRotationConfig `toml:"context_rotation"` // Context window rotation
 	SessionRecovery SessionRecoveryConfig `toml:"recovery"`          // Smart session recovery
 	Cleanup         CleanupConfig         `toml:"cleanup"`           // Temp file cleanup configuration
-	FileReservation FileReservationConfig `toml:"file_reservation"`  // Auto file reservation via Agent Mail
+	FileReservation FileReservationConfig `toml:"file_reservation"` // Auto file reservation via Agent Mail
+	Memory          MemoryConfig          `toml:"memory"`           // CASS Memory (cm) integration
 
 	// Runtime-only fields (populated by project config merging)
 	ProjectDefaults map[string]int `toml:"-"`
@@ -552,6 +554,41 @@ func ValidateFileReservationConfig(cfg *FileReservationConfig) error {
 	return nil
 }
 
+// MemoryConfig holds configuration for CASS Memory (cm) integration.
+// When enabled, NTM can query the memory system for relevant context
+// before starting tasks and include learned rules in session recovery.
+type MemoryConfig struct {
+	Enabled             bool `toml:"enabled"`               // Master toggle for memory integration
+	IncludeInRecovery   bool `toml:"include_in_recovery"`   // Include memory context in session recovery
+	MaxRules            int  `toml:"max_rules"`             // Maximum number of rules to inject
+	IncludeAntiPatterns bool `toml:"include_anti_patterns"` // Include anti-patterns in context
+	IncludeHistory      bool `toml:"include_history"`       // Include historical snippets
+	QueryTimeoutSeconds int  `toml:"query_timeout_seconds"` // Timeout for cm command
+}
+
+// DefaultMemoryConfig returns sensible defaults for memory integration.
+func DefaultMemoryConfig() MemoryConfig {
+	return MemoryConfig{
+		Enabled:             true,  // Enabled by default (when cm is available)
+		IncludeInRecovery:   true,  // Include in session recovery context
+		MaxRules:            10,    // Cap number of rules to inject
+		IncludeAntiPatterns: true,  // Include anti-patterns by default
+		IncludeHistory:      true,  // Include historical snippets
+		QueryTimeoutSeconds: 5,     // 5 second timeout for cm queries
+	}
+}
+
+// ValidateMemoryConfig validates the memory configuration.
+func ValidateMemoryConfig(cfg *MemoryConfig) error {
+	if cfg.MaxRules < 0 {
+		return fmt.Errorf("max_rules must be non-negative, got %d", cfg.MaxRules)
+	}
+	if cfg.QueryTimeoutSeconds < 1 {
+		return fmt.Errorf("query_timeout_seconds must be at least 1, got %d", cfg.QueryTimeoutSeconds)
+	}
+	return nil
+}
+
 // PaletteCmd represents a command in the palette
 type PaletteCmd struct {
 	Key      string   `toml:"key"`
@@ -837,6 +874,7 @@ func Default() *Config {
 
 	cfg := &Config{
 		ProjectsBase: projectsBase,
+		SuggestionsEnabled: true,
 		Agents:       DefaultAgentTemplates(),
 		Tmux: TmuxConfig{
 			DefaultPanes: 10,
@@ -864,6 +902,7 @@ func Default() *Config {
 		SessionRecovery: DefaultSessionRecoveryConfig(),
 		Cleanup:         DefaultCleanupConfig(),
 		FileReservation: DefaultFileReservationConfig(),
+		Memory:          DefaultMemoryConfig(),
 	}
 
 	// Try to load palette from markdown file

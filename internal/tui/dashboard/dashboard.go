@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -83,6 +84,22 @@ type AgentMailUpdateMsg struct {
 	Locks        int
 	LockInfo     []AgentMailLockInfo
 	Gen          uint64
+}
+
+// AgentMailInboxSummaryMsg is sent when per-agent inbox summaries are fetched.
+type AgentMailInboxSummaryMsg struct {
+	Inboxes  map[string][]agentmail.InboxMessage // paneID -> messages
+	AgentMap map[string]string                   // paneID -> agent name
+	Err      error
+	Gen      uint64
+}
+
+// AgentMailInboxDetailMsg is sent when message bodies are fetched for a single agent.
+type AgentMailInboxDetailMsg struct {
+	PaneID   string
+	Messages []agentmail.InboxMessage
+	Err      error
+	Gen      uint64
 }
 
 // CassSelectMsg is sent when a CASS search result is selected
@@ -218,6 +235,7 @@ const (
 	refreshCheckpoint
 	refreshSpawn
 	refreshAgentMail
+	refreshAgentMailInbox
 	refreshRouting
 	refreshSourceCount
 )
@@ -336,7 +354,15 @@ type Model struct {
 	agentMailArchiveFound bool                // Fallback: archive directory exists
 	agentMailLocks        int                 // Active file reservations
 	agentMailUnread       int                 // Unread message count (requires agent context)
+	agentMailUrgent       int                 // Urgent unread count (subset of unread)
 	agentMailLockInfo     []AgentMailLockInfo // Lock details for display
+	agentMailInbox        map[string][]agentmail.InboxMessage
+	agentMailInboxErrors  map[string]error
+	agentMailAgents       map[string]string // paneID -> agent name
+	fetchingMailInbox     bool
+	lastMailInboxFetch    time.Time
+	mailInboxRefreshInterval time.Duration
+	showInboxDetails      bool
 
 	// Config watcher
 	configSub    chan *config.Config
@@ -413,6 +439,10 @@ type PaneStatus struct {
 	ContextPercent float64 // Usage percentage (0-100+)
 	ContextModel   string  // Model name for context limit lookup
 
+	// Agent Mail inbox tracking
+	MailUnread int
+	MailUrgent int
+
 	TokenVelocity float64 // Estimated tokens/sec
 
 	// Health tracking
@@ -449,6 +479,7 @@ type KeyMap struct {
 	Quit           key.Binding
 	ContextRefresh key.Binding // 'c' to refresh context data
 	MailRefresh    key.Binding // 'm' to refresh Agent Mail data
+	InboxToggle    key.Binding // 'i' to toggle inbox details
 	CassSearch     key.Binding // 'ctrl+s' to open CASS search
 	Help           key.Binding // '?' to toggle help overlay
 	Diagnostics    key.Binding // 'd' to toggle diagnostics
@@ -481,6 +512,7 @@ const (
 	CheckpointRefreshInterval  = 30 * time.Second
 	SpawnActiveRefreshInterval = 500 * time.Millisecond // Poll frequently when spawn is active
 	SpawnIdleRefreshInterval   = 2 * time.Second        // Poll slowly when no spawn is active
+	MailInboxRefreshInterval   = 30 * time.Second
 )
 
 func (m *Model) initRenderer(width int) {
@@ -505,9 +537,10 @@ var dashKeys = KeyMap{
 	Quit:           key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit")),
 	ContextRefresh: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "refresh context")),
 	MailRefresh:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "refresh mail")),
+	InboxToggle:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inbox details")),
 	CassSearch:     key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "cass search")),
 	Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "toggle help")),
-	Diagnostics:    key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle diagnostics")),
+	Diagnostics:    key.NewBinding(key.WithKeys("d", "ctrl+d"), key.WithHelp("d/ctrl+d", "toggle diagnostics")),
 	ScanToggle:     key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "toggle UBS scan")),
 	Checkpoint:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "create checkpoint")),
 	Tab:            key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next panel")),
@@ -549,6 +582,7 @@ func New(session, projectDir string) Model {
 		scanRefreshInterval:        ScanRefreshInterval,
 		checkpointRefreshInterval:  CheckpointRefreshInterval,
 		spawnRefreshInterval:       SpawnIdleRefreshInterval,
+		mailInboxRefreshInterval:   MailInboxRefreshInterval,
 		paneOutputLines:            50,
 		paneOutputCaptureBudget:    20,
 		paneOutputCache:            make(map[string]string),
@@ -556,6 +590,9 @@ func New(session, projectDir string) Model {
 		renderedOutputCache:        make(map[string]string),
 		healthStatus:               "unknown",
 		healthMessage:              "",
+		agentMailInbox:             make(map[string][]agentmail.InboxMessage),
+		agentMailInboxErrors:       make(map[string]error),
+		agentMailAgents:            make(map[string]string),
 		cassSearch: components.NewCassSearch(func(hit cass.SearchHit) tea.Cmd {
 			return func() tea.Msg {
 				return CassSelectMsg{Hit: hit}
@@ -583,6 +620,7 @@ func New(session, projectDir string) Model {
 		fetchingHistory:     true,
 		fetchingFileChanges: true,
 		fetchingCheckpoint:  true,
+		fetchingMailInbox:   true,
 	}
 
 	// Initialize last-fetch timestamps to start cadence after the initial fetches from Init.
@@ -595,6 +633,7 @@ func New(session, projectDir string) Model {
 	m.lastScanFetch = now
 	m.lastCheckpointFetch = now
 	m.lastSpawnFetch = now
+	m.lastMailInboxFetch = now
 
 	applyDashboardEnvOverrides(&m)
 
@@ -645,6 +684,7 @@ func (m Model) Init() tea.Cmd {
 		m.fetchStatuses(),
 		m.fetchHealthCmd(), // Agent health check
 		m.fetchAgentMailStatus(),
+		m.fetchAgentMailInboxes(),
 		m.fetchBeadsCmd(),
 		m.fetchAlertsCmd(),
 		m.fetchMetricsCmd(),
@@ -856,6 +896,26 @@ func (m *Model) fetchScanStatusWithContext(ctx context.Context) tea.Cmd {
 	}
 }
 
+func (m *Model) newAgentMailClient(projectKey string) *agentmail.Client {
+	if projectKey == "" {
+		return nil
+	}
+	var opts []agentmail.Option
+	opts = append(opts, agentmail.WithProjectKey(projectKey))
+	if m.cfg != nil {
+		if !m.cfg.AgentMail.Enabled {
+			return nil
+		}
+		if m.cfg.AgentMail.URL != "" {
+			opts = append(opts, agentmail.WithBaseURL(m.cfg.AgentMail.URL))
+		}
+		if m.cfg.AgentMail.Token != "" {
+			opts = append(opts, agentmail.WithToken(m.cfg.AgentMail.Token))
+		}
+	}
+	return agentmail.NewClient(opts...)
+}
+
 // fetchAgentMailStatus fetches Agent Mail data (locks, connection status)
 func (m *Model) fetchAgentMailStatus() tea.Cmd {
 	gen := m.nextGen(refreshAgentMail)
@@ -865,7 +925,10 @@ func (m *Model) fetchAgentMailStatus() tea.Cmd {
 			return AgentMailUpdateMsg{Available: false, Gen: gen}
 		}
 
-		client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+		client := m.newAgentMailClient(projectKey)
+		if client == nil {
+			return AgentMailUpdateMsg{Available: false, Gen: gen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -922,6 +985,162 @@ func (m *Model) fetchAgentMailStatus() tea.Cmd {
 			Locks:     len(lockInfo),
 			LockInfo:  lockInfo,
 			Gen:       gen,
+		}
+	}
+}
+
+// fetchAgentMailInboxes polls inbox summaries for all registered agents in this session.
+func (m *Model) fetchAgentMailInboxes() tea.Cmd {
+	gen := m.nextGen(refreshAgentMailInbox)
+	projectKey := m.projectDir
+	sessionName := m.session
+	panes := append([]tmux.Pane(nil), m.panes...)
+
+	return func() tea.Msg {
+		if projectKey == "" || sessionName == "" {
+			return AgentMailInboxSummaryMsg{Gen: gen}
+		}
+
+		client := m.newAgentMailClient(projectKey)
+		if client == nil || !client.IsAvailable() {
+			return AgentMailInboxSummaryMsg{Gen: gen}
+		}
+
+		registry, err := agentmail.LoadSessionAgentRegistry(sessionName, projectKey)
+		if err != nil {
+			return AgentMailInboxSummaryMsg{Err: err, Gen: gen}
+		}
+		if registry == nil {
+			return AgentMailInboxSummaryMsg{AgentMap: map[string]string{}, Gen: gen}
+		}
+
+		agentMap := make(map[string]string)
+		for _, pane := range panes {
+			if pane.Type == tmux.AgentUser {
+				continue
+			}
+			if name, ok := registry.GetAgent(pane.Title, pane.ID); ok {
+				agentMap[pane.ID] = name
+			}
+		}
+
+		if len(agentMap) == 0 {
+			return AgentMailInboxSummaryMsg{AgentMap: agentMap, Gen: gen}
+		}
+
+		type job struct {
+			paneID    string
+			agentName string
+		}
+		type result struct {
+			paneID  string
+			inbox   []agentmail.InboxMessage
+			err     error
+		}
+
+		inboxes := make(map[string][]agentmail.InboxMessage, len(agentMap))
+		var firstErr error
+		var mu sync.Mutex
+		jobs := make(chan job)
+		results := make(chan result, len(agentMap))
+		workerCount := 4
+		if len(agentMap) < workerCount {
+			workerCount = len(agentMap)
+		}
+
+		var wg sync.WaitGroup
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range jobs {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					msgs, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+						ProjectKey:    projectKey,
+						AgentName:     j.agentName,
+						UrgentOnly:    false,
+						Limit:         5,
+						IncludeBodies: false,
+					})
+					cancel()
+					results <- result{paneID: j.paneID, inbox: msgs, err: err}
+				}
+			}()
+		}
+
+		go func() {
+			for paneID, agentName := range agentMap {
+				jobs <- job{paneID: paneID, agentName: agentName}
+			}
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+
+		for res := range results {
+			if res.err != nil {
+				if firstErr == nil {
+					firstErr = res.err
+				}
+				continue
+			}
+			mu.Lock()
+			inboxes[res.paneID] = res.inbox
+			mu.Unlock()
+		}
+
+		return AgentMailInboxSummaryMsg{
+			Inboxes:  inboxes,
+			AgentMap: agentMap,
+			Err:      firstErr,
+			Gen:      gen,
+		}
+	}
+}
+
+// fetchAgentMailInboxDetails fetches message bodies for a single pane's agent.
+func (m *Model) fetchAgentMailInboxDetails(pane tmux.Pane) tea.Cmd {
+	gen := m.nextGen(refreshAgentMailInbox)
+	projectKey := m.projectDir
+	sessionName := m.session
+	paneID := pane.ID
+	paneTitle := pane.Title
+
+	return func() tea.Msg {
+		if projectKey == "" || sessionName == "" {
+			return AgentMailInboxDetailMsg{PaneID: paneID, Gen: gen}
+		}
+
+		client := m.newAgentMailClient(projectKey)
+		if client == nil || !client.IsAvailable() {
+			return AgentMailInboxDetailMsg{PaneID: paneID, Gen: gen}
+		}
+
+		registry, err := agentmail.LoadSessionAgentRegistry(sessionName, projectKey)
+		if err != nil || registry == nil {
+			return AgentMailInboxDetailMsg{PaneID: paneID, Err: err, Gen: gen}
+		}
+
+		agentName, ok := registry.GetAgent(paneTitle, paneID)
+		if !ok {
+			return AgentMailInboxDetailMsg{PaneID: paneID, Gen: gen}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		msgs, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+			ProjectKey:    projectKey,
+			AgentName:     agentName,
+			UrgentOnly:    false,
+			Limit:         5,
+			IncludeBodies: true,
+		})
+		cancel()
+
+		return AgentMailInboxDetailMsg{
+			PaneID:   paneID,
+			Messages: msgs,
+			Err:      err,
+			Gen:      gen,
 		}
 	}
 }
@@ -1164,6 +1383,11 @@ func (m *Model) fullRefresh(cancelInFlight bool) []tea.Cmd {
 		m.fetchingSpawn = true
 		m.lastSpawnFetch = now
 		cmds = append(cmds, m.fetchSpawnStateCmd())
+	}
+	if !m.fetchingMailInbox {
+		m.fetchingMailInbox = true
+		m.lastMailInboxFetch = now
+		cmds = append(cmds, m.fetchAgentMailInboxes())
 	}
 
 	// Agent mail status is light enough to refresh on demand.
@@ -3478,16 +3702,18 @@ func dashboardDebugEnabled(m *Model) bool {
 	if m != nil && m.showDiagnostics {
 		return true
 	}
-	value := strings.TrimSpace(os.Getenv("NTM_DASH_DEBUG"))
-	if value == "" {
-		return false
+	// Check NTM_TUI_DEBUG (preferred) or NTM_DASH_DEBUG (legacy alias)
+	for _, envVar := range []string{"NTM_TUI_DEBUG", "NTM_DASH_DEBUG"} {
+		value := strings.TrimSpace(os.Getenv(envVar))
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(value) {
+		case "1", "true", "yes", "on":
+			return true
+		}
 	}
-	switch strings.ToLower(value) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 type sizedPanel interface {
@@ -3635,6 +3861,12 @@ func (m *Model) scheduleRefreshes(now time.Time) []tea.Cmd {
 		if cmd := m.requestScanFetch(false); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	}
+
+	if refreshDue(m.lastMailInboxFetch, m.mailInboxRefreshInterval) && !m.fetchingMailInbox {
+		m.fetchingMailInbox = true
+		m.lastMailInboxFetch = now
+		cmds = append(cmds, m.fetchAgentMailInboxes())
 	}
 
 	if refreshDue(m.lastAlertsFetch, m.alertsRefreshInterval) && !m.fetchingAlerts {

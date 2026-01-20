@@ -1550,6 +1550,31 @@ func FormatSessionSummaryText(summary *SessionSummary) string {
 	return sb.String()
 }
 
+// SessionSummaryOptions configures session summary generation.
+type SessionSummaryOptions struct {
+	Session   string
+	Since     time.Duration
+	RepoPath  string
+	AgentData []AgentActivityData
+}
+
+// SummarizeSession generates a session summary from captured agent output.
+func SummarizeSession(opts SessionSummaryOptions) (*SessionSummary, error) {
+	if opts.Session == "" {
+		return nil, fmt.Errorf("session name required")
+	}
+	if opts.Since == 0 {
+		opts.Since = 30 * time.Minute
+	}
+	if opts.RepoPath == "" {
+		opts.RepoPath, _ = os.Getwd()
+	}
+
+	detector := NewConflictDetector(&ConflictDetectorConfig{RepoPath: opts.RepoPath})
+	generator := NewSessionSummaryGenerator(detector, nil)
+	return generator.GenerateSummary(opts.Session, opts.Since, opts.AgentData), nil
+}
+
 // formatDuration formats a duration in a human-friendly way.
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
@@ -1613,13 +1638,14 @@ func PrintSummary(opts SummaryOptions) error {
 		agentData = append(agentData, data)
 	}
 
-	// Create generator and generate summary
-	wd, _ := os.Getwd()
-	detector := NewConflictDetector(&ConflictDetectorConfig{
-		RepoPath: wd,
+	summary, err := SummarizeSession(SessionSummaryOptions{
+		Session:   session,
+		Since:     since,
+		AgentData: agentData,
 	})
-	generator := NewSessionSummaryGenerator(detector, nil)
-	summary := generator.GenerateSummary(session, since, agentData)
+	if err != nil {
+		return err
+	}
 
 	// Output as JSON
 	resp := NewSessionSummaryResponse(summary)
