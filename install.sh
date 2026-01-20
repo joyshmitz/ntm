@@ -409,7 +409,7 @@ setup_shell_integration() {
         return
     fi
     if [ -f "$rc_file" ] && grep -q "ntm init" "$rc_file"; then
-        print_warning "Legacy shell integration detected in ${rc_file}"
+        print_warn "Legacy shell integration detected in ${rc_file}"
         print_info "Replace \"ntm init\" with \"ntm shell\" to keep aliases working."
         return
     fi
