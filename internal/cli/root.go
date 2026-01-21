@@ -106,6 +106,7 @@ Shell Integration:
 		// Resolve robot output format and verbosity: CLI flag > env var > config > default
 		resolveRobotFormat()
 		resolveRobotVerbosity(cfg)
+		robotDryRunEffective := robotDryRun || robotRestoreDry
 
 		// Handle robot flags for AI agent integration
 		if robotHelp {
@@ -626,7 +627,7 @@ Shell Integration:
 						AgentTypes: agentTypes,
 						Exclude:    excludeList,
 						DelayMs:    robotSendDelay,
-						DryRun:     robotRestoreDry,
+						DryRun:     robotDryRunEffective,
 					},
 					AckTimeoutMs: int(ackTimeout.Milliseconds()),
 					AckPollMs:    robotAckPoll,
@@ -646,7 +647,7 @@ Shell Integration:
 				AgentTypes: agentTypes,
 				Exclude:    excludeList,
 				DelayMs:    robotSendDelay,
-				DryRun:     robotRestoreDry,
+				DryRun:     robotDryRunEffective,
 			}
 			if err := robot.PrintSend(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -753,7 +754,7 @@ Shell Integration:
 				WorkingDir:     robotSpawnDir,
 				WaitReady:      robotSpawnWait,
 				ReadyTimeout:   int(spawnTimeout.Seconds()),
-				DryRun:         robotRestoreDry,
+				DryRun:         robotDryRunEffective,
 				Safety:         robotSpawnSafety,
 				AssignWork:     robotSpawnAssignWork,
 				AssignStrategy: robotSpawnStrategy,
@@ -784,7 +785,7 @@ Shell Integration:
 				Force:     robotInterruptForce,
 				NoWait:    robotInterruptNoWait,
 				TimeoutMs: int(interruptTimeout.Milliseconds()),
-				DryRun:    robotRestoreDry,
+				DryRun:    robotDryRunEffective,
 			}
 			if err := robot.PrintInterrupt(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -803,7 +804,7 @@ Shell Integration:
 				Panes:   paneFilter,
 				Type:    robotSendType,
 				All:     robotSendAll,
-				DryRun:  robotRestoreDry,
+				DryRun:  robotDryRunEffective,
 			}
 			if err := robot.PrintRestartPane(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -861,7 +862,7 @@ Shell Integration:
 		if robotRestore != "" {
 			opts := robot.RestoreOptions{
 				SavedName: robotRestore,
-				DryRun:    robotRestoreDry,
+				DryRun:    robotDryRunEffective,
 			}
 			if err := robot.PrintRestore(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1102,6 +1103,15 @@ Shell Integration:
 			return
 		}
 
+		// Robot-dcg-status handler for DCG status
+		if robotDCGStatus {
+			if err := robot.PrintDCGStatus(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		// Show help with appropriate verbosity when run without subcommand
 		if helpMinimal {
 			PrintMinimalHelp(cmd.OutOrStdout())
@@ -1235,6 +1245,7 @@ var (
 	// Robot-restore flags for session state restoration
 	robotRestore    string // saved state name to restore
 	robotRestoreDry bool   // dry-run mode
+	robotDryRun     bool   // shared dry-run mode for robot actions (--dry-run)
 
 	// Robot-cass flags for CASS integration
 	robotCassStatus   bool   // CASS health check
@@ -1417,6 +1428,9 @@ var (
 	robotAccountStatusProvider string // --provider filter for account-status
 	robotAccountsList        bool   // --robot-accounts-list flag
 	robotAccountsListProvider string // --provider filter for accounts-list
+
+	// Robot-dcg-status flag for DCG status
+	robotDCGStatus bool // --robot-dcg-status flag
 )
 
 func init() {
@@ -1574,6 +1588,7 @@ func init() {
 	// Robot-restore flags for session state restoration
 	rootCmd.Flags().StringVar(&robotRestore, "robot-restore", "", "Restore session from saved state. Required: path to save file. Example: ntm --robot-restore=backup.json")
 	rootCmd.Flags().BoolVar(&robotRestoreDry, "restore-dry-run", false, "Preview mode: show what would happen without executing. Use with --robot-restore")
+	rootCmd.Flags().BoolVar(&robotDryRun, "dry-run", false, "Preview mode: show what would happen without executing. Use with --robot-send, --robot-interrupt, --robot-spawn, --robot-restore, --robot-restart-pane")
 
 	// Robot-cass flags for CASS (Cross-Agent Semantic Search) integration
 	rootCmd.Flags().BoolVar(&robotCassStatus, "robot-cass-status", false, "Get CASS health: index status, message counts, freshness (JSON)")
@@ -1712,6 +1727,9 @@ func init() {
 	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "account-status-provider", "", "Filter to specific provider. Optional with --robot-account-status. Example: --account-status-provider=claude")
 	rootCmd.Flags().BoolVar(&robotAccountsList, "robot-accounts-list", false, "List all CAAM accounts. JSON output. Example: ntm --robot-accounts-list")
 	rootCmd.Flags().StringVar(&robotAccountsListProvider, "accounts-list-provider", "", "Filter to specific provider. Optional with --robot-accounts-list. Example: --accounts-list-provider=claude")
+
+	// Robot-dcg-status flag for DCG
+	rootCmd.Flags().BoolVar(&robotDCGStatus, "robot-dcg-status", false, "Show DCG status and configuration. JSON output. Example: ntm --robot-dcg-status")
 
 	// Sync version info with robot package
 	robot.Version = Version
