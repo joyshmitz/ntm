@@ -1,7 +1,6 @@
 package context
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -505,7 +504,7 @@ func TestNewRecordID(t *testing.T) {
 }
 
 func TestDefaultRotationHistoryPath(t *testing.T) {
-	t.Parallel()
+	// t.Parallel() removed because t.Setenv is incompatible with parallel tests
 
 	// Test with HOME set (XDG_DATA_HOME should be ignored)
 	tmpDir := t.TempDir()
