@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/export"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -472,24 +474,78 @@ func runTimelineCleanup(force bool) error {
 }
 
 func newTimelineExportCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "export <session-id> [output-file]",
+	var (
+		format    string
+		outputFile string
+		scale     int
+		since     string
+		until     string
+		width     int
+		lightTheme bool
+		noLegend  bool
+		noMeta    bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "export <session-id>",
 		Short: "Export timeline events to a file",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `Export timeline visualization to various formats.
+
+Supported formats:
+  jsonl - JSON Lines format (one event per line)
+  svg   - Scalable Vector Graphics (for docs/reports)
+  png   - PNG raster image (supports --scale for resolution)
+
+Examples:
+  ntm timeline export myproject                        # Export to JSONL
+  ntm timeline export myproject --format=svg           # Export to SVG
+  ntm timeline export myproject --format=png --scale=2 # Export to 2x PNG
+  ntm timeline export myproject -o timeline.svg        # Specify output file
+  ntm timeline export myproject --since=1h             # Last hour only
+  ntm timeline export myproject --light                # Light theme for print`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionID := args[0]
-			outputFile := ""
-			if len(args) > 1 {
-				outputFile = args[1]
-			} else {
-				outputFile = sessionID + "_timeline.jsonl"
-			}
-			return runTimelineExport(sessionID, outputFile)
+			return runTimelineExport(sessionID, exportOptions{
+				format:     format,
+				outputFile: outputFile,
+				scale:      scale,
+				since:      since,
+				until:      until,
+				width:      width,
+				lightTheme: lightTheme,
+				noLegend:   noLegend,
+				noMeta:     noMeta,
+			})
 		},
 	}
+
+	cmd.Flags().StringVarP(&format, "format", "f", "jsonl", "Output format: jsonl, svg, png")
+	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "Output file path (default: <session>_timeline.<format>)")
+	cmd.Flags().IntVarP(&scale, "scale", "s", 1, "Scale multiplier for PNG output (1, 2, or 3)")
+	cmd.Flags().StringVar(&since, "since", "", "Filter events since duration (e.g., 1h, 30m)")
+	cmd.Flags().StringVar(&until, "until", "", "Filter events until time/duration")
+	cmd.Flags().IntVarP(&width, "width", "w", 1200, "Image width in pixels")
+	cmd.Flags().BoolVar(&lightTheme, "light", false, "Use light theme (better for print)")
+	cmd.Flags().BoolVar(&noLegend, "no-legend", false, "Omit color legend from export")
+	cmd.Flags().BoolVar(&noMeta, "no-metadata", false, "Omit session metadata from export")
+
+	return cmd
 }
 
-func runTimelineExport(sessionID, outputFile string) error {
+type exportOptions struct {
+	format     string
+	outputFile string
+	scale      int
+	since      string
+	until      string
+	width      int
+	lightTheme bool
+	noLegend   bool
+	noMeta     bool
+}
+
+func runTimelineExport(sessionID string, opts exportOptions) error {
 	t := theme.Current()
 
 	persister, err := state.GetDefaultTimelinePersister()
@@ -502,26 +558,127 @@ func runTimelineExport(sessionID, outputFile string) error {
 		return fmt.Errorf("failed to load timeline: %w", err)
 	}
 
-	if events == nil {
-		return fmt.Errorf("timeline not found: %s", sessionID)
+	if events == nil || len(events) == 0 {
+		return fmt.Errorf("timeline not found or empty: %s", sessionID)
 	}
 
-	// Use the persister to save to a custom location
-	exportConfig := &state.TimelinePersistConfig{
-		BaseDir: ".",
+	// Determine output format and file
+	format := strings.ToLower(opts.format)
+	outputFile := opts.outputFile
+	if outputFile == "" {
+		ext := format
+		if ext == "jsonl" {
+			ext = "jsonl"
+		}
+		outputFile = sessionID + "_timeline." + ext
 	}
-	exporter, err := state.NewTimelinePersister(exportConfig)
+
+	// Handle JSONL export (original behavior)
+	if format == "jsonl" {
+		exportConfig := &state.TimelinePersistConfig{
+			BaseDir: ".",
+		}
+		jsonExporter, err := state.NewTimelinePersister(exportConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create exporter: %w", err)
+		}
+
+		baseName := strings.TrimSuffix(outputFile, ".jsonl")
+		if err := jsonExporter.SaveTimeline(baseName, events); err != nil {
+			return fmt.Errorf("failed to export: %w", err)
+		}
+
+		fmt.Printf("%s✓%s Exported %d events to %s\n", colorize(t.Success), colorize(t.Text), len(events), baseName+".jsonl")
+		return nil
+	}
+
+	// Handle SVG/PNG export
+	if format != "svg" && format != "png" {
+		return fmt.Errorf("unsupported format: %s (use jsonl, svg, or png)", format)
+	}
+
+	// Parse time filters
+	var sinceTime, untilTime time.Time
+	if opts.since != "" {
+		duration, err := time.ParseDuration(opts.since)
+		if err != nil {
+			return fmt.Errorf("invalid --since value: %w", err)
+		}
+		sinceTime = time.Now().Add(-duration)
+	}
+	if opts.until != "" {
+		duration, err := time.ParseDuration(opts.until)
+		if err != nil {
+			// Try parsing as absolute time
+			untilTime, err = time.Parse(time.RFC3339, opts.until)
+			if err != nil {
+				return fmt.Errorf("invalid --until value: %w", err)
+			}
+		} else {
+			untilTime = time.Now().Add(-duration)
+		}
+	}
+
+	// Filter events by time range if specified
+	if !sinceTime.IsZero() || !untilTime.IsZero() {
+		filteredEvents := make([]state.AgentEvent, 0, len(events))
+		for _, ev := range events {
+			if !sinceTime.IsZero() && ev.Timestamp.Before(sinceTime) {
+				continue
+			}
+			if !untilTime.IsZero() && ev.Timestamp.After(untilTime) {
+				continue
+			}
+			filteredEvents = append(filteredEvents, ev)
+		}
+		events = filteredEvents
+	}
+
+	if len(events) == 0 {
+		return fmt.Errorf("no events in the specified time range")
+	}
+
+	// Build export options
+	exportOpts := export.DefaultExportOptions()
+	exportOpts.SessionName = sessionID
+	exportOpts.Width = opts.width
+	exportOpts.Scale = opts.scale
+	exportOpts.Since = sinceTime
+	exportOpts.Until = untilTime
+	exportOpts.IncludeLegend = !opts.noLegend
+	exportOpts.IncludeMetadata = !opts.noMeta
+
+	if opts.lightTheme {
+		exportOpts.Theme = export.LightTheme()
+	}
+
+	if format == "svg" {
+		exportOpts.Format = export.FormatSVG
+	} else {
+		exportOpts.Format = export.FormatPNG
+	}
+
+	// Create exporter and export
+	exporter := export.NewTimelineExporter(exportOpts)
+
+	var data []byte
+	if format == "svg" {
+		data, err = exporter.ExportSVG(events)
+	} else {
+		data, err = exporter.ExportPNG(events)
+	}
 	if err != nil {
-		return fmt.Errorf("failed to create exporter: %w", err)
-	}
-
-	// Extract base name without extension for SaveTimeline
-	baseName := strings.TrimSuffix(outputFile, ".jsonl")
-	if err := exporter.SaveTimeline(baseName, events); err != nil {
 		return fmt.Errorf("failed to export: %w", err)
 	}
 
-	fmt.Printf("%s✓%s Exported %d events to %s\n", colorize(t.Success), colorize(t.Text), len(events), baseName+".jsonl")
+	// Write to file
+	if err := os.WriteFile(outputFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fmt.Printf("%s✓%s Exported %d events to %s (%s format)\n",
+		colorize(t.Success), colorize(t.Text),
+		len(events), outputFile, strings.ToUpper(format))
 	return nil
 }
 
