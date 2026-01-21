@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -133,6 +135,26 @@ func (a *DCGAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 
 // DCG-specific methods
 
+// DCGAvailability represents the availability and compatibility of dcg on PATH.
+// Available indicates the binary is found; Compatible indicates version meets minimum requirements.
+type DCGAvailability struct {
+	Available   bool      `json:"available"`
+	Compatible  bool      `json:"compatible"`
+	Version     Version   `json:"version,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	LastChecked time.Time `json:"last_checked"`
+	Error       string    `json:"error,omitempty"`
+}
+
+var (
+	dcgAvailabilityCache  DCGAvailability
+	dcgAvailabilityExpiry time.Time
+	dcgAvailabilityMutex  sync.RWMutex
+	dcgAvailabilityTTL    = 5 * time.Minute
+	dcgMinVersion         = Version{Major: 0, Minor: 1, Patch: 0}
+	dcgLogger             = slog.Default().With("component", "tools.dcg")
+)
+
 // BlockedCommand represents a command that was blocked by DCG
 type BlockedCommand struct {
 	Command   string `json:"command"`
@@ -177,6 +199,79 @@ func (a *DCGAdapter) GetStatus(ctx context.Context) (*DCGStatus, error) {
 	}
 
 	return &status, nil
+}
+
+// GetAvailability returns whether dcg is available and compatible, with caching.
+// It logs a warning if dcg is missing or incompatible, but does not return an error.
+func (a *DCGAdapter) GetAvailability(ctx context.Context) (*DCGAvailability, error) {
+	dcgAvailabilityMutex.RLock()
+	if time.Now().Before(dcgAvailabilityExpiry) {
+		availability := dcgAvailabilityCache
+		dcgAvailabilityMutex.RUnlock()
+		return &availability, nil
+	}
+	dcgAvailabilityMutex.RUnlock()
+
+	availability := a.fetchAvailability(ctx)
+
+	dcgAvailabilityMutex.Lock()
+	dcgAvailabilityCache = *availability
+	dcgAvailabilityExpiry = time.Now().Add(dcgAvailabilityTTL)
+	dcgAvailabilityMutex.Unlock()
+
+	return availability, nil
+}
+
+// InvalidateAvailabilityCache forces the next GetAvailability call to re-check.
+func (a *DCGAdapter) InvalidateAvailabilityCache() {
+	dcgAvailabilityMutex.Lock()
+	dcgAvailabilityExpiry = time.Time{}
+	dcgAvailabilityMutex.Unlock()
+}
+
+// IsAvailable returns true if dcg is installed and compatible.
+func (a *DCGAdapter) IsAvailable(ctx context.Context) bool {
+	availability, err := a.GetAvailability(ctx)
+	if err != nil || availability == nil {
+		return false
+	}
+	return availability.Available && availability.Compatible
+}
+
+func (a *DCGAdapter) fetchAvailability(ctx context.Context) *DCGAvailability {
+	availability := &DCGAvailability{
+		LastChecked: time.Now(),
+	}
+
+	path, err := exec.LookPath(a.BinaryName())
+	if err != nil {
+		availability.Error = err.Error()
+		dcgLogger.Warn("dcg binary not found", "error", err)
+		return availability
+	}
+
+	availability.Available = true
+	availability.Path = path
+
+	version, err := a.Version(ctx)
+	if err != nil {
+		availability.Error = err.Error()
+		dcgLogger.Warn("dcg version check failed", "path", path, "error", err)
+		return availability
+	}
+
+	availability.Version = version
+	if !dcgCompatible(version) {
+		dcgLogger.Warn("dcg version incompatible", "path", path, "version", version.String(), "min_version", dcgMinVersion.String())
+		return availability
+	}
+
+	availability.Compatible = true
+	return availability
+}
+
+func dcgCompatible(version Version) bool {
+	return version.AtLeast(dcgMinVersion)
 }
 
 // CheckCommand checks if a command would be blocked by DCG

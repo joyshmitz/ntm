@@ -368,6 +368,87 @@ func TestDCGAdapterVersionParsing(t *testing.T) {
 	}
 }
 
+func TestDCGAvailabilityWithFakeTool(t *testing.T) {
+	cleanup := withFakeTools(t)
+	defer cleanup()
+
+	adapter := NewDCGAdapter()
+	adapter.InvalidateAvailabilityCache()
+
+	ctx := context.Background()
+	availability, err := adapter.GetAvailability(ctx)
+	if err != nil {
+		t.Fatalf("GetAvailability() error = %v", err)
+	}
+	if !availability.Available {
+		t.Fatalf("expected dcg to be available on PATH")
+	}
+	if !availability.Compatible {
+		t.Fatalf("expected dcg to be compatible, got version %s", availability.Version.String())
+	}
+	if availability.Path == "" {
+		t.Fatalf("expected dcg path to be set")
+	}
+	if !adapter.IsAvailable(ctx) {
+		t.Fatalf("expected IsAvailable() to return true")
+	}
+}
+
+func TestDCGAvailabilityMissingBinary(t *testing.T) {
+	adapter := NewDCGAdapter()
+
+	emptyPath := t.TempDir()
+	t.Setenv("PATH", emptyPath)
+	adapter.InvalidateAvailabilityCache()
+
+	ctx := context.Background()
+	availability, err := adapter.GetAvailability(ctx)
+	if err != nil {
+		t.Fatalf("GetAvailability() error = %v", err)
+	}
+	if availability.Available {
+		t.Fatalf("expected dcg to be unavailable")
+	}
+	if availability.Compatible {
+		t.Fatalf("expected dcg to be incompatible when missing")
+	}
+	if availability.Path != "" {
+		t.Fatalf("expected dcg path to be empty when missing")
+	}
+	if adapter.IsAvailable(ctx) {
+		t.Fatalf("expected IsAvailable() to return false when missing")
+	}
+}
+
+func TestDCGAvailabilityIncompatibleVersion(t *testing.T) {
+	dir := t.TempDir()
+	fakeDCG := filepath.Join(dir, "dcg")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"dcg 0.0.1\"; exit 0; fi\nexit 0\n"
+	if err := os.WriteFile(fakeDCG, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write fake dcg: %v", err)
+	}
+
+	t.Setenv("PATH", dir)
+
+	adapter := NewDCGAdapter()
+	adapter.InvalidateAvailabilityCache()
+
+	ctx := context.Background()
+	availability, err := adapter.GetAvailability(ctx)
+	if err != nil {
+		t.Fatalf("GetAvailability() error = %v", err)
+	}
+	if !availability.Available {
+		t.Fatalf("expected dcg to be found on PATH")
+	}
+	if availability.Compatible {
+		t.Fatalf("expected dcg to be incompatible with version %s", availability.Version.String())
+	}
+	if adapter.IsAvailable(ctx) {
+		t.Fatalf("expected IsAvailable() to return false for incompatible version")
+	}
+}
+
 // TestUBSAdapterVersionParsing tests UBS version string parsing
 // UBS uses the generic parseVersion function which extracts X.Y.Z via regex
 func TestUBSAdapterVersionParsing(t *testing.T) {
