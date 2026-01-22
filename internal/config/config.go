@@ -685,6 +685,7 @@ type IntegrationsConfig struct {
 	RCH           RCHConfig           `toml:"rch"`            // RCH (Remote Compilation Helper) integration
 	Caut          CautConfig          `toml:"caut"`           // caut (Cloud API Usage Tracker) integration
 	ProcessTriage ProcessTriageConfig `toml:"process_triage"` // pt (process_triage) Bayesian health classification
+	Rano          RanoConfig          `toml:"rano"`           // rano network observer for per-agent API tracking
 }
 
 // DCGConfig holds configuration for the DCG (destructive_commit_guard) integration.
@@ -737,6 +738,7 @@ func DefaultIntegrationsConfig() IntegrationsConfig {
 		RCH:           DefaultRCHConfig(),
 		Caut:          DefaultCautConfig(),
 		ProcessTriage: DefaultProcessTriageConfig(),
+		Rano:          DefaultRanoConfig(),
 	}
 }
 
@@ -882,6 +884,62 @@ func ValidateProcessTriageConfig(cfg *ProcessTriageConfig) error {
 	validActions := map[string]bool{"alert": true, "kill": true, "ignore": true}
 	if !validActions[cfg.OnStuck] {
 		return fmt.Errorf("on_stuck must be 'alert', 'kill', or 'ignore', got %q", cfg.OnStuck)
+	}
+
+	return nil
+}
+
+// RanoConfig holds configuration for the rano network observer integration.
+// rano monitors network activity per process, enabling per-agent API tracking.
+type RanoConfig struct {
+	Enabled        bool     `toml:"enabled"`          // Enable rano network monitoring integration
+	BinaryPath     string   `toml:"binary_path"`      // Path to rano binary (optional, defaults to PATH lookup)
+	PollIntervalMs int      `toml:"poll_interval_ms"` // Polling interval in milliseconds
+	Providers      []string `toml:"providers"`        // Track these providers (empty = all known: anthropic, openai, google)
+	PersistHistory bool     `toml:"persist_history"`  // Persist historical network data
+	HistoryDays    int      `toml:"history_days"`     // Days to retain historical data
+}
+
+// DefaultRanoConfig returns sensible defaults for rano integration.
+func DefaultRanoConfig() RanoConfig {
+	return RanoConfig{
+		Enabled:        true,                                    // Enabled by default (when rano is available)
+		BinaryPath:     "",                                      // Default to PATH lookup
+		PollIntervalMs: 1000,                                    // Poll every second
+		Providers:      []string{"anthropic", "openai", "google"}, // Track major AI providers
+		PersistHistory: true,                                    // Keep historical data
+		HistoryDays:    7,                                       // Retain for a week
+	}
+}
+
+// ValidateRanoConfig validates the rano configuration.
+func ValidateRanoConfig(cfg *RanoConfig) error {
+	if cfg == nil {
+		return nil
+	}
+
+	// Skip validation for unconfigured/zero-valued configs (use defaults)
+	if !cfg.Enabled && cfg.PollIntervalMs == 0 && len(cfg.Providers) == 0 {
+		return nil
+	}
+
+	if cfg.BinaryPath != "" {
+		path := ExpandHome(cfg.BinaryPath)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("binary_path: %w", err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("binary_path: %q is a directory", path)
+		}
+	}
+
+	if cfg.PollIntervalMs < 100 {
+		return fmt.Errorf("poll_interval_ms must be at least 100ms, got %d", cfg.PollIntervalMs)
+	}
+
+	if cfg.HistoryDays < 0 {
+		return fmt.Errorf("history_days must be non-negative, got %d", cfg.HistoryDays)
 	}
 
 	return nil
