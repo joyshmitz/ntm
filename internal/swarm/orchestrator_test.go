@@ -179,3 +179,122 @@ func TestOrchestrationResultWithErrors(t *testing.T) {
 		t.Errorf("expected 2 failed panes, got %d", result.FailedPanes)
 	}
 }
+
+func TestPaneGeometry(t *testing.T) {
+	geom := PaneGeometry{
+		Width:  120,
+		Height: 40,
+	}
+
+	if geom.Width != 120 {
+		t.Errorf("expected width 120, got %d", geom.Width)
+	}
+
+	if geom.Height != 40 {
+		t.Errorf("expected height 40, got %d", geom.Height)
+	}
+}
+
+func TestGeometryResult_Uniform(t *testing.T) {
+	result := GeometryResult{
+		SessionName: "test_session",
+		PaneCount:   4,
+		Geometries: []PaneGeometry{
+			{Width: 80, Height: 24},
+			{Width: 80, Height: 24},
+			{Width: 80, Height: 24},
+			{Width: 80, Height: 24},
+		},
+		IsUniform:      true,
+		MaxWidthDelta:  0,
+		MaxHeightDelta: 0,
+	}
+
+	if result.SessionName != "test_session" {
+		t.Errorf("expected session name 'test_session', got %q", result.SessionName)
+	}
+
+	if result.PaneCount != 4 {
+		t.Errorf("expected 4 panes, got %d", result.PaneCount)
+	}
+
+	if !result.IsUniform {
+		t.Error("expected uniform geometry")
+	}
+
+	if result.MaxWidthDelta != 0 {
+		t.Errorf("expected 0 width delta, got %d", result.MaxWidthDelta)
+	}
+
+	if result.MaxHeightDelta != 0 {
+		t.Errorf("expected 0 height delta, got %d", result.MaxHeightDelta)
+	}
+}
+
+func TestGeometryResult_NonUniform(t *testing.T) {
+	result := GeometryResult{
+		SessionName: "test_session",
+		PaneCount:   3,
+		Geometries: []PaneGeometry{
+			{Width: 100, Height: 30},
+			{Width: 80, Height: 24},
+			{Width: 90, Height: 27},
+		},
+		IsUniform:      false,
+		MaxWidthDelta:  20,
+		MaxHeightDelta: 6,
+	}
+
+	if result.IsUniform {
+		t.Error("expected non-uniform geometry")
+	}
+
+	if result.MaxWidthDelta != 20 {
+		t.Errorf("expected 20 width delta, got %d", result.MaxWidthDelta)
+	}
+
+	if result.MaxHeightDelta != 6 {
+		t.Errorf("expected 6 height delta, got %d", result.MaxHeightDelta)
+	}
+}
+
+func TestGeometryResult_EmptySession(t *testing.T) {
+	result := GeometryResult{
+		SessionName: "empty_session",
+		PaneCount:   0,
+		Geometries:  []PaneGeometry{},
+		IsUniform:   true,
+	}
+
+	if !result.IsUniform {
+		t.Error("empty session should be considered uniform")
+	}
+
+	if result.PaneCount != 0 {
+		t.Errorf("expected 0 panes, got %d", result.PaneCount)
+	}
+}
+
+func TestGeometryResult_WithTolerance(t *testing.T) {
+	// Simulating geometry check with tolerance of 2
+	// Panes with 1 cell difference should be considered uniform
+	geometries := []PaneGeometry{
+		{Width: 80, Height: 24},
+		{Width: 81, Height: 24}, // 1 cell wider
+		{Width: 80, Height: 25}, // 1 cell taller
+	}
+
+	maxWidthDelta := 1
+	maxHeightDelta := 1
+	tolerance := 2
+
+	isUniform := maxWidthDelta <= tolerance && maxHeightDelta <= tolerance
+
+	if !isUniform {
+		t.Error("expected uniform with tolerance=2")
+	}
+
+	if len(geometries) != 3 {
+		t.Errorf("expected 3 geometries, got %d", len(geometries))
+	}
+}
