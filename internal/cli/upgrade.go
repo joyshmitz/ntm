@@ -443,8 +443,9 @@ func newUpgradeCmd() *cobra.Command {
 	var verbose bool
 
 	cmd := &cobra.Command{
-		Use:   "upgrade",
-		Short: "Upgrade NTM to the latest version",
+		Use:     "upgrade",
+		Aliases: []string{"update"},
+		Short:   "Upgrade NTM to the latest version",
 		Long: `Check for and install the latest version of NTM from GitHub releases.
 
 Examples:
