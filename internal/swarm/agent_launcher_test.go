@@ -1,28 +1,127 @@
 package swarm
 
 import (
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
+// MockTmuxClient is a mock implementation for testing AgentLauncher.
+// It records all operations for verification without executing real tmux commands.
+type MockTmuxClient struct {
+	t *testing.T
+	mu sync.Mutex
+
+	// Recorded operations
+	SendKeysCalls    []SendKeysCall
+	GetPanesCalls    []string // session names
+	CaptureSequence  []string // sequence of captured pane outputs for WaitForReady tests
+
+	// Return values
+	Panes    []tmux.Pane
+	PaneErr  error
+	SendErr  error
+
+	// State tracking
+	captureIndex int
+	lastCommand  string
+}
+
+// SendKeysCall records a call to SendKeys
+type SendKeysCall struct {
+	Target string
+	Keys   string
+	Enter  bool
+}
+
+// SendKeys records the call and optionally returns an error
+func (m *MockTmuxClient) SendKeys(target, keys string, enter bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	call := SendKeysCall{Target: target, Keys: keys, Enter: enter}
+	m.SendKeysCalls = append(m.SendKeysCalls, call)
+	m.lastCommand = keys
+
+	if m.t != nil {
+		m.t.Logf("[TEST] MockTmuxClient.SendKeys: target=%s keys=%q enter=%v", target, keys, enter)
+	}
+
+	return m.SendErr
+}
+
+// GetPanes returns mock panes
+func (m *MockTmuxClient) GetPanes(session string) ([]tmux.Pane, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.GetPanesCalls = append(m.GetPanesCalls, session)
+
+	if m.t != nil {
+		m.t.Logf("[TEST] MockTmuxClient.GetPanes: session=%s pane_count=%d", session, len(m.Panes))
+	}
+
+	return m.Panes, m.PaneErr
+}
+
+// CapturePaneOutput returns the next item from CaptureSequence
+func (m *MockTmuxClient) CapturePaneOutput(target string, lines int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.captureIndex < len(m.CaptureSequence) {
+		output := m.CaptureSequence[m.captureIndex]
+		m.captureIndex++
+		if m.t != nil {
+			m.t.Logf("[TEST] MockTmuxClient.CapturePaneOutput: target=%s output=%q", target, output)
+		}
+		return output, nil
+	}
+	return "", nil
+}
+
+// LastCommand returns the last command sent via SendKeys
+func (m *MockTmuxClient) LastCommand() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastCommand
+}
+
+// Reset clears all recorded calls
+func (m *MockTmuxClient) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SendKeysCalls = nil
+	m.GetPanesCalls = nil
+	m.captureIndex = 0
+	m.lastCommand = ""
+}
+
 func TestNewAgentLauncher(t *testing.T) {
+	t.Log("[TEST] TestNewAgentLauncher: creating launcher with default settings")
 	launcher := NewAgentLauncher()
 
 	if launcher == nil {
-		t.Fatal("NewAgentLauncher returned nil")
+		t.Fatal("[TEST] FAIL: NewAgentLauncher returned nil")
 	}
+	t.Log("[TEST] PASS: launcher is not nil")
 
 	if launcher.TmuxClient != nil {
-		t.Error("expected TmuxClient to be nil for default client")
+		t.Error("[TEST] FAIL: expected TmuxClient to be nil for default client")
 	}
+	t.Log("[TEST] PASS: TmuxClient is nil (uses default)")
 
 	if launcher.LaunchDelay != 200*time.Millisecond {
-		t.Errorf("expected LaunchDelay of 200ms, got %v", launcher.LaunchDelay)
+		t.Errorf("[TEST] FAIL: expected LaunchDelay of 200ms, got %v", launcher.LaunchDelay)
 	}
+	t.Logf("[TEST] PASS: LaunchDelay = %v", launcher.LaunchDelay)
 
 	if launcher.PostLaunchDelay != 50*time.Millisecond {
-		t.Errorf("expected PostLaunchDelay of 50ms, got %v", launcher.PostLaunchDelay)
+		t.Errorf("[TEST] FAIL: expected PostLaunchDelay of 50ms, got %v", launcher.PostLaunchDelay)
 	}
+	t.Logf("[TEST] PASS: PostLaunchDelay = %v", launcher.PostLaunchDelay)
 }
 
 func TestFormatPaneTarget(t *testing.T) {
