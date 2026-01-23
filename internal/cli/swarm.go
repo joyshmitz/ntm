@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -14,11 +16,13 @@ import (
 
 func newSwarmCmd() *cobra.Command {
 	var (
-		scanDir    string
-		projects   []string
-		dryRun     bool
-		remote     string
-		jsonOutput bool
+		scanDir         string
+		projects        []string
+		dryRun          bool
+		remote          string
+		jsonOutput      bool
+		sessionsPerType int
+		outputPath      string
 	)
 
 	cmd := &cobra.Command{
@@ -39,11 +43,13 @@ Examples:
   ntm swarm --remote=user@host        # Execute on remote host via SSH`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSwarm(swarmOptions{
-				ScanDir:    scanDir,
-				Projects:   projects,
-				DryRun:     dryRun,
-				Remote:     remote,
-				JSONOutput: jsonOutput,
+				ScanDir:         scanDir,
+				Projects:        projects,
+				DryRun:          dryRun,
+				Remote:          remote,
+				JSONOutput:      jsonOutput,
+				SessionsPerType: sessionsPerType,
+				OutputPath:      outputPath,
 			})
 		},
 	}
@@ -53,12 +59,18 @@ Examples:
 	if cfg != nil && cfg.Swarm.DefaultScanDir != "" {
 		defaultScanDir = cfg.Swarm.DefaultScanDir
 	}
+	defaultSessionsPerType := 3
+	if cfg != nil && cfg.Swarm.SessionsPerType > 0 {
+		defaultSessionsPerType = cfg.Swarm.SessionsPerType
+	}
 
 	cmd.Flags().StringVar(&scanDir, "scan-dir", defaultScanDir, "Directory to scan for projects")
 	cmd.Flags().StringSliceVar(&projects, "projects", nil, "Explicit list of project paths (comma-separated)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview plan without creating sessions")
 	cmd.Flags().StringVar(&remote, "remote", "", "Remote host for SSH execution (user@host)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output plan as JSON")
+	cmd.Flags().IntVar(&sessionsPerType, "sessions-per-type", defaultSessionsPerType, "Number of tmux sessions per agent type (default: 3)")
+	cmd.Flags().StringVar(&outputPath, "output", "", "Write swarm plan to JSON file (optional)")
 
 	// Add subcommands
 	cmd.AddCommand(newSwarmPlanCmd())
@@ -69,11 +81,13 @@ Examples:
 }
 
 type swarmOptions struct {
-	ScanDir    string
-	Projects   []string
-	DryRun     bool
-	Remote     string
-	JSONOutput bool
+	ScanDir         string
+	Projects        []string
+	DryRun          bool
+	Remote          string
+	JSONOutput      bool
+	SessionsPerType int
+	OutputPath      string
 }
 
 // SwarmPlanOutput is the JSON output format for swarm plan
@@ -116,11 +130,22 @@ type PaneOutput struct {
 }
 
 func runSwarm(opts swarmOptions) error {
+	logger := slog.Default()
+
 	// Get swarm config
 	swarmCfg := cfg.Swarm
 	if !swarmCfg.Enabled && !opts.DryRun {
 		return fmt.Errorf("swarm orchestration is disabled in config; set swarm.enabled=true or use --dry-run")
 	}
+
+	if opts.SessionsPerType < 1 {
+		return fmt.Errorf("--sessions-per-type must be at least 1, got %d", opts.SessionsPerType)
+	}
+	if opts.SessionsPerType > 10 {
+		logger.Warn("high sessions-per-type may impact performance", "value", opts.SessionsPerType)
+	}
+	logger.Info("session configuration", "sessions_per_type", opts.SessionsPerType)
+	swarmCfg.SessionsPerType = opts.SessionsPerType
 
 	// Discover projects
 	projects, err := discoverProjects(opts.ScanDir, opts.Projects)
@@ -142,6 +167,17 @@ func runSwarm(opts swarmOptions) error {
 	// Calculate allocations
 	calc := swarm.NewAllocationCalculator(&swarmCfg)
 	plan := calc.GenerateSwarmPlan(opts.ScanDir, projects)
+	logger.Info("calculated panes per session",
+		"sessions_per_type", plan.SessionsPerType,
+		"panes_per_session", plan.PanesPerSession,
+	)
+
+	if opts.OutputPath != "" {
+		if err := writePlanToFile(plan, opts.OutputPath); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		logger.Info("swarm plan written", "path", opts.OutputPath)
+	}
 
 	// Build output
 	out := buildSwarmPlanOutput(plan, opts.DryRun)
@@ -283,6 +319,30 @@ func printSwarmJSON(v interface{}) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+func writePlanToFile(plan *swarm.SwarmPlan, path string) error {
+	if plan == nil {
+		return fmt.Errorf("plan cannot be nil")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal plan: %w", err)
+	}
+
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Subcommand: swarm plan

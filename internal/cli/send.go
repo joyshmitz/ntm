@@ -1514,10 +1514,6 @@ func sendPromptWithDoubleEnter(paneID, prompt string) error {
 	if err := tmux.SendKeys(paneID, "", true); err != nil {
 		return err
 	}
-	// Log confirmation for debugging (bd-1h7g2)
-	if !IsJSONOutput() {
-		log.Printf("  → Sent prompt + Enter (x2) to %s", paneID)
-	}
 	return nil
 }
 

@@ -1940,6 +1940,260 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotQuotaCheck, "robot-quota-check", false, "Check quota for specific provider. JSON output. Example: ntm --robot-quota-check --quota-check-provider=claude")
 	rootCmd.Flags().StringVar(&robotQuotaCheckProvider, "quota-check-provider", "", "Provider for quota check. Required with --robot-quota-check. Example: --quota-check-provider=claude")
 
+	// ==========================================================================
+	// CANONICAL FLAG ALIASES - Robot Mode API Harmonization
+	// ==========================================================================
+	// These are the canonical (unprefixed) forms of modifier flags.
+	// The prefixed versions above are kept for backward compatibility.
+	// See docs/robot-api-design.md for design principles.
+	// ==========================================================================
+
+	// Global shared modifiers - these work across multiple commands
+	// Note: Some canonical flags (--since, --type, --strategy, --exclude) are already
+	// defined above and bound to primary use cases. Those flags serve double-duty.
+	// See docs/robot-api-design.md for design principles.
+	rootCmd.Flags().IntVar(&cassLimit, "limit", 10, "Max results to return (default varies by command)")
+	// Note: --since already defined at line 1631 for robotSince (used by --robot-snapshot)
+	rootCmd.Flags().StringVar(&cassAgent, "agent", "", "Filter by agent type: claude, codex, gemini, cursor, etc.")
+	rootCmd.Flags().StringVar(&cassWorkspace, "workspace", "", "Filter by workspace/project path")
+
+	// --category and --tag for JFP
+	rootCmd.Flags().StringVar(&jfpCategory, "category", "", "Filter by category")
+	rootCmd.Flags().StringVar(&jfpTag, "tag", "", "Filter by tag")
+
+	// --days and --group-by for tokens
+	rootCmd.Flags().IntVar(&robotTokensDays, "days", 30, "Number of days to analyze")
+	rootCmd.Flags().StringVar(&robotTokensGroupBy, "group-by", "agent", "Grouping: agent, model, day, week, month")
+
+	// --pane and --last, --stats for history
+	// Note: --type already defined at line 1689 for robotSendType (used by --robot-send)
+	rootCmd.Flags().StringVar(&robotHistoryPane, "pane", "", "Filter by pane ID")
+	rootCmd.Flags().IntVar(&robotHistoryLast, "last", 0, "Show last N entries")
+	rootCmd.Flags().BoolVar(&robotHistoryStats, "stats", false, "Show statistics instead of entries")
+
+	// --timeout, --poll, --any for wait/ack
+	rootCmd.Flags().StringVar(&robotWaitTimeout, "timeout", "5m", "Maximum wait/operation timeout")
+	rootCmd.Flags().StringVar(&robotWaitPoll, "poll", "2s", "Polling interval")
+	rootCmd.Flags().BoolVar(&robotWaitAny, "any", false, "Match ANY instead of ALL")
+
+	// Note: --strategy already defined at line 1696 for robotAssignStrategy
+	// Note: --exclude already defined at line 1690 for robotSendExclude
+
+	// --window for files
+	rootCmd.Flags().StringVar(&robotFilesWindow, "window", "15m", "Time window: 5m, 15m, 1h, all")
+
+	// --index, --code for inspect
+	rootCmd.Flags().IntVar(&robotInspectIndex, "index", 0, "Pane index to inspect")
+	rootCmd.Flags().BoolVar(&robotInspectCode, "code", false, "Parse code blocks from output")
+
+	// --period for metrics
+	rootCmd.Flags().StringVar(&robotMetricsPeriod, "period", "24h", "Time period: 1h, 24h, 7d, all")
+
+	// --severity, --status, --priority, --assignee for alerts/beads
+	rootCmd.Flags().StringVar(&robotAlertsSeverity, "severity", "", "Filter by severity: info, warning, error, critical")
+	rootCmd.Flags().StringVar(&robotBeadsStatus, "status", "", "Filter by status: open, in_progress, closed, blocked")
+	rootCmd.Flags().StringVar(&robotBeadsPriority, "priority", "", "Filter by priority: 0-4 or P0-P4")
+	rootCmd.Flags().StringVar(&robotBeadsAssignee, "assignee", "", "Filter by assignee")
+
+	// --threshold for relations
+	rootCmd.Flags().Float64Var(&robotRelationsThreshold, "threshold", 0.5, "Correlation threshold (0.0-1.0)")
+
+	// --id for replay
+	rootCmd.Flags().StringVar(&robotReplayID, "id", "", "Entry ID for replay")
+
+	// --provider for CAAM/quota
+	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude, openai, google")
+
+	// --verbose global flag (works with multiple commands)
+	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "verbose", false, "Include detailed/verbose output")
+
+	// --search for palette
+	rootCmd.Flags().StringVar(&robotPaletteSearch, "search", "", "Search query for palette commands")
+
+	// --fix, --brief for diagnose
+	rootCmd.Flags().BoolVar(&robotDiagnoseFix, "fix", false, "Attempt auto-fix for fixable issues")
+	rootCmd.Flags().BoolVar(&robotDiagnoseBrief, "brief", false, "Minimal output (summary only)")
+
+	// --compact, --sections, --max-beads, --max-alerts for markdown
+	rootCmd.Flags().BoolVar(&robotMarkdownCompact, "compact", false, "Ultra-compact output format")
+	rootCmd.Flags().StringVar(&robotMarkdownSections, "sections", "", "Include only specific sections")
+	rootCmd.Flags().IntVar(&robotMarkdownMaxBeads, "max-beads", 0, "Max beads to show")
+	rootCmd.Flags().IntVar(&robotMarkdownMaxAlerts, "max-alerts", 0, "Max alerts to show")
+
+	// --skip, --template for bulk-assign
+	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip", "", "Pane indices to skip (comma-separated)")
+	rootCmd.Flags().StringVar(&robotBulkAssignTemplate, "template", "", "Custom prompt template file")
+
+	// --vars, --background for pipeline
+	rootCmd.Flags().StringVar(&robotPipelineVars, "vars", "", "JSON variables for pipeline")
+	rootCmd.Flags().BoolVar(&robotPipelineBG, "background", false, "Run in background")
+
+	// --no-wait for interrupt
+	rootCmd.Flags().BoolVar(&robotInterruptNoWait, "no-wait", false, "Return immediately without waiting")
+
+	// ==========================================================================
+	// DEPRECATION WARNINGS - Mark old prefixed flags as deprecated
+	// ==========================================================================
+	// These flags still work but will show a deprecation warning.
+	// See docs/robot-api-design.md for canonical flag patterns.
+
+	// CASS prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("cass-limit", "use --limit instead")
+	rootCmd.Flags().MarkDeprecated("cass-since", "use --since instead")
+	rootCmd.Flags().MarkDeprecated("cass-agent", "use --agent instead")
+	rootCmd.Flags().MarkDeprecated("cass-workspace", "use --workspace instead")
+
+	// JFP prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("jfp-category", "use --category instead")
+	rootCmd.Flags().MarkDeprecated("jfp-tag", "use --tag instead")
+
+	// Tokens prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("tokens-days", "use --days instead")
+	rootCmd.Flags().MarkDeprecated("tokens-group-by", "use --group-by instead")
+	rootCmd.Flags().MarkDeprecated("tokens-since", "use --since instead")
+	rootCmd.Flags().MarkDeprecated("tokens-session", "use --session instead")
+	rootCmd.Flags().MarkDeprecated("tokens-agent", "use --agent instead")
+
+	// History prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("history-pane", "use --pane instead")
+	rootCmd.Flags().MarkDeprecated("history-type", "use --type instead")
+	rootCmd.Flags().MarkDeprecated("history-last", "use --last instead")
+	rootCmd.Flags().MarkDeprecated("history-since", "use --since instead")
+	rootCmd.Flags().MarkDeprecated("history-stats", "use --stats instead")
+
+	// Wait prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("wait-timeout", "use --timeout instead")
+	rootCmd.Flags().MarkDeprecated("wait-poll", "use --poll instead")
+	rootCmd.Flags().MarkDeprecated("wait-panes", "use --panes instead")
+	rootCmd.Flags().MarkDeprecated("wait-type", "use --type instead")
+	rootCmd.Flags().MarkDeprecated("wait-any", "use --any instead")
+
+	// Route prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("route-strategy", "use --strategy instead")
+	rootCmd.Flags().MarkDeprecated("route-type", "use --type instead")
+	rootCmd.Flags().MarkDeprecated("route-exclude", "use --exclude instead")
+
+	// Files prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("files-window", "use --window instead")
+	rootCmd.Flags().MarkDeprecated("files-limit", "use --limit instead")
+
+	// Inspect prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("inspect-index", "use --index instead")
+	rootCmd.Flags().MarkDeprecated("inspect-lines", "use --lines instead")
+	rootCmd.Flags().MarkDeprecated("inspect-code", "use --code instead")
+
+	// Metrics prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("metrics-period", "use --period instead")
+
+	// Alerts prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("alerts-severity", "use --severity instead")
+	rootCmd.Flags().MarkDeprecated("alerts-type", "use --type instead")
+	rootCmd.Flags().MarkDeprecated("alerts-session", "use --session instead")
+
+	// Beads prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("beads-status", "use --status instead")
+	rootCmd.Flags().MarkDeprecated("beads-priority", "use --priority instead")
+	rootCmd.Flags().MarkDeprecated("beads-assignee", "use --assignee instead")
+	rootCmd.Flags().MarkDeprecated("beads-type", "use --type instead")
+	rootCmd.Flags().MarkDeprecated("beads-limit", "use --limit instead")
+
+	// Relations prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("relations-limit", "use --limit instead")
+	rootCmd.Flags().MarkDeprecated("relations-threshold", "use --threshold instead")
+
+	// Replay prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("replay-id", "use --id instead")
+	rootCmd.Flags().MarkDeprecated("replay-dry-run", "use --dry-run instead")
+
+	// Verbose prefixed flags → canonical --verbose
+	rootCmd.Flags().MarkDeprecated("is-working-verbose", "use --verbose instead")
+	rootCmd.Flags().MarkDeprecated("agent-health-verbose", "use --verbose instead")
+	rootCmd.Flags().MarkDeprecated("smart-restart-verbose", "use --verbose instead")
+
+	// Palette prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("palette-session", "use --session instead")
+	rootCmd.Flags().MarkDeprecated("palette-category", "use --category instead")
+	rootCmd.Flags().MarkDeprecated("palette-search", "use --search instead")
+
+	// Diagnose prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("diagnose-fix", "use --fix instead")
+	rootCmd.Flags().MarkDeprecated("diagnose-brief", "use --brief instead")
+	rootCmd.Flags().MarkDeprecated("diagnose-pane", "use --pane instead")
+
+	// Markdown prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("md-compact", "use --compact instead")
+	rootCmd.Flags().MarkDeprecated("md-session", "use --session instead")
+	rootCmd.Flags().MarkDeprecated("md-sections", "use --sections instead")
+	rootCmd.Flags().MarkDeprecated("md-max-beads", "use --max-beads instead")
+	rootCmd.Flags().MarkDeprecated("md-max-alerts", "use --max-alerts instead")
+
+	// Bulk-assign prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("bulk-strategy", "use --strategy instead")
+	rootCmd.Flags().MarkDeprecated("skip-panes", "use --skip instead")
+	rootCmd.Flags().MarkDeprecated("prompt-template", "use --template instead")
+
+	// Pipeline prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("pipeline-session", "use --session instead")
+	rootCmd.Flags().MarkDeprecated("pipeline-vars", "use --vars instead")
+	rootCmd.Flags().MarkDeprecated("pipeline-dry-run", "use --dry-run instead")
+	rootCmd.Flags().MarkDeprecated("pipeline-background", "use --background instead")
+
+	// Interrupt prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("interrupt-msg", "use --msg instead")
+	rootCmd.Flags().MarkDeprecated("interrupt-all", "use --all instead")
+	rootCmd.Flags().MarkDeprecated("interrupt-force", "use --force instead")
+	rootCmd.Flags().MarkDeprecated("interrupt-no-wait", "use --no-wait instead")
+	rootCmd.Flags().MarkDeprecated("interrupt-timeout", "use --timeout instead")
+
+	// Account/provider prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("account-status-provider", "use --provider instead")
+	rootCmd.Flags().MarkDeprecated("accounts-list-provider", "use --provider instead")
+	rootCmd.Flags().MarkDeprecated("quota-check-provider", "use --provider instead")
+	rootCmd.Flags().MarkDeprecated("switch-account-pane", "use --pane instead")
+
+	// Triage prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("triage-limit", "use --limit instead")
+
+	// File-beads prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("file-beads-limit", "use --limit instead")
+
+	// Hotspots prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("hotspots-limit", "use --limit instead")
+
+	// Attention prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("attention-limit", "use --limit instead")
+
+	// Dismiss prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("dismiss-session", "use --session instead")
+	rootCmd.Flags().MarkDeprecated("dismiss-all", "use --all instead")
+
+	// Summary prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("summary-since", "use --since instead")
+
+	// Diff prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("diff-since", "use --since instead")
+
+	// Save prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("save-output", "use --output instead")
+
+	// Restore prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("restore-dry-run", "use --dry-run instead")
+
+	// Smart-restart prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("smart-restart-dry-run", "use --dry-run instead")
+
+	// Spawn prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("spawn-timeout", "use --timeout instead")
+	rootCmd.Flags().MarkDeprecated("ready-timeout", "use --timeout instead")
+	rootCmd.Flags().MarkDeprecated("spawn-assign-strategy", "use --strategy instead")
+
+	// Ack prefixed flags → canonical forms
+	rootCmd.Flags().MarkDeprecated("ack-timeout", "use --timeout instead")
+	rootCmd.Flags().MarkDeprecated("ack-poll", "use --poll instead")
+
+	// Bead prefixed flags → canonical forms (for filters on bead operations)
+	rootCmd.Flags().MarkDeprecated("bead-limit", "use --limit instead")
+
 	// Sync version info with robot package
 	robot.Version = Version
 	robot.Commit = Commit

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -313,6 +315,12 @@ func newSpawnCmd() *cobra.Command {
 	var assignQuiet bool
 	var assignTimeout time.Duration
 	var assignAgentType string
+	var assignCCOnly bool
+	var assignCodOnly bool
+	var assignGmiOnly bool
+	var assignCCOnly bool
+	var assignCodOnly bool
+	var assignGmiOnly bool
 
 	// Git worktree isolation flag
 	var useWorktrees bool
@@ -1299,6 +1307,83 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		}
 	}
 
+	// Start session monitor (handles resilience and daemons)
+	// Always started regardless of auto-restart config
+	// Note: Started BEFORE waiting for staggered prompts so that resilience is active
+	// even if the user interrupts the wait.
+	{
+		// Save manifest for the monitor process
+		manifest := &resilience.SpawnManifest{
+			Session:     opts.Session,
+			ProjectDir:  dir,
+			AutoRestart: opts.AutoRestart || cfg.Resilience.AutoRestart,
+		}
+		for _, agent := range launchedAgents {
+			manifest.Agents = append(manifest.Agents, resilience.AgentConfig{
+				PaneID:    agent.paneID,
+				PaneIndex: agent.paneIndex,
+				Type:      agent.agentType,
+				Model:     agent.model,
+				Command:   agent.command,
+			})
+		}
+		if err := resilience.SaveManifest(manifest); err != nil {
+			if !IsJSONOutput() {
+				output.PrintWarningf("Failed to save resilience manifest: %v", err)
+			}
+		} else {
+			// Launch monitor in background
+			exe, err := os.Executable()
+			if err == nil {
+				cmd := exec.Command(exe, "internal-monitor", opts.Session)
+
+				// Setup logging
+				logDir := resilience.LogDir()
+				if err := os.MkdirAll(logDir, 0755); err == nil {
+					logPath := filepath.Join(logDir, fmt.Sprintf("%s-monitor.log", opts.Session))
+					if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+						// Ensure file is closed after spawn
+						defer logFile.Close()
+						cmd.Stdout = logFile
+						cmd.Stderr = logFile
+					}
+				}
+
+				// Detach from terminal so it survives when ntm spawn exits
+				setDetachedProcess(cmd)
+				if err := cmd.Start(); err != nil {
+					if !IsJSONOutput() {
+						output.PrintWarningf("Failed to start session monitor: %v", err)
+					}
+				} else {
+					if !IsJSONOutput() {
+						if manifest.AutoRestart {
+							output.PrintInfof("Session monitor started (auto-restart enabled, pid: %d)", cmd.Process.Pid)
+						} else {
+							output.PrintInfof("Session monitor started (pid: %d)", cmd.Process.Pid)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Set up signal handling for graceful interruption during stagger wait
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	go func() {
+		<-sigChan
+		// If interrupted, we just print a warning. The monitor is already running.
+		// The spawn command will exit, killing the goroutines sending prompts.
+		if !IsJSONOutput() {
+			fmt.Println("\n⚠ Spawn interrupted. Some prompts may not have been delivered.")
+			fmt.Println("ℹ Session monitor is running (agents will auto-restart if they crash).")
+		}
+		os.Exit(1)
+	}()
+
 	// Wait for staggered prompt delivery to complete (if any)
 	if maxStaggerDelay > 0 {
 		if !IsJSONOutput() {
@@ -1524,65 +1609,6 @@ func spawnSessionLogic(opts SpawnOptions) error {
 			}
 		} else if !IsJSONOutput() {
 			postSteps.Done()
-		}
-	}
-
-	// Start session monitor (handles resilience and daemons)
-	// Always started regardless of auto-restart config
-	{
-		// Save manifest for the monitor process
-		manifest := &resilience.SpawnManifest{
-			Session:     opts.Session,
-			ProjectDir:  dir,
-			AutoRestart: opts.AutoRestart || cfg.Resilience.AutoRestart,
-		}
-		for _, agent := range launchedAgents {
-			manifest.Agents = append(manifest.Agents, resilience.AgentConfig{
-				PaneID:    agent.paneID,
-				PaneIndex: agent.paneIndex,
-				Type:      agent.agentType,
-				Model:     agent.model,
-				Command:   agent.command,
-			})
-		}
-		if err := resilience.SaveManifest(manifest); err != nil {
-			if !IsJSONOutput() {
-				output.PrintWarningf("Failed to save resilience manifest: %v", err)
-			}
-		} else {
-			// Launch monitor in background
-			exe, err := os.Executable()
-			if err == nil {
-				cmd := exec.Command(exe, "internal-monitor", opts.Session)
-
-				// Setup logging
-				logDir := resilience.LogDir()
-				if err := os.MkdirAll(logDir, 0755); err == nil {
-					logPath := filepath.Join(logDir, fmt.Sprintf("%s-monitor.log", opts.Session))
-					if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-						// Ensure file is closed after spawn
-						defer logFile.Close()
-						cmd.Stdout = logFile
-						cmd.Stderr = logFile
-					}
-				}
-
-				// Detach from terminal so it survives when ntm spawn exits
-				setDetachedProcess(cmd)
-				if err := cmd.Start(); err != nil {
-					if !IsJSONOutput() {
-						output.PrintWarningf("Failed to start session monitor: %v", err)
-					}
-				} else {
-					if !IsJSONOutput() {
-						if manifest.AutoRestart {
-							output.PrintInfof("Session monitor started (auto-restart enabled, pid: %d)", cmd.Process.Pid)
-						} else {
-							output.PrintInfof("Session monitor started (pid: %d)", cmd.Process.Pid)
-						}
-					}
-				}
-			}
 		}
 	}
 
