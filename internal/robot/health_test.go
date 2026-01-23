@@ -758,9 +758,9 @@ func TestHealthErrorPatterns(t *testing.T) {
 
 func TestSessionHealthOutputStruct(t *testing.T) {
 	output := SessionHealthOutput{
-		Success:   true,
-		Session:   "test-session",
-		CheckedAt: time.Now().UTC(),
+		RobotResponse: NewRobotResponse(true),
+		Session:       "test-session",
+		CheckedAt:     time.Now().UTC(),
 		Agents: []SessionAgentHealth{
 			{
 				Pane:             1,

@@ -644,7 +644,7 @@ ntm --robot-send=SESSION --msg="Fix auth" --type=claude  # Send to agents
 ntm --robot-ack=SESSION --ack-timeout=30s                # Watch for responses
 ntm --robot-spawn=SESSION --spawn-cc=2 --spawn-wait      # Create session
 ntm --robot-interrupt=SESSION --interrupt-msg="Stop"     # Send Ctrl+C
-ntm --robot-assign=SESSION --assign-beads=bd-1,bd-2      # Assign work to agents
+ntm --robot-assign=SESSION --beads=bd-1,bd-2             # Assign work to agents
 ntm --robot-replay=SESSION --replay-id=ID                # Replay command from history
 ntm --robot-dismiss-alert=ALERT_ID                       # Dismiss an alert
 ```
@@ -2877,7 +2877,7 @@ retention_days = 90        # Delete entries older than this
 
 ## Work Distribution
 
-NTM integrates with bv (Beads Viewer) to provide intelligent work distribution based on dependency graph analysis. The `ntm work` commands help you prioritize tasks, identify bottlenecks, and distribute work effectively across agents.
+NTM integrates with bv (Beads Viewer) to provide intelligent prioritization based on dependency graph analysis. The `ntm work` commands help you prioritize tasks, identify bottlenecks, and feed assignment decisions across agents.
 
 ### Triage Analysis
 
@@ -2951,6 +2951,27 @@ This returns the highest-impact, unblocked item with a ready-to-run `bd update` 
 
 NTM includes a sophisticated work assignment system that matches tasks to agents based on agent capabilities, task characteristics, and configurable strategies.
 
+### Canonical Assignment Flow (CLI)
+
+Use `ntm assign` to recommend or execute assignments:
+
+```bash
+ntm assign myproject                        # Show assignment recommendations
+ntm assign myproject --auto                 # Execute assignments without confirmation
+ntm assign myproject --strategy=dependency  # Prioritize unblocking work
+ntm assign myproject --beads=bd-42,bd-45    # Assign specific beads only
+```
+
+Spawn and assign in one step:
+
+```bash
+ntm spawn myproject --cc=2 --cod=2 --assign
+ntm spawn myproject --cc=4 --assign --strategy=quality
+```
+
+Available strategies (shared by `ntm assign` and `ntm spawn --assign`):
+`balanced`, `speed`, `quality`, `dependency`, `round-robin`.
+
 ### Agent Capability Matrix
 
 Different AI agents excel at different types of work. NTM maintains a capability matrix that influences assignment recommendations:
@@ -2980,16 +3001,16 @@ Choose a strategy based on your priorities:
 
 ```bash
 # Balanced (default): Distribute work evenly across agents
-ntm --robot-assign=myproject --assign-strategy=balanced
+ntm --robot-assign=myproject --strategy=balanced
 
 # Speed: Assign any available work to any idle agent quickly
-ntm --robot-assign=myproject --assign-strategy=speed
+ntm --robot-assign=myproject --strategy=speed
 
 # Quality: Optimize agent-task match for best results
-ntm --robot-assign=myproject --assign-strategy=quality
+ntm --robot-assign=myproject --strategy=quality
 
 # Dependency: Prioritize items that unblock the most downstream work
-ntm --robot-assign=myproject --assign-strategy=dependency
+ntm --robot-assign=myproject --strategy=dependency
 ```
 
 ### Strategy Behavior
@@ -3060,10 +3081,10 @@ Returns recommendations with confidence scores:
 
 ```bash
 # Assign specific beads only
-ntm --robot-assign=myproject --assign-beads=bd-42,bd-45
+ntm --robot-assign=myproject --beads=bd-42,bd-45
 
 # Combine with strategy
-ntm --robot-assign=myproject --assign-strategy=quality --assign-beads=bd-42
+ntm --robot-assign=myproject --strategy=quality --beads=bd-42
 ```
 
 ### Integration with Agent Mail

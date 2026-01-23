@@ -11,9 +11,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
-// AccountRotator provides account rotation for limit recovery (optional).
+// AccountRotatorI provides account rotation for limit recovery (optional).
 // If not provided, agents will be respawned with the same account.
-type AccountRotator interface {
+// Note: The concrete AccountRotator struct in account_rotator.go implements this interface.
+type AccountRotatorI interface {
 	// RotateAccount switches to the next available account for the agent type.
 	// Returns the new account identifier, or error if no accounts available.
 	RotateAccount(agentType string) (newAccount string, err error)
@@ -57,6 +58,14 @@ type AutoRespawnerConfig struct {
 	// Default: 100ms
 	ClearPaneDelay time.Duration
 
+	// ExitWaitTimeout is the maximum time to wait for agent exit verification.
+	// Default: 5 seconds
+	ExitWaitTimeout time.Duration
+
+	// ExitPollInterval is the interval between exit verification checks.
+	// Default: 500ms
+	ExitPollInterval time.Duration
+
 	// AutoRotateAccounts enables automatic account rotation on limit hit.
 	// Default: false
 	AutoRotateAccounts bool
@@ -70,6 +79,8 @@ func DefaultAutoRespawnerConfig() AutoRespawnerConfig {
 		MaxRetriesPerPane:  3,
 		RetryResetDuration: 1 * time.Hour,
 		ClearPaneDelay:     100 * time.Millisecond,
+		ExitWaitTimeout:    5 * time.Second,
+		ExitPollInterval:   500 * time.Millisecond,
 		AutoRotateAccounts: false,
 	}
 }
@@ -89,7 +100,7 @@ type AutoRespawner struct {
 	LimitDetector *LimitDetector
 
 	// AccountRotator switches accounts (optional).
-	AccountRotator AccountRotator
+	AccountRotator AccountRotatorI
 
 	// PromptInjector re-sends marching orders.
 	PromptInjector *PromptInjector
@@ -142,7 +153,7 @@ func (r *AutoRespawner) WithLimitDetector(ld *LimitDetector) *AutoRespawner {
 }
 
 // WithAccountRotator sets the account rotator (optional).
-func (r *AutoRespawner) WithAccountRotator(ar AccountRotator) *AutoRespawner {
+func (r *AutoRespawner) WithAccountRotator(ar AccountRotatorI) *AutoRespawner {
 	r.AccountRotator = ar
 	return r
 }
@@ -329,8 +340,14 @@ func (r *AutoRespawner) Respawn(sessionPane, agentType string) *RespawnResult {
 		return result
 	}
 
-	// Step 2: Wait for graceful exit
-	time.Sleep(r.Config.GracefulExitDelay)
+	// Step 2: Wait for graceful exit with verification
+	if !r.waitForExit(sessionPane) {
+		// Agent didn't exit cleanly within timeout, wait a bit more
+		r.logger().Warn("[AutoRespawner] agent_exit_not_verified",
+			"session_pane", sessionPane,
+			"continuing", true)
+		time.Sleep(r.Config.GracefulExitDelay)
+	}
 
 	// Step 3: (Optional) Rotate account
 	if r.Config.AutoRotateAccounts && r.AccountRotator != nil {
@@ -458,6 +475,134 @@ func (r *AutoRespawner) killAgent(sessionPane, agentType string) error {
 	}
 
 	return nil
+}
+
+// waitForExit waits for agent to terminate, returns true if exited.
+// It checks the pane output for shell prompt indicators.
+func (r *AutoRespawner) waitForExit(sessionPane string) bool {
+	timeout := r.Config.ExitWaitTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	pollInterval := r.Config.ExitPollInterval
+	if pollInterval == 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for time.Now().Before(deadline) {
+		<-ticker.C
+
+		// Check if pane is back to shell prompt
+		output := r.capturePaneOutput(sessionPane, 5)
+		if output == "" {
+			continue
+		}
+
+		if r.isShellPrompt(output) {
+			r.logger().Info("[AutoRespawner] agent_exited",
+				"session_pane", sessionPane)
+			return true
+		}
+	}
+
+	r.logger().Warn("[AutoRespawner] exit_timeout",
+		"session_pane", sessionPane,
+		"timeout", timeout)
+	return false
+}
+
+// isShellPrompt checks if the output indicates a shell prompt.
+func (r *AutoRespawner) isShellPrompt(output string) bool {
+	if len(output) == 0 {
+		return false
+	}
+
+	// Common shell prompt indicators
+	prompts := []string{"$", "%", ">", "#", "➜", "❯"}
+
+	// Check if the last non-whitespace line ends with a prompt
+	lines := splitLines(output)
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := trimWhitespace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Check if line ends with a prompt character
+		for _, prompt := range prompts {
+			if len(line) > 0 && line[len(line)-1] == prompt[0] {
+				return true
+			}
+		}
+		// Also check for common prompt patterns anywhere in line
+		if containsAny(line, prompts) {
+			return true
+		}
+		// Only check the last non-empty line
+		break
+	}
+	return false
+}
+
+// splitLines splits output into lines without importing strings.
+func splitLines(s string) []string {
+	var lines []string
+	var current []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, string(current))
+			current = current[:0]
+		} else if s[i] != '\r' {
+			current = append(current, s[i])
+		}
+	}
+	if len(current) > 0 {
+		lines = append(lines, string(current))
+	}
+	return lines
+}
+
+// trimWhitespace trims leading/trailing whitespace without importing strings.
+func trimWhitespace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// containsAny checks if s contains any of the substrings.
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		for i := 0; i <= len(s)-len(sub); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// capturePaneOutput captures the last N lines from a pane.
+func (r *AutoRespawner) capturePaneOutput(sessionPane string, lines int) string {
+	client := r.tmuxClient()
+
+	output, err := client.CapturePaneOutput(sessionPane, lines)
+	if err != nil {
+		r.logger().Debug("[AutoRespawner] capture_failed",
+			"session_pane", sessionPane,
+			"error", err)
+		return ""
+	}
+
+	return output
 }
 
 // clearPane sends the clear command to reset the terminal.

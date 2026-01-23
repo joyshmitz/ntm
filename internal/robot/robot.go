@@ -3334,7 +3334,7 @@ func PrintGraph() error {
 	if !bv.IsInstalled() {
 		output.Error = "bv (beads_viewer) is not installed"
 		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf(output.Error),
+			fmt.Errorf("%s", output.Error),
 			ErrCodeDependencyMissing,
 			"Install bv to enable graph insights",
 		)
@@ -4925,7 +4925,7 @@ func PrintTriage(opts TriageOptions) error {
 	if !bv.IsInstalled() {
 		output.Error = "bv (beads_viewer) is not installed"
 		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf(output.Error),
+			fmt.Errorf("%s", output.Error),
 			ErrCodeDependencyMissing,
 			"Install bv to enable triage",
 		)
@@ -4949,7 +4949,7 @@ func PrintTriage(opts TriageOptions) error {
 	if triage == nil {
 		output.Error = "no triage data returned"
 		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf(output.Error),
+			fmt.Errorf("%s", output.Error),
 			ErrCodeInternalError,
 			"Rebuild bv cache or retry triage",
 		)

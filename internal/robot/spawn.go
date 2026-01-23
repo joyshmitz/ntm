@@ -107,14 +107,14 @@ func PrintSpawn(opts SpawnOptions, cfg *config.Config) error {
 	// Check tmux availability
 	if !tmux.IsInstalled() {
 		output.Error = "tmux is not installed"
-		output.RobotResponse = NewErrorResponse(fmt.Errorf(output.Error), ErrCodeDependencyMissing, "Install tmux to spawn sessions")
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeDependencyMissing, "Install tmux to spawn sessions")
 		return encodeJSON(output)
 	}
 
 	// Safety check: fail if session already exists (when --spawn-safety is enabled)
 	if opts.Safety && tmux.SessionExists(opts.Session) {
 		output.Error = fmt.Sprintf("session '%s' already exists (--spawn-safety mode prevents reuse; use 'ntm kill %s' first)", opts.Session, opts.Session)
-		output.RobotResponse = NewErrorResponse(fmt.Errorf(output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Choose a new session name or disable --spawn-safety")
 		return encodeJSON(output)
 	}
 
@@ -145,7 +145,7 @@ func PrintSpawn(opts SpawnOptions, cfg *config.Config) error {
 	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount
 	if totalAgents == 0 {
 		output.Error = "no agents specified (use cc, cod, or gmi counts)"
-		output.RobotResponse = NewErrorResponse(fmt.Errorf(output.Error), ErrCodeInvalidFlag, "Specify at least one agent count")
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Specify at least one agent count")
 		return encodeJSON(output)
 	}
 
