@@ -197,8 +197,7 @@ func (m *EnsembleManager) SpawnEnsemble(ctx context.Context, cfg *EnsembleConfig
 		return state, nil
 	}
 
-	injector := m.promptInjector()
-	injector.TmuxClient = m.tmuxClient()
+	injector := m.ensembleInjector()
 
 	targets := buildPaneTargetMap(cfg.SessionName, panes)
 	var injectErrors []error
@@ -289,6 +288,14 @@ func (m *EnsembleManager) promptInjector() *swarm.PromptInjector {
 		return m.PromptInjector
 	}
 	return swarm.NewPromptInjector()
+}
+
+func (m *EnsembleManager) ensembleInjector() *EnsembleInjector {
+	basicInjector := m.promptInjector()
+	basicInjector.TmuxClient = m.tmuxClient()
+	return NewEnsembleInjector().
+		WithBasicInjector(basicInjector).
+		WithLogger(m.logger())
 }
 
 func (m *EnsembleManager) logger() *slog.Logger {

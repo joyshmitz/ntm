@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -61,6 +59,9 @@ type BatchInjectionResult struct {
 
 // PromptInjector sends prompts (marching orders) to agent panes.
 // It handles staggered sending to avoid rate limits and agent-specific quirks.
+//
+// For ensemble-specific mode injection, use ensemble.EnsembleInjector which
+// wraps this basic injector and adds preamble rendering capabilities.
 type PromptInjector struct {
 	// TmuxClient for sending keys to panes.
 	// If nil, the default tmux client is used.
@@ -86,9 +87,6 @@ type PromptInjector struct {
 	// Templates holds named prompt templates.
 	Templates map[string]string
 
-	// PreambleEngine renders mode-specific preambles for ensembles.
-	PreambleEngine *ensemble.PreambleEngine
-
 	// RateLimitTracker for adaptive delay learning.
 	// If set and UseAdaptiveDelay is true, delays are learned from rate limit events.
 	RateLimitTracker *ratelimit.RateLimitTracker
@@ -107,7 +105,6 @@ func NewPromptInjector() *PromptInjector {
 		EnterDelay:       100 * time.Millisecond,
 		DoubleEnterDelay: 500 * time.Millisecond,
 		Logger:           slog.Default(),
-		PreambleEngine:   ensemble.NewPreambleEngine(),
 		Templates: map[string]string{
 			"default": DefaultMarchingOrders,
 			"review":  ReviewTemplate,
@@ -126,12 +123,6 @@ func NewPromptInjectorWithClient(client *tmux.Client) *PromptInjector {
 // WithLogger sets a custom logger and returns the PromptInjector for chaining.
 func (p *PromptInjector) WithLogger(logger *slog.Logger) *PromptInjector {
 	p.Logger = logger
-	return p
-}
-
-// WithPreambleEngine sets a custom preamble engine.
-func (p *PromptInjector) WithPreambleEngine(engine *ensemble.PreambleEngine) *PromptInjector {
-	p.PreambleEngine = engine
 	return p
 }
 
@@ -170,10 +161,11 @@ func (p *PromptInjector) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// getDelayForAgent returns the appropriate delay for an agent type.
+// GetDelayForAgent returns the appropriate delay for an agent type.
 // If adaptive delay is enabled and a tracker is configured, it uses the learned optimal delay.
 // Otherwise, it uses the fixed StaggerDelay.
-func (p *PromptInjector) getDelayForAgent(agentType string) time.Duration {
+// This method is exported to satisfy the ensemble.BasicInjector interface.
+func (p *PromptInjector) GetDelayForAgent(agentType string) time.Duration {
 	if p.UseAdaptiveDelay && p.RateLimitTracker != nil {
 		return p.RateLimitTracker.GetOptimalDelay(agentType)
 	}
@@ -203,35 +195,20 @@ func (p *PromptInjector) SetTemplate(name, template string) {
 
 // InjectPrompt sends a prompt to a single pane.
 // agentType is used to handle agent-specific quirks (e.g., Codex needs double-Enter).
-func (p *PromptInjector) InjectPrompt(sessionPane, agentType, prompt string) (*InjectionResult, error) {
-	start := time.Now()
-	result := &InjectionResult{
-		SessionPane: sessionPane,
-		AgentType:   agentType,
-		SentAt:      start,
-	}
-
+// This method satisfies the ensemble.BasicInjector interface.
+func (p *PromptInjector) InjectPrompt(sessionPane, agentType, prompt string) error {
 	p.logger().Info("[PromptInjector] inject_start",
 		"session_pane", sessionPane,
 		"agent_type", agentType,
 		"prompt_len", len(prompt))
 
 	if err := p.sendToPane(sessionPane, agentType, prompt); err != nil {
-		result.Success = false
-		result.Error = err.Error()
-		result.Duration = time.Since(start)
-
 		p.logger().Error("[PromptInjector] inject_error",
 			"session_pane", sessionPane,
 			"agent_type", agentType,
-			"error", err,
-			"duration", result.Duration)
-
-		return result, err
+			"error", err)
+		return err
 	}
-
-	result.Success = true
-	result.Duration = time.Since(start)
 
 	// Record success for adaptive delay learning
 	p.recordSuccess(agentType)
@@ -239,23 +216,14 @@ func (p *PromptInjector) InjectPrompt(sessionPane, agentType, prompt string) (*I
 	p.logger().Info("[PromptInjector] inject_complete",
 		"session_pane", sessionPane,
 		"agent_type", agentType,
-		"success", true,
-		"duration", result.Duration)
+		"success", true)
 
-	return result, nil
+	return nil
 }
 
-// InjectWithMode sends a mode-specific preamble and question to a single pane.
-// The preamble is rendered from the reasoning mode metadata and schema contract.
-func (p *PromptInjector) InjectWithMode(
-	sessionPane string,
-	mode *ensemble.ReasoningMode,
-	question string,
-	agentType string,
-	contextPack *ensemble.ContextPack,
-	tokenCap int,
-	additionalContext string,
-) (*InjectionResult, error) {
+// InjectPromptWithResult sends a prompt to a single pane and returns detailed result.
+// agentType is used to handle agent-specific quirks (e.g., Codex needs double-Enter).
+func (p *PromptInjector) InjectPromptWithResult(sessionPane, agentType, prompt string) (*InjectionResult, error) {
 	start := time.Now()
 	result := &InjectionResult{
 		SessionPane: sessionPane,
@@ -263,68 +231,15 @@ func (p *PromptInjector) InjectWithMode(
 		SentAt:      start,
 	}
 
-	if mode == nil {
-		err := fmt.Errorf("mode is required")
-		result.Success = false
-		result.Error = err.Error()
-		result.Duration = time.Since(start)
-		return result, err
-	}
-	if p.PreambleEngine == nil {
-		err := fmt.Errorf("preamble engine is not configured")
+	if err := p.InjectPrompt(sessionPane, agentType, prompt); err != nil {
 		result.Success = false
 		result.Error = err.Error()
 		result.Duration = time.Since(start)
 		return result, err
 	}
 
-	p.logger().Info("[PromptInjector] mode_inject_start",
-		"session_pane", sessionPane,
-		"mode_id", mode.ID,
-		"mode_code", mode.Code,
-		"agent_type", agentType)
-
-	data := &ensemble.PreambleData{
-		Problem:      question,
-		ContextPack:  contextPack,
-		Mode:         mode,
-		TokenCap:     tokenCap,
-		OutputSchema: ensemble.GetSchemaContract(),
-	}
-
-	preamble, err := p.PreambleEngine.Render(data)
-	if err != nil {
-		result.Success = false
-		result.Error = err.Error()
-		result.Duration = time.Since(start)
-		p.logger().Error("[PromptInjector] mode_render_error",
-			"mode_id", mode.ID,
-			"mode_code", mode.Code,
-			"agent_type", agentType,
-			"error", err)
-		return result, fmt.Errorf("render preamble for %s: %w", mode.ID, err)
-	}
-
-	parts := []string{preamble}
-	if additionalContext != "" {
-		parts = append(parts, additionalContext)
-	}
-	if question != "" {
-		parts = append(parts, question)
-	}
-	prompt := strings.Join(parts, "\n\n")
-
-	result, err = p.InjectPrompt(sessionPane, agentType, prompt)
-	if err != nil {
-		p.logger().Error("[PromptInjector] mode_inject_error",
-			"session_pane", sessionPane,
-			"mode_id", mode.ID,
-			"mode_code", mode.Code,
-			"agent_type", agentType,
-			"error", err)
-		return result, err
-	}
-
+	result.Success = true
+	result.Duration = time.Since(start)
 	return result, nil
 }
 
@@ -411,7 +326,7 @@ func (p *PromptInjector) InjectBatchWithContext(ctx context.Context, targets []I
 
 		// Stagger sends (skip delay for first send)
 		if i > 0 {
-			delay := p.getDelayForAgent(target.AgentType)
+			delay := p.GetDelayForAgent(target.AgentType)
 			if delay > 0 {
 				p.logger().Debug("[PromptInjector] stagger_delay",
 					"pane", target.SessionPane,
@@ -429,7 +344,7 @@ func (p *PromptInjector) InjectBatchWithContext(ctx context.Context, targets []I
 			}
 		}
 
-		injResult, err := p.InjectPrompt(target.SessionPane, target.AgentType, prompt)
+		injResult, err := p.InjectPromptWithResult(target.SessionPane, target.AgentType, prompt)
 		if err != nil {
 			// Error already logged in InjectPrompt
 			result.Failed++
@@ -446,101 +361,6 @@ func (p *PromptInjector) InjectBatchWithContext(ctx context.Context, targets []I
 	result.Duration = time.Since(start)
 
 	p.logger().Info("[PromptInjector] batch_complete",
-		"successful", result.Successful,
-		"failed", result.Failed,
-		"duration", result.Duration)
-
-	return result, nil
-}
-
-// InjectEnsemble sends mode-specific preambles to all assigned panes.
-// It continues on per-pane errors and returns a batch result summary.
-func (p *PromptInjector) InjectEnsemble(
-	assignments []ensemble.ModeAssignment,
-	question string,
-	catalog *ensemble.ModeCatalog,
-	contextPack *ensemble.ContextPack,
-	tokenCap int,
-) (*BatchInjectionResult, error) {
-	start := time.Now()
-
-	if catalog == nil {
-		return nil, fmt.Errorf("catalog cannot be nil")
-	}
-
-	result := &BatchInjectionResult{
-		TotalPanes: len(assignments),
-		Results:    make([]InjectionResult, 0, len(assignments)),
-	}
-
-	if len(assignments) == 0 {
-		return result, nil
-	}
-
-	p.logger().Info("[PromptInjector] ensemble_inject_start",
-		"total_assignments", len(assignments))
-
-	for i, assignment := range assignments {
-		if i > 0 {
-			delay := p.getDelayForAgent(assignment.AgentType)
-			if delay > 0 {
-				p.logger().Debug("[PromptInjector] ensemble_stagger_delay",
-					"pane", assignment.PaneName,
-					"delay_ms", delay.Milliseconds(),
-					"index", i,
-					"total", len(assignments),
-					"adaptive", p.UseAdaptiveDelay)
-				time.Sleep(delay)
-			}
-		}
-
-		mode := catalog.GetMode(assignment.ModeID)
-		if mode == nil {
-			err := fmt.Errorf("mode not found: %s", assignment.ModeID)
-			result.Failed++
-			result.Results = append(result.Results, InjectionResult{
-				SessionPane: assignment.PaneName,
-				AgentType:   assignment.AgentType,
-				Success:     false,
-				Error:       err.Error(),
-				SentAt:      time.Now(),
-				Duration:    time.Since(start),
-			})
-			p.logger().Error("[PromptInjector] ensemble_mode_missing",
-				"mode_id", assignment.ModeID,
-				"session_pane", assignment.PaneName,
-				"agent_type", assignment.AgentType)
-			continue
-		}
-
-		injResult, err := p.InjectWithMode(
-			assignment.PaneName,
-			mode,
-			question,
-			assignment.AgentType,
-			contextPack,
-			tokenCap,
-			"",
-		)
-		if err != nil {
-			result.Failed++
-		} else {
-			result.Successful++
-		}
-		if injResult != nil {
-			result.Results = append(result.Results, *injResult)
-		}
-
-		p.logger().Info("[PromptInjector] ensemble_inject_progress",
-			"sent", i+1,
-			"total", len(assignments),
-			"mode_id", assignment.ModeID,
-			"session_pane", assignment.PaneName)
-	}
-
-	result.Duration = time.Since(start)
-
-	p.logger().Info("[PromptInjector] ensemble_inject_complete",
 		"successful", result.Successful,
 		"failed", result.Failed,
 		"duration", result.Duration)

@@ -13,8 +13,8 @@ import (
 type JobType string
 
 const (
-	JobTypeSession  JobType = "session"  // Create a new tmux session
-	JobTypePaneSplit JobType = "pane_split" // Split an existing pane
+	JobTypeSession     JobType = "session"      // Create a new tmux session
+	JobTypePaneSplit   JobType = "pane_split"   // Split an existing pane
 	JobTypeAgentLaunch JobType = "agent_launch" // Launch an agent in a pane
 )
 
@@ -22,23 +22,23 @@ const (
 type JobPriority int
 
 const (
-	PriorityUrgent   JobPriority = 0 // Respawns, recovery
-	PriorityHigh     JobPriority = 1 // User-initiated spawns
-	PriorityNormal   JobPriority = 2 // Regular batch spawns
-	PriorityLow      JobPriority = 3 // Background/deferred spawns
+	PriorityUrgent JobPriority = 0 // Respawns, recovery
+	PriorityHigh   JobPriority = 1 // User-initiated spawns
+	PriorityNormal JobPriority = 2 // Regular batch spawns
+	PriorityLow    JobPriority = 3 // Background/deferred spawns
 )
 
 // JobStatus represents the current state of a spawn job.
 type JobStatus string
 
 const (
-	StatusPending    JobStatus = "pending"    // Waiting in queue
-	StatusScheduled  JobStatus = "scheduled"  // Rate limiter approved, waiting for execution slot
-	StatusRunning    JobStatus = "running"    // Currently executing
-	StatusCompleted  JobStatus = "completed"  // Successfully finished
-	StatusFailed     JobStatus = "failed"     // Failed with error
-	StatusCancelled  JobStatus = "cancelled"  // Cancelled by user/system
-	StatusRetrying   JobStatus = "retrying"   // Failed but will retry
+	StatusPending   JobStatus = "pending"   // Waiting in queue
+	StatusScheduled JobStatus = "scheduled" // Rate limiter approved, waiting for execution slot
+	StatusRunning   JobStatus = "running"   // Currently executing
+	StatusCompleted JobStatus = "completed" // Successfully finished
+	StatusFailed    JobStatus = "failed"    // Failed with error
+	StatusCancelled JobStatus = "cancelled" // Cancelled by user/system
+	StatusRetrying  JobStatus = "retrying"  // Failed but will retry
 )
 
 // SpawnJob represents a single spawn operation in the queue.

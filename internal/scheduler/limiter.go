@@ -88,9 +88,9 @@ type LimiterStats struct {
 // DefaultLimiterConfig returns sensible default configuration.
 func DefaultLimiterConfig() LimiterConfig {
 	return LimiterConfig{
-		Rate:         2.0,              // 2 spawns per second
-		Capacity:     5.0,              // Allow burst of 5
-		BurstAllowed: true,             // Allow bursting
+		Rate:         2.0,                    // 2 spawns per second
+		Capacity:     5.0,                    // Allow burst of 5
+		BurstAllowed: true,                   // Allow bursting
 		MinInterval:  300 * time.Millisecond, // 300ms minimum between spawns
 	}
 }
@@ -359,19 +359,19 @@ func DefaultAgentLimiterConfig() AgentLimiterConfig {
 		Default: DefaultLimiterConfig(),
 		PerAgent: map[string]LimiterConfig{
 			"cc": {
-				Rate:         1.5,              // Claude is more conservative
+				Rate:         1.5, // Claude is more conservative
 				Capacity:     3.0,
 				BurstAllowed: true,
 				MinInterval:  500 * time.Millisecond,
 			},
 			"cod": {
-				Rate:         1.0,              // Codex is more rate-limited
+				Rate:         1.0, // Codex is more rate-limited
 				Capacity:     2.0,
 				BurstAllowed: true,
 				MinInterval:  800 * time.Millisecond,
 			},
 			"gmi": {
-				Rate:         2.0,              // Gemini allows more
+				Rate:         2.0, // Gemini allows more
 				Capacity:     5.0,
 				BurstAllowed: true,
 				MinInterval:  400 * time.Millisecond,

@@ -17,22 +17,22 @@ import (
 type ResourceErrorType string
 
 const (
-	ResourceErrorNone    ResourceErrorType = ""
-	ResourceErrorEAGAIN  ResourceErrorType = "EAGAIN"
-	ResourceErrorENOMEM  ResourceErrorType = "ENOMEM"
-	ResourceErrorENFILE  ResourceErrorType = "ENFILE"
-	ResourceErrorEMFILE  ResourceErrorType = "EMFILE"
+	ResourceErrorNone      ResourceErrorType = ""
+	ResourceErrorEAGAIN    ResourceErrorType = "EAGAIN"
+	ResourceErrorENOMEM    ResourceErrorType = "ENOMEM"
+	ResourceErrorENFILE    ResourceErrorType = "ENFILE"
+	ResourceErrorEMFILE    ResourceErrorType = "EMFILE"
 	ResourceErrorRateLimit ResourceErrorType = "RATE_LIMIT"
 )
 
 // ResourceError wraps an error with resource exhaustion classification.
 type ResourceError struct {
-	Original    error
-	Type        ResourceErrorType
-	ExitCode    int
-	StderrHint  string
-	Retryable   bool
-	Timestamp   time.Time
+	Original   error
+	Type       ResourceErrorType
+	ExitCode   int
+	StderrHint string
+	Retryable  bool
+	Timestamp  time.Time
 }
 
 func (e *ResourceError) Error() string {
@@ -228,7 +228,7 @@ func DefaultBackoffConfig() BackoffConfig {
 		Multiplier:                   2.0,
 		JitterFactor:                 0.3,
 		MaxRetries:                   5,
-		PauseQueueOnBackoff:         true,
+		PauseQueueOnBackoff:          true,
 		ConsecutiveFailuresThreshold: 3,
 	}
 }
@@ -258,20 +258,20 @@ type BackoffController struct {
 	scheduler *Scheduler
 
 	// hooks for events.
-	onBackoffStart    func(delay time.Duration, reason ResourceErrorType)
-	onBackoffEnd      func(totalDuration time.Duration)
-	onRetryExhausted  func(job *SpawnJob, attempts int)
+	onBackoffStart   func(delay time.Duration, reason ResourceErrorType)
+	onBackoffEnd     func(totalDuration time.Duration)
+	onRetryExhausted func(job *SpawnJob, attempts int)
 }
 
 // BackoffStats contains backoff statistics.
 type BackoffStats struct {
-	TotalBackoffs     int64         `json:"total_backoffs"`
-	TotalRetries      int64         `json:"total_retries"`
-	TotalExhausted    int64         `json:"total_exhausted"`
-	MaxConsecutive    int           `json:"max_consecutive"`
-	TotalBackoffTime  time.Duration `json:"total_backoff_time"`
+	TotalBackoffs     int64             `json:"total_backoffs"`
+	TotalRetries      int64             `json:"total_retries"`
+	TotalExhausted    int64             `json:"total_exhausted"`
+	MaxConsecutive    int               `json:"max_consecutive"`
+	TotalBackoffTime  time.Duration     `json:"total_backoff_time"`
 	LastBackoffReason ResourceErrorType `json:"last_backoff_reason,omitempty"`
-	LastBackoffAt     time.Time     `json:"last_backoff_at,omitempty"`
+	LastBackoffAt     time.Time         `json:"last_backoff_at,omitempty"`
 }
 
 // NewBackoffController creates a new backoff controller.

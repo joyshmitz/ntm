@@ -82,7 +82,7 @@ func DefaultAgentCapsConfig() AgentCapsConfig {
 		PerAgent: map[string]AgentCapConfig{
 			"cc":  DefaultAgentCapConfig(), // Claude: standard caps
 			"cod": CodexCapConfig(),        // Codex: conservative + ramp-up
-			"gmi": {                         // Gemini: slightly higher
+			"gmi": { // Gemini: slightly higher
 				MaxConcurrent:     5,
 				RampUpEnabled:     false,
 				CooldownOnFailure: true,

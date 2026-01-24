@@ -253,4 +253,3 @@ func buildRestorePreview(state *session.SessionState) *RestorePreview {
 		Actions:     actions,
 	}
 }
-

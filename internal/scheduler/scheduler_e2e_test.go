@@ -20,9 +20,9 @@ func TestScheduler_E2E_PacedSpawning(t *testing.T) {
 
 	const (
 		numPanes           = 12
-		tokensPerSecond    = 2.0  // Allow 2 operations per second
-		expectedMinSpacing = 400  // Minimum ms between operations (accounting for jitter)
-		maxConcurrent      = 2    // Max concurrent operations
+		tokensPerSecond    = 2.0 // Allow 2 operations per second
+		expectedMinSpacing = 400 // Minimum ms between operations (accounting for jitter)
+		maxConcurrent      = 2   // Max concurrent operations
 	)
 
 	// Track execution times for validation

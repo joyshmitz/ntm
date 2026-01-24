@@ -95,7 +95,7 @@ func TestSpawnJob_Retry(t *testing.T) {
 
 func TestRateLimiter_Basic(t *testing.T) {
 	cfg := LimiterConfig{
-		Rate:        10,           // 10 per second
+		Rate:        10, // 10 per second
 		Capacity:    5,
 		MinInterval: 0,
 	}
@@ -150,7 +150,7 @@ func TestRateLimiter_TryAcquire(t *testing.T) {
 
 func TestRateLimiter_MinInterval(t *testing.T) {
 	cfg := LimiterConfig{
-		Rate:        100,          // High rate
+		Rate:        100, // High rate
 		Capacity:    100,
 		MinInterval: 100 * time.Millisecond,
 	}

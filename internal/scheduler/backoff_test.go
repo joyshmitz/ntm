@@ -401,7 +401,7 @@ func TestBackoffController_ExponentialGrowth(t *testing.T) {
 		Multiplier:                   2.0,
 		JitterFactor:                 0, // Disable jitter for predictable test
 		MaxRetries:                   10,
-		PauseQueueOnBackoff:         false,
+		PauseQueueOnBackoff:          false,
 		ConsecutiveFailuresThreshold: 100, // High to avoid global backoff
 	}
 	bc := NewBackoffController(cfg)
@@ -436,7 +436,7 @@ func TestBackoffController_MaxDelay(t *testing.T) {
 		Multiplier:                   10.0, // Aggressive growth
 		JitterFactor:                 0,
 		MaxRetries:                   10,
-		PauseQueueOnBackoff:         false,
+		PauseQueueOnBackoff:          false,
 		ConsecutiveFailuresThreshold: 100,
 	}
 	bc := NewBackoffController(cfg)

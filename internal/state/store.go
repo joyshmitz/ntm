@@ -1132,6 +1132,9 @@ func (s *Store) GetBeadHistoryStats(sessionID string) (*BeadHistoryStats, error)
 		}
 		stats.ByStatus[status] = count
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate status counts: %w", err)
+	}
 
 	// Count by agent
 	// #nosec G202 -- sessionFilter is internally generated, not user input
@@ -1149,6 +1152,9 @@ func (s *Store) GetBeadHistoryStats(sessionID string) (*BeadHistoryStats, error)
 		if agent != "" {
 			stats.ByAgent[agent] = count
 		}
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent counts: %w", err)
 	}
 
 	// Count failure reasons
