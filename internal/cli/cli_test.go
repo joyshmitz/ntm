@@ -1996,3 +1996,174 @@ func TestProgressWriter(t *testing.T) {
 		}
 	})
 }
+
+// TestHasLegacyShellIntegration tests detection of legacy "ntm init" shell commands
+func TestHasLegacyShellIntegration(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ntm-shell-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Run("detects legacy ntm init bash", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, ".bashrc")
+		content := `# Some config
+export PATH="/usr/local/bin:$PATH"
+
+# NTM - Named Tmux Manager
+eval "$(ntm init bash)"
+`
+		if err := os.WriteFile(rcFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if !hasLegacyShellIntegration(rcFile) {
+			t.Error("Expected to detect legacy shell integration")
+		}
+	})
+
+	t.Run("detects legacy ntm init zsh", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, ".zshrc")
+		content := `# Some config
+eval "$(ntm init zsh)"
+`
+		if err := os.WriteFile(rcFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if !hasLegacyShellIntegration(rcFile) {
+			t.Error("Expected to detect legacy shell integration")
+		}
+	})
+
+	t.Run("detects legacy ntm init fish", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, "config.fish")
+		content := `# Fish config
+ntm init fish | source
+`
+		if err := os.WriteFile(rcFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if !hasLegacyShellIntegration(rcFile) {
+			t.Error("Expected to detect legacy shell integration")
+		}
+	})
+
+	t.Run("does not detect current ntm shell", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, ".bashrc-current")
+		content := `# Some config
+eval "$(ntm shell bash)"
+`
+		if err := os.WriteFile(rcFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if hasLegacyShellIntegration(rcFile) {
+			t.Error("Should not detect current shell command as legacy")
+		}
+	})
+
+	t.Run("handles nonexistent file", func(t *testing.T) {
+		if hasLegacyShellIntegration(filepath.Join(tempDir, "nonexistent")) {
+			t.Error("Should return false for nonexistent file")
+		}
+	})
+}
+
+// TestUpgradeShellRCFile tests the shell rc file upgrade function
+func TestUpgradeShellRCFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ntm-upgrade-shell-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Run("upgrades ntm init to ntm shell for bash", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, ".bashrc")
+		originalContent := `# Some config
+export PATH="/usr/local/bin:$PATH"
+
+# NTM - Named Tmux Manager
+eval "$(ntm init bash)"
+`
+		if err := os.WriteFile(rcFile, []byte(originalContent), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if err := upgradeShellRCFile(rcFile); err != nil {
+			t.Fatalf("upgradeShellRCFile failed: %v", err)
+		}
+
+		content, err := os.ReadFile(rcFile)
+		if err != nil {
+			t.Fatalf("Failed to read upgraded file: %v", err)
+		}
+
+		if strings.Contains(string(content), "ntm init") {
+			t.Error("File should not contain 'ntm init' after upgrade")
+		}
+		if !strings.Contains(string(content), "ntm shell bash") {
+			t.Error("File should contain 'ntm shell bash' after upgrade")
+		}
+
+		// Verify backup was created
+		backupPath := rcFile + ".ntm-backup"
+		backupContent, err := os.ReadFile(backupPath)
+		if err != nil {
+			t.Fatalf("Failed to read backup file: %v", err)
+		}
+		if string(backupContent) != originalContent {
+			t.Error("Backup should contain original content")
+		}
+	})
+
+	t.Run("upgrades ntm init to ntm shell for zsh", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, ".zshrc")
+		originalContent := `eval "$(ntm init zsh)"`
+		if err := os.WriteFile(rcFile, []byte(originalContent), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if err := upgradeShellRCFile(rcFile); err != nil {
+			t.Fatalf("upgradeShellRCFile failed: %v", err)
+		}
+
+		content, err := os.ReadFile(rcFile)
+		if err != nil {
+			t.Fatalf("Failed to read upgraded file: %v", err)
+		}
+
+		if !strings.Contains(string(content), "ntm shell zsh") {
+			t.Error("File should contain 'ntm shell zsh' after upgrade")
+		}
+	})
+
+	t.Run("upgrades ntm init to ntm shell for fish", func(t *testing.T) {
+		rcFile := filepath.Join(tempDir, "config.fish")
+		originalContent := `ntm init fish | source`
+		if err := os.WriteFile(rcFile, []byte(originalContent), 0644); err != nil {
+			t.Fatalf("Failed to write test file: %v", err)
+		}
+
+		if err := upgradeShellRCFile(rcFile); err != nil {
+			t.Fatalf("upgradeShellRCFile failed: %v", err)
+		}
+
+		content, err := os.ReadFile(rcFile)
+		if err != nil {
+			t.Fatalf("Failed to read upgraded file: %v", err)
+		}
+
+		if !strings.Contains(string(content), "ntm shell fish") {
+			t.Error("File should contain 'ntm shell fish' after upgrade")
+		}
+	})
+
+	t.Run("returns error for nonexistent file", func(t *testing.T) {
+		err := upgradeShellRCFile(filepath.Join(tempDir, "nonexistent"))
+		if err == nil {
+			t.Error("Expected error for nonexistent file")
+		}
+	})
+}

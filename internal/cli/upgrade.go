@@ -724,6 +724,10 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 	fmt.Println()
 	fmt.Println(successStyle.Render("  ✓ Successfully upgraded to " + latestVersion + "!"))
 	fmt.Println()
+
+	// Check for legacy shell integration that needs updating
+	migrateShellIntegration(warnStyle, successStyle, dimStyle)
+
 	fmt.Println(dimStyle.Render("  Release notes: " + release.HTMLURL))
 
 	return nil
@@ -1322,4 +1326,102 @@ func formatSize(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// migrateShellIntegration checks for and offers to migrate legacy "ntm init" shell
+// integration to the new "ntm shell" command. This handles users upgrading from
+// v1.5.0 or earlier where "ntm init <shell>" was used instead of "ntm shell <shell>".
+func migrateShellIntegration(warnStyle, successStyle, dimStyle lipgloss.Style) {
+	// Find shell rc files that might have legacy integration
+	rcFiles := []string{
+		filepath.Join(os.Getenv("HOME"), ".bashrc"),
+		filepath.Join(os.Getenv("HOME"), ".zshrc"),
+		filepath.Join(os.Getenv("HOME"), ".config", "fish", "config.fish"),
+	}
+
+	var legacyFiles []string
+	for _, rcFile := range rcFiles {
+		if hasLegacyShellIntegration(rcFile) {
+			legacyFiles = append(legacyFiles, rcFile)
+		}
+	}
+
+	if len(legacyFiles) == 0 {
+		return
+	}
+
+	fmt.Println()
+	fmt.Printf("  %s Legacy shell integration detected\n", warnStyle.Render("⚠"))
+	fmt.Println(dimStyle.Render("    'ntm init' was renamed to 'ntm shell' in v1.6.0"))
+	fmt.Println()
+	fmt.Println("  Files with legacy integration:")
+	for _, f := range legacyFiles {
+		fmt.Printf("    • %s\n", f)
+	}
+	fmt.Println()
+
+	// Prompt for migration
+	fmt.Print(warnStyle.Render("  Update to 'ntm shell' automatically? [Y/n] "))
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println(dimStyle.Render("  (could not read response, skipping)"))
+		fmt.Println()
+		fmt.Println(dimStyle.Render("  To update manually, replace 'ntm init' with 'ntm shell' in your rc files."))
+		return
+	}
+	response = strings.TrimSpace(strings.ToLower(response))
+
+	if response == "n" || response == "no" {
+		fmt.Println()
+		fmt.Println(dimStyle.Render("  To update manually, replace 'ntm init' with 'ntm shell' in your rc files."))
+		return
+	}
+
+	// Perform migration
+	fmt.Println()
+	for _, rcFile := range legacyFiles {
+		if err := upgradeShellRCFile(rcFile); err != nil {
+			fmt.Printf("  %s Failed to update %s: %s\n", warnStyle.Render("⚠"), rcFile, err)
+		} else {
+			fmt.Printf("  %s Updated %s\n", successStyle.Render("✓"), rcFile)
+		}
+	}
+	fmt.Println()
+	fmt.Println(dimStyle.Render("  Restart your shell or source your rc file to activate."))
+}
+
+// hasLegacyShellIntegration checks if a file contains legacy "ntm init" commands
+func hasLegacyShellIntegration(filePath string) bool {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(content), "ntm init")
+}
+
+// upgradeShellRCFile replaces "ntm init" with "ntm shell" in a shell rc file
+func upgradeShellRCFile(filePath string) error {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	// Create backup
+	backupPath := filePath + ".ntm-backup"
+	if err := os.WriteFile(backupPath, content, 0644); err != nil {
+		return fmt.Errorf("failed to create backup: %w", err)
+	}
+
+	// Replace "ntm init" with "ntm shell"
+	newContent := strings.ReplaceAll(string(content), "ntm init", "ntm shell")
+
+	// Write updated content
+	if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+		// Try to restore backup
+		os.WriteFile(filePath, content, 0644)
+		return err
+	}
+
+	return nil
 }

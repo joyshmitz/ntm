@@ -381,6 +381,80 @@ install_ntm() {
     echo "Run 'ntm --help' for full documentation."
 }
 
+# Get the shell integration command for the installed version
+# v1.5.0 and earlier use "ntm init <shell>", v1.6.0+ use "ntm shell <shell>"
+get_shell_cmd() {
+    local shell_name="$1"
+    local installed_version="$2"
+
+    # Determine which command to use based on version
+    # v1.5.0 and earlier use "ntm init", v1.6.0+ use "ntm shell"
+    local use_init=false
+    if [ -n "$installed_version" ]; then
+        # Strip 'v' prefix for comparison
+        local ver="${installed_version#v}"
+        local major minor
+        major=$(echo "$ver" | cut -d. -f1)
+        minor=$(echo "$ver" | cut -d. -f2)
+        # Use "ntm init" for v1.5.x and earlier
+        if [ "$major" -eq 1 ] && [ "$minor" -le 5 ] 2>/dev/null; then
+            use_init=true
+        fi
+    fi
+
+    local cmd_name="shell"
+    if [ "$use_init" = true ]; then
+        cmd_name="init"
+    fi
+
+    case "$shell_name" in
+        fish)
+            echo "ntm $cmd_name fish | source"
+            ;;
+        *)
+            echo "eval \"\$(ntm $cmd_name $shell_name)\""
+            ;;
+    esac
+}
+
+# Update legacy "ntm init" entries to "ntm shell" in a shell rc file
+upgrade_shell_integration() {
+    local rc_file="$1"
+
+    if [ ! -f "$rc_file" ]; then
+        return 1
+    fi
+
+    # Check if the file has legacy "ntm init" entries
+    if ! grep -q 'ntm init' "$rc_file"; then
+        return 1
+    fi
+
+    # Create a backup
+    local backup_file="${rc_file}.ntm-backup"
+    cp "$rc_file" "$backup_file"
+
+    # Replace "ntm init" with "ntm shell" in the file
+    # Handle both eval "$(ntm init bash)" and ntm init fish | source patterns
+    if sed -i.bak 's/ntm init/ntm shell/g' "$rc_file" 2>/dev/null; then
+        rm -f "${rc_file}.bak"
+        print_success "Updated shell integration in ${rc_file}"
+        print_info "Backup saved to ${backup_file}"
+        return 0
+    else
+        # macOS sed requires different syntax
+        if sed -i '' 's/ntm init/ntm shell/g' "$rc_file" 2>/dev/null; then
+            print_success "Updated shell integration in ${rc_file}"
+            print_info "Backup saved to ${backup_file}"
+            return 0
+        fi
+    fi
+
+    # Restore from backup if sed failed
+    mv "$backup_file" "$rc_file"
+    return 1
+}
+
 # Setup shell integration
 setup_shell_integration() {
     local shell_name rc_file init_cmd
@@ -391,29 +465,61 @@ setup_shell_integration() {
     case "$shell_name" in
         zsh)
             rc_file="${HOME}/.zshrc"
-            init_cmd='eval "$(ntm shell zsh)"'
             ;;
         bash)
             rc_file="${HOME}/.bashrc"
-            init_cmd='eval "$(ntm shell bash)"'
             ;;
         fish)
             rc_file="${HOME}/.config/fish/config.fish"
-            init_cmd='ntm shell fish | source'
             ;;
         *)
             return
             ;;
     esac
 
-    # Check if already configured
+    # Get the appropriate shell command for the installed version
+    init_cmd=$(get_shell_cmd "$shell_name" "$VERSION")
+
+    # Check if already configured with current "ntm shell" command
     if [ -f "$rc_file" ] && grep -q "ntm shell" "$rc_file"; then
         print_info "Shell integration already configured in ${rc_file}"
         return
     fi
+
+    # Check for legacy "ntm init" entries that need upgrading
     if [ -f "$rc_file" ] && grep -q "ntm init" "$rc_file"; then
         print_warn "Legacy shell integration detected in ${rc_file}"
-        print_info "Replace \"ntm init\" with \"ntm shell\" to keep aliases working."
+        print_info "The 'ntm init' command was renamed to 'ntm shell' in v1.6.0."
+
+        # In easy-mode, auto-upgrade
+        if [ "$EASY_MODE" = true ]; then
+            if upgrade_shell_integration "$rc_file"; then
+                print_info "Restart your shell or run 'source ${rc_file}' to activate."
+            else
+                print_warn "Could not auto-update. Please manually replace 'ntm init' with 'ntm shell'."
+            fi
+            return
+        fi
+
+        # Only prompt if interactive
+        if [ -t 0 ] && [ -t 1 ]; then
+            printf "Update to 'ntm shell' automatically? [Y/n]: "
+            read -r answer
+            case "$answer" in
+                n|N|no|NO)
+                    print_info "Please manually replace 'ntm init' with 'ntm shell' in ${rc_file}"
+                    ;;
+                *)
+                    if upgrade_shell_integration "$rc_file"; then
+                        print_info "Restart your shell or run 'source ${rc_file}' to activate."
+                    else
+                        print_warn "Could not auto-update. Please manually replace 'ntm init' with 'ntm shell'."
+                    fi
+                    ;;
+            esac
+        else
+            print_info "Run installer with --easy-mode to auto-update, or manually replace 'ntm init' with 'ntm shell'."
+        fi
         return
     fi
 
