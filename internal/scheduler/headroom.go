@@ -78,8 +78,10 @@ type HeadroomGuard struct {
 	onWarning   func(reason string, limits *ResourceLimits, usage *ResourceUsage)
 
 	// recheckTicker handles periodic rechecking when blocked.
-	recheckTicker *time.Ticker
-	recheckStop   chan struct{}
+	recheckTicker     *time.Ticker
+	recheckTickerStop chan struct{} // per-ticker stop signal
+	recheckStop       chan struct{} // permanent stop for Stop()
+	stopped           bool
 }
 
 // ResourceLimits holds the effective resource limits from various sources.
@@ -288,12 +290,22 @@ func (h *HeadroomGuard) startRecheck() {
 		return // Already running
 	}
 
-	h.recheckTicker = time.NewTicker(h.config.RecheckInterval)
+	interval := h.config.RecheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Second // Default fallback
+	}
+	ticker := time.NewTicker(interval)
+	tickerStop := make(chan struct{})
+	h.recheckTicker = ticker
+	h.recheckTickerStop = tickerStop
 	go func() {
+		defer ticker.Stop()
 		for {
 			select {
-			case <-h.recheckTicker.C:
+			case <-ticker.C:
 				h.recheck()
+			case <-tickerStop:
+				return
 			case <-h.recheckStop:
 				return
 			}
@@ -306,6 +318,11 @@ func (h *HeadroomGuard) stopRecheck() {
 	if h.recheckTicker != nil {
 		h.recheckTicker.Stop()
 		h.recheckTicker = nil
+		// Signal the goroutine to exit
+		if h.recheckTickerStop != nil {
+			close(h.recheckTickerStop)
+			h.recheckTickerStop = nil
+		}
 	}
 }
 
@@ -506,9 +523,10 @@ func (h *HeadroomGuard) getUlimitNproc() int {
 			if strings.Contains(line, "Max processes") {
 				fields := strings.Fields(line)
 				// Format: "Max processes    soft_limit    hard_limit    units"
-				// We want the soft limit (second to last numeric field before "processes")
-				for i := len(fields) - 1; i >= 0; i-- {
-					if val, err := strconv.Atoi(fields[i]); err == nil && val > 0 {
+				// After Fields(): ["Max", "processes", "soft_limit", "hard_limit", "processes"]
+				// We want the soft limit which is fields[2]
+				if len(fields) >= 4 {
+					if val, err := strconv.Atoi(fields[2]); err == nil && val > 0 {
 						return val
 					}
 				}
@@ -668,37 +686,26 @@ func (h *HeadroomGuard) getProcessCount() int {
 			continue
 		}
 
-		// Check owner
-		info, err := os.Stat(filepath.Join("/proc", entry.Name()))
+		// Read the status file to get the process owner UID
+		statusPath := filepath.Join("/proc", entry.Name(), "status")
+		data, err := os.ReadFile(statusPath)
 		if err != nil {
 			continue
 		}
 
-		// Get owner UID from stat
-		if stat, ok := info.Sys().(*syscallStatInfo); ok && stat != nil {
-			if int(stat.Uid) == uid {
-				count++
-			}
-		} else {
-			// Fallback: read status file
-			statusPath := filepath.Join("/proc", entry.Name(), "status")
-			data, err := os.ReadFile(statusPath)
-			if err != nil {
-				continue
-			}
-
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, "Uid:") {
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						if procUID, err := strconv.Atoi(fields[1]); err == nil && procUID == uid {
-							count++
-						}
+		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "Uid:") {
+				fields := strings.Fields(line)
+				// Format: "Uid:    real_uid    effective_uid    saved_uid    fs_uid"
+				// We want the real UID which is fields[1]
+				if len(fields) >= 2 {
+					if procUID, err := strconv.Atoi(fields[1]); err == nil && procUID == uid {
+						count++
 					}
-					break
 				}
+				break
 			}
 		}
 	}
@@ -706,16 +713,15 @@ func (h *HeadroomGuard) getProcessCount() int {
 	return count
 }
 
-// syscallStatInfo is a placeholder for syscall.Stat_t to avoid build issues.
-// The actual implementation uses the status file fallback on all platforms.
-type syscallStatInfo struct {
-	Uid uint32
-}
-
 // Stop stops the headroom guard and cleans up resources.
 func (h *HeadroomGuard) Stop() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.stopped {
+		return
+	}
+	h.stopped = true
 
 	h.stopRecheck()
 	close(h.recheckStop)

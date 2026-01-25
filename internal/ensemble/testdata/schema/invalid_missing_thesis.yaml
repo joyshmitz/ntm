@@ -1,0 +1,6 @@
+mode_id: abductive
+top_findings:
+  - finding: Pattern suggests underlying cause
+    impact: medium
+    confidence: 0.7
+confidence: 0.75

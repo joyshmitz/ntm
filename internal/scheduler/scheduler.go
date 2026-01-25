@@ -52,6 +52,9 @@ type Scheduler struct {
 	// backoff is the backoff controller for resource errors.
 	backoff *BackoffController
 
+	// headroom is the pre-spawn resource headroom guard.
+	headroom *HeadroomGuard
+
 	// running state
 	started   atomic.Bool
 	ctx       context.Context
@@ -124,6 +127,9 @@ type Config struct {
 
 	// BackpressureThreshold is the queue size that triggers backpressure alerts.
 	BackpressureThreshold int `json:"backpressure_threshold"`
+
+	// Headroom is the pre-spawn resource headroom configuration.
+	Headroom HeadroomConfig `json:"headroom"`
 }
 
 // DefaultConfig returns sensible default configuration.
@@ -139,6 +145,7 @@ func DefaultConfig() Config {
 		DefaultRetries:        3,
 		DefaultRetryDelay:     time.Second,
 		BackpressureThreshold: 50,
+		Headroom:              DefaultHeadroomConfig(),
 	}
 }
 
@@ -194,6 +201,9 @@ type Stats struct {
 
 	// RemainingBackoff is the remaining backoff duration if in global backoff.
 	RemainingBackoff time.Duration `json:"remaining_backoff,omitempty"`
+
+	// HeadroomStatus contains resource headroom status.
+	HeadroomStatus HeadroomStatus `json:"headroom_status"`
 }
 
 // New creates a new scheduler with the given configuration.
@@ -207,6 +217,7 @@ func New(cfg Config) *Scheduler {
 		agentLimiters: NewPerAgentLimiter(cfg.AgentRateLimits),
 		agentCaps:     NewAgentCaps(cfg.AgentCaps),
 		backoff:       NewBackoffController(cfg.Backoff),
+		headroom:      NewHeadroomGuard(cfg.Headroom),
 		running:       make(map[string]*SpawnJob),
 		completed:     make([]*SpawnJob, 0, cfg.MaxCompleted),
 		maxCompleted:  cfg.MaxCompleted,
@@ -218,6 +229,30 @@ func New(cfg Config) *Scheduler {
 
 	// Set scheduler reference for global backoff pause/resume
 	s.backoff.SetScheduler(s)
+
+	// Set up headroom guard callbacks
+	if s.headroom != nil {
+		s.headroom.SetCallbacks(
+			// onBlocked
+			func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
+				if s.hooks.OnGuardrailTriggered != nil {
+					// Create a dummy job for the callback (guardrail affects all jobs)
+					s.hooks.OnGuardrailTriggered(nil, reason)
+				}
+			},
+			// onUnblocked - resume job processing
+			func() {
+				select {
+				case s.jobNotify <- struct{}{}:
+				default:
+				}
+			},
+			// onWarning
+			func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
+				// Warning is logged by the guard, no additional action needed
+			},
+		)
+	}
 
 	return s
 }
@@ -271,6 +306,12 @@ func (s *Scheduler) Stop() {
 	s.cancel()
 	s.wg.Wait()
 	s.started.Store(false)
+
+	// Stop the headroom guard
+	if s.headroom != nil {
+		s.headroom.Stop()
+	}
+
 	slog.Info("scheduler stopped")
 }
 
@@ -496,6 +537,9 @@ func (s *Scheduler) Stats() Stats {
 	stats.CapsStats = s.agentCaps.Stats()
 	stats.InGlobalBackoff = s.backoff.IsInGlobalBackoff()
 	stats.RemainingBackoff = s.backoff.RemainingBackoff()
+	if s.headroom != nil {
+		stats.HeadroomStatus = s.headroom.Status()
+	}
 
 	return stats
 }
@@ -561,6 +605,18 @@ func (s *Scheduler) processJobs(workerID int) {
 
 		if s.paused.Load() {
 			return
+		}
+
+		// Check resource headroom before processing
+		if s.headroom != nil {
+			if allowed, reason := s.headroom.CheckHeadroom(); !allowed {
+				// Headroom exhausted, don't process jobs
+				slog.Debug("job processing blocked by headroom guard",
+					"worker_id", workerID,
+					"reason", reason,
+				)
+				return
+			}
 		}
 
 		// Try to get a job

@@ -3,7 +3,6 @@ package context
 import (
 	"sync"
 	"testing"
-	"time"
 )
 
 // TestMonitor_RaceConditions checks for race conditions in ContextMonitor.

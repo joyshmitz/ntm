@@ -1,0 +1,14 @@
+mode_id: risk-analysis
+thesis: String-based confidence and likelihood values should be normalized
+top_findings:
+  - finding: Finding with string confidence
+    impact: high
+    confidence: high
+  - finding: Finding with percentage confidence
+    impact: medium
+    confidence: 75%
+risks:
+  - risk: Risk with string likelihood
+    impact: medium
+    likelihood: low
+confidence: medium

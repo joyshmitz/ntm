@@ -1,0 +1,7 @@
+mode_id: deductive
+thesis: Test thesis for impact validation
+top_findings:
+  - finding: Finding with invalid impact
+    impact: extreme
+    confidence: 0.8
+confidence: 0.85

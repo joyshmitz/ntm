@@ -1,0 +1,6 @@
+thesis: Test thesis without mode_id
+top_findings:
+  - finding: Finding without mode context
+    impact: high
+    confidence: 0.9
+confidence: 0.80

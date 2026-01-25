@@ -1,0 +1,5 @@
+{invalid yaml syntax
+  mode_id: broken
+  thesis: this won't parse
+  top_findings: [
+    - finding: incomplete array

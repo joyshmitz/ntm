@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1333,11 +1334,25 @@ func loadRobotSendMessage(msg, msgFile string) (string, error) {
 	if msgFile == "" {
 		return msg, nil
 	}
-	data, err := os.ReadFile(msgFile)
+
+	f, err := os.Open(msgFile)
+	if err != nil {
+		return "", fmt.Errorf("open msg file: %w", err)
+	}
+	defer f.Close()
+
+	// Read up to 10MB + 1 byte to detect truncation
+	limit := int64(10 * 1024 * 1024)
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return "", fmt.Errorf("read msg file: %w", err)
 	}
-	if strings.TrimSpace(string(data)) == "" {
+
+	if int64(len(data)) > limit {
+		return "", fmt.Errorf("message file too large (max 10MB)")
+	}
+
+	if len(data) == 0 || strings.TrimSpace(string(data)) == "" {
 		return "", fmt.Errorf("message file is empty")
 	}
 	return string(data), nil

@@ -1,0 +1,7 @@
+mode_id: deductive
+thesis: The conclusion follows logically from the premises
+top_findings:
+  - finding: Premise 1 is true based on axiom A
+    impact: high
+    confidence: 0.95
+confidence: 0.90

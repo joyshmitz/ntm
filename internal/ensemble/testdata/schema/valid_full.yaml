@@ -1,0 +1,34 @@
+mode_id: bayesian-inference
+thesis: Evidence strongly supports hypothesis A with high confidence
+top_findings:
+  - finding: Statistical correlation is significant (p < 0.001)
+    impact: critical
+    confidence: 0.95
+    evidence_pointer: internal/analysis/stats.go:142
+  - finding: Prior probability was underestimated
+    impact: high
+    confidence: 0.88
+  - finding: Secondary indicators align with primary evidence
+    impact: medium
+    confidence: 0.72
+risks:
+  - risk: Sample size may be insufficient for strong claims
+    impact: medium
+    likelihood: 0.35
+  - risk: Confounding variables not fully controlled
+    impact: high
+    likelihood: 0.20
+recommendations:
+  - recommendation: Increase sample size to N=1000 for statistical power
+    priority: high
+  - recommendation: Run validation with independent dataset
+    priority: critical
+questions_for_user:
+  - question: Should we prioritize speed or thoroughness in the next iteration?
+  - question: Are there additional data sources we should consider?
+failure_modes_to_watch:
+  - mode: confirmation-bias
+    description: Tendency to favor evidence supporting initial hypothesis
+  - mode: availability-heuristic
+    description: Overweighting easily recalled examples
+confidence: 0.87

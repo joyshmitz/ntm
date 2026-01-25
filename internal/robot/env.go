@@ -251,9 +251,10 @@ func detectTmuxResurrect() bool {
 	return strings.Contains(string(content), "tmux-resurrect")
 }
 
-// PrintEnv outputs environment info for a session (or global if no session)
-func PrintEnv(session string) error {
-	output := EnvOutput{
+// GetEnv returns environment info for a session (or global if no session).
+// This function returns the data struct directly, enabling CLI/REST parity.
+func GetEnv(session string) (*EnvOutput, error) {
+	output := &EnvOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       session,
 		Tmux:          DetectTmuxEnv(),
@@ -284,6 +285,16 @@ func PrintEnv(session string) error {
 	// Detect shell environment
 	output.Shell = detectShellEnv()
 
+	return output, nil
+}
+
+// PrintEnv outputs environment info for a session (or global if no session).
+// This is a thin wrapper around GetEnv() for CLI output.
+func PrintEnv(session string) error {
+	output, err := GetEnv(session)
+	if err != nil {
+		return err
+	}
 	return encodeJSON(output)
 }
 

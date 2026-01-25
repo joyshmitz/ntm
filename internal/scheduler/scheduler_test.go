@@ -358,6 +358,7 @@ func TestScheduler_Retry(t *testing.T) {
 	cfg.GlobalRateLimit.MinInterval = 0
 	cfg.DefaultRetries = 2
 	cfg.DefaultRetryDelay = 10 * time.Millisecond
+	cfg.Headroom.Enabled = false // Disable headroom for retry-focused test
 
 	scheduler := New(cfg)
 
