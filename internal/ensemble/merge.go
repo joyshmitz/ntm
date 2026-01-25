@@ -70,6 +70,8 @@ type MergedFinding struct {
 	Finding     Finding  `json:"finding"`
 	SourceModes []string `json:"source_modes"`
 	MergeScore  float64  `json:"merge_score"`
+	// ProvenanceID links the merged finding back to its primary provenance chain.
+	ProvenanceID string `json:"provenance_id,omitempty"`
 }
 
 // MergedRisk wraps a risk with provenance.
@@ -100,6 +102,11 @@ type MergeStats struct {
 
 // MergeOutputs performs mechanical merging of multiple mode outputs.
 func MergeOutputs(outputs []ModeOutput, cfg MergeConfig) *MergedOutput {
+	return MergeOutputsWithProvenance(outputs, cfg, nil)
+}
+
+// MergeOutputsWithProvenance performs mechanical merging and records provenance if provided.
+func MergeOutputsWithProvenance(outputs []ModeOutput, cfg MergeConfig, tracker *ProvenanceTracker) *MergedOutput {
 	start := time.Now()
 
 	result := &MergedOutput{
@@ -116,7 +123,7 @@ func MergeOutputs(outputs []ModeOutput, cfg MergeConfig) *MergedOutput {
 	}
 
 	// Merge findings
-	result.Findings, result.Stats.TotalFindings, result.Stats.DedupedFindings = mergeFindings(outputs, cfg)
+	result.Findings, result.Stats.TotalFindings, result.Stats.DedupedFindings = mergeFindings(outputs, cfg, tracker)
 
 	// Merge risks
 	result.Risks, result.Stats.TotalRisks, result.Stats.DedupedRisks = mergeRisks(outputs, cfg)
@@ -136,11 +143,12 @@ func MergeOutputs(outputs []ModeOutput, cfg MergeConfig) *MergedOutput {
 }
 
 // mergeFindings deduplicates and ranks findings from multiple outputs.
-func mergeFindings(outputs []ModeOutput, cfg MergeConfig) ([]MergedFinding, int, int) {
+func mergeFindings(outputs []ModeOutput, cfg MergeConfig, tracker *ProvenanceTracker) ([]MergedFinding, int, int) {
 	type findingEntry struct {
-		finding     Finding
-		sourceModes []string
-		score       float64
+		finding        Finding
+		sourceModes    []string
+		score          float64
+		provenanceIDs  []string
 	}
 
 	// Collect all findings
@@ -148,7 +156,14 @@ func mergeFindings(outputs []ModeOutput, cfg MergeConfig) ([]MergedFinding, int,
 	for _, o := range outputs {
 		modeConf := float64(o.Confidence)
 		for _, f := range o.TopFindings {
+			provID := ""
+			if tracker != nil {
+				provID = tracker.RecordDiscovery(o.ModeID, f)
+			}
 			if float64(f.Confidence) < float64(cfg.MinConfidence) {
+				if tracker != nil && provID != "" {
+					_ = tracker.RecordFilter(provID, "below min confidence")
+				}
 				continue
 			}
 			score := float64(f.Confidence)
@@ -158,10 +173,15 @@ func mergeFindings(outputs []ModeOutput, cfg MergeConfig) ([]MergedFinding, int,
 			if cfg.PreferHighImpact {
 				score *= impactWeight(f.Impact)
 			}
+			var provenanceIDs []string
+			if provID != "" {
+				provenanceIDs = []string{provID}
+			}
 			all = append(all, findingEntry{
-				finding:     f,
-				sourceModes: []string{o.ModeID},
-				score:       score,
+				finding:       f,
+				sourceModes:   []string{o.ModeID},
+				score:         score,
+				provenanceIDs: provenanceIDs,
 			})
 		}
 	}
@@ -171,17 +191,28 @@ func mergeFindings(outputs []ModeOutput, cfg MergeConfig) ([]MergedFinding, int,
 	// Deduplicate by similarity
 	merged := deduplicateEntries(all, cfg.DeduplicationThreshold,
 		func(e findingEntry) string { return e.finding.Finding },
-		func(a, b findingEntry) findingEntry {
+		func(a, b findingEntry, similarity float64) findingEntry {
 			// Merge: combine source modes, take higher score
 			combined := append(a.sourceModes, b.sourceModes...)
 			score := a.score
 			if b.score > score {
 				score = b.score
 			}
+			combinedIDs := append(a.provenanceIDs, b.provenanceIDs...)
+			if tracker != nil {
+				primaryID := ""
+				if len(a.provenanceIDs) > 0 {
+					primaryID = a.provenanceIDs[0]
+				}
+				if primaryID != "" && len(b.provenanceIDs) > 0 {
+					_ = tracker.RecordMerge(primaryID, b.provenanceIDs, similarity)
+				}
+			}
 			return findingEntry{
-				finding:     a.finding,
-				sourceModes: uniqueStrings(combined),
-				score:       score * 1.1, // Boost for agreement
+				finding:       a.finding,
+				sourceModes:   uniqueStrings(combined),
+				score:         score * 1.1, // Boost for agreement
+				provenanceIDs: combinedIDs,
 			}
 		},
 	)
@@ -193,16 +224,30 @@ func mergeFindings(outputs []ModeOutput, cfg MergeConfig) ([]MergedFinding, int,
 
 	// Limit
 	if cfg.MaxFindings > 0 && len(merged) > cfg.MaxFindings {
+		if tracker != nil {
+			for _, dropped := range merged[cfg.MaxFindings:] {
+				for _, id := range dropped.provenanceIDs {
+					if id != "" {
+						_ = tracker.RecordFilter(id, "trimmed by max findings limit")
+					}
+				}
+			}
+		}
 		merged = merged[:cfg.MaxFindings]
 	}
 
 	// Convert to result type
 	result := make([]MergedFinding, len(merged))
 	for i, e := range merged {
+		primaryID := ""
+		if len(e.provenanceIDs) > 0 {
+			primaryID = e.provenanceIDs[0]
+		}
 		result[i] = MergedFinding{
-			Finding:     e.finding,
-			SourceModes: e.sourceModes,
-			MergeScore:  e.score,
+			Finding:       e.finding,
+			SourceModes:   e.sourceModes,
+			MergeScore:    e.score,
+			ProvenanceID:  primaryID,
 		}
 	}
 
@@ -237,7 +282,7 @@ func mergeRisks(outputs []ModeOutput, cfg MergeConfig) ([]MergedRisk, int, int) 
 
 	merged := deduplicateEntries(all, cfg.DeduplicationThreshold,
 		func(e riskEntry) string { return e.risk.Risk },
-		func(a, b riskEntry) riskEntry {
+		func(a, b riskEntry, _ float64) riskEntry {
 			combined := append(a.sourceModes, b.sourceModes...)
 			score := a.score
 			if b.score > score {
@@ -299,7 +344,7 @@ func mergeRecommendations(outputs []ModeOutput, cfg MergeConfig) ([]MergedRecomm
 
 	merged := deduplicateEntries(all, cfg.DeduplicationThreshold,
 		func(e recEntry) string { return e.rec.Recommendation },
-		func(a, b recEntry) recEntry {
+		func(a, b recEntry, _ float64) recEntry {
 			combined := append(a.sourceModes, b.sourceModes...)
 			score := a.score
 			if b.score > score {
@@ -338,7 +383,7 @@ func deduplicateEntries[T any](
 	entries []T,
 	threshold float64,
 	textFn func(T) string,
-	mergeFn func(a, b T) T,
+	mergeFn func(a, b T, similarity float64) T,
 ) []T {
 	if len(entries) == 0 {
 		return nil
@@ -368,7 +413,7 @@ func deduplicateEntries[T any](
 
 			similarity := jaccardSimilarity(currentTokens, otherTokens)
 			if similarity >= threshold {
-				current = mergeFn(current, entries[j])
+				current = mergeFn(current, entries[j], similarity)
 				merged[j] = true
 			}
 		}

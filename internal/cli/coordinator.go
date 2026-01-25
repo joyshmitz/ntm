@@ -113,9 +113,6 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer coord.Stop()
 
-	// Give it a moment to poll
-	time.Sleep(500 * time.Millisecond)
-
 	agents := coord.GetAgents()
 	idleAgents := coord.GetIdleAgents()
 
@@ -298,8 +295,6 @@ func runCoordinatorDigest(cmd *cobra.Command, args []string, sendMail bool) erro
 		return fmt.Errorf("starting coordinator: %w", err)
 	}
 	defer coord.Stop()
-
-	time.Sleep(500 * time.Millisecond)
 
 	digest := coord.GenerateDigest()
 
@@ -529,8 +524,6 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 		return fmt.Errorf("starting coordinator: %w", err)
 	}
 	defer coord.Stop()
-
-	time.Sleep(500 * time.Millisecond)
 
 	// Get idle agents and assignable work
 	idleAgents := coord.GetIdleAgents()

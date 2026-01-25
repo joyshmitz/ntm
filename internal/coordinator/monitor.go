@@ -86,11 +86,10 @@ func (m *AgentMonitor) GetAllAgentStatuses() (map[string]AgentStatusResult, erro
 
 	results := make(map[string]AgentStatusResult)
 	for _, pane := range panes {
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" {
+		if pane.Type == tmux.AgentUser || pane.Type == tmux.AgentUnknown {
 			continue // Skip non-agent panes
 		}
-		results[pane.ID] = m.GetAgentStatus(pane.ID, agentType)
+		results[pane.ID] = m.GetAgentStatus(pane.ID, string(pane.Type))
 	}
 
 	return results, nil

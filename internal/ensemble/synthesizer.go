@@ -72,7 +72,7 @@ func (s *Synthesizer) Synthesize(input *SynthesisInput) (*SynthesisResult, error
 
 // mechanicalSynthesize performs deterministic merging without an AI agent.
 func (s *Synthesizer) mechanicalSynthesize(input *SynthesisInput) (*SynthesisResult, error) {
-	merged := MergeOutputs(input.Outputs, s.MergeConfig)
+	merged := MergeOutputsWithProvenance(input.Outputs, s.MergeConfig, input.Provenance)
 
 	// Convert merged findings to plain findings
 	findings := make([]Finding, 0, len(merged.Findings))
@@ -100,6 +100,24 @@ func (s *Synthesizer) mechanicalSynthesize(input *SynthesisInput) (*SynthesisRes
 		QuestionsForUser: merged.Questions,
 		Confidence:       AverageConfidence(input.Outputs),
 		GeneratedAt:      time.Now().UTC(),
+	}
+
+	if input.Provenance != nil {
+		for i, mf := range merged.Findings {
+			if mf.ProvenanceID != "" {
+				_ = input.Provenance.RecordSynthesisCitation(mf.ProvenanceID, fmt.Sprintf("findings[%d]", i))
+			}
+		}
+	}
+
+	// Generate explanation layer if requested
+	if s.Config.IncludeExplanation {
+		explTracker := NewExplanationTracker(input.Provenance)
+		BuildExplanationFromMerge(explTracker, merged, s.Strategy)
+		if input.AuditReport != nil {
+			BuildExplanationFromConflicts(explTracker, input.AuditReport)
+		}
+		result.Explanation = explTracker.GenerateLayer()
 	}
 
 	return result, nil

@@ -56,6 +56,11 @@ type SessionStatusInput struct {
 	ShowSummary     bool     `json:"summary,omitempty"`
 }
 
+// SessionAttachInput is the kernel input for sessions.attach.
+type SessionAttachInput struct {
+	Session string `json:"session"`
+}
+
 type paneContextUsage struct {
 	Tokens  int
 	Limit   int
@@ -174,6 +179,48 @@ func init() {
 		}
 		return buildStatusResponse(opts.Session, statusOpts)
 	})
+
+	kernel.MustRegister(kernel.Command{
+		Name:        "sessions.attach",
+		Description: "Attach to a session",
+		Category:    "sessions",
+		Input: &kernel.SchemaRef{
+			Name: "SessionAttachInput",
+			Ref:  "cli.SessionAttachInput",
+		},
+		Output: &kernel.SchemaRef{
+			Name: "SessionResponse",
+			Ref:  "output.SessionResponse",
+		},
+		REST: &kernel.RESTBinding{
+			Method: "POST",
+			Path:   "/sessions/{sessionId}/attach",
+		},
+		Examples: []kernel.Example{
+			{
+				Name:        "attach",
+				Description: "Attach to session",
+				Command:     "ntm attach myproject",
+			},
+		},
+		SafetyLevel: kernel.SafetySafe,
+		Idempotent:  false,
+	})
+	kernel.MustRegisterHandler("sessions.attach", func(ctx context.Context, input any) (any, error) {
+		opts := SessionAttachInput{}
+		switch value := input.(type) {
+		case SessionAttachInput:
+			opts = value
+		case *SessionAttachInput:
+			if value != nil {
+				opts = *value
+			}
+		}
+		if strings.TrimSpace(opts.Session) == "" {
+			return nil, fmt.Errorf("session is required")
+		}
+		return buildAttachResponse(opts.Session)
+	})
 }
 
 // filterAssignments filters assignments by status, agent type, and pane number.
@@ -231,6 +278,18 @@ Examples:
 }
 
 func runAttach(session string) error {
+	if IsJSONOutput() {
+		result, err := kernel.Run(context.Background(), "sessions.attach", SessionAttachInput{Session: session})
+		if err != nil {
+			return output.PrintJSON(output.NewError(err.Error()))
+		}
+		resp, err := coerceSessionResponse(result)
+		if err != nil {
+			return output.PrintJSON(output.NewError(err.Error()))
+		}
+		return output.PrintJSON(resp)
+	}
+
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -517,7 +576,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 	dir := cfg.GetProjectDir(session)
 
 	// Load handoff info (best-effort)
-	var handoffGoal, handoffNow, handoffStatus string
+	var handoffGoal, handoffNow, handoffStatus, handoffPath string
 	var handoffAge time.Duration
 	{
 		reader := handoff.NewReader(dir)
@@ -525,7 +584,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 			handoffGoal = goal
 			handoffNow = now
 		}
-		if h, _, err := reader.FindLatest(session); err == nil && h != nil {
+		if h, path, err := reader.FindLatest(session); err == nil && h != nil {
 			if handoffGoal == "" {
 				handoffGoal = h.Goal
 			}
@@ -533,6 +592,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 				handoffNow = h.Now
 			}
 			handoffStatus = h.Status
+			handoffPath = path
 			handoffAge = time.Since(h.CreatedAt)
 		}
 	}
@@ -674,6 +734,48 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 	}
 
 	return resp, nil
+}
+
+func coerceSessionResponse(result any) (output.SessionResponse, error) {
+	switch value := result.(type) {
+	case output.SessionResponse:
+		return value, nil
+	case *output.SessionResponse:
+		if value != nil {
+			return *value, nil
+		}
+		return output.SessionResponse{}, fmt.Errorf("sessions.attach returned nil response")
+	default:
+		return output.SessionResponse{}, fmt.Errorf("sessions.attach returned unexpected type %T", result)
+	}
+}
+
+func buildAttachResponse(session string) (output.SessionResponse, error) {
+	if err := tmux.EnsureInstalled(); err != nil {
+		return output.SessionResponse{}, err
+	}
+
+	if !tmux.SessionExists(session) {
+		return output.SessionResponse{
+			Session: session,
+			Exists:  false,
+		}, nil
+	}
+
+	attached := false
+	sessions, _ := tmux.ListSessions()
+	for _, s := range sessions {
+		if s.Name == session {
+			attached = s.Attached
+			break
+		}
+	}
+
+	return output.SessionResponse{
+		Session:  session,
+		Exists:   true,
+		Attached: attached,
+	}, nil
 }
 func newStatusCmd() *cobra.Command {
 	var tags []string

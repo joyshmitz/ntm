@@ -21,10 +21,11 @@ const (
 
 // SynthesisFormatter formats synthesis results for output.
 type SynthesisFormatter struct {
-	Format      OutputFormat
-	IncludeRaw  bool
-	IncludeAudit bool
-	Verbose     bool
+	Format             OutputFormat
+	IncludeRaw         bool
+	IncludeAudit       bool
+	IncludeExplanation bool
+	Verbose            bool
 }
 
 // NewSynthesisFormatter creates a formatter with the given format.
@@ -202,6 +203,60 @@ func (f *SynthesisFormatter) formatMarkdown(w io.Writer, result *SynthesisResult
 				b.WriteString(fmt.Sprintf("- %s\n", s))
 			}
 			b.WriteString("\n")
+		}
+	}
+
+	// Explanation Layer
+	if f.IncludeExplanation && result.Explanation != nil {
+		b.WriteString("## Synthesis Explanation\n\n")
+
+		if result.Explanation.StrategyRationale != "" {
+			b.WriteString("### Strategy Rationale\n\n")
+			b.WriteString(result.Explanation.StrategyRationale)
+			b.WriteString("\n\n")
+		}
+
+		if len(result.Explanation.ModeWeights) > 0 {
+			b.WriteString("### Mode Weights\n\n")
+			b.WriteString("| Mode | Weight |\n")
+			b.WriteString("|------|--------|\n")
+			for mode, weight := range result.Explanation.ModeWeights {
+				b.WriteString(fmt.Sprintf("| %s | %.2f |\n", mode, weight))
+			}
+			b.WriteString("\n")
+		}
+
+		if len(result.Explanation.Conclusions) > 0 {
+			b.WriteString("### Conclusion Reasoning\n\n")
+			for i, c := range result.Explanation.Conclusions {
+				b.WriteString(fmt.Sprintf("#### %d. [%s] %s\n\n", i+1, c.Type, truncate(c.Text, 60)))
+				b.WriteString(fmt.Sprintf("- **Sources:** %s\n", strings.Join(c.SourceModes, ", ")))
+				b.WriteString(fmt.Sprintf("- **Confidence:** %.0f%%\n", float64(c.Confidence)*100))
+				if c.ConfidenceBasis != "" {
+					b.WriteString(fmt.Sprintf("- **Basis:** %s\n", c.ConfidenceBasis))
+				}
+				if c.Reasoning != "" {
+					b.WriteString(fmt.Sprintf("- **Reasoning:** %s\n", c.Reasoning))
+				}
+				if len(c.SourceFindings) > 0 {
+					b.WriteString(fmt.Sprintf("- **Source findings:** %s\n", strings.Join(c.SourceFindings, ", ")))
+				}
+				b.WriteString("\n")
+			}
+		}
+
+		if len(result.Explanation.ConflictsResolved) > 0 {
+			b.WriteString("### Conflict Resolutions\n\n")
+			for i, cr := range result.Explanation.ConflictsResolved {
+				b.WriteString(fmt.Sprintf("#### %d. %s\n\n", i+1, cr.Topic))
+				b.WriteString(fmt.Sprintf("- **Method:** %s\n", cr.Method))
+				b.WriteString(fmt.Sprintf("- **Resolution:** %s\n", cr.Resolution))
+				b.WriteString("- **Positions:**\n")
+				for _, p := range cr.Positions {
+					b.WriteString(fmt.Sprintf("  - %s: %s (strength: %.2f)\n", p.ModeID, truncate(p.Position, 50), p.Strength))
+				}
+				b.WriteString("\n")
+			}
 		}
 	}
 

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -13,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -24,6 +27,69 @@ var (
 	healthPane     int
 	healthStatus   string
 )
+
+// SessionHealthInput is the kernel input for sessions.health.
+type SessionHealthInput struct {
+	Session string `json:"session"`
+	Pane    *int   `json:"pane,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Verbose bool   `json:"verbose,omitempty"`
+}
+
+// HealthOutput mirrors the JSON output for the health command.
+type HealthOutput struct {
+	*health.SessionHealth
+	Error string `json:"error,omitempty"`
+}
+
+func init() {
+	kernel.MustRegister(kernel.Command{
+		Name:        "sessions.health",
+		Description: "Session health status summary",
+		Category:    "sessions",
+		Input: &kernel.SchemaRef{
+			Name: "SessionHealthInput",
+			Ref:  "cli.SessionHealthInput",
+		},
+		Output: &kernel.SchemaRef{
+			Name: "HealthOutput",
+			Ref:  "cli.HealthOutput",
+		},
+		REST: &kernel.RESTBinding{
+			Method: "GET",
+			Path:   "/sessions/{sessionId}/health",
+		},
+		Examples: []kernel.Example{
+			{
+				Name:        "health",
+				Description: "Check session health",
+				Command:     "ntm health myproject",
+			},
+			{
+				Name:        "health-filtered",
+				Description: "Check session health for a specific pane",
+				Command:     "ntm health myproject --pane 1",
+			},
+		},
+		SafetyLevel: kernel.SafetySafe,
+		Idempotent:  true,
+	})
+	kernel.MustRegisterHandler("sessions.health", func(ctx context.Context, input any) (any, error) {
+		opts := SessionHealthInput{}
+		switch value := input.(type) {
+		case SessionHealthInput:
+			opts = value
+		case *SessionHealthInput:
+			if value != nil {
+				opts = *value
+			}
+		}
+		if strings.TrimSpace(opts.Session) == "" {
+			return nil, fmt.Errorf("session is required")
+		}
+		return buildHealthOutput(opts)
+	})
+}
 
 func newHealthCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -105,16 +171,36 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 // runHealthOnce performs a single health check and outputs the result
 func runHealthOnce(session string) error {
+	if jsonOutput {
+		var pane *int
+		if healthPane >= 0 {
+			pane = &healthPane
+		}
+		result, err := kernel.Run(context.Background(), "sessions.health", SessionHealthInput{
+			Session: session,
+			Pane:    pane,
+			Status:  healthStatus,
+			Verbose: healthVerbose,
+		})
+		if err != nil {
+			return encodeHealthOutput(HealthOutput{
+				SessionHealth: &health.SessionHealth{Session: session},
+				Error:         err.Error(),
+			})
+		}
+		output, err := coerceHealthOutput(result)
+		if err != nil {
+			return encodeHealthOutput(HealthOutput{
+				SessionHealth: &health.SessionHealth{Session: session},
+				Error:         err.Error(),
+			})
+		}
+		return encodeHealthOutput(output)
+	}
+
 	result, err := health.CheckSession(session)
 	if err != nil {
 		if _, ok := err.(*health.SessionNotFoundError); ok {
-			if jsonOutput {
-				return outputHealthJSON(&health.SessionHealth{
-					Session: session,
-					Summary: health.HealthSummary{},
-					Agents:  []health.AgentHealth{},
-				}, fmt.Errorf("session '%s' not found", session))
-			}
 			return fmt.Errorf("session '%s' not found", session)
 		}
 		return err
@@ -125,10 +211,6 @@ func runHealthOnce(session string) error {
 
 	// Enrich with tracker data (uptime, restarts)
 	enrichHealthResult(session, result)
-
-	if jsonOutput {
-		return outputHealthJSON(result, nil)
-	}
 
 	return renderHealthTUI(result)
 }
@@ -170,7 +252,11 @@ func clearScreen() {
 
 // filterHealthResult applies pane and status filters to the result
 func filterHealthResult(result *health.SessionHealth) *health.SessionHealth {
-	if healthPane < 0 && healthStatus == "" {
+	return filterHealthResultWithOptions(result, healthPane, healthStatus)
+}
+
+func filterHealthResultWithOptions(result *health.SessionHealth, paneFilter int, statusFilter string) *health.SessionHealth {
+	if paneFilter < 0 && statusFilter == "" {
 		return result // No filters
 	}
 
@@ -184,14 +270,14 @@ func filterHealthResult(result *health.SessionHealth) *health.SessionHealth {
 
 	for _, agent := range result.Agents {
 		// Pane filter
-		if healthPane >= 0 && agent.Pane != healthPane {
+		if paneFilter >= 0 && agent.Pane != paneFilter {
 			continue
 		}
 
 		// Status filter
-		if healthStatus != "" {
+		if statusFilter != "" {
 			statusStr := strings.ToLower(string(agent.Status))
-			if statusStr != healthStatus {
+			if statusStr != statusFilter {
 				continue
 			}
 		}
@@ -236,6 +322,10 @@ func statusSeverity(s health.Status) int {
 
 // enrichHealthResult adds uptime and restart data from the health tracker
 func enrichHealthResult(session string, result *health.SessionHealth) {
+	enrichHealthResultWithOptions(session, result, healthVerbose)
+}
+
+func enrichHealthResultWithOptions(session string, result *health.SessionHealth, verbose bool) {
 	tracker := robot.GetHealthTracker(session)
 
 	for i := range result.Agents {
@@ -263,13 +353,70 @@ func enrichHealthResult(session string, result *health.SessionHealth) {
 		}
 
 		// Add last error info if verbose and there's an error
-		if healthVerbose && metrics.LastError != nil {
+		if verbose && metrics.LastError != nil {
 			agent.Issues = append(agent.Issues, health.Issue{
 				Type:    metrics.LastError.Type,
 				Message: metrics.LastError.Message,
 			})
 		}
 	}
+}
+
+func coerceHealthOutput(result any) (HealthOutput, error) {
+	switch value := result.(type) {
+	case HealthOutput:
+		return value, nil
+	case *HealthOutput:
+		if value != nil {
+			return *value, nil
+		}
+		return HealthOutput{}, fmt.Errorf("sessions.health returned nil response")
+	default:
+		return HealthOutput{}, fmt.Errorf("sessions.health returned unexpected type %T", result)
+	}
+}
+
+func buildHealthOutput(input SessionHealthInput) (HealthOutput, error) {
+	result, err := health.CheckSession(input.Session)
+	if err != nil {
+		if _, ok := err.(*health.SessionNotFoundError); ok {
+			return HealthOutput{
+				SessionHealth: &health.SessionHealth{
+					Session: input.Session,
+					Summary: health.HealthSummary{},
+					Agents:  []health.AgentHealth{},
+				},
+				Error: fmt.Sprintf("session '%s' not found", input.Session),
+			}, nil
+		}
+		return HealthOutput{}, err
+	}
+
+	statusFilter := strings.ToLower(strings.TrimSpace(input.Status))
+	if statusFilter != "" && statusFilter != "ok" && statusFilter != "warning" && statusFilter != "error" {
+		return HealthOutput{}, fmt.Errorf("invalid status filter '%s': must be ok, warning, or error", statusFilter)
+	}
+
+	paneFilter := -1
+	if input.Pane != nil {
+		paneFilter = *input.Pane
+	}
+
+	result = filterHealthResultWithOptions(result, paneFilter, statusFilter)
+	enrichHealthResultWithOptions(input.Session, result, input.Verbose)
+
+	return HealthOutput{SessionHealth: result}, nil
+}
+
+func encodeHealthOutput(output HealthOutput) error {
+	if output.SessionHealth == nil {
+		output.SessionHealth = &health.SessionHealth{}
+	}
+	var err error
+	if output.Error != "" {
+		err = errors.New(output.Error)
+	}
+	return outputHealthJSON(output.SessionHealth, err)
 }
 
 func outputHealthJSON(result *health.SessionHealth, err error) error {

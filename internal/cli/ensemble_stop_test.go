@@ -1,0 +1,151 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/output"
+)
+
+func TestEnsembleStopOutput_JSON(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	// Test JSON marshaling of stop output
+	payload := ensembleStopOutput{
+		GeneratedAt: output.Timestamp(),
+		Session:     "test-session",
+		Success:     true,
+		Message:     "Ensemble stopped: 3 panes terminated, 2 outputs captured",
+		Captured:    2,
+		Stopped:     3,
+		Errors:      0,
+		FinalStatus: "stopped",
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatalf("JSON marshal failed: %v", err)
+	}
+	t.Logf("TEST: %s - JSON output:\n%s", t.Name(), string(data))
+
+	if !strings.Contains(string(data), "test-session") {
+		t.Error("JSON should contain session name")
+	}
+	if !strings.Contains(string(data), "stopped") {
+		t.Error("JSON should contain final status")
+	}
+
+	t.Logf("TEST: %s - assertion: JSON marshaling works", t.Name())
+}
+
+func TestRenderEnsembleStopOutput_Text(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	payload := ensembleStopOutput{
+		GeneratedAt: output.Timestamp(),
+		Session:     "test-session",
+		Success:     true,
+		Message:     "Ensemble stopped: 3 panes terminated",
+		Stopped:     3,
+		FinalStatus: "stopped",
+	}
+
+	var buf bytes.Buffer
+	err := renderEnsembleStopOutput(&buf, payload, "text", false)
+	if err != nil {
+		t.Fatalf("renderEnsembleStopOutput failed: %v", err)
+	}
+
+	output := buf.String()
+	t.Logf("TEST: %s - text output:\n%s", t.Name(), output)
+
+	if !strings.Contains(output, "test-session") {
+		t.Error("Output should contain session name")
+	}
+	if !strings.Contains(output, "stopped") {
+		t.Error("Output should contain status")
+	}
+	if !strings.Contains(output, "3 panes") {
+		t.Error("Output should contain pane count")
+	}
+
+	t.Logf("TEST: %s - assertion: text rendering works", t.Name())
+}
+
+func TestRenderEnsembleStopOutput_Quiet(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	payload := ensembleStopOutput{
+		GeneratedAt: output.Timestamp(),
+		Session:     "test-session",
+		Success:     true,
+		FinalStatus: "stopped",
+	}
+
+	var buf bytes.Buffer
+	err := renderEnsembleStopOutput(&buf, payload, "text", true)
+	if err != nil {
+		t.Fatalf("renderEnsembleStopOutput failed: %v", err)
+	}
+
+	output := buf.String()
+	t.Logf("TEST: %s - quiet output: %q", t.Name(), output)
+
+	if output != "stopped\n" {
+		t.Errorf("Quiet output should be 'stopped\\n', got %q", output)
+	}
+
+	t.Logf("TEST: %s - assertion: quiet mode works", t.Name())
+}
+
+func TestRenderEnsembleStopOutput_Error(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	payload := ensembleStopOutput{
+		GeneratedAt: output.Timestamp(),
+		Session:     "test-session",
+		Success:     false,
+		Error:       "failed to kill session",
+		FinalStatus: "active",
+	}
+
+	var buf bytes.Buffer
+	err := renderEnsembleStopOutput(&buf, payload, "text", true)
+	if err != nil {
+		t.Fatalf("renderEnsembleStopOutput failed: %v", err)
+	}
+
+	output := buf.String()
+	t.Logf("TEST: %s - error output: %q", t.Name(), output)
+
+	if !strings.Contains(output, "error:") {
+		t.Error("Error output should contain 'error:'")
+	}
+
+	t.Logf("TEST: %s - assertion: error handling works", t.Name())
+}
+
+func TestNewEnsembleStopCmd(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	cmd := newEnsembleStopCmd()
+	if cmd == nil {
+		t.Fatal("newEnsembleStopCmd returned nil")
+	}
+
+	if cmd.Use != "stop [session]" {
+		t.Errorf("Use = %q, want 'stop [session]'", cmd.Use)
+	}
+
+	// Check flags exist
+	flags := []string{"force", "no-collect", "quiet", "format"}
+	for _, name := range flags {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("Flag --%s should exist", name)
+		}
+	}
+
+	t.Logf("TEST: %s - assertion: command created with correct flags", t.Name())
+}

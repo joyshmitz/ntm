@@ -263,14 +263,29 @@ func TestRetryLogic(t *testing.T) {
 		t.Errorf("dispatch failed: %v", err)
 	}
 
-	// Wait for retries
-	time.Sleep(500 * time.Millisecond)
+	// Poll for 3 attempts (2 failures + 1 success)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if attempts.Load() >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	if attempts.Load() != 3 {
 		t.Errorf("expected 3 attempts (2 failures + 1 success), got %d", attempts.Load())
 	}
 
-	stats := m.Stats()
+	// Poll for stats delivery count
+	var stats Stats
+	for time.Now().Before(deadline) {
+		stats = m.Stats()
+		if stats.Deliveries >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if stats.Deliveries != 1 {
 		t.Errorf("expected 1 successful delivery, got %d", stats.Deliveries)
 	}
@@ -318,15 +333,22 @@ func TestNoRetryOn4xx(t *testing.T) {
 		t.Errorf("dispatch failed: %v", err)
 	}
 
-	// Wait for processing
-	time.Sleep(200 * time.Millisecond)
+	// Poll for dead letter to appear (4xx goes directly to dead letter, no retry)
+	deadline := time.Now().Add(5 * time.Second)
+	var stats Stats
+	for time.Now().Before(deadline) {
+		stats = m.Stats()
+		if stats.DeadLetterCount >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Should only attempt once (no retry on 4xx)
 	if attempts.Load() != 1 {
 		t.Errorf("expected 1 attempt (no retry on 4xx), got %d", attempts.Load())
 	}
 
-	stats := m.Stats()
 	if stats.Failures != 1 {
 		t.Errorf("expected 1 failure, got %d", stats.Failures)
 	}
@@ -381,8 +403,14 @@ func TestRetryOn429(t *testing.T) {
 		t.Errorf("dispatch failed: %v", err)
 	}
 
-	// Wait for retry
-	time.Sleep(200 * time.Millisecond)
+	// Poll for second attempt (retry on 429)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if attempts.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Should retry on 429
 	if attempts.Load() != 2 {
@@ -431,10 +459,17 @@ func TestDeadLetterQueue(t *testing.T) {
 		t.Errorf("dispatch failed: %v", err)
 	}
 
-	// Wait for all retries to exhaust
-	time.Sleep(500 * time.Millisecond)
+	// Poll for dead letter to appear after all retries exhaust
+	deadline := time.Now().Add(5 * time.Second)
+	var deadLetters []DeadLetter
+	for time.Now().Before(deadline) {
+		deadLetters = m.DeadLetters()
+		if len(deadLetters) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	deadLetters := m.DeadLetters()
 	if len(deadLetters) != 1 {
 		t.Errorf("expected 1 dead letter, got %d", len(deadLetters))
 	}
@@ -764,8 +799,14 @@ func TestConcurrentDispatch(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Wait for all deliveries
-	time.Sleep(2 * time.Second)
+	// Poll for all 100 deliveries
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if received.Load() >= 100 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	if received.Load() != 100 {
 		t.Errorf("expected 100 deliveries, got %d", received.Load())

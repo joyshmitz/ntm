@@ -72,6 +72,9 @@ type SynthesisInput struct {
 
 	// AuditReport is the pre-computed disagreement analysis.
 	AuditReport *AuditReport `json:"audit_report,omitempty"`
+
+	// Provenance tracks finding lineage across merge and synthesis.
+	Provenance *ProvenanceTracker `json:"-" yaml:"-"`
 }
 
 // NewOutputCollector creates a collector with the given config.

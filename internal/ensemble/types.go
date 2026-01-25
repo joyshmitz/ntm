@@ -320,6 +320,8 @@ const (
 	EnsembleComplete EnsembleStatus = "complete"
 	// EnsembleError means an error occurred during the run.
 	EnsembleError EnsembleStatus = "error"
+	// EnsembleStopped means the ensemble was manually stopped.
+	EnsembleStopped EnsembleStatus = "stopped"
 )
 
 // String returns the status as a string.
@@ -327,9 +329,9 @@ func (s EnsembleStatus) String() string {
 	return string(s)
 }
 
-// IsTerminal returns true if this is a final status (complete or error).
+// IsTerminal returns true if this is a final status (complete, error, or stopped).
 func (s EnsembleStatus) IsTerminal() bool {
-	return s == EnsembleComplete || s == EnsembleError
+	return s == EnsembleComplete || s == EnsembleError || s == EnsembleStopped
 }
 
 // EnsembleSession tracks a reasoning ensemble session.
@@ -1182,6 +1184,9 @@ type SynthesisConfig struct {
 
 	// ConflictResolution specifies how to handle disagreements.
 	ConflictResolution string `json:"conflict_resolution,omitempty" toml:"conflict_resolution" yaml:"conflict_resolution,omitempty"`
+
+	// IncludeExplanation generates detailed reasoning for each conclusion.
+	IncludeExplanation bool `json:"include_explanation,omitempty" toml:"include_explanation" yaml:"include_explanation,omitempty"`
 }
 
 // DefaultSynthesisConfig returns sensible default synthesis settings.

@@ -324,6 +324,17 @@ Shell Integration:
 			}
 			return
 		}
+		if robotEnsembleStop != "" {
+			opts := robot.EnsembleStopOptions{
+				Force:     robotEnsembleStopForce,
+				NoCollect: robotEnsembleStopNoCollect,
+			}
+			if err := robot.PrintEnsembleStop(robotEnsembleStop, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotTools {
 			if err := robot.PrintTools(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1406,6 +1417,9 @@ var (
 	robotEnsembleProject       string // project directory override
 	robotEnsembleSuggest       string // question for ensemble suggestion
 	robotEnsembleSuggestIDOnly bool   // output only preset name
+	robotEnsembleStop          string // session name to stop
+	robotEnsembleStopForce     bool   // force kill without graceful shutdown
+	robotEnsembleStopNoCollect bool   // skip partial output collection
 
 	// Robot-send flags
 	robotSend        string // session name for send
@@ -1771,6 +1785,9 @@ func init() {
 	rootCmd.Flags().StringVar(&robotEnsembleProject, "project", "", "Project directory override for ensemble spawn")
 	rootCmd.Flags().StringVar(&robotEnsembleSuggest, "robot-ensemble-suggest", "", "Suggest best ensemble preset for a question. Example: ntm --robot-ensemble-suggest=\"What security issues exist?\"")
 	rootCmd.Flags().BoolVar(&robotEnsembleSuggestIDOnly, "suggest-id-only", false, "Output only preset name with --robot-ensemble-suggest")
+	rootCmd.Flags().StringVar(&robotEnsembleStop, "robot-ensemble-stop", "", "Stop an ensemble and save partial state. Required: SESSION. Example: ntm --robot-ensemble-stop=myproject")
+	rootCmd.Flags().BoolVar(&robotEnsembleStopForce, "stop-force", false, "Force kill without graceful shutdown. Optional with --robot-ensemble-stop")
+	rootCmd.Flags().BoolVar(&robotEnsembleStopNoCollect, "stop-no-collect", false, "Skip partial output collection. Optional with --robot-ensemble-stop")
 	rootCmd.Flags().IntVar(&robotBeadLimit, "bead-limit", 5, "Max beads per category in snapshot. Optional with --robot-snapshot, --robot-status. Example: --bead-limit=10")
 	rootCmd.Flags().StringVar(&robotVerbosity, "robot-verbosity", "", "Robot verbosity profile for JSON/TOON: terse, default, or debug. Env: NTM_ROBOT_VERBOSITY")
 
@@ -3052,7 +3069,7 @@ func needsConfigLoading(cmdName string) bool {
 			robotSend != "" || robotAck != "" || robotSpawn != "" ||
 			robotInterrupt != "" || robotRestartPane != "" || robotGraph || robotMail || robotHealth != "" ||
 			robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
-			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
+			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
 			robotSmartRestart != "" || robotMonitor != "" {
 			return true
 		}

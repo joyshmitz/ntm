@@ -864,6 +864,26 @@ func spawnSessionLogic(opts SpawnOptions) error {
 		}
 	}
 
+	getPanesWithRetry := func(session string, attempts int, delay time.Duration) ([]tmux.Pane, error) {
+		var lastErr error
+		for i := 0; i < attempts; i++ {
+			panes, err := tmux.GetPanes(session)
+			if err == nil {
+				return panes, nil
+			}
+			lastErr = err
+			if i == attempts-1 {
+				break
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "can't find window") && !strings.Contains(msg, "can't find session") {
+				break
+			}
+			time.Sleep(delay)
+		}
+		return nil, lastErr
+	}
+
 	// Create worktrees if enabled
 	var worktreeManager *worktrees.WorktreeManager
 	if opts.UseWorktrees {
@@ -889,7 +909,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 	}
 
 	// Get current pane count
-	panes, err := tmux.GetPanes(opts.Session)
+	panes, err := getPanesWithRetry(opts.Session, 5, 100*time.Millisecond)
 	if err != nil {
 		return outputError(err)
 	}
@@ -915,7 +935,7 @@ func spawnSessionLogic(opts SpawnOptions) error {
 	}
 
 	// Get updated pane list
-	panes, err = tmux.GetPanes(opts.Session)
+	panes, err = getPanesWithRetry(opts.Session, 5, 100*time.Millisecond)
 	if err != nil {
 		return outputError(err)
 	}

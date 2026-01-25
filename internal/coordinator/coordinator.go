@@ -5,7 +5,6 @@ package coordinator
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -41,8 +40,9 @@ type SessionCoordinator struct {
 	events chan CoordinatorEvent
 
 	// Control
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx      context.Context
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // AgentState tracks the current state of an agent pane.
@@ -133,7 +133,6 @@ type CoordinatorEvent struct {
 
 // New creates a new SessionCoordinator.
 func New(session, projectKey string, mailClient *agentmail.Client, agentName string) *SessionCoordinator {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &SessionCoordinator{
 		session:    session,
 		agentName:  agentName,
@@ -142,8 +141,8 @@ func New(session, projectKey string, mailClient *agentmail.Client, agentName str
 		agents:     make(map[string]*AgentState),
 		config:     DefaultCoordinatorConfig(),
 		events:     make(chan CoordinatorEvent, 100),
-		ctx:        ctx,
-		cancel:     cancel,
+		ctx:        context.Background(),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -155,6 +154,10 @@ func (c *SessionCoordinator) WithConfig(cfg CoordinatorConfig) *SessionCoordinat
 
 // Start begins coordinator operations.
 func (c *SessionCoordinator) Start(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Validate and fix interval configuration to prevent ticker panics.
 	// time.NewTicker requires a positive duration.
 	if c.config.PollInterval < MinPollInterval {
@@ -164,11 +167,16 @@ func (c *SessionCoordinator) Start(ctx context.Context) error {
 		c.config.DigestInterval = DefaultCoordinatorConfig().DigestInterval
 	}
 
-	// Create derived context
-	c.ctx, c.cancel = context.WithCancel(ctx)
+	// Store context and reset stop signal
+	c.ctx = ctx
+	c.stopCh = make(chan struct{})
+	c.stopOnce = sync.Once{}
 
 	// Initialize monitor
 	c.monitor = NewAgentMonitor(c.session, c.mailClient, c.projectKey)
+
+	// Perform initial update synchronously to ensure state is ready
+	c.updateAgentStates()
 
 	// Start monitoring goroutine
 	go c.monitorLoop()
@@ -183,9 +191,11 @@ func (c *SessionCoordinator) Start(ctx context.Context) error {
 
 // Stop halts coordinator operations.
 func (c *SessionCoordinator) Stop() {
-	if c.cancel != nil {
-		c.cancel()
-	}
+	c.stopOnce.Do(func() {
+		if c.stopCh != nil {
+			close(c.stopCh)
+		}
+	})
 }
 
 // Events returns the event channel for external listeners.
@@ -240,12 +250,11 @@ func (c *SessionCoordinator) monitorLoop() {
 	ticker := time.NewTicker(c.config.PollInterval)
 	defer ticker.Stop()
 
-	// Initial update
-	c.updateAgentStates()
-
 	for {
 		select {
 		case <-c.ctx.Done():
+			return
+		case <-c.stopCh:
 			return
 		case <-ticker.C:
 			c.updateAgentStates()
@@ -270,11 +279,11 @@ func (c *SessionCoordinator) updateAgentStates() {
 	for _, pane := range panes {
 		seenPanes[pane.ID] = true
 
-		// Detect agent type from pane title
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" {
+		// Use pre-parsed agent type from tmux
+		if pane.Type == tmux.AgentUser {
 			continue // Not an agent pane
 		}
+		agentType := string(pane.Type)
 
 		// Get or create agent state
 		agent, exists := c.agents[pane.ID]
@@ -357,6 +366,8 @@ func (c *SessionCoordinator) digestLoop() {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.stopCh:
+			return
 		case <-ticker.C:
 			if err := c.SendDigest(c.ctx); err != nil {
 				// Emit event for observability - don't stop the loop
@@ -373,20 +384,4 @@ func (c *SessionCoordinator) digestLoop() {
 			}
 		}
 	}
-}
-
-// detectAgentType determines agent type from pane title.
-func detectAgentType(title string) string {
-	title = strings.ToLower(title)
-
-	if strings.Contains(title, "claude") || strings.Contains(title, "cc") {
-		return "cc"
-	}
-	if strings.Contains(title, "codex") || strings.Contains(title, "cod") {
-		return "cod"
-	}
-	if strings.Contains(title, "gemini") || strings.Contains(title, "gmi") {
-		return "gmi"
-	}
-	return ""
 }

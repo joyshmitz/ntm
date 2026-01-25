@@ -37,6 +37,7 @@ const (
 	AgentWindsurf = agent.AgentTypeWindsurf
 	AgentAider    = agent.AgentTypeAider
 	AgentUser     = agent.AgentTypeUser
+	AgentUnknown  = agent.AgentTypeUnknown
 )
 
 // FieldSeparator is used to separate fields in tmux format strings.
