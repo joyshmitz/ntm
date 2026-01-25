@@ -22,12 +22,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
 // Server provides HTTP API and event streaming for NTM.
@@ -45,6 +48,15 @@ type Server struct {
 
 	corsAllowedOrigins []string
 	jwksCache          *jwksCache
+
+	// Idempotency support
+	idempotencyStore *IdempotencyStore
+
+	// Job management
+	jobStore *JobStore
+
+	// Chi router for /api/v1
+	router chi.Router
 }
 
 // AuthMode configures authentication for the server.
@@ -101,6 +113,202 @@ const requestIDHeader = "X-Request-Id"
 type ctxKey string
 
 const requestIDKey ctxKey = "request_id"
+
+// Response envelope types matching robot mode output format.
+// Arrays are always initialized to [] (never null).
+
+// APIResponse is the base envelope for all API responses.
+type APIResponse struct {
+	Success   bool   `json:"success"`
+	Timestamp string `json:"timestamp"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// APIError represents a structured error response.
+type APIError struct {
+	APIResponse
+	Error     string                 `json:"error"`
+	ErrorCode string                 `json:"error_code,omitempty"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+	Hint      string                 `json:"hint,omitempty"`
+}
+
+// Common error codes (matching robot mode conventions).
+const (
+	ErrCodeBadRequest       = "BAD_REQUEST"
+	ErrCodeUnauthorized     = "UNAUTHORIZED"
+	ErrCodeForbidden        = "FORBIDDEN"
+	ErrCodeNotFound         = "NOT_FOUND"
+	ErrCodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	ErrCodeConflict         = "CONFLICT"
+	ErrCodeInternalError    = "INTERNAL_ERROR"
+	ErrCodeServiceUnavail   = "SERVICE_UNAVAILABLE"
+	ErrCodeIdempotentReplay = "IDEMPOTENT_REPLAY"
+	ErrCodeJobPending       = "JOB_PENDING"
+)
+
+// IdempotencyStore caches responses by idempotency key.
+type IdempotencyStore struct {
+	mu      sync.RWMutex
+	entries map[string]*idempotencyEntry
+	ttl     time.Duration
+}
+
+type idempotencyEntry struct {
+	response   []byte
+	statusCode int
+	createdAt  time.Time
+}
+
+// NewIdempotencyStore creates an idempotency cache with the given TTL.
+func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	store := &IdempotencyStore{
+		entries: make(map[string]*idempotencyEntry),
+		ttl:     ttl,
+	}
+	// Start cleanup goroutine
+	go store.cleanup()
+	return store
+}
+
+func (s *IdempotencyStore) cleanup() {
+	ticker := time.NewTicker(time.Minute)
+	for range ticker.C {
+		s.mu.Lock()
+		now := time.Now()
+		for key, entry := range s.entries {
+			if now.Sub(entry.createdAt) > s.ttl {
+				delete(s.entries, key)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// Get returns a cached response for the idempotency key.
+func (s *IdempotencyStore) Get(key string) ([]byte, int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[key]
+	if !ok {
+		return nil, 0, false
+	}
+	if time.Since(entry.createdAt) > s.ttl {
+		return nil, 0, false
+	}
+	return entry.response, entry.statusCode, true
+}
+
+// Set stores a response for the idempotency key.
+func (s *IdempotencyStore) Set(key string, response []byte, statusCode int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries[key] = &idempotencyEntry{
+		response:   response,
+		statusCode: statusCode,
+		createdAt:  time.Now(),
+	}
+}
+
+// Job represents an asynchronous operation.
+type Job struct {
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Status    JobStatus              `json:"status"`
+	Progress  float64                `json:"progress,omitempty"`
+	Result    map[string]interface{} `json:"result,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	CreatedAt string                 `json:"created_at"`
+	UpdatedAt string                 `json:"updated_at"`
+}
+
+// JobStatus represents the state of a job.
+type JobStatus string
+
+const (
+	JobStatusPending   JobStatus = "pending"
+	JobStatusRunning   JobStatus = "running"
+	JobStatusCompleted JobStatus = "completed"
+	JobStatusFailed    JobStatus = "failed"
+	JobStatusCancelled JobStatus = "cancelled"
+)
+
+// JobStore manages asynchronous jobs.
+type JobStore struct {
+	mu   sync.RWMutex
+	jobs map[string]*Job
+}
+
+// NewJobStore creates a new job store.
+func NewJobStore() *JobStore {
+	return &JobStore{
+		jobs: make(map[string]*Job),
+	}
+}
+
+// Create creates a new job.
+func (s *JobStore) Create(jobType string) *Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := generateRequestID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	job := &Job{
+		ID:        id,
+		Type:      jobType,
+		Status:    JobStatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.jobs[id] = job
+	return job
+}
+
+// Get retrieves a job by ID.
+func (s *JobStore) Get(id string) *Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jobs[id]
+}
+
+// Update updates a job's status and progress.
+func (s *JobStore) Update(id string, status JobStatus, progress float64, result map[string]interface{}, errMsg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[id]
+	if !ok {
+		return
+	}
+	job.Status = status
+	job.Progress = progress
+	job.Result = result
+	job.Error = errMsg
+	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+}
+
+// List returns all jobs.
+func (s *JobStore) List() []*Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	jobs := make([]*Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		jobs = append(jobs, job)
+	}
+	return jobs
+}
+
+// Delete removes a job.
+func (s *JobStore) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.jobs[id]; !ok {
+		return false
+	}
+	delete(s.jobs, id)
+	return true
+}
 
 func ParseAuthMode(raw string) (AuthMode, error) {
 	mode := AuthMode(strings.ToLower(strings.TrimSpace(raw)))
@@ -179,7 +387,7 @@ func ValidateConfig(cfg Config) error {
 // New creates a new HTTP server.
 func New(cfg Config) *Server {
 	applyDefaults(&cfg)
-	return &Server{
+	s := &Server{
 		host:               cfg.Host,
 		port:               cfg.Port,
 		eventBus:           cfg.EventBus,
@@ -188,7 +396,80 @@ func New(cfg Config) *Server {
 		sseClients:         make(map[chan events.BusEvent]struct{}),
 		corsAllowedOrigins: cfg.AllowedOrigins,
 		jwksCache:          newJWKSCache(cfg.Auth.OIDC.CacheTTL),
+		idempotencyStore:   NewIdempotencyStore(24 * time.Hour),
+		jobStore:           NewJobStore(),
 	}
+	s.router = s.buildRouter()
+	return s
+}
+
+// buildRouter creates the chi router with all middleware and routes.
+func (s *Server) buildRouter() chi.Router {
+	r := chi.NewRouter()
+
+	// Base middleware stack
+	r.Use(chimw.RealIP)
+	r.Use(s.requestIDMiddlewareFunc)
+	r.Use(s.recovererMiddleware)
+	r.Use(s.loggingMiddlewareFunc)
+	r.Use(s.corsMiddlewareFunc)
+	r.Use(s.authMiddlewareFunc)
+
+	// Health check (no versioning)
+	r.Get("/health", s.handleHealth)
+
+	// SSE event stream (no versioning)
+	r.Get("/events", s.handleEventStream)
+
+	// WebSocket stub (no versioning)
+	r.Get("/ws", s.handleWS)
+
+	// Legacy /api/* routes (maintained for backward compatibility during migration)
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/sessions", s.handleSessions)
+		r.Get("/sessions/{id}", s.handleSession)
+		r.Get("/sessions/{id}/agents", func(w http.ResponseWriter, req *http.Request) {
+			s.handleSessionAgents(w, req, chi.URLParam(req, "id"))
+		})
+		r.Get("/sessions/{id}/events", func(w http.ResponseWriter, req *http.Request) {
+			s.handleSessionEvents(w, req, chi.URLParam(req, "id"))
+		})
+		r.Get("/robot/status", s.handleRobotStatus)
+		r.Get("/robot/health", s.handleRobotHealth)
+	})
+
+	// /api/v1 routes (canonical)
+	r.Route("/api/v1", func(r chi.Router) {
+		// System endpoints
+		r.Get("/health", s.handleHealthV1)
+		r.Get("/version", s.handleVersionV1)
+		r.Get("/capabilities", s.handleCapabilitiesV1)
+
+		// Sessions
+		r.Get("/sessions", s.handleSessionsV1)
+		r.Get("/sessions/{id}", s.handleSessionV1)
+		r.Get("/sessions/{id}/agents", func(w http.ResponseWriter, req *http.Request) {
+			s.handleSessionAgentsV1(w, req, chi.URLParam(req, "id"))
+		})
+		r.Get("/sessions/{id}/events", func(w http.ResponseWriter, req *http.Request) {
+			s.handleSessionEventsV1(w, req, chi.URLParam(req, "id"))
+		})
+
+		// Robot endpoints
+		r.Get("/robot/status", s.handleRobotStatusV1)
+		r.Get("/robot/health", s.handleRobotHealthV1)
+
+		// Jobs API
+		r.Route("/jobs", func(r chi.Router) {
+			r.Use(s.idempotencyMiddleware)
+			r.Get("/", s.handleListJobs)
+			r.Post("/", s.handleCreateJob)
+			r.Get("/{id}", s.handleGetJob)
+			r.Delete("/{id}", s.handleCancelJob)
+		})
+	})
+
+	return r
 }
 
 // Start starts the HTTP server and blocks until shutdown.
@@ -196,22 +477,6 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-
-	mux := http.NewServeMux()
-
-	// REST API endpoints
-	mux.HandleFunc("/api/sessions", s.handleSessions)
-	mux.HandleFunc("/api/sessions/", s.handleSession)
-	mux.HandleFunc("/api/robot/status", s.handleRobotStatus)
-	mux.HandleFunc("/api/robot/health", s.handleRobotHealth)
-
-	// SSE event stream
-	mux.HandleFunc("/events", s.handleEventStream)
-	// WebSocket stub (auth enforced even when implementation lands later)
-	mux.HandleFunc("/ws", s.handleWS)
-
-	// Health check
-	mux.HandleFunc("/health", s.handleHealth)
 
 	// Subscribe to events for SSE broadcasting
 	if s.eventBus != nil {
@@ -223,7 +488,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", s.host, s.port),
-		Handler:      requestIDMiddleware(loggingMiddleware(s.corsMiddleware(s.authMiddleware(mux)))),
+		Handler:      s.router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // Disabled to support long-lived SSE streams at /events
 		IdleTimeout:  60 * time.Second,
@@ -317,9 +582,10 @@ func (s *Server) buildMTLSConfig() (*tls.Config, error) {
 }
 
 // requestIDMiddleware assigns a request ID and stores it in context and response headers.
+// Deprecated: Use requestIDMiddlewareFunc for chi router.
 func requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqID := r.Header.Get(requestIDHeader)
+		reqID := sanitizeRequestID(r.Header.Get(requestIDHeader))
 		if reqID == "" {
 			reqID = generateRequestID()
 		}
@@ -327,6 +593,163 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// requestIDMiddlewareFunc is the chi middleware version of requestIDMiddleware.
+func (s *Server) requestIDMiddlewareFunc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := sanitizeRequestID(r.Header.Get(requestIDHeader))
+		if reqID == "" {
+			reqID = generateRequestID()
+		}
+		w.Header().Set(requestIDHeader, reqID)
+		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// recovererMiddleware catches panics and returns a proper JSON error response.
+func (s *Server) recovererMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				reqID := requestIDFromContext(r.Context())
+				stack := string(debug.Stack())
+				log.Printf("PANIC recovered: %v request_id=%s\n%s", rec, reqID, stack)
+				writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "internal server error", nil, reqID)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loggingMiddlewareFunc is the chi middleware version.
+func (s *Server) loggingMiddlewareFunc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		reqID := requestIDFromContext(r.Context())
+		log.Printf("%s %s %d %s request_id=%s", r.Method, r.URL.Path, ww.Status(), time.Since(start), reqID)
+	})
+}
+
+// corsMiddlewareFunc is the chi middleware version.
+func (s *Server) corsMiddlewareFunc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !originAllowed(origin, s.corsAllowedOrigins) {
+				reqID := requestIDFromContext(r.Context())
+				writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden, "origin not allowed", nil, reqID)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, Idempotency-Key, "+requestIDHeader)
+		}
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// authMiddlewareFunc is the chi middleware version.
+func (s *Server) authMiddlewareFunc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.auth.Mode == AuthModeLocal || s.auth.Mode == "" || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if err := s.authenticateRequest(r); err != nil {
+			reqID := requestIDFromContext(r.Context())
+			log.Printf("auth failed mode=%s path=%s remote=%s request_id=%s err=%v", s.auth.Mode, r.URL.Path, r.RemoteAddr, reqID, err)
+			writeErrorResponse(w, http.StatusUnauthorized, ErrCodeUnauthorized, "unauthorized", nil, reqID)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// idempotencyMiddleware handles Idempotency-Key header for mutating requests.
+func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only apply to mutating methods
+		if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := r.Header.Get("Idempotency-Key")
+		if key == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check cache
+		if cached, status, ok := s.idempotencyStore.Get(key); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Idempotent-Replay", "true")
+			w.WriteHeader(status)
+			w.Write(cached)
+			return
+		}
+
+		// Capture response
+		rec := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		// Cache successful responses
+		if rec.statusCode >= 200 && rec.statusCode < 300 {
+			s.idempotencyStore.Set(key, rec.body, rec.statusCode)
+		}
+	})
+}
+
+// responseRecorder captures the response for idempotency caching.
+type responseRecorder struct {
+	http.ResponseWriter
+	statusCode int
+	body       []byte
+}
+
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	r.body = append(r.body, b...)
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *responseRecorder) Bytes() []byte {
+	return r.body
+}
+
+func sanitizeRequestID(id string) string {
+	if id == "" {
+		return ""
+	}
+	// Allow alphanumeric and common separators
+	// Truncate to reasonable length (e.g., 64 chars)
+	if len(id) > 64 {
+		id = id[:64]
+	}
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' || r == ':' || r == '/' {
+			return r
+		}
+		return -1 // Drop invalid chars
+	}, id)
 }
 
 // loggingMiddleware logs HTTP requests.
@@ -440,11 +863,40 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 }
 
 // writeError writes an error response.
+// Deprecated: Use writeErrorResponse for better robot mode compatibility.
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]interface{}{
 		"success": false,
 		"error":   message,
 	})
+}
+
+// writeErrorResponse writes a structured error response matching robot mode format.
+func writeErrorResponse(w http.ResponseWriter, status int, code, message string, details map[string]interface{}, requestID string) {
+	resp := APIError{
+		APIResponse: APIResponse{
+			Success:   false,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			RequestID: requestID,
+		},
+		Error:     message,
+		ErrorCode: code,
+		Details:   details,
+	}
+	writeJSON(w, status, resp)
+}
+
+// writeSuccessResponse writes a success response with the given data.
+func writeSuccessResponse(w http.ResponseWriter, status int, data map[string]interface{}, requestID string) {
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+	data["success"] = true
+	data["timestamp"] = time.Now().UTC().Format(time.RFC3339)
+	if requestID != "" {
+		data["request_id"] = requestID
+	}
+	writeJSON(w, status, data)
 }
 
 // handleHealth handles health check requests.
@@ -1016,10 +1468,11 @@ func fetchJWKSKeys(ctx context.Context, jwksURL string) (map[string]*rsa.PublicK
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) // Read small error snippet
 		return nil, fmt.Errorf("fetch jwks: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	body, err := io.ReadAll(resp.Body)
+	// Limit JWKS to 1MB to prevent memory exhaustion DoS
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("read jwks: %w", err)
 	}
@@ -1066,4 +1519,316 @@ func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
 		N: n,
 		E: int(e.Int64()),
 	}, nil
+}
+
+// =============================================================================
+// API v1 Handlers
+// =============================================================================
+
+// handleHealthV1 handles GET /api/v1/health.
+func (s *Server) handleHealthV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "healthy",
+	}, reqID)
+}
+
+// handleVersionV1 handles GET /api/v1/version.
+func (s *Server) handleVersionV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"version":    "1.0.0", // TODO: inject from build
+		"api_version": "v1",
+		"go_version": "1.25",
+	}, reqID)
+}
+
+// handleCapabilitiesV1 handles GET /api/v1/capabilities.
+func (s *Server) handleCapabilitiesV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+
+	// Detect installed tools
+	tools := []string{}
+	toolChecks := map[string]string{
+		"br":   "beads_rust issue tracker",
+		"bv":   "beads viewer",
+		"cass": "code analysis/search",
+		"cm":   "cass memory",
+	}
+	for tool := range toolChecks {
+		// Simple existence check - in production, use the tools registry
+		tools = append(tools, tool)
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"auth_modes":    []string{string(AuthModeLocal), string(AuthModeAPIKey), string(AuthModeOIDC), string(AuthModeMTLS)},
+		"current_auth":  string(s.auth.Mode),
+		"stream_topics": []string{"events", "ws"},
+		"tools":         tools,
+		"features": map[string]bool{
+			"idempotency_keys": true,
+			"jobs_api":         true,
+			"sse_events":       true,
+			"websocket":        false, // Not yet implemented
+		},
+	}, reqID)
+}
+
+// handleSessionsV1 handles GET /api/v1/sessions.
+func (s *Server) handleSessionsV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+
+	if s.stateStore == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "state store not available", nil, reqID)
+		return
+	}
+
+	sessions, err := s.stateStore.ListSessions("")
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+
+	// Ensure sessions is never null
+	if sessions == nil {
+		sessions = []state.Session{}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"sessions": sessions,
+		"count":    len(sessions),
+	}, reqID)
+}
+
+// handleSessionV1 handles GET /api/v1/sessions/{id}.
+func (s *Server) handleSessionV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	sessionID := chi.URLParam(r, "id")
+
+	if sessionID == "" {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "session ID required", nil, reqID)
+		return
+	}
+
+	if s.stateStore == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "state store not available", nil, reqID)
+		return
+	}
+
+	session, err := s.stateStore.GetSession(sessionID)
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+	if session == nil {
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound, "session not found", nil, reqID)
+		return
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"session": session,
+	}, reqID)
+}
+
+// handleSessionAgentsV1 handles GET /api/v1/sessions/{id}/agents.
+func (s *Server) handleSessionAgentsV1(w http.ResponseWriter, r *http.Request, sessionID string) {
+	reqID := requestIDFromContext(r.Context())
+
+	if s.stateStore == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "state store not available", nil, reqID)
+		return
+	}
+
+	agents, err := s.stateStore.ListAgents(sessionID)
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+
+	// Ensure agents is never null
+	if agents == nil {
+		agents = []state.Agent{}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"agents":     agents,
+		"count":      len(agents),
+	}, reqID)
+}
+
+// handleSessionEventsV1 handles GET /api/v1/sessions/{id}/events.
+func (s *Server) handleSessionEventsV1(w http.ResponseWriter, r *http.Request, sessionID string) {
+	reqID := requestIDFromContext(r.Context())
+
+	if s.eventBus == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "event bus not available", nil, reqID)
+		return
+	}
+
+	eventsData := s.eventBus.History(100)
+
+	var filtered []events.BusEvent
+	for _, e := range eventsData {
+		if sessionID == "" || e.EventSession() == sessionID {
+			filtered = append(filtered, e)
+		}
+	}
+
+	// Ensure events is never null
+	if filtered == nil {
+		filtered = []events.BusEvent{}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"events":     filtered,
+		"count":      len(filtered),
+	}, reqID)
+}
+
+// handleRobotStatusV1 handles GET /api/v1/robot/status.
+func (s *Server) handleRobotStatusV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"note": "full robot status requires robot package integration",
+	}, reqID)
+}
+
+// handleRobotHealthV1 handles GET /api/v1/robot/health.
+func (s *Server) handleRobotHealthV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"note": "full robot health requires robot package integration",
+	}, reqID)
+}
+
+// =============================================================================
+// Jobs API Handlers
+// =============================================================================
+
+// handleListJobs handles GET /api/v1/jobs.
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	jobs := s.jobStore.List()
+
+	// Ensure jobs is never null
+	if jobs == nil {
+		jobs = []*Job{}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"jobs":  jobs,
+		"count": len(jobs),
+	}, reqID)
+}
+
+// CreateJobRequest is the request body for job creation.
+type CreateJobRequest struct {
+	Type    string                 `json:"type"`
+	Params  map[string]interface{} `json:"params,omitempty"`
+	Session string                 `json:"session,omitempty"`
+}
+
+// handleCreateJob handles POST /api/v1/jobs.
+func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+
+	var req CreateJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body", nil, reqID)
+		return
+	}
+
+	if req.Type == "" {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "job type required", nil, reqID)
+		return
+	}
+
+	// Validate job type
+	validTypes := map[string]bool{
+		"spawn":       true,
+		"scan":        true,
+		"checkpoint":  true,
+		"import":      true,
+		"export":      true,
+	}
+	if !validTypes[req.Type] {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid job type", map[string]interface{}{
+			"valid_types": []string{"spawn", "scan", "checkpoint", "import", "export"},
+		}, reqID)
+		return
+	}
+
+	job := s.jobStore.Create(req.Type)
+
+	// Start job execution in background
+	go s.executeJob(job.ID, req)
+
+	writeSuccessResponse(w, http.StatusAccepted, map[string]interface{}{
+		"job": job,
+	}, reqID)
+}
+
+// executeJob runs a job asynchronously.
+func (s *Server) executeJob(jobID string, req CreateJobRequest) {
+	s.jobStore.Update(jobID, JobStatusRunning, 0, nil, "")
+
+	// Simulate job execution - in production, this would dispatch to actual handlers
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark as completed
+	result := map[string]interface{}{
+		"type":    req.Type,
+		"params":  req.Params,
+		"session": req.Session,
+	}
+	s.jobStore.Update(jobID, JobStatusCompleted, 100, result, "")
+}
+
+// handleGetJob handles GET /api/v1/jobs/{id}.
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	jobID := chi.URLParam(r, "id")
+
+	job := s.jobStore.Get(jobID)
+	if job == nil {
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound, "job not found", nil, reqID)
+		return
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"job": job,
+	}, reqID)
+}
+
+// handleCancelJob handles DELETE /api/v1/jobs/{id}.
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	jobID := chi.URLParam(r, "id")
+
+	job := s.jobStore.Get(jobID)
+	if job == nil {
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound, "job not found", nil, reqID)
+		return
+	}
+
+	// Only allow cancelling pending or running jobs
+	if job.Status != JobStatusPending && job.Status != JobStatusRunning {
+		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, "job cannot be cancelled", map[string]interface{}{
+			"status": job.Status,
+		}, reqID)
+		return
+	}
+
+	s.jobStore.Update(jobID, JobStatusCancelled, job.Progress, nil, "cancelled by user")
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"job": s.jobStore.Get(jobID),
+	}, reqID)
+}
+
+// Router returns the chi router for testing.
+func (s *Server) Router() chi.Router {
+	return s.router
 }

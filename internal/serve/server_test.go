@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -556,4 +557,382 @@ func signJWT(t *testing.T, key *rsa.PrivateKey, kid, issuer, audience string, ex
 	}
 	sigEnc := base64.RawURLEncoding.EncodeToString(sig)
 	return signingInput + "." + sigEnc
+}
+
+// =============================================================================
+// API v1 Tests
+// =============================================================================
+
+func TestHealthV1Endpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+	if resp["status"] != "healthy" {
+		t.Error("Expected status=healthy")
+	}
+	if _, ok := resp["timestamp"]; !ok {
+		t.Error("Expected timestamp field")
+	}
+}
+
+func TestVersionV1Endpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+	if resp["api_version"] != "v1" {
+		t.Error("Expected api_version=v1")
+	}
+}
+
+func TestCapabilitiesV1Endpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/capabilities", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+	if _, ok := resp["auth_modes"]; !ok {
+		t.Error("Expected auth_modes field")
+	}
+	if _, ok := resp["features"]; !ok {
+		t.Error("Expected features field")
+	}
+}
+
+func TestSessionsV1Endpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+	// Verify sessions is an array (never null)
+	sessions, ok := resp["sessions"].([]interface{})
+	if !ok {
+		t.Error("Expected sessions to be an array")
+	}
+	if sessions == nil {
+		t.Error("Expected sessions to be non-nil array")
+	}
+}
+
+// =============================================================================
+// Jobs API Tests
+// =============================================================================
+
+func TestListJobsEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+	// Verify jobs is an array (never null)
+	jobs, ok := resp["jobs"].([]interface{})
+	if !ok {
+		t.Error("Expected jobs to be an array")
+	}
+	if jobs == nil {
+		t.Error("Expected jobs to be non-nil array")
+	}
+}
+
+func TestCreateJobEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	body := `{"type": "spawn", "session": "test-session"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+
+	job, ok := resp["job"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected job object in response")
+	}
+
+	if job["type"] != "spawn" {
+		t.Errorf("Job type = %v, want spawn", job["type"])
+	}
+	// Status can be "pending" or "running" due to the goroutine race
+	status, _ := job["status"].(string)
+	if status != "pending" && status != "running" {
+		t.Errorf("Job status = %v, want pending or running", job["status"])
+	}
+}
+
+func TestCreateJobInvalidType(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	body := `{"type": "invalid"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGetJobEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Create a job first
+	job := srv.jobStore.Create("spawn")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID, nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != true {
+		t.Error("Expected success=true")
+	}
+}
+
+func TestGetJobNotFound(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/nonexistent", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestCancelJobEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Create a job first
+	job := srv.jobStore.Create("spawn")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+job.ID, nil)
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	// Verify job is cancelled
+	updatedJob := srv.jobStore.Get(job.ID)
+	if updatedJob.Status != JobStatusCancelled {
+		t.Errorf("Job status = %v, want cancelled", updatedJob.Status)
+	}
+}
+
+// =============================================================================
+// Idempotency Tests
+// =============================================================================
+
+func TestIdempotencyStore(t *testing.T) {
+	store := NewIdempotencyStore(time.Hour)
+
+	// Test set and get
+	store.Set("key1", []byte(`{"test": true}`), 200)
+
+	resp, status, ok := store.Get("key1")
+	if !ok {
+		t.Fatal("Expected to find key1")
+	}
+	if status != 200 {
+		t.Errorf("Status = %d, want 200", status)
+	}
+	if string(resp) != `{"test": true}` {
+		t.Errorf("Response = %s, want {\"test\": true}", string(resp))
+	}
+
+	// Test non-existent key
+	_, _, ok = store.Get("nonexistent")
+	if ok {
+		t.Error("Expected not to find nonexistent key")
+	}
+}
+
+func TestIdempotencyMiddleware(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// First request
+	body := `{"type": "spawn"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-key-123")
+	rec := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("First request status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	// Capture the job ID from first response
+	var firstResp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&firstResp); err != nil {
+		t.Fatalf("Failed to decode first response: %v", err)
+	}
+	firstJob := firstResp["job"].(map[string]interface{})
+	firstJobID := firstJob["id"].(string)
+
+	// Second request with same idempotency key
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Idempotency-Key", "test-key-123")
+	rec2 := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(rec2, req2)
+
+	// Should get same response (replay)
+	if rec2.Header().Get("X-Idempotent-Replay") != "true" {
+		t.Error("Expected X-Idempotent-Replay header")
+	}
+
+	var secondResp map[string]interface{}
+	if err := json.NewDecoder(rec2.Body).Decode(&secondResp); err != nil {
+		t.Fatalf("Failed to decode second response: %v", err)
+	}
+	secondJob := secondResp["job"].(map[string]interface{})
+	secondJobID := secondJob["id"].(string)
+
+	// Should return same job ID
+	if firstJobID != secondJobID {
+		t.Errorf("Idempotent replay returned different job ID: %s vs %s", firstJobID, secondJobID)
+	}
+}
+
+// =============================================================================
+// Panic Recovery Tests
+// =============================================================================
+
+func TestRecovererMiddleware(t *testing.T) {
+	srv := New(Config{})
+
+	// Create a handler that panics
+	panicHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("test panic")
+	})
+
+	// Wrap with recoverer
+	handler := srv.recovererMiddleware(panicHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
+
+	// Should not panic
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("Status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if resp["success"] != false {
+		t.Error("Expected success=false")
+	}
+	if resp["error_code"] != "INTERNAL_ERROR" {
+		t.Errorf("Error code = %v, want INTERNAL_ERROR", resp["error_code"])
+	}
 }
