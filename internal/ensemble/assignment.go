@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -176,9 +177,12 @@ func AssignExplicit(specs []string, panes []tmux.Pane) ([]ModeAssignment, error)
 		if modeID == "" {
 			return nil, fmt.Errorf("invalid assignment %q: empty mode", spec)
 		}
-		agentType := strings.TrimSpace(parts[1])
+		agentType := strings.ToLower(strings.TrimSpace(parts[1]))
 		if agentType == "" {
 			return nil, fmt.Errorf("invalid assignment %q: empty agent type", spec)
+		}
+		if !isAssignableAgentType(agentType) {
+			return nil, fmt.Errorf("invalid assignment %q: unknown agent type %q", spec, agentType)
 		}
 		if _, exists := modeToAgent[modeID]; exists {
 			return nil, fmt.Errorf("duplicate assignment for mode %q", modeID)
@@ -444,6 +448,14 @@ func isAssignablePane(pane tmux.Pane) bool {
 		return false
 	}
 	return true
+}
+
+func isAssignableAgentType(agentType string) bool {
+	t := agent.AgentType(agentType)
+	if !t.IsValid() {
+		return false
+	}
+	return t != agent.AgentTypeUser
 }
 
 func paneLess(a, b tmux.Pane) bool {
