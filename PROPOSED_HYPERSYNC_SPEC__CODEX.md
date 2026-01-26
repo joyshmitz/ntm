@@ -1,12 +1,12 @@
 # PROPOSED_HYPERSYNC_SPEC__CODEX.md
 
-Status: PROPOSED (rev 2; needs implementer review)
-Date: 2026-01-24
+Status: PROPOSED (rev 3; addresses scalability and robustness gaps)
+Date: 2026-01-26
 Owner: Codex (GPT-5)
 Scope: Leader-authoritative, log-structured workspace replication fabric for NTM multi-agent workloads
 Audience: NTM maintainers + HyperSync implementers
 
-SpecVersion: 0.2
+SpecVersion: 0.3
 ProtocolVersion: hypersync/1
 Compatibility: Linux-only V1 (see 0.1); macOS support is explicitly deferred.
 
@@ -438,6 +438,18 @@ Logged (mutations, forwarded to leader, globally ordered and leader-commit-gated
 - fsync, fdatasync (barriers)
 - flock/fcntl lock operations (see 10)
 
+Extended attribute constraints (V1):
+- Maximum xattr value size: 64 KiB (XATTR_MAX_VALUE_SIZE)
+- Maximum xattr name length: 255 bytes (XATTR_MAX_NAME_LEN)
+- Maximum total xattr size per inode: 1 MiB (XATTR_MAX_TOTAL_SIZE)
+- setxattr operations exceeding these limits MUST return ENOSPC or E2BIG.
+- The leader enforces these limits; workers trust leader validation.
+
+Rationale:
+- ext4 default xattr limit is 64KB; xfs supports larger.
+- Standardizing on 64KB ensures cross-worker compatibility.
+- Total per-inode limit prevents abuse via many small xattrs.
+
 Not logged (served locally from S_{a_i} and worker caches):
 - open/close (not logged; see 6.8)
 - read, pread
@@ -474,6 +486,41 @@ For every logged mutation M:
 - After CommitAck(k), the worker MUST ensure it has applied all ops up through k locally before returning (a_i >= k), so read-your-writes holds immediately on the same worker.
 
 This is the core correction: mutation syscalls are leader-commit-gated.
+
+### 6.3.1 Batch Commit (Performance Under Load)
+
+At high intent rates, individual commits become the bottleneck. The leader MUST implement batch commit:
+
+Batch parameters (configurable):
+- BATCH_WINDOW_MS (default 1ms): maximum time to accumulate intents before committing
+- BATCH_MAX_OPS (default 100): maximum ops per batch
+- BATCH_MAX_BYTES (default 1MB): maximum total payload per batch
+
+Batch commit rules:
+1) The leader MAY delay CommitAck for up to BATCH_WINDOW_MS to accumulate multiple intents.
+2) A batch commits when ANY of the following triggers:
+   - BATCH_WINDOW_MS elapsed since first intent in batch
+   - BATCH_MAX_OPS intents accumulated
+   - BATCH_MAX_BYTES payload accumulated
+   - An fsync intent arrives (forces immediate flush)
+3) All intents in a batch are assigned sequential log_index values.
+4) A single WAL fsync durably commits the entire batch.
+5) Workers receive CommitAck for their intent only after the batch is durable.
+
+Group commit invariants:
+- Intents within a batch are ordered by arrival time at the leader.
+- Two intents from the same client MUST be committed in seq_no order.
+- Hazard detection operates on the committed batch, not individual intents.
+
+Telemetry (required):
+- batch_size histogram (ops per batch)
+- batch_latency_ms histogram (time from first intent to commit)
+- batch_bytes histogram (payload bytes per batch)
+- forced_flush_count counter (fsync-triggered early commits)
+
+Backpressure:
+- If the leader's pending intent queue exceeds MAX_PENDING_INTENTS (default 10000),
+  the leader MUST reject new intents with EAGAIN and per-worker rate limiting kicks in.
 
 ### 6.4 Error Semantics and Partitions (No Silent Divergence)
 
@@ -560,6 +607,25 @@ Rationale:
 
 Each filesystem object has a stable NodeID (128-bit random) assigned by the leader at creation. NodeID persists across rename. This is required to make rename/write ordering unambiguous.
 
+### 7.1.1 Symlink Handling (Cross-Boundary Safety)
+
+Symlinks require special handling because they can reference paths outside the replicated workspace:
+
+Rules (normative):
+1) Symlink creation (symlink syscall) is logged like other mutations.
+2) Symlink targets are stored verbatim (relative or absolute paths).
+3) The leader does NOT validate symlink targets at creation time.
+4) Resolution happens at access time, on the accessing worker.
+
+Cross-boundary behavior:
+- Symlinks to paths outside `/ntmfs/ws/<workspace>` will resolve to local paths on each worker.
+- This MAY produce different results on different workers (intentional; consistent with single-host symlink semantics).
+- Symlinks to `/ntmfs/local/<workspace>` are explicitly allowed (useful for cache shortcuts).
+
+Warning:
+- NTM SHOULD emit a warning when agents create symlinks with absolute paths outside the workspace.
+- This is advisory only; HyperSync does not enforce path restrictions on symlink targets.
+
 Lifetime rules:
 - NodeID is created at create/mkdir/symlink/etc.
 - NodeID remains live while it has at least one directory entry (link_count > 0) OR at least one open ref (see 6.8).
@@ -597,6 +663,33 @@ Each committed entry MUST include:
 - op (one of the mutation operations)
 - hazard (optional, see 11)
 - merkle_root (hash after applying this op)
+
+### 8.1.1 Incremental Merkle Root Computation (Mandatory for Performance)
+
+Computing a fresh Merkle root after every op is O(n) and will collapse throughput at scale.
+
+V1 requirements:
+1) The leader MUST use an incremental Merkle structure with O(log n) update complexity per mutation.
+2) Recommended structure: Merkle Mountain Range (MMR) or persistent balanced Merkle tree.
+3) The tree MUST be append-friendly for the common case (new file creates, writes to end of file).
+4) For random-access mutations (mid-file writes, deletes), the implementation MAY use:
+   - Lazy rebalancing (batch updates to amortize cost)
+   - Segment-level Merkle roots with periodic consolidation
+
+Implementation guidance:
+- Use BLAKE3 truncated to 256 bits for internal nodes (same as chunks).
+- Internal node format: BLAKE3(left_child_hash || right_child_hash || node_metadata).
+- node_metadata includes: subtree size, depth, optional flags.
+
+Performance targets:
+- Merkle root update: < 10us p99 for single-chunk mutations
+- Merkle root update: < 100us p99 for large-file mutations (1000+ chunks)
+- Proof generation (audit): < 1ms for any leaf
+
+Telemetry (required):
+- merkle_update_latency_us histogram
+- merkle_tree_depth gauge
+- merkle_rebalance_count counter
 
 ### 8.2 Idempotency Rules (Mandatory)
 
@@ -651,11 +744,41 @@ Control plane (QUIC reliable stream):
 
 This is the strict correctness path.
 
+### 9.3.1 Chunk Upload Interruption Recovery
+
+If the ChunkPut stream is interrupted (network failure, worker crash):
+
+Leader-side handling:
+1) The leader MUST retain partially received chunks for PARTIAL_UPLOAD_TTL (default 60s).
+2) Partial uploads are keyed by intent_id.
+3) After PARTIAL_UPLOAD_TTL, the leader MAY discard partial state for that intent.
+
+Worker-side recovery:
+1) On reconnection, the worker SHOULD retry the same intent (same client_id, seq_no).
+2) If the leader still has partial state, it responds with ChunkNeed listing only missing chunks.
+3) If the leader has discarded partial state, it responds with ChunkNeed listing all chunks.
+4) The worker MUST be prepared to re-upload all chunks if needed.
+
+Idempotency guarantee:
+- If the leader committed the op before the worker received CommitAck:
+  - The retry will receive the original CommitAck (same log_index).
+- If the leader did not commit:
+  - The retry is treated as a fresh intent (partial state may help).
+
+This ensures at-most-once commit semantics even under network instability.
+
 ### 9.4 Canonical Metadata and Timestamps
 
-To make replicas identical, timestamp assignment MUST be canonical:
+To make replicas identical and enable precise debugging, timestamp assignment MUST be canonical:
 - committed_at from the leader is the canonical time for mtime/ctime updates induced by Op[k].
 - Workers MUST set file mtime/ctime to the leader committed_at for that op.
+
+Timestamp format (normative):
+- committed_at MUST use RFC3339 with nanosecond precision: `YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`
+- Example: `2026-01-26T02:45:00.123456789Z`
+- The leader MUST ensure committed_at is strictly monotonically increasing across all ops.
+- If the system clock returns the same nanosecond for consecutive ops, the leader MUST
+  increment the nanosecond component by 1 (synthetic monotonicity).
 
 If exact host-ctime semantics are required by a tool, it MUST run on a single host; HyperSync intentionally defines canonical leader timestamps instead.
 
@@ -793,6 +916,26 @@ V1 scope correction (implementable + correct):
    - Workers MUST renew held locks periodically (e.g., every ttl/3) over the control stream.
    - If a worker fails to renew, the leader MUST revoke locks after TTL expiry.
 
+5) Grace period before revocation (required for reliability):
+   - After TTL expiry, locks enter GRACE state for LOCK_GRACE_MS (default 2000ms).
+   - During GRACE, the lock is still held but:
+     - The leader sends LockExpiryWarning to the holding worker.
+     - Other workers requesting the lock receive LOCK_HELD_EXPIRING status.
+   - If the worker renews during GRACE, the lock returns to normal state.
+   - After GRACE expires, the lock is forcibly released.
+
+6) Worker identity and lock ownership:
+   - worker_id is a stable identifier (persists across restarts); SHOULD be hostname or configured ID.
+   - client_id is per-session (changes on restart).
+   - Locks are associated with (worker_id, client_id) tuple.
+   - On worker restart, new client_id MAY reclaim locks from old client_id of same worker_id if:
+     - Old client_id has no active QUIC connection.
+     - New client_id proves same worker_id (via worker_secret or mTLS cert).
+   - This prevents lock starvation when workers restart quickly.
+
+- LockExpiryWarning (leader -> worker):
+  - lock_id, node_id, expires_at, grace_remaining_ms
+
 ### 10.3 Agent Mail Reservations (Hazards, Not Hard Blocks)
 
 Agent Mail reservations are checked and attached to mutation intents as ReservationContext:
@@ -895,6 +1038,27 @@ Lagging worker policy (V1 decision):
 - If a worker's lag exceeds MAX_LAG_ENTRIES (default 2,000,000) OR MAX_LAG_TIME (default 30m),
   - leader MAY stop streaming per-chunk symbols for that worker and instead require snapshot-based catch-up (13),
   - leader MUST continue accepting that worker's applied index reports and allow it to recover without impacting the rest of the cluster.
+
+### 12.5 Intent Rate Limiting (DoS Protection)
+
+To prevent a single misbehaving worker from overwhelming the leader:
+
+Per-worker rate limits (configurable):
+- INTENT_RATE_LIMIT_OPS (default 500/s): max intents per second per worker
+- INTENT_RATE_LIMIT_BYTES (default 50MB/s): max payload bytes per second per worker
+- INTENT_BURST_OPS (default 100): burst allowance for short spikes
+
+Enforcement:
+1) Leader maintains a token bucket per worker_id.
+2) Intents exceeding the rate limit receive:
+   - RATE_LIMITED error response
+   - Retry-After header indicating backoff duration (in ms)
+3) Workers MUST implement exponential backoff when receiving RATE_LIMITED.
+4) Leader MAY temporarily quarantine a worker that repeatedly exceeds limits.
+
+Telemetry:
+- rate_limit_rejections counter (per worker)
+- intent_rate histogram (per worker)
 
 ---
 
