@@ -733,6 +733,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.With(s.RequirePermission(PermReadHealth)).Get("/health", s.handleHealthV1)
 		r.With(s.RequirePermission(PermReadHealth)).Get("/version", s.handleVersionV1)
 		r.With(s.RequirePermission(PermReadHealth)).Get("/capabilities", s.handleCapabilitiesV1)
+		r.With(s.RequirePermission(PermReadHealth)).Get("/deps", s.handleDepsV1)
+		r.With(s.RequirePermission(PermReadHealth)).Get("/doctor", s.handleDoctorV1)
+		r.With(s.RequirePermission(PermReadHealth)).Get("/config", s.handleGetConfigV1)
+		r.With(s.RequirePermission(PermSystemConfig)).Patch("/config", s.handlePatchConfigV1)
 
 		// Sessions - read endpoints
 		r.With(s.RequirePermission(PermReadSessions)).Get("/sessions", s.handleSessionsV1)
@@ -1880,6 +1884,187 @@ func (s *Server) handleCapabilitiesV1(w http.ResponseWriter, r *http.Request) {
 			"websocket":        false, // Not yet implemented
 		},
 	}, reqID)
+}
+
+// handleDepsV1 handles GET /api/v1/deps.
+// Returns dependency check status for tmux, agent CLIs, and optional tools.
+func (s *Server) handleDepsV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	slog.Info("deps check", "request_id", reqID)
+
+	result, err := kernel.Run(r.Context(), "core.deps", nil)
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+
+	writeSuccessResponse(w, http.StatusOK, result, reqID)
+}
+
+// handleDoctorV1 handles GET /api/v1/doctor.
+// Returns comprehensive ecosystem health check including tools, daemons, and configuration.
+func (s *Server) handleDoctorV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	slog.Info("doctor check", "request_id", reqID)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	report := performDoctorCheckAPI(ctx)
+	writeSuccessResponse(w, http.StatusOK, report, reqID)
+}
+
+// handleGetConfigV1 handles GET /api/v1/config.
+// Returns the current server configuration (safe fields only).
+func (s *Server) handleGetConfigV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	slog.Info("config get", "request_id", reqID)
+
+	// Return safe configuration fields only (no secrets)
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"host":            s.host,
+		"port":            s.port,
+		"auth_mode":       string(s.auth.Mode),
+		"allowed_origins": s.corsAllowedOrigins,
+		"project_dir":     s.projectDir,
+	}, reqID)
+}
+
+// handlePatchConfigV1 handles PATCH /api/v1/config.
+// Updates mutable configuration fields at runtime.
+func (s *Server) handlePatchConfigV1(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	slog.Info("config patch", "request_id", reqID)
+
+	var req struct {
+		AllowedOrigins []string `json:"allowed_origins,omitempty"`
+		ProjectDir     string   `json:"project_dir,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body: "+err.Error(), nil, reqID)
+		return
+	}
+
+	// Apply updates
+	s.mu.Lock()
+	if req.AllowedOrigins != nil {
+		s.corsAllowedOrigins = req.AllowedOrigins
+	}
+	if req.ProjectDir != "" {
+		s.projectDir = req.ProjectDir
+		// Reset mail client so it picks up new project dir
+		s.mailClient = nil
+	}
+	s.mu.Unlock()
+
+	slog.Info("config updated", "request_id", reqID, "allowed_origins", len(s.corsAllowedOrigins), "project_dir", s.projectDir)
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"updated": true,
+		"config": map[string]interface{}{
+			"allowed_origins": s.corsAllowedOrigins,
+			"project_dir":     s.projectDir,
+		},
+	}, reqID)
+}
+
+// performDoctorCheckAPI runs doctor checks for the REST API.
+func performDoctorCheckAPI(ctx context.Context) map[string]interface{} {
+	report := map[string]interface{}{
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"overall":   "healthy",
+	}
+
+	warnings := 0
+	errors := 0
+
+	// Check dependencies
+	deps := []map[string]interface{}{}
+
+	// Check tmux
+	tmuxCheck := map[string]interface{}{
+		"name":     "tmux",
+		"required": true,
+	}
+	if _, err := exec.LookPath("tmux"); err == nil {
+		tmuxCheck["installed"] = true
+		tmuxCheck["status"] = "ok"
+		// Get version
+		if out, err := exec.CommandContext(ctx, "tmux", "-V").Output(); err == nil {
+			tmuxCheck["version"] = strings.TrimSpace(string(out))
+		}
+	} else {
+		tmuxCheck["installed"] = false
+		tmuxCheck["status"] = "error"
+		tmuxCheck["message"] = "tmux is required for NTM"
+		errors++
+	}
+	deps = append(deps, tmuxCheck)
+
+	// Check Go
+	goCheck := map[string]interface{}{
+		"name":     "go",
+		"required": false,
+	}
+	if path, err := exec.LookPath("go"); err == nil {
+		goCheck["installed"] = true
+		goCheck["path"] = path
+		goCheck["status"] = "ok"
+		if out, err := exec.CommandContext(ctx, "go", "version").Output(); err == nil {
+			goCheck["version"] = strings.TrimSpace(string(out))
+		}
+	} else {
+		goCheck["installed"] = false
+		goCheck["status"] = "warning"
+		goCheck["message"] = "not found (needed for plugins)"
+		warnings++
+	}
+	deps = append(deps, goCheck)
+
+	report["dependencies"] = deps
+
+	// Check daemons
+	daemons := []map[string]interface{}{}
+	daemonPorts := []struct {
+		name string
+		port int
+	}{
+		{"agent-mail", 8765},
+		{"cm-server", 8766},
+		{"bd-daemon", 8767},
+	}
+
+	dialer := &net.Dialer{Timeout: time.Second}
+	for _, dp := range daemonPorts {
+		check := map[string]interface{}{
+			"name": dp.name,
+			"port": dp.port,
+		}
+		conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", dp.port))
+		if err == nil {
+			conn.Close()
+			check["running"] = true
+			check["status"] = "ok"
+			check["message"] = fmt.Sprintf("listening on port %d", dp.port)
+		} else {
+			check["running"] = false
+			check["status"] = "ok"
+			check["message"] = fmt.Sprintf("port %d available", dp.port)
+		}
+		daemons = append(daemons, check)
+	}
+	report["daemons"] = daemons
+
+	// Set overall status
+	if errors > 0 {
+		report["overall"] = "unhealthy"
+	} else if warnings > 0 {
+		report["overall"] = "warning"
+	}
+	report["warnings"] = warnings
+	report["errors"] = errors
+
+	return report
 }
 
 // handleSessionsV1 handles GET /api/v1/sessions.
