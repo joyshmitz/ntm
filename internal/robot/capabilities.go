@@ -625,6 +625,20 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples:    []string{"ntm --robot-capabilities"},
 		},
 		{
+			Name:        "docs",
+			Flag:        "--robot-docs",
+			Category:    "utility",
+			Description: "Get documentation for a topic in JSON format. Topics: quickstart, commands, examples, exit-codes.",
+			Parameters: []RobotParameter{
+				{Name: "topic", Flag: "--robot-docs", Type: "string", Required: false, Default: "", Description: "Documentation topic. Empty returns topic index."},
+			},
+			Examples: []string{
+				"ntm --robot-docs=\"\"",
+				"ntm --robot-docs=quickstart",
+				"ntm --robot-docs=exit-codes",
+			},
+		},
+		{
 			Name:        "tools",
 			Flag:        "--robot-tools",
 			Category:    "utility",

@@ -157,3 +157,37 @@ func E2ETestPrecheck(t *testing.T) {
 	RequireTmux(t)
 	RequireNTMBinary(t)
 }
+
+// SkipIfBdUnavailable skips the test if bd (beads_rust) is not installed.
+func SkipIfBdUnavailable(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("br", "--version").Run(); err != nil {
+		t.Skip("br (beads_rust) not installed, skipping test")
+	}
+}
+
+// SkipIfBvUnavailable skips the test if bv is not installed.
+func SkipIfBvUnavailable(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("bv", "--version").Run(); err != nil {
+		t.Skip("bv not installed, skipping test")
+	}
+}
+
+// SkipIfMailUnavailable skips the test if Agent Mail MCP server is not available.
+func SkipIfMailUnavailable(t *testing.T) {
+	t.Helper()
+	// Agent Mail requires MCP server running - check for socket or command
+	// For now, skip based on environment variable
+	if os.Getenv("NTM_MAIL_TESTS") == "" {
+		t.Skip("Agent Mail tests disabled, set NTM_MAIL_TESTS=1 to enable")
+	}
+}
+
+// SkipIfUBSUnavailable skips the test if UBS scanner is not installed.
+func SkipIfUBSUnavailable(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("ubs", "--version").Run(); err != nil {
+		t.Skip("ubs (Ultimate Bug Scanner) not installed, skipping test")
+	}
+}
