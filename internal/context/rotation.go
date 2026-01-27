@@ -208,9 +208,12 @@ func (s *DefaultPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
 
 func (s *DefaultPaneSpawner) getAgentCommand(agentType string) string {
 	defaults := map[string]string{
-		"claude": "claude",
-		"codex":  "codex",
-		"gemini": "gemini",
+		"claude":   "claude",
+		"codex":    "codex",
+		"gemini":   "gemini",
+		"cursor":   "cursor",
+		"windsurf": "windsurf",
+		"aider":    "aider",
 	}
 
 	if s.config != nil {
@@ -227,6 +230,7 @@ func (s *DefaultPaneSpawner) getAgentCommand(agentType string) string {
 			if s.config.Agents.Gemini != "" {
 				return s.config.Agents.Gemini
 			}
+		// Future: add config support for other agents if needed
 		}
 	}
 
@@ -242,6 +246,12 @@ func agentTypeShort(agentType string) string {
 		return "cod"
 	case "gemini", "gmi":
 		return "gmi"
+	case "cursor":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "aider":
+		return "aider"
 	default:
 		return agentType
 	}
@@ -256,6 +266,12 @@ func agentTypeLong(shortType string) string {
 		return "codex"
 	case "gmi":
 		return "gemini"
+	case "cursor":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "aider":
+		return "aider"
 	default:
 		return shortType
 	}

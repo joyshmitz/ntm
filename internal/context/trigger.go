@@ -419,6 +419,12 @@ func (t *CompactionTrigger) generateRecoveryPrompt(agentType tmux.AgentType) str
 		return "Reread AGENTS.md so it's still fresh in your mind. Continue working on your assigned task."
 	case tmux.AgentGemini:
 		return "Reread AGENTS.md so it's still fresh in your mind. Continue working on your assigned task."
+	case tmux.AgentCursor:
+		return "Reread AGENTS.md so it's still fresh in your mind. Continue working on your assigned task."
+	case tmux.AgentWindsurf:
+		return "Reread AGENTS.md so it's still fresh in your mind. Continue working on your assigned task."
+	case tmux.AgentAider:
+		return "Reread AGENTS.md so it's still fresh in your mind. Continue working on your assigned task."
 	default:
 		return "Continue with your previous task."
 	}
