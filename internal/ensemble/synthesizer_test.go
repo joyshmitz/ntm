@@ -671,3 +671,206 @@ func TestSynthesizer_Contributions_UniqueInsights(t *testing.T) {
 
 	t.Logf("TEST: %s - assertion: unique insights tracked", t.Name())
 }
+
+func TestParseSynthesisOutput_JSON(t *testing.T) {
+	raw := `{"summary": "Test summary", "findings": [{"finding": "Test finding", "impact": "high", "confidence": 0.9}], "risks": [{"risk": "Test risk", "impact": "medium", "likelihood": 0.5}], "recommendations": [{"recommendation": "Test rec", "priority": "high"}], "confidence": 0.85}`
+
+	result, err := ParseSynthesisOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseSynthesisOutput failed: %v", err)
+	}
+
+	if result.Summary != "Test summary" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "Test summary")
+	}
+	if len(result.Findings) != 1 {
+		t.Errorf("Findings count = %d, want 1", len(result.Findings))
+	}
+	if result.Confidence != 0.85 {
+		t.Errorf("Confidence = %v, want 0.85", result.Confidence)
+	}
+}
+
+func TestParseSynthesisOutput_YAML(t *testing.T) {
+	raw := `summary: Test summary
+findings:
+  - finding: Test finding
+    impact: high
+    confidence: 0.9
+risks:
+  - risk: Test risk
+    impact: medium
+    likelihood: 0.5
+recommendations:
+  - recommendation: Test rec
+    priority: high
+confidence: 0.85`
+
+	result, err := ParseSynthesisOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseSynthesisOutput failed: %v", err)
+	}
+
+	if result.Summary != "Test summary" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "Test summary")
+	}
+	if len(result.Findings) != 1 {
+		t.Errorf("Findings count = %d, want 1", len(result.Findings))
+	}
+}
+
+func TestParseSynthesisOutput_CodeBlock(t *testing.T) {
+	raw := `Here is the synthesis:
+
+` + "```yaml" + `
+summary: Extracted from code block
+findings:
+  - finding: Finding in code block
+    impact: high
+    confidence: 0.8
+confidence: 0.75
+` + "```" + `
+
+Some text after the code block.`
+
+	result, err := ParseSynthesisOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseSynthesisOutput failed: %v", err)
+	}
+
+	if result.Summary != "Extracted from code block" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "Extracted from code block")
+	}
+}
+
+func TestParseSynthesisOutput_Empty(t *testing.T) {
+	_, err := ParseSynthesisOutput("")
+	if err == nil {
+		t.Error("Expected error for empty input")
+	}
+}
+
+func TestParseSynthesisOutput_Invalid(t *testing.T) {
+	_, err := ParseSynthesisOutput("this is not valid json or yaml {{{")
+	if err == nil {
+		t.Error("Expected error for invalid input")
+	}
+}
+
+func TestValidateSynthesisResult_Valid(t *testing.T) {
+	result := &SynthesisResult{
+		Summary: "Valid summary",
+		Findings: []Finding{
+			{Finding: "Test", Impact: ImpactHigh, Confidence: 0.9},
+		},
+		Confidence: 0.8,
+	}
+
+	errs := ValidateSynthesisResult(result)
+	if len(errs) != 0 {
+		t.Errorf("Expected no errors, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSynthesisResult_MissingSummary(t *testing.T) {
+	result := &SynthesisResult{
+		Summary:    "",
+		Confidence: 0.8,
+	}
+
+	errs := ValidateSynthesisResult(result)
+	if len(errs) == 0 {
+		t.Error("Expected validation error for missing summary")
+	}
+
+	found := false
+	for _, e := range errs {
+		if e.Field == "summary" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected error for summary field")
+	}
+}
+
+func TestValidateSynthesisResult_InvalidConfidence(t *testing.T) {
+	result := &SynthesisResult{
+		Summary:    "Test",
+		Confidence: 1.5, // Invalid
+	}
+
+	errs := ValidateSynthesisResult(result)
+	found := false
+	for _, e := range errs {
+		if e.Field == "confidence" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected error for invalid confidence")
+	}
+}
+
+func TestValidateSynthesisResult_InvalidFinding(t *testing.T) {
+	result := &SynthesisResult{
+		Summary: "Test",
+		Findings: []Finding{
+			{Finding: "", Impact: ImpactHigh, Confidence: 0.9}, // Empty finding
+		},
+		Confidence: 0.8,
+	}
+
+	errs := ValidateSynthesisResult(result)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Field, "findings[0].finding") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected error for empty finding")
+	}
+}
+
+func TestParseAndValidateSynthesisOutput(t *testing.T) {
+	raw := `summary: Test summary
+findings:
+  - finding: Test finding
+    impact: high
+    confidence: 0.9
+confidence: 0.85`
+
+	result, errs, err := ParseAndValidateSynthesisOutput(raw)
+	if err != nil {
+		t.Fatalf("ParseAndValidateSynthesisOutput failed: %v", err)
+	}
+	if len(errs) != 0 {
+		t.Errorf("Expected no validation errors, got %d: %v", len(errs), errs)
+	}
+	if result.Summary != "Test summary" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "Test summary")
+	}
+}
+
+func TestExtractSynthesisContent_NoCodeBlock(t *testing.T) {
+	raw := `summary: Direct content
+confidence: 0.8`
+
+	content := extractSynthesisContent(raw)
+	if !strings.Contains(content, "summary:") {
+		t.Error("Expected content to contain summary:")
+	}
+}
+
+func TestExtractSynthesisContent_JSONCodeBlock(t *testing.T) {
+	raw := "Some preamble\n```json\n{\"summary\": \"test\"}\n```\nSome epilogue"
+
+	content := extractSynthesisContent(raw)
+	if !strings.Contains(content, "summary") {
+		t.Errorf("Expected content to contain summary, got: %s", content)
+	}
+}
