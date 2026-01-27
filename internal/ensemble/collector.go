@@ -149,6 +149,12 @@ func (c *OutputCollector) Collect() (*CollectorResult, error) {
 		CollectedAt: c.CollectedAt,
 	}
 
+	if len(result.ValidOutputs) > 0 {
+		totalTokens := EstimateModeOutputsTokens(result.ValidOutputs)
+		result.Stats.TotalTokens = totalTokens
+		result.Stats.AverageTokens = totalTokens / len(result.ValidOutputs)
+	}
+
 	// Check minimum outputs
 	if len(c.Outputs) < c.Config.MinOutputs {
 		return result, fmt.Errorf(
