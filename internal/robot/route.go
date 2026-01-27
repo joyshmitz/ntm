@@ -71,10 +71,10 @@ type RouteAgentHints struct {
 	Suggestions []string `json:"suggestions,omitempty"`
 }
 
-// PrintRoute outputs routing recommendation as JSON.
-// Returns 0 on success, 1 on error.
-func PrintRoute(opts RouteOptions) int {
-	output := RouteOutput{
+// GetRoute executes the routing operation and returns the output data.
+// Returns the output and exit code (0=success, 1=error).
+func GetRoute(opts RouteOptions) (*RouteOutput, int) {
+	output := &RouteOutput{
 		Session:    opts.Session,
 		Strategy:   opts.Strategy,
 		Candidates: []RouteCandidate{},
@@ -88,8 +88,7 @@ func PrintRoute(opts RouteOptions) int {
 			ErrCodeInvalidFlag,
 			"Provide a session name: ntm --robot-route=mysession",
 		)
-		outputJSON(output)
-		return 1
+		return output, 1
 	}
 
 	// Validate strategy
@@ -104,8 +103,7 @@ func PrintRoute(opts RouteOptions) int {
 			ErrCodeInvalidFlag,
 			fmt.Sprintf("Valid strategies: %s", strings.Join(strategyNames(), ", ")),
 		)
-		outputJSON(output)
-		return 1
+		return output, 1
 	}
 
 	// Check session exists
@@ -115,8 +113,7 @@ func PrintRoute(opts RouteOptions) int {
 			ErrCodeSessionNotFound,
 			"Use 'ntm list' to see available sessions",
 		)
-		outputJSON(output)
-		return 1
+		return output, 1
 	}
 
 	// Get all panes
@@ -127,8 +124,7 @@ func PrintRoute(opts RouteOptions) int {
 			ErrCodeInternalError,
 			"Check tmux session is running",
 		)
-		outputJSON(output)
-		return 1
+		return output, 1
 	}
 
 	// Create scorer and score agents
@@ -246,11 +242,18 @@ func PrintRoute(opts RouteOptions) int {
 	}
 
 	// Add agent hints
-	output.AgentHints = generateRouteHints(opts, output)
+	output.AgentHints = generateRouteHints(opts, *output)
 
 	output.RobotResponse = NewRobotResponse(true)
+	return output, 0
+}
+
+// PrintRoute outputs routing recommendation as JSON.
+// Returns 0 on success, 1 on error.
+func PrintRoute(opts RouteOptions) int {
+	output, exitCode := GetRoute(opts)
 	outputJSON(output)
-	return 0
+	return exitCode
 }
 
 // generateRouteHints creates helpful hints for AI agents.
