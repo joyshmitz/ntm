@@ -3,6 +3,9 @@
   "private": true,
   "scripts": {
     "gen:openapi": "bun scripts/gen_openapi.ts",
-    "lint:openapi": "go run github.com/getkin/kin-openapi/cmd/validate@latest docs/openapi.json"
+    "lint:openapi": "go run github.com/getkin/kin-openapi/cmd/validate@latest docs/openapi.json",
+    "web:dev": "cd web && npm run dev",
+    "web:build": "cd web && npm run build",
+    "web:test": "cd web && npm run test:run"
   }
 }

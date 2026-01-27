@@ -72,6 +72,9 @@ type Server struct {
 	// WebSocket hub for real-time subscriptions
 	wsHub *WSHub
 
+	// Pane output streaming
+	streamManager *tmux.StreamManager
+
 	// Agent Mail client (lazy-init)
 	mailClient *agentmail.Client
 	projectDir string
@@ -696,6 +699,20 @@ func New(cfg Config) *Server {
 		jobStore:           NewJobStore(),
 		wsHub:              NewWSHub(),
 	}
+
+	// Initialize pane output streaming
+	streamCfg := tmux.DefaultPaneStreamerConfig()
+	s.streamManager = tmux.NewStreamManager(tmux.DefaultClient, func(event tmux.StreamEvent) {
+		// Publish pane output to WebSocket subscribers
+		// Topic format: panes:session:pane_idx
+		s.wsHub.Publish(event.Target, "pane.output", map[string]interface{}{
+			"lines":   event.Lines,
+			"seq":     event.Seq,
+			"ts":      event.Timestamp.UTC().Format(time.RFC3339Nano),
+			"is_full": event.IsFull,
+		})
+	}, streamCfg)
+
 	s.router = s.buildRouter()
 	return s
 }
@@ -810,6 +827,9 @@ func (s *Server) buildRouter() chi.Router {
 
 		// Beads and BV Robot API
 		s.registerBeadsRoutes(r)
+
+		// Scanner and Bug Reporting API
+		s.registerScannerRoutes(r)
 
 		// Metrics API - performance and analytics data
 		r.Route("/metrics", func(r chi.Router) {

@@ -55,6 +55,7 @@ const (
 	PermReadMail         Permission = "mail:read"
 	PermReadReservations Permission = "reservations:read"
 	PermReadBeads        Permission = "beads:read"
+	PermReadAccounts     Permission = "accounts:read"
 
 	// Write/operation permissions
 	PermWriteSessions     Permission = "sessions:write"
@@ -64,6 +65,7 @@ const (
 	PermWriteMail         Permission = "mail:write"
 	PermWriteReservations Permission = "reservations:write"
 	PermWriteBeads        Permission = "beads:write"
+	PermWriteAccounts     Permission = "accounts:write"
 	PermApproveRequests   Permission = "approvals:approve"
 
 	// Dangerous operations (require admin or approval)
@@ -87,6 +89,7 @@ var rolePermissions = map[Role][]Permission{
 		PermReadMail,
 		PermReadReservations,
 		PermReadBeads,
+		PermReadAccounts,
 	},
 	RoleOperator: {
 		// Viewer permissions
@@ -101,6 +104,7 @@ var rolePermissions = map[Role][]Permission{
 		PermReadMail,
 		PermReadReservations,
 		PermReadBeads,
+		PermReadAccounts,
 		// Operator permissions
 		PermWriteSessions,
 		PermWriteAgents,
@@ -109,6 +113,7 @@ var rolePermissions = map[Role][]Permission{
 		PermWriteMail,
 		PermWriteReservations,
 		PermWriteBeads,
+		PermWriteAccounts,
 	},
 	RoleAdmin: {
 		// All viewer and operator permissions
@@ -123,6 +128,7 @@ var rolePermissions = map[Role][]Permission{
 		PermReadMail,
 		PermReadReservations,
 		PermReadBeads,
+		PermReadAccounts,
 		PermWriteSessions,
 		PermWriteAgents,
 		PermWritePipelines,
@@ -130,6 +136,7 @@ var rolePermissions = map[Role][]Permission{
 		PermWriteMail,
 		PermWriteReservations,
 		PermWriteBeads,
+		PermWriteAccounts,
 		// Admin-only permissions
 		PermApproveRequests,
 		PermDangerousOps,
