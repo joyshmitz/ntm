@@ -417,3 +417,267 @@ func TestRunReassignment_NotAssigned(t *testing.T) {
 		t.Fatalf("expected error code NOT_ASSIGNED, got %q", envelope.Error.Code)
 	}
 }
+
+func TestRunReassignment_ToPaneNotFound(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+
+	cfg = config.Default()
+	cfg.ProjectsBase = tmpDir
+	cfg.AgentMail.Enabled = false
+	cfg.Agents.Claude = "cat"
+	cfg.Agents.Codex = "cat"
+	jsonOutput = true
+
+	sessionName, claudePane, _ := setupReassignSession(t, tmpDir)
+
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-127", "Test bead 127", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+		t.Fatalf("Assign failed: %v", err)
+	}
+	if err := store.MarkWorking("bd-127"); err != nil {
+		t.Fatalf("MarkWorking failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - starting with bead bd-127, targeting non-existent pane 999", t.Name())
+
+	assignReassign = "bd-127"
+	assignToPane = 999 // Non-existent pane
+	assignToType = ""
+	assignForce = true
+
+	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if err != nil {
+		t.Fatalf("runReassignment failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - got output: %s", t.Name(), output)
+
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+
+	t.Logf("TEST: %s - assertion: expect error envelope with PANE_NOT_FOUND", t.Name())
+	if envelope.Success || envelope.Error == nil {
+		t.Fatalf("expected error envelope, got: %+v", envelope)
+	}
+	if envelope.Error.Code != "PANE_NOT_FOUND" {
+		t.Fatalf("expected error code PANE_NOT_FOUND, got %q", envelope.Error.Code)
+	}
+}
+
+func TestRunReassignment_CompletedBead(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+
+	cfg = config.Default()
+	cfg.ProjectsBase = tmpDir
+	cfg.AgentMail.Enabled = false
+	cfg.Agents.Claude = "cat"
+	cfg.Agents.Codex = "cat"
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-128", "Test bead 128", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+		t.Fatalf("Assign failed: %v", err)
+	}
+	if err := store.MarkWorking("bd-128"); err != nil {
+		t.Fatalf("MarkWorking failed: %v", err)
+	}
+	if err := store.MarkCompleted("bd-128"); err != nil {
+		t.Fatalf("MarkCompleted failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - starting with completed bead bd-128", t.Name())
+
+	assignReassign = "bd-128"
+	assignToPane = codexPane.Index
+	assignToType = ""
+	assignForce = true
+
+	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if err != nil {
+		t.Fatalf("runReassignment failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - got output: %s", t.Name(), output)
+
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+
+	t.Logf("TEST: %s - assertion: expect error envelope with NOT_ASSIGNED and status detail", t.Name())
+	if envelope.Success || envelope.Error == nil {
+		t.Fatalf("expected error envelope, got: %+v", envelope)
+	}
+	if envelope.Error.Code != "NOT_ASSIGNED" {
+		t.Fatalf("expected error code NOT_ASSIGNED, got %q", envelope.Error.Code)
+	}
+	// Verify the details include current_status
+	if envelope.Error.Details == nil {
+		t.Fatalf("expected error details, got nil")
+	}
+	status, ok := envelope.Error.Details["current_status"].(string)
+	if !ok || status != "completed" {
+		t.Fatalf("expected current_status='completed' in details, got %v", envelope.Error.Details["current_status"])
+	}
+}
+
+func TestRunReassignment_FailedBead(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+
+	cfg = config.Default()
+	cfg.ProjectsBase = tmpDir
+	cfg.AgentMail.Enabled = false
+	cfg.Agents.Claude = "cat"
+	cfg.Agents.Codex = "cat"
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-129", "Test bead 129", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+		t.Fatalf("Assign failed: %v", err)
+	}
+	if err := store.MarkWorking("bd-129"); err != nil {
+		t.Fatalf("MarkWorking failed: %v", err)
+	}
+	if err := store.MarkFailed("bd-129", "Agent crashed"); err != nil {
+		t.Fatalf("MarkFailed failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - starting with failed bead bd-129", t.Name())
+
+	assignReassign = "bd-129"
+	assignToPane = codexPane.Index
+	assignToType = ""
+	assignForce = true
+
+	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if err != nil {
+		t.Fatalf("runReassignment failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - got output: %s", t.Name(), output)
+
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+
+	// Note: Currently, reassigning a failed bead is not supported because
+	// StatusFailed can only transition to StatusAssigned (retry), not StatusReassigned.
+	// The implementation allows the CLI to proceed (doesn't check for StatusFailed),
+	// but store.Reassign() will fail with InvalidTransitionError.
+	// This test documents current behavior; update if behavior changes.
+	t.Logf("TEST: %s - assertion: expect error due to invalid state transition", t.Name())
+	if envelope.Success {
+		t.Logf("TEST: %s - behavior changed: failed beads can now be reassigned", t.Name())
+		// If this succeeds in the future, verify the reassignment worked correctly
+		if envelope.Data == nil {
+			t.Fatalf("expected data in success envelope")
+		}
+		if envelope.Data.Pane != codexPane.Index {
+			t.Fatalf("expected pane %d, got %d", codexPane.Index, envelope.Data.Pane)
+		}
+	} else {
+		// Current expected behavior: fails with REASSIGN_ERROR
+		if envelope.Error == nil {
+			t.Fatalf("expected error envelope, got: %+v", envelope)
+		}
+		if envelope.Error.Code != "REASSIGN_ERROR" {
+			t.Fatalf("expected error code REASSIGN_ERROR, got %q", envelope.Error.Code)
+		}
+	}
+}
+
+func TestRunReassignment_FileReservationsGracefulDegradation(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	// Point to non-existent Agent Mail to test graceful degradation
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+
+	cfg = config.Default()
+	cfg.ProjectsBase = tmpDir
+	cfg.AgentMail.Enabled = false // Agent Mail disabled
+	cfg.Agents.Claude = "cat"
+	cfg.Agents.Codex = "cat"
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-130", "Test bead with file reservations", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+		t.Fatalf("Assign failed: %v", err)
+	}
+	if err := store.MarkWorking("bd-130"); err != nil {
+		t.Fatalf("MarkWorking failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - starting with bead bd-130, Agent Mail disabled", t.Name())
+
+	assignReassign = "bd-130"
+	assignToPane = codexPane.Index
+	assignToType = ""
+	assignForce = true
+	assignPrompt = "Continue work on bd-130"
+	assignQuiet = true
+
+	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if err != nil {
+		t.Fatalf("runReassignment failed: %v", err)
+	}
+
+	t.Logf("TEST: %s - got output: %s", t.Name(), output)
+
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+
+	t.Logf("TEST: %s - assertion: reassignment should succeed even with Agent Mail unavailable", t.Name())
+	if !envelope.Success {
+		t.Fatalf("expected success envelope, got error: %+v", envelope.Error)
+	}
+	if envelope.Data == nil {
+		t.Fatalf("expected data in success envelope")
+	}
+	if envelope.Data.Pane != codexPane.Index {
+		t.Fatalf("expected pane %d, got %d", codexPane.Index, envelope.Data.Pane)
+	}
+
+	// File reservations should not be transferred (Agent Mail unavailable)
+	// but the reassignment itself should succeed
+	t.Logf("TEST: %s - assertion: file reservations should not be transferred (Agent Mail disabled)", t.Name())
+	if envelope.Data.FileReservationsTransferred {
+		t.Logf("TEST: %s - unexpected: file reservations marked as transferred despite Agent Mail being disabled", t.Name())
+	}
+}

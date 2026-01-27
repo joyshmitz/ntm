@@ -1047,17 +1047,18 @@ type SystemInfo struct {
 // StatusOutput is the structured output for robot-status
 type StatusOutput struct {
 	RobotResponse
-	GeneratedAt  time.Time          `json:"generated_at"`
-	System       SystemInfo         `json:"system"`
-	Sessions     []SessionInfo      `json:"sessions"`
-	Summary      StatusSummary      `json:"summary"`
-	Beads        *bv.BeadsSummary   `json:"beads,omitempty"`
-	GraphMetrics *GraphMetrics      `json:"graph_metrics,omitempty"`
-	AgentMail    *AgentMailSummary  `json:"agent_mail,omitempty"`
-	Handoff      *HandoffSummary    `json:"handoff,omitempty"`
-	Alerts       []StatusAlert      `json:"alerts,omitempty"`
-	FileChanges  []FileChangeInfo   `json:"file_changes,omitempty"`
-	Conflicts    []tracker.Conflict `json:"conflicts,omitempty"`
+	GeneratedAt    time.Time               `json:"generated_at"`
+	System         SystemInfo              `json:"system"`
+	Sessions       []SessionInfo           `json:"sessions"`
+	Summary        StatusSummary           `json:"summary"`
+	Beads          *bv.BeadsSummary        `json:"beads,omitempty"`
+	GraphMetrics   *GraphMetrics           `json:"graph_metrics,omitempty"`
+	AgentMail      *AgentMailSummary       `json:"agent_mail,omitempty"`
+	Handoff        *HandoffSummary         `json:"handoff,omitempty"`
+	Alerts         []StatusAlert           `json:"alerts,omitempty"`
+	FileChanges    []FileChangeInfo        `json:"file_changes,omitempty"`
+	Conflicts      []tracker.Conflict      `json:"conflicts,omitempty"`
+	SchedulerStats *SchedulerStatsSummary  `json:"scheduler_stats,omitempty"`
 }
 
 // AgentMailSummary provides a lightweight Agent Mail state for --robot-status.
@@ -1079,6 +1080,63 @@ type HandoffSummary struct {
 	Path       string `json:"path,omitempty"`
 	AgeSeconds int64  `json:"age_seconds,omitempty"`
 	Status     string `json:"status,omitempty"`
+}
+
+// SchedulerStatsSummary provides spawn scheduler statistics for robot-status.
+// This surfaces queue depth, backoff state, headroom, and rate limit status
+// to help agents understand spawn pacing.
+type SchedulerStatsSummary struct {
+	// Enabled indicates if spawn pacing is active.
+	Enabled bool `json:"enabled"`
+
+	// QueueDepth is the current number of jobs waiting in queue.
+	QueueDepth int `json:"queue_depth"`
+
+	// RunningCount is the number of currently executing spawn jobs.
+	RunningCount int `json:"running_count"`
+
+	// TotalSubmitted is the total jobs submitted since scheduler start.
+	TotalSubmitted int64 `json:"total_submitted"`
+
+	// TotalCompleted is the total jobs completed successfully.
+	TotalCompleted int64 `json:"total_completed"`
+
+	// TotalFailed is the total jobs that failed after all retries.
+	TotalFailed int64 `json:"total_failed"`
+
+	// IsPaused indicates if the scheduler is paused.
+	IsPaused bool `json:"is_paused"`
+
+	// InBackoff indicates if global backoff is currently active.
+	InBackoff bool `json:"in_backoff"`
+
+	// BackoffRemainingMs is the remaining backoff time in milliseconds.
+	BackoffRemainingMs int64 `json:"backoff_remaining_ms,omitempty"`
+
+	// HeadroomOK indicates if resource headroom is sufficient.
+	HeadroomOK bool `json:"headroom_ok"`
+
+	// HeadroomReason describes why headroom is blocked (if any).
+	HeadroomReason string `json:"headroom_reason,omitempty"`
+
+	// RateLimitTokens is the current available rate limit tokens.
+	RateLimitTokens float64 `json:"rate_limit_tokens"`
+
+	// AgentCaps shows per-agent concurrency status.
+	AgentCaps *AgentCapsStatus `json:"agent_caps,omitempty"`
+
+	// UptimeSeconds is how long the scheduler has been running.
+	UptimeSeconds int64 `json:"uptime_seconds,omitempty"`
+}
+
+// AgentCapsStatus shows per-agent-type concurrency cap status.
+type AgentCapsStatus struct {
+	ClaudeCurrent int `json:"claude_current"`
+	ClaudeMax     int `json:"claude_max"`
+	CodexCurrent  int `json:"codex_current"`
+	CodexMax      int `json:"codex_max"`
+	GeminiCurrent int `json:"gemini_current"`
+	GeminiMax     int `json:"gemini_max"`
 }
 
 // StatusAlert represents a warning or alert emitted by robot status.

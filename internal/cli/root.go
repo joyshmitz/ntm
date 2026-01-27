@@ -963,6 +963,27 @@ Shell Integration:
 			}
 			return
 		}
+		if robotControllerSpawn != "" {
+			opts := ControllerInput{
+				Session:    robotControllerSpawn,
+				AgentType:  robotControllerAgentType,
+				PromptFile: robotControllerPrompt,
+				NoPrompt:   robotControllerNoPrompt,
+			}
+			resp, err := buildControllerResponse(opts)
+			if err != nil {
+				errResp := robot.NewErrorResponse(err, robot.ErrCodeSessionNotFound, err.Error())
+				if jsonErr := output.PrintJSON(errResp); jsonErr != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				os.Exit(3)
+			}
+			if err := output.PrintJSON(resp); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotInterrupt != "" {
 			// Parse pane filter (reuse --panes flag)
 			var paneFilter []string
@@ -1515,6 +1536,12 @@ var (
 	robotSpawnAssignWork bool   // enable orchestrator work assignment mode
 	robotSpawnStrategy   string // assignment strategy: top-n, diverse, dependency-aware, skill-matched
 
+	// Robot-controller-spawn flags for launching controller agents
+	robotControllerSpawn     string // session name for controller spawn
+	robotControllerAgentType string // agent type: cc, cod, gmi
+	robotControllerPrompt    string // custom prompt file
+	robotControllerNoPrompt  bool   // skip sending initial prompt
+
 	// Robot-interrupt flags for priority course correction
 	robotInterrupt        string // session name for interrupt
 	robotInterruptMsg     string // message to send after interrupt
@@ -1921,6 +1948,12 @@ func init() {
 	rootCmd.Flags().StringVar(&robotSpawnDir, "spawn-dir", "", "Working directory for spawned session. Use with --robot-spawn. Example: --spawn-dir=/path/to/project")
 	rootCmd.Flags().BoolVar(&robotSpawnAssignWork, "spawn-assign-work", false, "Enable orchestrator work assignment: get bv triage, claim beads, send work prompts to agents")
 	rootCmd.Flags().StringVar(&robotSpawnStrategy, "spawn-assign-strategy", "top-n", "Work assignment strategy (use with --spawn-assign-work). Values: top-n, diverse, dependency-aware, skill-matched")
+
+	// Robot-controller-spawn flags for launching controller agent
+	rootCmd.Flags().StringVar(&robotControllerSpawn, "robot-controller-spawn", "", "Launch controller agent in session. Required: SESSION. Example: ntm --robot-controller-spawn=proj")
+	rootCmd.Flags().StringVar(&robotControllerAgentType, "controller-agent-type", "cc", "Agent type for controller: cc, cod, gmi. Use with --robot-controller-spawn")
+	rootCmd.Flags().StringVar(&robotControllerPrompt, "controller-prompt", "", "Custom prompt file. Use with --robot-controller-spawn")
+	rootCmd.Flags().BoolVar(&robotControllerNoPrompt, "controller-no-prompt", false, "Skip initial prompt. Use with --robot-controller-spawn")
 
 	// Robot-interrupt flags for priority course correction
 	rootCmd.Flags().StringVar(&robotInterrupt, "robot-interrupt", "", "Send Ctrl+C to stop agents, optionally send new task. Required: SESSION. Example: ntm --robot-interrupt=proj --interrupt-msg='Stop and fix bug'")
@@ -2411,6 +2444,7 @@ func init() {
 		newPluginsCmd(),
 		newAgentsCmd(),
 		newAssignCmd(),
+		newControllerCmd(),
 
 		// Session navigation
 		newAttachCmd(),

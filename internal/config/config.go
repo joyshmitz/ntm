@@ -83,6 +83,7 @@ type Config struct {
 	Assign             AssignConfig          `toml:"assign"`           // Assignment strategy configuration
 	Ensemble           EnsembleConfig        `toml:"ensemble"`         // Reasoning ensemble defaults
 	Swarm              SwarmConfig           `toml:"swarm"`            // Weighted multi-project agent swarm
+	SpawnPacing        SpawnPacingConfig     `toml:"spawn_pacing"`     // Spawn scheduler pacing configuration
 
 	// Runtime-only fields (populated by project config merging)
 	ProjectDefaults map[string]int `toml:"-"`
