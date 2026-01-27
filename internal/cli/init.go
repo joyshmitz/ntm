@@ -79,9 +79,11 @@ func runProjectInit(opts initOptions) error {
 		}
 	}
 
+	// Backward compatibility: if user runs "ntm init zsh/bash/fish", redirect to shell integration
 	if opts.TargetDir != "" && isShellName(opts.TargetDir) {
 		if _, err := os.Stat(opts.TargetDir); err != nil {
-			return fmt.Errorf("shell integration moved: use \"ntm shell %s\"", opts.TargetDir)
+			// Directory doesn't exist, so this is a shell integration request
+			return runShellInit(opts.TargetDir)
 		}
 	}
 
