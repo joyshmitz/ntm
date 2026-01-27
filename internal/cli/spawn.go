@@ -172,10 +172,13 @@ func shouldStartInternalMonitor() bool {
 type SpawnOptions struct {
 	Session     string
 	Agents      []FlatAgent
-	CCCount     int
-	CodCount    int
-	GmiCount    int
-	UserPane    bool
+	CCCount       int
+	CodCount      int
+	GmiCount      int
+	CursorCount   int
+	WindsurfCount int
+	AiderCount    int
+	UserPane      bool
 	AutoRestart bool
 	RecipeName  string
 	PersonaMap  map[string]*persona.Persona

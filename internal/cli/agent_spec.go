@@ -17,9 +17,12 @@ var (
 type AgentType string
 
 const (
-	AgentTypeClaude AgentType = "cc"
-	AgentTypeCodex  AgentType = "cod"
-	AgentTypeGemini AgentType = "gmi"
+	AgentTypeClaude   AgentType = "cc"
+	AgentTypeCodex    AgentType = "cod"
+	AgentTypeGemini   AgentType = "gmi"
+	AgentTypeCursor   AgentType = "cursor"
+	AgentTypeWindsurf AgentType = "windsurf"
+	AgentTypeAider    AgentType = "aider"
 )
 
 // AgentSpec represents a parsed agent specification with optional model

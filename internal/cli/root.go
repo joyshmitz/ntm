@@ -1883,7 +1883,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotRecipes, "robot-recipes", false, "List available spawn recipes/presets (JSON). Use with --robot-spawn --spawn-preset")
 
 	// Robot-schema flag for JSON Schema generation
-	rootCmd.Flags().StringVar(&robotSchema, "robot-schema", "", "Generate JSON Schema for response types. Required: TYPE (status, send, spawn, interrupt, tail, ack, snapshot, all)")
+	rootCmd.Flags().StringVar(&robotSchema, "robot-schema", "", "Generate JSON Schema for response types. Required: TYPE (status, send, spawn, interrupt, tail, ack, snapshot, ensemble, ensemble_spawn, all)")
+	rootCmd.Flags().StringVar(&robotSchema, "schema", "", "Alias for --robot-schema. Generate JSON Schema for response types")
 
 	// Robot-mail flag for Agent Mail state
 	rootCmd.Flags().BoolVar(&robotMail, "robot-mail", false, "Get Agent Mail inbox/outbox state (JSON). Shows pending messages and coordination status")
@@ -2108,8 +2109,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotQuotaCheckProvider, "quota-check-provider", "", "Provider for quota check. Required with --robot-quota-check. Example: --quota-check-provider=claude")
 
 	// Robot-mail-check flags for Agent Mail inbox integration (bd-adgv)
-	rootCmd.Flags().BoolVar(&robotMailCheck, "robot-mail-check", false, "Check agent inboxes via Agent Mail. Requires --project. JSON output. Example: ntm --robot-mail-check --project=myproject")
-	rootCmd.Flags().StringVar(&mailProject, "project", "", "Project for mail check. Required with --robot-mail-check. Example: --project=myproject")
+	rootCmd.Flags().BoolVar(&robotMailCheck, "robot-mail-check", false, "Check agent inboxes via Agent Mail. Requires --mail-project. JSON output. Example: ntm --robot-mail-check --mail-project=myproject")
+	rootCmd.Flags().StringVar(&mailProject, "mail-project", "", "Project for mail check. Required with --robot-mail-check. Example: --mail-project=myproject")
 	rootCmd.Flags().StringVar(&mailAgent, "mail-agent", "", "Filter to specific agent inbox. Optional with --robot-mail-check. Example: --mail-agent=cc_1")
 	rootCmd.Flags().StringVar(&mailThread, "thread", "", "Filter to specific thread. Optional with --robot-mail-check. Example: --thread=TKT-api-design")
 	rootCmd.Flags().StringVar(&mailStatus, "status", "", "Filter by read status: read, unread, all. Optional with --robot-mail-check. Example: --status=unread")

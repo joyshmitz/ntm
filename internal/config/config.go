@@ -808,6 +808,35 @@ type PaletteState struct {
 type TmuxConfig struct {
 	DefaultPanes int    `toml:"default_panes"`
 	PaletteKey   string `toml:"palette_key"`
+	// ActivityIndicators control pane border activity coloring.
+	ActivityIndicators ActivityIndicatorConfig `toml:"activity_indicators"`
+}
+
+// ActivityIndicatorConfig controls tmux pane border color thresholds.
+type ActivityIndicatorConfig struct {
+	Enabled        bool `toml:"enabled"`         // Master toggle for activity indicators
+	ActiveSeconds  int  `toml:"active_seconds"`  // Seconds since activity to be considered active
+	StalledSeconds int  `toml:"stalled_seconds"` // Seconds since activity to be considered stalled
+}
+
+// DefaultActivityIndicatorConfig returns sensible defaults for pane activity indicators.
+func DefaultActivityIndicatorConfig() ActivityIndicatorConfig {
+	return ActivityIndicatorConfig{
+		Enabled:        true,
+		ActiveSeconds:  30,
+		StalledSeconds: 120,
+	}
+}
+
+// ValidateActivityIndicatorConfig validates activity indicator thresholds.
+func ValidateActivityIndicatorConfig(cfg *ActivityIndicatorConfig) error {
+	if cfg.ActiveSeconds < 1 {
+		return fmt.Errorf("active_seconds must be at least 1, got %d", cfg.ActiveSeconds)
+	}
+	if cfg.StalledSeconds <= cfg.ActiveSeconds {
+		return fmt.Errorf("stalled_seconds (%d) must be greater than active_seconds (%d)", cfg.StalledSeconds, cfg.ActiveSeconds)
+	}
+	return nil
 }
 
 // AgentMailConfig holds Agent Mail server settings
@@ -1425,8 +1454,9 @@ func Default() *Config {
 		SuggestionsEnabled: true,
 		Agents:             DefaultAgentTemplates(),
 		Tmux: TmuxConfig{
-			DefaultPanes: 10,
-			PaletteKey:   "F6",
+			DefaultPanes:       10,
+			PaletteKey:         "F6",
+			ActivityIndicators: DefaultActivityIndicatorConfig(),
 		},
 		Robot: DefaultRobotConfig(),
 		AgentMail: AgentMailConfig{

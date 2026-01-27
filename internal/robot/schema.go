@@ -11,15 +11,37 @@ import (
 
 // SchemaCommand is the supported schema command types.
 var SchemaCommand = map[string]interface{}{
-	"status":         StatusOutput{},
-	"send":           SendOutput{},
-	"spawn":          SpawnOutput{},
-	"ensemble_spawn": EnsembleSpawnOutput{},
-	"interrupt":      InterruptOutput{},
-	"tail":           TailOutput{},
-	"ack":            AckOutput{},
-	"snapshot":       SnapshotOutput{},
+	// Core state inspection
+	"status":   StatusOutput{},
+	"snapshot": SnapshotOutput{},
+	"version":  VersionOutput{},
+
+	// Session operations
+	"spawn":     SpawnOutput{},
+	"send":      SendOutput{},
+	"interrupt": InterruptOutput{},
+	"tail":      TailOutput{},
+	"ack":       AckOutput{},
+
+	// Pane inspection
+	"inspect": InspectPaneOutput{},
+
+	// Ensemble
 	"ensemble":       EnsembleOutput{},
+	"ensemble_spawn": EnsembleSpawnOutput{},
+
+	// Beads/work management
+	"beads_list": BeadsListOutput{},
+	"assign":     AssignOutput{},
+	"triage":     TriageOutput{},
+
+	// Health and diagnostics
+	"health":   HealthOutput{},
+	"diagnose": DiagnoseOutput{},
+
+	// Agent health
+	"agent_health": AgentHealthOutput{},
+	"is_working":   IsWorkingOutput{},
 }
 
 // JSONSchema represents a JSON Schema document.
