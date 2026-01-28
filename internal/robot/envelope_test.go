@@ -179,6 +179,8 @@ func TestOutputTypesEmbedRobotResponse(t *testing.T) {
 		{"JFPStatusOutput", reflect.TypeOf(JFPStatusOutput{})},
 		{"JFPSuggestOutput", reflect.TypeOf(JFPSuggestOutput{})},
 		{"JFPTagsOutput", reflect.TypeOf(JFPTagsOutput{})},
+		{"MSSearchOutput", reflect.TypeOf(MSSearchOutput{})},
+		{"MSShowOutput", reflect.TypeOf(MSShowOutput{})},
 		{"MailOutput", reflect.TypeOf(MailOutput{})},
 		{"MetricsOutput", reflect.TypeOf(MetricsOutput{})},
 		{"MonitorOutput", reflect.TypeOf(MonitorOutput{})},

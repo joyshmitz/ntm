@@ -1434,6 +1434,8 @@ Tool Bridges:
 -------------
 --robot-cass-search=QUERY    Search past conversations (--limit=20, --since=7d)
 --robot-jfp-search=QUERY     Search prompts library
+--robot-ms-search=QUERY      Search Meta Skill catalog
+--robot-ms-show=ID           Show Meta Skill details
 --robot-tokens               Token usage stats (--days=30, --group-by=agent)
 --robot-history=SESSION      Command history (--last=10)
 

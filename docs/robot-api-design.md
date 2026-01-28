@@ -77,12 +77,12 @@ Tool bridges are **optional**. When a tool is missing, robot commands return `DE
 
 **Implemented today**
 - **JFP** (JeffreysPrompts): `--robot-jfp-status`, `--robot-jfp-list`, `--robot-jfp-search`, `--robot-jfp-show`, `--robot-jfp-suggest`, `--robot-jfp-installed`, `--robot-jfp-categories`, `--robot-jfp-tags`, `--robot-jfp-bundles`
+- **MS** (Meta Skill): `--robot-ms-search`, `--robot-ms-show`
 - **DCG** (Destructive Command Guard): `--robot-dcg-status`
 
 **Planned / rolling out** (names follow `--robot-<tool>-<action>`; confirm via `--robot-capabilities`)
 - **SLB** (two-person approvals): `--robot-slb-*`
 - **RU** (repo updater): `--robot-ru-*`
-- **MS** (Meta Skill): `--robot-ms-*`
 - **UBS** (Ultimate Bug Scanner): `--robot-ubs-*`
 - **ACFS** (Flywheel setup/bootstrapping): `--robot-acfs-*`
 - **GIIL** (image fetch): `--robot-giil-*`
