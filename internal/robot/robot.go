@@ -1248,7 +1248,7 @@ API Design Principles (see docs/robot-api-design.md):
 -----------------------------------------------------
 1. Global commands: bool flags (--robot-status, --robot-plan)
 2. Session-scoped: =SESSION syntax (--robot-send=myproj, --robot-tail=myproj)
-3. Modifiers: unprefixed global flags (--limit, --since, --type)
+3. Modifiers: unprefixed global flags (--limit, --offset, --since, --type)
 4. Output: JSON by default, TOON for token-efficient (--robot-format=toon)
 
 Core Commands:
@@ -1309,6 +1309,9 @@ Output Formats:
 Common Modifiers:
 -----------------
 --limit=N       Max results (works with search, list commands)
+--offset=N      Pagination offset for list commands
+--robot-limit=N  Explicit pagination alias for robot list outputs
+--robot-offset=N Explicit pagination alias for robot list outputs
 --since=DURATION  Time filter (1d, 7d, 30d, ISO8601, or duration like 1h)
 --type=TYPE     Agent type filter (claude, codex, gemini)
 --panes=X,Y     Pane filter (comma-separated indices)

@@ -18,6 +18,8 @@ type HistoryOptions struct {
 	Last      int    // last N entries
 	Since     string // time-based filter (e.g., "1h", "30m", "2025-12-15")
 	Stats     bool   // show statistics instead of entries
+	Limit     int    // pagination limit
+	Offset    int    // pagination offset
 }
 
 // HistoryOutput is the structured output for --robot-history
@@ -29,6 +31,7 @@ type HistoryOutput struct {
 	Stats       *history.Stats         `json:"stats,omitempty"`
 	Total       int                    `json:"total"`
 	Filtered    int                    `json:"filtered"`
+	Pagination  *PaginationInfo        `json:"pagination,omitempty"`
 	AgentHints  *HistoryAgentHints     `json:"_agent_hints,omitempty"`
 }
 
@@ -172,8 +175,13 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 		filtered = filtered[len(filtered)-opts.Last:]
 	}
 
-	output.Entries = filtered
 	output.Filtered = len(filtered)
+	if paged, page := ApplyPagination(filtered, PaginationOptions{Limit: opts.Limit, Offset: opts.Offset}); page != nil {
+		output.Entries = paged
+		output.Pagination = page
+	} else {
+		output.Entries = filtered
+	}
 	output.AgentHints = generateHistoryHints(*output, opts)
 
 	return output, nil

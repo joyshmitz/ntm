@@ -93,8 +93,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Flag:        "--robot-status",
 			Category:    "state",
 			Description: "Get tmux sessions, panes, and agent states. The primary entry point for understanding current system state.",
-			Parameters:  []RobotParameter{},
-			Examples:    []string{"ntm --robot-status"},
+			Parameters: []RobotParameter{
+				{Name: "robot-limit", Flag: "--robot-limit", Type: "int", Required: false, Default: "0", Description: "Max sessions to return (alias: --limit)"},
+				{Name: "robot-offset", Flag: "--robot-offset", Type: "int", Required: false, Default: "0", Description: "Pagination offset for sessions (alias: --offset)"},
+			},
+			Examples: []string{"ntm --robot-status"},
 		},
 		{
 			Name:        "context",
@@ -124,6 +127,8 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "since", Flag: "--since", Type: "string", Required: false, Description: "RFC3339 timestamp for delta snapshot"},
 				{Name: "bead-limit", Flag: "--bead-limit", Type: "int", Required: false, Default: "5", Description: "Max beads per category"},
+				{Name: "robot-limit", Flag: "--robot-limit", Type: "int", Required: false, Default: "0", Description: "Max sessions to return (alias: --limit)"},
+				{Name: "robot-offset", Flag: "--robot-offset", Type: "int", Required: false, Default: "0", Description: "Pagination offset for sessions (alias: --offset)"},
 			},
 			Examples: []string{
 				"ntm --robot-snapshot",
@@ -792,6 +797,8 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "history-last", Flag: "--history-last", Type: "int", Required: false, Description: "Show last N entries"},
 				{Name: "history-since", Flag: "--history-since", Type: "string", Required: false, Description: "Show entries since time"},
 				{Name: "history-stats", Flag: "--history-stats", Type: "bool", Required: false, Description: "Show statistics instead of entries"},
+				{Name: "robot-limit", Flag: "--robot-limit", Type: "int", Required: false, Default: "0", Description: "Max history entries to return (alias: --limit)"},
+				{Name: "robot-offset", Flag: "--robot-offset", Type: "int", Required: false, Default: "0", Description: "Pagination offset for history entries (alias: --offset)"},
 			},
 			Examples: []string{"ntm --robot-history=myproject --history-last=10"},
 		},
