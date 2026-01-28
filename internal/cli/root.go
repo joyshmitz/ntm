@@ -836,6 +836,13 @@ Shell Integration:
 			}
 			return
 		}
+		if robotHealthOAuth != "" {
+			if err := robot.PrintHealthOAuth(robotHealthOAuth); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotDiagnose != "" {
 			if robotDiagnoseBrief {
 				if err := robot.PrintDiagnoseBrief(robotDiagnose); err != nil {
@@ -1496,7 +1503,8 @@ var (
 	robotBulkAssignTemplate string // prompt template file path
 
 	// Robot-health flag
-	robotHealth string // session health or project health (empty = project)
+	robotHealth      string // session health or project health (empty = project)
+	robotHealthOAuth string // session OAuth/rate-limit status
 
 	// Robot-diagnose flags
 	robotDiagnose      string // session name for comprehensive diagnosis
@@ -1908,6 +1916,7 @@ func init() {
 
 	// Robot-health flag for session/project health summary
 	rootCmd.Flags().StringVar(&robotHealth, "robot-health", "", "Get session or project health (JSON). SESSION for per-agent health, empty for project health. Example: ntm --robot-health=myproject")
+	rootCmd.Flags().StringVar(&robotHealthOAuth, "robot-health-oauth", "", "Get per-agent OAuth and rate-limit status (JSON). Required: SESSION. Example: ntm --robot-health-oauth=myproject")
 
 	// Robot-diagnose flags for comprehensive health diagnosis
 	rootCmd.Flags().StringVar(&robotDiagnose, "robot-diagnose", "", "Comprehensive health check with fix recommendations. Required: SESSION. Example: ntm --robot-diagnose=myproject")
@@ -3160,7 +3169,7 @@ func needsConfigLoading(cmdName string) bool {
 		if robotStatus || robotPlan || robotSnapshot || robotTail != "" ||
 			robotSend != "" || robotAck != "" || robotSpawn != "" ||
 			robotInterrupt != "" || robotRestartPane != "" || robotGraph || robotMail || robotHealth != "" ||
-			robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
+			robotHealthOAuth != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
 			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
 			robotSmartRestart != "" || robotMonitor != "" {
 			return true

@@ -356,25 +356,42 @@ func (m *Monitor) handleRateLimit(agent *AgentState, waitSeconds int) {
 }
 
 func (m *Monitor) recordRateLimitHit(agentType string, waitSeconds int) {
-	if m.rateLimitTracker == nil {
+	tracker := m.ensureRateLimitTracker()
+	if tracker == nil {
 		return
 	}
 	provider := ratelimit.NormalizeProvider(agentType)
-	m.rateLimitTracker.RecordRateLimitWithCooldown(provider, "send", waitSeconds)
-	if err := m.rateLimitTracker.SaveToDir(m.projectDir); err != nil {
+	tracker.RecordRateLimitWithCooldown(provider, "send", waitSeconds)
+	if err := tracker.SaveToDir(m.projectDir); err != nil {
 		log.Printf("[resilience] Warning: failed to persist rate limit history: %v", err)
 	}
 }
 
 func (m *Monitor) recordRateLimitSuccess(agentType string) {
-	if m.rateLimitTracker == nil {
+	tracker := m.ensureRateLimitTracker()
+	if tracker == nil {
 		return
 	}
 	provider := ratelimit.NormalizeProvider(agentType)
-	m.rateLimitTracker.RecordSuccess(provider)
-	if err := m.rateLimitTracker.SaveToDir(m.projectDir); err != nil {
+	tracker.RecordSuccess(provider)
+	if err := tracker.SaveToDir(m.projectDir); err != nil {
 		log.Printf("[resilience] Warning: failed to persist rate limit history: %v", err)
 	}
+}
+
+func (m *Monitor) ensureRateLimitTracker() *ratelimit.RateLimitTracker {
+	if m.rateLimitTracker != nil {
+		return m.rateLimitTracker
+	}
+	if !m.cfg.Resilience.RateLimit.Detect {
+		return nil
+	}
+	tracker := ratelimit.NewRateLimitTracker(m.projectDir)
+	if err := tracker.LoadFromDir(m.projectDir); err != nil {
+		log.Printf("[resilience] Warning: failed to load rate limit history: %v", err)
+	}
+	m.rateLimitTracker = tracker
+	return tracker
 }
 
 // triggerRotationAssistance sends a notification with rotation command or auto-initiates rotation
