@@ -843,6 +843,27 @@ Shell Integration:
 			}
 			return
 		}
+		if robotLogs != "" {
+			var panes []int
+			if robotLogsPanes != "" {
+				var err error
+				panes, err = robot.ParsePanesArg(robotLogsPanes)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+			opts := robot.LogsOptions{
+				Session: robotLogs,
+				Panes:   panes,
+				Limit:   robotLogsLimit,
+			}
+			if err := robot.PrintLogs(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotDiagnose != "" {
 			if robotDiagnoseBrief {
 				if err := robot.PrintDiagnoseBrief(robotDiagnose); err != nil {
@@ -1506,6 +1527,11 @@ var (
 	robotHealth      string // session health or project health (empty = project)
 	robotHealthOAuth string // session OAuth/rate-limit status
 
+	// Robot-logs flags
+	robotLogs      string // session name for logs
+	robotLogsPanes string // comma-separated pane indices
+	robotLogsLimit int    // max lines per pane
+
 	// Robot-diagnose flags
 	robotDiagnose      string // session name for comprehensive diagnosis
 	robotDiagnoseFix   bool   // attempt auto-fix
@@ -1917,6 +1943,11 @@ func init() {
 	// Robot-health flag for session/project health summary
 	rootCmd.Flags().StringVar(&robotHealth, "robot-health", "", "Get session or project health (JSON). SESSION for per-agent health, empty for project health. Example: ntm --robot-health=myproject")
 	rootCmd.Flags().StringVar(&robotHealthOAuth, "robot-health-oauth", "", "Get per-agent OAuth and rate-limit status (JSON). Required: SESSION. Example: ntm --robot-health-oauth=myproject")
+
+	// Robot-logs flags for aggregated agent logs
+	rootCmd.Flags().StringVar(&robotLogs, "robot-logs", "", "Get aggregated logs from all agent panes (JSON). Required: SESSION. Example: ntm --robot-logs=myproject")
+	rootCmd.Flags().StringVar(&robotLogsPanes, "logs-panes", "", "Filter to specific pane indices (comma-separated). Use with --robot-logs. Example: --logs-panes=1,2,3")
+	rootCmd.Flags().IntVar(&robotLogsLimit, "logs-limit", 100, "Max lines per pane. Use with --robot-logs. Example: --logs-limit=50")
 
 	// Robot-diagnose flags for comprehensive health diagnosis
 	rootCmd.Flags().StringVar(&robotDiagnose, "robot-diagnose", "", "Comprehensive health check with fix recommendations. Required: SESSION. Example: ntm --robot-diagnose=myproject")
@@ -2475,6 +2506,7 @@ func init() {
 		newChangesCmd(),
 		newConflictsCmd(),
 		newSummaryCmd(),
+		newLogsCmd(),
 
 		// Session persistence
 		newCheckpointCmd(),
@@ -3169,7 +3201,7 @@ func needsConfigLoading(cmdName string) bool {
 		if robotStatus || robotPlan || robotSnapshot || robotTail != "" ||
 			robotSend != "" || robotAck != "" || robotSpawn != "" ||
 			robotInterrupt != "" || robotRestartPane != "" || robotGraph || robotMail || robotHealth != "" ||
-			robotHealthOAuth != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
+			robotHealthOAuth != "" || robotLogs != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
 			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
 			robotSmartRestart != "" || robotMonitor != "" {
 			return true
