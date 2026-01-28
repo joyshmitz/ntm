@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -84,6 +85,62 @@ func (v *optionalDurationValue) Set(s string) error {
 	}
 	*v.duration = dur
 	return nil
+}
+
+type spawnTestPacing struct {
+	paneDelay  time.Duration
+	agentDelay time.Duration
+}
+
+func resolveSpawnTestPacing() (spawnTestPacing, error) {
+	if os.Getenv("NTM_TEST_MODE") == "" && os.Getenv("NTM_E2E") == "" {
+		return spawnTestPacing{}, nil
+	}
+
+	defaultDelay, err := parseEnvDurationMs("NTM_TEST_SPAWN_DELAY_MS")
+	if err != nil {
+		return spawnTestPacing{}, err
+	}
+
+	paneDelay, err := parseEnvDurationMs("NTM_TEST_SPAWN_PANE_DELAY_MS")
+	if err != nil {
+		return spawnTestPacing{}, err
+	}
+	if paneDelay == 0 {
+		paneDelay = defaultDelay
+	}
+
+	agentDelay, err := parseEnvDurationMs("NTM_TEST_SPAWN_AGENT_DELAY_MS")
+	if err != nil {
+		return spawnTestPacing{}, err
+	}
+	if agentDelay == 0 {
+		agentDelay = defaultDelay
+	}
+
+	if paneDelay == 0 && agentDelay == 0 {
+		return spawnTestPacing{}, nil
+	}
+
+	return spawnTestPacing{
+		paneDelay:  paneDelay,
+		agentDelay: agentDelay,
+	}, nil
+}
+
+func parseEnvDurationMs(key string) (time.Duration, error) {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return 0, nil
+	}
+	ms, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer millisecond value, got %q", key, val)
+	}
+	if ms < 0 {
+		return 0, fmt.Errorf("%s must be non-negative, got %d", key, ms)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 func (v *optionalDurationValue) Type() string {
@@ -475,6 +532,11 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionName := args[0]
 			dir := cfg.GetProjectDir(sessionName)
+
+			testPacing, err := resolveSpawnTestPacing()
+			if err != nil {
+				return outputError(err)
+			}
 
 			// Update CASS config from flags
 			if contextLimit > 0 {
@@ -938,6 +1000,9 @@ func spawnSessionLogic(opts SpawnOptions) error {
 			steps.Start(fmt.Sprintf("Creating %d pane(s)", toAdd))
 		}
 		for i := 0; i < toAdd; i++ {
+			if testPacing.paneDelay > 0 && i > 0 {
+				time.Sleep(testPacing.paneDelay)
+			}
 			if _, err := tmux.SplitWindow(opts.Session, dir); err != nil {
 				if !IsJSONOutput() {
 					steps.Fail()
@@ -1068,6 +1133,10 @@ func spawnSessionLogic(opts SpawnOptions) error {
 			break
 		}
 		pane := panes[agentNum]
+
+		if testPacing.agentDelay > 0 && staggerAgentIdx > 0 {
+			time.Sleep(testPacing.agentDelay)
+		}
 
 		// Format pane title with optional model variant
 		// Format: {session}__{type}_{index} or {session}__{type}_{index}_{variant}
