@@ -170,8 +170,8 @@ type ProbeEntry struct {
 
 // ProbeSummary provides aggregate counts for a probe session.
 type ProbeSummary struct {
-	TotalProbed int `json:"total_probed"`
-	Responsive  int `json:"responsive"`
+	TotalProbed  int `json:"total_probed"`
+	Responsive   int `json:"responsive"`
 	Unresponsive int `json:"unresponsive"`
 }
 

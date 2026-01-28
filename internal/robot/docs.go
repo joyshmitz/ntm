@@ -186,7 +186,8 @@ func getCommandsContent() *DocsContent {
 --robot-tail=SESSION: Capture recent pane output
 --robot-context=SESSION: Get context window usage
 --robot-is-working=SESSION: Check if agents are busy
---robot-diagnose=SESSION: Comprehensive health check`,
+--robot-diagnose=SESSION: Comprehensive health check
+--robot-probe=SESSION: Active pane responsiveness probe`,
 			},
 			{
 				Heading: "Agent Control",

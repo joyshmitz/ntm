@@ -500,6 +500,21 @@ Shell Integration:
 			}
 			return
 		}
+		// MS (Meta Skill) robot handlers
+		if robotMSSearch != "" {
+			if err := robot.PrintMSSearch(robotMSSearch); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotMSShow != "" {
+			if err := robot.PrintMSShow(robotMSShow); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotTokens {
 			opts := robot.TokensOptions{
 				Days:      robotTokensDays,
@@ -1122,6 +1137,27 @@ Shell Integration:
 			}
 			return
 		}
+		if robotProbe != "" {
+			panes, err := robot.ParsePanesArg(robotPanes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
+				os.Exit(3)
+			}
+			flags, err := robot.ParseProbeFlags(robotProbeMethod, robotProbeTimeout, robotProbeAggressive)
+			if err != nil {
+				if err := robot.PrintProbeFlagError(err); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				os.Exit(1)
+			}
+			opts := robot.ProbeSessionOptions{
+				Session: robotProbe,
+				Panes:   panes,
+				Flags:   *flags,
+			}
+			exitCode := robot.PrintProbeSession(opts)
+			os.Exit(exitCode)
+		}
 		if robotTerse {
 			if err := robot.PrintTerse(cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1719,6 +1755,10 @@ var (
 	jfpCategory        string // filter by category
 	jfpTag             string // filter by tag
 
+	// Robot-ms flags for Meta Skill integration
+	robotMSSearch string // search query
+	robotMSShow   string // skill ID to show
+
 	// Robot-tokens flags for token usage analysis
 	robotTokens        bool   // token usage output
 	robotTokensDays    int    // number of days to analyze
@@ -1852,10 +1892,10 @@ var (
 	robotRestartPane string // session name for pane restart
 
 	// Robot-probe flags for active pane responsiveness testing (bd-1cu1f)
-	robotProbe          string // session name to probe
-	robotProbeMethod    string // probe method: keystroke_echo, interrupt_test
-	robotProbeTimeout   int    // probe timeout in ms
-	robotProbeAggressive bool  // fallback to interrupt_test if keystroke_echo fails
+	robotProbe           string // session name to probe
+	robotProbeMethod     string // probe method: keystroke_echo, interrupt_test
+	robotProbeTimeout    int    // probe timeout in ms
+	robotProbeAggressive bool   // fallback to interrupt_test if keystroke_echo fails
 
 	// Robot-is-working flags for agent work state detection (bd-16ptx)
 	robotIsWorking        string // session name to check
@@ -2103,6 +2143,10 @@ func init() {
 
 	// Robot-restart-pane flag
 	rootCmd.Flags().StringVar(&robotRestartPane, "robot-restart-pane", "", "Restart pane process (kill and respawn). Required: SESSION. Example: ntm --robot-restart-pane=proj --panes=1,2")
+	rootCmd.Flags().StringVar(&robotProbe, "robot-probe", "", "Probe pane responsiveness. Required: SESSION. Example: ntm --robot-probe=proj --panes=1,2")
+	rootCmd.Flags().StringVar(&robotProbeMethod, "probe-method", "", "Probe method: keystroke_echo, interrupt_test (used with --robot-probe)")
+	rootCmd.Flags().IntVar(&robotProbeTimeout, "probe-timeout", 0, "Probe timeout in ms (100-60000, used with --robot-probe)")
+	rootCmd.Flags().BoolVar(&robotProbeAggressive, "probe-aggressive", false, "Fallback to interrupt_test if keystroke_echo fails (used with --robot-probe)")
 
 	// Robot-terse flag for ultra-compact output
 	rootCmd.Flags().BoolVar(&robotTerse, "robot-terse", false, "Single-line state: S:session|A:ready/total|W:working|I:idle|B:beads|M:mail|!:alerts. Minimal tokens")
@@ -2153,6 +2197,10 @@ func init() {
 	// JFP filters - work with --robot-jfp-list
 	rootCmd.Flags().StringVar(&jfpCategory, "jfp-category", "", "Filter JFP list by category. Example: --jfp-category=coding")
 	rootCmd.Flags().StringVar(&jfpTag, "jfp-tag", "", "Filter JFP list by tag. Example: --jfp-tag=debugging")
+
+	// MS (Meta Skill) robot flags
+	rootCmd.Flags().StringVar(&robotMSSearch, "robot-ms-search", "", "Search Meta Skill catalog. Required: QUERY. Example: ntm --robot-ms-search='commit workflow'")
+	rootCmd.Flags().StringVar(&robotMSShow, "robot-ms-show", "", "Show Meta Skill details. Required: ID. Example: ntm --robot-ms-show='commit-and-release'")
 
 	// Robot-tokens flags for token usage analysis
 	rootCmd.Flags().BoolVar(&robotTokens, "robot-tokens", false, "Get token usage statistics (JSON). Group by agent, model, or time period")
@@ -3300,7 +3348,7 @@ func needsConfigLoading(cmdName string) bool {
 		// Most other robot flags need full config
 		if robotStatus || robotPlan || robotSnapshot || robotTail != "" ||
 			robotSend != "" || robotAck != "" || robotSpawn != "" ||
-			robotInterrupt != "" || robotRestartPane != "" || robotGraph || robotMail || robotHealth != "" ||
+			robotInterrupt != "" || robotRestartPane != "" || robotProbe != "" || robotGraph || robotMail || robotHealth != "" ||
 			robotHealthOAuth != "" || robotLogs != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
 			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
 			robotSmartRestart != "" || robotMonitor != "" {

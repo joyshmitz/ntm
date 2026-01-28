@@ -295,6 +295,23 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-diagnose=myproject --diagnose-fix"},
 		},
 		{
+			Name:        "probe",
+			Flag:        "--robot-probe",
+			Category:    "state",
+			Description: "Active pane responsiveness probe using keystroke or interrupt methods.",
+			Parameters: []RobotParameter{
+				{Name: "session", Flag: "--robot-probe", Type: "string", Required: true, Description: "Session name"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to probe"},
+				{Name: "probe-method", Flag: "--probe-method", Type: "string", Required: false, Default: "keystroke_echo", Description: "Probe method: keystroke_echo, interrupt_test"},
+				{Name: "probe-timeout", Flag: "--probe-timeout", Type: "int", Required: false, Default: "5000", Description: "Probe timeout in milliseconds"},
+				{Name: "probe-aggressive", Flag: "--probe-aggressive", Type: "bool", Required: false, Description: "Fallback to interrupt_test if keystroke_echo fails"},
+			},
+			Examples: []string{
+				"ntm --robot-probe=myproject",
+				"ntm --robot-probe=myproject --panes=2 --probe-method=interrupt_test",
+			},
+		},
+		{
 			Name:        "diff",
 			Flag:        "--robot-diff",
 			Category:    "state",

@@ -38,6 +38,7 @@ var SchemaCommand = map[string]interface{}{
 	// Health and diagnostics
 	"health":   HealthOutput{},
 	"diagnose": DiagnoseOutput{},
+	"probe":    ProbeSessionOutput{},
 
 	// Agent health
 	"agent_health": AgentHealthOutput{},
