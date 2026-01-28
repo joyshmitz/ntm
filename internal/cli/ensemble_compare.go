@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -226,7 +227,7 @@ func writeCompareResult(w io.Writer, result *ensemble.ComparisonResult, opts com
 	switch format {
 	case "json":
 		out := compareOutput{
-			GeneratedAt: output.Timestamp().Format(output.TimeFormat),
+			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        result.RunA,
 			RunB:        result.RunB,
 			Summary:     result.Summary,
@@ -238,7 +239,7 @@ func writeCompareResult(w io.Writer, result *ensemble.ComparisonResult, opts com
 
 	case "yaml":
 		out := compareOutput{
-			GeneratedAt: output.Timestamp().Format(output.TimeFormat),
+			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        result.RunA,
 			RunB:        result.RunB,
 			Summary:     result.Summary,
@@ -257,7 +258,7 @@ func writeCompareError(w io.Writer, runAID, runBID string, err error, format str
 	switch format {
 	case "json":
 		out := compareOutput{
-			GeneratedAt: output.Timestamp().Format(output.TimeFormat),
+			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        runAID,
 			RunB:        runBID,
 			Error:       err.Error(),
@@ -269,7 +270,7 @@ func writeCompareError(w io.Writer, runAID, runBID string, err error, format str
 
 	case "yaml":
 		out := compareOutput{
-			GeneratedAt: output.Timestamp().Format(output.TimeFormat),
+			GeneratedAt: output.Timestamp().Format(time.RFC3339),
 			RunA:        runAID,
 			RunB:        runBID,
 			Error:       err.Error(),
