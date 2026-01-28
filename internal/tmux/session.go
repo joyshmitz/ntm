@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // paneNameRegex matches the NTM pane naming convention:
@@ -988,6 +988,9 @@ func (c *Client) CapturePaneOutput(target string, lines int) (string, error) {
 
 // CapturePaneOutputContext captures the output of a pane with cancellation support.
 func (c *Client) CapturePaneOutputContext(ctx context.Context, target string, lines int) (string, error) {
+	if lines < 0 {
+		lines = -lines
+	}
 	return c.RunContext(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines))
 }
 

@@ -3798,6 +3798,20 @@ Notes:
 - If the synthesizer mode is missing from the catalog you will see:
   `synthesis.strategy: synthesizer mode "argumentation" not found in catalog`.
 
+### Streaming synthesis output
+
+You can stream incremental synthesis chunks:
+
+```bash
+ntm ensemble synthesize mysession --stream
+ntm ensemble synthesize mysession --stream --format json  # JSONL chunks
+ntm ensemble synthesize mysession --stream --resume --run-id <id>
+```
+
+Notes:
+- `--stream --format json` emits one JSON object per line (JSONL).
+- On Ctrl+C, NTM writes a synthesis checkpoint and prints a resume command.
+
 ### Budget validation
 
 ```toml

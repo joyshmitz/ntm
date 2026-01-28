@@ -1077,6 +1077,18 @@ func streamEnsembleSynthesis(
 		return streamErr
 	}
 
+	saveErr := store.SaveSynthesisCheckpoint(runID, ensemble.SynthesisCheckpoint{
+		RunID:       runID,
+		SessionName: session,
+		LastIndex:   lastIndex,
+	})
+	if saveErr != nil {
+		slog.Default().Warn("failed to save synthesis checkpoint",
+			"run_id", runID,
+			"error", saveErr,
+		)
+	}
+
 	slog.Default().Info("ensemble synthesis streaming completed",
 		"session", session,
 		"run_id", runID,

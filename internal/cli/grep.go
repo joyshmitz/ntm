@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -362,6 +363,7 @@ func outputMatchingPanes(panes map[string]bool) error {
 		for p := range panes {
 			paneList = append(paneList, p)
 		}
+		sort.Strings(paneList)
 		return output.PrintJSON(map[string]interface{}{
 			"matching_panes": paneList,
 			"count":          len(paneList),
@@ -373,7 +375,12 @@ func outputMatchingPanes(panes map[string]bool) error {
 		return nil
 	}
 
+	paneList := make([]string, 0, len(panes))
 	for p := range panes {
+		paneList = append(paneList, p)
+	}
+	sort.Strings(paneList)
+	for _, p := range paneList {
 		fmt.Printf("%s%s%s\n", colorize(t.Blue), p, colorize(t.Text))
 	}
 	return nil
