@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ Examples:
 	cmd.AddCommand(newHandoffCreateCmd())
 	cmd.AddCommand(newHandoffListCmd())
 	cmd.AddCommand(newHandoffShowCmd())
+	cmd.AddCommand(newHandoffLedgerCmd())
 
 	return cmd
 }
@@ -148,6 +150,34 @@ Examples:
 
 	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 
+	return cmd
+}
+
+func newHandoffLedgerCmd() *cobra.Command {
+	var jsonFormat bool
+
+	cmd := &cobra.Command{
+		Use:   "ledger [session]",
+		Short: "Show continuity ledger for a session",
+		Long: `Show continuity ledger entries for a session.
+
+Ledger files live at:
+  .ntm/ledgers/CONTINUITY_{session}.md
+
+Examples:
+  ntm handoff ledger myproject
+  ntm handoff ledger            # defaults to "general"`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionName := ""
+			if len(args) > 0 {
+				sessionName = args[0]
+			}
+			return runHandoffLedger(cmd, sessionName, jsonFormat)
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 	return cmd
 }
 
@@ -311,6 +341,43 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 	fmt.Fprintf(cmd.OutOrStdout(), "  Goal: %s\n", truncateForDisplay(h.Goal, 70))
 	fmt.Fprintf(cmd.OutOrStdout(), "  Now: %s\n", truncateForDisplay(h.Now, 70))
 	return nil
+}
+
+func runHandoffLedger(cmd *cobra.Command, sessionName string, jsonFormat bool) error {
+	if IsJSONOutput() {
+		jsonFormat = true
+	}
+
+	sessionName, err := normalizeHandoffSession(sessionName)
+	if err != nil {
+		return err
+	}
+
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	ledgerPath := filepath.Join(projectDir, ".ntm", "ledgers", fmt.Sprintf("CONTINUITY_%s.md", sessionName))
+	data, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no continuity ledger found for session: %s", sessionName)
+		}
+		return fmt.Errorf("read ledger: %w", err)
+	}
+
+	if jsonFormat {
+		payload := map[string]interface{}{
+			"session": sessionName,
+			"path":    ledgerPath,
+			"content": string(data),
+		}
+		return outputHandoffJSON(cmd, payload)
+	}
+
+	_, err = cmd.OutOrStdout().Write(data)
+	return err
 }
 
 // outputHandoffToStdout outputs the handoff to stdout in the specified format.
@@ -733,6 +800,19 @@ func outputHandoffJSON(cmd *cobra.Command, v interface{}) error {
 	encoder := json.NewEncoder(cmd.OutOrStdout())
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(v)
+}
+
+var handoffSessionNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func normalizeHandoffSession(sessionName string) (string, error) {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		sessionName = "general"
+	}
+	if !handoffSessionNameRegex.MatchString(sessionName) {
+		return "", fmt.Errorf("invalid session name: %s", sessionName)
+	}
+	return sessionName, nil
 }
 
 func generateDescription(goal string) string {
