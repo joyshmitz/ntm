@@ -3,6 +3,7 @@
 package robot
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
@@ -82,7 +83,7 @@ func GetEnsembleModes(opts EnsembleModesOptions) (*EnsembleModesOutput, error) {
 	}
 	if catalog == nil {
 		output.RobotResponse = NewErrorResponse(
-			err,
+			fmt.Errorf("mode catalog is nil"),
 			ErrCodeInternalError,
 			"Mode catalog is nil",
 		)
@@ -238,7 +239,7 @@ func filterModesByTier(modes []ensemble.ReasoningMode, tier ensemble.ModeTier) [
 // buildCategorySummary creates category info from the catalog.
 func buildCategorySummary(catalog *ensemble.ModeCatalog) []CategoryInfo {
 	if catalog == nil {
-		return nil
+		return []CategoryInfo{}
 	}
 
 	categories := ensemble.AllCategories()

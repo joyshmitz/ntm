@@ -3,6 +3,8 @@
 package robot
 
 import (
+	"fmt"
+
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 )
 
@@ -58,7 +60,7 @@ func GetEnsemblePresets() (*EnsemblePresetsOutput, error) {
 	}
 	if registry == nil {
 		output.RobotResponse = NewErrorResponse(
-			err,
+			fmt.Errorf("ensemble registry is nil"),
 			ErrCodeInternalError,
 			"Ensemble registry is nil",
 		)

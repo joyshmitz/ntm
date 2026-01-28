@@ -223,8 +223,8 @@ func GetEnsembleSynthesize(opts EnsembleSynthesizeOptions) (*EnsembleSynthesizeO
 		return output, nil
 	}
 
-	// Run synthesis
-	result, auditReport, err := engine.Process(state.Question, nil)
+	// Run synthesis directly using the collected outputs
+	result, err := engine.Synthesizer.Synthesize(synthInput)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("synthesis failed: %w", err),
@@ -235,18 +235,11 @@ func GetEnsembleSynthesize(opts EnsembleSynthesizeOptions) (*EnsembleSynthesizeO
 		return output, nil
 	}
 
-	// Handle direct synthesis if Process returned nil (no context pack)
-	if result == nil {
-		result, err = engine.Synthesizer.Synthesize(synthInput)
-		if err != nil {
-			output.RobotResponse = NewErrorResponse(
-				fmt.Errorf("synthesis failed: %w", err),
-				ErrCodeInternalError,
-				"Review mode outputs for completeness",
-			)
-			output.Status = "error"
-			return output, nil
-		}
+	// Run disagreement audit on the collected outputs
+	var auditReport *ensemble.AuditReport
+	auditor := ensemble.NewDisagreementAuditor(collector.Outputs, result)
+	if auditor != nil {
+		auditReport, _ = auditor.Audit()
 	}
 
 	// Format output if path specified
