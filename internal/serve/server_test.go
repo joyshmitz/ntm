@@ -1085,3 +1085,265 @@ func TestWSHubPublish(t *testing.T) {
 		t.Errorf("seq = %d, want 1", seq)
 	}
 }
+
+// =============================================================================
+// WebSocket Streaming Tests (bd-3ef1l)
+// Tests for streaming event delivery and client subscription behavior
+// =============================================================================
+
+func TestWSHub_PaneOutputSequence(t *testing.T) {
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Publish multiple pane output events
+	for i := 0; i < 10; i++ {
+		hub.Publish("panes:test:0", "pane.output", map[string]interface{}{
+			"lines": []string{"output line " + string(rune('A'+i))},
+			"seq":   i,
+		})
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify sequence numbers
+	hub.seqMu.Lock()
+	finalSeq := hub.seq
+	hub.seqMu.Unlock()
+
+	if finalSeq != 10 {
+		t.Errorf("expected final seq 10, got %d", finalSeq)
+	}
+
+	t.Logf("WS_STREAMING_TEST: hub assigned sequences 1-%d for 10 pane output events", finalSeq)
+}
+
+func TestWSHub_MultiClientFanOut(t *testing.T) {
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Create simulated clients
+	clients := make([]*WSClient, 3)
+	for i := 0; i < 3; i++ {
+		clients[i] = &WSClient{
+			id:     "client-" + string(rune('A'+i)),
+			hub:    hub,
+			send:   make(chan []byte, 100),
+			topics: make(map[string]struct{}),
+		}
+		// Subscribe to pane output
+		clients[i].Subscribe([]string{"panes:*"})
+
+		// Register with hub
+		hub.register <- clients[i]
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Verify client count
+	if hub.ClientCount() != 3 {
+		t.Errorf("expected 3 clients, got %d", hub.ClientCount())
+	}
+
+	// Publish an event
+	hub.Publish("panes:test:0", "pane.output", map[string]interface{}{
+		"lines": []string{"test output"},
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Each client should receive the message
+	for i, client := range clients {
+		select {
+		case msg := <-client.send:
+			if len(msg) == 0 {
+				t.Errorf("client %d received empty message", i)
+			}
+			t.Logf("WS_STREAMING_TEST: client %s received %d bytes", client.id, len(msg))
+		default:
+			t.Errorf("client %d did not receive message", i)
+		}
+	}
+
+	// Cleanup
+	for _, client := range clients {
+		hub.unregister <- client
+	}
+}
+
+func TestWSHub_TopicFiltering(t *testing.T) {
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Create two clients with different subscriptions
+	paneClient := &WSClient{
+		id:     "pane-watcher",
+		hub:    hub,
+		send:   make(chan []byte, 100),
+		topics: make(map[string]struct{}),
+	}
+	paneClient.Subscribe([]string{"panes:*"})
+	hub.register <- paneClient
+
+	sessionClient := &WSClient{
+		id:     "session-watcher",
+		hub:    hub,
+		send:   make(chan []byte, 100),
+		topics: make(map[string]struct{}),
+	}
+	sessionClient.Subscribe([]string{"sessions:*"})
+	hub.register <- sessionClient
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Publish a pane event
+	hub.Publish("panes:test:0", "pane.output", map[string]interface{}{"data": "pane"})
+
+	// Publish a session event
+	hub.Publish("sessions:test", "session.started", map[string]interface{}{"data": "session"})
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Pane client should only receive pane event
+	paneCount := 0
+	for {
+		select {
+		case <-paneClient.send:
+			paneCount++
+		default:
+			goto donePane
+		}
+	}
+donePane:
+
+	// Session client should only receive session event
+	sessionCount := 0
+	for {
+		select {
+		case <-sessionClient.send:
+			sessionCount++
+		default:
+			goto doneSession
+		}
+	}
+doneSession:
+
+	if paneCount != 1 {
+		t.Errorf("pane client expected 1 message, got %d", paneCount)
+	}
+	if sessionCount != 1 {
+		t.Errorf("session client expected 1 message, got %d", sessionCount)
+	}
+
+	t.Logf("WS_STREAMING_TEST: topic filtering verified, pane_client=%d session_client=%d", paneCount, sessionCount)
+
+	// Cleanup
+	hub.unregister <- paneClient
+	hub.unregister <- sessionClient
+}
+
+func TestWSHub_ClientBufferFull(t *testing.T) {
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Create client with tiny buffer (1)
+	slowClient := &WSClient{
+		id:     "slow-client",
+		hub:    hub,
+		send:   make(chan []byte, 1), // Very small buffer
+		topics: make(map[string]struct{}),
+	}
+	slowClient.Subscribe([]string{"panes:*"})
+	hub.register <- slowClient
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Publish many events quickly - some should be dropped due to full buffer
+	for i := 0; i < 50; i++ {
+		hub.Publish("panes:test:0", "pane.output", map[string]interface{}{"idx": i})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Count received messages
+	received := 0
+	for {
+		select {
+		case <-slowClient.send:
+			received++
+		default:
+			goto done
+		}
+	}
+done:
+
+	// Should receive some but not all (buffer was full)
+	if received >= 50 {
+		t.Errorf("expected some messages to be dropped, but received all %d", received)
+	}
+	if received == 0 {
+		t.Error("expected at least some messages to be received")
+	}
+
+	t.Logf("WS_STREAMING_TEST: backpressure test - sent 50, received %d (dropped %d)", received, 50-received)
+
+	hub.unregister <- slowClient
+}
+
+func TestWSHub_GlobalWildcard(t *testing.T) {
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Client subscribed to everything
+	globalClient := &WSClient{
+		id:     "global-watcher",
+		hub:    hub,
+		send:   make(chan []byte, 100),
+		topics: make(map[string]struct{}),
+	}
+	globalClient.Subscribe([]string{"*"})
+	hub.register <- globalClient
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Publish to different topics
+	hub.Publish("panes:test:0", "pane.output", map[string]interface{}{})
+	hub.Publish("sessions:test", "session.started", map[string]interface{}{})
+	hub.Publish("global:events", "system.event", map[string]interface{}{})
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Global client should receive all 3
+	received := 0
+	for {
+		select {
+		case <-globalClient.send:
+			received++
+		default:
+			goto done
+		}
+	}
+done:
+
+	if received != 3 {
+		t.Errorf("global wildcard client expected 3 messages, got %d", received)
+	}
+
+	t.Logf("WS_STREAMING_TEST: global wildcard subscription received all %d events", received)
+
+	hub.unregister <- globalClient
+}
