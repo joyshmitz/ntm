@@ -34,6 +34,7 @@ require (
 	github.com/containerd/console v1.0.4 // indirect
 	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/ebitengine/purego v0.8.2 // indirect
+	github.com/go-chi/chi/v5 v5.2.4 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect

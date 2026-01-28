@@ -1517,7 +1517,7 @@ func runKill(session string, force bool, tags []string, noHooks bool, summarize 
 // buildKillResponse constructs the response for session kill.
 // Used by both kernel handler and direct CLI calls.
 // In JSON/robot mode, force is effectively always true (no interactive confirmation).
-func buildKillResponse(session string, force bool, tags []string, noHooks bool) (*output.KillResponse, error) {
+func buildKillResponse(session string, force bool, tags []string, noHooks bool, summarize bool) (*output.KillResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
@@ -1559,6 +1559,17 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool) 
 		}
 		if hooks.AnyFailed(results) {
 			return nil, fmt.Errorf("pre-kill hook failed: %w", hooks.AllErrors(results))
+		}
+	}
+
+	// Generate summary before killing if requested
+	var summaryResult *summary.SessionSummary
+	if summarize {
+		var err error
+		summaryResult, err = generateKillSummary(session)
+		if err != nil {
+			// Non-fatal - continue with kill but note the error
+			summaryResult = nil
 		}
 	}
 
@@ -1616,6 +1627,7 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool) 
 		Session:             session,
 		Killed:              true,
 		Message:             message,
+		Summary:             summaryResult,
 	}, nil
 }
 

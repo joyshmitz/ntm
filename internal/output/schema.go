@@ -329,7 +329,8 @@ type InterruptResponse struct {
 // KillResponse is the output format for kill command
 type KillResponse struct {
 	TimestampedResponse
-	Session string `json:"session"`
-	Killed  bool   `json:"killed"`
-	Message string `json:"message,omitempty"`
+	Session string      `json:"session"`
+	Killed  bool        `json:"killed"`
+	Message string      `json:"message,omitempty"`
+	Summary interface{} `json:"summary,omitempty"` // *summary.SessionSummary when --summarize is used
 }
