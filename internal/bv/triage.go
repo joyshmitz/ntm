@@ -1,5 +1,5 @@
 // Package bv provides integration with the beads_viewer (bv) tool.
-// triage.go implements the -robot-triage mega-command integration with caching.
+// triage.go implements the --robot-triage mega-command integration with caching.
 package bv
 
 import (
@@ -19,7 +19,7 @@ var (
 	triageCacheMu   sync.Mutex
 )
 
-// GetTriage returns the complete triage analysis from bv -robot-triage.
+// GetTriage returns the complete triage analysis from bv --robot-triage.
 // Results are cached for TriageCacheTTL (default 30 seconds).
 func GetTriage(dir string) (*TriageResponse, error) {
 	triageCacheMu.Lock()
@@ -30,7 +30,7 @@ func GetTriage(dir string) (*TriageResponse, error) {
 		return triageCache, nil
 	}
 
-	output, err := run(dir, "-robot-triage")
+	output, err := run(dir, "--robot-triage")
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func GetTriage(dir string) (*TriageResponse, error) {
 
 // GetTriageNoCache returns fresh triage data, bypassing the cache
 func GetTriageNoCache(dir string) (*TriageResponse, error) {
-	output, err := run(dir, "-robot-triage")
+	output, err := run(dir, "--robot-triage")
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func GetBlockersToClear(dir string, n int) ([]BlockerToClear, error) {
 }
 
 // GetNextRecommendation returns the single top recommendation.
-// This is equivalent to bv -robot-next but uses cached triage data.
+// This is equivalent to bv --robot-next but uses cached triage data.
 func GetNextRecommendation(dir string) (*TriageRecommendation, error) {
 	triage, err := GetTriage(dir)
 	if err != nil {

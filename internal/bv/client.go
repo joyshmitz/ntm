@@ -164,7 +164,7 @@ func (c *BVClient) GetRecommendations(opts RecommendationOpts) ([]Recommendation
 
 // GetInsights returns graph analysis insights.
 func (c *BVClient) GetInsights() (*Insights, error) {
-	// Try to get insights from bv -robot-insights
+	// Try to get insights from bv --robot-insights
 	insightsResp, err := GetInsights(c.workDir())
 	if err != nil {
 		// Fall back to triage data if insights fail

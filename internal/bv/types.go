@@ -146,7 +146,7 @@ type BeadInProgress struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
-// TriageResponse contains the complete -robot-triage output
+// TriageResponse contains the complete --robot-triage output
 type TriageResponse struct {
 	GeneratedAt time.Time  `json:"generated_at"`
 	DataHash    string     `json:"data_hash"`

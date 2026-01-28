@@ -94,7 +94,7 @@ func run(dir string, args ...string) (string, error) {
 
 // GetInsights returns graph analysis insights (bottlenecks, keystones, etc.)
 func GetInsights(dir string) (*InsightsResponse, error) {
-	output, err := run(dir, "-robot-insights")
+	output, err := run(dir, "--robot-insights")
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ func GetInsights(dir string) (*InsightsResponse, error) {
 
 // GetPriority returns priority recommendations
 func GetPriority(dir string) (*PriorityResponse, error) {
-	output, err := run(dir, "-robot-priority")
+	output, err := run(dir, "--robot-priority")
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func GetPriority(dir string) (*PriorityResponse, error) {
 
 // GetPlan returns a parallel execution plan
 func GetPlan(dir string) (*PlanResponse, error) {
-	output, err := run(dir, "-robot-plan")
+	output, err := run(dir, "--robot-plan")
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func GetPlan(dir string) (*PlanResponse, error) {
 
 // GetRecipes returns available recipes
 func GetRecipes(dir string) (*RecipesResponse, error) {
-	output, err := run(dir, "-robot-recipes")
+	output, err := run(dir, "--robot-recipes")
 	if err != nil {
 		return nil, err
 	}
@@ -907,7 +907,7 @@ func RunRaw(dir string, args ...string) (string, error) {
 
 // GetForecast returns forecast analysis
 func GetForecast(dir, target string) (*ForecastResponse, error) {
-	args := []string{"-robot-forecast"}
+	args := []string{"--robot-forecast"}
 	if target != "" {
 		args = append(args, target)
 	} else {
@@ -926,7 +926,7 @@ func GetForecast(dir, target string) (*ForecastResponse, error) {
 
 // GetSuggestions returns hygiene suggestions
 func GetSuggestions(dir string) (*SuggestionsResponse, error) {
-	output, err := run(dir, "-robot-suggest")
+	output, err := run(dir, "--robot-suggest")
 	if err != nil {
 		return nil, err
 	}
@@ -939,7 +939,7 @@ func GetSuggestions(dir string) (*SuggestionsResponse, error) {
 
 // GetImpact returns impact analysis for a file
 func GetImpact(dir, filePath string) (*ImpactResponse, error) {
-	output, err := run(dir, "-robot-impact", filePath)
+	output, err := run(dir, "--robot-impact", filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -952,7 +952,7 @@ func GetImpact(dir, filePath string) (*ImpactResponse, error) {
 
 // GetSearch performs semantic search
 func GetSearch(dir, query string) (*SearchResponse, error) {
-	output, err := run(dir, "-robot-search", query)
+	output, err := run(dir, "--robot-search", query)
 	if err != nil {
 		return nil, err
 	}
@@ -965,7 +965,7 @@ func GetSearch(dir, query string) (*SearchResponse, error) {
 
 // GetLabelAttention returns label attention ranking
 func GetLabelAttention(dir string, limit int) (*LabelAttentionResponse, error) {
-	args := []string{"-robot-label-attention"}
+	args := []string{"--robot-label-attention"}
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--attention-limit=%d", limit))
 	}
@@ -982,7 +982,7 @@ func GetLabelAttention(dir string, limit int) (*LabelAttentionResponse, error) {
 
 // GetLabelFlow returns cross-label dependency flow
 func GetLabelFlow(dir string) (*LabelFlowResponse, error) {
-	output, err := run(dir, "-robot-label-flow")
+	output, err := run(dir, "--robot-label-flow")
 	if err != nil {
 		return nil, err
 	}
@@ -995,7 +995,7 @@ func GetLabelFlow(dir string) (*LabelFlowResponse, error) {
 
 // GetLabelHealth returns per-label health metrics
 func GetLabelHealth(dir string) (*LabelHealthResponse, error) {
-	output, err := run(dir, "-robot-label-health")
+	output, err := run(dir, "--robot-label-health")
 	if err != nil {
 		return nil, err
 	}
@@ -1008,7 +1008,7 @@ func GetLabelHealth(dir string) (*LabelHealthResponse, error) {
 
 // GetFileBeads returns file-to-bead mapping
 func GetFileBeads(dir, filePath string, limit int) (*FileBeadsResponse, error) {
-	args := []string{"-robot-file-beads", filePath}
+	args := []string{"--robot-file-beads", filePath}
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", limit))
 	}
@@ -1025,7 +1025,7 @@ func GetFileBeads(dir, filePath string, limit int) (*FileBeadsResponse, error) {
 
 // GetFileHotspots returns frequently changed files
 func GetFileHotspots(dir string, limit int) (*FileHotspotsResponse, error) {
-	args := []string{"-robot-file-hotspots"}
+	args := []string{"--robot-file-hotspots"}
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", limit))
 	}
@@ -1042,7 +1042,7 @@ func GetFileHotspots(dir string, limit int) (*FileHotspotsResponse, error) {
 
 // GetFileRelations returns file co-change relationships
 func GetFileRelations(dir, filePath string, limit int, threshold float64) (*FileRelationsResponse, error) {
-	args := []string{"-robot-file-relations", filePath}
+	args := []string{"--robot-file-relations", filePath}
 	if limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", limit))
 	}
