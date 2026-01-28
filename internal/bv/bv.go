@@ -630,8 +630,8 @@ func GetDependencyContext(dir string, n int) (*DependencyContext, error) {
 	return ctx, nil
 }
 
-// RunBd executes bd with given args and returns stdout.
-// If bd reports a missing database and suggests `--no-db`, it retries once with `--no-db`
+// RunBd executes br (beads_rust) with given args and returns stdout.
+// If br reports a missing database and suggests `--no-db`, it retries once with `--no-db`
 // and caches that preference for the remainder of the process.
 func RunBd(dir string, args ...string) (string, error) {
 	// Resolve empty dir to current working directory first to ensure consistent cache keys
@@ -651,7 +651,7 @@ func RunBd(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := exec.CommandContext(ctx, "br", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -660,7 +660,7 @@ func RunBd(dir string, args ...string) (string, error) {
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("bd timed out after %v", DefaultTimeout)
+			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
 		}
 
 		stderrStr := stderr.String()
@@ -669,7 +669,7 @@ func RunBd(dir string, args ...string) (string, error) {
 			setNoDBState(dir, true)
 			return RunBd(dir, append([]string{"--no-db"}, args...)...)
 		}
-		return "", fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, stderrStr)
+		return "", fmt.Errorf("br %s: %w: %s", strings.Join(args, " "), err, stderrStr)
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
@@ -677,7 +677,7 @@ func RunBd(dir string, args ...string) (string, error) {
 
 func isNoBeadsDBError(stderr string) bool {
 	s := strings.ToLower(stderr)
-	return strings.Contains(s, "no beads database found") || strings.Contains(s, "use 'bd --no-db'")
+	return strings.Contains(s, "no beads database found") || strings.Contains(s, "use 'br --no-db'")
 }
 
 func containsString(list []string, value string) bool {
@@ -689,9 +689,9 @@ func containsString(list []string, value string) bool {
 	return false
 }
 
-// IsBdInstalled checks if bd is available in PATH
+// IsBdInstalled checks if br is available in PATH (legacy name).
 func IsBdInstalled() bool {
-	_, err := exec.LookPath("bd")
+	_, err := exec.LookPath("br")
 	return err == nil
 }
 
