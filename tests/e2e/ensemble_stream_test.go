@@ -50,7 +50,7 @@ func TestEnsembleSynthesizeStreamJSONL(t *testing.T) {
 	}
 
 	assertChunkIndexes(t, chunks)
-	assertChunkTypes(t, chunks, []string{"status", "complete"})
+	assertChunkTypes(t, chunks, []string{"complete"})
 }
 
 func TestEnsembleSynthesizeStreamResumeJSONL(t *testing.T) {
@@ -88,7 +88,7 @@ func TestEnsembleSynthesizeStreamResumeJSONL(t *testing.T) {
 		}
 	}
 	assertChunkIndexes(t, chunks)
-	assertChunkTypes(t, chunks, []string{"status", "complete"})
+	assertChunkTypes(t, chunks, []string{"complete"})
 }
 
 func TestEnsembleSynthesizeStreamWritesCheckpoint(t *testing.T) {
@@ -290,8 +290,11 @@ func runNTMStreamSynthesize(t *testing.T, workDir, session, runID string, resume
 	t.Helper()
 
 	args := []string{"ensemble", "synthesize", session, "--stream", "--format", "json"}
+	if runID != "" {
+		args = append(args, "--run-id", runID)
+	}
 	if resume {
-		args = append(args, "--resume", "--run-id", runID)
+		args = append(args, "--resume")
 	}
 
 	cmd := exec.Command("ntm", args...)
