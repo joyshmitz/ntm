@@ -14,6 +14,7 @@ const TriageCacheTTL = 30 * time.Second
 
 var (
 	triageCache     *TriageResponse
+	triageCacheDir  string
 	triageCacheTime time.Time
 	triageCacheTTL  = TriageCacheTTL
 	triageCacheMu   sync.Mutex
@@ -25,8 +26,8 @@ func GetTriage(dir string) (*TriageResponse, error) {
 	triageCacheMu.Lock()
 	defer triageCacheMu.Unlock()
 
-	// Return cached result if still valid
-	if triageCache != nil && time.Since(triageCacheTime) < triageCacheTTL {
+	// Return cached result if still valid and for the same directory
+	if triageCache != nil && triageCacheDir == dir && time.Since(triageCacheTime) < triageCacheTTL {
 		return triageCache, nil
 	}
 
@@ -42,6 +43,7 @@ func GetTriage(dir string) (*TriageResponse, error) {
 
 	// Update cache
 	triageCache = &resp
+	triageCacheDir = dir
 	triageCacheTime = time.Now()
 
 	return &resp, nil
@@ -62,6 +64,7 @@ func GetTriageNoCache(dir string) (*TriageResponse, error) {
 	// Also update cache with fresh data
 	triageCacheMu.Lock()
 	triageCache = &resp
+	triageCacheDir = dir
 	triageCacheTime = time.Now()
 	triageCacheMu.Unlock()
 
@@ -73,6 +76,7 @@ func GetTriageNoCache(dir string) (*TriageResponse, error) {
 func InvalidateTriageCache() {
 	triageCacheMu.Lock()
 	triageCache = nil
+	triageCacheDir = ""
 	triageCacheTTL = TriageCacheTTL // Reset to default
 	triageCacheMu.Unlock()
 }

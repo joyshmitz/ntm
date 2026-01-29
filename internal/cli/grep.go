@@ -31,12 +31,13 @@ type GrepMatch struct {
 
 // GrepResult contains all matches from a grep operation
 type GrepResult struct {
-	Pattern    string      `json:"pattern"`
-	Session    string      `json:"session"`
-	Matches    []GrepMatch `json:"matches"`
-	TotalLines int         `json:"total_lines_searched"`
-	MatchCount int         `json:"match_count"`
-	PaneCount  int         `json:"panes_searched"`
+	Pattern         string      `json:"pattern"`
+	Session         string      `json:"session"`
+	Matches         []GrepMatch `json:"matches"`
+	TotalLines      int         `json:"total_lines_searched"`
+	MatchCount      int         `json:"match_count"`
+	PaneCount       int         `json:"panes_searched"`
+	CaseInsensitive bool        `json:"case_insensitive,omitempty"`
 }
 
 // Text outputs the grep result as human-readable text
@@ -80,7 +81,7 @@ func (r *GrepResult) Text(w io.Writer) error {
 		// Print matching line with highlighting
 		fmt.Fprintf(w, "%s%s/%s:%d:%s %s\n",
 			colorize(t.Blue), m.Session, m.Pane, m.Line, colorize(t.Text),
-			highlightMatch(m.Content, r.Pattern, t))
+			highlightMatch(m.Content, r.Pattern, r.CaseInsensitive, t))
 
 		// Print context after (if any)
 		if len(m.Context) > 0 {
@@ -333,12 +334,13 @@ func runGrep(pattern, session string, opts GrepOptions) error {
 
 	// Build result
 	result := &GrepResult{
-		Pattern:    pattern,
-		Session:    session,
-		Matches:    allMatches,
-		TotalLines: totalLines,
-		MatchCount: len(allMatches),
-		PaneCount:  panesSearched,
+		Pattern:         pattern,
+		Session:         session,
+		Matches:         allMatches,
+		TotalLines:      totalLines,
+		MatchCount:      len(allMatches),
+		PaneCount:       panesSearched,
+		CaseInsensitive: opts.CaseInsensitive,
 	}
 	if opts.AllSessions {
 		result.Session = "<all>"
@@ -387,12 +389,20 @@ func outputMatchingPanes(panes map[string]bool) error {
 }
 
 // highlightMatch highlights the matched portion in the line
-func highlightMatch(line, pattern string, t theme.Theme) string {
-	// Try raw pattern first (matches what the search actually uses)
-	re, err := regexp.Compile("(?i)(" + pattern + ")")
+func highlightMatch(line, pattern string, caseInsensitive bool, t theme.Theme) string {
+	// Build pattern with optional case-insensitivity to match actual search behavior
+	rePattern := "(" + pattern + ")"
+	if caseInsensitive {
+		rePattern = "(?i)" + rePattern
+	}
+	re, err := regexp.Compile(rePattern)
 	if err != nil {
 		// If pattern fails to compile as regex, use escaped literal
-		re, err = regexp.Compile("(?i)(" + regexp.QuoteMeta(pattern) + ")")
+		rePattern = "(" + regexp.QuoteMeta(pattern) + ")"
+		if caseInsensitive {
+			rePattern = "(?i)" + rePattern
+		}
+		re, err = regexp.Compile(rePattern)
 		if err != nil {
 			return line // Can't highlight, return as-is
 		}

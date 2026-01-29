@@ -5,6 +5,7 @@ package robot
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -226,8 +227,7 @@ func getLoadAverage() float64 {
 			return load
 		}
 		// Linux: read from /proc/loadavg
-		cmd := exec.Command("cat", "/proc/loadavg")
-		out, err := cmd.Output()
+		out, err := os.ReadFile("/proc/loadavg")
 		if err != nil {
 			return -1
 		}
