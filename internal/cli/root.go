@@ -1140,6 +1140,8 @@ Shell Integration:
 				Type:    robotSendType,
 				All:     robotSendAll,
 				DryRun:  robotDryRunEffective,
+				Bead:    robotRestartPaneBead,
+				Prompt:  robotRestartPanePrompt,
 			}
 			if err := robot.PrintRestartPane(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1937,8 +1939,10 @@ var (
 	robotRelationsLimit     int     // max related files to return
 	robotRelationsThreshold float64 // correlation threshold (0.0-1.0)
 
-	// Robot-restart-pane flag
-	robotRestartPane string // session name for pane restart
+	// Robot-restart-pane flags
+	robotRestartPane       string // session name for pane restart
+	robotRestartPaneBead   string // bead ID to assign after restart
+	robotRestartPanePrompt string // custom prompt to send after restart
 
 	// Robot-probe flags for active pane responsiveness testing (bd-1cu1f)
 	robotProbe           string // session name to probe
@@ -2204,6 +2208,8 @@ func init() {
 
 	// Robot-restart-pane flag
 	rootCmd.Flags().StringVar(&robotRestartPane, "robot-restart-pane", "", "Restart pane process (kill and respawn). Required: SESSION. Example: ntm --robot-restart-pane=proj --panes=1,2")
+	rootCmd.Flags().StringVar(&robotRestartPaneBead, "restart-bead", "", "Assign bead to agent after restart. Fetches info via br show --json, sends prompt. Use with --robot-restart-pane. Example: --restart-bead=bd-abc12")
+	rootCmd.Flags().StringVar(&robotRestartPanePrompt, "restart-prompt", "", "Custom prompt to send after restart. Overrides --restart-bead template. Use with --robot-restart-pane")
 	rootCmd.Flags().StringVar(&robotProbe, "robot-probe", "", "Probe pane responsiveness. Required: SESSION. Example: ntm --robot-probe=proj --panes=1,2")
 	rootCmd.Flags().StringVar(&robotProbeMethod, "probe-method", "", "Probe method: keystroke_echo, interrupt_test (used with --robot-probe)")
 	rootCmd.Flags().IntVar(&robotProbeTimeout, "probe-timeout", 0, "Probe timeout in ms (100-60000, used with --robot-probe)")

@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
-	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -466,8 +466,8 @@ func newCoordinatorAssignCmd() *cobra.Command {
 		Short: "Trigger work assignment to idle agents",
 		Long: `Assign work to idle agents based on bv triage recommendations.
 
-Uses the bv graph analysis to find the highest-impact unblocked work
-and assigns it to available idle agents.
+This is a thin wrapper around the canonical "ntm assign" flow
+(recommended: "ntm assign <session> --auto").
 
 Examples:
   ntm coordinator assign myproject
@@ -504,119 +504,58 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, _ := os.Getwd()
-	if cfg != nil {
-		projectKey = cfg.GetProjectDir(session)
-	}
-
-	mailClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
-	coord := coordinator.New(session, projectKey, mailClient, "NTM-Coordinator")
-
-	// Enable auto-assign for this call
-	coordCfg := coordinator.DefaultCoordinatorConfig()
-	coordCfg.AutoAssign = true
-	coord.WithConfig(coordCfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := coord.Start(ctx); err != nil {
-		return fmt.Errorf("starting coordinator: %w", err)
-	}
-	defer coord.Stop()
-
-	// Get idle agents and assignable work
-	idleAgents := coord.GetIdleAgents()
-	work, err := coord.GetAssignableWork(ctx)
-	if err != nil {
-		return fmt.Errorf("getting assignable work: %w", err)
-	}
-
-	if dryRun {
-		return outputAssignmentPreview(session, idleAgents, work)
-	}
-
-	// Perform actual assignment
-	results, err := coord.AssignWork(ctx)
-	if err != nil {
-		return fmt.Errorf("assigning work: %w", err)
-	}
-
-	if jsonOutput {
-		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-			"session":     session,
-			"assignments": results,
-			"count":       len(results),
-		})
-	}
-
-	t := theme.Current()
-	fmt.Printf("\n%s Work Assignment: %s%s\n\n",
-		colorize(t.Primary), session, "\033[0m")
-
-	if len(results) == 0 {
-		fmt.Println("  No assignments made.")
-		if len(idleAgents) == 0 {
-			fmt.Println("  (No idle agents available)")
-		} else if len(work) == 0 {
-			fmt.Println("  (No assignable work found)")
+	// Apply config default for strategy if not explicitly set via flag
+	if !cmd.Flags().Changed("strategy") {
+		if cfg != nil && cfg.Assign.Strategy != "" {
+			assignStrategy = cfg.Assign.Strategy
 		}
-		fmt.Println()
+	}
+
+	// Validate strategy
+	if !config.IsValidStrategy(assignStrategy) {
+		return fmt.Errorf("unknown strategy %q. Valid strategies: %s",
+			assignStrategy, strings.Join(config.ValidAssignStrategies, ", "))
+	}
+
+	// Resolve agent type filter from flags
+	agentTypeFilter := resolveAgentTypeFilter()
+
+	assignOpts := &AssignCommandOptions{
+		Session:         session,
+		BeadIDs:         nil,
+		Strategy:        assignStrategy,
+		Limit:           assignLimit,
+		AgentTypeFilter: agentTypeFilter,
+		Template:        assignTemplate,
+		TemplateFile:    assignTemplateFile,
+		Verbose:         assignVerbose,
+		Quiet:           assignQuiet,
+		Timeout:         assignTimeout,
+		ReserveFiles:    assignReserveFiles,
+		Pane:            assignPane,
+		Force:           assignForce,
+		IgnoreDeps:      assignIgnoreDeps,
+		Prompt:          assignPrompt,
+	}
+
+	if IsJSONOutput() {
+		return runAssignJSON(assignOpts)
+	}
+
+	assignOutput, err := getAssignOutputEnhanced(assignOpts)
+	if err != nil {
+		return err
+	}
+
+	if !assignQuiet {
+		displayAssignOutputEnhanced(assignOutput, assignVerbose)
+	}
+
+	if dryRun || len(assignOutput.Assignments) == 0 {
 		return nil
 	}
 
-	for _, r := range results {
-		if r.Success && r.Assignment != nil {
-			fmt.Printf("  %s✓%s Assigned %s to pane %s\n",
-				"\033[32m", "\033[0m",
-				r.Assignment.BeadID, r.Assignment.AgentPaneID)
-			if r.MessageSent {
-				fmt.Println("    (Message sent via Agent Mail)")
-			}
-		} else if !r.Success {
-			fmt.Printf("  %s✗%s Failed: %s\n",
-				"\033[31m", "\033[0m", r.Error)
-		}
-	}
-	fmt.Println()
-
-	return nil
-}
-
-func outputAssignmentPreview(session string, idleAgents []*coordinator.AgentState, work []bv.TriageRecommendation) error {
-	if jsonOutput {
-		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-			"session":         session,
-			"dry_run":         true,
-			"idle_agents":     idleAgents,
-			"assignable_work": work,
-			"would_assign":    min(len(idleAgents), len(work)),
-		})
-	}
-
-	fmt.Printf("\n  Dry Run - Assignment Preview\n")
-	fmt.Printf("  %s%s%s\n\n", "\033[2m", strings.Repeat("─", 40), "\033[0m")
-
-	fmt.Printf("  Idle agents: %d\n", len(idleAgents))
-	for _, a := range idleAgents {
-		fmt.Printf("    - Pane %d (%s)\n", a.PaneIndex, a.AgentType)
-	}
-	fmt.Println()
-
-	fmt.Printf("  Assignable work: %d items\n", len(work))
-	for i, w := range work {
-		if i >= 5 {
-			fmt.Printf("    ... and %d more\n", len(work)-5)
-			break
-		}
-		fmt.Printf("    - %s: %s (score: %.2f)\n", w.ID, w.Title, w.Score)
-	}
-	fmt.Println()
-
-	wouldAssign := min(len(idleAgents), len(work))
-	fmt.Printf("  Would assign: %d items\n\n", wouldAssign)
-
-	return nil
+	return executeAssignmentsEnhanced(session, assignOutput, assignOpts)
 }
 
 // newCoordinatorEnableCmd enables coordinator features
