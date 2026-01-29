@@ -312,6 +312,230 @@ func TestGenerateAlerts(t *testing.T) {
 	}
 }
 
+func TestGenerateAlerts_CriticalBugs(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	summary := QualitySummary{
+		CriticalBugs: 3,
+	}
+
+	alerts := qm.generateAlerts(summary)
+	found := false
+	for _, a := range alerts {
+		if a == "Critical bugs detected by UBS - address immediately" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected critical bugs alert")
+	}
+}
+
+func TestGenerateAlerts_StaleScan(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	summary := QualitySummary{
+		UBSAvailable: true,
+		LastScanAge:  45, // 45 minutes since last scan
+	}
+
+	alerts := qm.generateAlerts(summary)
+	found := false
+	for _, a := range alerts {
+		if a == "Last UBS scan was over 30 minutes ago" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected stale scan alert")
+	}
+}
+
+func TestGenerateAlerts_ConsecutiveErrors(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	summary := QualitySummary{
+		ConsecutiveError: 3,
+	}
+
+	alerts := qm.generateAlerts(summary)
+	found := false
+	for _, a := range alerts {
+		if a == "Multiple consecutive UBS scan failures" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected consecutive error alert")
+	}
+}
+
+func TestGenerateAlerts_DecliningTrends(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	summary := QualitySummary{
+		Trend: QualityTrend{
+			BugTrend:   TrendDeclining,
+			TestTrend:  TrendDeclining,
+			ErrorTrend: TrendDeclining,
+		},
+	}
+
+	alerts := qm.generateAlerts(summary)
+	if len(alerts) != 3 {
+		t.Errorf("expected 3 declining trend alerts, got %d: %v", len(alerts), alerts)
+	}
+}
+
+func TestGenerateAlerts_NoAlerts(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	summary := QualitySummary{
+		TestPassRate: 95,
+		Trend: QualityTrend{
+			BugTrend:   TrendStable,
+			TestTrend:  TrendStable,
+			ErrorTrend: TrendStable,
+		},
+	}
+
+	alerts := qm.generateAlerts(summary)
+	if len(alerts) != 0 {
+		t.Errorf("expected no alerts, got %v", alerts)
+	}
+}
+
+func TestUpdateBugTrend_InsufficientHistory(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	// Only 2 scans - not enough
+	qm.scanHistory = []ScanMetrics{
+		{Critical: 5, Warning: 3},
+		{Critical: 3, Warning: 2},
+	}
+
+	qm.updateBugTrend()
+	if qm.qualityTrend.BugTrend != TrendUnknown {
+		t.Errorf("expected TrendUnknown with <3 scans, got %s", qm.qualityTrend.BugTrend)
+	}
+}
+
+func TestUpdateBugTrend_Improving(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	qm.scanHistory = []ScanMetrics{
+		{Critical: 5, Warning: 5}, // total 10
+		{Critical: 3, Warning: 3}, // total 6
+		{Critical: 1, Warning: 1}, // total 2 (improving)
+	}
+
+	qm.updateBugTrend()
+	if qm.qualityTrend.BugTrend != TrendImproving {
+		t.Errorf("expected TrendImproving, got %s", qm.qualityTrend.BugTrend)
+	}
+}
+
+func TestUpdateBugTrend_Declining(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	qm.scanHistory = []ScanMetrics{
+		{Critical: 1, Warning: 1}, // total 2
+		{Critical: 3, Warning: 3}, // total 6
+		{Critical: 5, Warning: 5}, // total 10 (declining)
+	}
+
+	qm.updateBugTrend()
+	if qm.qualityTrend.BugTrend != TrendDeclining {
+		t.Errorf("expected TrendDeclining, got %s", qm.qualityTrend.BugTrend)
+	}
+}
+
+func TestUpdateBugTrend_Stable(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	qm.scanHistory = []ScanMetrics{
+		{Critical: 3, Warning: 2}, // total 5
+		{Critical: 1, Warning: 4}, // total 5
+		{Critical: 2, Warning: 3}, // total 5 (stable)
+	}
+
+	qm.updateBugTrend()
+	if qm.qualityTrend.BugTrend != TrendStable {
+		t.Errorf("expected TrendStable, got %s", qm.qualityTrend.BugTrend)
+	}
+}
+
+func TestUpdateTestTrend_InsufficientHistory(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	// Only 5 test runs - not enough (needs 10)
+	for i := 0; i < 5; i++ {
+		qm.testHistory = append(qm.testHistory, TestRunMetrics{Passed: 10, Failed: 0})
+	}
+
+	qm.updateTestTrend()
+	if qm.qualityTrend.TestTrend != TrendUnknown {
+		t.Errorf("expected TrendUnknown with <10 runs, got %s", qm.qualityTrend.TestTrend)
+	}
+}
+
+func TestUpdateErrorTrend(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	now := time.Now()
+	// 3 errors in last hour, 1 error in previous hour -> declining
+	qm.agentMetrics["a1"] = &AgentQualityMetrics{
+		ErrorHistory: []time.Time{
+			now.Add(-30 * time.Minute),
+			now.Add(-20 * time.Minute),
+			now.Add(-10 * time.Minute),
+			now.Add(-90 * time.Minute), // previous hour
+		},
+	}
+
+	qm.updateErrorTrend()
+	if qm.qualityTrend.ErrorTrend != TrendDeclining {
+		t.Errorf("expected TrendDeclining (more recent errors), got %s", qm.qualityTrend.ErrorTrend)
+	}
+}
+
+func TestUpdateErrorTrend_Improving(t *testing.T) {
+	qm := NewQualityMonitor("/tmp/test")
+
+	now := time.Now()
+	// 1 error in last hour, 3 errors in previous hour -> improving
+	qm.agentMetrics["a1"] = &AgentQualityMetrics{
+		ErrorHistory: []time.Time{
+			now.Add(-30 * time.Minute),  // recent hour: 1
+			now.Add(-90 * time.Minute),  // older hour: 3
+			now.Add(-100 * time.Minute),
+			now.Add(-110 * time.Minute),
+		},
+	}
+
+	qm.updateErrorTrend()
+	if qm.qualityTrend.ErrorTrend != TrendImproving {
+		t.Errorf("expected TrendImproving (fewer recent errors), got %s", qm.qualityTrend.ErrorTrend)
+	}
+}
+
+func TestTrendConstants(t *testing.T) {
+	t.Parallel()
+
+	// Verify constants are non-empty and distinct
+	trends := []TrendDirection{TrendImproving, TrendStable, TrendDeclining, TrendUnknown}
+	seen := make(map[TrendDirection]bool)
+	for _, td := range trends {
+		if string(td) == "" {
+			t.Error("TrendDirection constant is empty")
+		}
+		if seen[td] {
+			t.Errorf("Duplicate TrendDirection: %q", td)
+		}
+		seen[td] = true
+	}
+}
+
 func TestHistoryLimits(t *testing.T) {
 	qm := NewQualityMonitor("/tmp/test")
 
