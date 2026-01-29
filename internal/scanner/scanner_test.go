@@ -389,3 +389,92 @@ func TestMatchAssignmentPattern(t *testing.T) {
 		})
 	}
 }
+
+func TestSeverityMeetsThreshold(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		sev       Severity
+		threshold Severity
+		want      bool
+	}{
+		{"critical meets critical", SeverityCritical, SeverityCritical, true},
+		{"critical meets warning", SeverityCritical, SeverityWarning, true},
+		{"critical meets info", SeverityCritical, SeverityInfo, true},
+		{"warning meets warning", SeverityWarning, SeverityWarning, true},
+		{"warning meets info", SeverityWarning, SeverityInfo, true},
+		{"warning does not meet critical", SeverityWarning, SeverityCritical, false},
+		{"info meets info", SeverityInfo, SeverityInfo, true},
+		{"info does not meet warning", SeverityInfo, SeverityWarning, false},
+		{"info does not meet critical", SeverityInfo, SeverityCritical, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SeverityMeetsThreshold(tc.sev, tc.threshold)
+			if got != tc.want {
+				t.Errorf("SeverityMeetsThreshold(%q, %q) = %v, want %v", tc.sev, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTruncateMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		msg    string
+		maxLen int
+		want   string
+	}{
+		{"empty string", "", 10, ""},
+		{"within limit", "hello", 10, "hello"},
+		{"exact limit", "hello", 5, "hello"},
+		{"truncated", "hello world!", 8, "hello..."},
+		{"max zero", "hello", 0, ""},
+		{"max negative", "hello", -1, ""},
+		{"max 1", "hello", 1, "."},
+		{"max 2", "hello", 2, ".."},
+		{"max 3", "hello", 3, "..."},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncateMessage(tc.msg, tc.maxLen)
+			if got != tc.want {
+				t.Errorf("truncateMessage(%q, %d) = %q, want %q", tc.msg, tc.maxLen, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShortenPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"short path", "file.go", "file.go"},
+		{"two components", "dir/file.go", "dir/file.go"},
+		{"three components", "a/b/file.go", "b/file.go"},
+		{"deep path", "/usr/local/src/project/main.go", "project/main.go"},
+		{"empty", "", ""},
+		{"single slash", "/", "/"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shortenPath(tc.path)
+			if got != tc.want {
+				t.Errorf("shortenPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}

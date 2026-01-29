@@ -375,3 +375,33 @@ func TestNewPaneLauncherWithClient(t *testing.T) {
 		t.Error("expected ValidatePaths to be true by default")
 	}
 }
+
+func TestIsCodexProvider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agentType string
+		want      bool
+	}{
+		{"cod", "cod", true},
+		{"codex", "codex", true},
+		{"openai", "openai", true},
+		{"gpt", "gpt", true},
+		{"claude", "claude", false},
+		{"cc", "cc", false},
+		{"gemini", "gemini", false},
+		{"gmi", "gmi", false},
+		{"empty", "", false},
+		{"unknown", "unknown", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isCodexProvider(tc.agentType); got != tc.want {
+				t.Errorf("isCodexProvider(%q) = %v, want %v", tc.agentType, got, tc.want)
+			}
+		})
+	}
+}

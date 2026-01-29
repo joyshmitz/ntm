@@ -313,3 +313,32 @@ func containsAt(s, substr string, start int) bool {
 	}
 	return false
 }
+
+func TestJsonEscape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain text", "hello", "hello"},
+		{"with quotes", `say "hello"`, `say \"hello\"`},
+		{"with backslash", `path\to\file`, `path\\to\\file`},
+		{"with newline", "line1\nline2", `line1\nline2`},
+		{"with tab", "col1\tcol2", `col1\tcol2`},
+		{"empty string", "", ""},
+		{"unicode", "日本語", "日本語"},
+		{"html chars escaped", "<b>bold</b>", `\u003cb\u003ebold\u003c/b\u003e`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := jsonEscape(tc.input)
+			if got != tc.want {
+				t.Errorf("jsonEscape(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
