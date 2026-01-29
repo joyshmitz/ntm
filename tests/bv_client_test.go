@@ -156,7 +156,7 @@ func TestBVClientNonZeroExit(t *testing.T) {
 
 	_, err := client.GetRecommendations(bv.RecommendationOpts{})
 	logger.Log("Actual: error=%v", err)
-	if err == nil || !strings.Contains(err.Error(), "bv --robot-triage failed") {
+	if err == nil || !strings.Contains(err.Error(), "bv -robot-triage failed") {
 		logger.Log("FAIL: expected bv failure, got %v", err)
 		t.Fatalf("expected bv failure, got %v", err)
 	}

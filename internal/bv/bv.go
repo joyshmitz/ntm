@@ -69,8 +69,8 @@ func run(dir string, args ...string) (string, error) {
 	}
 
 	// Resolve empty dir to current working directory
+	var err error
 	if dir == "" {
-		var err error
 		dir, err = os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("failed to get working directory: %w", err)
@@ -86,7 +86,7 @@ func run(dir string, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		// Check context timeout first since it's more fundamental
 		if ctx.Err() == context.DeadlineExceeded {
@@ -645,14 +645,12 @@ func GetDependencyContext(dir string, n int) (*DependencyContext, error) {
 // If br reports a missing database and suggests `--no-db`, it retries once with `--no-db`
 // and caches that preference for the remainder of the process.
 func RunBd(dir string, args ...string) (string, error) {
-	// Resolve empty dir to current working directory first to ensure consistent cache keys
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("failed to get working directory: %w", err)
-		}
+	// Normalize dir to ensure consistent cache keys.
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return "", err
 	}
+	dir = normalizedDir
 
 	// Check cache for this specific directory
 	if getNoDBState(dir) && !containsString(args, "--no-db") {
@@ -668,7 +666,7 @@ func RunBd(dir string, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
