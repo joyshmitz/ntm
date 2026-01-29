@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -21,26 +22,38 @@ var (
 	triageCacheMu   sync.Mutex
 )
 
-// GetTriage returns the complete triage analysis from bv -robot-triage.
-// Results are cached for TriageCacheTTL (default 30 seconds).
-func GetTriage(dir string) (*TriageResponse, error) {
+func normalizeTriageDir(dir string) (string, error) {
 	if dir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, fmt.Errorf("getting working directory: %w", err)
+			return "", fmt.Errorf("getting working directory: %w", err)
 		}
 		dir = cwd
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolving triage directory: %w", err)
+	}
+	return absDir, nil
+}
+
+// GetTriage returns the complete triage analysis from bv -robot-triage.
+// Results are cached for TriageCacheTTL (default 30 seconds).
+func GetTriage(dir string) (*TriageResponse, error) {
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	triageCacheMu.Lock()
 	defer triageCacheMu.Unlock()
 
 	// Return cached result if still valid and for the same directory
-	if triageCache != nil && triageCacheDir == dir && time.Since(triageCacheTime) < triageCacheTTL {
+	if triageCache != nil && triageCacheDir == normalizedDir && time.Since(triageCacheTime) < triageCacheTTL {
 		return triageCache, nil
 	}
 
-	output, err := run(dir, "-robot-triage")
+	output, err := run(normalizedDir, "-robot-triage")
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +65,7 @@ func GetTriage(dir string) (*TriageResponse, error) {
 
 	// Update cache
 	triageCache = &resp
-	triageCacheDir = dir
+	triageCacheDir = normalizedDir
 	triageCacheTime = time.Now()
 
 	return &resp, nil
@@ -60,15 +73,12 @@ func GetTriage(dir string) (*TriageResponse, error) {
 
 // GetTriageNoCache returns fresh triage data, bypassing the cache
 func GetTriageNoCache(dir string) (*TriageResponse, error) {
-	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("getting working directory: %w", err)
-		}
-		dir = cwd
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return nil, err
 	}
 
-	output, err := run(dir, "-robot-triage")
+	output, err := run(normalizedDir, "-robot-triage")
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +91,7 @@ func GetTriageNoCache(dir string) (*TriageResponse, error) {
 	// Also update cache with fresh data
 	triageCacheMu.Lock()
 	triageCache = &resp
-	triageCacheDir = dir
+	triageCacheDir = normalizedDir
 	triageCacheTime = time.Now()
 	triageCacheMu.Unlock()
 
