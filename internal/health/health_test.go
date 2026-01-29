@@ -131,3 +131,330 @@ func TestCalculateStatus(t *testing.T) {
 		t.Errorf("Expected Warning for stale activity, got %v", s)
 	}
 }
+
+func TestNormalizeConfidence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		score float64
+		want  float64
+	}{
+		{"very high score", 1.5, 0.95},
+		{"score exactly 1.0", 1.0, 0.95},
+		{"score 0.8", 0.8, 0.85},
+		{"score exactly 0.7", 0.7, 0.85},
+		{"score 0.6", 0.6, 0.75},
+		{"score exactly 0.5", 0.5, 0.75},
+		{"score 0.4", 0.4, 0.60},
+		{"score exactly 0.3", 0.3, 0.60},
+		{"low score 0.2", 0.2, 0.50},
+		{"very low score 0.1", 0.1, 0.50},
+		{"zero score", 0.0, 0.50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeConfidence(tt.score)
+			if got != tt.want {
+				t.Errorf("normalizeConfidence(%v) = %v, want %v", tt.score, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDedupeIndicators(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input []string
+		want  int // expected unique count
+	}{
+		{"empty slice", []string{}, 0},
+		{"nil slice", nil, 0},
+		{"no duplicates", []string{"a", "b", "c"}, 3},
+		{"all duplicates", []string{"a", "a", "a"}, 1},
+		{"mixed duplicates", []string{"a", "b", "a", "c", "b"}, 3},
+		{"single element", []string{"x"}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dedupeIndicators(tt.input)
+			if len(got) != tt.want {
+				t.Errorf("dedupeIndicators(%v) returned %d items, want %d", tt.input, len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestDedupeIndicators_PreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	input := []string{"c", "a", "b", "a", "c"}
+	got := dedupeIndicators(input)
+	expected := []string{"c", "a", "b"}
+
+	if len(got) != len(expected) {
+		t.Fatalf("length mismatch: got %d, want %d", len(got), len(expected))
+	}
+	for i, v := range got {
+		if v != expected[i] {
+			t.Errorf("dedupeIndicators[%d] = %q, want %q", i, v, expected[i])
+		}
+	}
+}
+
+func TestHasRateLimitIssue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		issues []Issue
+		want   bool
+	}{
+		{"empty issues", []Issue{}, false},
+		{"nil issues", nil, false},
+		{"rate limit present", []Issue{{Type: "rate_limit"}}, true},
+		{"other issue only", []Issue{{Type: "crash"}}, false},
+		{"mixed with rate limit", []Issue{{Type: "crash"}, {Type: "rate_limit"}}, true},
+		{"multiple non-rate", []Issue{{Type: "auth_error"}, {Type: "network_error"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasRateLimitIssue(tt.issues)
+			if got != tt.want {
+				t.Errorf("hasRateLimitIssue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasErrorIssue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		issues []Issue
+		want   bool
+	}{
+		{"empty issues", []Issue{}, false},
+		{"nil issues", nil, false},
+		{"crash present", []Issue{{Type: "crash"}}, true},
+		{"auth_error present", []Issue{{Type: "auth_error"}}, true},
+		{"network_error present", []Issue{{Type: "network_error"}}, true},
+		{"rate_limit only", []Issue{{Type: "rate_limit"}}, false},
+		{"error type only", []Issue{{Type: "error"}}, false},
+		{"mixed with crash", []Issue{{Type: "rate_limit"}, {Type: "crash"}}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasErrorIssue(tt.issues)
+			if got != tt.want {
+				t.Errorf("hasErrorIssue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStatusSeverity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status Status
+		want   int
+	}{
+		{StatusOK, 0},
+		{StatusWarning, 1},
+		{StatusError, 2},
+		{StatusUnknown, 0}, // default case
+		{Status("invalid"), 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			got := statusSeverity(tt.status)
+			if got != tt.want {
+				t.Errorf("statusSeverity(%v) = %d, want %d", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectProcessStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		output  string
+		command string
+		want    ProcessStatus
+	}{
+		{"exit status in output", "exit status 1", "python", ProcessExited},
+		{"exited with in output", "process exited with code 0", "node", ProcessExited},
+		{"connection closed", "connection closed by remote host", "ssh", ProcessExited},
+		{"session ended", "session ended", "tmux", ProcessExited},
+		{"normal output with bash", "some output", "bash", ProcessRunning},
+		{"normal output with zsh", "some output", "zsh", ProcessRunning},
+		{"normal output with sh", "some output", "sh", ProcessRunning},
+		{"empty command", "some output", "", ProcessRunning},
+		{"normal output non-shell", "some output", "python", ProcessRunning},
+		{"empty output non-shell", "", "node", ProcessRunning},
+		{"case insensitive exit", "Exit Status 127", "python", ProcessExited},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := detectProcessStatus(tt.output, tt.command)
+			if got != tt.want {
+				t.Errorf("detectProcessStatus(%q, %q) = %v, want %v", tt.output, tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCalculateStatus_DetailedCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		h    AgentHealth
+		want Status
+	}{
+		{
+			name: "crash issue returns error",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityActive,
+				Issues:        []Issue{{Type: "crash", Message: "panic"}},
+			},
+			want: StatusError,
+		},
+		{
+			name: "auth_error returns error",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityActive,
+				Issues:        []Issue{{Type: "auth_error", Message: "unauthorized"}},
+			},
+			want: StatusError,
+		},
+		{
+			name: "rate_limit returns warning",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityActive,
+				Issues:        []Issue{{Type: "rate_limit", Message: "429"}},
+			},
+			want: StatusWarning,
+		},
+		{
+			name: "network_error returns warning",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityActive,
+				Issues:        []Issue{{Type: "network_error", Message: "refused"}},
+			},
+			want: StatusWarning,
+		},
+		{
+			name: "idle process is ok",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityIdle,
+				Issues:        []Issue{},
+			},
+			want: StatusOK,
+		},
+		{
+			name: "unknown everything",
+			h: AgentHealth{
+				ProcessStatus: ProcessUnknown,
+				Activity:      ActivityUnknown,
+				Issues:        []Issue{},
+			},
+			want: StatusUnknown,
+		},
+		{
+			name: "crash takes precedence over rate_limit",
+			h: AgentHealth{
+				ProcessStatus: ProcessRunning,
+				Activity:      ActivityActive,
+				Issues:        []Issue{{Type: "rate_limit"}, {Type: "crash"}},
+			},
+			want: StatusError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := calculateStatus(tt.h)
+			if got != tt.want {
+				t.Errorf("calculateStatus() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionNotFoundError(t *testing.T) {
+	t.Parallel()
+
+	err := &SessionNotFoundError{Session: "my-session"}
+	got := err.Error()
+	want := "session 'my-session' not found"
+	if got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestDetectProgress_WithLargeOutput(t *testing.T) {
+	t.Parallel()
+
+	// Output larger than 2000 chars should be truncated to last 2000
+	largePrefix := make([]byte, 3000)
+	for i := range largePrefix {
+		largePrefix[i] = 'x'
+	}
+	output := string(largePrefix) + "\nI have completed the task."
+	p := detectProgress(output, ActivityActive, nil)
+	if p.Stage != StageFinishing {
+		t.Errorf("detectProgress with large output: got stage %v, want StageFinishing", p.Stage)
+	}
+}
+
+func TestDetectProgress_ErrorIssuePreempts(t *testing.T) {
+	t.Parallel()
+
+	// Even with finishing output, error issues should preempt
+	issues := []Issue{{Type: "crash", Message: "panic"}}
+	p := detectProgress("I have completed the task.", ActivityActive, issues)
+	if p.Stage != StageStuck {
+		t.Errorf("detectProgress with error issues: got stage %v, want StageStuck", p.Stage)
+	}
+}
+
+func TestDetectProgress_ConfidenceAndIndicators(t *testing.T) {
+	t.Parallel()
+
+	// Verify progress returns non-zero confidence and indicators for matched stage
+	p := detectProgress("Editing file and running tests", ActivityActive, nil)
+	if p.Stage == StageUnknown {
+		t.Fatal("Expected a matched stage, got unknown")
+	}
+	if p.Confidence <= 0 {
+		t.Errorf("Expected positive confidence, got %f", p.Confidence)
+	}
+	if len(p.Indicators) == 0 {
+		t.Error("Expected non-empty indicators")
+	}
+}

@@ -288,3 +288,114 @@ func TestPolicyVersion(t *testing.T) {
 		t.Errorf("expected Version to be 1, got %d", p.Version)
 	}
 }
+
+func TestSplitLines(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input []byte
+		want  int // expected number of lines
+	}{
+		{"empty input", []byte{}, 0},
+		{"single line no newline", []byte("hello"), 1},
+		{"single line with newline", []byte("hello\n"), 1},
+		{"two lines", []byte("hello\nworld"), 2},
+		{"two lines trailing newline", []byte("hello\nworld\n"), 2},
+		{"three lines", []byte("a\nb\nc"), 3},
+		{"empty lines", []byte("\n\n\n"), 3},
+		{"mixed empty and content", []byte("a\n\nb\n"), 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitLines(tt.input)
+			if len(got) != tt.want {
+				t.Errorf("splitLines(%q) returned %d lines, want %d", tt.input, len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitLines_Content(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("first\nsecond\nthird")
+	lines := splitLines(data)
+
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	if string(lines[0]) != "first" {
+		t.Errorf("lines[0] = %q, want %q", lines[0], "first")
+	}
+	if string(lines[1]) != "second" {
+		t.Errorf("lines[1] = %q, want %q", lines[1], "second")
+	}
+	if string(lines[2]) != "third" {
+		t.Errorf("lines[2] = %q, want %q", lines[2], "third")
+	}
+}
+
+func TestSplitLines_NoAllocation(t *testing.T) {
+	t.Parallel()
+
+	// splitLines should return sub-slices of the original data, not copies
+	data := []byte("abc\ndef\nghi")
+	lines := splitLines(data)
+
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+	// Modify the original data and verify the lines reflect the change
+	data[0] = 'X'
+	if lines[0][0] != 'X' {
+		t.Error("splitLines should return sub-slices, not copies")
+	}
+}
+
+func TestBlockedEntryAction(t *testing.T) {
+	t.Parallel()
+
+	entry := BlockedEntry{
+		Session: "test-session",
+		Agent:   "agent-1",
+		Command: "rm -rf /",
+		Pattern: `rm\s+-rf\s+/`,
+		Reason:  "destructive command",
+		Action:  ActionBlock,
+	}
+
+	if entry.Action != ActionBlock {
+		t.Errorf("Action = %v, want %v", entry.Action, ActionBlock)
+	}
+	if entry.Session != "test-session" {
+		t.Errorf("Session = %q, want %q", entry.Session, "test-session")
+	}
+}
+
+func TestPolicyStats(t *testing.T) {
+	t.Parallel()
+
+	p := DefaultPolicy()
+	blocked, approval, allowed := p.Stats()
+
+	// Default policy should have all three types
+	if blocked == 0 {
+		t.Error("expected blocked > 0")
+	}
+	if approval == 0 {
+		t.Error("expected approval > 0")
+	}
+	if allowed == 0 {
+		t.Error("expected allowed > 0")
+	}
+
+	// Total should equal sum of all rules
+	total := blocked + approval + allowed
+	expectedTotal := len(p.Blocked) + len(p.ApprovalRequired) + len(p.Allowed)
+	if total != expectedTotal {
+		t.Errorf("Stats() total %d != rule count %d", total, expectedTotal)
+	}
+}

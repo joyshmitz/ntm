@@ -244,6 +244,205 @@ func TestGetTargetStatus(t *testing.T) {
 	}
 }
 
+func TestGenerateTargetComparisons_WithLatency(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Add CM query latency samples
+	c.RecordLatency("cm_query", 40*time.Millisecond)
+	c.RecordLatency("cm_query", 60*time.Millisecond)
+
+	report, err := c.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+
+	// Should have 3 comparisons: destructive_cmd_incidents, file_conflicts, cm_query_latency_ms
+	if len(report.TargetComparison) != 3 {
+		t.Errorf("expected 3 target comparisons, got %d", len(report.TargetComparison))
+	}
+
+	// Find cm_query_latency_ms comparison
+	found := false
+	for _, tc := range report.TargetComparison {
+		if tc.Metric == "cm_query_latency_ms" {
+			found = true
+			if tc.Target != Tier0Targets["cm_query_latency_ms"] {
+				t.Errorf("target = %v, want %v", tc.Target, Tier0Targets["cm_query_latency_ms"])
+			}
+			if tc.Baseline != Tier0Baselines["cm_query_latency_ms"] {
+				t.Errorf("baseline = %v, want %v", tc.Baseline, Tier0Baselines["cm_query_latency_ms"])
+			}
+			// Average of 40 and 60 = 50, which meets the target of <=50
+			if tc.Status != "met" {
+				t.Errorf("status = %q, want %q", tc.Status, "met")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected cm_query_latency_ms in target comparisons")
+	}
+}
+
+func TestGenerateTargetComparisons_NoLatency(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	report, err := c.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+
+	// Without cm_query latency, should have only 2 comparisons
+	if len(report.TargetComparison) != 2 {
+		t.Errorf("expected 2 target comparisons (no latency data), got %d", len(report.TargetComparison))
+	}
+
+	for _, tc := range report.TargetComparison {
+		if tc.Metric == "cm_query_latency_ms" {
+			t.Error("cm_query_latency_ms should not appear without latency data")
+		}
+	}
+}
+
+func TestCompareSnapshots_Regressions(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	baseline := &MetricsReport{
+		SessionID:       "baseline",
+		APICallCounts:   map[string]int64{"bv:triage": 5},
+		LatencyStats:    map[string]LatencyStats{"op1": {Count: 10, AvgMs: 100}},
+		BlockedCommands: 0,
+		FileConflicts:   0,
+	}
+
+	// Current has regressions
+	current := &MetricsReport{
+		SessionID:       "current",
+		APICallCounts:   map[string]int64{"bv:triage": 10, "new:op": 3},
+		LatencyStats:    map[string]LatencyStats{"op1": {Count: 10, AvgMs: 200}},
+		BlockedCommands: 5,
+		FileConflicts:   2,
+	}
+
+	result := c.CompareSnapshots(baseline, current)
+
+	// API call deltas
+	if result.APICallDeltas["bv:triage"] != 5 {
+		t.Errorf("bv:triage delta = %d, want 5", result.APICallDeltas["bv:triage"])
+	}
+	if result.APICallDeltas["new:op"] != 3 {
+		t.Errorf("new:op delta = %d, want 3", result.APICallDeltas["new:op"])
+	}
+
+	// Should detect regressions (latency doubled, blocked/conflicts increased)
+	if len(result.Regressions) == 0 {
+		t.Error("expected regressions to be detected")
+	}
+
+	// Verify specific regressions found
+	hasLatencyRegression := false
+	hasBlockedRegression := false
+	hasConflictRegression := false
+	for _, r := range result.Regressions {
+		if containsHelper(r, "latency regressed") {
+			hasLatencyRegression = true
+		}
+		if containsHelper(r, "blocked commands") {
+			hasBlockedRegression = true
+		}
+		if containsHelper(r, "file conflicts") {
+			hasConflictRegression = true
+		}
+	}
+	if !hasLatencyRegression {
+		t.Error("expected latency regression to be reported")
+	}
+	if !hasBlockedRegression {
+		t.Error("expected blocked commands regression to be reported")
+	}
+	if !hasConflictRegression {
+		t.Error("expected file conflicts regression to be reported")
+	}
+}
+
+func TestCompareSnapshots_NoChanges(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	report := &MetricsReport{
+		SessionID:       "same",
+		APICallCounts:   map[string]int64{"op": 5},
+		LatencyStats:    map[string]LatencyStats{"op": {Count: 10, AvgMs: 100}},
+		BlockedCommands: 0,
+		FileConflicts:   0,
+	}
+
+	result := c.CompareSnapshots(report, report)
+
+	if len(result.Improvements) != 0 {
+		t.Errorf("expected no improvements, got %v", result.Improvements)
+	}
+	if len(result.Regressions) != 0 {
+		t.Errorf("expected no regressions, got %v", result.Regressions)
+	}
+}
+
+func TestCalculateLatencyStats_Empty(t *testing.T) {
+	stats := calculateLatencyStats([]float64{})
+	if stats.Count != 0 {
+		t.Errorf("expected count=0, got %d", stats.Count)
+	}
+}
+
+func TestCalculateLatencyStats_SingleSample(t *testing.T) {
+	stats := calculateLatencyStats([]float64{42.0})
+	if stats.Count != 1 {
+		t.Errorf("expected count=1, got %d", stats.Count)
+	}
+	if stats.MinMs != 42.0 || stats.MaxMs != 42.0 {
+		t.Errorf("min/max should be 42.0, got %.1f/%.1f", stats.MinMs, stats.MaxMs)
+	}
+	if stats.AvgMs != 42.0 {
+		t.Errorf("avg should be 42.0, got %.1f", stats.AvgMs)
+	}
+}
+
+func TestTier0Constants(t *testing.T) {
+	t.Parallel()
+
+	// Verify targets and baselines have matching keys
+	for key := range Tier0Targets {
+		if _, ok := Tier0Baselines[key]; !ok {
+			t.Errorf("Tier0Targets has key %q not found in Tier0Baselines", key)
+		}
+	}
+	for key := range Tier0Baselines {
+		if _, ok := Tier0Targets[key]; !ok {
+			t.Errorf("Tier0Baselines has key %q not found in Tier0Targets", key)
+		}
+	}
+}
+
+func TestLatencySampleCap(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Record more than 1000 latency samples
+	for i := 0; i < 1100; i++ {
+		c.RecordLatency("test_op", time.Millisecond)
+	}
+
+	c.mu.RLock()
+	count := len(c.latencies["test_op"])
+	c.mu.RUnlock()
+
+	if count > 1000 {
+		t.Errorf("expected at most 1000 samples, got %d", count)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }
