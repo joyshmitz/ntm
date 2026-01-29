@@ -72,6 +72,34 @@ func DefaultRoutingConfig() RoutingConfig {
 	}
 }
 
+// defaultRoutingContextLines aligns with --robot-context default (root.go uses 1000 when --lines is unset).
+const defaultRoutingContextLines = 1000
+
+// getContextUsageByPane returns a map of pane index -> context usage percent.
+// Returns nil if context usage can't be computed.
+func getContextUsageByPane(session string) map[int]float64 {
+	output, err := GetContext(session, defaultRoutingContextLines)
+	if err != nil || output == nil || !output.Success {
+		return nil
+	}
+
+	usage := make(map[int]float64, len(output.Agents))
+	for _, agent := range output.Agents {
+		usage[agent.PaneIdx] = agent.UsagePercent
+	}
+	return usage
+}
+
+func contextUsageForPane(usage map[int]float64, paneIndex int) float64 {
+	if usage == nil {
+		return 0
+	}
+	if value, ok := usage[paneIndex]; ok {
+		return value
+	}
+	return 0
+}
+
 // ScoredAgent represents an agent with its computed routing score.
 type ScoredAgent struct {
 	// Identity
@@ -491,6 +519,8 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 		return nil, err
 	}
 
+	contextUsage := getContextUsageByPane(session)
+
 	var scored []ScoredAgent
 
 	for _, pane := range panes {
@@ -518,6 +548,7 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 			State:        activity.State,
 			Confidence:   activity.Confidence,
 			Velocity:     activity.Velocity,
+			ContextUsage: contextUsageForPane(contextUsage, pane.Index),
 			LastActivity: activity.LastOutput,
 			HealthState:  deriveHealthState(activity.State),
 			RateLimited:  false, // TODO: Detect from patterns

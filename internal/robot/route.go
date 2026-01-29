@@ -127,6 +127,8 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 		return output, 1
 	}
 
+	contextUsage := getContextUsageByPane(opts.Session)
+
 	// Create scorer and score agents
 	scorer := NewAgentScorer(DefaultRoutingConfig())
 	var agents []ScoredAgent
@@ -167,6 +169,7 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 			State:        activity.State,
 			Confidence:   activity.Confidence,
 			Velocity:     activity.Velocity,
+			ContextUsage: contextUsageForPane(contextUsage, pane.Index),
 			LastActivity: activity.LastOutput,
 			HealthState:  deriveHealthState(activity.State),
 			RateLimited:  false,
@@ -343,6 +346,8 @@ func GetRouteRecommendation(opts RouteOptions) (*RouteRecommendation, error) {
 		return nil, fmt.Errorf("failed to get panes: %w", err)
 	}
 
+	contextUsage := getContextUsageByPane(opts.Session)
+
 	// Create scorer and score agents
 	scorer := NewAgentScorer(DefaultRoutingConfig())
 	var agents []ScoredAgent
@@ -376,6 +381,7 @@ func GetRouteRecommendation(opts RouteOptions) (*RouteRecommendation, error) {
 			State:        activity.State,
 			Confidence:   activity.Confidence,
 			Velocity:     activity.Velocity,
+			ContextUsage: contextUsageForPane(contextUsage, pane.Index),
 			LastActivity: activity.LastOutput,
 			HealthState:  deriveHealthState(activity.State),
 			RateLimited:  false,
