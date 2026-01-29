@@ -81,9 +81,9 @@ func TestGetTmuxVersion(t *testing.T) {
 				t.Errorf("getTmuxVersion(%q) returned empty, want version string", tt.binaryPath)
 			}
 
-			// If we got a version, it should contain "tmux"
-			if version != "" && !contains(version, "tmux") {
-				t.Errorf("getTmuxVersion() = %q, want string containing 'tmux'", version)
+			// Version should be the version number without "tmux " prefix
+			if version != "" && contains(version, "tmux ") {
+				t.Errorf("getTmuxVersion() = %q, should not contain 'tmux ' prefix", version)
 			}
 		})
 	}
@@ -921,6 +921,139 @@ func TestGetTmuxVersion_Formats(t *testing.T) {
 		if version == "" {
 			t.Error("getTmuxVersion returned empty for valid tmux binary")
 		}
+	}
+}
+
+// =============================================================================
+// Helper Contains Function Test (bd-3eu7h)
+// =============================================================================
+
+// =============================================================================
+// GetEnv Integration Tests (bd-18gwh)
+// =============================================================================
+
+func TestGetEnv_GlobalMode(t *testing.T) {
+	output, err := GetEnv("global")
+	if err != nil {
+		t.Fatalf("GetEnv('global') returned error: %v", err)
+	}
+
+	if !output.RobotResponse.Success {
+		t.Errorf("GetEnv('global') returned success=false: %s", output.RobotResponse.Error)
+	}
+
+	if output.Session != "global" {
+		t.Errorf("Session = %q, want %q", output.Session, "global")
+	}
+
+	// Global mode should include tmux, shell, and timing info
+	if output.Tmux.BinaryPath == "" {
+		t.Error("Tmux.BinaryPath should not be empty")
+	}
+	if output.Shell == nil {
+		t.Error("Shell should not be nil in global mode")
+	}
+	if output.Timing == nil {
+		t.Error("Timing should not be nil")
+	}
+
+	// Global mode should NOT include session-specific structure
+	if output.SessionStructure != nil {
+		t.Error("SessionStructure should be nil in global mode")
+	}
+	if output.Targeting != nil {
+		t.Error("Targeting should be nil in global mode")
+	}
+}
+
+func TestGetEnv_EmptySession(t *testing.T) {
+	output, err := GetEnv("")
+	if err != nil {
+		t.Fatalf("GetEnv('') returned error: %v", err)
+	}
+
+	if !output.RobotResponse.Success {
+		t.Errorf("GetEnv('') returned success=false: %s", output.RobotResponse.Error)
+	}
+
+	// Empty session is valid (global env info)
+	if output.Tmux.BinaryPath == "" {
+		t.Error("Tmux.BinaryPath should not be empty")
+	}
+}
+
+func TestGetEnv_NonExistentSession(t *testing.T) {
+	output, err := GetEnv("nonexistent_session_xyz_12345")
+	if err != nil {
+		t.Fatalf("GetEnv should not return Go error for missing session: %v", err)
+	}
+
+	if output.RobotResponse.Success {
+		t.Error("GetEnv for non-existent session should return success=false")
+	}
+
+	if output.RobotResponse.ErrorCode != ErrCodeSessionNotFound {
+		t.Errorf("ErrorCode = %q, want %q", output.RobotResponse.ErrorCode, ErrCodeSessionNotFound)
+	}
+
+	if output.RobotResponse.Hint == "" {
+		t.Error("Hint should be set for error responses")
+	}
+}
+
+func TestGetEnv_VersionClean(t *testing.T) {
+	output, err := GetEnv("global")
+	if err != nil {
+		t.Fatalf("GetEnv('global') returned error: %v", err)
+	}
+
+	version := output.Tmux.Version
+	if version == "" {
+		t.Skip("tmux not installed or version not detectable")
+	}
+
+	// Version should not contain the "tmux " prefix
+	if contains(version, "tmux ") {
+		t.Errorf("Tmux.Version = %q, should not contain 'tmux ' prefix", version)
+	}
+}
+
+func TestGetEnv_TimingDefaults(t *testing.T) {
+	output, err := GetEnv("global")
+	if err != nil {
+		t.Fatalf("GetEnv('global') returned error: %v", err)
+	}
+
+	if output.Timing == nil {
+		t.Fatal("Timing should not be nil")
+	}
+
+	if output.Timing.CtrlCGapMs != 100 {
+		t.Errorf("CtrlCGapMs = %d, want 100", output.Timing.CtrlCGapMs)
+	}
+	if output.Timing.PostExitWaitMs != 3000 {
+		t.Errorf("PostExitWaitMs = %d, want 3000", output.Timing.PostExitWaitMs)
+	}
+	if output.Timing.CCInitWaitMs != 6000 {
+		t.Errorf("CCInitWaitMs = %d, want 6000", output.Timing.CCInitWaitMs)
+	}
+	if output.Timing.PromptSubmitDelayMs != 1000 {
+		t.Errorf("PromptSubmitDelayMs = %d, want 1000", output.Timing.PromptSubmitDelayMs)
+	}
+}
+
+func TestGetEnv_ResponseEnvelope(t *testing.T) {
+	output, err := GetEnv("global")
+	if err != nil {
+		t.Fatalf("GetEnv('global') returned error: %v", err)
+	}
+
+	if output.RobotResponse.Version != EnvelopeVersion {
+		t.Errorf("Version = %q, want %q", output.RobotResponse.Version, EnvelopeVersion)
+	}
+
+	if output.RobotResponse.Timestamp == "" {
+		t.Error("Timestamp should not be empty")
 	}
 }
 

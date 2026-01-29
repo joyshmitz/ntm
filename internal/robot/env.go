@@ -135,7 +135,8 @@ func findTmuxBinaryPath() string {
 	return "/usr/bin/tmux"
 }
 
-// getTmuxVersion returns the tmux version string
+// getTmuxVersion returns the tmux version string (e.g., "3.5a").
+// It strips the "tmux " prefix from the output of tmux -V.
 func getTmuxVersion(binaryPath string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -144,7 +145,10 @@ func getTmuxVersion(binaryPath string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	version := strings.TrimSpace(string(out))
+	// tmux -V outputs "tmux 3.5a" or "tmux next-3.5"; strip the prefix
+	version = strings.TrimPrefix(version, "tmux ")
+	return version
 }
 
 // detectTmuxAlias checks if tmux is aliased or wrapped in the shell
@@ -271,8 +275,17 @@ func GetEnv(session string) (*EnvOutput, error) {
 		PromptSubmitDelayMs: 1000, // 1s before submitting prompts
 	}
 
-	// If session specified, add session-specific info
-	if session != "" {
+	// If session specified (and not "global"), add session-specific info
+	if session != "" && session != "global" {
+		if !tmux.SessionExists(session) {
+			output.RobotResponse = NewErrorResponse(
+				fmt.Errorf("session '%s' not found", session),
+				ErrCodeSessionNotFound,
+				"Use --robot-status to list available sessions",
+			)
+			return output, nil
+		}
+
 		structure, err := detectSessionStructure(session)
 		if err == nil {
 			output.SessionStructure = structure

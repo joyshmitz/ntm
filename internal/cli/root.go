@@ -1488,6 +1488,15 @@ Shell Integration:
 			return
 		}
 
+		// Robot-env handler for environment info (bd-18gwh)
+		if robotEnv != "" {
+			if err := robot.PrintEnv(robotEnv); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		// Robot-rano-stats handler for per-agent network stats
 		if robotRanoStats {
 			panes, err := robot.ParsePanesArg(robotPanes)
@@ -1990,6 +1999,9 @@ var (
 	robotAccountsList          bool   // --robot-accounts-list flag
 	robotAccountsListProvider  string // --provider filter for accounts-list
 
+	// Robot-env flag for environment info (bd-18gwh)
+	robotEnv string // --robot-env flag (session name or "global")
+
 	// Robot-dcg-status flag for DCG status
 	robotDCGStatus bool // --robot-dcg-status flag
 
@@ -2394,6 +2406,9 @@ func init() {
 	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "account-status-provider", "", "Filter to specific provider. Optional with --robot-account-status. Example: --account-status-provider=claude")
 	rootCmd.Flags().BoolVar(&robotAccountsList, "robot-accounts-list", false, "List all CAAM accounts. JSON output. Example: ntm --robot-accounts-list")
 	rootCmd.Flags().StringVar(&robotAccountsListProvider, "accounts-list-provider", "", "Filter to specific provider. Optional with --robot-accounts-list. Example: --accounts-list-provider=claude")
+
+	// Robot-env flag for environment info (bd-18gwh)
+	rootCmd.Flags().StringVar(&robotEnv, "robot-env", "", "Environment info for agent operation. Pass session name or 'global'. JSON output. Example: ntm --robot-env=myproject")
 
 	// Robot-dcg-status flag for DCG
 	rootCmd.Flags().BoolVar(&robotDCGStatus, "robot-dcg-status", false, "Show DCG status and configuration. JSON output. Example: ntm --robot-dcg-status")
@@ -3431,7 +3446,7 @@ func needsConfigLoading(cmdName string) bool {
 			robotInterrupt != "" || robotRestartPane != "" || robotProbe != "" || robotGraph || robotMail || robotHealth != "" ||
 			robotHealthOAuth != "" || robotLogs != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
 			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
-			robotSmartRestart != "" || robotMonitor != "" {
+			robotSmartRestart != "" || robotMonitor != "" || robotEnv != "" {
 			return true
 		}
 	}
