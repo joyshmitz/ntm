@@ -193,13 +193,13 @@ func (a *BVAdapter) GetNext(ctx context.Context, dir string) (json.RawMessage, e
 func (a *BVAdapter) GetAlerts(ctx context.Context, dir string, opts BVAlertOptions) (json.RawMessage, error) {
 	args := []string{"-robot-alerts"}
 	if opts.AlertType != "" {
-		args = append(args, "--alert-type", opts.AlertType)
+		args = append(args, "-alert-type", opts.AlertType)
 	}
 	if opts.Label != "" {
-		args = append(args, "--alert-label", opts.Label)
+		args = append(args, "-alert-label", opts.Label)
 	}
 	if opts.Severity != "" {
-		args = append(args, "--severity", opts.Severity)
+		args = append(args, "-severity", opts.Severity)
 	}
 	return a.runRobotCommand(ctx, dir, args...)
 }
@@ -207,7 +207,7 @@ func (a *BVAdapter) GetAlerts(ctx context.Context, dir string, opts BVAlertOptio
 func (a *BVAdapter) GetGraph(ctx context.Context, dir string, opts BVGraphOptions) (json.RawMessage, error) {
 	args := []string{"-robot-graph"}
 	if opts.Format != "" {
-		args = append(args, "--graph-format", opts.Format)
+		args = append(args, "-graph-format", opts.Format)
 	}
 	return a.runRobotCommand(ctx, dir, args...)
 }
@@ -253,20 +253,24 @@ func (a *BVAdapter) GetSearch(ctx context.Context, dir string, query string) (js
 func (a *BVAdapter) GetSearchWithOptions(ctx context.Context, dir string, opts BVSearchOptions) (json.RawMessage, error) {
 	args := []string{"-robot-search"}
 	if opts.Query != "" {
-		args = append(args, "--search", opts.Query)
+		args = append(args, "-search", opts.Query)
 	}
 	if opts.Limit > 0 {
-		args = append(args, fmt.Sprintf("--search-limit=%d", opts.Limit))
+		args = append(args, fmt.Sprintf("-search-limit=%d", opts.Limit))
 	}
 	if opts.Mode != "" {
-		args = append(args, "--search-mode", opts.Mode)
+		args = append(args, "-search-mode", opts.Mode)
 	}
 	return a.runRobotCommand(ctx, dir, args...)
 }
 
 // Label mode methods for label-based analysis
 func (a *BVAdapter) GetLabelAttention(ctx context.Context, dir string, limit int) (json.RawMessage, error) {
-	return a.runRobotCommand(ctx, dir, "-robot-label-attention", fmt.Sprintf("--attention-limit=%d", limit))
+	args := []string{"-robot-label-attention"}
+	if limit > 0 {
+		args = append(args, fmt.Sprintf("-attention-limit=%d", limit))
+	}
+	return a.runRobotCommand(ctx, dir, args...)
 }
 
 func (a *BVAdapter) GetLabelFlow(ctx context.Context, dir string) (json.RawMessage, error) {
@@ -279,17 +283,30 @@ func (a *BVAdapter) GetLabelHealth(ctx context.Context, dir string) (json.RawMes
 
 // File mode methods for file-based analysis
 func (a *BVAdapter) GetFileBeads(ctx context.Context, dir string, filePath string, limit int) (json.RawMessage, error) {
-	return a.runRobotCommand(ctx, dir, "-robot-file-beads", filePath, fmt.Sprintf("--file-beads-limit=%d", limit))
+	args := []string{"-robot-file-beads", filePath}
+	if limit > 0 {
+		args = append(args, fmt.Sprintf("-file-beads-limit=%d", limit))
+	}
+	return a.runRobotCommand(ctx, dir, args...)
 }
 
 func (a *BVAdapter) GetFileHotspots(ctx context.Context, dir string, limit int) (json.RawMessage, error) {
-	return a.runRobotCommand(ctx, dir, "-robot-file-hotspots", fmt.Sprintf("--hotspots-limit=%d", limit))
+	args := []string{"-robot-file-hotspots"}
+	if limit > 0 {
+		args = append(args, fmt.Sprintf("-hotspots-limit=%d", limit))
+	}
+	return a.runRobotCommand(ctx, dir, args...)
 }
 
 func (a *BVAdapter) GetFileRelations(ctx context.Context, dir string, filePath string, limit int, threshold float64) (json.RawMessage, error) {
-	return a.runRobotCommand(ctx, dir, "-robot-file-relations", filePath,
-		fmt.Sprintf("--relations-limit=%d", limit),
-		fmt.Sprintf("--relations-threshold=%.2f", threshold))
+	args := []string{"-robot-file-relations", filePath}
+	if limit > 0 {
+		args = append(args, fmt.Sprintf("-relations-limit=%d", limit))
+	}
+	if threshold > 0 {
+		args = append(args, fmt.Sprintf("-relations-threshold=%.2f", threshold))
+	}
+	return a.runRobotCommand(ctx, dir, args...)
 }
 
 // runRobotCommand executes a bv robot command and returns raw JSON
