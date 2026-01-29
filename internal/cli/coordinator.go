@@ -504,33 +504,41 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	// Apply config default for strategy if not explicitly set via flag
-	if !cmd.Flags().Changed("strategy") {
+	// Apply default strategy for coordinator wrapper.
+	strategy := strings.TrimSpace(assignStrategy)
+	if strategy == "" {
 		if cfg != nil && cfg.Assign.Strategy != "" {
-			assignStrategy = cfg.Assign.Strategy
+			strategy = cfg.Assign.Strategy
+		} else {
+			strategy = config.DefaultAssignConfig().Strategy
 		}
 	}
 
 	// Validate strategy
-	if !config.IsValidStrategy(assignStrategy) {
+	if !config.IsValidStrategy(strategy) {
 		return fmt.Errorf("unknown strategy %q. Valid strategies: %s",
-			assignStrategy, strings.Join(config.ValidAssignStrategies, ", "))
+			strategy, strings.Join(config.ValidAssignStrategies, ", "))
 	}
 
 	// Resolve agent type filter from flags
 	agentTypeFilter := resolveAgentTypeFilter()
 
+	timeout := assignTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
 	assignOpts := &AssignCommandOptions{
 		Session:         session,
 		BeadIDs:         nil,
-		Strategy:        assignStrategy,
+		Strategy:        strategy,
 		Limit:           assignLimit,
 		AgentTypeFilter: agentTypeFilter,
 		Template:        assignTemplate,
 		TemplateFile:    assignTemplateFile,
 		Verbose:         assignVerbose,
 		Quiet:           assignQuiet,
-		Timeout:         assignTimeout,
+		Timeout:         timeout,
 		ReserveFiles:    assignReserveFiles,
 		Pane:            assignPane,
 		Force:           assignForce,

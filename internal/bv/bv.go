@@ -708,16 +708,13 @@ func IsBdInstalled() bool {
 func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 	result := &BeadsSummary{}
 
-	// Resolve empty dir to current working directory
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			result.Available = false
-			result.Reason = fmt.Sprintf("failed to get working directory: %v", err)
-			return result
-		}
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		result.Available = false
+		result.Reason = err.Error()
+		return result
 	}
+	dir = normalizedDir
 
 	// Validate directory exists
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
