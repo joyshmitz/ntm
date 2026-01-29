@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // --- AgentConfig Tests ---
@@ -647,4 +649,177 @@ func TestSaveOptions_Defaults(t *testing.T) {
 	if opts.Description != "" {
 		t.Errorf("SaveOptions.Description default = %q, want empty", opts.Description)
 	}
+}
+
+// --- countAgents Tests ---
+
+func TestCountAgents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty panes", func(t *testing.T) {
+		t.Parallel()
+		cfg := countAgents(nil)
+		if cfg.Total() != 0 {
+			t.Errorf("Total() = %d, want 0", cfg.Total())
+		}
+	})
+
+	t.Run("one of each type", func(t *testing.T) {
+		t.Parallel()
+		panes := []tmux.Pane{
+			{Type: tmux.AgentClaude},
+			{Type: tmux.AgentCodex},
+			{Type: tmux.AgentGemini},
+			{Type: tmux.AgentCursor},
+			{Type: tmux.AgentWindsurf},
+			{Type: tmux.AgentAider},
+			{Type: tmux.AgentUser},
+		}
+		cfg := countAgents(panes)
+		if cfg.Claude != 1 {
+			t.Errorf("Claude = %d, want 1", cfg.Claude)
+		}
+		if cfg.Codex != 1 {
+			t.Errorf("Codex = %d, want 1", cfg.Codex)
+		}
+		if cfg.Gemini != 1 {
+			t.Errorf("Gemini = %d, want 1", cfg.Gemini)
+		}
+		if cfg.Cursor != 1 {
+			t.Errorf("Cursor = %d, want 1", cfg.Cursor)
+		}
+		if cfg.Windsurf != 1 {
+			t.Errorf("Windsurf = %d, want 1", cfg.Windsurf)
+		}
+		if cfg.Aider != 1 {
+			t.Errorf("Aider = %d, want 1", cfg.Aider)
+		}
+		if cfg.User != 1 {
+			t.Errorf("User = %d, want 1", cfg.User)
+		}
+		if cfg.Total() != 7 {
+			t.Errorf("Total() = %d, want 7", cfg.Total())
+		}
+	})
+
+	t.Run("multiple of same type", func(t *testing.T) {
+		t.Parallel()
+		panes := []tmux.Pane{
+			{Type: tmux.AgentClaude},
+			{Type: tmux.AgentClaude},
+			{Type: tmux.AgentClaude},
+			{Type: tmux.AgentCodex},
+		}
+		cfg := countAgents(panes)
+		if cfg.Claude != 3 {
+			t.Errorf("Claude = %d, want 3", cfg.Claude)
+		}
+		if cfg.Codex != 1 {
+			t.Errorf("Codex = %d, want 1", cfg.Codex)
+		}
+		if cfg.Total() != 4 {
+			t.Errorf("Total() = %d, want 4", cfg.Total())
+		}
+	})
+
+	t.Run("unknown type ignored", func(t *testing.T) {
+		t.Parallel()
+		panes := []tmux.Pane{
+			{Type: tmux.AgentUnknown},
+			{Type: tmux.AgentClaude},
+		}
+		cfg := countAgents(panes)
+		if cfg.Claude != 1 {
+			t.Errorf("Claude = %d, want 1", cfg.Claude)
+		}
+		if cfg.Total() != 1 {
+			t.Errorf("Total() = %d, want 1 (unknown should not count)", cfg.Total())
+		}
+	})
+}
+
+// --- mapPaneStates Tests ---
+
+func TestMapPaneStates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty panes", func(t *testing.T) {
+		t.Parallel()
+		states := mapPaneStates(nil)
+		if len(states) != 0 {
+			t.Errorf("expected empty for nil input, got len=%d", len(states))
+		}
+	})
+
+	t.Run("single pane preserves fields", func(t *testing.T) {
+		t.Parallel()
+		panes := []tmux.Pane{
+			{
+				ID:      "%5",
+				Index:   2,
+				Title:   "myproject__cc_1_opus",
+				Type:    tmux.AgentClaude,
+				Variant: "opus",
+				Active:  true,
+				Width:   120,
+				Height:  40,
+			},
+		}
+		states := mapPaneStates(panes)
+		if len(states) != 1 {
+			t.Fatalf("len = %d, want 1", len(states))
+		}
+		s := states[0]
+		if s.Title != "myproject__cc_1_opus" {
+			t.Errorf("Title = %q", s.Title)
+		}
+		if s.Index != 2 {
+			t.Errorf("Index = %d, want 2", s.Index)
+		}
+		if s.AgentType != string(tmux.AgentClaude) {
+			t.Errorf("AgentType = %q", s.AgentType)
+		}
+		if s.Model != "opus" {
+			t.Errorf("Model = %q, want opus", s.Model)
+		}
+		if !s.Active {
+			t.Error("Active should be true")
+		}
+		if s.Width != 120 {
+			t.Errorf("Width = %d, want 120", s.Width)
+		}
+		if s.Height != 40 {
+			t.Errorf("Height = %d, want 40", s.Height)
+		}
+		if s.PaneID != "%5" {
+			t.Errorf("PaneID = %q, want %%5", s.PaneID)
+		}
+	})
+
+	t.Run("multiple panes preserve order", func(t *testing.T) {
+		t.Parallel()
+		panes := []tmux.Pane{
+			{Index: 0, Type: tmux.AgentUser, Title: "bash"},
+			{Index: 1, Type: tmux.AgentClaude, Title: "proj__cc_1"},
+			{Index: 2, Type: tmux.AgentCodex, Title: "proj__cod_1"},
+		}
+		states := mapPaneStates(panes)
+		if len(states) != 3 {
+			t.Fatalf("len = %d, want 3", len(states))
+		}
+		for i, s := range states {
+			if s.Index != i {
+				t.Errorf("states[%d].Index = %d, want %d", i, s.Index, i)
+			}
+		}
+		if states[0].AgentType != string(tmux.AgentUser) {
+			t.Errorf("states[0].AgentType = %q, want user", states[0].AgentType)
+		}
+		if states[1].AgentType != string(tmux.AgentClaude) {
+			t.Errorf("states[1].AgentType = %q, want cc", states[1].AgentType)
+		}
+		if states[2].AgentType != string(tmux.AgentCodex) {
+			t.Errorf("states[2].AgentType = %q, want cod", states[2].AgentType)
+		}
+	})
 }
