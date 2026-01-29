@@ -227,3 +227,62 @@ func TestSanitizeFilename(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		bytes    int64
+		expected string
+	}{
+		{0, "0 B"},
+		{500, "500 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{1073741824, "1.0 GB"},
+		{1099511627776, "1.0 TB"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.expected, func(t *testing.T) {
+			result := FormatBytes(tc.bytes)
+			if result != tc.expected {
+				t.Errorf("FormatBytes(%d) = %q, want %q", tc.bytes, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestSafeSlice(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{"short string", "hello", 10, "hello"},
+		{"exact length", "hello", 5, "hello"},
+		{"truncate ascii", "hello world", 5, "hello"},
+		{"empty string", "", 5, ""},
+		{"zero maxlen", "hello", 0, ""},
+		// Multi-byte rune: "日" is 3 bytes
+		{"rune boundary safe", "日本語", 4, "日"},
+		{"rune boundary exact", "日本語", 6, "日本"},
+		{"all multibyte fits", "日本語", 9, "日本語"},
+		{"mixed cuts mid-rune", "a日b", 3, "a"},      // "日" needs bytes 1-3, s[:1]="a"
+		{"mixed fits rune", "a日b", 4, "a日"},         // "日" ends at byte 4, s[:4]="a日"
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := SafeSlice(tc.input, tc.maxLen)
+			if result != tc.expected {
+				t.Errorf("SafeSlice(%q, %d) = %q, want %q", tc.input, tc.maxLen, result, tc.expected)
+			}
+		})
+	}
+}
