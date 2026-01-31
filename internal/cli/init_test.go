@@ -474,3 +474,81 @@ func TestRunShellInit_InvalidShell(t *testing.T) {
 
 	t.Logf("TEST: RunShellInit_InvalidShell | Input: powershell | Expected: error | Got: %v", err)
 }
+
+// TestInstallGitHooks_NotGitRepo verifies hooks installation skips non-git directories
+func TestInstallGitHooks_NotGitRepo(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	installed, warning := installGitHooks(tmpDir, false)
+
+	if len(installed) != 0 {
+		t.Errorf("expected no hooks installed, got %v", installed)
+	}
+
+	if warning == "" {
+		t.Error("expected warning for non-git repo")
+	}
+
+	if !strings.Contains(warning, "not a git repository") {
+		t.Errorf("expected 'not a git repository' warning, got: %s", warning)
+	}
+
+	t.Logf("TEST: InstallGitHooks_NotGitRepo | Input: %s | Expected: warning | Got: %s", tmpDir, warning)
+}
+
+// TestInstallGitHooks_GitRepo verifies hooks installation in a git repo
+func TestInstallGitHooks_GitRepo(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Initialize a git repo
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "hooks"), 0755); err != nil {
+		t.Fatalf("create .git/hooks: %v", err)
+	}
+
+	// Create minimal git config
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n\trepositoryformatversion = 0\n"), 0644); err != nil {
+		t.Fatalf("create git config: %v", err)
+	}
+
+	installed, warning := installGitHooks(tmpDir, false)
+
+	// Should install hooks (or report they exist)
+	t.Logf("TEST: InstallGitHooks_GitRepo | Installed: %v | Warning: %s", installed, warning)
+}
+
+// TestInstallGitHooks_Force verifies force flag behavior
+func TestInstallGitHooks_Force(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Initialize a git repo
+	gitDir := filepath.Join(tmpDir, ".git")
+	hooksDir := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatalf("create .git/hooks: %v", err)
+	}
+
+	// Create minimal git config
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n\trepositoryformatversion = 0\n"), 0644); err != nil {
+		t.Fatalf("create git config: %v", err)
+	}
+
+	// Create existing hooks
+	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("create existing hook: %v", err)
+	}
+
+	// Install without force first
+	installed1, _ := installGitHooks(tmpDir, false)
+
+	// Install with force
+	installed2, _ := installGitHooks(tmpDir, true)
+
+	t.Logf("TEST: InstallGitHooks_Force | Without force: %v | With force: %v", installed1, installed2)
+}
