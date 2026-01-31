@@ -218,6 +218,13 @@ func listReservations(t *testing.T, client *agentmail.Client, projectDir string)
 	return reservations
 }
 
+func runCmdAllowFail(t *testing.T, dir, cmd string, args ...string) ([]byte, error) {
+	t.Helper()
+	c := exec.Command(cmd, args...)
+	c.Dir = dir
+	return c.CombinedOutput()
+}
+
 func hasReservation(reservations []agentmail.FileReservation, path string) bool {
 	for _, r := range reservations {
 		if r.PathPattern == path && r.ReleasedTS == nil {

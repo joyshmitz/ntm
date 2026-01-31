@@ -620,3 +620,57 @@ func TestFormatProviderUsageMessage(t *testing.T) {
 		t.Errorf("message = %s, want %s", msg, expected)
 	}
 }
+
+// =============================================================================
+// Warning Message Tests
+// =============================================================================
+
+func TestGetWarningMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		level     WarningLevel
+		threshold float64
+		want      string
+	}{
+		{LevelCritical, 15.0, "Context below 15% threshold"},
+		{LevelWarning, 25.0, "Context below 25% threshold"},
+		{LevelInfo, 40.0, "Context below 40% threshold"},
+		{LevelCritical, 10.0, "Context below threshold"}, // Non-standard threshold
+		{"", 25.0, ""},                                   // Empty level
+		{LevelAlert, 80.0, ""},                           // Alert not in switch
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.level), func(t *testing.T) {
+			got := getWarningMessage(tt.level, tt.threshold)
+			if got != tt.want {
+				t.Errorf("getWarningMessage(%q, %.0f) = %q, want %q", tt.level, tt.threshold, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatWarningMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		threshold float64
+		want      string
+	}{
+		{"critical_15", 15.0, "Context below 15% threshold"},
+		{"warning_25", 25.0, "Context below 25% threshold"},
+		{"info_40", 40.0, "Context below 40% threshold"},
+		{"custom_10", 10.0, "Context below threshold"},
+		{"custom_50", 50.0, "Context below threshold"},
+		{"custom_80", 80.0, "Context below threshold"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatWarningMessage("Context below %.0f%% threshold", tt.threshold)
+			if got != tt.want {
+				t.Errorf("formatWarningMessage(%.0f) = %q, want %q", tt.threshold, got, tt.want)
+			}
+		})
+	}
+}

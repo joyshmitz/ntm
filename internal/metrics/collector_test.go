@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -454,4 +455,375 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// =============================================================================
+// Additional Pure Function Tests for Coverage Improvement
+// =============================================================================
+
+func TestPercentile_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		sorted []float64
+		p      int
+		want   float64
+	}{
+		{"empty slice", []float64{}, 50, 0},
+		{"p=0 returns first", []float64{10, 20, 30}, 0, 10},
+		{"p=100 returns last", []float64{10, 20, 30}, 100, 30},
+		{"p>100 clamped to last", []float64{10, 20, 30}, 200, 30},
+		{"single element p=0", []float64{42}, 0, 42},
+		{"single element p=50", []float64{42}, 50, 42},
+		{"single element p=100", []float64{42}, 100, 42},
+		{"two elements p=0", []float64{10, 20}, 0, 10},
+		{"two elements p=50", []float64{10, 20}, 50, 20},
+		{"two elements p=100", []float64{10, 20}, 100, 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := percentile(tt.sorted, tt.p)
+			if got != tt.want {
+				t.Errorf("percentile(%v, %d) = %v, want %v", tt.sorted, tt.p, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSortFloat64s_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input []float64
+		want  []float64
+	}{
+		{"empty", []float64{}, []float64{}},
+		{"single", []float64{42}, []float64{42}},
+		{"already sorted", []float64{1, 2, 3}, []float64{1, 2, 3}},
+		{"reverse sorted", []float64{3, 2, 1}, []float64{1, 2, 3}},
+		{"with duplicates", []float64{3, 1, 2, 1, 3}, []float64{1, 1, 2, 3, 3}},
+		{"negative numbers", []float64{-1, -5, 0, 2, -3}, []float64{-5, -3, -1, 0, 2}},
+		{"with zero", []float64{0, -1, 1}, []float64{-1, 0, 1}},
+		{"all same", []float64{5, 5, 5, 5}, []float64{5, 5, 5, 5}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Make a copy to not modify test data
+			got := make([]float64, len(tt.input))
+			copy(got, tt.input)
+			sortFloat64s(got)
+
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("sorted[%d] = %v, want %v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAverage_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input []float64
+		want  float64
+	}{
+		{"single element", []float64{42}, 42},
+		{"negative numbers", []float64{-10, -20, -30}, -20},
+		{"mixed signs", []float64{-10, 10}, 0},
+		{"with zero", []float64{0, 10, 20}, 10},
+		{"large numbers", []float64{1000000, 2000000, 3000000}, 2000000},
+		{"small fractions", []float64{0.1, 0.2, 0.3}, 0.2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := average(tt.input)
+			if got != tt.want {
+				t.Errorf("average(%v) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCalculateLatencyStats_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		samples []float64
+		wantMin float64
+		wantMax float64
+		wantAvg float64
+	}{
+		{
+			name:    "all same values",
+			samples: []float64{50, 50, 50, 50, 50},
+			wantMin: 50,
+			wantMax: 50,
+			wantAvg: 50,
+		},
+		{
+			name:    "two values",
+			samples: []float64{10, 90},
+			wantMin: 10,
+			wantMax: 90,
+			wantAvg: 50,
+		},
+		{
+			name:    "unsorted input",
+			samples: []float64{50, 10, 90, 30, 70},
+			wantMin: 10,
+			wantMax: 90,
+			wantAvg: 50,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats := calculateLatencyStats(tt.samples)
+			if stats.MinMs != tt.wantMin {
+				t.Errorf("MinMs = %v, want %v", stats.MinMs, tt.wantMin)
+			}
+			if stats.MaxMs != tt.wantMax {
+				t.Errorf("MaxMs = %v, want %v", stats.MaxMs, tt.wantMax)
+			}
+			if stats.AvgMs != tt.wantAvg {
+				t.Errorf("AvgMs = %v, want %v", stats.AvgMs, tt.wantAvg)
+			}
+			if stats.Count != len(tt.samples) {
+				t.Errorf("Count = %v, want %v", stats.Count, len(tt.samples))
+			}
+		})
+	}
+}
+
+func TestSaveSnapshot_NilStore(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Should return nil (no-op) when store is nil
+	err := c.SaveSnapshot("test-snapshot")
+	if err != nil {
+		t.Errorf("SaveSnapshot with nil store should return nil, got %v", err)
+	}
+}
+
+func TestLoadSnapshot_NilStore(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Should return error when store is nil
+	_, err := c.LoadSnapshot("test-snapshot")
+	if err == nil {
+		t.Error("LoadSnapshot with nil store should return error")
+	}
+	if !containsHelper(err.Error(), "no store configured") {
+		t.Errorf("expected 'no store configured' error, got %v", err)
+	}
+}
+
+func TestClose_MultipleCallsSafe(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+
+	// First close
+	c.Close()
+
+	// Second close should not panic
+	c.Close()
+
+	// Third close should not panic
+	c.Close()
+}
+
+func TestGetTargetStatus_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		current       float64
+		target        float64
+		lowerIsBetter bool
+		want          string
+	}{
+		{"exactly at target (lower)", 50, 50, true, "met"},
+		{"exactly at target (higher)", 50, 50, false, "met"},
+		{"slightly below (lower is better)", 49.9, 50, true, "met"},
+		{"slightly above (lower is better)", 50.1, 50, true, "regressing"},
+		{"slightly below (higher is better)", 49.9, 50, false, "regressing"},
+		{"slightly above (higher is better)", 50.1, 50, false, "met"},
+		{"zero target met with zero", 0, 0, true, "met"},
+		{"negative below zero target", -1, 0, true, "met"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getTargetStatus(tt.current, tt.target, tt.lowerIsBetter)
+			if got != tt.want {
+				t.Errorf("getTargetStatus(%v, %v, %v) = %q, want %q",
+					tt.current, tt.target, tt.lowerIsBetter, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExportCSV_Empty(t *testing.T) {
+	report := &MetricsReport{
+		SessionID:    "test",
+		LatencyStats: map[string]LatencyStats{},
+	}
+
+	csv := report.ExportCSV()
+
+	// Should have header only
+	if csv != "operation,count,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms\n" {
+		t.Errorf("empty CSV should only have header, got %q", csv)
+	}
+}
+
+func TestExportCSV_MultipleOperations(t *testing.T) {
+	report := &MetricsReport{
+		SessionID: "test",
+		LatencyStats: map[string]LatencyStats{
+			"op1": {Count: 10, MinMs: 1, MaxMs: 100, AvgMs: 50, P50Ms: 45, P95Ms: 95, P99Ms: 99},
+			"op2": {Count: 5, MinMs: 10, MaxMs: 50, AvgMs: 30, P50Ms: 28, P95Ms: 48, P99Ms: 50},
+		},
+	}
+
+	csv := report.ExportCSV()
+
+	// Should contain both operations
+	if !containsHelper(csv, "op1,10,") {
+		t.Error("CSV should contain op1 data")
+	}
+	if !containsHelper(csv, "op2,5,") {
+		t.Error("CSV should contain op2 data")
+	}
+}
+
+func TestExportJSON_ValidJSON(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	c.RecordAPICall("test", "op")
+	c.RecordLatency("test_op", 100*time.Millisecond)
+
+	report, err := c.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+
+	jsonData, err := report.ExportJSON()
+	if err != nil {
+		t.Fatalf("ExportJSON failed: %v", err)
+	}
+
+	// Verify it's valid JSON by unmarshaling
+	var parsed MetricsReport
+	if err := json.Unmarshal(jsonData, &parsed); err != nil {
+		t.Errorf("ExportJSON produced invalid JSON: %v", err)
+	}
+
+	// Verify key fields survived round-trip
+	if parsed.SessionID != "test-session" {
+		t.Errorf("SessionID = %q, want %q", parsed.SessionID, "test-session")
+	}
+	if parsed.APICallCounts["test:op"] != 1 {
+		t.Errorf("APICallCounts[test:op] = %d, want 1", parsed.APICallCounts["test:op"])
+	}
+}
+
+func TestCompareSnapshots_MissingBaselineOperation(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Baseline has no operations
+	baseline := &MetricsReport{
+		SessionID:     "baseline",
+		APICallCounts: map[string]int64{},
+		LatencyStats:  map[string]LatencyStats{},
+	}
+
+	// Current has new operations
+	current := &MetricsReport{
+		SessionID:     "current",
+		APICallCounts: map[string]int64{"new:op": 10},
+		LatencyStats:  map[string]LatencyStats{"new_op": {Count: 5, AvgMs: 100}},
+	}
+
+	result := c.CompareSnapshots(baseline, current)
+
+	// New operation should show full count as delta
+	if result.APICallDeltas["new:op"] != 10 {
+		t.Errorf("new:op delta = %d, want 10", result.APICallDeltas["new:op"])
+	}
+}
+
+func TestRecordLatency_MaintainsOrder(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	// Record latencies in specific order
+	c.RecordLatency("test", 100*time.Millisecond)
+	c.RecordLatency("test", 200*time.Millisecond)
+	c.RecordLatency("test", 300*time.Millisecond)
+
+	c.mu.RLock()
+	samples := c.latencies["test"]
+	c.mu.RUnlock()
+
+	// Should maintain insertion order
+	if len(samples) != 3 {
+		t.Fatalf("expected 3 samples, got %d", len(samples))
+	}
+	if samples[0] != 100 || samples[1] != 200 || samples[2] != 300 {
+		t.Errorf("samples = %v, want [100, 200, 300]", samples)
+	}
+}
+
+func TestGenerateReport_EmptyCollector(t *testing.T) {
+	c := NewCollector(nil, "empty-session")
+	defer c.Close()
+
+	report, err := c.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+
+	if report.SessionID != "empty-session" {
+		t.Errorf("SessionID = %q, want %q", report.SessionID, "empty-session")
+	}
+	if len(report.APICallCounts) != 0 {
+		t.Errorf("APICallCounts should be empty, got %v", report.APICallCounts)
+	}
+	if len(report.LatencyStats) != 0 {
+		t.Errorf("LatencyStats should be empty, got %v", report.LatencyStats)
+	}
+	if report.BlockedCommands != 0 {
+		t.Errorf("BlockedCommands = %d, want 0", report.BlockedCommands)
+	}
+	if report.FileConflicts != 0 {
+		t.Errorf("FileConflicts = %d, want 0", report.FileConflicts)
+	}
+}
+
+func TestMetricsReport_GeneratedAtIsRecent(t *testing.T) {
+	c := NewCollector(nil, "test-session")
+	defer c.Close()
+
+	before := time.Now().UTC()
+	report, err := c.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport failed: %v", err)
+	}
+	after := time.Now().UTC()
+
+	if report.GeneratedAt.Before(before) || report.GeneratedAt.After(after) {
+		t.Errorf("GeneratedAt = %v, expected between %v and %v",
+			report.GeneratedAt, before, after)
+	}
 }

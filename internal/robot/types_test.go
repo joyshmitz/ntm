@@ -31,6 +31,67 @@ func TestNewRobotResponse(t *testing.T) {
 	})
 }
 
+func TestNewRobotResponseWithMeta(t *testing.T) {
+	t.Run("with valid meta", func(t *testing.T) {
+		meta := &ResponseMeta{
+			Command:    "test-command",
+			DurationMs: 150,
+		}
+		resp := NewRobotResponseWithMeta(true, meta)
+		if !resp.Success {
+			t.Error("expected Success to be true")
+		}
+		if resp.Meta == nil {
+			t.Fatal("expected Meta to be set")
+		}
+		if resp.Meta.Command != "test-command" {
+			t.Errorf("expected Command 'test-command', got %q", resp.Meta.Command)
+		}
+		if resp.Meta.DurationMs != 150 {
+			t.Errorf("expected DurationMs 150, got %d", resp.Meta.DurationMs)
+		}
+	})
+
+	t.Run("with nil meta", func(t *testing.T) {
+		resp := NewRobotResponseWithMeta(false, nil)
+		if resp.Success {
+			t.Error("expected Success to be false")
+		}
+		if resp.Meta != nil {
+			t.Error("expected Meta to be nil")
+		}
+	})
+
+	t.Run("meta JSON serialization", func(t *testing.T) {
+		meta := &ResponseMeta{
+			Command:    "robot-status",
+			DurationMs: 250,
+		}
+		resp := NewRobotResponseWithMeta(true, meta)
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("failed to marshal: %v", err)
+		}
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+
+		metaData, ok := parsed["_meta"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected _meta in JSON output")
+		}
+		if metaData["command"] != "robot-status" {
+			t.Errorf("unexpected command: %v", metaData["command"])
+		}
+		if metaData["duration_ms"] != float64(250) {
+			t.Errorf("unexpected duration: %v", metaData["duration_ms"])
+		}
+	})
+}
+
 func TestNewErrorResponse(t *testing.T) {
 	err := errors.New("session not found")
 	resp := NewErrorResponse(err, ErrCodeSessionNotFound, "Use 'ntm list' to see sessions")
