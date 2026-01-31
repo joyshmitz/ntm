@@ -233,6 +233,24 @@ func TestListSessions(t *testing.T) {
 	}
 }
 
+func TestGetAllPanes_NoServerReturnsEmpty(t *testing.T) {
+	skipIfNoTmux(t)
+
+	// Point tmux at an empty socket directory so no server exists.
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+
+	panes, err := GetAllPanes()
+	if err != nil {
+		t.Fatalf("GetAllPanes error: %v", err)
+	}
+	if panes == nil {
+		t.Fatal("expected non-nil panes map")
+	}
+	if len(panes) != 0 {
+		t.Fatalf("expected no panes, got %d", len(panes))
+	}
+}
+
 func TestGetSession(t *testing.T) {
 	skipIfNoTmux(t)
 

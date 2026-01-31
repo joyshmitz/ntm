@@ -391,6 +391,14 @@ func (c *Client) GetAllPanesContext(ctx context.Context) (map[string][]Pane, err
 	format := fmt.Sprintf("#{session_name}%[1]s#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_pid}", sep)
 	output, err := c.RunContext(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
+		// No server/no sessions is not an error; treat as empty result.
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "no server running") ||
+			strings.Contains(errMsg, "no sessions") ||
+			strings.Contains(errMsg, "No such file or directory") ||
+			strings.Contains(errMsg, "error connecting to") {
+			return map[string][]Pane{}, nil
+		}
 		return nil, err
 	}
 
