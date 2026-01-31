@@ -483,6 +483,18 @@ func (c *Client) ListReservations(ctx context.Context, projectKey, agentName str
 		if unmarshalErr := json.Unmarshal(toolResult, &reservations); unmarshalErr != nil {
 			return nil, NewAPIError("list_file_reservations", 0, unmarshalErr)
 		}
+
+		// Some legacy tool implementations may ignore agent_name filtering. Mirror the
+		// resource path behavior and defensively filter client-side when requested.
+		if agentName != "" && !allAgents {
+			filtered := make([]FileReservation, 0, len(reservations))
+			for _, r := range reservations {
+				if r.AgentName == agentName {
+					filtered = append(filtered, r)
+				}
+			}
+			reservations = filtered
+		}
 		return reservations, nil
 	}
 
