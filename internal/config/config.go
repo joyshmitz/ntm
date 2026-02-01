@@ -3027,6 +3027,11 @@ func Validate(cfg *Config) []error {
 		errs = append(errs, fmt.Errorf("integrations.process_triage: %w", err))
 	}
 
+	// Validate redaction configuration
+	if err := ValidateRedactionConfig(&cfg.Redaction); err != nil {
+		errs = append(errs, fmt.Errorf("redaction: %w", err))
+	}
+
 	// Validate projects_base if set
 	if cfg.ProjectsBase != "" {
 		expanded := ExpandHome(cfg.ProjectsBase)

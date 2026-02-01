@@ -597,3 +597,31 @@ func TestCreatedAtPreserved(t *testing.T) {
 		t.Error("UpdatedAt should be set")
 	}
 }
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{"short string", "hello", 10, "hello"},
+		{"exact length", "hello", 5, "hello"},
+		{"needs truncation", "hello world", 8, "hello..."},
+		{"maxLen 3", "hello", 3, "hel"},
+		{"maxLen 2", "hello", 2, "he"},
+		{"maxLen 1", "hello", 1, "h"},
+		{"maxLen 0", "hello", 0, ""},
+		{"maxLen negative", "hello", -1, ""},
+		{"empty string", "", 5, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncate(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+		})
+	}
+}

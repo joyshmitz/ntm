@@ -2670,6 +2670,23 @@ func TestValidateRejectsInvalidRobotOutputFormat(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidRedactionMode(t *testing.T) {
+	cfg := Default()
+	cfg.Redaction.Mode = "invalid"
+
+	errs := Validate(cfg)
+	found := false
+	for _, err := range errs {
+		if strings.Contains(err.Error(), "redaction") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected Validate to return error for invalid redaction mode")
+	}
+}
+
 func TestUpsertTOMLTable(t *testing.T) {
 	t.Parallel()
 

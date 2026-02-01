@@ -163,8 +163,15 @@ func (h *Handoff) ValidateAndSetDefaults() ValidationErrors {
 
 // truncate shortens a string for logging purposes.
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
+	}
+	// Need at least 4 chars to fit content + "..." (1 char + 3 for ellipsis)
+	if maxLen <= 3 {
+		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
 }
