@@ -21,7 +21,7 @@ func TestAMAdapter_Capabilities_ServerAvailable(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
+		if r.URL.Path != "/health/liveness" {
 			http.NotFound(w, r)
 			return
 		}
@@ -58,7 +58,7 @@ func TestAMAdapter_Capabilities_ServerUnavailableOnNonOK(t *testing.T) {
 	t.Parallel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
+		if r.URL.Path != "/health/liveness" {
 			http.NotFound(w, r)
 			return
 		}

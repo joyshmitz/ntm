@@ -400,7 +400,7 @@ func TestHealthCheck(t *testing.T) {
 
 	// Start a test HTTP server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health/liveness", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
@@ -416,13 +416,13 @@ func TestHealthCheck(t *testing.T) {
 	defer server.Shutdown(context.Background())
 
 	// Test checkHealthHTTP
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health/liveness", port)
 	if !s.checkHealthHTTP(healthURL) {
 		t.Error("checkHealthHTTP() returned false for healthy endpoint")
 	}
 
 	// Test with invalid URL
-	if s.checkHealthHTTP("http://127.0.0.1:99999/health") {
+	if s.checkHealthHTTP("http://127.0.0.1:99999/health/liveness") {
 		t.Error("checkHealthHTTP() returned true for invalid endpoint")
 	}
 }

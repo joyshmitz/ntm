@@ -415,7 +415,7 @@ func TestHealthCheckFlapping(t *testing.T) {
 		Command:     "sleep",
 		Args:        []string{"30"},
 		DefaultPort: port,
-		HealthURL:   fmt.Sprintf("http://127.0.0.1:%d/health", port),
+		HealthURL:   fmt.Sprintf("http://127.0.0.1:%d/health/liveness", port),
 	}
 
 	err = s.Start(spec)
