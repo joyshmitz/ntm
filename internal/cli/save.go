@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -95,11 +96,6 @@ func runSave(w io.Writer, session, outputDir string, lines int, filter AgentFilt
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	// Ensure output directory exists
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
-	}
-
 	panes, err := tmux.GetPanes(session)
 	if err != nil {
 		return err
@@ -118,7 +114,19 @@ func runSave(w io.Writer, session, outputDir string, lines int, filter AgentFilt
 	}
 
 	timestamp := time.Now().Format("20060102_150405")
-	savedFiles := 0
+
+	type capturedOutput struct {
+		path      string
+		content   string
+		redaction *RedactionSummary
+	}
+
+	redactCfg := redaction.DefaultConfig()
+	if cfg != nil {
+		redactCfg = cfg.Redaction.ToRedactionLibConfig()
+	}
+
+	captured := make([]capturedOutput, 0, len(targetPanes))
 
 	for _, p := range targetPanes {
 		output, err := tmux.CapturePaneOutput(p.ID, lines)
@@ -146,18 +154,56 @@ func runSave(w io.Writer, session, outputDir string, lines int, filter AgentFilt
 		header += "═══════════════════════════════════════════════════════════════\n\n"
 
 		content := header + output
+		content, redactionSummary, err := applyOutputRedaction(content, redactCfg)
+		if err != nil {
+			return err
+		}
 
-		if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write %s: %v\n", outputPath, err)
+		captured = append(captured, capturedOutput{path: outputPath, content: content, redaction: redactionSummary})
+	}
+
+	if len(captured) == 0 {
+		return fmt.Errorf("no content captured")
+	}
+
+	// Ensure output directory exists (side effects after redaction preflight).
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	savedFiles := 0
+	totalFindings := 0
+	totalCategories := map[string]int{}
+
+	for _, c := range captured {
+		if c.redaction != nil {
+			totalFindings += c.redaction.Findings
+			for cat, count := range c.redaction.Categories {
+				totalCategories[cat] += count
+			}
+		}
+
+		if err := os.WriteFile(c.path, []byte(c.content), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write %s: %v\n", c.path, err)
 			continue
 		}
 
 		savedFiles++
-		fmt.Printf("  %s✓%s %s\n", colorize(t.Success), colorize(t.Text), outputPath)
+		fmt.Printf("  %s✓%s %s\n", colorize(t.Success), colorize(t.Text), c.path)
 	}
 
 	if savedFiles == 0 {
 		return fmt.Errorf("no files saved")
+	}
+
+	if totalFindings > 0 {
+		cats := formatRedactionCategoryCounts(totalCategories)
+		switch redactCfg.Mode {
+		case redaction.ModeWarn:
+			fmt.Fprintf(os.Stderr, "Warning: detected %d potential secret(s) across saved outputs (%s); files are NOT modified (mode=warn)\n", totalFindings, cats)
+		case redaction.ModeRedact:
+			fmt.Fprintf(os.Stderr, "Redacted %d potential secret(s) across saved outputs (%s)\n", totalFindings, cats)
+		}
 	}
 
 	fmt.Printf("\n%s✓%s Saved %d file(s) to %s\n",

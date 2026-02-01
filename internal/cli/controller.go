@@ -27,13 +27,13 @@ type ControllerInput struct {
 // ControllerResponse is the JSON output for the controller command.
 type ControllerResponse struct {
 	output.TimestampedResponse
-	Session     string `json:"session"`
-	PaneID      string `json:"pane_id"`
-	PaneIndex   int    `json:"pane_index"`
-	AgentType   string `json:"agent_type"`
-	PromptUsed  string `json:"prompt_used,omitempty"`
-	AgentCount  int    `json:"agent_count"`
-	AgentList   string `json:"agent_list,omitempty"`
+	Session    string `json:"session"`
+	PaneID     string `json:"pane_id"`
+	PaneIndex  int    `json:"pane_index"`
+	AgentType  string `json:"agent_type"`
+	PromptUsed string `json:"prompt_used,omitempty"`
+	AgentCount int    `json:"agent_count"`
+	AgentList  string `json:"agent_list,omitempty"`
 }
 
 // Default controller prompt template
@@ -196,6 +196,18 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
+	}
+
+	{
+		res, err := ResolveSession(session, nil)
+		if err != nil {
+			return nil, err
+		}
+		if res.Session == "" {
+			return nil, fmt.Errorf("session is required")
+		}
+		session = res.Session
+		opts.Session = res.Session
 	}
 
 	if !tmux.SessionExists(session) {

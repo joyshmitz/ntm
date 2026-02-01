@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/clipboard"
 	"github.com/Dicklesworthstone/ntm/internal/codeblock"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -139,14 +140,15 @@ type CopyOptions struct {
 }
 
 type copyResult struct {
-	Source      string   `json:"source"`
-	Panes       []string `json:"panes"`
-	Lines       int      `json:"lines"`
-	Bytes       int      `json:"bytes"`
-	Destination string   `json:"destination"`
-	Pattern     string   `json:"pattern,omitempty"`
-	Code        bool     `json:"code,omitempty"`
-	OutputPath  string   `json:"output_path,omitempty"`
+	Source      string            `json:"source"`
+	Panes       []string          `json:"panes"`
+	Lines       int               `json:"lines"`
+	Bytes       int               `json:"bytes"`
+	Destination string            `json:"destination"`
+	Pattern     string            `json:"pattern,omitempty"`
+	Code        bool              `json:"code,omitempty"`
+	OutputPath  string            `json:"output_path,omitempty"`
+	Redaction   *RedactionSummary `json:"redaction,omitempty"`
 }
 
 func runCopy(w io.Writer, session string, filter AgentFilter, opts CopyOptions) error {
@@ -261,6 +263,26 @@ func runCopy(w io.Writer, session string, filter AgentFilter, opts CopyOptions) 
 
 	combined := strings.Join(outputs, "\n")
 
+	redactCfg := redaction.DefaultConfig()
+	if cfg != nil {
+		redactCfg = cfg.Redaction.ToRedactionLibConfig()
+	}
+
+	redacted, redactionSummary, err := applyOutputRedaction(combined, redactCfg)
+	if err != nil {
+		return err
+	}
+	if redactionSummary != nil {
+		cats := formatRedactionCategoryCounts(redactionSummary.Categories)
+		switch redactionSummary.Action {
+		case "warn":
+			fmt.Fprintf(os.Stderr, "Warning: detected %d potential secret(s) (%s); output is NOT modified (mode=warn)\n", redactionSummary.Findings, cats)
+		case "redact":
+			fmt.Fprintf(os.Stderr, "Redacted %d potential secret(s) (%s)\n", redactionSummary.Findings, cats)
+		}
+	}
+	combined = redacted
+
 	trimmed := strings.TrimRight(combined, "\n")
 	lineCount := 0
 	if trimmed != "" {
@@ -270,6 +292,7 @@ func runCopy(w io.Writer, session string, filter AgentFilter, opts CopyOptions) 
 
 	destination := "clipboard"
 	if opts.Output != "" {
+		// Make side effects (mkdir/write) happen only after redaction preflight.
 		if err := os.MkdirAll(filepath.Dir(opts.Output), 0o755); err != nil && !os.IsExist(err) {
 			return fmt.Errorf("failed to create output directory: %w", err)
 		}
@@ -303,6 +326,7 @@ func runCopy(w io.Writer, session string, filter AgentFilter, opts CopyOptions) 
 		Destination: destination,
 		Pattern:     opts.Pattern,
 		Code:        opts.Code,
+		Redaction:   redactionSummary,
 	}
 	if opts.Output != "" {
 		result.OutputPath = opts.Output

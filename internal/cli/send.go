@@ -908,6 +908,18 @@ func runSendInternal(opts SendOptions) error {
 		return outputError(err)
 	}
 
+	{
+		res, err := ResolveSession(session, os.Stdout)
+		if err != nil {
+			return outputError(err)
+		}
+		if res.Session == "" {
+			return outputError(fmt.Errorf("session is required"))
+		}
+		session = res.Session
+		opts.Session = res.Session
+	}
+
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' not found", session))
 	}
@@ -1353,6 +1365,15 @@ func runInterrupt(session string, tags []string) error {
 		return err
 	}
 
+	res, err := ResolveSession(session, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if res.Session == "" {
+		return fmt.Errorf("session is required")
+	}
+	session = res.Session
+
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)
 	}
@@ -1450,7 +1471,7 @@ Examples:
   ntm kill myproject --summarize # Generate summary before killing`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runKill(args[0], force, tags, noHooks, summarize)
+			return runKill(cmd.OutOrStdout(), args[0], force, tags, noHooks, summarize)
 		},
 	}
 
@@ -1462,7 +1483,7 @@ Examples:
 	return cmd
 }
 
-func runKill(session string, force bool, tags []string, noHooks bool, summarize bool) error {
+func runKill(w io.Writer, session string, force bool, tags []string, noHooks bool, summarize bool) error {
 	// Use kernel for JSON output mode
 	if IsJSONOutput() {
 		result, err := kernel.Run(context.Background(), "sessions.kill", SessionKillInput{
@@ -1481,6 +1502,15 @@ func runKill(session string, force bool, tags []string, noHooks bool, summarize 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
+
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
+	}
+	if res.Session == "" {
+		return fmt.Errorf("session is required")
+	}
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)
@@ -2212,17 +2242,41 @@ func checkCassDuplicates(session, prompt string, threshold float64, days int) er
 func runDistributeMode(session, strategy string, limit int, autoExecute bool, dryRun bool) error {
 	th := theme.Current()
 
+	outputError := func(err error) error {
+		if jsonOutput {
+			result := map[string]interface{}{
+				"success": false,
+				"session": session,
+				"error":   err.Error(),
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(result)
+		}
+		return err
+	}
+
 	// Check if bv is installed
 	if !bv.IsInstalled() {
-		return fmt.Errorf("bv (beads graph triage) is not installed; cannot use --distribute")
+		return outputError(fmt.Errorf("bv (beads graph triage) is not installed; cannot use --distribute"))
 	}
 
 	// Verify session exists
 	if err := tmux.EnsureInstalled(); err != nil {
-		return err
+		return outputError(err)
 	}
+
+	{
+		res, err := ResolveSession(session, os.Stdout)
+		if err != nil {
+			return outputError(err)
+		}
+		if res.Session == "" {
+			return outputError(fmt.Errorf("session is required"))
+		}
+		session = res.Session
+	}
+
 	if !tmux.SessionExists(session) {
-		return fmt.Errorf("session '%s' not found", session)
+		return outputError(fmt.Errorf("session '%s' not found", session))
 	}
 
 	// Get assignment recommendations using robot module

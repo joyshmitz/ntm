@@ -16,6 +16,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/palette"
+	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -165,43 +166,7 @@ func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveO
 }
 
 func resolveExplicitSessionName(input string, sessions []tmux.Session, allowPrefix bool) (string, string, error) {
-	names := sessionNames(sessions)
-	if len(names) == 0 {
-		return "", "", fmt.Errorf("session %q not found (no tmux sessions running)", input)
-	}
-	for _, name := range names {
-		if name == input {
-			return name, "exact match", nil
-		}
-	}
-	if !allowPrefix {
-		return "", "", fmt.Errorf("session %q not found (available: %s)", input, strings.Join(names, ", "))
-	}
-	var matches []string
-	for _, name := range names {
-		if strings.HasPrefix(name, input) {
-			matches = append(matches, name)
-		}
-	}
-	sort.Strings(matches)
-	if len(matches) == 1 {
-		return matches[0], "prefix match", nil
-	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("session %q matches multiple sessions: %s (please be more specific)", input, strings.Join(matches, ", "))
-	}
-	return "", "", fmt.Errorf("session %q not found (available: %s)", input, strings.Join(names, ", "))
-}
-
-func sessionNames(sessions []tmux.Session) []string {
-	names := make([]string, 0, len(sessions))
-	for _, s := range sessions {
-		if s.Name != "" {
-			names = append(names, s.Name)
-		}
-	}
-	sort.Strings(names)
-	return names
+	return sessionPkg.ResolveExplicitSessionName(input, sessions, allowPrefix)
 }
 
 func inferSessionFromCWD(sessions []tmux.Session) (string, string) {

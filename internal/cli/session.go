@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tokens"
@@ -300,8 +302,21 @@ func runAttach(session string) error {
 		return tmux.AttachOrSwitch(session)
 	}
 
-	if IsJSONOutput() {
-		return output.PrintJSON(output.NewError(fmt.Sprintf("session '%s' does not exist", session)))
+	sessionList, err := tmux.ListSessions()
+	if err != nil {
+		return err
+	}
+
+	// Prefix resolution (exact match is preferred inside resolver).
+	if resolved, _, err := sessionPkg.ResolveExplicitSessionName(session, sessionList, true); err == nil {
+		session = resolved
+		updateSessionActivity(session)
+		return tmux.AttachOrSwitch(session)
+	} else {
+		var re *sessionPkg.ResolveExplicitSessionNameError
+		if errors.As(err, &re) && re.Kind == sessionPkg.ResolveExplicitSessionNameErrorAmbiguous {
+			return err
+		}
 	}
 
 	fmt.Printf("Session '%s' does not exist.\n\n", session)
@@ -902,6 +917,17 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return outputError(err)
+	}
+
+	{
+		res, err := ResolveSession(session, w)
+		if err != nil {
+			return outputError(err)
+		}
+		if res.Session == "" {
+			return outputError(fmt.Errorf("session is required"))
+		}
+		session = res.Session
 	}
 
 	if !tmux.SessionExists(session) {

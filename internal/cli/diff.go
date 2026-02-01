@@ -46,6 +46,14 @@ func runDiff(session, pane1ID, pane2ID string, unified, sideBySide, codeOnly boo
 		return err
 	}
 
+	if !IsJSONOutput() {
+		res, err := ResolveSession(session, nil)
+		if err != nil {
+			return err
+		}
+		session = res.Session
+	}
+
 	// Resolve panes
 	p1, err := resolvePane(session, pane1ID)
 	if err != nil {

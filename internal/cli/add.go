@@ -176,6 +176,15 @@ func runAdd(opts AddOptions) error {
 		return outputError(err)
 	}
 
+	if !IsJSONOutput() {
+		res, err := ResolveSession(session, nil)
+		if err != nil {
+			return outputError(err)
+		}
+		session = res.Session
+		opts.Session = session
+	}
+
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' does not exist (use 'ntm spawn' to create)", session))
 	}
