@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -148,7 +149,7 @@ func (l *Logger) maybeRotate() {
 	// Perform rotation
 	if err := l.rotateOldEntries(); err != nil {
 		// Log rotation errors but don't fail
-		fmt.Fprintf(os.Stderr, "event log rotation error: %v\n", err)
+		slog.Warn("event log rotation error", "error", err)
 	}
 }
 
@@ -335,9 +336,9 @@ func (l *Logger) Replay(since time.Time) (<-chan *Event, error) {
 		f, err := os.Open(l.path)
 		if err != nil {
 			// No log file or can't open - nothing to replay
-			// Errors are logged to stderr for debugging
+			// Errors are logged for debugging
 			if !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "event log replay: %v\n", err)
+				slog.Warn("event log replay error", "error", err)
 			}
 			return
 		}
@@ -362,7 +363,7 @@ func (l *Logger) Replay(since time.Time) (<-chan *Event, error) {
 
 		// Check for scanner errors (I/O errors during reading)
 		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "event log replay scan error: %v\n", err)
+			slog.Warn("event log replay scan error", "error", err)
 		}
 	}()
 

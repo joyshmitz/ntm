@@ -2,6 +2,7 @@ package persona
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func PrepareSystemPromptWithContext(p *Persona, projectDir string, ctx *Template
 		contextContent, err := PrepareContextFiles(p, projectDir)
 		if err != nil {
 			// Log warning but continue without context files
-			fmt.Fprintf(os.Stderr, "warning: could not load context files for persona %s: %v\n", p.Name, err)
+			slog.Warn("could not load context files for persona", "persona", p.Name, "error", err)
 		} else if contextContent != "" {
 			content = contextContent + "\n\n---\n\n" + content
 		}
@@ -95,7 +96,7 @@ func PrepareContextFiles(p *Persona, projectDir string) (string, error) {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			// Skip unreadable files with warning
-			fmt.Fprintf(os.Stderr, "warning: could not read context file %s: %v\n", f, err)
+			slog.Warn("could not read context file", "file", f, "error", err)
 			continue
 		}
 
@@ -238,7 +239,7 @@ func loadCustomVars(projectDir string, ctx *TemplateContext) {
 
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		// Log error but continue (best effort)
-		fmt.Fprintf(os.Stderr, "warning: parsing %s: %v\n", configPath, err)
+		slog.Warn("error parsing config", "path", configPath, "error", err)
 		return
 	}
 
