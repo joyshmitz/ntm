@@ -150,7 +150,7 @@ func (a *AMAdapter) HealthCheck(ctx context.Context) (json.RawMessage, error) {
 		return nil, err
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("agent mail server not responding: %w", err)
