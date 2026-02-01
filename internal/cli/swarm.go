@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -48,7 +51,7 @@ Examples:
   ntm swarm --projects=foo,bar        # Only include specific projects
   ntm swarm --remote=user@host        # Execute on remote host via SSH`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSwarm(swarmOptions{
+			return runSwarm(cmd.Context(), swarmOptions{
 				ScanDir:         scanDir,
 				Projects:        projects,
 				DryRun:          dryRun,
@@ -151,7 +154,10 @@ type PaneOutput struct {
 	AgentType string `json:"agent_type"`
 }
 
-func runSwarm(opts swarmOptions) error {
+func runSwarm(ctx context.Context, opts swarmOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	logger := slog.Default()
 
 	initialPrompt, promptSource, promptPath, err := resolveSwarmInitialPrompt(opts.InitialPrompt, opts.PromptFile)
@@ -247,117 +253,65 @@ func runSwarm(opts swarmOptions) error {
 		return nil
 	}
 
-	// Create the orchestrator
-	var orch *swarm.SessionOrchestrator
-	if opts.Remote != "" {
-		orch = swarm.NewRemoteSessionOrchestrator(opts.Remote)
-		output.PrintInfof("Creating swarm on remote host: %s", opts.Remote)
-	} else {
-		orch = swarm.NewSessionOrchestrator()
+	staggerDelay := time.Duration(swarmCfg.StaggerDelayMs) * time.Millisecond
+	if staggerDelay < 0 {
+		staggerDelay = 0
 	}
 
-	// Execute the plan
-	result, err := orch.CreateSessions(plan)
-	if err != nil {
-		return fmt.Errorf("failed to create sessions: %w", err)
+	// Create a tmux session orchestrator (local or remote).
+	var sessOrch *swarm.SessionOrchestrator
+	if opts.Remote != "" {
+		sessOrch = swarm.NewRemoteSessionOrchestrator(opts.Remote)
+		sessOrch.StaggerDelay = staggerDelay
+		output.PrintInfof("Creating swarm on remote host: %s", opts.Remote)
+	} else {
+		sessOrch = swarm.NewSessionOrchestrator()
+		sessOrch.StaggerDelay = staggerDelay
 	}
 
 	// Derive a concrete tmux client for follow-up actions.
-	tmuxClient := orch.TmuxClient
+	tmuxClient := sessOrch.TmuxClient
 	if tmuxClient == nil {
 		tmuxClient = tmux.DefaultClient
 	}
 
-	// Report results
-	output.PrintSuccessf("Created %d sessions with %d/%d panes",
-		len(result.Sessions), result.SuccessfulPanes, result.TotalPanes)
+	executor := &swarm.SwarmOrchestrator{
+		SessionOrchestrator: sessOrch,
+		PaneLauncher:        swarm.NewPaneLauncherWithClient(tmuxClient).WithLogger(logger),
+		PromptInjector:      swarm.NewPromptInjectorWithClient(tmuxClient).WithLogger(logger),
+		Logger:              logger,
+		StaggerDelay:        staggerDelay,
+	}
 
-	if result.FailedPanes > 0 {
-		output.PrintWarningf("%d panes failed to create", result.FailedPanes)
-		for _, err := range result.Errors {
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
+	execResult, err := executor.Execute(ctx, plan, initialPrompt)
+	if err != nil {
+		return err
+	}
+
+	// Report results
+	if execResult.Sessions != nil {
+		output.PrintSuccessf("Created %d sessions with %d/%d panes",
+			len(execResult.Sessions.Sessions), execResult.Sessions.SuccessfulPanes, execResult.Sessions.TotalPanes)
+
+		if execResult.Sessions.FailedPanes > 0 {
+			output.PrintWarningf("%d panes failed to create", execResult.Sessions.FailedPanes)
+			for _, err := range execResult.Sessions.Errors {
+				fmt.Fprintf(os.Stderr, "  %v\n", err)
+			}
 		}
 	}
 
-	if initialPrompt != "" {
-		// Launch agents in each successfully created pane, then inject the prompt.
-		// This is best-effort: failures are logged and summarized but do not abort the command.
-		logger.Info("launching swarm agents before prompt injection",
-			"total_sessions", len(result.Sessions),
-			"total_panes", result.SuccessfulPanes,
-		)
-
-		launchFailed := 0
-		launchSucceeded := 0
-		const launchDelay = 200 * time.Millisecond
-
-		for _, sess := range result.Sessions {
-			for i, paneID := range sess.PaneIDs {
-				if i >= len(sess.SessionSpec.Panes) {
-					break
-				}
-				paneSpec := sess.SessionSpec.Panes[i]
-				launchCmd := paneSpec.LaunchCmd
-				if launchCmd == "" {
-					launchCmd = paneSpec.AgentType
-				}
-
-				if err := tmuxClient.SendKeysWithDelay(paneID, launchCmd, true, tmux.ShellEnterDelay); err != nil {
-					launchFailed++
-					logger.Error("failed to launch agent in pane",
-						"session", sess.SessionName,
-						"pane_id", paneID,
-						"pane_index", paneSpec.Index,
-						"agent_type", paneSpec.AgentType,
-						"launch_cmd", launchCmd,
-						"error", err,
-					)
-				} else {
-					launchSucceeded++
-					logger.Info("agent launched in pane",
-						"session", sess.SessionName,
-						"pane_id", paneID,
-						"pane_index", paneSpec.Index,
-						"agent_type", paneSpec.AgentType,
-					)
-				}
-
-				time.Sleep(launchDelay)
-			}
+	if execResult.Launch != nil {
+		output.PrintSuccessf("Launched agents: %d succeeded, %d failed", execResult.Launch.Successful, execResult.Launch.Failed)
+		if execResult.Launch.Failed > 0 {
+			output.PrintWarningf("%d agents failed to launch (see logs)", execResult.Launch.Failed)
 		}
+	}
 
-		output.PrintSuccessf("Launched agents: %d succeeded, %d failed", launchSucceeded, launchFailed)
-		if launchFailed > 0 {
-			output.PrintWarningf("%d agents failed to launch (see logs)", launchFailed)
-		}
-
-		// Give agent CLIs a moment to initialize before sending the prompt.
-		time.Sleep(500 * time.Millisecond)
-
-		injector := swarm.NewPromptInjectorWithClient(tmuxClient).WithLogger(logger)
-		targets := make([]swarm.InjectionTarget, 0, result.SuccessfulPanes)
-
-		for _, sess := range result.Sessions {
-			for i, paneID := range sess.PaneIDs {
-				if i >= len(sess.SessionSpec.Panes) {
-					break
-				}
-				paneSpec := sess.SessionSpec.Panes[i]
-				targets = append(targets, swarm.InjectionTarget{
-					SessionPane: paneID,
-					AgentType:   paneSpec.AgentType,
-				})
-			}
-		}
-
-		injectRes, err := injector.InjectBatchWithContext(context.Background(), targets, initialPrompt)
-		if err != nil {
-			return fmt.Errorf("inject initial prompt: %w", err)
-		}
-
-		output.PrintSuccessf("Injected initial prompt: %d succeeded, %d failed", injectRes.Successful, injectRes.Failed)
-		if injectRes.Failed > 0 {
-			output.PrintWarningf("%d panes failed prompt injection (see logs)", injectRes.Failed)
+	if initialPrompt != "" && execResult.Injection != nil {
+		output.PrintSuccessf("Injected initial prompt: %d succeeded, %d failed", execResult.Injection.Successful, execResult.Injection.Failed)
+		if execResult.Injection.Failed > 0 {
+			output.PrintWarningf("%d panes failed prompt injection (see logs)", execResult.Injection.Failed)
 		}
 	}
 
@@ -518,7 +472,7 @@ func newSwarmPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runSwarm(swarmOptions{
+			return runSwarm(cmd.Context(), swarmOptions{
 				ScanDir:    scanDir,
 				Projects:   projects,
 				DryRun:     true,
@@ -541,12 +495,119 @@ func newSwarmPlanCmd() *cobra.Command {
 
 // Subcommand: swarm status
 func newSwarmStatusCmd() *cobra.Command {
+	swarmSessionRE := regexp.MustCompile(`^(cc|cod|gmi)_agents_[0-9]+$`)
+
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show current swarm status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO: Implement swarm status
-			output.PrintInfo("Swarm status not yet implemented")
+			if err := tmux.EnsureInstalled(); err != nil {
+				return err
+			}
+
+			sessions, err := tmux.ListSessions()
+			if err != nil {
+				return err
+			}
+
+			var swarmSessions []string
+			for _, sess := range sessions {
+				if swarmSessionRE.MatchString(sess.Name) {
+					swarmSessions = append(swarmSessions, sess.Name)
+				}
+			}
+			sort.Strings(swarmSessions)
+
+			if len(swarmSessions) == 0 {
+				output.PrintInfo("No swarm sessions found")
+				return nil
+			}
+
+			type swarmSessionStatus struct {
+				Session string                `json:"session"`
+				Health  *health.SessionHealth `json:"health,omitempty"`
+				Error   string                `json:"error,omitempty"`
+			}
+
+			type swarmStatusOutput struct {
+				CheckedAt     time.Time            `json:"checked_at"`
+				Sessions      []swarmSessionStatus `json:"sessions"`
+				Summary       health.HealthSummary `json:"summary"`
+				OverallStatus health.Status        `json:"overall_status"`
+			}
+
+			out := swarmStatusOutput{
+				CheckedAt:     time.Now().UTC(),
+				Sessions:      make([]swarmSessionStatus, 0, len(swarmSessions)),
+				Summary:       health.HealthSummary{},
+				OverallStatus: health.StatusOK,
+			}
+
+			statusSeverity := func(s health.Status) int {
+				switch s {
+				case health.StatusError:
+					return 3
+				case health.StatusWarning:
+					return 2
+				case health.StatusOK:
+					return 1
+				default:
+					return 0
+				}
+			}
+
+			for _, name := range swarmSessions {
+				sessionHealth, err := health.CheckSession(name)
+				entry := swarmSessionStatus{Session: name}
+				if err != nil {
+					entry.Error = err.Error()
+					out.Sessions = append(out.Sessions, entry)
+					continue
+				}
+
+				entry.Health = sessionHealth
+				out.Sessions = append(out.Sessions, entry)
+
+				out.Summary.Total += sessionHealth.Summary.Total
+				out.Summary.Healthy += sessionHealth.Summary.Healthy
+				out.Summary.Warning += sessionHealth.Summary.Warning
+				out.Summary.Error += sessionHealth.Summary.Error
+				out.Summary.Unknown += sessionHealth.Summary.Unknown
+
+				if statusSeverity(sessionHealth.OverallStatus) > statusSeverity(out.OverallStatus) {
+					out.OverallStatus = sessionHealth.OverallStatus
+				}
+			}
+
+			if jsonOutput {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(out)
+			}
+
+			output.PrintInfof("Swarm sessions: %d", len(out.Sessions))
+			for _, sess := range out.Sessions {
+				if sess.Health == nil {
+					output.PrintWarningf("  %s: error (%s)", sess.Session, sess.Error)
+					continue
+				}
+				output.PrintInfof("  %s: %s (ok:%d warn:%d err:%d unk:%d)",
+					sess.Session,
+					sess.Health.OverallStatus,
+					sess.Health.Summary.Healthy,
+					sess.Health.Summary.Warning,
+					sess.Health.Summary.Error,
+					sess.Health.Summary.Unknown,
+				)
+			}
+			output.PrintInfof("Overall: %s (total:%d ok:%d warn:%d err:%d unk:%d)",
+				out.OverallStatus,
+				out.Summary.Total,
+				out.Summary.Healthy,
+				out.Summary.Warning,
+				out.Summary.Error,
+				out.Summary.Unknown,
+			)
 			return nil
 		},
 	}

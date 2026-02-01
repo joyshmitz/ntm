@@ -1,7 +1,9 @@
 package swarm
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -515,4 +517,239 @@ func (o *SessionOrchestrator) setPaneTitleWithRetry(client *tmux.Client, paneID,
 		time.Sleep(100 * time.Millisecond)
 	}
 	return err
+}
+
+type swarmSessionCreator interface {
+	CreateSessions(plan *SwarmPlan) (*OrchestrationResult, error)
+}
+
+type swarmPaneLauncher interface {
+	LaunchSwarm(ctx context.Context, plan *SwarmPlan, staggerDelay time.Duration) (*BatchLaunchResult, error)
+}
+
+type swarmPromptInjector interface {
+	InjectSwarmWithContext(ctx context.Context, plan *SwarmPlan, prompt string) (*BatchInjectionResult, error)
+}
+
+// SwarmOrchestrator executes a full swarm launch workflow.
+//
+// Phases:
+//  1. Create tmux sessions/panes from the plan
+//  2. Launch agents in panes
+//  3. (Optional) Inject an initial prompt to all panes
+//
+// This is intended to be used by CLI, robot mode, and future service layers without
+// duplicating orchestration logic.
+type SwarmOrchestrator struct {
+	// SessionOrchestrator performs tmux session creation.
+	// Defaults to NewSessionOrchestrator when nil.
+	SessionOrchestrator swarmSessionCreator
+
+	// PaneLauncher launches agents in panes.
+	// Defaults to NewPaneLauncher when nil.
+	PaneLauncher swarmPaneLauncher
+
+	// PromptInjector injects prompts into panes.
+	// Defaults to NewPromptInjector when nil.
+	PromptInjector swarmPromptInjector
+
+	// Logger for structured logs (optional).
+	Logger *slog.Logger
+
+	// StaggerDelay controls pacing between operations.
+	// Used for LaunchSwarm; PromptInjector has its own internal pacing.
+	StaggerDelay time.Duration
+}
+
+// SwarmOrchestrationResult is the aggregated output of a swarm execution.
+type SwarmOrchestrationResult struct {
+	StartedAt time.Time `json:"started_at"`
+	Plan      *SwarmPlan
+
+	// Phase results.
+	Sessions   *OrchestrationResult  `json:"sessions,omitempty"`
+	Launch     *BatchLaunchResult    `json:"launch,omitempty"`
+	Injection  *BatchInjectionResult `json:"injection,omitempty"`
+	ErrorCount int                   `json:"error_count"`
+
+	// Errors holds concrete errors for internal callers; not JSON-serializable.
+	Errors []error `json:"-"`
+}
+
+// NewSwarmOrchestrator creates a SwarmOrchestrator with default components.
+func NewSwarmOrchestrator() *SwarmOrchestrator {
+	return &SwarmOrchestrator{
+		SessionOrchestrator: NewSessionOrchestrator(),
+		PaneLauncher:        NewPaneLauncher(),
+		PromptInjector:      NewPromptInjector(),
+		Logger:              slog.Default(),
+		StaggerDelay:        300 * time.Millisecond,
+	}
+}
+
+func (o *SwarmOrchestrator) logger() *slog.Logger {
+	if o.Logger != nil {
+		return o.Logger
+	}
+	return slog.Default()
+}
+
+func (o *SwarmOrchestrator) sessionOrchestrator() swarmSessionCreator {
+	if o.SessionOrchestrator != nil {
+		return o.SessionOrchestrator
+	}
+	return NewSessionOrchestrator()
+}
+
+func (o *SwarmOrchestrator) paneLauncher() swarmPaneLauncher {
+	if o.PaneLauncher != nil {
+		return o.PaneLauncher
+	}
+	return NewPaneLauncher()
+}
+
+func (o *SwarmOrchestrator) promptInjector() swarmPromptInjector {
+	if o.PromptInjector != nil {
+		return o.PromptInjector
+	}
+	return NewPromptInjector()
+}
+
+func (o *SwarmOrchestrator) staggerDelay() time.Duration {
+	if o.StaggerDelay > 0 {
+		return o.StaggerDelay
+	}
+	return 300 * time.Millisecond
+}
+
+func planWithSuccessfulSessions(plan *SwarmPlan, result *OrchestrationResult) *SwarmPlan {
+	if plan == nil || result == nil {
+		return plan
+	}
+
+	ok := make(map[string]struct{}, len(result.Sessions))
+	for _, sess := range result.Sessions {
+		if sess.Error == nil {
+			ok[sess.SessionName] = struct{}{}
+		}
+	}
+
+	filtered := &SwarmPlan{
+		CreatedAt:          plan.CreatedAt,
+		ScanDir:            plan.ScanDir,
+		Allocations:        plan.Allocations,
+		AutoRotateAccounts: plan.AutoRotateAccounts,
+		SessionsPerType:    plan.SessionsPerType,
+		PanesPerSession:    plan.PanesPerSession,
+		Ensemble:           plan.Ensemble,
+	}
+
+	for _, sess := range plan.Sessions {
+		if _, keep := ok[sess.Name]; !keep {
+			continue
+		}
+		filtered.Sessions = append(filtered.Sessions, sess)
+		filtered.TotalAgents += sess.PaneCount
+		switch sess.AgentType {
+		case "cc":
+			filtered.TotalCC += sess.PaneCount
+		case "cod":
+			filtered.TotalCod += sess.PaneCount
+		case "gmi":
+			filtered.TotalGmi += sess.PaneCount
+		}
+	}
+
+	return filtered
+}
+
+// Execute runs the swarm orchestration workflow.
+//
+// If prompt is empty, the injection phase is skipped.
+// The workflow is best-effort: session creation and agent launches proceed even if
+// individual sessions/panes fail. Context cancellation aborts subsequent phases.
+func (o *SwarmOrchestrator) Execute(ctx context.Context, plan *SwarmPlan, prompt string) (*SwarmOrchestrationResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if plan == nil {
+		return nil, fmt.Errorf("plan cannot be nil")
+	}
+
+	logger := o.logger()
+	result := &SwarmOrchestrationResult{
+		StartedAt: time.Now().UTC(),
+		Plan:      plan,
+	}
+
+	logger.Info("[SwarmOrchestrator] execute_start",
+		"total_sessions", len(plan.Sessions),
+		"total_agents", plan.TotalAgents,
+		"inject_prompt", prompt != "")
+
+	// Phase 1: sessions
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	logger.Info("[SwarmOrchestrator] phase_sessions_start", "sessions", len(plan.Sessions))
+	sessionsResult, err := o.sessionOrchestrator().CreateSessions(plan)
+	if err != nil {
+		return result, err
+	}
+	result.Sessions = sessionsResult
+	result.Errors = append(result.Errors, sessionsResult.Errors...)
+	logger.Info("[SwarmOrchestrator] phase_sessions_complete",
+		"successful_panes", sessionsResult.SuccessfulPanes,
+		"failed_panes", sessionsResult.FailedPanes)
+
+	execPlan := planWithSuccessfulSessions(plan, sessionsResult)
+
+	// Phase 2: launch agents
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	logger.Info("[SwarmOrchestrator] phase_launch_start",
+		"sessions", len(execPlan.Sessions),
+		"total_agents", execPlan.TotalAgents,
+		"stagger_delay_ms", o.staggerDelay().Milliseconds())
+	launchResult, err := o.paneLauncher().LaunchSwarm(ctx, execPlan, o.staggerDelay())
+	result.Launch = launchResult
+	if launchResult != nil {
+		result.Errors = append(result.Errors, launchResult.Errors...)
+	}
+	if err != nil {
+		return result, err
+	}
+	logger.Info("[SwarmOrchestrator] phase_launch_complete",
+		"successful", launchResult.Successful,
+		"failed", launchResult.Failed)
+
+	// Phase 3: inject prompt (optional)
+	if prompt != "" {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		logger.Info("[SwarmOrchestrator] phase_inject_start",
+			"total_agents", execPlan.TotalAgents,
+			"prompt_len", len(prompt))
+		injectionResult, err := o.promptInjector().InjectSwarmWithContext(ctx, execPlan, prompt)
+		result.Injection = injectionResult
+		if injectionResult != nil && injectionResult.Failed > 0 {
+			result.Errors = append(result.Errors, fmt.Errorf("prompt injection failed for %d/%d panes", injectionResult.Failed, injectionResult.TotalPanes))
+		}
+		if err != nil {
+			return result, err
+		}
+		logger.Info("[SwarmOrchestrator] phase_inject_complete",
+			"successful", injectionResult.Successful,
+			"failed", injectionResult.Failed)
+	} else {
+		logger.Info("[SwarmOrchestrator] phase_inject_skipped")
+	}
+
+	result.ErrorCount = len(result.Errors)
+	logger.Info("[SwarmOrchestrator] execute_complete",
+		"errors", result.ErrorCount)
+
+	return result, nil
 }

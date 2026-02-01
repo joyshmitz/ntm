@@ -1,6 +1,8 @@
 package swarm
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -228,6 +230,146 @@ func TestGeometryResult_Uniform(t *testing.T) {
 
 	if result.MaxHeightDelta != 0 {
 		t.Errorf("expected 0 height delta, got %d", result.MaxHeightDelta)
+	}
+}
+
+type fakeSessionCreator struct {
+	called bool
+	result *OrchestrationResult
+	err    error
+}
+
+func (f *fakeSessionCreator) CreateSessions(plan *SwarmPlan) (*OrchestrationResult, error) {
+	f.called = true
+	return f.result, f.err
+}
+
+type fakePaneLauncher struct {
+	called    bool
+	lastPlan  *SwarmPlan
+	lastDelay time.Duration
+	result    *BatchLaunchResult
+	err       error
+}
+
+func (f *fakePaneLauncher) LaunchSwarm(ctx context.Context, plan *SwarmPlan, staggerDelay time.Duration) (*BatchLaunchResult, error) {
+	f.called = true
+	f.lastPlan = plan
+	f.lastDelay = staggerDelay
+	return f.result, f.err
+}
+
+type fakePromptInjector struct {
+	called   bool
+	lastPlan *SwarmPlan
+	lastText string
+	result   *BatchInjectionResult
+	err      error
+}
+
+func (f *fakePromptInjector) InjectSwarmWithContext(ctx context.Context, plan *SwarmPlan, prompt string) (*BatchInjectionResult, error) {
+	f.called = true
+	f.lastPlan = plan
+	f.lastText = prompt
+	return f.result, f.err
+}
+
+func TestSwarmOrchestrator_Execute_SkipsInjectionWhenPromptEmpty(t *testing.T) {
+	plan := &SwarmPlan{
+		Sessions: []SessionSpec{{Name: "cc_agents_1", AgentType: "cc", PaneCount: 1, Panes: []PaneSpec{{Index: 1, AgentType: "cc"}}}},
+	}
+	sessionRes := &OrchestrationResult{
+		Sessions: []CreateSessionResult{{SessionName: "cc_agents_1"}},
+	}
+
+	sess := &fakeSessionCreator{result: sessionRes}
+	launcher := &fakePaneLauncher{result: &BatchLaunchResult{}}
+	injector := &fakePromptInjector{result: &BatchInjectionResult{}}
+
+	orch := &SwarmOrchestrator{
+		SessionOrchestrator: sess,
+		PaneLauncher:        launcher,
+		PromptInjector:      injector,
+		StaggerDelay:        10 * time.Millisecond,
+	}
+
+	got, err := orch.Execute(context.Background(), plan, "")
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got.Injection != nil {
+		t.Fatalf("expected Injection to be nil when prompt is empty, got %+v", got.Injection)
+	}
+	if injector.called {
+		t.Fatal("expected PromptInjector not to be called when prompt is empty")
+	}
+	if !sess.called || !launcher.called {
+		t.Fatal("expected session creation and launch phases to run")
+	}
+}
+
+func TestSwarmOrchestrator_Execute_FiltersFailedSessions(t *testing.T) {
+	plan := &SwarmPlan{
+		Sessions: []SessionSpec{
+			{Name: "cc_agents_1", AgentType: "cc", PaneCount: 1, Panes: []PaneSpec{{Index: 1, AgentType: "cc"}}},
+			{Name: "cod_agents_1", AgentType: "cod", PaneCount: 1, Panes: []PaneSpec{{Index: 1, AgentType: "cod"}}},
+		},
+	}
+	sessionRes := &OrchestrationResult{
+		Sessions: []CreateSessionResult{
+			{SessionName: "cc_agents_1"},
+			{SessionName: "cod_agents_1", Error: errors.New("boom")},
+		},
+	}
+
+	sess := &fakeSessionCreator{result: sessionRes}
+	launcher := &fakePaneLauncher{result: &BatchLaunchResult{}}
+	injector := &fakePromptInjector{result: &BatchInjectionResult{}}
+
+	orch := &SwarmOrchestrator{
+		SessionOrchestrator: sess,
+		PaneLauncher:        launcher,
+		PromptInjector:      injector,
+		StaggerDelay:        10 * time.Millisecond,
+	}
+
+	_, err := orch.Execute(context.Background(), plan, "hello")
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if launcher.lastPlan == nil || len(launcher.lastPlan.Sessions) != 1 || launcher.lastPlan.Sessions[0].Name != "cc_agents_1" {
+		t.Fatalf("expected launcher plan filtered to only cc_agents_1, got %+v", launcher.lastPlan)
+	}
+
+	if injector.lastPlan == nil || len(injector.lastPlan.Sessions) != 1 || injector.lastPlan.Sessions[0].Name != "cc_agents_1" {
+		t.Fatalf("expected injector plan filtered to only cc_agents_1, got %+v", injector.lastPlan)
+	}
+}
+
+func TestSwarmOrchestrator_Execute_RespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sess := &fakeSessionCreator{result: &OrchestrationResult{}}
+	launcher := &fakePaneLauncher{result: &BatchLaunchResult{}}
+	injector := &fakePromptInjector{result: &BatchInjectionResult{}}
+
+	orch := &SwarmOrchestrator{
+		SessionOrchestrator: sess,
+		PaneLauncher:        launcher,
+		PromptInjector:      injector,
+	}
+
+	_, err := orch.Execute(ctx, &SwarmPlan{Sessions: []SessionSpec{}}, "hello")
+	if err == nil {
+		t.Fatal("expected cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if sess.called || launcher.called || injector.called {
+		t.Fatal("expected no phases to run when context is already cancelled")
 	}
 }
 
