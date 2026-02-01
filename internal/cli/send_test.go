@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -736,60 +738,71 @@ func TestSendSmartRouteIsDisabledWhenPanesSpecified(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	// If smart routing were applied, it would ignore pane 0 (user) and select an agent pane.
-	// With --panes specified, we expect routing to be skipped and the command to be sent to pane 0.
-	prompt := "echo $PWD"
-	if err := runSendWithTargets(SendOptions{
-		Session:        sessionName,
-		Prompt:         prompt,
-		PromptSource:   "args",
-		Targets:        SendTargets{},
-		PanesSpecified: true,
-		Panes:          []int{0},
-		SmartRoute:     true,
-		PaneIndex:      -1,
-	}); err != nil {
-		t.Fatalf("runSendWithTargets failed: %v", err)
-	}
-
-	time.Sleep(500 * time.Millisecond)
-
 	panes, err := tmux.GetPanes(sessionName)
 	if err != nil {
 		t.Fatalf("failed to get panes: %v", err)
 	}
 
-	var userPane *tmux.Pane
-	var agentPane *tmux.Pane
-	for i := range panes {
-		if panes[i].Type == tmux.AgentUser {
-			userPane = &panes[i]
-		}
-		if panes[i].Type == tmux.AgentClaude {
-			agentPane = &panes[i]
+	var userPaneID string
+	var userPaneIndex int
+	for _, p := range panes {
+		if p.Type == tmux.AgentUser {
+			userPaneID = p.ID
+			userPaneIndex = p.Index
 		}
 	}
-	if userPane == nil {
+	if userPaneID == "" {
 		t.Fatal("User pane not found")
 	}
 
-	userOut, err := tmux.CapturePaneOutput(userPane.ID, 30)
+	// If smart routing were applied, it would ignore the user pane and select an agent pane.
+	// With --panes specified, we expect routing to be skipped and the command to be sent to the explicitly selected pane.
+	prompt := "echo $PWD"
+
+	// Capture only the send command's JSON output (stdout) and assert that it targeted the explicitly specified pane.
+	// This avoids relying on the user shell actually executing the command.
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("CapturePaneOutput(user) failed: %v", err)
+		t.Fatalf("failed to create stdout pipe: %v", err)
 	}
-	if !strings.Contains(userOut, projectDir) {
-		t.Errorf("Expected pane 0 to execute %q and print %q. Got:\n%s", prompt, projectDir, userOut)
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	sendErr := runSendWithTargets(SendOptions{
+		Session:        sessionName,
+		Prompt:         prompt,
+		PromptSource:   "args",
+		Targets:        SendTargets{},
+		PanesSpecified: true,
+		Panes:          []int{userPaneIndex},
+		SmartRoute:     true,
+		PaneIndex:      -1,
+	})
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	stdoutBytes, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if readErr != nil {
+		t.Fatalf("failed reading stdout: %v", readErr)
+	}
+	if sendErr != nil {
+		t.Fatalf("runSendWithTargets failed: %v (stdout=%q)", sendErr, strings.TrimSpace(string(stdoutBytes)))
 	}
 
-	if agentPane == nil {
-		return
+	var res SendResult
+	if err := json.Unmarshal(stdoutBytes, &res); err != nil {
+		t.Fatalf("failed to parse send JSON: %v (stdout=%q)", err, strings.TrimSpace(string(stdoutBytes)))
 	}
-	agentOut, err := tmux.CapturePaneOutput(agentPane.ID, 30)
-	if err != nil {
-		t.Fatalf("CapturePaneOutput(agent) failed: %v", err)
+	if len(res.Targets) != 1 || res.Targets[0] != userPaneIndex {
+		t.Fatalf("expected targets [%d], got %v", userPaneIndex, res.Targets)
 	}
-	if strings.Contains(agentOut, projectDir) {
-		t.Errorf("Did not expect agent pane to print %q. Got:\n%s", projectDir, agentOut)
+	if res.RoutedTo != nil {
+		t.Fatalf("expected routed_to to be omitted when --panes is explicitly set, got %+v", *res.RoutedTo)
 	}
 }
 
