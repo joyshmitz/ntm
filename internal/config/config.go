@@ -12,6 +12,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/Dicklesworthstone/ntm/internal/notify"
+	"github.com/Dicklesworthstone/ntm/internal/safety/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -85,6 +86,7 @@ type Config struct {
 	Ensemble           EnsembleConfig        `toml:"ensemble"`         // Reasoning ensemble defaults
 	Swarm              SwarmConfig           `toml:"swarm"`            // Weighted multi-project agent swarm
 	SpawnPacing        SpawnPacingConfig     `toml:"spawn_pacing"`     // Spawn scheduler pacing configuration
+	Redaction          RedactionConfig       `toml:"redaction"`        // Secrets/PII redaction configuration
 
 	// Runtime-only fields (populated by project config merging)
 	ProjectDefaults map[string]int `toml:"-"`
@@ -1443,6 +1445,86 @@ func LoadPaletteFromMarkdown(path string) ([]PaletteCmd, error) {
 // DefaultAgentMailURL is the default Agent Mail server URL.
 const DefaultAgentMailURL = "http://127.0.0.1:8765/mcp/"
 
+// RedactionConfig holds configuration for secrets/PII redaction.
+// This controls how NTM handles sensitive content in commands, mail, and exports.
+type RedactionConfig struct {
+	// Mode controls redaction behavior: off, warn, redact, block
+	// - off: disable all scanning
+	// - warn: log findings but don't modify content
+	// - redact: replace sensitive content with placeholders
+	// - block: fail operations if secrets detected
+	Mode string `toml:"mode"`
+
+	// Allowlist contains regex patterns that should NOT be flagged.
+	// Use for known-safe patterns like test tokens or placeholder values.
+	Allowlist []string `toml:"allowlist,omitempty"`
+
+	// ExtraPatterns contains additional patterns to detect beyond defaults.
+	// Map category names (e.g., "CUSTOM_TOKEN") to regex patterns.
+	ExtraPatterns map[string][]string `toml:"extra_patterns,omitempty"`
+
+	// DisabledCategories lists secret categories to skip during scanning.
+	// Valid categories: OPENAI_KEY, ANTHROPIC_KEY, GITHUB_TOKEN, AWS_ACCESS_KEY,
+	// AWS_SECRET_KEY, JWT, GOOGLE_API_KEY, PRIVATE_KEY, DATABASE_URL, PASSWORD,
+	// GENERIC_API_KEY, GENERIC_SECRET, BEARER_TOKEN
+	DisabledCategories []string `toml:"disabled_categories,omitempty"`
+}
+
+// DefaultRedactionConfig returns sensible redaction defaults.
+func DefaultRedactionConfig() RedactionConfig {
+	return RedactionConfig{
+		Mode: "warn", // Safe default: detect but don't block
+	}
+}
+
+// ValidateRedactionConfig validates the redaction configuration.
+func ValidateRedactionConfig(cfg *RedactionConfig) error {
+	switch cfg.Mode {
+	case "", "off", "warn", "redact", "block":
+		return nil
+	default:
+		return fmt.Errorf("invalid redaction mode %q: must be off, warn, redact, or block", cfg.Mode)
+	}
+}
+
+// ToRedactionLibConfig converts the config to the redaction library's Config type.
+func (c *RedactionConfig) ToRedactionLibConfig() redaction.Config {
+	mode := redaction.ModeWarn // default
+	switch c.Mode {
+	case "off":
+		mode = redaction.ModeOff
+	case "warn":
+		mode = redaction.ModeWarn
+	case "redact":
+		mode = redaction.ModeRedact
+	case "block":
+		mode = redaction.ModeBlock
+	}
+
+	libCfg := redaction.Config{
+		Mode:      mode,
+		Allowlist: c.Allowlist,
+	}
+
+	// Convert extra patterns
+	if len(c.ExtraPatterns) > 0 {
+		libCfg.ExtraPatterns = make(map[redaction.Category][]string)
+		for cat, patterns := range c.ExtraPatterns {
+			libCfg.ExtraPatterns[redaction.Category(cat)] = patterns
+		}
+	}
+
+	// Convert disabled categories
+	if len(c.DisabledCategories) > 0 {
+		libCfg.DisabledCategories = make([]redaction.Category, len(c.DisabledCategories))
+		for i, cat := range c.DisabledCategories {
+			libCfg.DisabledCategories[i] = redaction.Category(cat)
+		}
+	}
+
+	return libCfg
+}
+
 // Default returns the default configuration.
 // It tries to load the palette from a markdown file first, falling back to hardcoded defaults.
 func Default() *Config {
@@ -1490,6 +1572,7 @@ func Default() *Config {
 		Assign:          DefaultAssignConfig(),
 		Ensemble:        DefaultEnsembleConfig(),
 		Swarm:           DefaultSwarmConfig(),
+		Redaction:       DefaultRedactionConfig(),
 	}
 
 	// Try to load palette from markdown file

@@ -2825,3 +2825,126 @@ func TestRenderPaletteStateTOML(t *testing.T) {
 		}
 	})
 }
+
+// ============================================================================
+// RedactionConfig Tests
+// ============================================================================
+
+func TestDefaultRedactionConfig(t *testing.T) {
+	cfg := DefaultRedactionConfig()
+
+	if cfg.Mode != "warn" {
+		t.Errorf("Default redaction mode should be 'warn', got %q", cfg.Mode)
+	}
+
+	if len(cfg.Allowlist) != 0 {
+		t.Errorf("Default allowlist should be empty, got %d items", len(cfg.Allowlist))
+	}
+
+	if len(cfg.ExtraPatterns) != 0 {
+		t.Errorf("Default extra patterns should be empty, got %d items", len(cfg.ExtraPatterns))
+	}
+
+	if len(cfg.DisabledCategories) != 0 {
+		t.Errorf("Default disabled categories should be empty, got %d items", len(cfg.DisabledCategories))
+	}
+}
+
+func TestValidateRedactionConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		wantErr bool
+	}{
+		{"empty mode is valid", "", false},
+		{"off mode", "off", false},
+		{"warn mode", "warn", false},
+		{"redact mode", "redact", false},
+		{"block mode", "block", false},
+		{"invalid mode", "invalid", true},
+		{"uppercase mode is invalid", "WARN", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &RedactionConfig{Mode: tt.mode}
+			err := ValidateRedactionConfig(cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateRedactionConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRedactionConfig_ToRedactionLibConfig(t *testing.T) {
+	t.Run("basic conversion", func(t *testing.T) {
+		cfg := &RedactionConfig{
+			Mode:      "redact",
+			Allowlist: []string{"test-.*", "example"},
+		}
+
+		libCfg := cfg.ToRedactionLibConfig()
+
+		if string(libCfg.Mode) != "redact" {
+			t.Errorf("Mode should be 'redact', got %q", libCfg.Mode)
+		}
+
+		if len(libCfg.Allowlist) != 2 {
+			t.Errorf("Allowlist should have 2 items, got %d", len(libCfg.Allowlist))
+		}
+	})
+
+	t.Run("with extra patterns", func(t *testing.T) {
+		cfg := &RedactionConfig{
+			Mode: "warn",
+			ExtraPatterns: map[string][]string{
+				"CUSTOM_TOKEN": {"custom-[a-z]+"},
+			},
+		}
+
+		libCfg := cfg.ToRedactionLibConfig()
+
+		if len(libCfg.ExtraPatterns) != 1 {
+			t.Errorf("ExtraPatterns should have 1 category, got %d", len(libCfg.ExtraPatterns))
+		}
+	})
+
+	t.Run("with disabled categories", func(t *testing.T) {
+		cfg := &RedactionConfig{
+			Mode:               "redact",
+			DisabledCategories: []string{"JWT", "PASSWORD"},
+		}
+
+		libCfg := cfg.ToRedactionLibConfig()
+
+		if len(libCfg.DisabledCategories) != 2 {
+			t.Errorf("DisabledCategories should have 2 items, got %d", len(libCfg.DisabledCategories))
+		}
+	})
+
+	t.Run("mode conversion", func(t *testing.T) {
+		modes := map[string]string{
+			"":       "warn", // default
+			"off":    "off",
+			"warn":   "warn",
+			"redact": "redact",
+			"block":  "block",
+		}
+
+		for input, expected := range modes {
+			cfg := &RedactionConfig{Mode: input}
+			libCfg := cfg.ToRedactionLibConfig()
+			if string(libCfg.Mode) != expected {
+				t.Errorf("Mode %q should convert to %q, got %q", input, expected, libCfg.Mode)
+			}
+		}
+	})
+}
+
+func TestRedactionConfigInDefault(t *testing.T) {
+	cfg := Default()
+
+	if cfg.Redaction.Mode != "warn" {
+		t.Errorf("Default config should have redaction mode 'warn', got %q", cfg.Redaction.Mode)
+	}
+}

@@ -36,6 +36,10 @@ var (
 	// Global color control flag - inherited by all subcommands
 	noColor bool
 
+	// Global redaction flags - inherited by all subcommands
+	redactMode    string // --redact=MODE override
+	allowSecret   bool   // --allow-secret override
+
 	// Build information - set by goreleaser via ldflags
 	Version = "dev"
 	Commit  = "none"
@@ -105,6 +109,9 @@ Shell Integration:
 				// Use defaults if config loading fails
 				cfg = config.Default()
 			}
+
+			// Apply redaction flag overrides
+			applyRedactionFlagOverrides(cfg)
 
 			// Run automatic temp file cleanup if enabled
 			MaybeRunStartupCleanup(
@@ -2060,6 +2067,10 @@ func init() {
 	// Global no-color flag - disables colored output (respects NO_COLOR env var standard)
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "Disable colored output")
 
+	// Global redaction flags - secrets/PII redaction control
+	rootCmd.PersistentFlags().StringVar(&redactMode, "redact", "", "Redaction mode override: off, warn, redact, block")
+	rootCmd.PersistentFlags().BoolVar(&allowSecret, "allow-secret", false, "Bypass 'block' mode for this invocation (use with caution)")
+
 	// Profiling flag for startup timing analysis
 	rootCmd.PersistentFlags().BoolVar(&profileStartup, "profile-startup", false, "Enable startup profiling (outputs timing data)")
 
@@ -3383,6 +3394,29 @@ func resolveRobotVerbosity(cfg *config.Config) {
 		return
 	}
 	robot.OutputVerbosity = verbosity
+}
+
+// applyRedactionFlagOverrides applies CLI flag overrides to the redaction config.
+// Priority: --allow-secret > --redact > config > default
+func applyRedactionFlagOverrides(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+
+	// --redact flag overrides config mode
+	if redactMode != "" {
+		switch redactMode {
+		case "off", "warn", "redact", "block":
+			cfg.Redaction.Mode = redactMode
+		default:
+			fmt.Fprintf(os.Stderr, "Warning: invalid --redact value %q, ignoring\n", redactMode)
+		}
+	}
+
+	// --allow-secret forces mode to "off" (bypasses block mode)
+	if allowSecret {
+		cfg.Redaction.Mode = "off"
+	}
 }
 
 func applyRobotEnsembleConfigDefaults(cmd *cobra.Command, cfg *config.Config) {
