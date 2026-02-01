@@ -450,6 +450,12 @@ func (s *Supervisor) waitForExit(d *ManagedDaemon) {
 // handleDaemonFailure handles a daemon crash and potentially restarts it.
 func (s *Supervisor) handleDaemonFailure(d *ManagedDaemon) {
 	d.mu.Lock()
+	// Avoid double-handling the same failure (e.g. monitor + wait goroutines).
+	// If a daemon is already in a terminal/recovery state, a second failure signal is noise.
+	if d.State == StateStopping || d.State == StateStopped || d.State == StateFailed || d.State == StateRestarting {
+		d.mu.Unlock()
+		return
+	}
 	d.Restarts++
 	restarts := d.Restarts
 	d.State = StateFailed

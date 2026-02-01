@@ -308,7 +308,7 @@ func (r *Restorer) checkGitState(cp *Checkpoint, workDir string) string {
 	currentCommit := trimSpace(commit)
 	if currentCommit != cp.Git.Commit {
 		return fmt.Sprintf("git commit mismatch: current=%s, checkpoint=%s",
-			currentCommit[:8], cp.Git.Commit[:8])
+			shortHash(currentCommit), shortHash(cp.Git.Commit))
 	}
 
 	return ""
@@ -372,6 +372,14 @@ func formatContextInjection(content string, checkpointTime time.Time) string {
 	header := fmt.Sprintf("# Context from checkpoint (%s ago)\n\n",
 		formatDuration(time.Since(checkpointTime)))
 	return header + content
+}
+
+// shortHash returns the first 8 characters of a hash, or the whole string if shorter.
+func shortHash(h string) string {
+	if len(h) <= 8 {
+		return h
+	}
+	return h[:8]
 }
 
 // formatDuration returns a human-readable duration.
