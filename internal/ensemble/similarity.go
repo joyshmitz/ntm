@@ -113,8 +113,10 @@ func CalculateRedundancyWithConfig(outputs []ModeOutput, cfg RedundancyConfig) *
 			recsA := modeRecSets[modeA]
 			recsB := modeRecSets[modeB]
 
-			// Compute Jaccard similarity for findings
-			findingsSim := jaccardSimilarityFromSets(findingsA, findingsB)
+			// Compute similarity for findings (Dice coefficient).
+			// This treats subset overlap as more redundant than pure Jaccard, which is
+			// desirable when one mode adds little/no new information.
+			findingsSim := diceSimilarityFromSets(findingsA, findingsB)
 
 			// Compute weighted similarity
 			// Only include recommendations weight if at least one mode has recommendations
@@ -290,6 +292,28 @@ func normalizeFinding(f Finding) string {
 		key += "|" + normalizeText(f.EvidencePointer)
 	}
 	return key
+}
+
+// diceSimilarityFromSets computes Sørensen–Dice similarity between two string sets.
+// Returns 0 if either set is empty (no meaningful basis for redundancy).
+func diceSimilarityFromSets(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+
+	intersection := 0
+	for key := range a {
+		if _, ok := b[key]; ok {
+			intersection++
+		}
+	}
+
+	denom := len(a) + len(b)
+	if denom == 0 {
+		return 0.0
+	}
+
+	return (2.0 * float64(intersection)) / float64(denom)
 }
 
 // jaccardSimilarityFromSets computes Jaccard similarity between two string sets.

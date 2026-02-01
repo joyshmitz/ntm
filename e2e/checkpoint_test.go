@@ -6,6 +6,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -197,8 +198,30 @@ func (s *CheckpointTestSuite) RunCheckpoint(args ...string) ([]byte, error) {
 
 // RunCheckpointJSON executes ntm checkpoint with --json flag
 func (s *CheckpointTestSuite) RunCheckpointJSON(args ...string) ([]byte, error) {
-	allArgs := append(args, "--json")
-	return s.RunCheckpoint(allArgs...)
+	allArgs := append([]string{"checkpoint"}, args...)
+	allArgs = append(allArgs, "--json")
+	cmd := exec.Command("ntm", allArgs...)
+	cmd.Dir = s.tempDir
+
+	s.logger.Log("[E2E-CHECKPOINT] Running: ntm %v", allArgs)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	stdout, err := cmd.Output()
+	if len(stdout) > 0 {
+		s.logger.Log("[E2E-CHECKPOINT] Stdout: %s", string(stdout))
+	} else {
+		s.logger.Log("[E2E-CHECKPOINT] Stdout: <empty>")
+	}
+	if stderr.Len() > 0 {
+		s.logger.Log("[E2E-CHECKPOINT] Stderr: %s", strings.TrimSpace(stderr.String()))
+	}
+	if err != nil {
+		s.logger.Log("[E2E-CHECKPOINT] Exit error: %v", err)
+	}
+
+	return stdout, err
 }
 
 // RunRollback executes ntm rollback and returns the output

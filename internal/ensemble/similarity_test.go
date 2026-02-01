@@ -101,7 +101,7 @@ func TestCalculateRedundancy_DisjointFindings(t *testing.T) {
 }
 
 func TestCalculateRedundancy_PartialOverlap(t *testing.T) {
-	// Two modes with 1 shared, 1 unique each → Jaccard = 1/3 ≈ 0.333
+	// Two modes with 1 shared, 1 unique each → Dice = 2*1/(2+2) = 0.5
 	outputs := []ModeOutput{
 		{
 			ModeID: "mode-a",
@@ -132,9 +132,9 @@ func TestCalculateRedundancy_PartialOverlap(t *testing.T) {
 	}
 
 	pair := analysis.PairwiseScores[0]
-	// Jaccard for findings: 1/(2+2-1) = 1/3 ≈ 0.333
-	// No recommendations in either mode, so we use findings similarity directly
-	expectedFindingsSim := 1.0 / 3.0
+	// Dice for findings: 2*1/(2+2) = 0.5
+	// No recommendations in either mode, so we use findings similarity directly.
+	expectedFindingsSim := 0.5
 
 	if pair.Similarity < expectedFindingsSim-0.05 || pair.Similarity > expectedFindingsSim+0.05 {
 		t.Errorf("expected similarity ~%.2f for partial overlap, got %.2f",

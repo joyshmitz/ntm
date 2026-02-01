@@ -142,10 +142,10 @@ func (c *Capturer) captureSessionState(sessionName string) (SessionState, error)
 	var paneStates []PaneState
 	activeIndex := 0
 
-	for _, p := range panes {
+	for i, p := range panes {
 		state := FromTmuxPane(p)
 		if p.Active {
-			activeIndex = p.Index
+			activeIndex = i
 		}
 		paneStates = append(paneStates, state)
 	}
