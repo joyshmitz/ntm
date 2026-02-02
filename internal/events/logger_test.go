@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
 func TestNewLogger(t *testing.T) {
@@ -90,6 +92,48 @@ func TestLogger_Log(t *testing.T) {
 
 	if logged.Session != "myproject" {
 		t.Errorf("Session = %q, want %q", logged.Session, "myproject")
+	}
+}
+
+func TestLogger_Log_RedactsSecretsForStorage(t *testing.T) {
+	// Ensure clean state
+	SetRedactionConfig(nil)
+	defer SetRedactionConfig(nil)
+
+	SetRedactionConfig(&redaction.Config{Mode: redaction.ModeWarn})
+
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "events.jsonl")
+
+	logger, err := NewLogger(LoggerOptions{
+		Path:    logPath,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	secret := "sk-proj-FAKEtestkey1234567890123456789012345678901234"
+	event := NewEvent(EventError, "test-session", map[string]interface{}{
+		"message": "failed with key: " + secret,
+	})
+	if err := logger.Log(event); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+
+	logger.Close()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+
+	if bytes.Contains(data, []byte(secret)) {
+		t.Fatalf("event log on disk contains raw secret; want redacted")
+	}
+	if !bytes.Contains(data, []byte("[REDACTED:")) {
+		t.Fatalf("expected redaction marker in persisted event log")
 	}
 }
 

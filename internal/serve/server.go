@@ -420,16 +420,16 @@ type WSClient struct {
 
 // WSHub manages WebSocket connections and topic routing.
 type WSHub struct {
-	clients       map[*WSClient]struct{}
-	clientsMu     sync.RWMutex
-	register      chan *WSClient
-	unregister    chan *WSClient
-	broadcast     chan *WSEvent
-	seq           int64
-	seqMu         sync.Mutex
-	done          chan struct{}
-	redactionCfg  *RedactionConfig
-	redactionMu   sync.RWMutex
+	clients      map[*WSClient]struct{}
+	clientsMu    sync.RWMutex
+	register     chan *WSClient
+	unregister   chan *WSClient
+	broadcast    chan *WSEvent
+	seq          int64
+	seqMu        sync.Mutex
+	done         chan struct{}
+	redactionCfg *RedactionConfig
+	redactionMu  sync.RWMutex
 }
 
 // NewWSHub creates a new WebSocket hub.
@@ -796,7 +796,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(s.loggingMiddlewareFunc)
 	r.Use(s.corsMiddlewareFunc)
 	r.Use(s.authMiddlewareFunc)
-	r.Use(s.rbacMiddleware) // Extract role from auth claims
+	r.Use(s.rbacMiddleware)      // Extract role from auth claims
 	r.Use(s.redactionMiddleware) // Redact sensitive content in requests/responses
 
 	// Health check (no versioning)
