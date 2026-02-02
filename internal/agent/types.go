@@ -12,14 +12,15 @@ import (
 type AgentType string
 
 const (
-	AgentTypeClaudeCode AgentType = "cc"      // Claude Code CLI
-	AgentTypeCodex      AgentType = "cod"     // Codex CLI (OpenAI)
-	AgentTypeGemini     AgentType = "gmi"     // Gemini CLI (Google)
-	AgentTypeCursor     AgentType = "cursor"  // Cursor AI
+	AgentTypeClaudeCode AgentType = "cc"       // Claude Code CLI
+	AgentTypeCodex      AgentType = "cod"      // Codex CLI (OpenAI)
+	AgentTypeGemini     AgentType = "gmi"      // Gemini CLI (Google)
+	AgentTypeOllama     AgentType = "ollama"   // Local Ollama CLI
+	AgentTypeCursor     AgentType = "cursor"   // Cursor AI
 	AgentTypeWindsurf   AgentType = "windsurf" // Windsurf IDE
-	AgentTypeAider      AgentType = "aider"   // Aider CLI
-	AgentTypeUser       AgentType = "user"    // User/Shell pane
-	AgentTypeUnknown    AgentType = "unknown" // Unable to determine agent type
+	AgentTypeAider      AgentType = "aider"    // Aider CLI
+	AgentTypeUser       AgentType = "user"     // User/Shell pane
+	AgentTypeUnknown    AgentType = "unknown"  // Unable to determine agent type
 )
 
 // String returns the agent type as a string.
@@ -36,6 +37,8 @@ func (t AgentType) DisplayName() string {
 		return "Codex CLI"
 	case AgentTypeGemini:
 		return "Gemini CLI"
+	case AgentTypeOllama:
+		return "Ollama"
 	case AgentTypeCursor:
 		return "Cursor"
 	case AgentTypeWindsurf:
@@ -58,6 +61,8 @@ func (t AgentType) ProfileName() string {
 		return "Codex"
 	case AgentTypeGemini:
 		return "Gemini"
+	case AgentTypeOllama:
+		return "Ollama"
 	case AgentTypeCursor:
 		return "Cursor"
 	case AgentTypeWindsurf:
@@ -79,7 +84,7 @@ func (t AgentType) ProfileName() string {
 // IsValid returns true if this is a known agent type.
 func (t AgentType) IsValid() bool {
 	switch t {
-	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeUser:
+	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeUser:
 		return true
 	default:
 		return false
