@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/util"
+
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
@@ -295,16 +297,16 @@ func TestExpandPath(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := expandPath(tt.input)
+		got := util.ExpandPath(tt.input)
 		if got != tt.want {
-			t.Errorf("expandPath(%q) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("ExpandPath(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 
 	// Test ~ expansion (can't test exact value since it depends on user)
-	expanded := expandPath("~/test")
+	expanded := util.ExpandPath("~/test")
 	if expanded == "~/test" {
-		t.Error("expandPath should have expanded ~")
+		t.Error("ExpandPath should have expanded ~")
 	}
 }
 

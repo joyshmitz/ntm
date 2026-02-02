@@ -326,26 +326,6 @@ func TestStartsWithLines(t *testing.T) {
 	}
 }
 
-func TestExpandPath(t *testing.T) {
-	home, _ := os.UserHomeDir()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"~/test", filepath.Join(home, "test")},
-		{"/absolute/path", "/absolute/path"},
-		{"relative/path", "relative/path"},
-	}
-
-	for _, tc := range tests {
-		got := expandPath(tc.input)
-		if got != tc.want {
-			t.Errorf("expandPath(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
 func TestArchiveRecord_JSONFormat(t *testing.T) {
 	record := ArchiveRecord{
 		Session:   "myproject",
@@ -1051,23 +1031,5 @@ func TestStartsWithLines_EdgeCases(t *testing.T) {
 				t.Errorf("startsWithLines() = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestExpandPath_NoHome(t *testing.T) {
-	// Test with path that doesn't start with ~
-	result := expandPath("/absolute/path")
-	if result != "/absolute/path" {
-		t.Errorf("expandPath(/absolute/path) = %q, want /absolute/path", result)
-	}
-
-	result = expandPath("relative/path")
-	if result != "relative/path" {
-		t.Errorf("expandPath(relative/path) = %q, want relative/path", result)
-	}
-
-	result = expandPath("")
-	if result != "" {
-		t.Errorf("expandPath('') = %q, want ''", result)
 	}
 }

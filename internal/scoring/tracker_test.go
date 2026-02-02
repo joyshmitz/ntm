@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 func TestScoreMetrics_ComputeOverall(t *testing.T) {
@@ -506,21 +508,21 @@ func TestExpandPath(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := expandPath(tc.input)
+			got := util.ExpandPath(tc.input)
 			if got != tc.input {
-				t.Errorf("expandPath(%q) = %q, want %q", tc.input, got, tc.input)
+				t.Errorf("ExpandPath(%q) = %q, want %q", tc.input, got, tc.input)
 			}
 		})
 	}
 
 	// Tilde expansion should produce a different path
 	t.Run("tilde expansion", func(t *testing.T) {
-		got := expandPath("~/foo")
+		got := util.ExpandPath("~/foo")
 		if got == "~/foo" {
-			t.Error("expandPath(\"~/foo\") should expand tilde")
+			t.Error("ExpandPath(\"~/foo\") should expand tilde")
 		}
 		if !filepath.IsAbs(got) {
-			t.Errorf("expandPath(\"~/foo\") = %q, expected absolute path", got)
+			t.Errorf("ExpandPath(\"~/foo\") = %q, expected absolute path", got)
 		}
 	})
 }
