@@ -22,6 +22,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	swarmlib "github.com/Dicklesworthstone/ntm/internal/swarm"
@@ -1144,13 +1145,14 @@ var stateTracker = tracker.New()
 
 // SessionInfo contains machine-readable session information
 type SessionInfo struct {
-	Name      string     `json:"name"`
-	Exists    bool       `json:"exists"`
-	Attached  bool       `json:"attached,omitempty"`
-	Windows   int        `json:"windows,omitempty"`
-	Panes     int        `json:"panes,omitempty"`
-	CreatedAt *time.Time `json:"created_at,omitempty"`
-	Agents    []Agent    `json:"agents,omitempty"`
+	Name        string     `json:"name"`
+	Exists      bool       `json:"exists"`
+	Attached    bool       `json:"attached,omitempty"`
+	Windows     int        `json:"windows,omitempty"`
+	Panes       int        `json:"panes,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	Agents      []Agent    `json:"agents,omitempty"`
+	PrivacyMode bool       `json:"privacy_mode,omitempty"` // True if privacy mode is enabled
 }
 
 // Agent represents an AI agent in a session
@@ -3579,6 +3581,9 @@ type SendOutput struct {
 	RobotResponse                     // Embed standard response fields (success, timestamp, error)
 	Session        string             `json:"session"`
 	SentAt         time.Time          `json:"sent_at"`
+	Blocked        bool               `json:"blocked"`
+	Redaction      RedactionSummary   `json:"redaction"`
+	Warnings       []string           `json:"warnings"`
 	Targets        []string           `json:"targets"`
 	Successful     []string           `json:"successful"`
 	Failed         []SendError        `json:"failed"`
@@ -3587,6 +3592,15 @@ type SendOutput struct {
 	WouldSendTo    []string           `json:"would_send_to,omitempty"`
 	CASSInjection  *CASSInjectionInfo `json:"cass_injection,omitempty"`
 	AgentHints     *SendAgentHints    `json:"_agent_hints,omitempty"`
+}
+
+// RedactionSummary is a safe-to-print summary of redaction findings.
+// It intentionally does NOT include the matched secret values.
+type RedactionSummary struct {
+	Mode       string         `json:"mode"`
+	Findings   int            `json:"findings"`
+	Categories map[string]int `json:"categories,omitempty"`
+	Action     string         `json:"action,omitempty"` // off|warn|redact|block
 }
 
 // CASSInjectionInfo reports CASS context injection details in robot responses.
@@ -3663,6 +3677,7 @@ type SendError struct {
 type SendOptions struct {
 	Session    string   // Target session name
 	Message    string   // Message to send
+	Redaction  redaction.Config
 	All        bool     // Send to all panes (including user)
 	Panes      []string // Specific pane indices (e.g., "0", "1", "2")
 	AgentTypes []string // Filter by agent types (e.g., "claude", "codex")
@@ -3678,18 +3693,150 @@ type SendOptions struct {
 	InjectConfig *InjectConfig // CASS injection configuration (optional)
 }
 
+func normalizeSendRedactionConfig(cfg redaction.Config) redaction.Config {
+	// Zero value is treated as off for backwards compatibility.
+	if cfg.Mode == "" {
+		cfg.Mode = redaction.ModeOff
+	}
+	return cfg
+}
+
+func summarizeSendRedactionResult(result redaction.Result) RedactionSummary {
+	summary := RedactionSummary{
+		Mode:     string(result.Mode),
+		Findings: len(result.Findings),
+	}
+
+	cats := make(map[string]int, len(result.Findings))
+	for _, f := range result.Findings {
+		cats[string(f.Category)]++
+	}
+	if len(cats) > 0 {
+		summary.Categories = cats
+	}
+
+	switch result.Mode {
+	case redaction.ModeOff:
+		summary.Action = "off"
+	case redaction.ModeWarn:
+		summary.Action = "warn"
+	case redaction.ModeRedact:
+		summary.Action = "redact"
+	case redaction.ModeBlock:
+		summary.Action = "block"
+	}
+
+	return summary
+}
+
+func formatRedactionCategoryCounts(categories map[string]int) string {
+	if len(categories) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(categories))
+	for k := range categories {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, categories[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func applySendMessageRedaction(message string, cfg redaction.Config) (messageToSend string, preview string, summary RedactionSummary, warnings []string, blocked bool) {
+	cfg = normalizeSendRedactionConfig(cfg)
+	warnings = []string{}
+
+	// Default summary always reflects configured mode.
+	summary = RedactionSummary{
+		Mode:     string(cfg.Mode),
+		Findings: 0,
+		Action:   string(cfg.Mode),
+	}
+	if cfg.Mode == redaction.ModeOff {
+		summary.Action = "off"
+		return message, truncateMessage(message), summary, warnings, false
+	}
+
+	result := redaction.ScanAndRedact(message, cfg)
+	summary = summarizeSendRedactionResult(result)
+
+	if len(result.Findings) == 0 {
+		// No findings: keep message unchanged regardless of mode.
+		return message, truncateMessage(message), summary, warnings, false
+	}
+
+	switch cfg.Mode {
+	case redaction.ModeWarn:
+		msg := "Warning: potential secrets detected in message"
+		if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+			msg = fmt.Sprintf("%s (%s)", msg, parts)
+		}
+		warnings = append(warnings, msg)
+		return message, truncateMessage(message), summary, warnings, false
+	case redaction.ModeRedact:
+		msg := "Warning: redacted potential secrets in message"
+		if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+			msg = fmt.Sprintf("%s (%s)", msg, parts)
+		}
+		warnings = append(warnings, msg)
+		return result.Output, truncateMessage(result.Output), summary, warnings, false
+	case redaction.ModeBlock:
+		msg := "Blocked: potential secrets detected in message (redaction mode: block)"
+		if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+			msg = fmt.Sprintf("%s (%s)", msg, parts)
+		}
+		warnings = append(warnings, msg)
+
+		previewCfg := cfg
+		previewCfg.Mode = redaction.ModeRedact
+		previewRes := redaction.ScanAndRedact(message, previewCfg)
+		return "", truncateMessage(previewRes.Output), summary, warnings, true
+	default:
+		return message, truncateMessage(message), summary, warnings, false
+	}
+}
+
 // GetSend sends a message to multiple panes atomically and returns structured results.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetSend(opts SendOptions) (*SendOutput, error) {
+	redactCfg := normalizeSendRedactionConfig(opts.Redaction)
+	_, initialPreview, initialSummary, initialWarnings, initialBlocked := applySendMessageRedaction(opts.Message, redactCfg)
+
+	if initialBlocked {
+		errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
+		if parts := formatRedactionCategoryCounts(initialSummary.Categories); parts != "" {
+			errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
+		}
+		return &SendOutput{
+			RobotResponse:  NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact"),
+			Session:        opts.Session,
+			SentAt:         time.Now().UTC(),
+			Blocked:        true,
+			Redaction:      initialSummary,
+			Warnings:       initialWarnings,
+			Targets:        []string{},
+			Successful:     []string{},
+			Failed:         []SendError{},
+			MessagePreview: initialPreview,
+		}, nil
+	}
+
 	if strings.TrimSpace(opts.Session) == "" {
 		return &SendOutput{
 			RobotResponse:  NewErrorResponse(fmt.Errorf("session name is required"), ErrCodeInvalidFlag, "Provide a session name"),
 			Session:        opts.Session,
 			SentAt:         time.Now().UTC(),
+			Blocked:        false,
+			Redaction:      initialSummary,
+			Warnings:       initialWarnings,
 			Targets:        []string{},
 			Successful:     []string{},
 			Failed:         []SendError{{Pane: "session", Error: "session name is required"}},
-			MessagePreview: truncateMessage(opts.Message),
+			MessagePreview: initialPreview,
 		}, nil
 	}
 
@@ -3698,10 +3845,13 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			RobotResponse:  NewErrorResponse(fmt.Errorf("session '%s' not found", opts.Session), ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions"),
 			Session:        opts.Session,
 			SentAt:         time.Now().UTC(),
+			Blocked:        false,
+			Redaction:      initialSummary,
+			Warnings:       initialWarnings,
 			Targets:        []string{},
 			Successful:     []string{},
 			Failed:         []SendError{{Pane: "session", Error: fmt.Sprintf("session '%s' not found", opts.Session)}},
-			MessagePreview: truncateMessage(opts.Message),
+			MessagePreview: initialPreview,
 		}, nil
 	}
 
@@ -3711,10 +3861,13 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			RobotResponse:  NewErrorResponse(fmt.Errorf("failed to get panes: %w", err), ErrCodeInternalError, "Check tmux is running"),
 			Session:        opts.Session,
 			SentAt:         time.Now().UTC(),
+			Blocked:        false,
+			Redaction:      initialSummary,
+			Warnings:       initialWarnings,
 			Targets:        []string{},
 			Successful:     []string{},
 			Failed:         []SendError{{Pane: "panes", Error: fmt.Sprintf("failed to get panes: %v", err)}},
-			MessagePreview: truncateMessage(opts.Message),
+			MessagePreview: initialPreview,
 		}, nil
 	}
 
@@ -3722,10 +3875,13 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		RobotResponse:  NewRobotResponse(true), // Will be updated based on results
 		Session:        opts.Session,
 		SentAt:         time.Now().UTC(),
+		Blocked:        false,
+		Redaction:      initialSummary,
+		Warnings:       initialWarnings,
 		Targets:        []string{},
 		Successful:     []string{},
 		Failed:         []SendError{},
-		MessagePreview: truncateMessage(opts.Message),
+		MessagePreview: initialPreview,
 	}
 
 	// Build exclusion map
@@ -3833,6 +3989,24 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			messageToSend = injectResult.ModifiedPrompt
 		}
 	}
+
+	// Redaction preflight on final outbound message (after CASS injection, if any).
+	redacted, preview, summary, warnings, blocked := applySendMessageRedaction(messageToSend, redactCfg)
+	output.Redaction = summary
+	output.Warnings = warnings
+	output.Blocked = blocked
+	output.MessagePreview = preview
+
+	if blocked {
+		errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
+		if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+			errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
+		}
+		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact")
+		output.Success = false
+		return &output, nil
+	}
+	messageToSend = redacted
 
 	// Dry-run mode: show what would happen without sending
 	if opts.DryRun {

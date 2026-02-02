@@ -2965,3 +2965,58 @@ func TestRedactionConfigInDefault(t *testing.T) {
 		t.Errorf("Default config should have redaction mode 'warn', got %q", cfg.Redaction.Mode)
 	}
 }
+
+func TestDefaultPrivacyConfig(t *testing.T) {
+	cfg := DefaultPrivacyConfig()
+
+	// Privacy mode should be disabled by default (opt-in)
+	if cfg.Enabled {
+		t.Error("Privacy mode should be disabled by default")
+	}
+
+	// When privacy mode is enabled, these should all be true by default
+	if !cfg.DisablePromptHistory {
+		t.Error("DisablePromptHistory should be true when privacy mode is enabled")
+	}
+
+	if !cfg.DisableEventLogs {
+		t.Error("DisableEventLogs should be true when privacy mode is enabled")
+	}
+
+	if !cfg.DisableCheckpoints {
+		t.Error("DisableCheckpoints should be true when privacy mode is enabled")
+	}
+
+	if !cfg.DisableScrollbackCapture {
+		t.Error("DisableScrollbackCapture should be true when privacy mode is enabled")
+	}
+
+	if !cfg.RequireExplicitPersist {
+		t.Error("RequireExplicitPersist should be true when privacy mode is enabled")
+	}
+}
+
+func TestPrivacyConfigInDefault(t *testing.T) {
+	cfg := Default()
+
+	// Privacy config should be present with default values
+	if cfg.Privacy.Enabled {
+		t.Error("Default config should have privacy mode disabled")
+	}
+}
+
+func TestValidatePrivacyConfig(t *testing.T) {
+	// Validate should always succeed for PrivacyConfig (only boolean flags)
+	tests := []PrivacyConfig{
+		{},
+		{Enabled: true},
+		{Enabled: true, DisablePromptHistory: false}, // override defaults
+		{Enabled: false, RequireExplicitPersist: true},
+	}
+
+	for i, cfg := range tests {
+		if err := ValidatePrivacyConfig(&cfg); err != nil {
+			t.Errorf("Test %d: ValidatePrivacyConfig should not error, got: %v", i, err)
+		}
+	}
+}

@@ -87,6 +87,7 @@ type Config struct {
 	Swarm              SwarmConfig           `toml:"swarm"`            // Weighted multi-project agent swarm
 	SpawnPacing        SpawnPacingConfig     `toml:"spawn_pacing"`     // Spawn scheduler pacing configuration
 	Redaction          RedactionConfig       `toml:"redaction"`        // Secrets/PII redaction configuration
+	Privacy            PrivacyConfig         `toml:"privacy"`          // Privacy mode configuration
 
 	// Runtime-only fields (populated by project config merging)
 	ProjectDefaults map[string]int `toml:"-"`
@@ -464,6 +465,7 @@ type AgentConfig struct {
 	Claude       string            `toml:"claude"`
 	Codex        string            `toml:"codex"`
 	Gemini       string            `toml:"gemini"`
+	Ollama       string            `toml:"ollama"`
 	Cursor       string            `toml:"cursor"`
 	Windsurf     string            `toml:"windsurf"`
 	Aider        string            `toml:"aider"`
@@ -1487,6 +1489,49 @@ func ValidateRedactionConfig(cfg *RedactionConfig) error {
 	}
 }
 
+// PrivacyConfig holds configuration for privacy mode.
+// Privacy mode prevents persistence of sensitive session data.
+type PrivacyConfig struct {
+	// Enabled is the global default for privacy mode.
+	// When true, all new sessions start in privacy mode unless overridden.
+	Enabled bool `toml:"enabled"`
+
+	// DisablePromptHistory prevents storing prompt/command history.
+	DisablePromptHistory bool `toml:"disable_prompt_history"`
+
+	// DisableEventLogs prevents writing event logs (or limits to minimal metadata).
+	DisableEventLogs bool `toml:"disable_event_logs"`
+
+	// DisableCheckpoints prevents automatic checkpoint creation.
+	DisableCheckpoints bool `toml:"disable_checkpoints"`
+
+	// DisableScrollbackCapture prevents scrollback persistence in support bundles.
+	DisableScrollbackCapture bool `toml:"disable_scrollback_capture"`
+
+	// RequireExplicitPersist requires --allow-persist flag for any persistence operations.
+	// When true, operations that would write to disk fail unless explicitly allowed.
+	RequireExplicitPersist bool `toml:"require_explicit_persist"`
+}
+
+// DefaultPrivacyConfig returns sensible privacy defaults.
+// Privacy mode is opt-in by default.
+func DefaultPrivacyConfig() PrivacyConfig {
+	return PrivacyConfig{
+		Enabled:                  false, // Privacy mode disabled by default
+		DisablePromptHistory:     true,  // When enabled, disable history by default
+		DisableEventLogs:         true,  // When enabled, disable event logs
+		DisableCheckpoints:       true,  // When enabled, disable checkpoints
+		DisableScrollbackCapture: true,  // When enabled, disable scrollback capture
+		RequireExplicitPersist:   true,  // When enabled, require explicit --allow-persist
+	}
+}
+
+// ValidatePrivacyConfig validates the privacy configuration.
+func ValidatePrivacyConfig(cfg *PrivacyConfig) error {
+	// No complex validation needed for boolean flags
+	return nil
+}
+
 // ToRedactionLibConfig converts the config to the redaction library's Config type.
 func (c *RedactionConfig) ToRedactionLibConfig() redaction.Config {
 	mode := redaction.ModeWarn // default
@@ -1573,6 +1618,7 @@ func Default() *Config {
 		Ensemble:        DefaultEnsembleConfig(),
 		Swarm:           DefaultSwarmConfig(),
 		Redaction:       DefaultRedactionConfig(),
+		Privacy:         DefaultPrivacyConfig(),
 	}
 
 	// Try to load palette from markdown file

@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent/ollama"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
@@ -256,6 +257,8 @@ type SpawnOptions struct {
 	NoCassContext    bool
 	Prompt           string
 	InitPrompt       string
+	LocalModel       string
+	LocalHost        string
 
 	// Hooks
 	NoHooks bool
@@ -287,6 +290,10 @@ type SpawnOptions struct {
 
 	// Git worktree isolation configuration
 	UseWorktrees bool // Enable git worktree isolation for agents
+
+	// Privacy mode configuration (bd-2u3tv)
+	PrivacyMode  bool // Enable privacy mode (no persistence)
+	AllowPersist bool // Allow persistence even in privacy mode
 }
 
 // RecoveryContext holds all the information needed to help an agent recover
@@ -415,6 +422,10 @@ func newSpawnCmd() *cobra.Command {
 	var staggerDuration time.Duration
 	var staggerEnabled bool
 	var safety bool
+	var localCount int
+	var ollamaCount int
+	var localModel string
+	var localHost string
 
 	// New stagger flags for bd-2wih
 	var staggerMode string         // smart, fixed, or none
@@ -432,6 +443,10 @@ func newSpawnCmd() *cobra.Command {
 
 	// Git worktree isolation flag
 	var useWorktrees bool
+
+	// Privacy mode flag (bd-2u3tv)
+	var privacyMode bool
+	var allowPersist bool
 
 	// Pre-load plugins to avoid double loading in RunE
 	// TODO: This runs eagerly during init() which slows down startup for all commands.
@@ -624,6 +639,36 @@ Examples:
 				}
 			}
 
+			// Handle local/Ollama agents.
+			// --ollama is an alias for --local (both spawn the same "ollama" agent type).
+			if localCount < 0 {
+				return fmt.Errorf("--local must be >= 0, got %d", localCount)
+			}
+			if ollamaCount < 0 {
+				return fmt.Errorf("--ollama must be >= 0, got %d", ollamaCount)
+			}
+			if localCount > 0 && ollamaCount > 0 {
+				return fmt.Errorf("cannot use both --local and --ollama; pick one")
+			}
+			ollamaTotal := localCount
+			if ollamaTotal == 0 {
+				ollamaTotal = ollamaCount
+			}
+			if ollamaTotal > 0 {
+				localModel = strings.TrimSpace(localModel)
+				if localModel == "" {
+					localModel = "codellama:latest"
+				}
+				if !modelPattern.MatchString(localModel) {
+					return fmt.Errorf("invalid characters in --local-model %q; allowed: letters, numbers, . _ / @ : + -", localModel)
+				}
+				agentSpecs = append(agentSpecs, AgentSpec{
+					Type:  AgentTypeOllama,
+					Count: ollamaTotal,
+					Model: localModel,
+				})
+			}
+
 			// Extract simple counts
 			ccCount := agentSpecs.ByType(AgentTypeClaude).TotalCount()
 			codCount := agentSpecs.ByType(AgentTypeCodex).TotalCount()
@@ -693,7 +738,7 @@ Examples:
 				}
 
 				// Warn if profile count doesn't match agent count
-				totalAgents := ccCount + codCount + gmiCount
+				totalAgents := agentSpecs.TotalCount()
 				if len(profileList) > 0 && totalAgents > 0 && len(profileList) != totalAgents {
 					if !IsJSONOutput() {
 						fmt.Printf("Warning: %d profiles for %d agents; profiles will be assigned in order\n",
@@ -717,6 +762,8 @@ Examples:
 				NoCassContext:      noCassContext,
 				Prompt:             prompt,
 				InitPrompt:         initPrompt,
+				LocalModel:         localModel,
+				LocalHost:          localHost,
 				NoHooks:            noHooks,
 				Safety:             safety,
 				StaggerMode:        staggerMode,
@@ -733,6 +780,8 @@ Examples:
 				AssignTimeout:      assignTimeout,
 				AssignAgentType:    assignAgentType,
 				UseWorktrees:       useWorktrees,
+				PrivacyMode:        privacyMode,
+				AllowPersist:       allowPersist,
 			}
 
 			return spawnSessionLogic(opts)
@@ -743,6 +792,10 @@ Examples:
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeClaude, &agentSpecs), "cc", "Claude agents (N or N:model, model charset: a-zA-Z0-9._/@:+-)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCodex, &agentSpecs), "cod", "Codex agents (N or N:model, model charset: a-zA-Z0-9._/@:+-)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGemini, &agentSpecs), "gmi", "Gemini agents (N or N:model, model charset: a-zA-Z0-9._/@:+-)")
+	cmd.Flags().IntVar(&localCount, "local", 0, "Local agents via Ollama (alias: --ollama)")
+	cmd.Flags().IntVar(&ollamaCount, "ollama", 0, "Alias for --local (explicit Ollama)")
+	cmd.Flags().StringVar(&localModel, "local-model", "codellama:latest", "Ollama model to run for --local/--ollama agents")
+	cmd.Flags().StringVar(&localHost, "local-host", "", "Ollama host URL for --local/--ollama agents (overrides OLLAMA_HOST/NTM_OLLAMA_HOST)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAider, &agentSpecs), "aider", "Aider agents (N or N:model)")
@@ -784,6 +837,10 @@ Examples:
 	// Git worktree isolation flag
 	cmd.Flags().BoolVar(&useWorktrees, "worktrees", false, "Enable git worktree isolation for agents (each agent gets isolated working directory)")
 
+	// Privacy mode flags (bd-2u3tv)
+	cmd.Flags().BoolVar(&privacyMode, "privacy", false, "Enable privacy mode (disables persistence of session data)")
+	cmd.Flags().BoolVar(&allowPersist, "allow-persist", false, "Allow persistence operations even in privacy mode")
+
 	// Profile flags for mapping personas to agents
 	cmd.Flags().StringVar(&profilesFlag, "profiles", "", "Comma-separated list of profile/persona names to map to agents in order")
 	cmd.Flags().StringVar(&profileSetFlag, "profile-set", "", "Predefined profile set name (e.g., backend-team, review-team)")
@@ -818,6 +875,11 @@ func spawnSessionLogic(opts SpawnOptions) error {
 	}
 
 	if err := tmux.ValidateSessionName(opts.Session); err != nil {
+		return outputError(err)
+	}
+
+	ollamaHost, err := preflightOllamaSpawn(opts)
+	if err != nil {
 		return outputError(err)
 	}
 
@@ -1180,6 +1242,11 @@ func spawnSessionLogic(opts SpawnOptions) error {
 			agentCmdTemplate = cfg.Agents.Codex
 		case AgentTypeGemini:
 			agentCmdTemplate = cfg.Agents.Gemini
+		case AgentTypeOllama:
+			agentCmdTemplate = cfg.Agents.Ollama
+			if ollamaHost != "" {
+				envVars = map[string]string{"OLLAMA_HOST": ollamaHost}
+			}
 		case AgentTypeCursor:
 			agentCmdTemplate = cfg.Agents.Cursor
 		case AgentTypeWindsurf:
@@ -1227,6 +1294,12 @@ func spawnSessionLogic(opts SpawnOptions) error {
 
 		// Resolve model alias to full model name
 		resolvedModel := ResolveModel(agent.Type, agent.Model)
+		if agent.Type == AgentTypeOllama && resolvedModel == "" {
+			resolvedModel = strings.TrimSpace(opts.LocalModel)
+			if resolvedModel == "" {
+				resolvedModel = "codellama:latest"
+			}
+		}
 
 		// Check if this is a persona agent and prepare system prompt
 		var systemPromptFile string
@@ -1865,6 +1938,101 @@ func spawnSessionLogic(opts SpawnOptions) error {
 	}
 
 	return nil
+}
+
+func preflightOllamaSpawn(opts SpawnOptions) (string, error) {
+	if len(opts.Agents) == 0 {
+		return "", nil
+	}
+
+	var requiredModels []string
+	seenModels := make(map[string]struct{})
+	for _, a := range opts.Agents {
+		if a.Type != AgentTypeOllama {
+			continue
+		}
+		model := strings.TrimSpace(a.Model)
+		if model == "" {
+			model = strings.TrimSpace(opts.LocalModel)
+		}
+		if model == "" {
+			model = "codellama:latest"
+		}
+		if !modelPattern.MatchString(model) {
+			return "", fmt.Errorf("invalid Ollama model %q; allowed: letters, numbers, . _ / @ : + -", model)
+		}
+		if _, ok := seenModels[model]; ok {
+			continue
+		}
+		seenModels[model] = struct{}{}
+		requiredModels = append(requiredModels, model)
+	}
+
+	if len(requiredModels) == 0 {
+		return "", nil
+	}
+
+	host := strings.TrimSpace(opts.LocalHost)
+	if host == "" {
+		host = strings.TrimSpace(os.Getenv("NTM_OLLAMA_HOST"))
+	}
+	if host == "" {
+		host = strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	}
+	if host == "" {
+		host = ollama.DefaultHost
+	}
+
+	adapter := ollama.NewAdapter()
+	if err := adapter.Connect(host); err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = adapter.Close()
+	}()
+
+	normalizedHost := adapter.Host()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	models, err := adapter.ListModels(ctx)
+	cancel()
+	if err != nil {
+		return "", err
+	}
+
+	available := make(map[string]struct{}, len(models))
+	for _, m := range models {
+		available[m.Name] = struct{}{}
+	}
+
+	for _, model := range requiredModels {
+		if _, ok := available[model]; ok {
+			continue
+		}
+
+		if IsJSONOutput() {
+			var names []string
+			for name := range available {
+				names = append(names, name)
+			}
+			return "", fmt.Errorf("Ollama model %q not found at %s (available: %s)", model, normalizedHost, strings.Join(names, ", "))
+		}
+
+		// Offer to pull missing model.
+		prompt := fmt.Sprintf("Ollama model %q not found at %s. Pull it now?", model, normalizedHost)
+		if !output.ConfirmWithOptions(prompt, output.ConfirmOptions{Style: output.StyleInfo, Default: false}) {
+			return "", fmt.Errorf("Ollama model %q not found (try: ollama pull %s)", model, model)
+		}
+
+		pullCtx, pullCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		pullErr := adapter.PullModel(pullCtx, model)
+		pullCancel()
+		if pullErr != nil {
+			return "", pullErr
+		}
+	}
+
+	return normalizedHost, nil
 }
 
 // registerSessionAgent registers the session with Agent Mail.
