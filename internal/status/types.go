@@ -95,6 +95,10 @@ type AgentStatus struct {
 	LastActive time.Time `json:"last_active"`
 	// LastOutput contains the last N characters of output (for preview)
 	LastOutput string `json:"last_output,omitempty"`
+	// ContextUsage is the estimated context usage percentage (0-100)
+	ContextUsage float64 `json:"context_usage,omitempty"`
+	// TokensUsed is the estimated token count
+	TokensUsed int64 `json:"tokens_used,omitempty"`
 	// UpdatedAt is when this status was computed
 	UpdatedAt time.Time `json:"updated_at"`
 }
