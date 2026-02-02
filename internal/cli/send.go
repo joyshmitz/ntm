@@ -28,6 +28,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/prompt"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/state"
@@ -43,6 +44,10 @@ type SendResult struct {
 	Success       bool               `json:"success"`
 	Session       string             `json:"session"`
 	PromptPreview string             `json:"prompt_preview,omitempty"`
+	Redaction     *RedactionSummary  `json:"redaction,omitempty"`
+	Warnings      []string           `json:"warnings,omitempty"`
+	Blocked       bool               `json:"blocked,omitempty"`
+	ErrorCode     string             `json:"error_code,omitempty"`
 	Targets       []int              `json:"targets"`
 	Delivered     int                `json:"delivered"`
 	Failed        int                `json:"failed"`
@@ -62,6 +67,10 @@ type SendDryRunResult struct {
 	Success   bool               `json:"success"`
 	DryRun    bool               `json:"dry_run"`
 	Session   string             `json:"session"`
+	Redaction *RedactionSummary  `json:"redaction,omitempty"`
+	Warnings  []string           `json:"warnings,omitempty"`
+	Blocked   bool               `json:"blocked,omitempty"`
+	ErrorCode string             `json:"error_code,omitempty"`
 	Total     int                `json:"total"`
 	WouldSend []SendDryRunEntry  `json:"would_send"`
 	RoutedTo  *SendRoutingResult `json:"routed_to,omitempty"`
@@ -776,6 +785,62 @@ func runSendInternal(opts SendOptions) error {
 		histSuccess bool
 	)
 
+	// Redaction preflight for outbound prompts
+	var (
+		redactionSummary  *RedactionSummary
+		redactionWarnings []string
+		redactionBlocked  bool
+	)
+
+	if cfg != nil {
+		redactCfg := cfg.Redaction.ToRedactionLibConfig()
+		if redactCfg.Mode != redaction.ModeOff {
+			result := redaction.ScanAndRedact(prompt, redactCfg)
+			if len(result.Findings) > 0 {
+				summary := summarizeRedactionResult(result)
+				redactionSummary = &summary
+
+				switch result.Mode {
+				case redaction.ModeWarn:
+					msg := "Warning: potential secrets detected in prompt"
+					if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+						msg = fmt.Sprintf("%s (%s)", msg, parts)
+					}
+					redactionWarnings = append(redactionWarnings, msg)
+					if !jsonOutput {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+				case redaction.ModeRedact:
+					prompt = result.Output
+					opts.Prompt = prompt
+					msg := "Warning: redacted potential secrets in prompt"
+					if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+						msg = fmt.Sprintf("%s (%s)", msg, parts)
+					}
+					redactionWarnings = append(redactionWarnings, msg)
+					if !jsonOutput {
+						fmt.Fprintln(os.Stderr, msg)
+					}
+				case redaction.ModeBlock:
+					// Avoid persisting raw secrets in history/session prompt store by replacing
+					// the in-memory prompt with a redacted preview before returning the error.
+					previewCfg := redactCfg
+					previewCfg.Mode = redaction.ModeRedact
+					previewRes := redaction.ScanAndRedact(prompt, previewCfg)
+					prompt = previewRes.Output
+					opts.Prompt = prompt
+
+					redactionBlocked = true
+					msg := "Blocked: potential secrets detected in prompt (redaction mode: block)"
+					if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+						msg = fmt.Sprintf("%s (%s)", msg, parts)
+					}
+					redactionWarnings = append(redactionWarnings, msg)
+				}
+			}
+		}
+	}
+
 	// Start time tracking for history
 	start := time.Now()
 
@@ -808,10 +873,24 @@ func runSendInternal(opts SendOptions) error {
 	outputError := func(err error) error {
 		histErr = err
 		if jsonOutput {
+			code := ""
+			if redactionBlocked {
+				code = "SENSITIVE_DATA_BLOCKED"
+			}
 			result := SendResult{
 				Success: false,
 				Session: session,
-				Error:   err.Error(),
+				Redaction: func() *RedactionSummary {
+					if redactionSummary == nil {
+						return nil
+					}
+					cp := *redactionSummary
+					return &cp
+				}(),
+				Warnings:  redactionWarnings,
+				Blocked:   redactionBlocked,
+				ErrorCode: code,
+				Error:     err.Error(),
 			}
 			_ = json.NewEncoder(os.Stdout).Encode(result)
 			// Return error to ensure non-zero exit code
@@ -819,6 +898,10 @@ func runSendInternal(opts SendOptions) error {
 			return err
 		}
 		return err
+	}
+
+	if redactionBlocked {
+		return outputError(redactionBlockedError{summary: *redactionSummary})
 	}
 
 	// Smart routing: select best agent automatically.
@@ -1125,6 +1208,9 @@ func runSendInternal(opts SendOptions) error {
 			Success:   true,
 			DryRun:    true,
 			Session:   session,
+			Redaction: redactionSummary,
+			Warnings:  redactionWarnings,
+			Blocked:   false,
 			Total:     len(entries),
 			WouldSend: entries,
 			RoutedTo:  opts.routingResult,
@@ -1146,6 +1232,8 @@ func runSendInternal(opts SendOptions) error {
 					Success:       false,
 					Session:       session,
 					PromptPreview: truncatePrompt(prompt, 50),
+					Redaction:     redactionSummary,
+					Warnings:      redactionWarnings,
 					Targets:       targetPanes,
 					Delivered:     delivered,
 					Failed:        failed,
@@ -1164,6 +1252,8 @@ func runSendInternal(opts SendOptions) error {
 				Success:       true,
 				Session:       session,
 				PromptPreview: truncatePrompt(prompt, 50),
+				Redaction:     redactionSummary,
+				Warnings:      redactionWarnings,
 				Targets:       targetPanes,
 				Delivered:     delivered,
 				Failed:        failed,
@@ -1234,6 +1324,8 @@ func runSendInternal(opts SendOptions) error {
 			Success:       failed == 0,
 			Session:       session,
 			PromptPreview: truncatePrompt(prompt, 50),
+			Redaction:     redactionSummary,
+			Warnings:      redactionWarnings,
 			Targets:       targetPanes,
 			Delivered:     delivered,
 			Failed:        failed,
