@@ -22,7 +22,7 @@ func TestLinterBasic(t *testing.T) {
 
 func TestEstimateTokens(t *testing.T) {
 	tests := []struct {
-		input    string
+		input     string
 		minTokens int
 		maxTokens int
 	}{
@@ -161,9 +161,9 @@ func TestLinterPII(t *testing.T) {
 	l := New()
 
 	tests := []struct {
-		prompt   string
-		wantPII  bool
-		piiType  string
+		prompt  string
+		wantPII bool
+		piiType string
 	}{
 		{"Contact me at test@example.com", true, "email_address"},
 		{"Call me at 555-123-4567", true, "phone_number"},
