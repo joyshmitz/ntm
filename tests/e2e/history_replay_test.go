@@ -118,7 +118,7 @@ claude = "bash"
 		t.Fatalf("history entries must have timestamps")
 	}
 	now := time.Now().UTC()
-	for _, e := range []historyEntry{entry1, entry2} {
+	for _, e := range []robotHistoryEntry{entry1, entry2} {
 		if e.Timestamp.After(now.Add(10 * time.Second)) {
 			t.Fatalf("history timestamp is unexpectedly in the future: %s", e.Timestamp.Format(time.RFC3339))
 		}
@@ -198,16 +198,16 @@ claude = "bash"
 	})
 }
 
-type historyResponse struct {
+type robotHistoryResponse struct {
 	raw      string
-	Success  bool           `json:"success"`
-	Session  string         `json:"session"`
-	Entries  []historyEntry `json:"entries"`
-	Total    int            `json:"total"`
-	Filtered int            `json:"filtered"`
+	Success  bool                `json:"success"`
+	Session  string              `json:"session"`
+	Entries  []robotHistoryEntry `json:"entries"`
+	Total    int                 `json:"total"`
+	Filtered int                 `json:"filtered"`
 }
 
-type historyEntry struct {
+type robotHistoryEntry struct {
 	ID        string    `json:"id"`
 	Timestamp time.Time `json:"ts"`
 	Session   string    `json:"session"`
@@ -220,14 +220,14 @@ type historyEntry struct {
 	marker string // test-only: which marker this entry matched
 }
 
-func getRobotHistory(t *testing.T, logger *testutil.TestLogger, configPath, session string, extraArgs []string) historyResponse {
+func getRobotHistory(t *testing.T, logger *testutil.TestLogger, configPath, session string, extraArgs []string) robotHistoryResponse {
 	t.Helper()
 
 	args := []string{"--config", configPath, "--robot-history=" + session}
 	args = append(args, extraArgs...)
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", args...)
 
-	var resp historyResponse
+	var resp robotHistoryResponse
 	resp.raw = string(out)
 	if err := json.Unmarshal(out, &resp); err != nil {
 		t.Fatalf("invalid JSON from --robot-history: %v", err)
@@ -241,17 +241,17 @@ func getRobotHistory(t *testing.T, logger *testutil.TestLogger, configPath, sess
 	return resp
 }
 
-func findHistoryEntryByMarker(resp historyResponse, marker string) (historyEntry, bool) {
+func findHistoryEntryByMarker(resp robotHistoryResponse, marker string) (robotHistoryEntry, bool) {
 	for _, e := range resp.Entries {
 		if strings.Contains(e.Prompt, marker) {
 			e.marker = marker
 			return e, true
 		}
 	}
-	return historyEntry{}, false
+	return robotHistoryEntry{}, false
 }
 
-func historyContainsID(resp historyResponse, id string) bool {
+func historyContainsID(resp robotHistoryResponse, id string) bool {
 	for _, e := range resp.Entries {
 		if e.ID == id {
 			return true
