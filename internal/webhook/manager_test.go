@@ -363,6 +363,167 @@ func TestDispatch_RedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestDispatch_RedactsSecrets_SlackFormat(t *testing.T) {
+	t.Parallel()
+
+	var received atomic.Int32
+	var mu sync.Mutex
+	var receivedBody []byte
+	done := make(chan struct{}, 1)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = append([]byte(nil), body...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}))
+	defer ts.Close()
+
+	m := NewManagerWithRedaction(ManagerConfig{
+		QueueSize:   10,
+		WorkerCount: 1,
+	}, redaction.Config{Mode: redaction.ModeWarn})
+
+	if err := m.Register(WebhookConfig{
+		ID:      "slack",
+		URL:     ts.URL,
+		Format:  "slack",
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer m.Stop()
+
+	secretPassword := "password=hunter2hunter2"
+	secretKey := "sk-proj-FAKEtestkey1234567890123456789012345678901234"
+
+	if err := m.Dispatch(Event{
+		Type:    "test.event",
+		Message: secretPassword,
+		Details: map[string]string{"api_key": secretKey},
+	}); err != nil {
+		t.Fatalf("dispatch failed: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for delivery, got %d deliveries", received.Load())
+	}
+
+	mu.Lock()
+	body := append([]byte(nil), receivedBody...)
+	mu.Unlock()
+
+	if len(body) == 0 {
+		t.Fatalf("expected non-empty webhook body")
+	}
+
+	if err := json.Unmarshal(body, new(any)); err != nil {
+		t.Fatalf("expected valid JSON payload, got unmarshal error: %v\nbody=%s", err, string(body))
+	}
+
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "hunter2hunter2") {
+		t.Fatalf("expected password secret to be redacted from slack payload")
+	}
+	if strings.Contains(bodyStr, "sk-proj-FAKE") {
+		t.Fatalf("expected API key secret to be redacted from slack payload")
+	}
+	if !strings.Contains(bodyStr, "[REDACTED:") {
+		t.Fatalf("expected redaction placeholder in slack payload")
+	}
+}
+
+func TestDispatch_RedactsSecrets_TemplatePayload(t *testing.T) {
+	t.Parallel()
+
+	var received atomic.Int32
+	var mu sync.Mutex
+	var receivedBody []byte
+	done := make(chan struct{}, 1)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = append([]byte(nil), body...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}))
+	defer ts.Close()
+
+	m := NewManagerWithRedaction(ManagerConfig{
+		QueueSize:   10,
+		WorkerCount: 1,
+	}, redaction.Config{Mode: redaction.ModeWarn})
+
+	if err := m.Register(WebhookConfig{
+		ID:       "tmpl",
+		URL:      ts.URL,
+		Template: `{"message": {{json .Message}}, "details": {{json .Details}}}`,
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer m.Stop()
+
+	secretPassword := "password=hunter2hunter2"
+	secretKey := "sk-proj-FAKEtestkey1234567890123456789012345678901234"
+
+	if err := m.Dispatch(Event{
+		Type:    "test.event",
+		Message: secretPassword,
+		Details: map[string]string{"api_key": secretKey},
+	}); err != nil {
+		t.Fatalf("dispatch failed: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for delivery, got %d deliveries", received.Load())
+	}
+
+	mu.Lock()
+	body := append([]byte(nil), receivedBody...)
+	mu.Unlock()
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("expected valid JSON payload, got unmarshal error: %v\nbody=%s", err, string(body))
+	}
+
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "hunter2hunter2") {
+		t.Fatalf("expected password secret to be redacted from template payload")
+	}
+	if strings.Contains(bodyStr, "sk-proj-FAKE") {
+		t.Fatalf("expected API key secret to be redacted from template payload")
+	}
+	if !strings.Contains(bodyStr, "[REDACTED:") {
+		t.Fatalf("expected redaction placeholder in template payload")
+	}
+}
+
 func TestRetryLogic(t *testing.T) {
 	t.Parallel()
 
