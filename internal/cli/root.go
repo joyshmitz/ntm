@@ -2812,6 +2812,7 @@ func init() {
 		newHealthCmd(),
 		newDoctorCmd(),
 		newCleanupCmd(),
+		newSupportBundleCmd(),
 		newSafetyCmd(),
 		newPolicyCmd(),
 		newKernelCmd(),
