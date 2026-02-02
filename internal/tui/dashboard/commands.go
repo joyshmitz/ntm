@@ -80,10 +80,20 @@ func (m *Model) fetchMetricsCmd() tea.Cmd {
 // fetchHistoryCmd reads recent history
 func (m *Model) fetchHistoryCmd() tea.Cmd {
 	gen := m.nextGen(refreshHistory)
+	session := m.session
 	return func() tea.Msg {
-		entries, err := history.ReadRecent(20)
+		entries, err := history.ReadRecent(200)
 		if err != nil {
 			return HistoryUpdateMsg{Err: err, Gen: gen}
+		}
+		if session != "" && len(entries) > 0 {
+			filtered := make([]history.HistoryEntry, 0, len(entries))
+			for _, e := range entries {
+				if e.Session == session {
+					filtered = append(filtered, e)
+				}
+			}
+			entries = filtered
 		}
 		return HistoryUpdateMsg{Entries: entries, Gen: gen}
 	}

@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Dicklesworthstone/ntm/internal/history"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestNewHistoryPanel(t *testing.T) {
@@ -484,5 +485,150 @@ func TestHistoryEntryStruct(t *testing.T) {
 	}
 	if !entry.Success {
 		t.Error("expected Success to be true")
+	}
+}
+
+func TestHistoryPanel_FilterStatusCycle(t *testing.T) {
+	panel := NewHistoryPanel()
+	panel.SetSize(80, 20)
+	panel.Focus()
+
+	entries := []history.HistoryEntry{
+		{ID: "ok", Prompt: "ok", Targets: []string{"1"}, Success: true, Timestamp: time.Now().UTC()},
+		{ID: "bad", Prompt: "bad", Targets: []string{"2"}, Success: false, Timestamp: time.Now().UTC()},
+	}
+	panel.SetEntries(entries, nil)
+
+	if got := len(panel.visibleEntries); got != 2 {
+		t.Fatalf("expected 2 visible entries initially, got %d", got)
+	}
+
+	// f => success-only
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if got := len(panel.visibleEntries); got != 1 {
+		t.Fatalf("expected 1 visible entry after success-only filter, got %d", got)
+	}
+	if panel.visibleEntries[0].ID != "ok" {
+		t.Fatalf("expected 'ok' entry visible, got %q", panel.visibleEntries[0].ID)
+	}
+
+	// f => failure-only
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if got := len(panel.visibleEntries); got != 1 {
+		t.Fatalf("expected 1 visible entry after failure-only filter, got %d", got)
+	}
+	if panel.visibleEntries[0].ID != "bad" {
+		t.Fatalf("expected 'bad' entry visible, got %q", panel.visibleEntries[0].ID)
+	}
+
+	// f => all
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if got := len(panel.visibleEntries); got != 2 {
+		t.Fatalf("expected 2 visible entries after resetting filter, got %d", got)
+	}
+}
+
+func TestHistoryPanel_FilterAgentCycle_UsesPaneMeta(t *testing.T) {
+	panel := NewHistoryPanel()
+	panel.SetSize(80, 20)
+	panel.Focus()
+
+	entries := []history.HistoryEntry{
+		{ID: "cc", Prompt: "to claude", Targets: []string{"1"}, Success: true, Timestamp: time.Now().UTC()},
+		{ID: "cod", Prompt: "to codex", Targets: []string{"2"}, Success: true, Timestamp: time.Now().UTC()},
+	}
+	panel.SetEntries(entries, nil)
+	panel.SetPanes([]tmux.Pane{
+		{Index: 1, Type: tmux.AgentClaude, NTMIndex: 1, Title: "sess__cc_1"},
+		{Index: 2, Type: tmux.AgentCodex, NTMIndex: 1, Title: "sess__cod_1"},
+	})
+
+	// a => Claude only
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got := len(panel.visibleEntries); got != 1 {
+		t.Fatalf("expected 1 visible entry after Claude filter, got %d", got)
+	}
+	if panel.visibleEntries[0].ID != "cc" {
+		t.Fatalf("expected 'cc' entry visible, got %q", panel.visibleEntries[0].ID)
+	}
+
+	// a => Codex only
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got := len(panel.visibleEntries); got != 1 {
+		t.Fatalf("expected 1 visible entry after Codex filter, got %d", got)
+	}
+	if panel.visibleEntries[0].ID != "cod" {
+		t.Fatalf("expected 'cod' entry visible, got %q", panel.visibleEntries[0].ID)
+	}
+
+	// a => Gemini only (none)
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got := len(panel.visibleEntries); got != 0 {
+		t.Fatalf("expected 0 visible entries after Gemini filter, got %d", got)
+	}
+
+	// a => Any (all)
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got := len(panel.visibleEntries); got != 2 {
+		t.Fatalf("expected 2 visible entries after resetting agent filter, got %d", got)
+	}
+}
+
+func TestHistoryPanel_FilterTimeCycle(t *testing.T) {
+	panel := NewHistoryPanel()
+	panel.SetSize(80, 20)
+	panel.Focus()
+
+	now := time.Now().UTC()
+	entries := []history.HistoryEntry{
+		{ID: "recent", Prompt: "recent", Targets: []string{"1"}, Success: true, Timestamp: now.Add(-10 * time.Minute)},
+		{ID: "old", Prompt: "old", Targets: []string{"1"}, Success: true, Timestamp: now.Add(-2 * time.Hour)},
+	}
+	panel.SetEntries(entries, nil)
+
+	// t => 1h
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if got := len(panel.visibleEntries); got != 1 {
+		t.Fatalf("expected 1 visible entry after 1h filter, got %d", got)
+	}
+	if panel.visibleEntries[0].ID != "recent" {
+		t.Fatalf("expected 'recent' entry visible, got %q", panel.visibleEntries[0].ID)
+	}
+}
+
+func TestHistoryPanel_PreviewOverlayToggleAndCopyMsg(t *testing.T) {
+	panel := NewHistoryPanel()
+	panel.SetSize(80, 20)
+	panel.Focus()
+
+	entries := []history.HistoryEntry{
+		{ID: "entry-1", Prompt: "First command", Targets: []string{"1"}, Success: true, Timestamp: time.Now().UTC()},
+	}
+	panel.SetEntries(entries, nil)
+
+	// v => open preview overlay
+	panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if !panel.showPreview {
+		t.Fatal("expected preview overlay to be shown after 'v'")
+	}
+
+	// y should produce a CopyMsg command while preview is open.
+	_, cmd := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd after 'y' in preview overlay")
+	}
+	msg := cmd()
+	copyMsg, ok := msg.(CopyMsg)
+	if !ok {
+		t.Fatalf("expected CopyMsg, got %T", msg)
+	}
+	if copyMsg.Text != "First command" {
+		t.Fatalf("expected copied text to match prompt, got %q", copyMsg.Text)
+	}
+
+	// Esc => close preview overlay
+	panel.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if panel.showPreview {
+		t.Fatal("expected preview overlay to be closed after Esc")
 	}
 }

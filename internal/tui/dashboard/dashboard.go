@@ -24,6 +24,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
+	"github.com/Dicklesworthstone/ntm/internal/clipboard"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	ctxmon "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/cost"
@@ -660,7 +661,7 @@ var dashKeys = KeyMap{
 	Send:           key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "send prompt")),
 	Refresh:        key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Pause:          key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause/resume auto-refresh")),
-	Quit:           key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit")),
+	Quit:           key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 	ContextRefresh: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "refresh context")),
 	MailRefresh:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "refresh mail")),
 	InboxToggle:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inbox details")),
@@ -1998,6 +1999,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle replay request from history panel
 		return m, m.executeReplay(msg.Entry)
 
+	case panels.CopyMsg:
+		clip, err := clipboard.New()
+		if err != nil {
+			m.healthMessage = fmt.Sprintf("Clipboard unavailable: %v", err)
+			return m, nil
+		}
+		if err := clip.Copy(msg.Text); err != nil {
+			m.healthMessage = fmt.Sprintf("Copy failed: %v", err)
+			return m, nil
+		}
+		m.healthMessage = "Copied prompt to clipboard"
+		return m, nil
+
 	case BeadsUpdateMsg:
 		if !m.acceptUpdate(refreshBeads, msg.Gen) {
 			return m, nil
@@ -2297,6 +2311,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 
 			m.panes = msg.Panes
+			if m.historyPanel != nil {
+				m.historyPanel.SetPanes(m.panes)
+			}
 
 			// Migrate paneStatus entries from old indices to new indices by pane ID
 			// This prevents stale data when pane indices change (add/remove/reorder)
@@ -2832,13 +2849,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case key.Matches(msg, dashKeys.Up):
-			if m.cursor > 0 {
-				m.cursor--
+			if m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail {
+				if m.cursor > 0 {
+					m.cursor--
+				}
 			}
 
 		case key.Matches(msg, dashKeys.Down):
-			if m.cursor < len(m.panes)-1 {
-				m.cursor++
+			if m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail {
+				if m.cursor < len(m.panes)-1 {
+					m.cursor++
+				}
 			}
 
 		case key.Matches(msg, dashKeys.Refresh):
@@ -2864,7 +2885,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.createCheckpointCmd()
 
 		case key.Matches(msg, dashKeys.Zoom):
-			if len(m.panes) > 0 && m.cursor < len(m.panes) {
+			if (m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail) && len(m.panes) > 0 && m.cursor < len(m.panes) {
 				// Zoom to selected pane
 				p := m.panes[m.cursor]
 				_ = tmux.ZoomPane(m.session, p.Index)
