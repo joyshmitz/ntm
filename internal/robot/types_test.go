@@ -622,6 +622,9 @@ func TestCriticalFieldsAlwaysPresent(t *testing.T) {
 		output := SendOutput{
 			RobotResponse:  NewRobotResponse(true),
 			Session:        "test",
+			Blocked:        false,
+			Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+			Warnings:       []string{},
 			Targets:        []string{},
 			Successful:     []string{},
 			Failed:         []SendError{},
@@ -638,7 +641,7 @@ func TestCriticalFieldsAlwaysPresent(t *testing.T) {
 			t.Fatalf("failed to unmarshal: %v", err)
 		}
 
-		requiredArrays := []string{"targets", "successful", "failed"}
+		requiredArrays := []string{"warnings", "targets", "successful", "failed"}
 		for _, field := range requiredArrays {
 			if _, ok := parsed[field]; !ok {
 				t.Errorf("required field %q is missing from JSON output", field)
@@ -717,6 +720,9 @@ func TestOptionalFieldsOmitted(t *testing.T) {
 		output := SendOutput{
 			RobotResponse:  NewRobotResponse(true),
 			Session:        "test",
+			Blocked:        false,
+			Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+			Warnings:       []string{},
 			Targets:        []string{"1"},
 			Successful:     []string{"1"},
 			Failed:         []SendError{},
@@ -746,6 +752,9 @@ func TestOptionalFieldsOmitted(t *testing.T) {
 		output := SendOutput{
 			RobotResponse:  NewRobotResponse(true),
 			Session:        "test",
+			Blocked:        false,
+			Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+			Warnings:       []string{},
 			Targets:        []string{"1"},
 			Successful:     []string{},
 			Failed:         []SendError{},

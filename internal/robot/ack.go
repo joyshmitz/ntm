@@ -413,6 +413,41 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 	// First, send the message
 	sentAt := time.Now().UTC()
 
+	redactCfg := normalizeSendRedactionConfig(opts.Redaction)
+	messageToSend, preview, redactionSummary, redactionWarnings, blocked := applySendMessageRedaction(opts.Message, redactCfg)
+	if blocked {
+		errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
+		if parts := formatRedactionCategoryCounts(redactionSummary.Categories); parts != "" {
+			errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
+		}
+		errResp := NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact")
+		return &SendAndAckOutput{
+			RobotResponse: errResp,
+			Send: SendOutput{
+				RobotResponse:  errResp,
+				Session:        opts.Session,
+				SentAt:         sentAt,
+				Blocked:        true,
+				Redaction:      redactionSummary,
+				Warnings:       redactionWarnings,
+				Targets:        []string{},
+				Successful:     []string{},
+				Failed:         []SendError{},
+				MessagePreview: preview,
+			},
+			Ack: AckOutput{
+				RobotResponse: errResp,
+				Session:       opts.Session,
+				SentAt:        sentAt,
+				CompletedAt:   time.Now().UTC(),
+				Confirmations: []AckConfirmation{},
+				Pending:       []string{},
+				Failed:        []AckFailure{{Pane: "send", Reason: "blocked by redaction"}},
+			},
+		}, nil
+	}
+	opts.Message = messageToSend
+
 	if !tmux.SessionExists(opts.Session) {
 		return &SendAndAckOutput{
 			RobotResponse: NewErrorResponse(
@@ -428,10 +463,13 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 				),
 				Session:        opts.Session,
 				SentAt:         sentAt,
+				Blocked:        false,
+				Redaction:      redactionSummary,
+				Warnings:       redactionWarnings,
 				Targets:        []string{},
 				Successful:     []string{},
 				Failed:         []SendError{{Pane: "session", Error: fmt.Sprintf("session '%s' not found", opts.Session)}},
-				MessagePreview: truncateMessage(opts.Message),
+				MessagePreview: preview,
 			},
 			Ack: AckOutput{
 				RobotResponse: NewErrorResponse(
@@ -465,10 +503,13 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 				),
 				Session:        opts.Session,
 				SentAt:         sentAt,
+				Blocked:        false,
+				Redaction:      redactionSummary,
+				Warnings:       redactionWarnings,
 				Targets:        []string{},
 				Successful:     []string{},
 				Failed:         []SendError{{Pane: "panes", Error: fmt.Sprintf("failed to get panes: %v", err)}},
-				MessagePreview: truncateMessage(opts.Message),
+				MessagePreview: preview,
 			},
 			Ack: AckOutput{
 				RobotResponse: NewErrorResponse(
@@ -554,12 +595,16 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 	}
 
 	sendOutput := SendOutput{
+		RobotResponse:  NewRobotResponse(true), // Will be updated based on results
 		Session:        opts.Session,
 		SentAt:         sentAt,
+		Blocked:        false,
+		Redaction:      redactionSummary,
+		Warnings:       redactionWarnings,
 		Targets:        targetKeys,
 		Successful:     []string{},
 		Failed:         []SendError{},
-		MessagePreview: truncateMessage(opts.Message),
+		MessagePreview: preview,
 	}
 
 	// Send to all targets
@@ -581,8 +626,16 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		}
 	}
 
+	// Update success based on send results
+	sendOutput.Success = len(sendOutput.Failed) == 0 && len(sendOutput.Successful) > 0
+	if len(sendOutput.Failed) > 0 {
+		sendOutput.Error = fmt.Sprintf("%d of %d sends failed", len(sendOutput.Failed), len(sendOutput.Targets))
+		sendOutput.ErrorCode = ErrCodeInternalError
+	}
+
 	// Now wait for acknowledgments (only for successful sends)
 	ackOutput := AckOutput{
+		RobotResponse: NewRobotResponse(true), // Will be updated based on results
 		Session:       opts.Session,
 		SentAt:        sentAt,
 		Confirmations: []AckConfirmation{},
@@ -660,6 +713,11 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 
 	if len(ackOutput.Pending) > 0 {
 		ackOutput.TimedOut = true
+		ackOutput.RobotResponse = NewErrorResponse(
+			fmt.Errorf("ack timeout"),
+			ErrCodeTimeout,
+			"Increase --ack-timeout or check agent health",
+		)
 	}
 
 	ackOutput.CompletedAt = time.Now().UTC()

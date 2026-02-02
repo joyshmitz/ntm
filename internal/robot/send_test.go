@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
 // TestSendOutputSchemaStability ensures SendOutput structure remains stable
@@ -17,6 +19,9 @@ func TestSendOutputSchemaStability(t *testing.T) {
 		RobotResponse:  NewRobotResponse(true),
 		Session:        "test-session",
 		SentAt:         time.Now().UTC(),
+		Blocked:        false,
+		Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+		Warnings:       []string{},
 		Targets:        []string{"0", "1", "2"},
 		Successful:     []string{"0", "1"},
 		Failed:         []SendError{{Pane: "2", Error: "test error"}},
@@ -39,6 +44,7 @@ func TestSendOutputSchemaStability(t *testing.T) {
 	// Check that required fields are present
 	requiredFields := []string{
 		"success", "timestamp", "session", "sent_at",
+		"blocked", "redaction", "warnings",
 		"targets", "successful", "failed", "message_preview",
 	}
 
@@ -54,7 +60,7 @@ func TestSendOutputSchemaStability(t *testing.T) {
 	}
 
 	// Check that arrays are never null
-	arrayFields := []string{"targets", "successful", "failed"}
+	arrayFields := []string{"warnings", "targets", "successful", "failed"}
 	for _, field := range arrayFields {
 		value, exists := jsonMap[field]
 		if !exists {
@@ -73,6 +79,9 @@ func TestSendOutputDeterministicOrdering(t *testing.T) {
 		RobotResponse:  NewRobotResponse(true),
 		Session:        "test-session",
 		SentAt:         time.Now().UTC(),
+		Blocked:        false,
+		Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+		Warnings:       []string{},
 		Targets:        []string{"2", "0", "1"}, // Intentionally unordered
 		Successful:     []string{"1", "0"},      // Intentionally unordered
 		Failed:         []SendError{{Pane: "2", Error: "error"}},
@@ -120,6 +129,75 @@ func TestSendOutputDeterministicOrdering(t *testing.T) {
 		if success != expectedSuccessful[i] {
 			t.Errorf("Successful array order changed: expected %q at position %d, got %q", expectedSuccessful[i], i, success)
 		}
+	}
+}
+
+func TestApplySendMessageRedaction_WarnMode(t *testing.T) {
+	input := "prefix password=hunter2hunter2 suffix\n"
+	msgToSend, preview, summary, warnings, blocked := applySendMessageRedaction(input, redaction.Config{Mode: redaction.ModeWarn})
+	if blocked {
+		t.Fatalf("expected blocked=false")
+	}
+	if msgToSend != input {
+		t.Fatalf("expected msgToSend to be unchanged in warn mode")
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in warn mode")
+	}
+	if summary.Action != "warn" {
+		t.Fatalf("expected action=warn, got %q", summary.Action)
+	}
+	if summary.Findings == 0 {
+		t.Fatalf("expected findings > 0")
+	}
+	if !strings.Contains(preview, "hunter2hunter2") {
+		t.Fatalf("expected preview to include the original content in warn mode, got %q", preview)
+	}
+}
+
+func TestApplySendMessageRedaction_RedactMode(t *testing.T) {
+	input := "prefix password=hunter2hunter2 suffix\n"
+	msgToSend, preview, summary, warnings, blocked := applySendMessageRedaction(input, redaction.Config{Mode: redaction.ModeRedact})
+	if blocked {
+		t.Fatalf("expected blocked=false")
+	}
+	if strings.Contains(msgToSend, "hunter2hunter2") {
+		t.Fatalf("expected msgToSend to be redacted, got %q", msgToSend)
+	}
+	if !strings.Contains(msgToSend, "[REDACTED:PASSWORD:") {
+		t.Fatalf("expected msgToSend to contain password placeholder, got %q", msgToSend)
+	}
+	if summary.Action != "redact" {
+		t.Fatalf("expected action=redact, got %q", summary.Action)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in redact mode")
+	}
+	if strings.Contains(preview, "hunter2hunter2") {
+		t.Fatalf("expected preview to be redacted, got %q", preview)
+	}
+}
+
+func TestApplySendMessageRedaction_BlockMode(t *testing.T) {
+	input := "prefix password=hunter2hunter2 suffix\n"
+	msgToSend, preview, summary, warnings, blocked := applySendMessageRedaction(input, redaction.Config{Mode: redaction.ModeBlock})
+	if !blocked {
+		t.Fatalf("expected blocked=true")
+	}
+	if msgToSend != "" {
+		t.Fatalf("expected msgToSend to be empty when blocked, got %q", msgToSend)
+	}
+	if summary.Action != "block" {
+		t.Fatalf("expected action=block, got %q", summary.Action)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in block mode")
+	}
+	if strings.Contains(preview, "hunter2hunter2") {
+		t.Fatalf("expected preview to be redacted in block mode, got %q", preview)
+	}
+	if !strings.Contains(preview, "[REDACTED:PASSWORD:") {
+		t.Fatalf("expected preview to include placeholder in block mode, got %q", preview)
 	}
 }
 
@@ -553,6 +631,9 @@ func simulateSendDryRun(opts SendOptions, panes []mockPane) SendOutput {
 		RobotResponse:  NewRobotResponse(true),
 		Session:        opts.Session,
 		SentAt:         time.Now().UTC(),
+		Blocked:        false,
+		Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+		Warnings:       []string{},
 		Targets:        targets,
 		Successful:     []string{},
 		Failed:         []SendError{},

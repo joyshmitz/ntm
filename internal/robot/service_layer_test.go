@@ -231,6 +231,9 @@ func TestServiceLayerNullSafety(t *testing.T) {
 		output := SendOutput{
 			RobotResponse: NewRobotResponse(true),
 			Session:       "test",
+			Blocked:       false,
+			Redaction:     RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+			Warnings:      []string{},
 			Targets:       []string{},
 			Successful:    []string{},
 			Failed:        []SendError{},
@@ -247,7 +250,7 @@ func TestServiceLayerNullSafety(t *testing.T) {
 		}
 
 		// Arrays should be [] not null
-		arrayFields := []string{"targets", "successful", "failed"}
+		arrayFields := []string{"warnings", "targets", "successful", "failed"}
 		for _, field := range arrayFields {
 			val, exists := raw[field]
 			if !exists {

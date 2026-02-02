@@ -22,8 +22,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/health"
-	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	swarmlib "github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -3675,8 +3675,8 @@ type SendError struct {
 
 // SendOptions configures the PrintSend operation
 type SendOptions struct {
-	Session    string   // Target session name
-	Message    string   // Message to send
+	Session    string // Target session name
+	Message    string // Message to send
 	Redaction  redaction.Config
 	All        bool     // Send to all panes (including user)
 	Panes      []string // Specific pane indices (e.g., "0", "1", "2")

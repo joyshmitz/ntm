@@ -302,6 +302,9 @@ func TestArrayFieldsNeverNull(t *testing.T) {
 		output := SendOutput{
 			RobotResponse: NewRobotResponse(true),
 			Session:       "test",
+			Blocked:       false,
+			Redaction:     RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+			Warnings:      []string{},    // Empty but present
 			Targets:       []string{},    // Empty but present
 			Successful:    []string{},    // Empty but present
 			Failed:        []SendError{}, // Empty but present
@@ -318,7 +321,7 @@ func TestArrayFieldsNeverNull(t *testing.T) {
 		}
 
 		// These arrays should be present as [] not null
-		for _, field := range []string{"targets", "successful", "failed"} {
+		for _, field := range []string{"warnings", "targets", "successful", "failed"} {
 			val, exists := unmarshaled[field]
 			if !exists {
 				t.Errorf("SendOutput.%s should be present in JSON", field)

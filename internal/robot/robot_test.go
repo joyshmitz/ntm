@@ -389,6 +389,9 @@ func TestSendOutputMarshal(t *testing.T) {
 	output := SendOutput{
 		Session:        "myproject",
 		SentAt:         time.Now().UTC(),
+		Blocked:        false,
+		Redaction:      RedactionSummary{Mode: "off", Findings: 0, Action: "off"},
+		Warnings:       []string{},
 		Targets:        []string{"1", "2", "3"},
 		Successful:     []string{"1", "2"},
 		Failed:         []SendError{{Pane: "3", Error: "pane not found"}},
