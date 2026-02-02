@@ -88,6 +88,7 @@ func NewLogger(opts LoggerOptions) (*Logger, error) {
 }
 
 // Log writes an event to the log file.
+// If redaction is configured via SetRedactionConfig, sensitive data is redacted before storage.
 func (l *Logger) Log(event *Event) error {
 	if !l.enabled || l.file == nil {
 		return nil
@@ -96,8 +97,11 @@ func (l *Logger) Log(event *Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Apply redaction if configured
+	eventToWrite := RedactEvent(event)
+
 	// Serialize event to JSON
-	data, err := json.Marshal(event)
+	data, err := json.Marshal(eventToWrite)
 	if err != nil {
 		return fmt.Errorf("marshaling event: %w", err)
 	}

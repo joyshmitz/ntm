@@ -49,6 +49,7 @@ func StoragePath() string {
 
 // Append adds an entry to the history file.
 // Thread-safe and process-safe.
+// If redaction is configured via SetRedactionConfig, prompts are redacted before storage.
 func Append(entry *HistoryEntry) error {
 	unlock, err := acquireLock()
 	if err != nil {
@@ -69,7 +70,10 @@ func Append(entry *HistoryEntry) error {
 	}
 	defer f.Close()
 
-	data, err := json.Marshal(entry)
+	// Apply redaction if configured
+	entryToWrite := RedactEntry(entry)
+
+	data, err := json.Marshal(entryToWrite)
 	if err != nil {
 		return err
 	}
@@ -80,6 +84,7 @@ func Append(entry *HistoryEntry) error {
 }
 
 // BatchAppend adds multiple entries to the history file atomically.
+// If redaction is configured via SetRedactionConfig, prompts are redacted before storage.
 func BatchAppend(entries []*HistoryEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -106,7 +111,10 @@ func BatchAppend(entries []*HistoryEntry) error {
 
 	writer := bufio.NewWriter(f)
 	for _, entry := range entries {
-		data, err := json.Marshal(entry)
+		// Apply redaction if configured
+		entryToWrite := RedactEntry(entry)
+
+		data, err := json.Marshal(entryToWrite)
 		if err != nil {
 			return err
 		}

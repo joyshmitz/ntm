@@ -1196,6 +1196,7 @@ type SystemInfo struct {
 type StatusOutput struct {
 	RobotResponse
 	GeneratedAt    time.Time              `json:"generated_at"`
+	SafetyProfile  string                 `json:"safety_profile,omitempty"`
 	System         SystemInfo             `json:"system"`
 	Sessions       []SessionInfo          `json:"sessions"`
 	Pagination     *PaginationInfo        `json:"pagination,omitempty"`
@@ -1511,6 +1512,7 @@ func GetStatusWithOptions(opts PaginationOptions) (*StatusOutput, error) {
 	output := &StatusOutput{
 		RobotResponse: NewRobotResponse(true),
 		GeneratedAt:   time.Now().UTC(),
+		SafetyProfile: cfg.Safety.Profile,
 		System: SystemInfo{
 			Version:   Version,
 			Commit:    Commit,
@@ -3035,6 +3037,7 @@ func buildSnapshotAgentMail() *SnapshotAgentMail {
 type SnapshotOutput struct {
 	RobotResponse
 	Timestamp      string             `json:"ts"`
+	SafetyProfile  string             `json:"safety_profile,omitempty"`
 	Sessions       []SnapshotSession  `json:"sessions"`
 	Pagination     *PaginationInfo    `json:"pagination,omitempty"`
 	AgentHints     *AgentHints        `json:"_agent_hints,omitempty"`
@@ -3170,6 +3173,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 	output := &SnapshotOutput{
 		RobotResponse: NewRobotResponse(true),
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
+		SafetyProfile: cfg.Safety.Profile,
 		Sessions:      []SnapshotSession{},
 		Alerts:        []string{},
 	}

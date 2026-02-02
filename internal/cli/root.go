@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
@@ -112,6 +114,14 @@ Shell Integration:
 
 			// Apply redaction flag overrides
 			applyRedactionFlagOverrides(cfg)
+
+			// Ensure persisted prompt history + event logs never store raw secrets/PII when redaction is enabled.
+			// (bd-3sl0s)
+			if cfg != nil {
+				redactCfg := cfg.Redaction.ToRedactionLibConfig()
+				history.SetRedactionConfig(&redactCfg)
+				events.SetRedactionConfig(&redactCfg)
+			}
 
 			// Run automatic temp file cleanup if enabled
 			MaybeRunStartupCleanup(

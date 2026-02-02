@@ -550,6 +550,19 @@ func TestPrintStatus(t *testing.T) {
 		t.Error("GeneratedAt is zero")
 	}
 
+	if result.SafetyProfile == "" {
+		t.Error("SafetyProfile is empty")
+	} else {
+		valid := map[string]bool{
+			config.SafetyProfileStandard: true,
+			config.SafetyProfileSafe:     true,
+			config.SafetyProfileParanoid: true,
+		}
+		if !valid[result.SafetyProfile] {
+			t.Errorf("SafetyProfile = %q, want one of standard|safe|paranoid", result.SafetyProfile)
+		}
+	}
+
 	// System info should be populated
 	if result.System.GoVersion == "" {
 		t.Error("System.GoVersion is empty")
@@ -983,6 +996,10 @@ func TestPrintSnapshot(t *testing.T) {
 	// Timestamp should be set
 	if result.Timestamp == "" {
 		t.Error("Timestamp is empty")
+	}
+
+	if result.SafetyProfile != config.SafetyProfileStandard {
+		t.Errorf("SafetyProfile = %q, want %q", result.SafetyProfile, config.SafetyProfileStandard)
 	}
 
 	// Sessions should be an array

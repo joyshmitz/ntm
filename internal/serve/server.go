@@ -36,6 +36,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/metrics"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -80,6 +81,9 @@ type Server struct {
 	mailClient *agentmail.Client
 	projectDir string
 	mu         sync.Mutex
+
+	// Redaction configuration for REST API
+	redactionCfg *RedactionConfig
 }
 
 // AuthMode configures authentication for the server.
@@ -416,14 +420,16 @@ type WSClient struct {
 
 // WSHub manages WebSocket connections and topic routing.
 type WSHub struct {
-	clients    map[*WSClient]struct{}
-	clientsMu  sync.RWMutex
-	register   chan *WSClient
-	unregister chan *WSClient
-	broadcast  chan *WSEvent
-	seq        int64
-	seqMu      sync.Mutex
-	done       chan struct{}
+	clients       map[*WSClient]struct{}
+	clientsMu     sync.RWMutex
+	register      chan *WSClient
+	unregister    chan *WSClient
+	broadcast     chan *WSEvent
+	seq           int64
+	seqMu         sync.Mutex
+	done          chan struct{}
+	redactionCfg  *RedactionConfig
+	redactionMu   sync.RWMutex
 }
 
 // NewWSHub creates a new WebSocket hub.
@@ -478,6 +484,16 @@ func (h *WSHub) nextSeq() int64 {
 // broadcastEvent sends an event to all subscribed clients.
 func (h *WSHub) broadcastEvent(event *WSEvent) {
 	event.Seq = h.nextSeq()
+
+	// Apply redaction if configured
+	h.redactionMu.RLock()
+	cfg := h.redactionCfg
+	h.redactionMu.RUnlock()
+
+	if cfg != nil && cfg.Enabled && cfg.Config.Mode != redaction.ModeOff {
+		event.Data = redactWSEventData(event.Data, cfg.Config)
+	}
+
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("ws marshal error: %v", err)
@@ -499,6 +515,33 @@ func (h *WSHub) broadcastEvent(event *WSEvent) {
 	}
 }
 
+// redactWSEventData recursively redacts sensitive content in event data.
+func redactWSEventData(data interface{}, cfg redaction.Config) interface{} {
+	if cfg.Mode == redaction.ModeOff {
+		return data
+	}
+
+	switch v := data.(type) {
+	case string:
+		result := redaction.ScanAndRedact(v, cfg)
+		return result.Output
+	case map[string]interface{}:
+		redacted := make(map[string]interface{}, len(v))
+		for key, val := range v {
+			redacted[key] = redactWSEventData(val, cfg)
+		}
+		return redacted
+	case []interface{}:
+		redacted := make([]interface{}, len(v))
+		for i, val := range v {
+			redacted[i] = redactWSEventData(val, cfg)
+		}
+		return redacted
+	default:
+		return data
+	}
+}
+
 // Publish publishes an event to a topic.
 func (h *WSHub) Publish(topic, eventType string, data interface{}) {
 	event := &WSEvent{
@@ -513,6 +556,20 @@ func (h *WSHub) Publish(topic, eventType string, data interface{}) {
 	default:
 		log.Printf("ws broadcast buffer full, dropping event topic=%s", topic)
 	}
+}
+
+// SetRedactionConfig sets the redaction configuration for WebSocket events.
+func (h *WSHub) SetRedactionConfig(cfg *RedactionConfig) {
+	h.redactionMu.Lock()
+	defer h.redactionMu.Unlock()
+	h.redactionCfg = cfg
+}
+
+// GetRedactionConfig returns the current redaction configuration.
+func (h *WSHub) GetRedactionConfig() *RedactionConfig {
+	h.redactionMu.RLock()
+	defer h.redactionMu.RUnlock()
+	return h.redactionCfg
 }
 
 // ClientCount returns the number of connected clients.
@@ -740,6 +797,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(s.corsMiddlewareFunc)
 	r.Use(s.authMiddlewareFunc)
 	r.Use(s.rbacMiddleware) // Extract role from auth claims
+	r.Use(s.redactionMiddleware) // Redact sensitive content in requests/responses
 
 	// Health check (no versioning)
 	r.Get("/health", s.handleHealth)

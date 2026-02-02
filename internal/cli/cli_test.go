@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +211,49 @@ func TestConfigShowCmdExecutes(t *testing.T) {
 	err := rootCmd.Execute()
 	if err != nil {
 		t.Fatalf("Execute() failed: %v", err)
+	}
+}
+
+func TestConfigShowJSONIncludesSafetyProfile(t *testing.T) {
+	resetFlags()
+	cfg = config.Default()
+
+	output, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--json", "config", "show"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+
+	safetyAny, ok := parsed["safety"]
+	if !ok {
+		t.Fatalf("expected safety key in output")
+	}
+	safety, ok := safetyAny.(map[string]any)
+	if !ok {
+		t.Fatalf("expected safety to be object, got %T", safetyAny)
+	}
+
+	profile, _ := safety["profile"].(string)
+	if profile == "" {
+		t.Fatalf("expected safety.profile to be non-empty")
+	}
+	if profile != config.SafetyProfileStandard {
+		t.Fatalf("safety.profile = %q, want %q", profile, config.SafetyProfileStandard)
+	}
+
+	preflight, ok := safety["preflight"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected safety.preflight to be object, got %T", safety["preflight"])
+	}
+	if enabled, ok := preflight["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("expected safety.preflight.enabled=true, got %v", preflight["enabled"])
 	}
 }
 

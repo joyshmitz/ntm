@@ -3020,3 +3020,110 @@ func TestValidatePrivacyConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestSafetyProfileDefaultsInDefault(t *testing.T) {
+	cfg := Default()
+
+	if cfg.Safety.Profile != SafetyProfileStandard {
+		t.Errorf("Default safety profile = %q, want %q", cfg.Safety.Profile, SafetyProfileStandard)
+	}
+	if !cfg.Preflight.Enabled {
+		t.Error("Default Preflight.Enabled should be true")
+	}
+	if cfg.Preflight.Strict {
+		t.Error("Default Preflight.Strict should be false")
+	}
+	if cfg.Redaction.Mode != "warn" {
+		t.Errorf("Default redaction mode = %q, want %q", cfg.Redaction.Mode, "warn")
+	}
+	if cfg.Privacy.Enabled {
+		t.Error("Default privacy should be disabled")
+	}
+}
+
+func TestLoadSafetyProfileAppliesDefaultsAndAllowsOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	t.Run("profile safe applies defaults", func(t *testing.T) {
+		content := `
+[safety]
+profile = "safe"
+`
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+
+		if cfg.Safety.Profile != SafetyProfileSafe {
+			t.Errorf("Safety.Profile = %q, want %q", cfg.Safety.Profile, SafetyProfileSafe)
+		}
+		if cfg.Redaction.Mode != "redact" {
+			t.Errorf("Redaction.Mode = %q, want %q", cfg.Redaction.Mode, "redact")
+		}
+		if cfg.Privacy.Enabled {
+			t.Error("Privacy.Enabled should be false for safe profile")
+		}
+		if cfg.Integrations.DCG.AllowOverride {
+			t.Error("Integrations.DCG.AllowOverride should be false for safe profile")
+		}
+		if !cfg.Preflight.Enabled {
+			t.Error("Preflight.Enabled should be true for safe profile")
+		}
+	})
+
+	t.Run("explicit knob overrides profile defaults", func(t *testing.T) {
+		content := `
+[safety]
+profile = "safe"
+
+[redaction]
+mode = "warn"
+`
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+
+		if cfg.Safety.Profile != SafetyProfileSafe {
+			t.Errorf("Safety.Profile = %q, want %q", cfg.Safety.Profile, SafetyProfileSafe)
+		}
+		if cfg.Redaction.Mode != "warn" {
+			t.Errorf("Redaction.Mode = %q, want %q", cfg.Redaction.Mode, "warn")
+		}
+	})
+}
+
+func TestValidateSafetyConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     SafetyConfig
+		wantErr bool
+	}{
+		{name: "empty ok", cfg: SafetyConfig{}, wantErr: false},
+		{name: "standard ok", cfg: SafetyConfig{Profile: "standard"}, wantErr: false},
+		{name: "safe ok", cfg: SafetyConfig{Profile: "safe"}, wantErr: false},
+		{name: "paranoid ok", cfg: SafetyConfig{Profile: "paranoid"}, wantErr: false},
+		{name: "invalid", cfg: SafetyConfig{Profile: "nope"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSafetyConfig(&tt.cfg)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
