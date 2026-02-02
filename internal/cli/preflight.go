@@ -275,7 +275,12 @@ Examples:
 				return fmt.Errorf("prompt is required")
 			}
 
-			result, err := runPreflight(prompt, strict)
+			effectiveStrict := strict
+			if cfg != nil && !cmd.Flags().Changed("strict") {
+				effectiveStrict = cfg.Preflight.Strict
+			}
+
+			result, err := runPreflight(prompt, effectiveStrict)
 			if err != nil {
 				return err
 			}

@@ -834,6 +834,25 @@ Shell Integration:
 			}
 			return
 		}
+		if robotSupportBundle != "" || cmd.Flags().Changed("robot-support-bundle") {
+			opts := robot.SupportBundleOptions{
+				Session:      robotSupportBundle,
+				OutputPath:   robotSupportBundleOutput,
+				Format:       robotSupportBundleFormat,
+				Since:        robotSupportBundleSince,
+				Lines:        robotSupportBundleLines,
+				MaxSizeMB:    robotSupportBundleMax,
+				RedactMode:   robotSupportBundleRedact,
+				AllSessions:  robotSendAll, // Reuse --all flag
+				AllowPersist: allowSecret,  // Reuse --allow-secret for persist override
+				NTMVersion:   Version,
+			}
+			if err := robot.PrintSupportBundle(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotSend != "" {
 			// Load message from --msg or --msg-file
 			msg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
@@ -2021,6 +2040,15 @@ var (
 	robotMonitorIncludeCaut bool   // include caut provider data
 	robotMonitorOutput      string // output file path (empty = stdout)
 
+	// Robot-support-bundle flags for diagnostic bundle generation (bd-wlon9)
+	robotSupportBundle       string // session name (empty = all or none)
+	robotSupportBundleOutput string // output file path
+	robotSupportBundleFormat string // archive format: zip or tar.gz
+	robotSupportBundleSince  string // include content since duration
+	robotSupportBundleLines  int    // max lines per pane
+	robotSupportBundleMax    int    // max size in MB
+	robotSupportBundleRedact string // redaction mode: warn, redact, block
+
 	// Help verbosity flags
 	helpMinimal bool // show minimal help with essential commands only
 	helpFull    bool // show full help (default behavior)
@@ -2122,6 +2150,16 @@ func init() {
 	rootCmd.Flags().StringVar(&robotMonitorAlert, "alert-threshold", "", "Provider usage % for ALERT level. Optional with --robot-monitor. Example: --alert-threshold=80 (default 80)")
 	rootCmd.Flags().BoolVar(&robotMonitorIncludeCaut, "include-caut", false, "Query caut for provider usage data. Optional with --robot-monitor")
 	rootCmd.Flags().StringVar(&robotMonitorOutput, "output", "", "Output file path for JSONL. Optional with --robot-monitor. Example: --output=/tmp/monitor.jsonl")
+
+	// Robot-support-bundle flags for diagnostic bundle generation
+	rootCmd.Flags().StringVar(&robotSupportBundle, "robot-support-bundle", "", "Generate support bundle with diagnostic info. Optional: SESSION. Example: ntm --robot-support-bundle=myproject")
+	rootCmd.Flags().StringVar(&robotSupportBundleOutput, "bundle-output", "", "Output file path for bundle. Optional with --robot-support-bundle. Example: --bundle-output=/tmp/debug.zip")
+	rootCmd.Flags().StringVar(&robotSupportBundleFormat, "bundle-format", "zip", "Archive format: zip or tar.gz. Optional with --robot-support-bundle")
+	rootCmd.Flags().StringVar(&robotSupportBundleSince, "bundle-since", "", "Include content from duration ago. Optional with --robot-support-bundle. Example: --bundle-since=1h")
+	rootCmd.Flags().IntVar(&robotSupportBundleLines, "bundle-lines", 1000, "Max scrollback lines per pane. Optional with --robot-support-bundle. Example: --bundle-lines=500")
+	rootCmd.Flags().IntVar(&robotSupportBundleMax, "bundle-max-size", 100, "Max bundle size in MB. Optional with --robot-support-bundle. Example: --bundle-max-size=50")
+	rootCmd.Flags().StringVar(&robotSupportBundleRedact, "bundle-redact", "redact", "Redaction mode: off, warn, redact, block. Optional with --robot-support-bundle")
+
 	rootCmd.Flags().BoolVar(&robotGraph, "robot-graph", false, "Get bv dependency graph insights: PageRank, critical path, cycles (JSON)")
 	rootCmd.Flags().BoolVar(&robotTriage, "robot-triage", false, "Get bv triage analysis with recommendations, quick wins, blockers (JSON). Example: ntm --robot-triage --triage-limit=20")
 	rootCmd.Flags().IntVar(&robotTriageLimit, "triage-limit", 10, "Max recommendations per category. Optional with --robot-triage. Example: --triage-limit=20")
@@ -3133,6 +3171,22 @@ Examples:
 						"bead_stale_hours":       effectiveCfg.Alerts.BeadStaleHours,
 						"resolved_prune_minutes": effectiveCfg.Alerts.ResolvedPruneMinutes,
 					},
+					"safety": map[string]interface{}{
+						"profile": effectiveCfg.Safety.Profile,
+						"preflight": map[string]interface{}{
+							"enabled": effectiveCfg.Preflight.Enabled,
+							"strict":  effectiveCfg.Preflight.Strict,
+						},
+						"redaction": map[string]interface{}{
+							"mode": effectiveCfg.Redaction.Mode,
+						},
+						"privacy": map[string]interface{}{
+							"enabled": effectiveCfg.Privacy.Enabled,
+						},
+						"dcg": map[string]interface{}{
+							"allow_override": effectiveCfg.Integrations.DCG.AllowOverride,
+						},
+					},
 					"palette": palette,
 				})
 			}
@@ -3521,7 +3575,7 @@ func needsConfigLoading(cmdName string) bool {
 			robotInterrupt != "" || robotRestartPane != "" || robotProbe != "" || robotGraph || robotMail || robotHealth != "" ||
 			robotHealthOAuth != "" || robotLogs != "" || robotDiagnose != "" || robotTerse || robotMarkdown || robotSave != "" || robotRestore != "" ||
 			robotContext != "" || robotEnsemble != "" || robotEnsembleSpawn != "" || robotEnsembleSuggest != "" || robotEnsembleStop != "" || robotAlerts || robotIsWorking != "" || robotAgentHealth != "" ||
-			robotSmartRestart != "" || robotMonitor != "" || robotEnv != "" {
+			robotSmartRestart != "" || robotMonitor != "" || robotEnv != "" || robotSupportBundle != "" {
 			return true
 		}
 	}

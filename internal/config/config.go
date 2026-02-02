@@ -86,6 +86,8 @@ type Config struct {
 	Ensemble           EnsembleConfig        `toml:"ensemble"`         // Reasoning ensemble defaults
 	Swarm              SwarmConfig           `toml:"swarm"`            // Weighted multi-project agent swarm
 	SpawnPacing        SpawnPacingConfig     `toml:"spawn_pacing"`     // Spawn scheduler pacing configuration
+	Safety             SafetyConfig          `toml:"safety"`           // Safety profile selection + defaults
+	Preflight          PreflightConfig       `toml:"preflight"`        // Prompt preflight/lint configuration
 	Redaction          RedactionConfig       `toml:"redaction"`        // Secrets/PII redaction configuration
 	Privacy            PrivacyConfig         `toml:"privacy"`          // Privacy mode configuration
 
@@ -1447,6 +1449,123 @@ func LoadPaletteFromMarkdown(path string) ([]PaletteCmd, error) {
 // DefaultAgentMailURL is the default Agent Mail server URL.
 const DefaultAgentMailURL = "http://127.0.0.1:8765/mcp/"
 
+// Safety profiles are user-friendly presets that bundle multiple safety knobs.
+// These should remain explicit mappings (no hidden magic) so users can reason about overrides.
+const (
+	SafetyProfileStandard = "standard"
+	SafetyProfileSafe     = "safe"
+	SafetyProfileParanoid = "paranoid"
+)
+
+// SafetyConfig controls safety profile selection.
+type SafetyConfig struct {
+	// Profile selects the safety profile preset:
+	// - standard (default): preflight on, redaction=warn, privacy=off
+	// - safe: preflight on, redaction=redact, stricter destructive command gating
+	// - paranoid: preflight on, redaction=block, privacy=on by default
+	Profile string `toml:"profile"`
+}
+
+// DefaultSafetyConfig returns sensible safety defaults.
+func DefaultSafetyConfig() SafetyConfig {
+	return SafetyConfig{Profile: SafetyProfileStandard}
+}
+
+// ValidateSafetyConfig validates the safety configuration.
+func ValidateSafetyConfig(cfg *SafetyConfig) error {
+	if cfg.Profile == "" {
+		return nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Profile)) {
+	case SafetyProfileStandard, SafetyProfileSafe, SafetyProfileParanoid:
+		return nil
+	default:
+		return fmt.Errorf("invalid safety profile %q: must be %q, %q, or %q",
+			cfg.Profile, SafetyProfileStandard, SafetyProfileSafe, SafetyProfileParanoid)
+	}
+}
+
+// PreflightConfig controls prompt preflight (lint/validation) defaults.
+type PreflightConfig struct {
+	// Enabled controls whether prompt preflight is used by commands that send content.
+	Enabled bool `toml:"enabled"`
+	// Strict controls whether warnings are treated as errors by default.
+	Strict bool `toml:"strict"`
+}
+
+// DefaultPreflightConfig returns sensible preflight defaults.
+func DefaultPreflightConfig() PreflightConfig {
+	return PreflightConfig{
+		Enabled: true,
+		Strict:  false,
+	}
+}
+
+// ValidatePreflightConfig validates the preflight configuration.
+func ValidatePreflightConfig(cfg *PreflightConfig) error {
+	// No complex validation needed for boolean flags.
+	return nil
+}
+
+type safetyProfileDefaults struct {
+	preflightEnabled bool
+	preflightStrict  bool
+	redactionMode    string
+	privacyEnabled   bool
+	dcgAllowOverride bool
+}
+
+var safetyProfileMap = map[string]safetyProfileDefaults{
+	SafetyProfileStandard: {
+		preflightEnabled: true,
+		preflightStrict:  false,
+		redactionMode:    "warn",
+		privacyEnabled:   false,
+		dcgAllowOverride: true,
+	},
+	SafetyProfileSafe: {
+		preflightEnabled: true,
+		preflightStrict:  false,
+		redactionMode:    "redact",
+		privacyEnabled:   false,
+		dcgAllowOverride: false,
+	},
+	SafetyProfileParanoid: {
+		preflightEnabled: true,
+		preflightStrict:  true,
+		redactionMode:    "block",
+		privacyEnabled:   true,
+		dcgAllowOverride: false,
+	},
+}
+
+func normalizeSafetyProfile(profile string) string {
+	p := strings.ToLower(strings.TrimSpace(profile))
+	if p == "" {
+		return SafetyProfileStandard
+	}
+	if _, ok := safetyProfileMap[p]; ok {
+		return p
+	}
+	return SafetyProfileStandard
+}
+
+func applySafetyProfileDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+
+	cfg.Safety.Profile = normalizeSafetyProfile(cfg.Safety.Profile)
+	def := safetyProfileMap[cfg.Safety.Profile]
+
+	cfg.Preflight.Enabled = def.preflightEnabled
+	cfg.Preflight.Strict = def.preflightStrict
+	cfg.Redaction.Mode = def.redactionMode
+	cfg.Privacy.Enabled = def.privacyEnabled
+	cfg.Integrations.DCG.AllowOverride = def.dcgAllowOverride
+}
+
 // RedactionConfig holds configuration for secrets/PII redaction.
 // This controls how NTM handles sensitive content in commands, mail, and exports.
 type RedactionConfig struct {
@@ -1617,9 +1736,14 @@ func Default() *Config {
 		Assign:          DefaultAssignConfig(),
 		Ensemble:        DefaultEnsembleConfig(),
 		Swarm:           DefaultSwarmConfig(),
+		Safety:          DefaultSafetyConfig(),
+		Preflight:       DefaultPreflightConfig(),
 		Redaction:       DefaultRedactionConfig(),
 		Privacy:         DefaultPrivacyConfig(),
 	}
+
+	// Apply safety profile defaults (standard/safe/paranoid).
+	applySafetyProfileDefaults(cfg)
 
 	// Try to load palette from markdown file
 	if mdPath := findPaletteMarkdown(); mdPath != "" {
@@ -1771,6 +1895,19 @@ func Load(path string) (*Config, error) {
 
 	// 2. Read and unmarshal TOML over defaults
 	if data, err := os.ReadFile(path); err == nil {
+		// Pre-scan safety profile so we can apply profile defaults before decoding the rest.
+		// This lets explicit knob overrides in TOML take precedence over the selected profile.
+		var pre struct {
+			Safety SafetyConfig `toml:"safety"`
+		}
+		if err := toml.Unmarshal(data, &pre); err != nil {
+			return nil, fmt.Errorf("parsing config: %w", err)
+		}
+		if pre.Safety.Profile != "" {
+			cfg.Safety.Profile = pre.Safety.Profile
+		}
+		applySafetyProfileDefaults(cfg)
+
 		if err := toml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config: %w", err)
 		}
@@ -2155,6 +2292,44 @@ func Print(cfg *Config, w io.Writer) error {
 		fmt.Fprintln(w, "# audit_log = \"~/.ntm/dcg_audit.log\"")
 	}
 	fmt.Fprintf(w, "allow_override = %t\n", cfg.Integrations.DCG.AllowOverride)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[safety]")
+	fmt.Fprintln(w, "# Safety profile presets that set defaults for multiple knobs")
+	fmt.Fprintln(w, "# profile = \"standard\"  # standard|safe|paranoid")
+	fmt.Fprintf(w, "profile = %q\n", cfg.Safety.Profile)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[preflight]")
+	fmt.Fprintln(w, "# Prompt preflight (lint/validation) defaults")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Preflight.Enabled)
+	fmt.Fprintf(w, "strict = %t\n", cfg.Preflight.Strict)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[redaction]")
+	fmt.Fprintln(w, "# Secrets/PII redaction configuration: off|warn|redact|block")
+	fmt.Fprintf(w, "mode = %q\n", cfg.Redaction.Mode)
+	if len(cfg.Redaction.Allowlist) > 0 {
+		fmt.Fprintf(w, "allowlist = %s\n", renderTOMLStringArray(cfg.Redaction.Allowlist))
+	} else {
+		fmt.Fprintln(w, "allowlist = []")
+	}
+	if len(cfg.Redaction.DisabledCategories) > 0 {
+		fmt.Fprintf(w, "disabled_categories = %s\n", renderTOMLStringArray(cfg.Redaction.DisabledCategories))
+	} else {
+		fmt.Fprintln(w, "disabled_categories = []")
+	}
+	fmt.Fprintln(w, "# extra_patterns = { CUSTOM_TOKEN = [\"regex\"] }")
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[privacy]")
+	fmt.Fprintln(w, "# Privacy mode prevents persistence of sensitive session data")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Privacy.Enabled)
+	fmt.Fprintf(w, "disable_prompt_history = %t\n", cfg.Privacy.DisablePromptHistory)
+	fmt.Fprintf(w, "disable_event_logs = %t\n", cfg.Privacy.DisableEventLogs)
+	fmt.Fprintf(w, "disable_checkpoints = %t\n", cfg.Privacy.DisableCheckpoints)
+	fmt.Fprintf(w, "disable_scrollback_capture = %t\n", cfg.Privacy.DisableScrollbackCapture)
+	fmt.Fprintf(w, "require_explicit_persist = %t\n", cfg.Privacy.RequireExplicitPersist)
 	fmt.Fprintln(w)
 
 	// Write models configuration
@@ -3071,6 +3246,14 @@ func Validate(cfg *Config) []error {
 	// Validate ProcessTriage integration config
 	if err := ValidateProcessTriageConfig(&cfg.Integrations.ProcessTriage); err != nil {
 		errs = append(errs, fmt.Errorf("integrations.process_triage: %w", err))
+	}
+
+	// Validate safety profile and preflight configuration
+	if err := ValidateSafetyConfig(&cfg.Safety); err != nil {
+		errs = append(errs, fmt.Errorf("safety: %w", err))
+	}
+	if err := ValidatePreflightConfig(&cfg.Preflight); err != nil {
+		errs = append(errs, fmt.Errorf("preflight: %w", err))
 	}
 
 	// Validate redaction configuration
