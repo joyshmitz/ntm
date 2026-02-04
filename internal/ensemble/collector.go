@@ -48,12 +48,12 @@ type InvalidOutput struct {
 
 // CollectorStats summarizes the collection.
 type CollectorStats struct {
-	TotalReceived   int `json:"total_received"`
-	ValidCount      int `json:"valid_count"`
-	InvalidCount    int `json:"invalid_count"`
-	MissingCount    int `json:"missing_count,omitempty"`
-	TotalTokens     int `json:"total_tokens,omitempty"`
-	AverageTokens   int `json:"average_tokens,omitempty"`
+	TotalReceived int `json:"total_received"`
+	ValidCount    int `json:"valid_count"`
+	InvalidCount  int `json:"invalid_count"`
+	MissingCount  int `json:"missing_count,omitempty"`
+	TotalTokens   int `json:"total_tokens,omitempty"`
+	AverageTokens int `json:"average_tokens,omitempty"`
 }
 
 // SynthesisInput is the validated input for the synthesis stage.
@@ -307,11 +307,19 @@ func (c *OutputCollector) CollectFromSession(session *EnsembleSession, capture *
 
 // CollectFromCaptures processes pre-captured outputs and adds them to the collector.
 func (c *OutputCollector) CollectFromCaptures(captured []CapturedOutput) error {
+	return c.CollectFromCapturesFiltered(captured, nil)
+}
+
+// CollectFromCapturesFiltered processes captured outputs that match the include filter.
+func (c *OutputCollector) CollectFromCapturesFiltered(captured []CapturedOutput, include func(CapturedOutput) bool) error {
 	if c == nil {
 		return errors.New("collector is nil")
 	}
 
 	for _, cap := range captured {
+		if include != nil && !include(cap) {
+			continue
+		}
 		if cap.Parsed != nil {
 			// Use pre-parsed output
 			output := *cap.Parsed

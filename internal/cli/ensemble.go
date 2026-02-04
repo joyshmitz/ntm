@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
@@ -123,6 +126,7 @@ Primary usage:
 	cmd.AddCommand(newEnsembleSuggestCmd())
 	cmd.AddCommand(newEnsembleEstimateCmd())
 	cmd.AddCommand(newEnsembleSynthesizeCmd())
+	cmd.AddCommand(newEnsembleCacheCmd())
 	cmd.AddCommand(newEnsembleExportFindingsCmd())
 	cmd.AddCommand(newEnsembleProvenanceCmd())
 	cmd.AddCommand(newEnsembleCompareCmd())
@@ -751,11 +755,14 @@ type synthesizeOptions struct {
 	Stream   bool
 	RunID    string
 	Resume   bool
+	UseCache bool
+	NoCache  bool
 }
 
 func newEnsembleSynthesizeCmd() *cobra.Command {
 	opts := synthesizeOptions{
-		Format: "markdown",
+		Format:   "markdown",
+		UseCache: true,
 	}
 
 	cmd := &cobra.Command{
@@ -801,6 +808,8 @@ Use --force to synthesize even if some agents haven't completed.`,
 	cmd.Flags().BoolVar(&opts.Stream, "stream", false, "Stream synthesis output incrementally")
 	cmd.Flags().StringVar(&opts.RunID, "run-id", "", "Checkpoint run ID for streaming resume")
 	cmd.Flags().BoolVar(&opts.Resume, "resume", false, "Resume streaming from checkpoint run ID")
+	cmd.Flags().BoolVar(&opts.UseCache, "use-cache", true, "Use cached mode outputs when available")
+	cmd.Flags().BoolVar(&opts.NoCache, "no-cache", false, "Bypass cached mode outputs")
 	cmd.ValidArgsFunction = completeSessionArgs
 	return cmd
 }
@@ -839,7 +848,8 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 		format = "json"
 	}
 
-	slog.Default().Info("ensemble synthesis starting",
+	logger := slog.Default()
+	logger.Info("ensemble synthesis starting",
 		"session", session,
 		"ready", ready,
 		"pending", pending,
@@ -851,16 +861,132 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 	capture := ensemble.NewOutputCapture(tmux.DefaultClient)
 	collector := ensemble.NewOutputCollector(ensemble.DefaultOutputCollectorConfig())
 
-	// Collect outputs from panes
-	if err := collector.CollectFromSession(state, capture); err != nil {
-		return fmt.Errorf("collect outputs: %w", err)
+	cacheEnabled := opts.UseCache && !opts.NoCache
+	collectedModes := make(map[string]bool)
+	cacheFingerprints := make(map[string]ensemble.ModeOutputFingerprint)
+	var outputCache *ensemble.ModeOutputCache
+	var cacheContextHash string
+
+	if cacheEnabled {
+		projectDir, projErr := resolveEnsembleProjectDir("")
+		if projErr != nil {
+			logger.Warn("mode output cache disabled (project dir)", "error", projErr)
+			cacheEnabled = false
+		} else {
+			cacheCfg := ensemble.DefaultModeOutputCacheConfig()
+			cacheCfg.Enabled = true
+			cache, err := ensemble.NewModeOutputCache(projectDir, cacheCfg, logger)
+			if err != nil {
+				logger.Warn("mode output cache init failed", "error", err)
+				cacheEnabled = false
+			} else {
+				outputCache = cache
+			}
+
+			if cacheEnabled {
+				catalog, err := ensemble.LoadModeCatalog()
+				if err != nil {
+					logger.Warn("mode catalog load failed for cache", "error", err)
+					cacheEnabled = false
+				} else {
+					generator := ensemble.NewContextPackGenerator(projectDir, nil, logger)
+					pack, packErr := generator.Generate(state.Question, "", ensemble.CacheConfig{Enabled: false})
+					if packErr != nil {
+						logger.Warn("context pack generation failed for cache", "error", packErr)
+						cacheEnabled = false
+					} else if pack != nil {
+						cacheContextHash = pack.Hash
+					}
+
+					if cacheEnabled {
+						for _, assignment := range state.Assignments {
+							mode := catalog.GetMode(assignment.ModeID)
+							if mode == nil {
+								logger.Warn("cache skip: mode not found", "mode_id", assignment.ModeID)
+								continue
+							}
+							cfg := ensemble.ModeOutputConfig{
+								Question:          state.Question,
+								AgentType:         assignment.AgentType,
+								SynthesisStrategy: state.SynthesisStrategy.String(),
+								SchemaVersion:     ensemble.SchemaVersion,
+							}
+							fingerprint, err := ensemble.BuildModeOutputFingerprint(cacheContextHash, mode, cfg)
+							if err != nil {
+								logger.Warn("cache skip: fingerprint error", "mode_id", assignment.ModeID, "error", err)
+								continue
+							}
+							cacheFingerprints[assignment.ModeID] = fingerprint
+
+							lookup := outputCache.Lookup(fingerprint)
+							if lookup.Hit {
+								if lookup.Output == nil {
+									logger.Warn("mode output cache hit but output is nil", "mode_id", assignment.ModeID, "reason", lookup.Reason)
+									continue
+								}
+								if err := lookup.Output.Validate(); err != nil {
+									logger.Warn("mode output cache hit but output invalid", "mode_id", assignment.ModeID, "error", err)
+									continue
+								}
+								if err := collector.Add(*lookup.Output); err != nil {
+									logger.Warn("cache hit add failed", "mode_id", assignment.ModeID, "error", err)
+									continue
+								}
+								collectedModes[assignment.ModeID] = true
+								logger.Info("mode output cache hit", "mode_id", assignment.ModeID, "reason", lookup.Reason)
+							} else {
+								logger.Info("mode output cache miss", "mode_id", assignment.ModeID, "reason", lookup.Reason)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Collect outputs from panes for cache misses
+	if len(collectedModes) < len(state.Assignments) {
+		captured, err := capture.CaptureAll(state)
+		if err != nil {
+			if len(collectedModes) == 0 {
+				return fmt.Errorf("collect outputs: %w", err)
+			}
+			logger.Warn("capture outputs failed; continuing with cached outputs", "error", err)
+		} else {
+			if err := collector.CollectFromCapturesFiltered(captured, func(cap ensemble.CapturedOutput) bool {
+				return !collectedModes[cap.ModeID]
+			}); err != nil {
+				return fmt.Errorf("collect outputs: %w", err)
+			}
+
+			if cacheEnabled && outputCache != nil {
+				for _, cap := range captured {
+					if collectedModes[cap.ModeID] {
+						continue
+					}
+					if cap.Parsed == nil {
+						continue
+					}
+					if err := cap.Parsed.Validate(); err != nil {
+						continue
+					}
+					fingerprint, ok := cacheFingerprints[cap.ModeID]
+					if !ok {
+						continue
+					}
+					if err := outputCache.Put(fingerprint, cap.Parsed); err != nil {
+						logger.Warn("mode output cache write failed", "mode_id", cap.ModeID, "error", err)
+					}
+				}
+			}
+		}
 	}
 
 	if collector.Count() == 0 {
 		return fmt.Errorf("no valid outputs collected (errors: %d)", collector.ErrorCount())
 	}
 
-	slog.Default().Info("ensemble outputs collected",
+	logger.Info("ensemble outputs collected",
 		"session", session,
 		"valid", collector.Count(),
 		"errors", collector.ErrorCount(),
@@ -1349,9 +1475,11 @@ func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsO
 			continue
 		}
 
-		ctxTimeout, cancel := context.WithTimeout(context.Background(), defaultBrTimeout)
-		beadID, err := runBrCreate(ctxTimeout, ctx.ProjectDir, spec)
-		cancel()
+		beadID, err := func() (string, error) {
+			ctxTimeout, cancel := context.WithTimeout(context.Background(), defaultBrTimeout)
+			defer cancel()
+			return runBrCreate(ctxTimeout, ctx.ProjectDir, spec)
+		}()
 		if err != nil {
 			errs = append(errs, err.Error())
 			slog.Default().Warn("export finding failed",
@@ -1440,7 +1568,8 @@ func renderExportFindingsOutput(w io.Writer, payload exportFindingsOutput, forma
 		if len(payload.Errors) > 0 {
 			fmt.Fprintf(w, "\nErrors:\n")
 			for _, err := range payload.Errors {
-				fmt.Fprintf(w, "  - %s\n", err)
+				safeErr := html.EscapeString(status.StripANSI(err))
+				fmt.Fprintf(w, "  - %s\n", safeErr)
 			}
 		}
 		return nil
@@ -2560,6 +2689,173 @@ func runEnsembleCleanCheckpoints(w io.Writer, format, maxAge string, all, dryRun
 }
 
 func renderCheckpointCleanOutput(w io.Writer, payload checkpointCleanOutput, format string) error {
+	switch format {
+	case "json":
+		return output.WriteJSON(w, payload, true)
+	case "yaml":
+		data, err := yaml.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	default:
+		fmt.Fprintf(w, "%s\n", payload.Message)
+		return nil
+	}
+}
+
+type ensembleCacheStatsOutput struct {
+	GeneratedAt time.Time                     `json:"generated_at" yaml:"generated_at"`
+	ProjectDir  string                        `json:"project_dir" yaml:"project_dir"`
+	CacheDir    string                        `json:"cache_dir" yaml:"cache_dir"`
+	Stats       ensemble.ModeOutputCacheStats `json:"stats" yaml:"stats"`
+}
+
+type ensembleCacheClearOutput struct {
+	GeneratedAt time.Time `json:"generated_at" yaml:"generated_at"`
+	ProjectDir  string    `json:"project_dir" yaml:"project_dir"`
+	CacheDir    string    `json:"cache_dir" yaml:"cache_dir"`
+	Removed     int       `json:"removed" yaml:"removed"`
+	Message     string    `json:"message" yaml:"message"`
+}
+
+func newEnsembleCacheCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Manage ensemble mode output cache",
+	}
+
+	cmd.AddCommand(newEnsembleCacheStatsCmd())
+	cmd.AddCommand(newEnsembleCacheClearCmd())
+	return cmd
+}
+
+func newEnsembleCacheStatsCmd() *cobra.Command {
+	var (
+		format  string
+		project string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show mode output cache statistics",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runEnsembleCacheStats(cmd.OutOrStdout(), format, project)
+		},
+	}
+
+	cmd.Flags().StringVarP(&format, "format", "f", "text", "Output format: text, json, yaml")
+	cmd.Flags().StringVar(&project, "project", "", "Project directory (default: current dir)")
+	return cmd
+}
+
+func newEnsembleCacheClearCmd() *cobra.Command {
+	var (
+		format  string
+		project string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear cached mode outputs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runEnsembleCacheClear(cmd.OutOrStdout(), format, project)
+		},
+	}
+
+	cmd.Flags().StringVarP(&format, "format", "f", "text", "Output format: text, json, yaml")
+	cmd.Flags().StringVar(&project, "project", "", "Project directory (default: current dir)")
+	return cmd
+}
+
+func runEnsembleCacheStats(w io.Writer, format, project string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "text"
+	}
+	if jsonOutput {
+		format = "json"
+	}
+
+	projectDir, err := resolveEnsembleProjectDir(project)
+	if err != nil {
+		return err
+	}
+
+	cacheCfg := ensemble.DefaultModeOutputCacheConfig()
+	cache, err := ensemble.NewModeOutputCache(projectDir, cacheCfg, slog.Default())
+	if err != nil {
+		return fmt.Errorf("open mode output cache: %w", err)
+	}
+
+	cacheDir := filepath.Join(projectDir, ".ntm", "ensemble-cache")
+	payload := ensembleCacheStatsOutput{
+		GeneratedAt: output.Timestamp(),
+		ProjectDir:  projectDir,
+		CacheDir:    cacheDir,
+		Stats:       cache.Stats(),
+	}
+
+	switch format {
+	case "json":
+		return output.WriteJSON(w, payload, true)
+	case "yaml":
+		data, err := yaml.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	default:
+		fmt.Fprintf(w, "Cache Dir: %s\n", payload.CacheDir)
+		fmt.Fprintf(w, "Entries: %d\n", payload.Stats.Entries)
+		fmt.Fprintf(w, "Expired: %d\n", payload.Stats.Expired)
+		fmt.Fprintf(w, "Size: %d bytes\n", payload.Stats.SizeBytes)
+		if !payload.Stats.Oldest.IsZero() {
+			fmt.Fprintf(w, "Oldest: %s\n", payload.Stats.Oldest.Format(time.RFC3339))
+		}
+		if !payload.Stats.Newest.IsZero() {
+			fmt.Fprintf(w, "Newest: %s\n", payload.Stats.Newest.Format(time.RFC3339))
+		}
+		fmt.Fprintf(w, "TTL: %s\n", payload.Stats.TTL)
+		fmt.Fprintf(w, "Max Entries: %d\n", payload.Stats.MaxEntries)
+		return nil
+	}
+}
+
+func runEnsembleCacheClear(w io.Writer, format, project string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "text"
+	}
+	if jsonOutput {
+		format = "json"
+	}
+
+	projectDir, err := resolveEnsembleProjectDir(project)
+	if err != nil {
+		return err
+	}
+
+	cacheCfg := ensemble.DefaultModeOutputCacheConfig()
+	cache, err := ensemble.NewModeOutputCache(projectDir, cacheCfg, slog.Default())
+	if err != nil {
+		return fmt.Errorf("open mode output cache: %w", err)
+	}
+
+	cacheDir := filepath.Join(projectDir, ".ntm", "ensemble-cache")
+	removed := cache.Clear()
+	payload := ensembleCacheClearOutput{
+		GeneratedAt: output.Timestamp(),
+		ProjectDir:  projectDir,
+		CacheDir:    cacheDir,
+		Removed:     removed,
+		Message:     fmt.Sprintf("Removed %d cached outputs", removed),
+	}
+
 	switch format {
 	case "json":
 		return output.WriteJSON(w, payload, true)
