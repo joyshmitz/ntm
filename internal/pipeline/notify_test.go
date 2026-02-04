@@ -115,6 +115,12 @@ func TestShouldNotify(t *testing.T) {
 			event:    NotifyCancelled,
 			want:     false,
 		},
+		{
+			name:     "unknown event returns false",
+			settings: WorkflowSettings{NotifyOnComplete: true, NotifyOnError: true},
+			event:    NotificationEvent("unknown"),
+			want:     false,
+		},
 	}
 
 	for _, tt := range tests {
