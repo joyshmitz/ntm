@@ -1060,6 +1060,31 @@ func TestSubstituteStrict_RemainingUnsubstituted(t *testing.T) {
 	}
 }
 
+func TestSubstituteStrict_SubstituteError(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+	}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	// A bad namespace causes Substitute() to return an error (not just leave var unsubstituted)
+	_, err := sub.SubstituteStrict("${badnamespace.var}")
+	if err == nil {
+		t.Error("SubstituteStrict should return error from Substitute")
+	}
+}
+
+func TestParseYAML_InvalidSyntax(t *testing.T) {
+	t.Parallel()
+
+	parser := NewOutputParser()
+	_, err := parser.Parse("invalid: yaml: [[[", OutputParse{Type: "yaml"})
+	if err == nil {
+		t.Error("parseYAML should error on invalid YAML syntax")
+	}
+}
+
 func TestOutputParser_ParseUnknownType(t *testing.T) {
 	t.Parallel()
 
