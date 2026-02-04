@@ -515,6 +515,7 @@ var Registry = map[string]CommandInfo{
 		Description: "Assign work to agents",
 		Examples: []string{
 			"ntm assign myproject --auto",
+			"ntm assign myproject --strategy=dependency",
 			"ntm assign myproject --pane=1 --beads=bd-123",
 		},
 	},

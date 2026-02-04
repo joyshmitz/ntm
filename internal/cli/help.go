@@ -77,6 +77,7 @@ func PrintStunningHelp(w io.Writer) {
 			commands: []commandHelp{
 				{"add", "ant", "<session> --cc=N --cod=N", "Add agents to existing session"},
 				{"send", "bp", "<session> <prompt> [--agents]", "Send prompt to agents"},
+				{"assign", "", "<session> --strategy=dependency", "Assign work to agents"},
 				{"interrupt", "int", "<session>", "Send Ctrl+C to all agents"},
 			},
 		},
