@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
 
 // EnsembleLoader loads ensemble presets from multiple sources with precedence:
-// embedded < user (~/.config/ntm/ensembles.toml) < project (.ntm/ensembles.toml).
+// embedded < imported (~/.config/ntm/ensembles.imported.toml) < user (~/.config/ntm/ensembles.toml) < project (.ntm/ensembles.toml).
 type EnsembleLoader struct {
 	// UserConfigDir is the user config directory (default: ~/.config/ntm).
 	UserConfigDir string
@@ -23,6 +24,16 @@ type EnsembleLoader struct {
 // ensemblesFile is the TOML structure for user/project ensemble files.
 type ensemblesFile struct {
 	Ensembles []EnsemblePreset `toml:"ensembles"`
+}
+
+const importedEnsemblesFilename = "ensembles.imported.toml"
+
+// ImportedEnsemblesPath returns the default path for imported ensembles.
+func ImportedEnsemblesPath(userConfigDir string) string {
+	if strings.TrimSpace(userConfigDir) == "" {
+		userConfigDir = defaultModeConfigDir()
+	}
+	return filepath.Join(userConfigDir, importedEnsemblesFilename)
 }
 
 // NewEnsembleLoader creates a loader with default paths.
@@ -43,6 +54,12 @@ func (l *EnsembleLoader) Load() ([]EnsemblePreset, error) {
 		preset := e
 		preset.Source = "embedded"
 		merged[e.Name] = preset
+	}
+
+	// Layer imported ensembles (user-level imports, lower precedence than user-defined)
+	importedPath := ImportedEnsemblesPath(l.UserConfigDir)
+	if err := l.mergeFromFile(merged, importedPath, "imported"); err != nil {
+		return nil, fmt.Errorf("imported ensembles (%s): %w", importedPath, err)
 	}
 
 	// Layer user ensembles
@@ -118,6 +135,45 @@ func (l *EnsembleLoader) mergeFromFile(merged map[string]EnsemblePreset, path, s
 		merged[e.Name] = e
 	}
 
+	return nil
+}
+
+// LoadEnsemblesFile loads ensembles from a TOML file.
+// Missing files return an empty slice and no error.
+func LoadEnsemblesFile(path string) ([]EnsemblePreset, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []EnsemblePreset{}, nil
+		}
+		return nil, fmt.Errorf("read ensembles file: %w", err)
+	}
+
+	var file ensemblesFile
+	if _, err := toml.Decode(string(data), &file); err != nil {
+		return nil, fmt.Errorf("parse TOML: %w", err)
+	}
+	if file.Ensembles == nil {
+		return []EnsemblePreset{}, nil
+	}
+	return file.Ensembles, nil
+}
+
+// SaveEnsemblesFile writes ensembles to a TOML file, creating parent directories if needed.
+func SaveEnsemblesFile(path string, presets []EnsemblePreset) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create ensembles dir: %w", err)
+	}
+	file := ensemblesFile{Ensembles: presets}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create ensembles file: %w", err)
+	}
+	defer f.Close()
+
+	if err := toml.NewEncoder(f).Encode(file); err != nil {
+		return fmt.Errorf("encode TOML: %w", err)
+	}
 	return nil
 }
 

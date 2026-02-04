@@ -11,10 +11,32 @@ func TestEnsembleLoader_MergePrecedence(t *testing.T) {
 	projectDir := t.TempDir()
 
 	userFile := filepath.Join(userDir, "ensembles.toml")
+	importedFile := filepath.Join(userDir, "ensembles.imported.toml")
 	projectFile := filepath.Join(projectDir, ".ntm", "ensembles.toml")
 	if err := os.MkdirAll(filepath.Dir(projectFile), 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
+
+	importedToml := `[[ensembles]]
+name = "diagnosis"
+description = "imported override"
+
+  [[ensembles.modes]]
+  id = "deductive"
+
+  [[ensembles.modes]]
+  id = "abductive"
+
+[[ensembles]]
+name = "imported-only"
+description = "imported only preset"
+
+  [[ensembles.modes]]
+  id = "deductive"
+
+  [[ensembles.modes]]
+  id = "practical"
+`
 
 	userToml := `[[ensembles]]
 name = "diagnosis"
@@ -38,6 +60,9 @@ description = "project override"
   id = "practical"
 `
 
+	if err := os.WriteFile(importedFile, []byte(importedToml), 0o644); err != nil {
+		t.Fatalf("write imported toml: %v", err)
+	}
 	if err := os.WriteFile(userFile, []byte(userToml), 0o644); err != nil {
 		t.Fatalf("write user toml: %v", err)
 	}
@@ -56,6 +81,7 @@ description = "project override"
 		t.Fatalf("Load error: %v", err)
 	}
 	found := false
+	importedFound := false
 	for _, preset := range presets {
 		if preset.Name == "diagnosis" {
 			found = true
@@ -66,9 +92,18 @@ description = "project override"
 				t.Fatalf("preset description = %q, want project override", preset.Description)
 			}
 		}
+		if preset.Name == "imported-only" {
+			importedFound = true
+			if preset.Source != "imported" {
+				t.Fatalf("imported preset source = %q, want imported", preset.Source)
+			}
+		}
 	}
 	if !found {
 		t.Fatal("expected diagnosis preset in merged list")
+	}
+	if !importedFound {
+		t.Fatal("expected imported-only preset in merged list")
 	}
 }
 
