@@ -1076,3 +1076,359 @@ func TestPrintPipelineCancel_CompletedPipeline(t *testing.T) {
 
 	ClearPipelineRegistry()
 }
+
+func TestCancelPipeline_Running(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	cancelled := false
+	exec := &PipelineExecution{
+		RunID:      "cancel-test-1",
+		WorkflowID: "test-wf",
+		Status:     "running",
+		StartedAt:  time.Now(),
+		cancelFn:   func() { cancelled = true },
+	}
+	RegisterPipeline(exec)
+
+	CancelPipeline("cancel-test-1")
+
+	got := GetPipelineExecution("cancel-test-1")
+	if got.Status != "cancelled" {
+		t.Errorf("Status = %q, want %q", got.Status, "cancelled")
+	}
+	if got.FinishedAt == nil {
+		t.Error("FinishedAt should be set after cancel")
+	}
+	if !cancelled {
+		t.Error("cancelFn was not called")
+	}
+}
+
+func TestCancelPipeline_NotFound(t *testing.T) {
+	ClearPipelineRegistry()
+	// Should not panic
+	CancelPipeline("nonexistent-run")
+}
+
+func TestCancelPipeline_NilFuncs(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	exec := &PipelineExecution{
+		RunID:    "cancel-nil-test",
+		Status:   "running",
+		cancelFn: nil,
+		executor: nil,
+	}
+	RegisterPipeline(exec)
+
+	// Should not panic even with nil cancelFn and executor
+	CancelPipeline("cancel-nil-test")
+
+	got := GetPipelineExecution("cancel-nil-test")
+	if got.Status != "cancelled" {
+		t.Errorf("Status = %q, want %q", got.Status, "cancelled")
+	}
+}
+
+func TestPrintPipelineCancel_RunningPipeline(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	cancelled := false
+	exec := &PipelineExecution{
+		RunID:      "cancel-running-test",
+		WorkflowID: "test-workflow",
+		Session:    "test-session",
+		Status:     "running",
+		StartedAt:  time.Now(),
+		cancelFn:   func() { cancelled = true },
+	}
+	RegisterPipeline(exec)
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		exitCode = PrintPipelineCancel("cancel-running-test")
+	})
+
+	if exitCode != 0 {
+		t.Errorf("PrintPipelineCancel() exit code = %d, want 0", exitCode)
+	}
+
+	var result PipelineCancelOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if !result.Success {
+		t.Errorf("Expected success=true, got error: %s", result.Error)
+	}
+	if result.Status != "cancelled" {
+		t.Errorf("Status = %q, want %q", result.Status, "cancelled")
+	}
+	if result.RunID != "cancel-running-test" {
+		t.Errorf("RunID = %q, want %q", result.RunID, "cancel-running-test")
+	}
+	if !cancelled {
+		t.Error("cancelFn was not called")
+	}
+}
+
+func TestPrintPipelineStatus_FinishedPipeline(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	now := time.Now()
+	finished := now.Add(5 * time.Minute)
+	exec := &PipelineExecution{
+		RunID:      "status-finished-test",
+		WorkflowID: "done-workflow",
+		Session:    "done-session",
+		Status:     "completed",
+		StartedAt:  now,
+		FinishedAt: &finished,
+		Steps:      make(map[string]PipelineStep),
+		Progress: PipelineProgress{
+			Total:     3,
+			Completed: 3,
+			Percent:   100,
+		},
+	}
+	RegisterPipeline(exec)
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		exitCode = PrintPipelineStatus("status-finished-test")
+	})
+
+	if exitCode != 0 {
+		t.Errorf("PrintPipelineStatus() exit code = %d, want 0", exitCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if success, _ := result["success"].(bool); !success {
+		t.Error("Expected success=true")
+	}
+	if result["finished_at"] == nil || result["finished_at"] == "" {
+		t.Error("finished_at should be set for finished pipeline")
+	}
+	durationMs, _ := result["duration_ms"].(float64)
+	if durationMs <= 0 {
+		t.Errorf("duration_ms = %v, want > 0", durationMs)
+	}
+}
+
+func TestUpdatePipelineFromState_NilState(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	exec := &PipelineExecution{
+		RunID:  "nil-state-test",
+		Status: "running",
+	}
+	RegisterPipeline(exec)
+
+	// Should not panic
+	UpdatePipelineFromState("nil-state-test", nil)
+
+	got := GetPipelineExecution("nil-state-test")
+	if got.Status != "running" {
+		t.Errorf("Status should remain unchanged, got %q", got.Status)
+	}
+}
+
+func TestUpdatePipelineFromState_NonExistent(t *testing.T) {
+	ClearPipelineRegistry()
+	state := &ExecutionState{
+		RunID:  "nonexistent",
+		Status: StatusCompleted,
+	}
+	// Should not panic
+	UpdatePipelineFromState("nonexistent", state)
+}
+
+func TestUpdatePipelineFromState_TotalPreservation(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	exec := &PipelineExecution{
+		RunID:      "total-preserve-test",
+		WorkflowID: "big-workflow",
+		Status:     "running",
+		Steps:      make(map[string]PipelineStep),
+		Progress: PipelineProgress{
+			Total:   10, // Originally 10 steps from workflow
+			Pending: 10,
+		},
+	}
+	RegisterPipeline(exec)
+
+	// State only has 2 steps completed so far
+	state := &ExecutionState{
+		RunID:  "total-preserve-test",
+		Status: StatusRunning,
+		Steps: map[string]StepResult{
+			"step1": {StepID: "step1", Status: StatusCompleted},
+			"step2": {StepID: "step2", Status: StatusCompleted},
+		},
+	}
+	UpdatePipelineFromState("total-preserve-test", state)
+
+	got := GetPipelineExecution("total-preserve-test")
+	if got.Progress.Total != 10 {
+		t.Errorf("Total = %d, want 10 (should preserve original total)", got.Progress.Total)
+	}
+	if got.Progress.Completed != 2 {
+		t.Errorf("Completed = %d, want 2", got.Progress.Completed)
+	}
+	if got.Progress.Percent != 20 {
+		t.Errorf("Percent = %f, want 20", got.Progress.Percent)
+	}
+}
+
+func TestUpdatePipelineFromState_WithErrors(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	exec := &PipelineExecution{
+		RunID:  "errors-test",
+		Status: "running",
+		Steps:  make(map[string]PipelineStep),
+	}
+	RegisterPipeline(exec)
+
+	finishedAt := time.Now()
+	state := &ExecutionState{
+		RunID:      "errors-test",
+		Status:     StatusFailed,
+		FinishedAt: finishedAt,
+		Steps: map[string]StepResult{
+			"step1": {StepID: "step1", Status: StatusFailed, Error: &StepError{Message: "boom"}},
+		},
+		Errors: []ExecutionError{
+			{Message: "first error"},
+			{Message: "last error"},
+		},
+	}
+	UpdatePipelineFromState("errors-test", state)
+
+	got := GetPipelineExecution("errors-test")
+	if got.Error != "last error" {
+		t.Errorf("Error = %q, want %q (should use last error)", got.Error, "last error")
+	}
+	if got.FinishedAt == nil {
+		t.Error("FinishedAt should be set")
+	}
+}
+
+func TestPrintPipelineRun_DryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	workflowContent := `schema_version: "1.0"
+name: dry-run-test
+steps:
+  - id: step1
+    prompt: "Hello world"
+    agent: claude
+  - id: step2
+    prompt: "Second step"
+    agent: codex
+    depends_on: [step1]
+`
+	workflowPath := tmpDir + "/test.yaml"
+	if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	opts := PipelineRunOptions{
+		WorkflowFile: workflowPath,
+		Session:      "test-session",
+		DryRun:       true,
+	}
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		exitCode = PrintPipelineRun(opts)
+	})
+
+	if exitCode != 0 {
+		t.Errorf("PrintPipelineRun() exit code = %d, want 0\nOutput: %s", exitCode, output)
+	}
+
+	var result PipelineRunOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if !result.Success {
+		t.Errorf("Expected success=true, got error: %s", result.Error)
+	}
+	if !result.DryRun {
+		t.Error("DryRun should be true in response")
+	}
+	if result.WorkflowID != "dry-run-test" {
+		t.Errorf("WorkflowID = %q, want %q", result.WorkflowID, "dry-run-test")
+	}
+	if result.Status != "completed" {
+		t.Errorf("Status = %q, want %q", result.Status, "completed")
+	}
+}
+
+func TestPrintPipelineList_StatusCounts(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	now := time.Now()
+	fin := now.Add(time.Minute)
+
+	// Register pipelines with various statuses
+	for _, s := range []struct {
+		id, status string
+		finished   bool
+	}{
+		{"list-r1", "running", false},
+		{"list-r2", "completed", true},
+		{"list-r3", "failed", true},
+		{"list-r4", "cancelled", true},
+	} {
+		exec := &PipelineExecution{
+			RunID:     s.id,
+			Status:    s.status,
+			StartedAt: now,
+		}
+		if s.finished {
+			exec.FinishedAt = &fin
+		}
+		RegisterPipeline(exec)
+	}
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		exitCode = PrintPipelineList()
+	})
+
+	if exitCode != 0 {
+		t.Errorf("PrintPipelineList() exit code = %d, want 0", exitCode)
+	}
+
+	var result PipelineListOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	if len(result.Pipelines) != 4 {
+		t.Errorf("Pipelines count = %d, want 4", len(result.Pipelines))
+	}
+
+	if result.AgentHints == nil {
+		t.Fatal("AgentHints should not be nil")
+	}
+	if !strings.Contains(result.AgentHints.Summary, "1 running") {
+		t.Errorf("Summary = %q, should contain '1 running'", result.AgentHints.Summary)
+	}
+}
