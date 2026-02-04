@@ -1077,3 +1077,216 @@ invalid toml [here
 		t.Error("expected error for invalid TOML")
 	}
 }
+
+func TestValidate_StepWithPromptAndParallel(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Prompt: "do something",
+				Parallel: []Step{
+					{ID: "p1", Agent: "cc", Prompt: "parallel task"},
+				},
+			},
+		},
+	}
+
+	result := Validate(w)
+	if result.Valid {
+		t.Error("expected validation to fail for prompt + parallel")
+	}
+
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "both prompt and parallel") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected error about prompt + parallel conflict")
+	}
+}
+
+func TestValidate_StepWithUnknownAgent(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Agent:  "unknown-agent-type",
+				Prompt: "test",
+			},
+		},
+	}
+
+	result := Validate(w)
+	// Unknown agent should be a warning, not error
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w.Message, "unknown agent type") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected warning about unknown agent type")
+	}
+}
+
+func TestValidate_StepWithInvalidRoute(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Route:  "invalid-route",
+				Prompt: "test",
+			},
+		},
+	}
+
+	result := Validate(w)
+	if result.Valid {
+		t.Error("expected validation to fail for invalid route")
+	}
+
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "invalid routing strategy") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected error about invalid routing strategy")
+	}
+}
+
+func TestValidate_StepWithMultipleAgentMethods(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Agent:  "claude",
+				Pane:   1,
+				Route:  "least-loaded",
+				Prompt: "test",
+			},
+		},
+	}
+
+	result := Validate(w)
+	if result.Valid {
+		t.Error("expected validation to fail for multiple agent methods")
+	}
+
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "can only use one of") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected error about multiple agent selection methods, got %v", result.Errors)
+	}
+}
+
+func TestValidate_IncompleteVarsReference(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Prompt: "The value is ${vars}",
+			},
+		},
+	}
+
+	result := Validate(w)
+	// Should have warning about incomplete reference
+	found := false
+	for _, warn := range result.Warnings {
+		if strings.Contains(warn.Message, "incomplete variable reference") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about incomplete variable reference, got %v", result.Warnings)
+	}
+}
+
+func TestValidate_IncompleteStepsReference(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Prompt: "Using ${steps.prev}",
+			},
+		},
+	}
+
+	result := Validate(w)
+	// Should have warning about incomplete step reference
+	found := false
+	for _, warn := range result.Warnings {
+		if strings.Contains(warn.Message, "incomplete step reference") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about incomplete step reference, got %v", result.Warnings)
+	}
+}
+
+func TestValidate_UnknownReferenceType(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Prompt: "Using ${unknown.ref}",
+			},
+		},
+	}
+
+	result := Validate(w)
+	// Should have warning about unknown reference type
+	found := false
+	for _, warn := range result.Warnings {
+		if strings.Contains(warn.Message, "unknown reference type") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about unknown reference type, got %v", result.Warnings)
+	}
+}

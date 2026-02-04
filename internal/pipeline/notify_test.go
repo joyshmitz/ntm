@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -379,10 +380,23 @@ func TestTruncateMessage(t *testing.T) {
 		{"ab", 2, "ab"},        // fits, no truncation needed
 		{"abcdef", 3, "..."},   // doesn't fit, show ellipsis
 		{"abcdef", 5, "ab..."}, // truncate with room for some content
+		{"hello", 0, ""},       // zero length
+		{"hello", -1, ""},      // negative length
+		{"hello", 1, "."},      // n=1 returns "."
+		{"hello", 2, ".."},     // n=2 returns ".."
+		{"héllo wörld", 8, "héll..."},  // UTF-8 multibyte chars (counts bytes)
+		{"", 5, ""},            // empty string
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.s[:min(len(tt.s), 5)], func(t *testing.T) {
+		name := tt.s
+		if len(name) > 5 {
+			name = name[:5]
+		}
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(fmt.Sprintf("%s_n%d", name, tt.n), func(t *testing.T) {
 			got := truncateMessage(tt.s, tt.n)
 			if got != tt.want {
 				t.Errorf("truncateMessage(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
@@ -740,5 +754,75 @@ func TestNotifyNoChannels(t *testing.T) {
 	err := n.Notify(context.Background(), payload)
 	if err != nil {
 		t.Errorf("expected no error for empty channels, got %v", err)
+	}
+}
+
+func TestNotifyWebhook_ServerError(t *testing.T) {
+	t.Parallel()
+
+	// Create a test server that returns 500
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	n := NewNotifier(NotifierConfig{
+		Channels:   []string{"webhook"},
+		WebhookURL: server.URL,
+	})
+
+	payload := NotificationPayload{
+		Event:        NotifyFailed,
+		WorkflowName: "test",
+		Timestamp:    time.Now(),
+	}
+
+	err := n.Notify(context.Background(), payload)
+	if err == nil {
+		t.Error("expected error for 500 status")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected error to mention status 500, got: %v", err)
+	}
+}
+
+func TestNotifyWebhook_Success(t *testing.T) {
+	t.Parallel()
+
+	var receivedPayload NotificationPayload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify content type
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Error("expected Content-Type: application/json")
+		}
+
+		// Decode payload
+		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
+			t.Errorf("failed to decode payload: %v", err)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	n := NewNotifier(NotifierConfig{
+		Channels:   []string{"webhook"},
+		WebhookURL: server.URL,
+	})
+
+	payload := NotificationPayload{
+		Event:        NotifyCompleted,
+		WorkflowName: "test-workflow",
+		RunID:        "run-123",
+		Timestamp:    time.Now(),
+	}
+
+	err := n.Notify(context.Background(), payload)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if receivedPayload.WorkflowName != "test-workflow" {
+		t.Errorf("expected workflow 'test-workflow', got %q", receivedPayload.WorkflowName)
 	}
 }

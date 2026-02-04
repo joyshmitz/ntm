@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/privacy"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
 // EventType represents the type of audit event
@@ -71,6 +76,171 @@ type LoggerConfig struct {
 	SessionID     string
 	BufferSize    int           // Number of entries to buffer before flush
 	FlushInterval time.Duration // Maximum time between flushes
+}
+
+var (
+	redactionMu     sync.RWMutex
+	redactionCfg    redaction.Config
+	redactionCfgSet bool
+
+	loggerMu    sync.Mutex
+	loggerCache = map[string]*AuditLogger{}
+)
+
+// SetRedactionConfig sets the redaction config for audit payloads.
+// Audit logs always redact when redaction is enabled.
+func SetRedactionConfig(cfg *redaction.Config) {
+	redactionMu.Lock()
+	defer redactionMu.Unlock()
+	if cfg == nil {
+		redactionCfgSet = false
+		redactionCfg = redaction.Config{}
+		return
+	}
+	redactionCfg = *cfg
+	redactionCfgSet = true
+}
+
+// NewCorrelationID returns a unique correlation ID for command tracing.
+func NewCorrelationID() string {
+	ms := time.Now().UnixMilli()
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("cmd-%d-%x", ms, b)
+}
+
+// LogEvent writes an audit event. It is safe to ignore returned errors.
+func LogEvent(session string, eventType EventType, actor Actor, target string, payload, metadata map[string]interface{}) error {
+	if shouldSkipAudit(session) {
+		return nil
+	}
+
+	logger, err := getLoggerForSession(session)
+	if err != nil {
+		return err
+	}
+
+	entry := AuditEntry{
+		EventType: eventType,
+		Actor:     actor,
+		Target:    target,
+		Payload:   sanitizeMap(payload),
+		Metadata:  sanitizeMap(metadata),
+	}
+
+	return logger.Log(entry)
+}
+
+// CloseAll closes any cached audit loggers.
+func CloseAll() error {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	var firstErr error
+	for key, logger := range loggerCache {
+		if logger == nil {
+			delete(loggerCache, key)
+			continue
+		}
+		if err := logger.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(loggerCache, key)
+	}
+	return firstErr
+}
+
+func shouldSkipAudit(session string) bool {
+	if os.Getenv("NTM_TEST_MODE") != "" || os.Getenv("NTM_E2E") != "" {
+		return true
+	}
+	if strings.HasSuffix(os.Args[0], ".test") {
+		return true
+	}
+	if session != "" {
+		if err := privacy.GetDefaultManager().CanPersist(session, privacy.OpEventLog); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func getLoggerForSession(session string) (*AuditLogger, error) {
+	sessionID := strings.TrimSpace(session)
+	if sessionID == "" {
+		sessionID = "global"
+	}
+
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+
+	if logger := loggerCache[sessionID]; logger != nil {
+		return logger, nil
+	}
+
+	cfg := &LoggerConfig{
+		SessionID:     sessionID,
+		BufferSize:    1,
+		FlushInterval: 2 * time.Second,
+	}
+	logger, err := NewAuditLogger(cfg)
+	if err != nil {
+		return nil, err
+	}
+	loggerCache[sessionID] = logger
+	return logger, nil
+}
+
+func sanitizeMap(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(input))
+	for k, v := range input {
+		out[k] = sanitizeValue(v)
+	}
+	return out
+}
+
+func sanitizeValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case string:
+		return redactString(v)
+	case []string:
+		out := make([]string, len(v))
+		for i, item := range v {
+			out[i] = redactString(item)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = sanitizeValue(item)
+		}
+		return out
+	case map[string]interface{}:
+		return sanitizeMap(v)
+	default:
+		return value
+	}
+}
+
+func redactString(value string) string {
+	cfg := getRedactionConfig()
+	if cfg.Mode == redaction.ModeOff {
+		return value
+	}
+	cfg.Mode = redaction.ModeRedact
+	result := redaction.ScanAndRedact(value, cfg)
+	return result.Output
+}
+
+func getRedactionConfig() redaction.Config {
+	redactionMu.RLock()
+	defer redactionMu.RUnlock()
+	if redactionCfgSet {
+		return redactionCfg
+	}
+	return redaction.Config{Mode: redaction.ModeRedact}
 }
 
 // DefaultConfig returns a sensible default configuration
@@ -171,10 +341,10 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 	const bufferSize = 4096
 	buf := make([]byte, bufferSize)
 	offset := fileSize
-	
+
 	// We need to find the last line that contains valid JSON.
 	// We'll scan backward looking for newlines, and try to parse the content.
-	
+
 	// Start from end
 	for offset > 0 {
 		readSize := int64(bufferSize)
@@ -191,20 +361,20 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 		// Scan from end of buffer to find newlines
 		for i := int(readSize) - 1; i >= 0; i-- {
 			if buf[i] == '\n' {
-				// Potential end of a line. 
+				// Potential end of a line.
 				// If this is the very last byte of file, it's just the terminator of the last line.
 				if offset+int64(i) == fileSize-1 {
 					continue
 				}
-				
+
 				// Found a newline. The line starts after this newline (or at file start).
 				lineStart := offset + int64(i) + 1
-				
+
 				// Read this line
 				if _, err := readFile.Seek(lineStart, io.SeekStart); err != nil {
 					return nil, err
 				}
-				
+
 				scanner := bufio.NewScanner(readFile)
 				if scanner.Scan() {
 					line := scanner.Text()

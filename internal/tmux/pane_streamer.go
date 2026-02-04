@@ -399,8 +399,7 @@ type StreamManager struct {
 
 // NewStreamManager creates a new stream manager.
 func NewStreamManager(client *Client, callback StreamCallback, cfg PaneStreamerConfig) *StreamManager {
-	ctx := context.Background()
-	cancel := func() {}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &StreamManager{
 		client:    client,
 		config:    cfg,

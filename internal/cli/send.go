@@ -19,6 +19,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
@@ -763,7 +764,7 @@ func runSendWithTargets(opts SendOptions) error {
 	return runSendInternal(opts)
 }
 
-func runSendInternal(opts SendOptions) error {
+func runSendInternal(opts SendOptions) (err error) {
 	session := opts.Session
 	prompt := opts.Prompt
 	promptSource := opts.PromptSource
@@ -842,6 +843,38 @@ func runSendInternal(opts SendOptions) error {
 			}
 		}
 	}
+
+	delivered := 0
+	failed := 0
+
+	// Audit: send command start (redacted preview only)
+	_ = audit.LogEvent(session, audit.EventTypeSend, audit.ActorUser, "send", map[string]interface{}{
+		"phase":          "start",
+		"prompt_preview": truncateForPreview(prompt, 80),
+		"prompt_length":  len(prompt),
+		"prompt_source":  promptSource,
+		"template":       templateName,
+		"targets":        buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex, tags),
+		"dry_run":        dryRun,
+		"correlation_id": auditCorrelationID,
+	}, nil)
+
+	defer func() {
+		payload := map[string]interface{}{
+			"phase":          "finish",
+			"prompt_preview": truncateForPreview(prompt, 80),
+			"prompt_length":  len(prompt),
+			"delivered":      delivered,
+			"failed":         failed,
+			"dry_run":        dryRun,
+			"success":        err == nil,
+			"correlation_id": auditCorrelationID,
+		}
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+		_ = audit.LogEvent(session, audit.EventTypeSend, audit.ActorUser, "send", payload, nil)
+	}()
 
 	// Start time tracking for history
 	start := time.Now()
@@ -1219,9 +1252,6 @@ func runSendInternal(opts SendOptions) error {
 			Message:   "use without --dry-run to execute",
 		})
 	}
-
-	delivered := 0
-	failed := 0
 
 	// If specific pane requested
 	if paneIndex >= 0 {

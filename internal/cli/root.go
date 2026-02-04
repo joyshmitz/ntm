@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
@@ -44,6 +45,11 @@ var (
 	// Global redaction flags - inherited by all subcommands
 	redactMode  string // --redact=MODE override
 	allowSecret bool   // --allow-secret override
+
+	// Audit command tracking
+	auditCorrelationID string
+	auditCommandPath   string
+	auditCommandStart  time.Time
 
 	// Build information - set by goreleaser via ldflags
 	Version = "dev"
@@ -94,6 +100,7 @@ Shell Integration:
 		// Check if this command can skip config loading (Phase 1 only)
 		// This includes subcommands AND robot flags that don't need config
 		if canSkipConfigLoading(cmd.Name()) {
+			startCommandAudit(cmd, args)
 			return nil
 		}
 
@@ -126,6 +133,7 @@ Shell Integration:
 				redactCfg := cfg.Redaction.ToRedactionLibConfig()
 				history.SetRedactionConfig(&redactCfg)
 				events.SetRedactionConfig(&redactCfg)
+				audit.SetRedactionConfig(&redactCfg)
 				session.SetRedactionConfig(&redactCfg)
 				checkpoint.SetRedactionConfig(&redactCfg)
 			}
@@ -137,6 +145,7 @@ Shell Integration:
 				cfg.Cleanup.Verbose,
 			)
 		}
+		startCommandAudit(cmd, args)
 		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
@@ -1669,7 +1678,10 @@ Shell Integration:
 }
 
 func Execute() error {
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	logCommandAuditEnd(err)
+	_ = audit.CloseAll()
+	if err != nil {
 		// If not in JSON mode, print the error to stderr
 		// (SilenceErrors is set to true to handle JSON mode properly)
 		if !jsonOutput {
@@ -1698,6 +1710,57 @@ func resolveRobotPagination(cmd *cobra.Command) (robot.PaginationOptions, error)
 	}
 
 	return opts, nil
+}
+
+func startCommandAudit(cmd *cobra.Command, args []string) {
+	if cmd == nil || !auditCommandStart.IsZero() {
+		return
+	}
+	auditCorrelationID = audit.NewCorrelationID()
+	auditCommandPath = cmd.CommandPath()
+	auditCommandStart = time.Now()
+
+	cwd, _ := os.Getwd()
+	payload := map[string]interface{}{
+		"phase":          "start",
+		"command":        auditCommandPath,
+		"command_name":   cmd.Name(),
+		"args_preview":   commandArgsPreview(args),
+		"args_count":     len(args),
+		"cwd":            cwd,
+		"correlation_id": auditCorrelationID,
+	}
+	_ = audit.LogEvent("", audit.EventTypeCommand, audit.ActorUser, auditCommandPath, payload, nil)
+}
+
+func logCommandAuditEnd(err error) {
+	if auditCommandStart.IsZero() {
+		return
+	}
+	duration := time.Since(auditCommandStart)
+	payload := map[string]interface{}{
+		"phase":          "finish",
+		"command":        auditCommandPath,
+		"success":        err == nil,
+		"duration_ms":    duration.Milliseconds(),
+		"correlation_id": auditCorrelationID,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	_ = audit.LogEvent("", audit.EventTypeCommand, audit.ActorUser, auditCommandPath, payload, nil)
+}
+
+func commandArgsPreview(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	const maxLen = 200
+	preview := strings.Join(args, " ")
+	if len(preview) > maxLen {
+		return preview[:maxLen] + "..."
+	}
+	return preview
 }
 
 // goVersion returns the current Go runtime version.

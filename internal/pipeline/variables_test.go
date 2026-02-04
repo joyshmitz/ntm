@@ -741,6 +741,19 @@ func TestFormatValue_TimeTypes(t *testing.T) {
 	}
 }
 
+func TestFormatValue_JSONMarshalFailure(t *testing.T) {
+	t.Parallel()
+
+	// Create a channel, which cannot be JSON marshaled
+	ch := make(chan int)
+	got := formatValue(ch)
+
+	// Should fall back to fmt.Sprintf("%v")
+	if got == "" {
+		t.Error("expected non-empty result for channel")
+	}
+}
+
 func TestStoreStepOutput(t *testing.T) {
 	state := &ExecutionState{}
 
@@ -769,6 +782,11 @@ func TestValidateVarRefs(t *testing.T) {
 		{"${unknown.var}", 1},      // unknown namespace
 		{"\\${vars.name}", 0},      // escaped is ignored
 		{"${vars.x} ${vars.y}", 2}, // both undefined
+		{"${steps.build.output}", 0}, // steps namespace is valid
+		{"${loop.item}", 0},          // loop namespace is valid
+		{"${run_id}", 0},             // context var run_id is valid
+		{"${timestamp}", 0},          // context var timestamp is valid
+		{"${workflow}", 0},           // context var workflow is valid
 	}
 
 	for _, tt := range tests {
@@ -1215,5 +1233,261 @@ func TestSubstitutionError_Error(t *testing.T) {
 				t.Errorf("SubstitutionError.Error() = %q, want %q", got, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestExtractJSONBlock_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty string", "", ""},
+		{"escaped quote in string", `{"key": "value with \" quote"}`, `{"key": "value with \" quote"}`},
+		{"unclosed JSON object", `{"key": "value"`, `{"key": "value"`},
+		{"unclosed JSON array", `[1, 2, 3`, `[1, 2, 3`},
+		{"nested arrays", `[[1, 2], [3, 4]]`, `[[1, 2], [3, 4]]`},
+		{"mixed nested", `{"arr": [1, 2], "obj": {"a": 1}}`, `{"arr": [1, 2], "obj": {"a": 1}}`},
+		{"backslash not in string", `{"key":1}\ extra`, `{"key":1}`},
+		{"just opening brace no close", `{`, `{`},
+		{"just opening bracket no close", `[`, `[`},
+		{"starts with space", ` {"key": 1}`, ` {"key": 1}`}, // doesn't start with { or [
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractJSONBlock(tt.input)
+			if got != tt.want {
+				t.Errorf("extractJSONBlock(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSteps_Agent(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"build": {
+				StepID:    "build",
+				Status:    StatusCompleted,
+				AgentType: "cc",
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	// Test agent field resolution
+	result, err := sub.Substitute("${steps.build.agent}")
+	if err != nil {
+		t.Fatalf("Substitute error: %v", err)
+	}
+	if result != "cc" {
+		t.Errorf("expected 'cc', got %q", result)
+	}
+}
+
+func TestSetLoopVars_NilVariables(t *testing.T) {
+	t.Parallel()
+
+	// State with nil Variables map
+	state := &ExecutionState{
+		Variables: nil,
+	}
+
+	// SetLoopVars should initialize the Variables map
+	SetLoopVars(state, "item", "value", 0, 3)
+
+	if state.Variables == nil {
+		t.Fatal("Variables should be initialized")
+	}
+	if state.Variables["loop.item"] != "value" {
+		t.Errorf("loop.item = %v, want 'value'", state.Variables["loop.item"])
+	}
+	if state.Variables["loop.first"] != true {
+		t.Errorf("loop.first = %v, want true", state.Variables["loop.first"])
+	}
+	if state.Variables["loop.last"] != false {
+		t.Errorf("loop.last = %v, want false", state.Variables["loop.last"])
+	}
+}
+
+func TestStoreStepOutput_NilVariables(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: nil,
+	}
+
+	StoreStepOutput(state, "test-step", "output value", map[string]string{"key": "val"})
+
+	if state.Variables == nil {
+		t.Fatal("Variables should be initialized")
+	}
+	if state.Variables["steps.test-step.output"] != "output value" {
+		t.Errorf("unexpected output value: %v", state.Variables["steps.test-step.output"])
+	}
+	if state.Variables["steps.test-step.data"] == nil {
+		t.Error("steps.test-step.data should be set")
+	}
+}
+
+func TestResolveVar_NestedLoop(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{
+			"loop.item":  "current_item",
+			"loop.index": 5,
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	result, err := sub.Substitute("Item: ${loop.item}, Index: ${loop.index}")
+	if err != nil {
+		t.Fatalf("Substitute error: %v", err)
+	}
+	if result != "Item: current_item, Index: 5" {
+		t.Errorf("unexpected result: %q", result)
+	}
+}
+
+func TestResolveSteps_OutputNestedField(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"api": {
+				StepID:     "api",
+				Status:     StatusCompleted,
+				Output:     `{"user": {"name": "Alice"}}`,
+				ParsedData: map[string]interface{}{
+					"user": map[string]interface{}{
+						"name": "Alice",
+					},
+				},
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	// Test nested output field
+	result, err := sub.Substitute("${steps.api.output.user.name}")
+	if err != nil {
+		t.Fatalf("Substitute error: %v", err)
+	}
+	if result != "Alice" {
+		t.Errorf("expected 'Alice', got %q", result)
+	}
+}
+
+func TestResolveSteps_OutputNestedNoParsedData(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"raw": {
+				StepID:     "raw",
+				Status:     StatusCompleted,
+				Output:     "raw output",
+				ParsedData: nil,
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	// Accessing nested field when there's no parsed data should fail
+	_, err := sub.Substitute("${steps.raw.output.field}")
+	if err == nil {
+		t.Error("expected error for nested access without parsed data")
+	}
+}
+
+func TestResolveSteps_DataNoParsedData(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"step": {
+				StepID:     "step",
+				Status:     StatusCompleted,
+				Output:     "output",
+				ParsedData: nil,
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	// Accessing data when there's no parsed data should fail
+	_, err := sub.Substitute("${steps.step.data}")
+	if err == nil {
+		t.Error("expected error for data access without parsed data")
+	}
+}
+
+func TestResolveSteps_DataNestedField(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"api": {
+				StepID: "api",
+				Status: StatusCompleted,
+				ParsedData: map[string]interface{}{
+					"config": map[string]interface{}{
+						"timeout": 30,
+					},
+				},
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	result, err := sub.Substitute("${steps.api.data.config.timeout}")
+	if err != nil {
+		t.Fatalf("Substitute error: %v", err)
+	}
+	if result != "30" {
+		t.Errorf("expected '30', got %q", result)
+	}
+}
+
+func TestResolveSteps_DurationZero(t *testing.T) {
+	t.Parallel()
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"pending": {
+				StepID: "pending",
+				Status: StatusPending,
+				// FinishedAt is zero
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	result, err := sub.Substitute("${steps.pending.duration}")
+	if err != nil {
+		t.Fatalf("Substitute error: %v", err)
+	}
+	if result != "0s" {
+		t.Errorf("expected '0s', got %q", result)
 	}
 }
