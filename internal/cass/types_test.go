@@ -337,3 +337,133 @@ func TestTimelineEntryTimestampTime(t *testing.T) {
 		t.Errorf("TimestampTime() = %v, want %v", got, tm)
 	}
 }
+
+// =============================================================================
+// FlexTime.UnmarshalJSON tests
+// =============================================================================
+
+func TestFlexTimeUnmarshalJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantZero bool
+		wantErr  bool
+		checkFn  func(t *testing.T, ft FlexTime) // optional extra checks
+	}{
+		{
+			name:     "null",
+			input:    `null`,
+			wantZero: true,
+		},
+		{
+			name:  "RFC3339 string",
+			input: `"2026-01-15T10:30:00Z"`,
+		},
+		{
+			name:     "empty string",
+			input:    `""`,
+			wantZero: true,
+		},
+		{
+			name:  "Unix seconds integer",
+			input: `1702200000`,
+			checkFn: func(t *testing.T, ft FlexTime) {
+				t.Helper()
+				want := time.Unix(1702200000, 0)
+				if !ft.Time.Equal(want) {
+					t.Errorf("got %v, want %v", ft.Time, want)
+				}
+			},
+		},
+		{
+			name:     "zero integer",
+			input:    `0`,
+			wantZero: true,
+		},
+		{
+			name:  "Unix milliseconds (large int)",
+			input: `1702200000000`,
+			checkFn: func(t *testing.T, ft FlexTime) {
+				t.Helper()
+				want := time.UnixMilli(1702200000000)
+				if !ft.Time.Equal(want) {
+					t.Errorf("got %v, want %v", ft.Time, want)
+				}
+			},
+		},
+		{
+			name:    "invalid string format",
+			input:   `"not-a-date"`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid JSON",
+			input:   `{invalid}`,
+			wantErr: true,
+		},
+		{
+			name:    "boolean",
+			input:   `true`,
+			wantErr: true,
+		},
+		{
+			name:    "array",
+			input:   `[1,2,3]`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var ft FlexTime
+			err := json.Unmarshal([]byte(tc.input), &ft)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error for input %s", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantZero && !ft.Time.IsZero() {
+				t.Errorf("expected zero time for %s, got %v", tc.input, ft.Time)
+			}
+			if !tc.wantZero && ft.Time.IsZero() {
+				t.Errorf("expected non-zero time for %s", tc.input)
+			}
+			if tc.checkFn != nil {
+				tc.checkFn(t, ft)
+			}
+		})
+	}
+}
+
+func TestFlexTimeUnmarshalJSON_MillisecondHeuristic(t *testing.T) {
+	t.Parallel()
+
+	// Value at the boundary: 100000000001 should be treated as milliseconds
+	var ft FlexTime
+	err := json.Unmarshal([]byte(`100000000001`), &ft)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	want := time.UnixMilli(100000000001)
+	if !ft.Time.Equal(want) {
+		t.Errorf("boundary value: got %v, want %v", ft.Time, want)
+	}
+
+	// Value at boundary: 100000000000 should be treated as seconds
+	var ft2 FlexTime
+	err = json.Unmarshal([]byte(`100000000000`), &ft2)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	want2 := time.Unix(100000000000, 0)
+	if !ft2.Time.Equal(want2) {
+		t.Errorf("boundary value: got %v, want %v", ft2.Time, want2)
+	}
+}
