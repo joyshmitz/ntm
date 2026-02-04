@@ -140,7 +140,6 @@ type Tracker struct {
 	retentionDays int
 	enabled       bool
 	mu            sync.Mutex
-	file          *os.File
 }
 
 // TrackerOptions configures the score tracker.
@@ -184,25 +183,19 @@ func NewTracker(opts TrackerOptions) (*Tracker, error) {
 		return nil, fmt.Errorf("creating score directory: %w", err)
 	}
 
-	// Open file for appending
-	f, err := os.OpenFile(t.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("opening score file: %w", err)
-	}
-	t.file = f
-
 	return t, nil
 }
 
 // Record persists a score to the tracker.
 func (t *Tracker) Record(score *Score) error {
-	if !t.enabled || t.file == nil {
+	if !t.enabled {
 		return nil
 	}
 
+	now := time.Now().UTC()
 	// Ensure timestamp is set
 	if score.Timestamp.IsZero() {
-		score.Timestamp = time.Now().UTC()
+		score.Timestamp = now
 	}
 
 	// Compute overall if not set
@@ -210,16 +203,28 @@ func (t *Tracker) Record(score *Score) error {
 		score.Metrics.ComputeOverall()
 	}
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	data, err := json.Marshal(score)
 	if err != nil {
 		return fmt.Errorf("marshaling score: %w", err)
 	}
 
-	if _, err := t.file.Write(append(data, '\n')); err != nil {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.pruneLocked(now); err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(t.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("opening score file: %w", err)
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		f.Close()
 		return fmt.Errorf("writing score: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing score file: %w", err)
 	}
 
 	return nil
@@ -239,13 +244,92 @@ func (t *Tracker) RecordSessionEnd(session string, agentScores []Score) error {
 // Close closes the tracker file.
 func (t *Tracker) Close() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.mu.Unlock()
+	return nil
+}
 
-	if t.file != nil {
-		err := t.file.Close()
-		t.file = nil
-		return err
+// Prune removes score records older than the retention window.
+func (t *Tracker) Prune() error {
+	return t.pruneAt(time.Now().UTC())
+}
+
+func (t *Tracker) pruneAt(now time.Time) error {
+	if !t.enabled {
+		return nil
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.pruneLocked(now)
+}
+
+func (t *Tracker) pruneLocked(now time.Time) error {
+	if t.retentionDays <= 0 || t.path == "" {
+		return nil
+	}
+
+	cutoff := now.AddDate(0, 0, -t.retentionDays)
+
+	f, err := os.Open(t.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("opening score file: %w", err)
+	}
+	defer f.Close()
+
+	var kept [][]byte
+	pruned := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var score Score
+		if err := json.Unmarshal(line, &score); err != nil {
+			kept = append(kept, append([]byte(nil), line...))
+			continue
+		}
+		if score.Timestamp.IsZero() || !score.Timestamp.Before(cutoff) {
+			kept = append(kept, append([]byte(nil), line...))
+		} else {
+			pruned = true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanning scores: %w", err)
+	}
+
+	if !pruned {
+		return nil
+	}
+
+	dir := filepath.Dir(t.path)
+	tmpFile, err := os.CreateTemp(dir, "scores-prune-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("creating prune temp file: %w", err)
+	}
+	for _, line := range kept {
+		if _, err := tmpFile.Write(line); err != nil {
+			tmpFile.Close()
+			return fmt.Errorf("writing prune temp file: %w", err)
+		}
+		if _, err := tmpFile.Write([]byte("\n")); err != nil {
+			tmpFile.Close()
+			return fmt.Errorf("writing prune temp file: %w", err)
+		}
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("closing prune temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile.Name(), t.path); err != nil {
+		return fmt.Errorf("replacing score file: %w", err)
+	}
+
 	return nil
 }
 
@@ -483,6 +567,27 @@ func (t *Tracker) SummarizeByAgent(since time.Time) (map[string]*AgentSummary, e
 	}
 
 	return summaries, nil
+}
+
+// SummarizeByAgentList returns summaries sorted by agent type for deterministic ordering.
+func (t *Tracker) SummarizeByAgentList(since time.Time) ([]*AgentSummary, error) {
+	summaries, err := t.SummarizeByAgent(since)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := make([]string, 0, len(summaries))
+	for key := range summaries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	ordered := make([]*AgentSummary, 0, len(keys))
+	for _, key := range keys {
+		ordered = append(ordered, summaries[key])
+	}
+
+	return ordered, nil
 }
 
 // Export writes all scores to a JSON file for external analysis.

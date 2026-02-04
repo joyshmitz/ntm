@@ -829,3 +829,53 @@ func TestAssignModes_EmptyStrategy(t *testing.T) {
 		t.Fatalf("expected 2 assignments, got %d", len(assignments))
 	}
 }
+
+func TestOrderAssignmentsForTimebox_PrioritizesCoreAndValue(t *testing.T) {
+	catalog := testModeCatalog(t)
+	assignments := []ModeAssignment{
+		{ModeID: "advanced-mode", Status: AssignmentPending},
+		{ModeID: "deductive", Status: AssignmentPending},
+		{ModeID: "abductive", Status: AssignmentPending},
+	}
+
+	order := orderAssignmentsForTimebox(assignments, catalog)
+	if len(order) != 3 {
+		t.Fatalf("order len = %d, want 3", len(order))
+	}
+
+	got := []string{
+		assignments[order[0]].ModeID,
+		assignments[order[1]].ModeID,
+		assignments[order[2]].ModeID,
+	}
+	want := []string{"abductive", "deductive", "advanced-mode"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order[%d] = %q, want %q (full order=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestMarkAssignmentsSkipped(t *testing.T) {
+	assignments := []ModeAssignment{
+		{ModeID: "mode-a", Status: AssignmentPending},
+		{ModeID: "mode-b", Status: AssignmentPending},
+	}
+
+	skipped := markAssignmentsSkipped(assignments, []int{1}, "timeout reached")
+	if len(skipped) != 1 || skipped[0] != "mode-b" {
+		t.Fatalf("skipped = %v, want [mode-b]", skipped)
+	}
+	if assignments[1].Status != AssignmentError {
+		t.Fatalf("assignment[1] status = %q, want %q", assignments[1].Status, AssignmentError)
+	}
+	if assignments[1].Error != "timeout reached" {
+		t.Fatalf("assignment[1] error = %q, want %q", assignments[1].Error, "timeout reached")
+	}
+	if assignments[1].CompletedAt == nil {
+		t.Fatal("assignment[1] CompletedAt should be set")
+	}
+	if assignments[0].Status != AssignmentPending {
+		t.Fatalf("assignment[0] status = %q, want %q", assignments[0].Status, AssignmentPending)
+	}
+}

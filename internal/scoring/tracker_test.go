@@ -223,6 +223,63 @@ func TestTracker_RollingAverage(t *testing.T) {
 	}
 }
 
+func TestTracker_PruneRetention(t *testing.T) {
+	tmpDir := t.TempDir()
+	scorePath := filepath.Join(tmpDir, "scores.jsonl")
+
+	tracker, err := NewTracker(TrackerOptions{Path: scorePath, Enabled: true, RetentionDays: 365})
+	if err != nil {
+		t.Fatalf("NewTracker() error: %v", err)
+	}
+	defer tracker.Close()
+
+	now := time.Date(2026, 2, 4, 0, 0, 0, 0, time.UTC)
+	scores := []Score{
+		{
+			Timestamp: now.Add(-48 * time.Hour),
+			AgentType: "claude",
+			Metrics:   ScoreMetrics{Overall: 0.5},
+		},
+		{
+			Timestamp: now.Add(-12 * time.Hour),
+			AgentType: "codex",
+			Metrics:   ScoreMetrics{Overall: 0.7},
+		},
+		{
+			Timestamp: now.Add(-1 * time.Hour),
+			AgentType: "gemini",
+			Metrics:   ScoreMetrics{Overall: 0.9},
+		},
+	}
+
+	for i := range scores {
+		if err := tracker.Record(&scores[i]); err != nil {
+			t.Fatalf("Record() error: %v", err)
+		}
+	}
+
+	// Tighten retention window after recording to test pruning behavior.
+	tracker.retentionDays = 1
+	if err := tracker.pruneAt(now); err != nil {
+		t.Fatalf("pruneAt() error: %v", err)
+	}
+
+	results, err := tracker.QueryScores(Query{})
+	if err != nil {
+		t.Fatalf("QueryScores() error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 scores after pruning, got %d", len(results))
+	}
+
+	cutoff := now.Add(-24 * time.Hour)
+	for _, s := range results {
+		if s.Timestamp.Before(cutoff) {
+			t.Errorf("expected old score to be pruned, found timestamp %v", s.Timestamp)
+		}
+	}
+}
+
 func TestTracker_AnalyzeTrend(t *testing.T) {
 	tmpDir := t.TempDir()
 	scorePath := filepath.Join(tmpDir, "scores.jsonl")
@@ -370,6 +427,45 @@ func TestTracker_SummarizeByAgent(t *testing.T) {
 		}
 	} else {
 		t.Error("claude summary missing")
+	}
+}
+
+func TestTracker_SummarizeByAgentList(t *testing.T) {
+	tmpDir := t.TempDir()
+	scorePath := filepath.Join(tmpDir, "scores.jsonl")
+
+	tracker, err := NewTracker(TrackerOptions{Path: scorePath, Enabled: true})
+	if err != nil {
+		t.Fatalf("NewTracker() error: %v", err)
+	}
+	defer tracker.Close()
+
+	now := time.Now().UTC()
+	entries := []Score{
+		{Timestamp: now, AgentType: "gemini", Metrics: ScoreMetrics{Overall: 0.8}},
+		{Timestamp: now, AgentType: "claude", Metrics: ScoreMetrics{Overall: 0.9}},
+		{Timestamp: now, AgentType: "codex", Metrics: ScoreMetrics{Overall: 0.7}},
+	}
+	for i := range entries {
+		if err := tracker.Record(&entries[i]); err != nil {
+			t.Fatalf("Record() error: %v", err)
+		}
+	}
+
+	ordered, err := tracker.SummarizeByAgentList(now.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("SummarizeByAgentList() error: %v", err)
+	}
+	if len(ordered) != 3 {
+		t.Fatalf("SummarizeByAgentList() returned %d summaries, want 3", len(ordered))
+	}
+
+	got := []string{ordered[0].AgentType, ordered[1].AgentType, ordered[2].AgentType}
+	want := []string{"claude", "codex", "gemini"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ordered[%d] = %s, want %s", i, got[i], want[i])
+		}
 	}
 }
 

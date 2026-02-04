@@ -206,9 +206,42 @@ func (m *EnsembleManager) SpawnEnsemble(ctx context.Context, cfg *EnsembleConfig
 	targets := buildPaneTargetMap(cfg.SessionName, panes)
 	var injectErrors []error
 	successes := 0
+	skippedModes := []string{}
 
-	for i := range state.Assignments {
-		assignment := &state.Assignments[i]
+	order := orderAssignmentsForTimebox(state.Assignments, catalog)
+	orderedModeIDs := make([]string, 0, len(order))
+	for _, idx := range order {
+		if idx >= 0 && idx < len(state.Assignments) {
+			orderedModeIDs = append(orderedModeIDs, state.Assignments[idx].ModeID)
+		}
+	}
+
+	deadline := timeboxDeadline(time.Now(), resolvedCfg.budget.TotalTimeout)
+	if !deadline.IsZero() {
+		logger.Info("ensemble timebox configured",
+			"session", cfg.SessionName,
+			"total_timeout", resolvedCfg.budget.TotalTimeout,
+			"deadline", deadline,
+			"ordered_modes", orderedModeIDs,
+		)
+	} else {
+		logger.Debug("ensemble timebox disabled",
+			"session", cfg.SessionName,
+			"ordered_modes", orderedModeIDs,
+		)
+	}
+
+	for orderIndex, assignmentIndex := range order {
+		if timeboxExpired(deadline, time.Now()) {
+			skippedModes = append(skippedModes, markAssignmentsSkipped(
+				state.Assignments,
+				order[orderIndex:],
+				"skipped: total timeout reached before injection",
+			)...)
+			break
+		}
+
+		assignment := &state.Assignments[assignmentIndex]
 		mode := catalog.GetMode(assignment.ModeID)
 		if mode == nil {
 			err := fmt.Errorf("mode not found: %s", assignment.ModeID)
@@ -263,8 +296,21 @@ func (m *EnsembleManager) SpawnEnsemble(ctx context.Context, cfg *EnsembleConfig
 	if successes == 0 && len(injectErrors) > 0 {
 		state.Status = EnsembleError
 		state.Error = "all injections failed"
+	} else if successes == 0 && len(skippedModes) > 0 {
+		state.Status = EnsembleError
+		state.Error = "all injections skipped due to timeout"
 	} else {
 		state.Status = EnsembleActive
+	}
+
+	if len(skippedModes) > 0 {
+		logger.Info("ensemble timebox reached; skipping remaining modes",
+			"session", cfg.SessionName,
+			"skipped", skippedModes,
+			"completed", successes,
+			"total", len(state.Assignments),
+			"timeout", resolvedCfg.budget.TotalTimeout,
+		)
 	}
 
 	if saveErr := SaveSession(cfg.SessionName, state); saveErr != nil {
@@ -524,6 +570,127 @@ func normalizeExplicitSpecs(specs []string, catalog *ModeCatalog) ([]string, err
 		return nil, errors.New("explicit assignment requires at least one mapping")
 	}
 	return normalized, nil
+}
+
+func orderAssignmentsForTimebox(assignments []ModeAssignment, catalog *ModeCatalog) []int {
+	order := make([]int, len(assignments))
+	for i := range assignments {
+		order[i] = i
+	}
+
+	sort.Slice(order, func(i, j int) bool {
+		aIdx := order[i]
+		bIdx := order[j]
+		aID := assignments[aIdx].ModeID
+		bID := assignments[bIdx].ModeID
+
+		var aMode, bMode *ReasoningMode
+		if catalog != nil {
+			aMode = catalog.GetMode(aID)
+			bMode = catalog.GetMode(bID)
+		}
+
+		aPriority := modePriorityWeight(aMode)
+		bPriority := modePriorityWeight(bMode)
+		if aPriority != bPriority {
+			return aPriority > bPriority
+		}
+
+		aValuePerSecond := modeValuePerSecond(aMode)
+		bValuePerSecond := modeValuePerSecond(bMode)
+		if aValuePerSecond != bValuePerSecond {
+			return aValuePerSecond > bValuePerSecond
+		}
+
+		return aID < bID
+	})
+
+	return order
+}
+
+func modePriorityWeight(mode *ReasoningMode) int {
+	if mode == nil {
+		return 0
+	}
+	switch mode.Tier {
+	case TierCore:
+		return 3
+	case TierAdvanced:
+		return 2
+	case TierExperimental:
+		return 1
+	default:
+		return 2
+	}
+}
+
+const (
+	timeboxTokensPerSecond   = 25.0
+	timeboxMinRuntimeSeconds = 15.0
+)
+
+func estimateModeRuntime(mode *ReasoningMode) time.Duration {
+	if mode == nil {
+		return 0
+	}
+	tokens := estimateTypicalCost(mode)
+	if tokens <= 0 {
+		tokens = 2000
+	}
+	seconds := float64(tokens) / timeboxTokensPerSecond
+	if seconds < timeboxMinRuntimeSeconds {
+		seconds = timeboxMinRuntimeSeconds
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+func modeValuePerSecond(mode *ReasoningMode) float64 {
+	if mode == nil {
+		return 0
+	}
+	runtime := estimateModeRuntime(mode).Seconds()
+	if runtime <= 0 {
+		return 0
+	}
+	return modeValueScore(mode) / runtime
+}
+
+func timeboxDeadline(start time.Time, total time.Duration) time.Time {
+	if total <= 0 {
+		return time.Time{}
+	}
+	return start.Add(total)
+}
+
+func timeboxExpired(deadline, now time.Time) bool {
+	if deadline.IsZero() {
+		return false
+	}
+	return !now.Before(deadline)
+}
+
+func markAssignmentsSkipped(assignments []ModeAssignment, indices []int, reason string) []string {
+	if reason == "" {
+		reason = "skipped"
+	}
+	now := time.Now().UTC()
+	skipped := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(assignments) {
+			continue
+		}
+		assignment := &assignments[idx]
+		if assignment.Status != AssignmentPending {
+			continue
+		}
+		assignment.Status = AssignmentError
+		if assignment.Error == "" {
+			assignment.Error = reason
+		}
+		assignment.CompletedAt = &now
+		skipped = append(skipped, assignment.ModeID)
+	}
+	return skipped
 }
 
 func explicitModeIDs(specs []string) []string {
