@@ -319,7 +319,7 @@ func TestModeVisualization_View_WithAssignments(t *testing.T) {
 
 	modes := []ensemble.ReasoningMode{
 		{ID: "deductive", Code: "A1", Name: "Deductive Logic", Category: ensemble.CategoryFormal, Tier: ensemble.TierCore, ShortDesc: "Formal deductive logic"},
-		{ID: "bayesian", Code: "B2", Name: "Bayesian Analysis", Category: ensemble.CategoryUncertainty, Tier: ensemble.TierAdvanced, ShortDesc: "Bayes"},
+		{ID: "bayesian", Code: "C2", Name: "Bayesian Analysis", Category: ensemble.CategoryUncertainty, Tier: ensemble.TierAdvanced, ShortDesc: "Bayes"},
 	}
 	catalog, err := ensemble.NewModeCatalog(modes, "test")
 	if err != nil {
@@ -350,8 +350,8 @@ func TestModeVisualization_View_WithAssignments(t *testing.T) {
 	if !strings.Contains(view, "A1") {
 		t.Errorf("expected mode code A1 in view, got %q", view)
 	}
-	if !strings.Contains(view, "B2") {
-		t.Errorf("expected mode code B2 in view, got %q", view)
+	if !strings.Contains(view, "C2") {
+		t.Errorf("expected mode code C2 in view, got %q", view)
 	}
 	if !strings.Contains(view, "consensus") {
 		t.Errorf("expected strategy in footer, got %q", view)
