@@ -974,3 +974,106 @@ func TestIsValidWaitCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestParseString_UnsupportedFormat(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseString("{}", "json")
+	if err == nil {
+		t.Error("expected error for unsupported format")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if !strings.Contains(pe.Message, "unsupported format") {
+		t.Errorf("expected 'unsupported format' in message, got %q", pe.Message)
+	}
+	if pe.Hint != "Use 'yaml' or 'toml'" {
+		t.Errorf("expected hint about yaml/toml, got %q", pe.Hint)
+	}
+}
+
+func TestParseString_InvalidYAML(t *testing.T) {
+	t.Parallel()
+
+	content := `
+name: test
+steps:
+  - id: step1
+  invalid yaml here: [
+`
+	_, err := ParseString(content, "yaml")
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if !strings.Contains(pe.Message, "YAML parse error") {
+		t.Errorf("expected 'YAML parse error' in message, got %q", pe.Message)
+	}
+}
+
+func TestParseString_InvalidTOML(t *testing.T) {
+	t.Parallel()
+
+	content := `
+name = "test"
+invalid toml [here
+`
+	_, err := ParseString(content, "toml")
+	if err == nil {
+		t.Error("expected error for invalid TOML")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if !strings.Contains(pe.Message, "TOML parse error") {
+		t.Errorf("expected 'TOML parse error' in message, got %q", pe.Message)
+	}
+}
+
+func TestParseString_YMLFormat(t *testing.T) {
+	t.Parallel()
+
+	content := `
+schema_version: "2.0"
+name: yml-test
+steps:
+  - id: s1
+    prompt: test
+`
+	w, err := ParseString(content, "yml")
+	if err != nil {
+		t.Fatalf("ParseString failed: %v", err)
+	}
+
+	if w.Name != "yml-test" {
+		t.Errorf("expected name 'yml-test', got %q", w.Name)
+	}
+}
+
+func TestParseFile_InvalidTOML(t *testing.T) {
+	t.Parallel()
+
+	content := `
+name = "test"
+invalid toml [here
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "workflow.toml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(path)
+	if err == nil {
+		t.Error("expected error for invalid TOML")
+	}
+}
