@@ -1,7 +1,11 @@
 package policy
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultPolicy(t *testing.T) {
@@ -397,5 +401,341 @@ func TestPolicyStats(t *testing.T) {
 	expectedTotal := len(p.Blocked) + len(p.ApprovalRequired) + len(p.Allowed)
 	if total != expectedTotal {
 		t.Errorf("Stats() total %d != rule count %d", total, expectedTotal)
+	}
+}
+
+// =============================================================================
+// Policy Load tests
+// =============================================================================
+
+func TestLoad(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid YAML", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "policy.yaml")
+		content := `version: 1
+blocked:
+  - pattern: "rm -rf /"
+    reason: "dangerous"
+allowed:
+  - pattern: "git status"
+    reason: "safe"
+approval_required:
+  - pattern: "force_release"
+    reason: "needs approval"
+    slb: true
+automation:
+  auto_push: false
+  auto_commit: true
+  force_release: "approval"
+`
+		os.WriteFile(path, []byte(content), 0644)
+		p, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(p.Blocked) != 1 {
+			t.Errorf("expected 1 blocked rule, got %d", len(p.Blocked))
+		}
+		if len(p.Allowed) != 1 {
+			t.Errorf("expected 1 allowed rule, got %d", len(p.Allowed))
+		}
+		if !p.ApprovalRequired[0].SLB {
+			t.Error("expected SLB flag on approval_required rule")
+		}
+	})
+
+	t.Run("invalid regex", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "policy.yaml")
+		content := `version: 1
+blocked:
+  - pattern: "[invalid"
+    reason: "bad regex"
+`
+		os.WriteFile(path, []byte(content), 0644)
+		_, err := Load(path)
+		if err == nil {
+			t.Error("expected error for invalid regex pattern")
+		}
+	})
+
+	t.Run("nonexistent file", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load("/nonexistent/path/policy.yaml")
+		if err == nil {
+			t.Error("expected error for nonexistent file")
+		}
+	})
+
+	t.Run("invalid YAML", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "policy.yaml")
+		os.WriteFile(path, []byte("{{{{not yaml"), 0644)
+		_, err := Load(path)
+		if err == nil {
+			t.Error("expected error for invalid YAML")
+		}
+	})
+}
+
+func TestCompileInvalidPatterns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid blocked pattern", func(t *testing.T) {
+		t.Parallel()
+		p := &Policy{
+			Blocked: []Rule{{Pattern: "[unclosed"}},
+		}
+		if err := p.compile(); err == nil {
+			t.Error("expected error for invalid blocked pattern")
+		}
+	})
+
+	t.Run("invalid approval pattern", func(t *testing.T) {
+		t.Parallel()
+		p := &Policy{
+			ApprovalRequired: []Rule{{Pattern: "(?P<>invalid)"}},
+		}
+		if err := p.compile(); err == nil {
+			t.Error("expected error for invalid approval_required pattern")
+		}
+	})
+
+	t.Run("invalid allowed pattern", func(t *testing.T) {
+		t.Parallel()
+		p := &Policy{
+			Allowed: []Rule{{Pattern: "*bad"}},
+		}
+		if err := p.compile(); err == nil {
+			t.Error("expected error for invalid allowed pattern")
+		}
+	})
+}
+
+// =============================================================================
+// BlockedLogger tests
+// =============================================================================
+
+func TestBlockedLogger(t *testing.T) {
+	t.Parallel()
+
+	t.Run("create log and write entries", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "blocked.jsonl")
+
+		logger, err := NewBlockedLogger(logPath)
+		if err != nil {
+			t.Fatalf("NewBlockedLogger: %v", err)
+		}
+		defer logger.Close()
+
+		// Write via Log
+		err = logger.Log(&BlockedEntry{
+			Timestamp: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			Session:   "sess1",
+			Agent:     "agent1",
+			Command:   "rm -rf /",
+			Pattern:   `rm\s+-rf\s+/`,
+			Reason:    "destructive",
+			Action:    ActionBlock,
+		})
+		if err != nil {
+			t.Fatalf("Log: %v", err)
+		}
+
+		// Write via LogBlocked
+		err = logger.LogBlocked("sess2", "agent2", "git reset --hard", `git\s+reset\s+--hard`, "dangerous")
+		if err != nil {
+			t.Fatalf("LogBlocked: %v", err)
+		}
+
+		logger.Close()
+
+		// Read back
+		entries, err := ReadBlockedLog(logPath)
+		if err != nil {
+			t.Fatalf("ReadBlockedLog: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 entries, got %d", len(entries))
+		}
+		if entries[0].Command != "rm -rf /" {
+			t.Errorf("entries[0].Command = %q, want %q", entries[0].Command, "rm -rf /")
+		}
+		if entries[1].Agent != "agent2" {
+			t.Errorf("entries[1].Agent = %q, want %q", entries[1].Agent, "agent2")
+		}
+	})
+
+	t.Run("log with nil file", func(t *testing.T) {
+		t.Parallel()
+		logger := &BlockedLogger{path: "unused"}
+		// file is nil, should return nil error
+		err := logger.Log(&BlockedEntry{Command: "test"})
+		if err != nil {
+			t.Errorf("Log with nil file should return nil, got %v", err)
+		}
+	})
+
+	t.Run("log auto-sets timestamp", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "blocked.jsonl")
+
+		logger, err := NewBlockedLogger(logPath)
+		if err != nil {
+			t.Fatalf("NewBlockedLogger: %v", err)
+		}
+		defer logger.Close()
+
+		before := time.Now()
+		logger.Log(&BlockedEntry{
+			Command: "test",
+			Pattern: "test",
+			Reason:  "test",
+			Action:  ActionBlock,
+		})
+		logger.Close()
+
+		entries, _ := ReadBlockedLog(logPath)
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 entry, got %d", len(entries))
+		}
+		if entries[0].Timestamp.Before(before) {
+			t.Error("auto-set timestamp should be >= before")
+		}
+	})
+
+	t.Run("close idempotent", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "blocked.jsonl")
+
+		logger, err := NewBlockedLogger(logPath)
+		if err != nil {
+			t.Fatalf("NewBlockedLogger: %v", err)
+		}
+
+		if err := logger.Close(); err != nil {
+			t.Errorf("first Close: %v", err)
+		}
+		if err := logger.Close(); err != nil {
+			t.Errorf("second Close should be nil, got %v", err)
+		}
+	})
+}
+
+func TestReadBlockedLog(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nonexistent file returns nil", func(t *testing.T) {
+		t.Parallel()
+		entries, err := ReadBlockedLog("/nonexistent/path.jsonl")
+		if err != nil {
+			t.Errorf("expected nil error for nonexistent, got %v", err)
+		}
+		if entries != nil {
+			t.Errorf("expected nil entries, got %v", entries)
+		}
+	})
+
+	t.Run("empty file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "empty.jsonl")
+		os.WriteFile(path, []byte(""), 0644)
+
+		entries, err := ReadBlockedLog(path)
+		if err != nil {
+			t.Fatalf("ReadBlockedLog: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected 0 entries from empty file, got %d", len(entries))
+		}
+	})
+
+	t.Run("skips malformed entries", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "mixed.jsonl")
+
+		good, _ := json.Marshal(BlockedEntry{Command: "good", Action: ActionBlock})
+		content := string(good) + "\n{invalid json}\n" + string(good) + "\n"
+		os.WriteFile(path, []byte(content), 0644)
+
+		entries, err := ReadBlockedLog(path)
+		if err != nil {
+			t.Fatalf("ReadBlockedLog: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("expected 2 valid entries (skipping malformed), got %d", len(entries))
+		}
+	})
+}
+
+func TestRecentBlocked(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocked.jsonl")
+
+	logger, err := NewBlockedLogger(path)
+	if err != nil {
+		t.Fatalf("NewBlockedLogger: %v", err)
+	}
+
+	// Write an old entry and a recent entry
+	oldEntry := &BlockedEntry{
+		Timestamp: time.Now().Add(-48 * time.Hour),
+		Command:   "old command",
+		Pattern:   "old",
+		Reason:    "old",
+		Action:    ActionBlock,
+	}
+	recentEntry := &BlockedEntry{
+		Timestamp: time.Now(),
+		Command:   "recent command",
+		Pattern:   "recent",
+		Reason:    "recent",
+		Action:    ActionBlock,
+	}
+	logger.Log(oldEntry)
+	logger.Log(recentEntry)
+	logger.Close()
+
+	// Recent within last 24 hours should return only 1
+	recent, err := RecentBlocked(path, 24)
+	if err != nil {
+		t.Fatalf("RecentBlocked: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Errorf("expected 1 recent entry (last 24h), got %d", len(recent))
+	}
+	if len(recent) > 0 && recent[0].Command != "recent command" {
+		t.Errorf("recent entry should be 'recent command', got %q", recent[0].Command)
+	}
+
+	// Recent within last 72 hours should return both
+	recent, err = RecentBlocked(path, 72)
+	if err != nil {
+		t.Fatalf("RecentBlocked: %v", err)
+	}
+	if len(recent) != 2 {
+		t.Errorf("expected 2 entries (last 72h), got %d", len(recent))
+	}
+
+	// Nonexistent path returns nil
+	recent, err = RecentBlocked("/nonexistent.jsonl", 24)
+	if err != nil {
+		t.Fatalf("RecentBlocked nonexistent: %v", err)
+	}
+	if recent != nil {
+		t.Errorf("expected nil for nonexistent, got %v", recent)
 	}
 }
