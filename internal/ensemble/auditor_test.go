@@ -125,3 +125,99 @@ func TestParseModeCode_Invalid(t *testing.T) {
 		t.Fatal("expected parseModeCode to fail on short code")
 	}
 }
+
+// =============================================================================
+// Pure helper function tests
+// =============================================================================
+
+func TestTokenize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  int // expected number of tokens
+	}{
+		{"simple words", "hello world", 2},
+		{"single word", "word", 1},
+		{"empty string", "", 0},
+		{"only whitespace", "   ", 0},
+		{"multiple spaces", "one  two   three", 3},
+		{"tabs and newlines", "a\tb\nc", 3},
+		{"repeated words", "word word word", 1}, // Set only keeps unique
+		{"mixed case", "Word WORD word", 3},     // Case sensitive
+		{"with punctuation", "hello, world!", 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tokens := tokenize(tc.input)
+			if len(tokens) != tc.want {
+				t.Errorf("tokenize(%q) got %d tokens, want %d", tc.input, len(tokens), tc.want)
+			}
+		})
+	}
+}
+
+func TestJaccardSimilarity_EdgeCases(t *testing.T) {
+	t.Parallel()
+
+	// Test edge cases not covered in similarity_test.go
+	tests := []struct {
+		name string
+		a    map[string]struct{}
+		b    map[string]struct{}
+		want float64
+	}{
+		{
+			name: "both empty returns 1",
+			a:    map[string]struct{}{},
+			b:    map[string]struct{}{},
+			want: 1.0,
+		},
+		{
+			name: "one empty one single",
+			a:    map[string]struct{}{},
+			b:    map[string]struct{}{"x": {}},
+			want: 0.0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := jaccardSimilarity(tc.a, tc.b)
+			if got != tc.want {
+				t.Errorf("jaccardSimilarity(%v, %v) = %f, want %f", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUniqueStrings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input []string
+		want  int
+	}{
+		{"no duplicates", []string{"a", "b", "c"}, 3},
+		{"all duplicates", []string{"a", "a", "a"}, 1},
+		{"some duplicates", []string{"a", "b", "a", "c", "b"}, 3},
+		{"empty slice", []string{}, 0},
+		{"single element", []string{"x"}, 1},
+		{"empty strings skipped", []string{"", "", ""}, 0}, // Empty strings are filtered out
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := uniqueStrings(tc.input)
+			if len(got) != tc.want {
+				t.Errorf("uniqueStrings(%v) returned %d items, want %d", tc.input, len(got), tc.want)
+			}
+		})
+	}
+}
