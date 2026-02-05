@@ -482,3 +482,531 @@ func TestDefaultTimelinePersistConfig(t *testing.T) {
 
 	t.Log("PASS: Default config has sensible values")
 }
+
+func TestCompressTimeline(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "compress-me"
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now()},
+		{AgentID: "cc_2", SessionID: sessionID, State: TimelineIdle, Timestamp: time.Now()},
+	}
+	if err := persister.SaveTimeline(sessionID, events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+
+	// Verify uncompressed file exists
+	uncompressed := filepath.Join(tmpDir, sessionID+".jsonl")
+	if _, err := os.Stat(uncompressed); err != nil {
+		t.Fatalf("uncompressed file missing: %v", err)
+	}
+
+	// Compress
+	if err := persister.compressTimeline(sessionID); err != nil {
+		t.Fatalf("compressTimeline: %v", err)
+	}
+
+	// Verify .gz exists and original is removed
+	compressed := filepath.Join(tmpDir, sessionID+".jsonl.gz")
+	if _, err := os.Stat(compressed); err != nil {
+		t.Fatalf("compressed file missing: %v", err)
+	}
+	if _, err := os.Stat(uncompressed); !os.IsNotExist(err) {
+		t.Error("original file should be removed after compression")
+	}
+
+	// Verify we can still load the compressed timeline
+	loaded, err := persister.LoadTimeline(sessionID)
+	if err != nil {
+		t.Fatalf("LoadTimeline from compressed: %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Errorf("expected 2 events from compressed, got %d", len(loaded))
+	}
+}
+
+func TestCompressTimeline_NonExistent(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	err = persister.compressTimeline("does-not-exist")
+	if err == nil {
+		t.Error("expected error compressing nonexistent timeline")
+	}
+}
+
+func TestCompressOldTimelines(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Use a very short compress threshold so we can test it
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:           tmpDir,
+		CompressOlderThan: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Create two timelines
+	for _, id := range []string{"old-session", "old-session-2"} {
+		events := []AgentEvent{
+			{AgentID: "cc_1", SessionID: id, State: TimelineWorking, Timestamp: time.Now()},
+		}
+		if err := persister.SaveTimeline(id, events); err != nil {
+			t.Fatalf("SaveTimeline(%s): %v", id, err)
+		}
+	}
+
+	// Wait past the threshold
+	time.Sleep(5 * time.Millisecond)
+
+	compressed, err := persister.CompressOldTimelines()
+	if err != nil {
+		t.Fatalf("CompressOldTimelines: %v", err)
+	}
+	if compressed != 2 {
+		t.Errorf("expected 2 compressed, got %d", compressed)
+	}
+
+	// Verify both are now .gz
+	for _, id := range []string{"old-session", "old-session-2"} {
+		gzPath := filepath.Join(tmpDir, id+".jsonl.gz")
+		if _, err := os.Stat(gzPath); err != nil {
+			t.Errorf("expected %s to be compressed: %v", id, err)
+		}
+		plainPath := filepath.Join(tmpDir, id+".jsonl")
+		if _, err := os.Stat(plainPath); !os.IsNotExist(err) {
+			t.Errorf("expected original %s to be removed", id)
+		}
+	}
+}
+
+func TestCompressOldTimelines_DisabledWhenZero(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:           tmpDir,
+		CompressOlderThan: -1, // disabled
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Should return 0 immediately since compression is disabled
+	compressed, err := persister.CompressOldTimelines()
+	if err != nil {
+		t.Fatalf("CompressOldTimelines: %v", err)
+	}
+	if compressed != 0 {
+		t.Errorf("expected 0 compressed when disabled, got %d", compressed)
+	}
+}
+
+func TestCompressOldTimelines_SkipsAlreadyCompressed(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:           tmpDir,
+		CompressOlderThan: 1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "already-compressed"
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now()},
+	}
+	if err := persister.SaveTimeline(sessionID, events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	// First compression
+	n1, err := persister.CompressOldTimelines()
+	if err != nil {
+		t.Fatalf("first CompressOldTimelines: %v", err)
+	}
+	if n1 != 1 {
+		t.Fatalf("expected 1 compressed, got %d", n1)
+	}
+
+	// Second compression should skip (already compressed)
+	n2, err := persister.CompressOldTimelines()
+	if err != nil {
+		t.Fatalf("second CompressOldTimelines: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("expected 0 on second run, got %d", n2)
+	}
+}
+
+func TestListTimelines_IncludesCompressed(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Save two sessions
+	for _, id := range []string{"plain-session", "gz-session"} {
+		events := []AgentEvent{
+			{AgentID: "cc_1", SessionID: id, State: TimelineWorking, Timestamp: time.Now()},
+		}
+		if err := persister.SaveTimeline(id, events); err != nil {
+			t.Fatalf("SaveTimeline(%s): %v", id, err)
+		}
+	}
+
+	// Compress one
+	if err := persister.compressTimeline("gz-session"); err != nil {
+		t.Fatalf("compressTimeline: %v", err)
+	}
+
+	timelines, err := persister.ListTimelines()
+	if err != nil {
+		t.Fatalf("ListTimelines: %v", err)
+	}
+	if len(timelines) != 2 {
+		t.Fatalf("expected 2 timelines, got %d", len(timelines))
+	}
+
+	// Verify one is compressed and one is not
+	var gotPlain, gotCompressed bool
+	for _, ti := range timelines {
+		if ti.SessionID == "plain-session" && !ti.Compressed {
+			gotPlain = true
+		}
+		if ti.SessionID == "gz-session" && ti.Compressed {
+			gotCompressed = true
+		}
+	}
+	if !gotPlain {
+		t.Error("expected plain-session to be uncompressed")
+	}
+	if !gotCompressed {
+		t.Error("expected gz-session to be compressed")
+	}
+}
+
+func TestStopCheckpoint(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// StopCheckpoint on non-existent session should be safe
+	persister.StopCheckpoint("nonexistent")
+
+	// Stop on empty persister should be safe
+	persister.Stop()
+}
+
+func TestGetTimelineInfo_NotFound(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	info, err := persister.GetTimelineInfo("nonexistent")
+	if err != nil {
+		t.Fatalf("GetTimelineInfo: %v", err)
+	}
+	if info != nil {
+		t.Error("expected nil for nonexistent session")
+	}
+}
+
+func TestCountUniqueAgents(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		events []AgentEvent
+		want   int
+	}{
+		{"empty", nil, 0},
+		{"single agent", []AgentEvent{
+			{AgentID: "cc_1"},
+			{AgentID: "cc_1"},
+		}, 1},
+		{"multiple agents", []AgentEvent{
+			{AgentID: "cc_1"},
+			{AgentID: "cod_1"},
+			{AgentID: "gmi_1"},
+			{AgentID: "cc_1"},
+		}, 3},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := countUniqueAgents(tc.events)
+			if got != tc.want {
+				t.Errorf("countUniqueAgents() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeleteTimeline_CompressedFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "delete-compressed"
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now()},
+	}
+	if err := persister.SaveTimeline(sessionID, events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+	if err := persister.compressTimeline(sessionID); err != nil {
+		t.Fatalf("compressTimeline: %v", err)
+	}
+
+	// Delete the compressed timeline
+	if err := persister.DeleteTimeline(sessionID); err != nil {
+		t.Fatalf("DeleteTimeline: %v", err)
+	}
+
+	// Verify it's gone
+	loaded, err := persister.LoadTimeline(sessionID)
+	if err != nil {
+		t.Fatalf("LoadTimeline after delete: %v", err)
+	}
+	if loaded != nil {
+		t.Error("expected nil after deleting compressed timeline")
+	}
+}
+
+func TestReadHeader_Compressed(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "header-gz"
+	now := time.Now()
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: now},
+		{AgentID: "cc_2", SessionID: sessionID, State: TimelineIdle, Timestamp: now.Add(time.Second)},
+	}
+	if err := persister.SaveTimeline(sessionID, events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+
+	// Compress the file
+	if err := persister.compressTimeline(sessionID); err != nil {
+		t.Fatalf("compressTimeline: %v", err)
+	}
+
+	// Read header from compressed file
+	gzPath := filepath.Join(tmpDir, sessionID+".jsonl.gz")
+	header, err := persister.readHeader(gzPath, true)
+	if err != nil {
+		t.Fatalf("readHeader compressed: %v", err)
+	}
+	if header == nil {
+		t.Fatal("expected non-nil header")
+	}
+	if header.SessionID != sessionID {
+		t.Errorf("expected SessionID %q, got %q", sessionID, header.SessionID)
+	}
+	if header.EventCount != 2 {
+		t.Errorf("expected EventCount 2, got %d", header.EventCount)
+	}
+	if header.AgentCount != 2 {
+		t.Errorf("expected AgentCount 2, got %d", header.AgentCount)
+	}
+}
+
+func TestReadHeader_EmptyFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Create empty file
+	emptyPath := filepath.Join(tmpDir, "empty.jsonl")
+	if err := os.WriteFile(emptyPath, nil, 0644); err != nil {
+		t.Fatalf("create empty file: %v", err)
+	}
+
+	_, err = persister.readHeader(emptyPath, false)
+	if err == nil {
+		t.Error("expected error for empty file")
+	}
+}
+
+func TestNewTimelinePersister_DefaultConfig(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// Pass nil config — should use defaults but override BaseDir
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	if persister.config.MaxTimelines != 30 {
+		t.Errorf("expected default MaxTimelines 30, got %d", persister.config.MaxTimelines)
+	}
+	if persister.config.CompressOlderThan != 24*time.Hour {
+		t.Errorf("expected default CompressOlderThan 24h, got %v", persister.config.CompressOlderThan)
+	}
+	if persister.config.CheckpointInterval != 5*time.Minute {
+		t.Errorf("expected default CheckpointInterval 5m, got %v", persister.config.CheckpointInterval)
+	}
+}
+
+func TestLoadTimeline_MalformedLines(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "malformed"
+	path := filepath.Join(tmpDir, sessionID+".jsonl")
+
+	// Write header + malformed line + valid event
+	content := `{"version":"1.0","session_id":"malformed","event_count":1}
+not valid json
+{"agent_id":"cc_1","session_id":"malformed","state":"working","timestamp":"2026-01-01T00:00:00Z"}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	events, err := persister.LoadTimeline(sessionID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	// Should skip malformed line and return the valid event
+	if len(events) != 1 {
+		t.Errorf("expected 1 valid event, got %d", len(events))
+	}
+}
+
+func TestCleanup_NothingToClean(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:      tmpDir,
+		MaxTimelines: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Create just 2 timelines with limit 100
+	for _, id := range []string{"s1", "s2"} {
+		events := []AgentEvent{
+			{AgentID: "cc_1", SessionID: id, State: TimelineWorking, Timestamp: time.Now()},
+		}
+		if err := persister.SaveTimeline(id, events); err != nil {
+			t.Fatalf("SaveTimeline: %v", err)
+		}
+	}
+
+	deleted, err := persister.Cleanup()
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("expected 0 deleted, got %d", deleted)
+	}
+}
+
+func TestListTimelines_EmptyDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	timelines, err := persister.ListTimelines()
+	if err != nil {
+		t.Fatalf("ListTimelines: %v", err)
+	}
+	if len(timelines) != 0 {
+		t.Errorf("expected 0 timelines in empty dir, got %d", len(timelines))
+	}
+}
+
+func TestListTimelines_IgnoresNonJSONL(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Create a non-jsonl file
+	if err := os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Create a valid timeline
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: "valid", State: TimelineWorking, Timestamp: time.Now()},
+	}
+	if err := persister.SaveTimeline("valid", events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+
+	timelines, err := persister.ListTimelines()
+	if err != nil {
+		t.Fatalf("ListTimelines: %v", err)
+	}
+	if len(timelines) != 1 {
+		t.Errorf("expected 1 timeline (ignoring .txt), got %d", len(timelines))
+	}
+}
+
+func TestGetTimelinePath(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	plain := persister.getTimelinePath("my-session", false)
+	if plain != filepath.Join(tmpDir, "my-session.jsonl") {
+		t.Errorf("plain path = %q", plain)
+	}
+
+	gz := persister.getTimelinePath("my-session", true)
+	if gz != filepath.Join(tmpDir, "my-session.jsonl.gz") {
+		t.Errorf("gz path = %q", gz)
+	}
+}
