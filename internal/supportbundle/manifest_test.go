@@ -8,6 +8,49 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
+// =============================================================================
+// DefaultHost (bd-2fgaj)
+// =============================================================================
+
+func TestDefaultHost(t *testing.T) {
+	t.Parallel()
+	host := DefaultHost()
+	if host.OS == "" {
+		t.Error("DefaultHost().OS should not be empty")
+	}
+	if host.Arch == "" {
+		t.Error("DefaultHost().Arch should not be empty")
+	}
+}
+
+// =============================================================================
+// NewManifest (bd-2fgaj)
+// =============================================================================
+
+func TestNewManifest(t *testing.T) {
+	t.Parallel()
+	m := NewManifest("v1.2.3")
+	if m.SchemaVersion != SchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", m.SchemaVersion, SchemaVersion)
+	}
+	if m.NTMVersion != "v1.2.3" {
+		t.Errorf("NTMVersion = %q, want v1.2.3", m.NTMVersion)
+	}
+	if m.GeneratedAt.IsZero() {
+		t.Error("GeneratedAt should not be zero")
+	}
+	if m.Host.OS == "" || m.Host.Arch == "" {
+		t.Error("Host should be populated from DefaultHost()")
+	}
+	if m.Files != nil {
+		t.Error("Files should be nil for new manifest")
+	}
+}
+
+// =============================================================================
+// Existing tests below
+// =============================================================================
+
 func TestSHA256Hex(t *testing.T) {
 	got := SHA256Hex([]byte("abc"))
 	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

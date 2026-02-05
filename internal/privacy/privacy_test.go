@@ -243,3 +243,40 @@ func TestUnregisteredSession(t *testing.T) {
 		t.Error("Checkpoints should be blocked for unregistered session when global privacy is enabled")
 	}
 }
+
+// =============================================================================
+// SetDefaultManager / GetDefaultManager (bd-2fgaj)
+// =============================================================================
+
+func TestSetDefaultManager(t *testing.T) {
+	// Save original and restore
+	original := GetDefaultManager()
+	t.Cleanup(func() { SetDefaultManager(original) })
+
+	custom := New(config.PrivacyConfig{Enabled: true})
+	SetDefaultManager(custom)
+
+	got := GetDefaultManager()
+	if got != custom {
+		t.Error("GetDefaultManager should return the manager set by SetDefaultManager")
+	}
+}
+
+func TestSetDefaultManager_NilIgnored(t *testing.T) {
+	original := GetDefaultManager()
+	t.Cleanup(func() { SetDefaultManager(original) })
+
+	// SetDefaultManager(nil) should be a no-op
+	SetDefaultManager(nil)
+	got := GetDefaultManager()
+	if got == nil {
+		t.Error("SetDefaultManager(nil) should not clear the default manager")
+	}
+}
+
+func TestGetDefaultManager_ReturnsNonNil(t *testing.T) {
+	m := GetDefaultManager()
+	if m == nil {
+		t.Error("GetDefaultManager should always return a non-nil manager")
+	}
+}

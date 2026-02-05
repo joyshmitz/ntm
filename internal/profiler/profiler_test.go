@@ -376,3 +376,52 @@ func TestWriteTextRecommendationSeverityIcons(t *testing.T) {
 		t.Error("expected output to contain warning or critical icons for slow operation")
 	}
 }
+
+// =============================================================================
+// TotalDuration (bd-2fgaj)
+// =============================================================================
+
+func TestTotalDuration(t *testing.T) {
+	Reset()
+	Enable()
+	t.Cleanup(func() { Disable(); Reset() })
+
+	time.Sleep(10 * time.Millisecond)
+	d := TotalDuration()
+	if d < 10*time.Millisecond {
+		t.Errorf("TotalDuration = %v, expected >= 10ms", d)
+	}
+}
+
+// =============================================================================
+// TimePhase (bd-2fgaj)
+// =============================================================================
+
+func TestTimePhase(t *testing.T) {
+	Reset()
+	Enable()
+	t.Cleanup(func() { Disable(); Reset() })
+
+	executed := false
+	TimePhase("test-op", "startup", func() {
+		executed = true
+		time.Sleep(5 * time.Millisecond)
+	})
+	if !executed {
+		t.Error("TimePhase should have executed the function")
+	}
+
+	profile := GetProfile()
+	found := false
+	for _, span := range profile.Spans {
+		if span.Name == "test-op" && span.Phase == "startup" {
+			found = true
+			if span.DurationMs < 5 {
+				t.Errorf("span duration = %.2fms, expected >= 5ms", span.DurationMs)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find test-op span with startup phase in profile")
+	}
+}
