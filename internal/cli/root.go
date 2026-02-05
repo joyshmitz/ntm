@@ -418,6 +418,13 @@ Shell Integration:
 			}
 			return
 		}
+		if robotACFSStatus || robotSetup {
+			if err := robot.PrintACFSStatus(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotSLBPending {
 			if err := robot.PrintSLBPending(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1930,6 +1937,10 @@ var (
 	// Robot-tools flag for tool inventory
 	robotTools bool // tool inventory and health output
 
+	// Robot-acfs/setup flags
+	robotACFSStatus bool // ACFS setup status
+	robotSetup      bool // alias for ACFS setup status
+
 	// Robot-ack flags for send confirmation tracking
 	robotAck        string // session name for ack
 	robotAckTimeout string // timeout (e.g., "30s", "5000ms")
@@ -2419,6 +2430,10 @@ func init() {
 
 	// Robot-tools flag for tool inventory and health
 	rootCmd.Flags().BoolVar(&robotTools, "robot-tools", false, "Get tool inventory with health status (JSON). Shows all registered flywheel tools")
+
+	// Robot-acfs/setup flags for setup status
+	rootCmd.Flags().BoolVar(&robotACFSStatus, "robot-acfs-status", false, "Get setup status via ACFS (JSON)")
+	rootCmd.Flags().BoolVar(&robotSetup, "robot-setup", false, "Alias for --robot-acfs-status")
 
 	// Robot-ack flags for send confirmation tracking
 	rootCmd.Flags().StringVar(&robotAck, "robot-ack", "", "Watch for agent responses after send. Required: SESSION. Example: ntm --robot-ack=proj --ack-timeout=30s")

@@ -253,6 +253,12 @@ type DCGStatusUpdateMsg struct {
 	Gen         uint64
 }
 
+// RCHStatusUpdateMsg is sent when RCH status is fetched.
+type RCHStatusUpdateMsg struct {
+	Data panels.RCHPanelData
+	Gen  uint64
+}
+
 // PendingRotationsUpdateMsg is sent when pending rotations data is fetched
 type PendingRotationsUpdateMsg struct {
 	Pending []*ctxmon.PendingRotation
@@ -308,6 +314,7 @@ const (
 	refreshAgentMail
 	refreshAgentMailInbox
 	refreshRouting
+	refreshRCH
 	refreshDCG
 	refreshPendingRotations
 	refreshPTHealth
@@ -468,6 +475,7 @@ type Model struct {
 	beadsPanel           *panels.BeadsPanel
 	alertsPanel          *panels.AlertsPanel
 	costPanel            *panels.CostPanel
+	rchPanel             *panels.RCHPanel
 	metricsPanel         *panels.MetricsPanel
 	historyPanel         *panels.HistoryPanel
 	cassPanel            *panels.CASSPanel
@@ -542,6 +550,12 @@ type Model struct {
 	fetchingDCG        bool   // Whether we're currently fetching DCG status
 	lastDCGFetch       time.Time
 	dcgRefreshInterval time.Duration // How often to refresh DCG status
+
+	// RCH (Remote Compilation Helper) status
+	rchActive          bool // Whether builds are actively running
+	fetchingRCH        bool // Whether we're currently fetching RCH status
+	lastRCHFetch       time.Time
+	rchRefreshInterval time.Duration // How often to refresh RCH status
 
 	// Error tracking for data sources (displayed as badges)
 	beadsError       error
@@ -649,7 +663,9 @@ const (
 	BeadsRefreshInterval       = 5 * time.Second
 	CassContextRefreshInterval = 15 * time.Minute
 	ScanRefreshInterval        = 1 * time.Minute
-	DCGRefreshInterval         = 5 * time.Minute // DCG status changes infrequently
+	RCHActiveRefreshInterval   = 5 * time.Second  // Faster polling when builds are active
+	RCHIdleRefreshInterval     = 30 * time.Second // Slower polling when idle
+	DCGRefreshInterval         = 5 * time.Minute  // DCG status changes infrequently
 	CheckpointRefreshInterval  = 30 * time.Second
 	HandoffRefreshInterval     = 30 * time.Second
 	SpawnActiveRefreshInterval = 500 * time.Millisecond // Poll frequently when spawn is active
@@ -728,6 +744,7 @@ func New(session, projectDir string) Model {
 		beadsRefreshInterval:       BeadsRefreshInterval,
 		cassContextRefreshInterval: CassContextRefreshInterval,
 		scanRefreshInterval:        ScanRefreshInterval,
+		rchRefreshInterval:         RCHIdleRefreshInterval,
 		dcgRefreshInterval:         DCGRefreshInterval,
 		checkpointRefreshInterval:  CheckpointRefreshInterval,
 		handoffRefreshInterval:     HandoffRefreshInterval,
@@ -754,6 +771,7 @@ func New(session, projectDir string) Model {
 		beadsPanel:           panels.NewBeadsPanel(),
 		alertsPanel:          panels.NewAlertsPanel(),
 		costPanel:            panels.NewCostPanel(),
+		rchPanel:             panels.NewRCHPanel(),
 		metricsPanel:         panels.NewMetricsPanel(),
 		historyPanel:         panels.NewHistoryPanel(),
 		cassPanel:            panels.NewCASSPanel(),
@@ -778,6 +796,7 @@ func New(session, projectDir string) Model {
 		fetchingCheckpoint:  true,
 		fetchingHandoff:     true,
 		fetchingMailInbox:   true,
+		fetchingRCH:         true,
 		fetchingDCG:         true,
 	}
 
@@ -789,6 +808,7 @@ func New(session, projectDir string) Model {
 	m.lastBeadsFetch = now
 	m.lastCassContextFetch = now
 	m.lastScanFetch = now
+	m.lastRCHFetch = now
 	m.lastDCGFetch = now
 	m.lastCheckpointFetch = now
 	m.lastHandoffFetch = now
@@ -862,6 +882,7 @@ func (m Model) Init() tea.Cmd {
 		m.fetchCASSContextCmd(),
 		m.fetchCheckpointStatus(),
 		m.fetchHandoffCmd(),
+		m.fetchRCHStatus(),
 		m.fetchDCGStatus(),
 		m.fetchPendingRotations(),
 		m.fetchPTHealthStatesCmd(),
@@ -1086,6 +1107,58 @@ func (m *Model) fetchScanStatusWithContext(ctx context.Context) tea.Cmd {
 			Duration: dur,
 			Gen:      gen,
 		}
+	}
+}
+
+// fetchRCHStatus fetches the current RCH status.
+func (m *Model) fetchRCHStatus() tea.Cmd {
+	gen := m.nextGen(refreshRCH)
+	cfg := m.cfg
+
+	return func() tea.Msg {
+		data := panels.RCHPanelData{
+			Loaded: true,
+		}
+
+		enabled := true
+		if cfg != nil {
+			enabled = cfg.Integrations.RCH.Enabled
+		}
+		data.Enabled = enabled
+
+		if !enabled {
+			return RCHStatusUpdateMsg{Data: data, Gen: gen}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+
+		adapter := tools.NewRCHAdapter()
+		availability, err := adapter.GetAvailability(ctx)
+		if err != nil {
+			data.Error = err
+			return RCHStatusUpdateMsg{Data: data, Gen: gen}
+		}
+
+		if availability != nil {
+			data.Available = availability.Available && availability.Compatible
+			if availability.Version.Raw != "" {
+				data.Version = availability.Version.String()
+			}
+		}
+
+		if !data.Available {
+			return RCHStatusUpdateMsg{Data: data, Gen: gen}
+		}
+
+		status, err := adapter.GetStatus(ctx)
+		if err != nil {
+			data.Error = err
+			return RCHStatusUpdateMsg{Data: data, Gen: gen}
+		}
+		data.Status = status
+
+		return RCHStatusUpdateMsg{Data: data, Gen: gen}
 	}
 }
 
@@ -1782,9 +1855,9 @@ func (m *Model) fetchSessionDataWithOutputsCtx(ctx context.Context) tea.Cmd {
 
 		// Parallelize output capture
 		type captureResult struct {
-			pane      tmux.PaneActivity
-			output    string
-			err       error
+			pane   tmux.PaneActivity
+			output string
+			err    error
 		}
 
 		resultsCh := make(chan captureResult, len(plan.Targets))
@@ -1792,7 +1865,7 @@ func (m *Model) fetchSessionDataWithOutputsCtx(ctx context.Context) tea.Cmd {
 			go func(p tmux.PaneActivity) {
 				capCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				defer cancel()
-				
+
 				out, err := tmux.CapturePaneOutputContext(capCtx, p.Pane.ID, outputLines)
 				resultsCh <- captureResult{pane: p, output: out, err: err}
 			}(pane)
@@ -1808,7 +1881,7 @@ func (m *Model) fetchSessionDataWithOutputsCtx(ctx context.Context) tea.Cmd {
 					}
 					continue
 				}
-				
+
 				outputs = append(outputs, PaneOutputData{
 					PaneID:       res.pane.Pane.ID,
 					PaneIndex:    res.pane.Pane.Index,
@@ -2818,6 +2891,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.checkpointStatus = msg.Status
 			m.checkpointError = nil
 			m.markUpdated(refreshCheckpoint, time.Now())
+		}
+		return m, nil
+
+	case RCHStatusUpdateMsg:
+		if !m.acceptUpdate(refreshRCH, msg.Gen) {
+			return m, nil
+		}
+		m.fetchingRCH = false
+		m.lastRCHFetch = time.Now()
+		if m.rchPanel != nil {
+			m.rchPanel.SetData(msg.Data)
+		}
+		if msg.Data.Error == nil {
+			m.markUpdated(refreshRCH, time.Now())
+		}
+		wasActive := m.rchActive
+		m.rchActive = rchStatusActive(msg.Data.Status)
+		if m.rchRefreshInterval == RCHIdleRefreshInterval || m.rchRefreshInterval == RCHActiveRefreshInterval {
+			if m.rchActive {
+				m.rchRefreshInterval = RCHActiveRefreshInterval
+			} else if wasActive && !m.rchActive {
+				m.rchRefreshInterval = RCHIdleRefreshInterval
+			}
 		}
 		return m, nil
 
@@ -4745,6 +4841,9 @@ func (m *Model) resizeSidebarPanels(width, height int) {
 	if m.costPanel != nil {
 		m.costPanel.SetSize(width, height)
 	}
+	if m.rchPanel != nil {
+		m.rchPanel.SetSize(width, height)
+	}
 	if m.metricsPanel != nil {
 		m.metricsPanel.SetSize(width, height)
 	}
@@ -5326,6 +5425,12 @@ func (m *Model) scheduleRefreshes(now time.Time) []tea.Cmd {
 		cmds = append(cmds, m.fetchHandoffCmd())
 	}
 
+	if refreshDue(m.lastRCHFetch, m.rchRefreshInterval) && !m.fetchingRCH {
+		m.fetchingRCH = true
+		m.lastRCHFetch = now
+		cmds = append(cmds, m.fetchRCHStatus())
+	}
+
 	if refreshDue(m.lastDCGFetch, m.dcgRefreshInterval) && !m.fetchingDCG {
 		m.fetchingDCG = true
 		m.lastDCGFetch = now
@@ -5342,6 +5447,21 @@ func (m *Model) scheduleSpawnRefresh(now time.Time) tea.Cmd {
 		return m.fetchSpawnStateCmd()
 	}
 	return nil
+}
+
+func rchStatusActive(status *tools.RCHStatus) bool {
+	if status == nil {
+		return false
+	}
+	for _, worker := range status.Workers {
+		if strings.TrimSpace(worker.CurrentBuild) != "" {
+			return true
+		}
+		if worker.Queue > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5498,6 +5618,26 @@ func (m Model) renderSidebar(width, height int) string {
 	if m.scanStatus != "" && m.scanStatus != "unavailable" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(t.Blue).Bold(true).Render("Scan Status"))
 		lines = append(lines, m.renderScanBadge())
+	}
+
+	// RCH build offload status (best-effort, height-gated)
+	if m.rchPanel != nil && height > 0 && m.rchPanel.HasData() {
+		used := lipgloss.Height(strings.Join(lines, "\n"))
+		spacer := 1
+		panelHeight := height - used - spacer
+		if panelHeight >= m.rchPanel.Config().MinHeight {
+			if panelHeight > 18 {
+				panelHeight = 18
+			}
+
+			if m.focusedPanel == PanelSidebar {
+				m.rchPanel.Focus()
+			} else {
+				m.rchPanel.Blur()
+			}
+			m.rchPanel.SetSize(width, panelHeight)
+			lines = append(lines, "", m.rchPanel.View())
+		}
 	}
 
 	// Cost tracking (best-effort, height-gated)

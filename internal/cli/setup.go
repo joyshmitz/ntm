@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -49,6 +50,15 @@ This is the recommended first step for using NTM with a new project.`,
 	cmd.Flags().BoolVarP(&installWrappers, "wrappers", "w", false, "Install PATH wrappers for git and rm")
 	cmd.Flags().BoolVar(&installHooks, "hooks", false, "Install Claude Code PreToolUse hooks")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Overwrite existing files")
+
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show setup status and core tool availability",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSetupStatus()
+		},
+	}
+	cmd.AddCommand(statusCmd)
 
 	return cmd
 }
@@ -239,6 +249,73 @@ func runSetup(installWrappers, installHooks, force bool) error {
 	fmt.Println(mutedStyle.Render("    3. Run 'ntm quick' to start orchestrating"))
 	fmt.Println()
 
+	return nil
+}
+
+func runSetupStatus() error {
+	status, err := robot.GetACFSStatus()
+	if err != nil {
+		return err
+	}
+
+	if IsJSONOutput() {
+		return output.PrintJSON(status)
+	}
+
+	fmt.Println()
+	acfsLine := "missing"
+	if status.ACFSAvailable {
+		acfsLine = "installed"
+		if status.ACFSVersion != "" {
+			acfsLine += " (" + status.ACFSVersion + ")"
+		}
+	} else if status.Error != "" {
+		acfsLine = "missing"
+	}
+	fmt.Printf("ACFS: %s\n", acfsLine)
+	if !status.ACFSAvailable && status.Hint != "" {
+		fmt.Printf("  Hint: %s\n", status.Hint)
+	}
+
+	if len(status.Tools) == 0 {
+		fmt.Println("Tools: none")
+		fmt.Println()
+		return nil
+	}
+
+	fmt.Println("Tools:")
+	keys := make([]string, 0, len(status.Tools))
+	for key := range status.Tools {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		tool := status.Tools[key]
+		label := "missing"
+		if tool.Installed {
+			label = "ok"
+		} else if tool.Required {
+			label = "missing (required)"
+		}
+
+		details := ""
+		if tool.Version != "" {
+			details = tool.Version
+		}
+		if tool.Path != "" {
+			if details != "" {
+				details += " "
+			}
+			details += tool.Path
+		}
+		fmt.Printf("  %-5s %-16s %s\n", key, label, details)
+		if !tool.Installed && tool.Hint != "" {
+			fmt.Printf("    Hint: %s\n", tool.Hint)
+		}
+	}
+
+	fmt.Println()
 	return nil
 }
 

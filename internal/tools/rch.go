@@ -149,10 +149,19 @@ type RCHWorker struct {
 
 // RCHStatus represents the current RCH status including workers
 type RCHStatus struct {
-	Enabled      bool        `json:"enabled"`
-	WorkerCount  int         `json:"worker_count"`
-	HealthyCount int         `json:"healthy_count"`
-	Workers      []RCHWorker `json:"workers,omitempty"`
+	Enabled      bool             `json:"enabled"`
+	WorkerCount  int              `json:"worker_count"`
+	HealthyCount int              `json:"healthy_count"`
+	Workers      []RCHWorker      `json:"workers,omitempty"`
+	SessionStats *RCHSessionStats `json:"session_stats,omitempty"`
+}
+
+// RCHSessionStats represents per-session build stats emitted by rch (if available).
+type RCHSessionStats struct {
+	BuildsTotal      int `json:"builds_total"`
+	BuildsRemote     int `json:"builds_remote"`
+	BuildsLocal      int `json:"builds_local"`
+	TimeSavedSeconds int `json:"time_saved_seconds"`
 }
 
 // RCHAvailability represents the availability and compatibility of rch on PATH.

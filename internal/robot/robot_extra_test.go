@@ -91,6 +91,52 @@ func TestTerseKeyMapRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGetACFSStatus_MissingBinary(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	output, err := GetACFSStatus()
+	if err != nil {
+		t.Fatalf("GetACFSStatus error: %v", err)
+	}
+	if output.Success {
+		t.Fatalf("expected failure when acfs missing")
+	}
+	if output.ErrorCode != ErrCodeDependencyMissing {
+		t.Fatalf("error_code=%q, want %q", output.ErrorCode, ErrCodeDependencyMissing)
+	}
+	if output.Tools == nil {
+		t.Fatalf("expected tools map to be present")
+	}
+}
+
+func TestGetACFSStatus_WithFakeTools(t *testing.T) {
+	cleanup := withFakeTools(t)
+	defer cleanup()
+
+	output, err := GetACFSStatus()
+	if err != nil {
+		t.Fatalf("GetACFSStatus error: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("expected success, got error: %s", output.Error)
+	}
+	if !output.ACFSAvailable {
+		t.Fatalf("expected acfs_available true")
+	}
+	if output.ACFSVersion == "" {
+		t.Fatalf("expected acfs_version to be set")
+	}
+	if output.Tools == nil {
+		t.Fatalf("expected tools map to be present")
+	}
+	// Ensure core keys exist (installed may vary by environment).
+	for _, key := range []string{"tmux", "br", "bv", "cc", "cod", "gmi", "git"} {
+		if _, ok := output.Tools[key]; !ok {
+			t.Fatalf("missing tool entry for %q", key)
+		}
+	}
+}
+
 func parseTerseOutput(output string) []string {
 	// Strip newline
 	output = stripNewline(output)

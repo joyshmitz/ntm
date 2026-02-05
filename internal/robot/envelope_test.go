@@ -151,6 +151,7 @@ func TestOutputTypesEmbedRobotResponse(t *testing.T) {
 		{"CASSInsightsOutput", reflect.TypeOf(CASSInsightsOutput{})},
 		{"CASSSearchOutput", reflect.TypeOf(CASSSearchOutput{})},
 		{"CASSStatusOutput", reflect.TypeOf(CASSStatusOutput{})},
+		{"ACFSStatusOutput", reflect.TypeOf(ACFSStatusOutput{})},
 		{"CapabilitiesOutput", reflect.TypeOf(CapabilitiesOutput{})},
 		{"ContextOutput", reflect.TypeOf(ContextOutput{})},
 		{"DCGStatusOutput", reflect.TypeOf(DCGStatusOutput{})},

@@ -812,6 +812,22 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples:    []string{"ntm --robot-tools"},
 		},
 		{
+			Name:        "acfs-status",
+			Flag:        "--robot-acfs-status",
+			Category:    "utility",
+			Description: "Get setup status via ACFS (core tool availability).",
+			Parameters:  []RobotParameter{},
+			Examples:    []string{"ntm --robot-acfs-status"},
+		},
+		{
+			Name:        "setup-status",
+			Flag:        "--robot-setup",
+			Category:    "utility",
+			Description: "Alias for --robot-acfs-status.",
+			Parameters:  []RobotParameter{},
+			Examples:    []string{"ntm --robot-setup"},
+		},
+		{
 			Name:        "jfp-status",
 			Flag:        "--robot-jfp-status",
 			Category:    "utility",

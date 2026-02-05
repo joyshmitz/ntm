@@ -231,6 +231,86 @@ func TestDetectFormatEnv(t *testing.T) {
 	os.Unsetenv("NTM_OUTPUT_FORMAT")
 }
 
+func TestTerminalHelpersWithPipeStdout(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+		w.Close()
+		r.Close()
+	}()
+
+	if IsTerminal() {
+		t.Error("IsTerminal() should be false for pipe stdout")
+	}
+	if isStdoutTerminal() {
+		t.Error("isStdoutTerminal() should be false for pipe stdout")
+	}
+
+	os.Unsetenv("NTM_OUTPUT_FORMAT")
+	if f := DetectFormat(false); f != FormatJSON {
+		t.Errorf("DetectFormat(false) with pipe stdout = %v, want FormatJSON", f)
+	}
+}
+
+func TestTerminalHelpersWithPipeStderr(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+		w.Close()
+		r.Close()
+	}()
+
+	if isStderrTerminal() {
+		t.Error("isStderrTerminal() should be false for pipe stderr")
+	}
+}
+
+func TestConfirmWriterDefaults(t *testing.T) {
+	var buf bytes.Buffer
+
+	ok := ConfirmWriter(&buf, strings.NewReader("\n"), "Proceed?", ConfirmOptions{
+		Default: true,
+	})
+	if !ok {
+		t.Error("ConfirmWriter should return default true on empty input")
+	}
+	if !strings.Contains(buf.String(), "[Y/n]") {
+		t.Errorf("ConfirmWriter output missing default hint: %q", buf.String())
+	}
+
+	buf.Reset()
+	ok = ConfirmWriter(&buf, strings.NewReader("n\n"), "Proceed?", ConfirmOptions{
+		Default: true,
+	})
+	if ok {
+		t.Error("ConfirmWriter should return false for explicit 'n'")
+	}
+	if !strings.Contains(buf.String(), "[Y/n]") {
+		t.Errorf("ConfirmWriter output missing default hint: %q", buf.String())
+	}
+
+	buf.Reset()
+	ok = ConfirmWriter(&buf, strings.NewReader("\n"), "Proceed?", ConfirmOptions{
+		Default: false,
+	})
+	if ok {
+		t.Error("ConfirmWriter should return default false on empty input")
+	}
+	if !strings.Contains(buf.String(), "[y/N]") {
+		t.Errorf("ConfirmWriter output missing default hint: %q", buf.String())
+	}
+}
+
 func TestTableAlignment(t *testing.T) {
 	var buf bytes.Buffer
 	tbl := NewTable(&buf, "Col1", "Col2")
@@ -561,6 +641,30 @@ func TestPrintSuccessFooterToBuffer(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "What's next?") {
 		t.Errorf("Expected 'What's next?' in output, got: %q", output)
+	}
+}
+
+func TestPrintSuccessFooterSkipsNonTerminalFile(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error: %v", err)
+	}
+
+	suggestions := []Suggestion{
+		{Command: "ntm attach demo", Description: "Attach to session"},
+	}
+
+	PrintSuccessFooter(w, suggestions...)
+	w.Close()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom pipe error: %v", err)
+	}
+	r.Close()
+
+	if buf.Len() != 0 {
+		t.Errorf("Expected no output for non-terminal *os.File, got: %q", buf.String())
 	}
 }
 

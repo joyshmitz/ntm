@@ -100,11 +100,20 @@ func GetRCHStatus() (*RCHStatusOutput, error) {
 		status.Version = availability.Version.String()
 	}
 
-	workers, err := adapter.GetWorkers(ctx)
-	if err == nil {
+	rchStatus, err := adapter.GetStatus(ctx)
+	if err == nil && rchStatus != nil {
+		workers := rchStatus.Workers
 		status.Workers.Total = len(workers)
 		status.Workers.Healthy = countRCHHealthyWorkers(workers)
 		status.Workers.Busy = countRCHBusyWorkers(workers)
+		if rchStatus.SessionStats != nil {
+			status.SessionStats = &RCHSessionStats{
+				BuildsTotal:      rchStatus.SessionStats.BuildsTotal,
+				BuildsRemote:     rchStatus.SessionStats.BuildsRemote,
+				BuildsLocal:      rchStatus.SessionStats.BuildsLocal,
+				TimeSavedSeconds: rchStatus.SessionStats.TimeSavedSeconds,
+			}
+		}
 	}
 
 	return &RCHStatusOutput{

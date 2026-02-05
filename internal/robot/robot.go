@@ -389,6 +389,156 @@ func PrintCASSContext(query string) error {
 }
 
 // ===========================================================================
+// ACFS (Flywheel Setup) Robot Wrappers
+// ===========================================================================
+
+// SetupToolStatus represents a single tool status in setup checks.
+type SetupToolStatus struct {
+	Installed bool   `json:"installed"`
+	Version   string `json:"version,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Hint      string `json:"hint,omitempty"`
+	Required  bool   `json:"required,omitempty"`
+}
+
+// ACFSStatusOutput represents the output for --robot-acfs-status / --robot-setup.
+type ACFSStatusOutput struct {
+	RobotResponse
+	ACFSAvailable bool                       `json:"acfs_available"`
+	ACFSVersion   string                     `json:"acfs_version,omitempty"`
+	ACFSPath      string                     `json:"acfs_path,omitempty"`
+	Tools         map[string]SetupToolStatus `json:"tools"`
+}
+
+type setupToolSpec struct {
+	Key         string
+	Command     string
+	VersionArgs []string
+	Hint        string
+	Required    bool
+}
+
+var setupToolSpecs = []setupToolSpec{
+	{
+		Key:         "tmux",
+		Command:     "tmux",
+		VersionArgs: []string{"-V"},
+		Hint:        "brew install tmux (macOS) / apt install tmux (Linux)",
+		Required:    true,
+	},
+	{
+		Key:         "br",
+		Command:     "br",
+		VersionArgs: []string{"--version"},
+		Hint:        "Install beads_rust (br)",
+	},
+	{
+		Key:         "bv",
+		Command:     "bv",
+		VersionArgs: []string{"--version"},
+		Hint:        "Install beads_viewer (bv)",
+	},
+	{
+		Key:         "cc",
+		Command:     "claude",
+		VersionArgs: []string{"--version"},
+		Hint:        "npm install -g @anthropic-ai/claude-code",
+	},
+	{
+		Key:         "cod",
+		Command:     "codex",
+		VersionArgs: []string{"--version"},
+		Hint:        "npm install -g @openai/codex",
+	},
+	{
+		Key:         "gmi",
+		Command:     "gemini",
+		VersionArgs: []string{"--version"},
+		Hint:        "npm install -g @google/gemini-cli",
+	},
+	{
+		Key:         "git",
+		Command:     "git",
+		VersionArgs: []string{"--version"},
+		Hint:        "brew install git (macOS) / apt install git (Linux)",
+	},
+}
+
+// GetACFSStatus returns ACFS setup status and core tool availability.
+// This function returns the data struct directly, enabling CLI/REST parity.
+func GetACFSStatus() (*ACFSStatusOutput, error) {
+	adapter := tools.NewACFSAdapter()
+
+	output := &ACFSStatusOutput{
+		RobotResponse: NewRobotResponse(true),
+		Tools:         make(map[string]SetupToolStatus, len(setupToolSpecs)),
+	}
+
+	// Collect tool statuses
+	for _, spec := range setupToolSpecs {
+		output.Tools[spec.Key] = buildSetupToolStatus(spec)
+	}
+
+	// Check ACFS availability
+	path, installed := adapter.Detect()
+	output.ACFSAvailable = installed
+	output.ACFSPath = path
+
+	if !installed {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("acfs not installed"),
+			ErrCodeDependencyMissing,
+			"Install acfs to enable setup status checks",
+		)
+		return output, nil
+	}
+
+	ctx := context.Background()
+	version, err := adapter.Version(ctx)
+	if err == nil {
+		output.ACFSVersion = version.Raw
+	}
+
+	return output, nil
+}
+
+// PrintACFSStatus outputs ACFS status as JSON.
+// This is a thin wrapper around GetACFSStatus() for CLI output.
+func PrintACFSStatus() error {
+	output, err := GetACFSStatus()
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+func buildSetupToolStatus(spec setupToolSpec) SetupToolStatus {
+	status := SetupToolStatus{
+		Installed: false,
+		Required:  spec.Required,
+	}
+
+	path, err := exec.LookPath(spec.Command)
+	if err != nil {
+		status.Hint = spec.Hint
+		return status
+	}
+
+	status.Installed = true
+	status.Path = path
+
+	if len(spec.VersionArgs) > 0 {
+		cmd := exec.Command(spec.Command, spec.VersionArgs...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			status.Version = strings.TrimSpace(string(out))
+		}
+	}
+
+	return status
+}
+
+// ===========================================================================
 // JFP (JeffreysPrompts) Robot Wrappers
 // ===========================================================================
 
@@ -1642,6 +1792,8 @@ Analysis & Monitoring:
 Tool Bridges:
 -------------
 --robot-cass-search=QUERY    Search past conversations (--limit=20, --since=7d)
+--robot-acfs-status          Setup status via ACFS (alias: --robot-setup)
+--robot-setup                Alias for --robot-acfs-status
 --robot-giil-fetch=URL       Download image from share URL via giil
 --robot-jfp-search=QUERY     Search prompts library
 --robot-jfp-install=ID       Install prompt(s) (--jfp-project=PATH)
