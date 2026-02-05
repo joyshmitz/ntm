@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,7 +311,7 @@ func TestAudit_ExportCSV(t *testing.T) {
 			string(entry.EventType),
 			string(entry.Actor),
 			entry.Target,
-			string(rune('0' + entry.SequenceNum)),
+			fmt.Sprintf("%d", entry.SequenceNum),
 			entry.Checksum,
 		}
 		writer.Write(row)
