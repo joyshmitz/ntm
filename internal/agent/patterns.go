@@ -175,6 +175,8 @@ var (
 		"running ",    // Running command
 		"generating ", // Content generation
 		"analyzing ",  // Analysis
+		"processing",  // General processing
+		"thinking",    // Chain of thought
 	}
 
 	// gmiIdlePatterns indicates waiting for input.
@@ -339,10 +341,10 @@ func extractFloat(pattern *regexp.Regexp, text string) *float64 {
 	// Handle comma-separated numbers (e.g., "219,582")
 	cleaned := strings.ReplaceAll(match[1], ",", "")
 	val, err := strconv.ParseFloat(cleaned, 64)
-	if err != nil {
-		return nil
+	if err == nil {
+		return &val
 	}
-	return &val
+	return nil
 }
 
 // extractInt extracts the last integer value from a regex match group.
@@ -359,10 +361,10 @@ func extractInt(pattern *regexp.Regexp, text string) *int64 {
 	// Handle comma-separated numbers
 	cleaned := strings.ReplaceAll(match[1], ",", "")
 	val, err := strconv.ParseInt(cleaned, 10, 64)
-	if err != nil {
-		return nil
+	if err == nil {
+		return &val
 	}
-	return &val
+	return nil
 }
 
 // getLastNLines returns the last n lines of text.

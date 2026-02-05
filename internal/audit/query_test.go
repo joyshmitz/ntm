@@ -241,6 +241,176 @@ func TestSearcher_Search_TimeRange(t *testing.T) {
 	})
 }
 
+func TestSearcher_CountAndStream(t *testing.T) {
+	auditDir, cleanup := setupTestAuditDir(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	entries := []AuditEntry{
+		{
+			Timestamp:   now.Add(-10 * time.Minute),
+			SessionID:   "count-session",
+			EventType:   EventTypeCommand,
+			Actor:       ActorUser,
+			Target:      "pane-1",
+			SequenceNum: 1,
+			Checksum:    "a1",
+		},
+		{
+			Timestamp:   now.Add(-5 * time.Minute),
+			SessionID:   "count-session",
+			EventType:   EventTypeSend,
+			Actor:       ActorSystem,
+			Target:      "pane-2",
+			SequenceNum: 2,
+			Checksum:    "a2",
+		},
+	}
+
+	writeTestEntries(t, auditDir, "count-session", now.Format("2006-01-02"), entries)
+
+	searcher := NewSearcherWithPath(auditDir)
+	count, err := searcher.Count(Query{
+		EventTypes: []EventType{EventTypeSend},
+	})
+	if err != nil {
+		t.Fatalf("Count failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected count 1, got %d", count)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = searcher.CountContext(ctx, Query{})
+	if err == nil {
+		t.Fatalf("Expected CountContext to return context error")
+	}
+
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer streamCancel()
+
+	results, err := searcher.StreamSearch(streamCtx, Query{Limit: 10})
+	if err != nil {
+		t.Fatalf("StreamSearch failed: %v", err)
+	}
+
+	streamed := 0
+	for res := range results {
+		if res.Err != nil {
+			t.Fatalf("StreamSearch error: %v", res.Err)
+		}
+		if res.Entry != nil {
+			streamed++
+		}
+	}
+	if streamed != 2 {
+		t.Fatalf("Expected 2 streamed entries, got %d", streamed)
+	}
+
+	_, err = searcher.StreamSearch(streamCtx, Query{GrepPattern: "["})
+	if err == nil {
+		t.Fatalf("Expected StreamSearch to fail with invalid grep pattern")
+	}
+}
+
+func TestSearcher_BuildIndexAndStats(t *testing.T) {
+	auditDir, cleanup := setupTestAuditDir(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	writeTestEntries(t, auditDir, "session-a", now.Format("2006-01-02"), []AuditEntry{
+		{
+			Timestamp:   now.Add(-1 * time.Hour),
+			SessionID:   "session-a",
+			EventType:   EventTypeCommand,
+			Actor:       ActorUser,
+			Target:      "pane-1",
+			SequenceNum: 1,
+			Checksum:    "a",
+		},
+	})
+	writeTestEntries(t, auditDir, "session-b", now.Format("2006-01-02"), []AuditEntry{
+		{
+			Timestamp:   now.Add(-30 * time.Minute),
+			SessionID:   "session-b",
+			EventType:   EventTypeSend,
+			Actor:       ActorSystem,
+			Target:      "pane-2",
+			SequenceNum: 1,
+			Checksum:    "b",
+		},
+	})
+
+	searcher := NewSearcherWithPath(auditDir)
+	if err := searcher.BuildIndex(context.Background()); err != nil {
+		t.Fatalf("BuildIndex failed: %v", err)
+	}
+
+	stats := searcher.IndexStats()
+	if indexed, ok := stats["indexed"].(bool); !ok || !indexed {
+		t.Fatalf("Expected index stats to be indexed")
+	}
+	if count, ok := stats["entry_count"].(int); !ok || count != 2 {
+		t.Fatalf("Expected entry_count 2, got %v", stats["entry_count"])
+	}
+	if sessions, ok := stats["session_count"].(int); !ok || sessions != 2 {
+		t.Fatalf("Expected session_count 2, got %v", stats["session_count"])
+	}
+}
+
+func TestGlobToRegexAndExtractDate(t *testing.T) {
+	re := regexp.MustCompile(globToRegex("session*__cc_?"))
+	if !re.MatchString("session__cc_1") {
+		t.Fatalf("Expected glob regex to match")
+	}
+	if re.MatchString("session__cc_12") {
+		t.Fatalf("Expected glob regex to not match")
+	}
+
+	if got := extractDateFromFilename("proj-2026-02-05.jsonl"); got != "2026-02-05" {
+		t.Fatalf("Expected date 2026-02-05, got %q", got)
+	}
+	if got := extractDateFromFilename("no-date.jsonl"); got != "" {
+		t.Fatalf("Expected empty date, got %q", got)
+	}
+}
+
+func TestNewSearcher_AuditDirAndIndex(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+
+	searcher, err := NewSearcher()
+	if err != nil {
+		t.Fatalf("NewSearcher failed: %v", err)
+	}
+
+	expectedDir := filepath.Join(tempDir, ".local", "share", "ntm", "audit")
+	if searcher.AuditDir() != expectedDir {
+		t.Fatalf("Expected audit dir %q, got %q", expectedDir, searcher.AuditDir())
+	}
+
+	if searcher.GetIndex() == nil {
+		t.Fatalf("Expected index to be initialized")
+	}
+
+	stats := searcher.IndexStats()
+	if indexed, ok := stats["indexed"].(bool); !ok || indexed {
+		t.Fatalf("Expected empty index stats to be indexed=false")
+	}
+}
+
+func TestSearcher_Count_InvalidGrepPattern(t *testing.T) {
+	auditDir, cleanup := setupTestAuditDir(t)
+	defer cleanup()
+
+	searcher := NewSearcherWithPath(auditDir)
+	_, err := searcher.Count(Query{GrepPattern: "["})
+	if err == nil {
+		t.Fatalf("Expected Count to fail with invalid grep pattern")
+	}
+}
+
 func TestSearcher_Search_TargetPattern(t *testing.T) {
 	auditDir, cleanup := setupTestAuditDir(t)
 	defer cleanup()

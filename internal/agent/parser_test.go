@@ -1147,6 +1147,18 @@ Error: quota exceeded. Please try again in 1 minute.`,
 			wantIdle:    false,
 			wantLimited: false,
 		},
+		{
+			name: "gemini thinking",
+			output: `gemini-2.0-flash-preview
+I am thinking about the best way to solve this...
+Here is a plan:
+1. First step
+2. Second step`,
+			wantType:    AgentTypeGemini,
+			wantWorking: true,
+			wantIdle:    false,
+			wantLimited: false,
+		},
 	}
 
 	for _, tt := range tests {

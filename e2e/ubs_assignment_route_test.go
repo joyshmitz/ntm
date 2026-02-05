@@ -35,6 +35,11 @@ func TestE2E_UBSAssignmentRouting(t *testing.T) {
 		t.Skip("Agent Mail not available; skipping routing test")
 	}
 
+	// Ensure project exists before registering agent
+	if _, err := client.EnsureProject(ctx, projectKey); err != nil {
+		t.Fatalf("[E2E-UBS-ROUTE] ensure project failed: %v", err)
+	}
+
 	if _, err := client.RegisterAgent(ctx, agentmail.RegisterAgentOptions{
 		ProjectKey:      projectKey,
 		Program:         "ntm",

@@ -294,11 +294,7 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 		return matchAnyRegex(lastLines, codIdlePatterns)
 	case AgentTypeGemini:
 		// Gemini is trickier - check for prompt or lack of working indicators
-		if matchAnyRegex(lastLines, gmiIdlePatterns) {
-			return true
-		}
-		// If no working patterns in last lines, likely idle
-		return !matchAny(lastLines, gmiWorkingPatterns)
+		return matchAnyRegex(lastLines, gmiIdlePatterns)
 	case AgentTypeCursor:
 		return matchAnyRegex(lastLines, cursorIdlePatterns)
 	case AgentTypeWindsurf:
