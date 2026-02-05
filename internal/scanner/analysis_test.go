@@ -126,21 +126,41 @@ func TestFormatImpactReport(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
+		name   string
 		input  string
 		maxLen int
 		want   string
 	}{
-		{"short", 10, "short"},
-		{"this is a long message", 10, "this is..."},
-		{"exactly10!", 10, "exactly10!"},
+		{"short string unchanged", "short", 10, "short"},
+		{"long string truncated", "this is a long message", 10, "this is..."},
+		{"exactly at max", "exactly10!", 10, "exactly10!"},
+		{"maxLen zero", "anything", 0, ""},
+		{"maxLen negative", "anything", -5, ""},
+		{"maxLen 1", "long text", 1, "."},
+		{"maxLen 2", "long text", 2, ".."},
+		{"maxLen 3", "long text", 3, "..."},
+		{"maxLen 4 fits ellipsis", "long text", 4, "l..."},
+		{"empty string", "", 10, ""},
+		{"empty string zero max", "", 0, ""},
+		{"unicode string", "こんにちは世界", 10, "こんに..."},
+		{"unicode exactly at boundary", "hello", 5, "hello"},
+		// Multi-byte: "日本" is 6 bytes, 2 runes. maxLen=5 → targetLen=2, i=3 >= 2 → "日..."
+		{"multibyte truncates at rune boundary", "日本", 5, "日..."},
+		// Another edge: short multibyte that exceeds maxLen in bytes
+		{"short multibyte exceeds bytes", "日", 4, "日"},
 	}
 
 	for _, tt := range tests {
-		got := truncate(tt.input, tt.maxLen)
-		if got != tt.want {
-			t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncate(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+		})
 	}
 }
 
