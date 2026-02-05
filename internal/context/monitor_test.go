@@ -542,16 +542,28 @@ func TestContextMonitor_SetAgentType(t *testing.T) {
 	if state == nil {
 		t.Fatal("expected agent-1 to be registered")
 	}
-	if state.AgentType != "claude" { // claude-opus-4 normalizes to claude
-		t.Errorf("initial AgentType = %q, want %q", state.AgentType, "claude")
+	// RegisterAgent doesn't set AgentType, only Model
+	if state.AgentType != "" {
+		t.Errorf("initial AgentType = %q, want empty string", state.AgentType)
+	}
+	if state.Model != "claude-opus-4" {
+		t.Errorf("Model = %q, want %q", state.Model, "claude-opus-4")
 	}
 
-	// Update agent type
+	// Update agent type using SetAgentType
+	monitor.SetAgentType("agent-1", "claude")
+
+	state = monitor.GetState("agent-1")
+	if state.AgentType != "claude" {
+		t.Errorf("after SetAgentType, AgentType = %q, want %q", state.AgentType, "claude")
+	}
+
+	// Update to a different type
 	monitor.SetAgentType("agent-1", "codex")
 
 	state = monitor.GetState("agent-1")
 	if state.AgentType != "codex" {
-		t.Errorf("after SetAgentType, AgentType = %q, want %q", state.AgentType, "codex")
+		t.Errorf("after second SetAgentType, AgentType = %q, want %q", state.AgentType, "codex")
 	}
 
 	// SetAgentType on non-existent agent should not panic
