@@ -22,16 +22,24 @@ func writeProjectsBaseConfig(t *testing.T, projectsBase string) string {
 	return configPath
 }
 
+func logQuickSetupContext(logger *testutil.TestLogger, projectName, projectsBase, configPath, projectDir string) {
+	logger.Log("project_name=%s", projectName)
+	logger.Log("projects_base=%s", projectsBase)
+	logger.Log("config_path=%s", configPath)
+	logger.Log("project_dir=%s", projectDir)
+}
+
 // TestQuickSetupGo tests ntm quick with Go template creates correct scaffolding.
 func TestQuickSetupGo(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_go_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	// Run ntm quick with Go template
 	logger.LogSection("Creating Go project with ntm quick")
@@ -75,12 +83,13 @@ func TestQuickSetupGo(t *testing.T) {
 func TestQuickSetupPython(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_python_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	logger.LogSection("Creating Python project with ntm quick")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath, "quick", projectName, "--template=python")
@@ -113,12 +122,13 @@ func TestQuickSetupPython(t *testing.T) {
 func TestQuickSetupNode(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_node_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	logger.LogSection("Creating Node.js project with ntm quick")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath, "quick", projectName, "--template=node")
@@ -151,12 +161,13 @@ func TestQuickSetupNode(t *testing.T) {
 func TestQuickSetupRust(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_rust_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	logger.LogSection("Creating Rust project with ntm quick")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath, "quick", projectName, "--template=rust")
@@ -189,12 +200,13 @@ func TestQuickSetupRust(t *testing.T) {
 func TestQuickSetupNoTemplate(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_basic_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	logger.LogSection("Creating basic project with ntm quick (no template)")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath, "quick", projectName)
@@ -217,12 +229,13 @@ func TestQuickSetupNoTemplate(t *testing.T) {
 func TestQuickSetupNoGit(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_nogit_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	logger.LogSection("Creating project with --no-git flag")
 	out := testutil.AssertCommandSuccess(t, logger, "ntm", "--config", configPath, "quick", projectName, "--no-git")
@@ -244,12 +257,13 @@ func TestQuickSetupNoGit(t *testing.T) {
 func TestQuickSetupExistingDirectory(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectName := fmt.Sprintf("ntm_e2e_test_exists_%d", time.Now().UnixNano())
 
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
 	projectDir := filepath.Join(projectsBase, projectName)
+	logQuickSetupContext(logger, projectName, projectsBase, configPath, projectDir)
 
 	// Create the directory first
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
@@ -266,9 +280,10 @@ func TestQuickSetupExistingDirectory(t *testing.T) {
 func TestQuickSetupInvalidName(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	projectsBase := t.TempDir()
 	configPath := writeProjectsBaseConfig(t, projectsBase)
+	logQuickSetupContext(logger, "invalid-name-suite", projectsBase, configPath, "")
 
 	invalidNames := []string{
 		"test/project",

@@ -40,13 +40,14 @@ func TestE2ELockUnlockFileReservations(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 	client := requireAgentMail(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	logger.LogSection("setup")
 
 	// Isolate session agent files from the developer machine.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	projectDir := t.TempDir()
+	logger.Log("project_dir=%s", projectDir)
 	conflictPath := filepath.Join(projectDir, "internal", "cli", "send.go")
 	if err := os.MkdirAll(filepath.Dir(conflictPath), 0755); err != nil {
 		t.Fatalf("mkdir lock path dir: %v", err)
@@ -60,6 +61,8 @@ func TestE2ELockUnlockFileReservations(t *testing.T) {
 	}
 	patternConflict := filepath.ToSlash("internal/cli/send.go")
 	patternOther := filepath.ToSlash("internal/cli/other.go")
+	logger.Log("pattern_conflict=%s", patternConflict)
+	logger.Log("pattern_other=%s", patternOther)
 
 	sessionA := "lock_unlock_a"
 	sessionB := "lock_unlock_b"
@@ -308,13 +311,14 @@ func TestE2EUnlockAllReleasesReservations(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 	client := requireAgentMail(t)
 
-	logger := testutil.NewTestLoggerStdout(t)
+	logger := testutil.NewTestLogger(t, t.TempDir())
 	logger.LogSection("setup")
 
 	// Isolate session agent files from the developer machine.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	projectDir := t.TempDir()
+	logger.Log("project_dir=%s", projectDir)
 	pathOne := filepath.Join(projectDir, "file-one.txt")
 	if err := os.WriteFile(pathOne, []byte("one\n"), 0644); err != nil {
 		t.Fatalf("write file one: %v", err)

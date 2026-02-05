@@ -16,7 +16,9 @@ func TestE2EPlugins_ListEmpty(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
 	t.Run("no_plugins_message", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Set XDG_CONFIG_HOME to empty temp dir (no plugins)
 		configDir := filepath.Join(tmpDir, "config")
@@ -25,7 +27,7 @@ func TestE2EPlugins_ListEmpty(t *testing.T) {
 		}
 
 		// Run plugins list with custom config location
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"XDG_CONFIG_HOME": tmpDir,
 			"HOME":            tmpDir,
 		}, "ntm", "plugins", "list")
@@ -47,7 +49,9 @@ func TestE2EPlugins_ListAgentPlugins(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
 	t.Run("agent_plugin_discovered", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create ntm config directory structure
 		ntmDir := filepath.Join(tmpDir, ".config", "ntm")
@@ -67,9 +71,10 @@ description = "A test agent plugin"
 		if err := os.WriteFile(pluginPath, []byte(pluginContent), 0644); err != nil {
 			t.Fatalf("write plugin: %v", err)
 		}
+		logger.Log("agent_plugin_path=%s", pluginPath)
 
 		// Run plugins list
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -101,7 +106,9 @@ description = "A test agent plugin"
 	})
 
 	t.Run("multiple_agent_plugins", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create config directory
 		agentsDir := filepath.Join(tmpDir, ".config", "ntm", "agents")
@@ -138,10 +145,11 @@ description = "Plugin B"
 			if err := os.WriteFile(path, []byte(p.content), 0644); err != nil {
 				t.Fatalf("write %s: %v", p.name, err)
 			}
+			logger.Log("agent_plugin_path=%s", path)
 		}
 
 		// Run plugins list
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -167,7 +175,9 @@ func TestE2EPlugins_ListCommandPlugins(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
 	t.Run("command_plugin_discovered", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create config directory
 		commandsDir := filepath.Join(tmpDir, ".config", "ntm", "commands")
@@ -185,9 +195,10 @@ echo "test command"
 		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
 			t.Fatalf("write script: %v", err)
 		}
+		logger.Log("command_plugin_path=%s", scriptPath)
 
 		// Run plugins list
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -220,7 +231,9 @@ func TestE2EPlugins_InvalidPlugins(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
 	t.Run("skip_invalid_toml", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create config directory
 		agentsDir := filepath.Join(tmpDir, ".config", "ntm", "agents")
@@ -230,9 +243,11 @@ func TestE2EPlugins_InvalidPlugins(t *testing.T) {
 
 		// Create invalid TOML file
 		invalidContent := `this is not valid toml {{{`
-		if err := os.WriteFile(filepath.Join(agentsDir, "invalid.toml"), []byte(invalidContent), 0644); err != nil {
+		invalidPath := filepath.Join(agentsDir, "invalid.toml")
+		if err := os.WriteFile(invalidPath, []byte(invalidContent), 0644); err != nil {
 			t.Fatalf("write invalid: %v", err)
 		}
+		logger.Log("invalid_plugin_path=%s", invalidPath)
 
 		// Create valid plugin
 		validContent := `[agent]
@@ -240,12 +255,14 @@ name = "valid-plugin"
 command = "echo valid"
 description = "Valid plugin"
 `
-		if err := os.WriteFile(filepath.Join(agentsDir, "valid.toml"), []byte(validContent), 0644); err != nil {
+		validPath := filepath.Join(agentsDir, "valid.toml")
+		if err := os.WriteFile(validPath, []byte(validContent), 0644); err != nil {
 			t.Fatalf("write valid: %v", err)
 		}
+		logger.Log("valid_plugin_path=%s", validPath)
 
 		// Run plugins list - should not fail, just skip invalid
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -279,7 +296,9 @@ description = "Valid plugin"
 	})
 
 	t.Run("skip_missing_command", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create config directory
 		agentsDir := filepath.Join(tmpDir, ".config", "ntm", "agents")
@@ -292,12 +311,14 @@ description = "Valid plugin"
 name = "no-command"
 description = "Plugin without command"
 `
-		if err := os.WriteFile(filepath.Join(agentsDir, "no-command.toml"), []byte(noCommandContent), 0644); err != nil {
+		pluginPath := filepath.Join(agentsDir, "no-command.toml")
+		if err := os.WriteFile(pluginPath, []byte(noCommandContent), 0644); err != nil {
 			t.Fatalf("write no-command: %v", err)
 		}
+		logger.Log("agent_plugin_path=%s", pluginPath)
 
 		// Run plugins list
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -323,7 +344,9 @@ func TestE2EPlugins_MixedPlugins(t *testing.T) {
 	testutil.RequireNTMBinary(t)
 
 	t.Run("both_types_shown", func(t *testing.T) {
+		logger := testutil.NewTestLogger(t, t.TempDir())
 		tmpDir := t.TempDir()
+		logger.Log("tmp_dir=%s", tmpDir)
 
 		// Create config directories
 		agentsDir := filepath.Join(tmpDir, ".config", "ntm", "agents")
@@ -341,21 +364,25 @@ name = "my-agent"
 command = "echo agent"
 description = "My agent"
 `
-		if err := os.WriteFile(filepath.Join(agentsDir, "my-agent.toml"), []byte(agentContent), 0644); err != nil {
+		agentPath := filepath.Join(agentsDir, "my-agent.toml")
+		if err := os.WriteFile(agentPath, []byte(agentContent), 0644); err != nil {
 			t.Fatalf("write agent: %v", err)
 		}
+		logger.Log("agent_plugin_path=%s", agentPath)
 
 		// Create command plugin
 		cmdContent := `#!/bin/bash
 # Description: My command
 echo "command"
 `
-		if err := os.WriteFile(filepath.Join(commandsDir, "my-cmd"), []byte(cmdContent), 0755); err != nil {
+		commandPath := filepath.Join(commandsDir, "my-cmd")
+		if err := os.WriteFile(commandPath, []byte(cmdContent), 0755); err != nil {
 			t.Fatalf("write cmd: %v", err)
 		}
+		logger.Log("command_plugin_path=%s", commandPath)
 
 		// Run plugins list
-		out, err := runCmdWithEnv(t, tmpDir, map[string]string{
+		out, err := runCmdWithEnv(t, logger, tmpDir, map[string]string{
 			"HOME": tmpDir,
 		}, "ntm", "plugins", "list")
 
@@ -384,8 +411,15 @@ echo "command"
 }
 
 // runCmdWithEnv runs a command with custom environment variables.
-func runCmdWithEnv(t *testing.T, dir string, env map[string]string, name string, args ...string) ([]byte, error) {
+func runCmdWithEnv(t *testing.T, logger *testutil.TestLogger, dir string, env map[string]string, name string, args ...string) ([]byte, error) {
 	t.Helper()
+	if logger != nil {
+		logger.Log("EXEC: %s %s", name, strings.Join(args, " "))
+		logger.Log("DIR: %s", dir)
+		for k, v := range env {
+			logger.Log("ENV: %s=%s", k, v)
+		}
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 
@@ -395,5 +429,20 @@ func runCmdWithEnv(t *testing.T, dir string, env map[string]string, name string,
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if logger != nil {
+		outStr := string(out)
+		if len(outStr) > 2000 {
+			outStr = outStr[:2000] + "\n... (truncated)"
+		}
+		if outStr != "" {
+			logger.Log("OUTPUT:\n%s", outStr)
+		}
+		if err != nil {
+			logger.Log("EXIT: error: %v", err)
+		} else {
+			logger.Log("EXIT: success (exit 0)")
+		}
+	}
+	return out, err
 }
