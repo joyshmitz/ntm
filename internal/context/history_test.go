@@ -518,3 +518,129 @@ func TestDefaultRotationHistoryPath(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, expected)
 	}
 }
+
+func TestRotationHistoryStoragePath(t *testing.T) {
+	t.Parallel()
+
+	// RotationHistoryStoragePath returns the path from DefaultRotationHistoryStore
+	path := RotationHistoryStoragePath()
+	if path == "" {
+		t.Error("RotationHistoryStoragePath() returned empty string")
+	}
+	// Should contain the expected filename
+	if !filepath.IsAbs(path) && path != "" {
+		// If it's a relative path, that's okay for some test environments
+		// but it should still have the expected basename
+	}
+	if filepath.Base(path) != rotationHistoryFile {
+		t.Errorf("RotationHistoryStoragePath() basename = %q, want %q", filepath.Base(path), rotationHistoryFile)
+	}
+}
+
+func TestGlobalConvenienceFunctions(t *testing.T) {
+	// Note: These test the global convenience functions that use DefaultRotationHistoryStore.
+	// We test that they don't panic and return appropriate types.
+	// We don't use t.Parallel() to avoid race conditions with DefaultRotationHistoryStore.
+
+	// Save original store and restore after test
+	originalStore := DefaultRotationHistoryStore
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test_rotations.jsonl")
+	DefaultRotationHistoryStore = NewRotationHistoryStoreWithPath(path)
+	defer func() {
+		DefaultRotationHistoryStore = originalStore
+	}()
+
+	// Test GetRecentRotations with empty store
+	records, err := GetRecentRotations(10)
+	if err != nil {
+		t.Fatalf("GetRecentRotations() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("GetRecentRotations() with empty store returned %d records, want 0", len(records))
+	}
+
+	// Test RecordRotation
+	record := &RotationRecord{
+		ID:          newRecordID(),
+		Timestamp:   time.Now(),
+		SessionName: "test-session",
+		AgentID:     "test__cc_1",
+		AgentType:   "claude",
+		Success:     true,
+	}
+	if err := RecordRotation(record); err != nil {
+		t.Fatalf("RecordRotation() error = %v", err)
+	}
+
+	// Test GetRecentRotations after adding record
+	records, err = GetRecentRotations(10)
+	if err != nil {
+		t.Fatalf("GetRecentRotations() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Errorf("GetRecentRotations() returned %d records, want 1", len(records))
+	}
+
+	// Test GetRotationsForSession
+	records, err = GetRotationsForSession("test-session")
+	if err != nil {
+		t.Fatalf("GetRotationsForSession() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Errorf("GetRotationsForSession() returned %d records, want 1", len(records))
+	}
+
+	// Test GetRotationsForSession with non-existent session
+	records, err = GetRotationsForSession("non-existent")
+	if err != nil {
+		t.Fatalf("GetRotationsForSession() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("GetRotationsForSession() for non-existent returned %d records, want 0", len(records))
+	}
+
+	// Add a failed rotation
+	failedRecord := &RotationRecord{
+		ID:            newRecordID(),
+		Timestamp:     time.Now(),
+		SessionName:   "test-session-2",
+		AgentID:       "test__cc_2",
+		AgentType:     "claude",
+		Success:       false,
+		FailureReason: "test failure",
+	}
+	if err := RecordRotation(failedRecord); err != nil {
+		t.Fatalf("RecordRotation() error = %v", err)
+	}
+
+	// Test GetFailedRotations
+	records, err = GetFailedRotations()
+	if err != nil {
+		t.Fatalf("GetFailedRotations() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Errorf("GetFailedRotations() returned %d records, want 1", len(records))
+	}
+	if records[0].Success {
+		t.Error("GetFailedRotations() returned a successful record")
+	}
+
+	// Test GetRotationStats
+	stats, err := GetRotationStats()
+	if err != nil {
+		t.Fatalf("GetRotationStats() error = %v", err)
+	}
+	if stats == nil {
+		t.Fatal("GetRotationStats() returned nil")
+	}
+	if stats.TotalRotations != 2 {
+		t.Errorf("GetRotationStats() TotalRotations = %d, want 2", stats.TotalRotations)
+	}
+	if stats.SuccessCount != 1 {
+		t.Errorf("GetRotationStats() SuccessCount = %d, want 1", stats.SuccessCount)
+	}
+	if stats.FailureCount != 1 {
+		t.Errorf("GetRotationStats() FailureCount = %d, want 1", stats.FailureCount)
+	}
+}
