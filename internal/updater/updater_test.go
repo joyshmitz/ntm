@@ -36,6 +36,35 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
+// TestCompareVersions_MissingBranches tests uncovered branches.
+func TestCompareVersions_MissingBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		v1, v2 string
+		want   int
+	}{
+		{"both invalid equal", "invalid", "invalid", 0},
+		{"both prerelease same label", "1.0.0-alpha", "1.0.0-alpha", 0},
+		{"v1 invalid v2 invalid equal strings", "abc", "abc", 0},
+		{"lexicographic v1 < v2 both invalid", "aaa", "bbb", -1},
+		{"lexicographic v1 > v2 both invalid", "bbb", "aaa", 1},
+		{"minor version differs", "1.2.0", "1.1.0", 1},
+		{"patch version differs", "1.0.2", "1.0.1", 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := compareVersions(tc.v1, tc.v2)
+			if got != tc.want {
+				t.Errorf("compareVersions(%q, %q) = %d, want %d", tc.v1, tc.v2, got, tc.want)
+			}
+		})
+	}
+}
+
 // MockRoundTripper for intercepting HTTP requests
 type MockRoundTripper struct {
 	Response *http.Response

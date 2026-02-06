@@ -496,3 +496,34 @@ func TestSpinnerFrames(t *testing.T) {
 		t.Error("BounceSpinnerFrames should not be empty")
 	}
 }
+
+// =============================================================================
+// ParseHex — missing branches (bd-4b4zf)
+// =============================================================================
+
+func TestParseHex_MissingBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		hex  string
+		want Color
+	}{
+		{"uppercase hex", "#FF0000", Color{R: 255, G: 0, B: 0}},
+		{"mixed case hex", "#aAbBcC", Color{R: 170, G: 187, B: 204}},
+		{"too short", "#fff", Color{}},
+		{"too long", "#ff0000ff", Color{}},
+		{"no hash prefix", "ff0000f", Color{}},
+		{"3-char shorthand", "#abc", Color{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ParseHex(tc.hex)
+			if got != tc.want {
+				t.Errorf("ParseHex(%q) = %v, want %v", tc.hex, got, tc.want)
+			}
+		})
+	}
+}

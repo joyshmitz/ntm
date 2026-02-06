@@ -291,11 +291,13 @@ func TestTokensForWidth(t *testing.T) {
 		{"medium", bp.SM + 10, false, true, false},
 		{"large", bp.MD + 10, false, false, true},
 		{"very wide", 150, false, false, true},
+		{"ultra wide", 250, false, false, false},
 	}
 
 	compactTokens := Compact()
 	defaultTokens := DefaultTokens()
 	spaciousTokens := Spacious()
+	ultraWideTokens := UltraWide()
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -309,6 +311,12 @@ func TestTokensForWidth(t *testing.T) {
 			}
 			if tt.expectSpacious && tokens.Spacing.MD != spaciousTokens.Spacing.MD {
 				t.Errorf("width %d should use spacious tokens", tt.width)
+			}
+			// Ultra-wide: none of the other three are true
+			if !tt.expectCompact && !tt.expectDefault && !tt.expectSpacious {
+				if tokens.Spacing.MD != ultraWideTokens.Spacing.MD {
+					t.Errorf("width %d should use ultra-wide tokens", tt.width)
+				}
 			}
 		})
 	}

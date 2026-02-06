@@ -228,6 +228,46 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
+// TestSanitizeFilename_UTF8Boundary tests the UTF-8 boundary truncation in SanitizeFilename.
+func TestSanitizeFilename_UTF8Boundary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"exactly 50 bytes no truncation",
+			strings.Repeat("a", 50),
+			strings.Repeat("a", 50),
+		},
+		{
+			"51 bytes truncated to 50",
+			strings.Repeat("a", 51),
+			strings.Repeat("a", 50),
+		},
+		{
+			"multibyte at boundary",
+			// 48 ASCII 'a' chars + one 4-byte emoji = 52 bytes total after replacement
+			// The emoji gets replaced by SanitizeFilename (not a special char, stays as-is)
+			strings.Repeat("a", 48) + "\xf0\x9f\x8c\x8d", // 🌍 = 4 bytes
+			strings.Repeat("a", 48), // truncated before the multibyte char
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SanitizeFilename(tc.input)
+			if got != tc.want {
+				t.Errorf("SanitizeFilename(%q) = %q (len %d), want %q (len %d)",
+					tc.input, got, len(got), tc.want, len(tc.want))
+			}
+		})
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	t.Parallel()
 

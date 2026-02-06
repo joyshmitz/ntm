@@ -83,6 +83,8 @@ func TestAdaptiveCardDimensions(t *testing.T) {
 		// total=100, min=40, max=45, gap=2: initial cards=(102/42)=2, width=(100-2)/2=49 > 45
 		// After clamp: cards=(102/47)=2, width=45
 		{"max_clamp", 100, 40, 45, 2, 45, 2},
+		// Negative gap produces cardsPerRow<1 after initial calc
+		{"negative_gap_guard", 10, 5, 40, -100, 10, 1},
 	}
 
 	for _, tt := range tests {
