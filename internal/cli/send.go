@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -66,6 +67,7 @@ type SendDryRunEntry struct {
 	Prompt        string `json:"prompt"`
 	PromptPreview string `json:"prompt_preview,omitempty"`
 	Source        string `json:"source,omitempty"`
+	Priority      int    `json:"priority,omitempty"` // -1 omitted; 0..4 = P0..P4
 }
 
 type SendDryRunResult struct {
@@ -222,6 +224,7 @@ type SendOptions struct {
 	DryRun         bool
 	Randomize      bool  // Randomize send order for individualized prompts
 	Seed           int64 // Deterministic seed (only used when Randomize=true)
+	PriorityOrder  bool  // Sort batch prompts by priority (P0 first)
 
 	// Smart routing options
 	SmartRoute    bool   // Use smart routing to select best agent
@@ -474,6 +477,7 @@ func newSendCmd() *cobra.Command {
 	var distributeAuto bool
 	var randomize bool
 	var seed int64
+	var priorityOrder bool
 	var basePrompt string
 	var basePromptFile string
 
@@ -596,6 +600,7 @@ func newSendCmd() *cobra.Command {
 					BatchAgentIndex: batchAgentIndex,
 					Randomize:       randomize,
 					Seed:            seed,
+					PriorityOrder:   priorityOrder,
 				}
 				return runSendBatch(batchOpts)
 			}
@@ -710,6 +715,9 @@ func newSendCmd() *cobra.Command {
 	// Randomization flags
 	cmd.Flags().BoolVar(&randomize, "randomize", false, "Randomize send order for individualized prompts (reduces thundering herd)")
 	cmd.Flags().Int64Var(&seed, "seed", 0, "Deterministic seed for --randomize (0 = time-based)")
+
+	// Priority ordering flag (bd-2wzs)
+	cmd.Flags().BoolVar(&priorityOrder, "priority-order", false, "Sort batch prompts by priority (P0 first, annotate with '# priority: N')")
 
 	// Base prompt flags (bd-3ejl) - prepend common instructions to all prompts
 	cmd.Flags().StringVar(&basePrompt, "base-prompt", "", "Text to prepend to all prompts")
@@ -2907,23 +2915,25 @@ func runDistributeMode(session, strategy string, limit int, autoExecute bool, dr
 
 // BatchResult represents the JSON output for batch send operations
 type BatchResult struct {
-	Success    bool                `json:"success"`
-	Session    string              `json:"session"`
-	Randomized bool                `json:"randomized,omitempty"`
-	SeedUsed   int64               `json:"seed_used,omitempty"`
-	Order      []string            `json:"order,omitempty"` // BatchPrompt.Source in execution order (for debugging/tests)
-	Total      int                 `json:"batch_total"`
-	Delivered  int                 `json:"batch_delivered"`
-	Failed     int                 `json:"batch_failed"`
-	Skipped    int                 `json:"batch_skipped"`
-	Results    []BatchPromptResult `json:"results"`
-	Error      string              `json:"error,omitempty"`
+	Success         bool                `json:"success"`
+	Session         string              `json:"session"`
+	Randomized      bool                `json:"randomized,omitempty"`
+	SeedUsed        int64               `json:"seed_used,omitempty"`
+	PriorityOrdered bool                `json:"priority_ordered,omitempty"`
+	Order           []string            `json:"order,omitempty"` // BatchPrompt.Source in execution order (for debugging/tests)
+	Total           int                 `json:"batch_total"`
+	Delivered       int                 `json:"batch_delivered"`
+	Failed          int                 `json:"batch_failed"`
+	Skipped         int                 `json:"batch_skipped"`
+	Results         []BatchPromptResult `json:"results"`
+	Error           string              `json:"error,omitempty"`
 }
 
 // BatchPromptResult represents the result of sending a single prompt in a batch
 type BatchPromptResult struct {
 	Index         int    `json:"index"`
 	PromptPreview string `json:"prompt_preview"`
+	Priority      int    `json:"priority,omitempty"` // -1 omitted; 0..4 = P0..P4
 	Success       bool   `json:"success"`
 	Targets       []int  `json:"targets,omitempty"`
 	Delivered     int    `json:"delivered"`
@@ -2932,8 +2942,9 @@ type BatchPromptResult struct {
 }
 
 type BatchPrompt struct {
-	Text   string
-	Source string
+	Text     string
+	Source   string
+	Priority int // -1 = unset; 0..4 = P0..P4 (lower = higher priority)
 }
 
 // parseBatchFile reads and parses a batch file into individual prompts.
@@ -2962,13 +2973,15 @@ func parseBatchFile(path string) ([]BatchPrompt, error) {
 		blockStartLine := 0
 
 		flushBlock := func() {
-			cleaned := removeComments(strings.Join(blockLines, "\n"))
+			raw := strings.Join(blockLines, "\n")
+			cleaned := removeComments(raw)
 			if cleaned == "" || blockStartLine == 0 {
 				return
 			}
 			prompts = append(prompts, BatchPrompt{
-				Text:   cleaned,
-				Source: fmt.Sprintf("line:%d", blockStartLine),
+				Text:     cleaned,
+				Source:   fmt.Sprintf("line:%d", blockStartLine),
+				Priority: parsePriorityAnnotation(raw),
 			})
 		}
 
@@ -2988,18 +3001,27 @@ func parseBatchFile(path string) ([]BatchPrompt, error) {
 		}
 		flushBlock()
 	} else {
-		// Simple one-prompt-per-line format
+		// Simple one-prompt-per-line format.
+		// Track last priority annotation so "# priority: N" applies to the next prompt.
+		pendingPriority := -1
 		for i, line := range lines {
 			lineNo := i + 1
 			trimmed := strings.TrimSpace(line)
-			// Skip empty lines and comments
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			if trimmed == "" {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "#") {
+				if p := parsePriorityAnnotation(trimmed); p >= 0 {
+					pendingPriority = p
+				}
 				continue
 			}
 			prompts = append(prompts, BatchPrompt{
-				Text:   trimmed,
-				Source: fmt.Sprintf("line:%d", lineNo),
+				Text:     trimmed,
+				Source:   fmt.Sprintf("line:%d", lineNo),
+				Priority: pendingPriority,
 			})
+			pendingPriority = -1
 		}
 	}
 
@@ -3021,6 +3043,48 @@ func removeComments(text string) string {
 	}
 	result := strings.Join(lines, "\n")
 	return strings.TrimSpace(result)
+}
+
+// parsePriorityAnnotation extracts a priority value from a "# priority: N" comment.
+// Returns -1 if no priority annotation is found.
+func parsePriorityAnnotation(text string) int {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Strip leading # and whitespace
+		comment := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
+		lower := strings.ToLower(comment)
+		if strings.HasPrefix(lower, "priority:") {
+			valStr := strings.TrimSpace(strings.TrimPrefix(lower, "priority:"))
+			if len(valStr) == 1 && valStr[0] >= '0' && valStr[0] <= '4' {
+				return int(valStr[0] - '0')
+			}
+		}
+	}
+	return -1
+}
+
+// sortBatchByPriority performs a stable sort of batch prompts by priority.
+// Lower priority values sort first (P0 before P1). Prompts without a priority
+// annotation (Priority == -1) sort last.
+func sortBatchByPriority(prompts []BatchPrompt) {
+	sort.SliceStable(prompts, func(i, j int) bool {
+		pi, pj := prompts[i].Priority, prompts[j].Priority
+		// Both unset: preserve order
+		if pi == -1 && pj == -1 {
+			return false
+		}
+		// Unset sorts last
+		if pi == -1 {
+			return false
+		}
+		if pj == -1 {
+			return true
+		}
+		return pi < pj
+	})
 }
 
 // truncateForPreview shortens a string for display/logging
@@ -3122,6 +3186,12 @@ func runSendBatch(opts SendOptions) error {
 		}
 	}
 
+	// Sort by priority annotation if --priority-order (bd-2wzs).
+	// Applied before randomization so priority wins.
+	if opts.PriorityOrder {
+		sortBatchByPriority(prompts)
+	}
+
 	jsonOutput := IsJSONOutput()
 	total := len(prompts)
 
@@ -3185,6 +3255,7 @@ func runSendBatch(opts SendOptions) error {
 					Prompt:        bp.Text,
 					PromptPreview: truncateForPreview(bp.Text, 80),
 					Source:        bp.Source,
+					Priority:      bp.Priority,
 				})
 			}
 		}
@@ -3215,6 +3286,9 @@ func runSendBatch(opts SendOptions) error {
 	if !jsonOutput {
 		fmt.Printf("Batch contains %d prompts\n", total)
 		fmt.Printf("Target agents: %d panes\n", len(agentPanes))
+		if opts.PriorityOrder {
+			fmt.Println("Order: priority (P0 first)")
+		}
 		if opts.BatchDelay > 0 {
 			fmt.Printf("Delay between prompts: %v\n", opts.BatchDelay)
 		}
@@ -3249,6 +3323,7 @@ func runSendBatch(opts SendOptions) error {
 				results = append(results, BatchPromptResult{
 					Index:         j,
 					PromptPreview: truncateForPreview(prompts[j].Text, 60),
+					Priority:      prompts[j].Priority,
 					Skipped:       true,
 				})
 				skipped++
@@ -3261,6 +3336,7 @@ func runSendBatch(opts SendOptions) error {
 		result := BatchPromptResult{
 			Index:         i,
 			PromptPreview: preview,
+			Priority:      bp.Priority,
 		}
 
 		// Handle --confirm-each
@@ -3367,6 +3443,7 @@ func runSendBatch(opts SendOptions) error {
 					results = append(results, BatchPromptResult{
 						Index:         j,
 						PromptPreview: truncateForPreview(prompts[j].Text, 60),
+						Priority:      prompts[j].Priority,
 						Skipped:       true,
 					})
 					skipped++
@@ -3381,10 +3458,11 @@ summary:
 	// Output results
 	if jsonOutput {
 		batchResult := BatchResult{
-			Success:    failed == 0 && !interrupted,
-			Session:    opts.Session,
-			Randomized: opts.Randomize,
-			SeedUsed:   seedUsed,
+			Success:         failed == 0 && !interrupted,
+			Session:         opts.Session,
+			Randomized:      opts.Randomize,
+			SeedUsed:        seedUsed,
+			PriorityOrdered: opts.PriorityOrder,
 			Order: func() []string {
 				if !opts.Randomize {
 					return nil

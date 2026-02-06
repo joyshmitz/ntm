@@ -1175,10 +1175,10 @@ func TestFilterPanesForBatchAllUser(t *testing.T) {
 func TestApplyBasePrompt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		base       string
-		user       string
-		want       string
+		name string
+		base string
+		user string
+		want string
 	}{
 		{
 			name: "empty base returns user unchanged",
@@ -1308,4 +1308,149 @@ func TestResolveBasePrompt_MissingConfigFile(t *testing.T) {
 	if !strings.Contains(err.Error(), "send.base_prompt_file") {
 		t.Errorf("error should mention config, got: %v", err)
 	}
+}
+
+// --- bd-2wzs: priority-order tests ---
+
+func TestParsePriorityAnnotation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"no annotation", "just text", -1},
+		{"priority 0", "# priority: 0", 0},
+		{"priority 4", "# priority: 4", 4},
+		{"priority 2 with text", "# priority: 2\nDo something", 2},
+		{"mixed comments", "# note\n# priority: 1\nwork", 1},
+		{"uppercase", "# PRIORITY: 1", 1},
+		{"no space after colon", "# priority:3", 3},
+		{"out of range", "# priority: 9", -1},
+		{"negative", "# priority: -1", -1},
+		{"empty value", "# priority: ", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parsePriorityAnnotation(tt.text)
+			if got != tt.want {
+				t.Errorf("parsePriorityAnnotation(%q) = %d, want %d", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSortBatchByPriority(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sorts P0 before P2 before unset", func(t *testing.T) {
+		t.Parallel()
+		prompts := []BatchPrompt{
+			{Text: "unset", Source: "line:1", Priority: -1},
+			{Text: "p2", Source: "line:2", Priority: 2},
+			{Text: "p0", Source: "line:3", Priority: 0},
+		}
+		sortBatchByPriority(prompts)
+		if prompts[0].Priority != 0 {
+			t.Errorf("first should be P0, got P%d", prompts[0].Priority)
+		}
+		if prompts[1].Priority != 2 {
+			t.Errorf("second should be P2, got P%d", prompts[1].Priority)
+		}
+		if prompts[2].Priority != -1 {
+			t.Errorf("third should be unset, got P%d", prompts[2].Priority)
+		}
+	})
+
+	t.Run("stable sort preserves order within same priority", func(t *testing.T) {
+		t.Parallel()
+		prompts := []BatchPrompt{
+			{Text: "first-p1", Source: "line:1", Priority: 1},
+			{Text: "second-p1", Source: "line:2", Priority: 1},
+			{Text: "third-p1", Source: "line:3", Priority: 1},
+		}
+		sortBatchByPriority(prompts)
+		if prompts[0].Text != "first-p1" || prompts[1].Text != "second-p1" || prompts[2].Text != "third-p1" {
+			t.Errorf("stable sort broken: %s, %s, %s", prompts[0].Text, prompts[1].Text, prompts[2].Text)
+		}
+	})
+
+	t.Run("all unset preserves order", func(t *testing.T) {
+		t.Parallel()
+		prompts := []BatchPrompt{
+			{Text: "a", Priority: -1},
+			{Text: "b", Priority: -1},
+			{Text: "c", Priority: -1},
+		}
+		sortBatchByPriority(prompts)
+		if prompts[0].Text != "a" || prompts[1].Text != "b" || prompts[2].Text != "c" {
+			t.Errorf("order changed: %s, %s, %s", prompts[0].Text, prompts[1].Text, prompts[2].Text)
+		}
+	})
+
+	t.Run("single element", func(t *testing.T) {
+		t.Parallel()
+		prompts := []BatchPrompt{{Text: "only", Priority: 3}}
+		sortBatchByPriority(prompts)
+		if prompts[0].Text != "only" {
+			t.Error("single element sort failed")
+		}
+	})
+}
+
+func TestParseBatchFile_PriorityAnnotations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("multi-line format extracts priority", func(t *testing.T) {
+		t.Parallel()
+		content := "---\n# priority: 0\nCritical fix\n---\n# priority: 2\nMedium task\n---\nNo priority\n"
+		dir := t.TempDir()
+		path := dir + "/batch.txt"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		prompts, err := parseBatchFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(prompts) != 3 {
+			t.Fatalf("expected 3 prompts, got %d", len(prompts))
+		}
+		if prompts[0].Priority != 0 {
+			t.Errorf("prompt 0: want priority 0, got %d", prompts[0].Priority)
+		}
+		if prompts[1].Priority != 2 {
+			t.Errorf("prompt 1: want priority 2, got %d", prompts[1].Priority)
+		}
+		if prompts[2].Priority != -1 {
+			t.Errorf("prompt 2: want priority -1, got %d", prompts[2].Priority)
+		}
+	})
+
+	t.Run("simple format extracts priority from preceding comment", func(t *testing.T) {
+		t.Parallel()
+		content := "# priority: 1\nHigh priority task\nRegular task\n# priority: 3\nLow priority task\n"
+		dir := t.TempDir()
+		path := dir + "/batch.txt"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		prompts, err := parseBatchFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(prompts) != 3 {
+			t.Fatalf("expected 3 prompts, got %d", len(prompts))
+		}
+		if prompts[0].Priority != 1 {
+			t.Errorf("prompt 0: want priority 1, got %d", prompts[0].Priority)
+		}
+		if prompts[1].Priority != -1 {
+			t.Errorf("prompt 1: want priority -1 (no annotation), got %d", prompts[1].Priority)
+		}
+		if prompts[2].Priority != 3 {
+			t.Errorf("prompt 2: want priority 3, got %d", prompts[2].Priority)
+		}
+	})
 }
