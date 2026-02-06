@@ -606,13 +606,16 @@ NTM provides machine-readable output for integration with AI coding agents and a
 
 **Robot Output Formats + Verbosity:**
 
-- `--robot-format=json|toon|auto` (Env: `NTM_ROBOT_FORMAT`, `NTM_OUTPUT_FORMAT`, `TOON_DEFAULT_FORMAT`; Config: `[robot.output] format` = json|toon). `auto` currently resolves to JSON.
+- `--robot-format=json|toon|auto` (Alias: `--robot-output-format=...`; Env: `NTM_ROBOT_FORMAT`, `NTM_OUTPUT_FORMAT`, `TOON_DEFAULT_FORMAT`; Config: `[robot.output] format` = json|toon). `auto` currently resolves to JSON.
 - `--robot-verbosity=terse|default|debug` (Env: `NTM_ROBOT_VERBOSITY`). Applies to JSON/TOON only.
 - Config default for verbosity: `~/.config/ntm/config.toml` → `[robot] verbosity = "default"`.
 - `--robot-terse` is a **separate single-line format** and ignores `--robot-format` / `--robot-verbosity`.
-- TOON is token-efficient but only supports uniform arrays and simple objects; unsupported shapes return an error. Use `--robot-format=json` or `auto` to avoid TOON failures.
+- JSON remains the default. For scripts that must always get JSON, pass `--robot-format=json` (or `--robot-output-format=json`) explicitly.
+- TOON is token-efficient (often ~40-60% fewer tokens for tabular outputs) but only supports uniform arrays and simple objects; unsupported shapes return an error. Use `--robot-format=json` or `auto` to avoid TOON failures.
 
 **Example output (JSON vs TOON):**
+
+JSON (default; also `--robot-format=json`):
 
 ```json
 {
@@ -623,6 +626,8 @@ NTM provides machine-readable output for integration with AI coding agents and a
   ]
 }
 ```
+
+TOON (e.g. `--robot-output-format=toon`):
 
 ```text
 success: true
