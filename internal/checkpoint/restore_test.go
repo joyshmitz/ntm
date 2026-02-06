@@ -431,6 +431,186 @@ func TestRestorer_Restore_CheckpointNotFound(t *testing.T) {
 	}
 }
 
+func TestRestoreResult_AssignmentsAndBVSummary(t *testing.T) {
+	// Test RestoreResult with assignments and BV summary (bd-32ck)
+	now := time.Now()
+	result := &RestoreResult{
+		SessionName:   "test-session",
+		PanesRestored: 2,
+		DryRun:        true,
+		Assignments: []AssignmentSnapshot{
+			{
+				BeadID:     "bd-1234",
+				BeadTitle:  "Fix the widget",
+				Pane:       1,
+				AgentType:  "claude",
+				AgentName:  "BlueLake",
+				Status:     "working",
+				AssignedAt: now,
+			},
+			{
+				BeadID:     "bd-5678",
+				BeadTitle:  "Add tests",
+				Pane:       2,
+				AgentType:  "codex",
+				Status:     "assigned",
+				AssignedAt: now,
+			},
+		},
+		BVSummary: &BVSnapshot{
+			OpenCount:       15,
+			ActionableCount: 8,
+			BlockedCount:    5,
+			InProgressCount: 2,
+			TopPicks:        []string{"bd-1234", "bd-5678"},
+			CapturedAt:      now,
+		},
+	}
+
+	if len(result.Assignments) != 2 {
+		t.Fatalf("len(Assignments) = %d, want 2", len(result.Assignments))
+	}
+	if result.Assignments[0].BeadID != "bd-1234" {
+		t.Errorf("Assignments[0].BeadID = %q, want bd-1234", result.Assignments[0].BeadID)
+	}
+	if result.Assignments[0].AgentType != "claude" {
+		t.Errorf("Assignments[0].AgentType = %q, want claude", result.Assignments[0].AgentType)
+	}
+	if result.Assignments[1].Status != "assigned" {
+		t.Errorf("Assignments[1].Status = %q, want assigned", result.Assignments[1].Status)
+	}
+	if result.BVSummary == nil {
+		t.Fatal("BVSummary should not be nil")
+	}
+	if result.BVSummary.ActionableCount != 8 {
+		t.Errorf("BVSummary.ActionableCount = %d, want 8", result.BVSummary.ActionableCount)
+	}
+	if result.BVSummary.BlockedCount != 5 {
+		t.Errorf("BVSummary.BlockedCount = %d, want 5", result.BVSummary.BlockedCount)
+	}
+	if len(result.BVSummary.TopPicks) != 2 {
+		t.Errorf("len(BVSummary.TopPicks) = %d, want 2", len(result.BVSummary.TopPicks))
+	}
+}
+
+func TestRestoreResult_NoAssignmentsOrBVSummary(t *testing.T) {
+	// Test backward compat: RestoreResult without assignments (bd-32ck)
+	result := &RestoreResult{
+		SessionName:   "test-session",
+		PanesRestored: 1,
+	}
+
+	if len(result.Assignments) != 0 {
+		t.Errorf("len(Assignments) = %d, want 0", len(result.Assignments))
+	}
+	if result.BVSummary != nil {
+		t.Error("BVSummary should be nil when not set")
+	}
+}
+
+func TestRestorer_RestoreFromCheckpoint_DryRun_SurfacesAssignments(t *testing.T) {
+	// Test that DryRun restore surfaces assignment and BV data (bd-32ck)
+	tmpDir, err := os.MkdirTemp("", "ntm-restore-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	r := NewRestorerWithStorage(NewStorageWithDir(tmpDir))
+
+	now := time.Now()
+	cp := &Checkpoint{
+		ID:          "test-checkpoint",
+		SessionName: "test-session",
+		WorkingDir:  tmpDir,
+		Session: SessionState{
+			Panes: []PaneState{
+				{Index: 0, ID: "%0", Title: "user"},
+				{Index: 1, ID: "%1", Title: "cc_1"},
+			},
+		},
+		Assignments: []AssignmentSnapshot{
+			{
+				BeadID:     "bd-42",
+				BeadTitle:  "Implement feature X",
+				Pane:       1,
+				AgentType:  "claude",
+				AgentName:  "GreenCastle",
+				Status:     "working",
+				AssignedAt: now,
+			},
+		},
+		BVSummary: &BVSnapshot{
+			OpenCount:       20,
+			ActionableCount: 12,
+			BlockedCount:    6,
+			InProgressCount: 2,
+			TopPicks:        []string{"bd-42", "bd-99"},
+			CapturedAt:      now,
+		},
+	}
+
+	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("RestoreFromCheckpoint(DryRun) failed: %v", err)
+	}
+
+	// Verify assignments are surfaced in result
+	if len(result.Assignments) != 1 {
+		t.Fatalf("len(result.Assignments) = %d, want 1", len(result.Assignments))
+	}
+	if result.Assignments[0].BeadID != "bd-42" {
+		t.Errorf("Assignments[0].BeadID = %q, want bd-42", result.Assignments[0].BeadID)
+	}
+	if result.Assignments[0].AgentName != "GreenCastle" {
+		t.Errorf("Assignments[0].AgentName = %q, want GreenCastle", result.Assignments[0].AgentName)
+	}
+
+	// Verify BV summary is surfaced
+	if result.BVSummary == nil {
+		t.Fatal("result.BVSummary should not be nil")
+	}
+	if result.BVSummary.ActionableCount != 12 {
+		t.Errorf("BVSummary.ActionableCount = %d, want 12", result.BVSummary.ActionableCount)
+	}
+	if result.BVSummary.InProgressCount != 2 {
+		t.Errorf("BVSummary.InProgressCount = %d, want 2", result.BVSummary.InProgressCount)
+	}
+}
+
+func TestRestorer_RestoreFromCheckpoint_DryRun_NoAssignments(t *testing.T) {
+	// Test that restore without assignments still works (backward compat, bd-32ck)
+	tmpDir, err := os.MkdirTemp("", "ntm-restore-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	r := NewRestorerWithStorage(NewStorageWithDir(tmpDir))
+
+	cp := &Checkpoint{
+		ID:          "test-checkpoint",
+		SessionName: "test-session",
+		WorkingDir:  tmpDir,
+		Session: SessionState{
+			Panes: []PaneState{{Index: 0, ID: "%0"}},
+		},
+		// No Assignments or BVSummary
+	}
+
+	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("RestoreFromCheckpoint(DryRun) failed: %v", err)
+	}
+
+	if len(result.Assignments) != 0 {
+		t.Errorf("len(result.Assignments) = %d, want 0", len(result.Assignments))
+	}
+	if result.BVSummary != nil {
+		t.Error("result.BVSummary should be nil for checkpoint without BV data")
+	}
+}
+
 func TestRestorer_RestoreLatest_NoCheckpoints(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ntm-restore-test")
 	if err != nil {

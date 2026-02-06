@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -45,6 +46,13 @@ type RestoreResult struct {
 	Warnings []string
 	// DryRun indicates this was a simulation
 	DryRun bool
+
+	// Assignments contains bead-to-agent assignment state from the checkpoint (bd-32ck).
+	// Empty if no assignments were captured.
+	Assignments []AssignmentSnapshot
+	// BVSummary contains BV triage summary from the checkpoint (bd-32ck).
+	// Nil if no BV snapshot was captured.
+	BVSummary *BVSnapshot
 }
 
 // Restorer handles checkpoint restoration.
@@ -82,6 +90,22 @@ func (r *Restorer) RestoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (*
 	result := &RestoreResult{
 		SessionName: cp.SessionName,
 		DryRun:      opts.DryRun,
+		Assignments: cp.Assignments,
+		BVSummary:   cp.BVSummary,
+	}
+
+	// Surface assignment and BV summary from checkpoint (bd-32ck)
+	if len(cp.Assignments) > 0 {
+		slog.Info("checkpoint contains assignments",
+			"session", cp.SessionName,
+			"assignment_count", len(cp.Assignments))
+	}
+	if cp.BVSummary != nil {
+		slog.Info("checkpoint contains BV summary",
+			"session", cp.SessionName,
+			"actionable", cp.BVSummary.ActionableCount,
+			"blocked", cp.BVSummary.BlockedCount,
+			"in_progress", cp.BVSummary.InProgressCount)
 	}
 
 	// Determine working directory
