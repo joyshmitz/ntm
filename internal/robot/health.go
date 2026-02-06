@@ -2397,13 +2397,13 @@ func PrintHealthOAuth(session string) error {
 // AutoRestartStuckOutput is the structured output for --robot-health-restart-stuck.
 type AutoRestartStuckOutput struct {
 	RobotResponse
-	Session    string   `json:"session"`
-	StuckPanes []int    `json:"stuck_panes"`
-	Restarted  []int    `json:"restarted"`
-	Failed     []int    `json:"failed,omitempty"`
-	Threshold  string   `json:"threshold"`
-	DryRun     bool     `json:"dry_run,omitempty"`
-	CheckedAt  string   `json:"checked_at"`
+	Session    string `json:"session"`
+	StuckPanes []int  `json:"stuck_panes"`
+	Restarted  []int  `json:"restarted"`
+	Failed     []int  `json:"failed,omitempty"`
+	Threshold  string `json:"threshold"`
+	DryRun     bool   `json:"dry_run,omitempty"`
+	CheckedAt  string `json:"checked_at"`
 }
 
 // AutoRestartStuckOptions configures the auto-restart-stuck operation.
