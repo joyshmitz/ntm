@@ -594,3 +594,36 @@ func TestWatcherIgnorePaths(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// isPathUnderRoots — all branches (bd-4b4zf)
+// =============================================================================
+
+func TestIsPathUnderRoots_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		path  string
+		roots []string
+		want  bool
+	}{
+		{"empty roots", "/foo/bar", nil, false},
+		{"exact match", "/foo", []string{"/foo"}, true},
+		{"nested path", "/foo/bar/baz", []string{"/foo"}, true},
+		{"sibling path not matched", "/foobar", []string{"/foo"}, false},
+		{"no match", "/bar", []string{"/foo"}, false},
+		{"multiple roots match second", "/bar/baz", []string{"/foo", "/bar"}, true},
+		{"multiple roots no match", "/qux", []string{"/foo", "/bar"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isPathUnderRoots(tc.path, tc.roots)
+			if got != tc.want {
+				t.Errorf("isPathUnderRoots(%q, %v) = %v, want %v", tc.path, tc.roots, got, tc.want)
+			}
+		})
+	}
+}

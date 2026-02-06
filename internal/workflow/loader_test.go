@@ -296,6 +296,15 @@ func TestProfileToAgentType(t *testing.T) {
 		{"gmi", "gmi"},
 		{"gemini-cli", "gmi"},
 		{"GEMINI", "gmi"},
+		// Cursor variants
+		{"cursor", "cursor"},
+		{"CURSOR", "cursor"},
+		// Windsurf variants
+		{"windsurf", "windsurf"},
+		{"WINDSURF", "windsurf"},
+		// Aider variants
+		{"aider", "aider"},
+		{"AIDER", "aider"},
 		// Unknown profiles default to Claude
 		{"tester", "cc"},
 		{"implementer", "cc"},

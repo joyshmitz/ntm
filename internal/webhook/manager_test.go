@@ -1239,3 +1239,67 @@ func TestMatchesEvent(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// matchesEvent — missing branches (bd-4b4zf)
+// =============================================================================
+
+func TestMatchesEvent_MissingBranches(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(DefaultManagerConfig())
+
+	tests := []struct {
+		name     string
+		events   []string
+		event    string
+		expected bool
+	}{
+		{"empty eventType", []string{"agent.started"}, "", false},
+		{"empty event in list skipped", []string{"", "agent.started"}, "agent.started", true},
+		{"whitespace-only event in list skipped", []string{"  ", "agent.started"}, "agent.started", true},
+		{"no match returns false", []string{"agent.started"}, "session.created", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wh := &WebhookConfig{Events: tt.events}
+			got := m.matchesEvent(wh, tt.event)
+			if got != tt.expected {
+				t.Errorf("matchesEvent(%v, %q) = %v, want %v", tt.events, tt.event, got, tt.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// jsonEscape — all branches (bd-4b4zf)
+// =============================================================================
+
+func TestJsonEscape_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple string", "hello", "hello"},
+		{"with quotes", `say "hi"`, `say \"hi\"`},
+		{"with newline", "line1\nline2", `line1\nline2`},
+		{"with tab", "col1\tcol2", `col1\tcol2`},
+		{"with backslash", `a\b`, `a\\b`},
+		{"empty string", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := jsonEscape(tc.input)
+			if got != tc.want {
+				t.Errorf("jsonEscape(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

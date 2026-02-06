@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -72,5 +73,77 @@ webhooks:
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for webhook delivery")
+	}
+}
+
+// =============================================================================
+// stableWebhookID — all branches (bd-4b4zf)
+// =============================================================================
+
+func TestStableWebhookID_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", "   ", ""},
+		{"simple lowercase", "slack", "wh_slack"},
+		{"uppercase", "SLACK", "wh_slack"},
+		{"with spaces", "  My Hook  ", "wh_my_hook"},
+		{"with digits", "hook123", "wh_hook123"},
+		{"special chars replaced", "hook!@#$%", "wh_hook_____"},
+		{"mixed", "My-Hook.v2", "wh_my_hook_v2"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stableWebhookID(tc.input)
+			if got != tc.want {
+				t.Errorf("stableWebhookID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// trimStrings — all branches (bd-4b4zf)
+// =============================================================================
+
+func TestTrimStrings_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"empty slice", []string{}, nil},
+		{"all non-empty", []string{"a", "b"}, []string{"a", "b"}},
+		{"with whitespace", []string{"  a  ", " b "}, []string{"a", "b"}},
+		{"skip empty strings", []string{"a", "", "b"}, []string{"a", "b"}},
+		{"skip whitespace-only", []string{"  ", "a", "\t"}, []string{"a"}},
+		{"all empty", []string{"", "  ", "\t"}, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := trimStrings(tc.in)
+			// nil and empty slice should both be nil
+			if tc.want == nil {
+				if got != nil && len(got) != 0 {
+					t.Errorf("trimStrings(%v) = %v, want nil", tc.in, got)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("trimStrings(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
