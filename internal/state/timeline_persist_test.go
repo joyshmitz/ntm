@@ -992,6 +992,129 @@ func TestListTimelines_IgnoresNonJSONL(t *testing.T) {
 	}
 }
 
+func TestStartCheckpointAndStop(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	sessionID := "checkpoint-session"
+	tracker.RecordEvent(AgentEvent{
+		AgentID:   "cc_1",
+		SessionID: sessionID,
+		State:     TimelineWorking,
+		Timestamp: time.Now(),
+	})
+
+	// Start checkpointing
+	persister.StartCheckpoint(sessionID, tracker)
+
+	// Wait for at least one checkpoint to fire
+	time.Sleep(120 * time.Millisecond)
+
+	// Verify timeline was saved via checkpoint
+	loaded, err := persister.LoadTimeline(sessionID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	if len(loaded) == 0 {
+		t.Error("expected events to be checkpointed")
+	}
+
+	// Stop should clean up all checkpoints
+	persister.Stop()
+}
+
+func TestStartCheckpoint_RestartsExisting(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	sessionID := "restart-session"
+
+	// Start checkpoint twice - second should replace first without error
+	persister.StartCheckpoint(sessionID, tracker)
+	persister.StartCheckpoint(sessionID, tracker)
+
+	persister.Stop()
+}
+
+func TestStartCheckpoint_NilTrackerNoop(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	// Should not panic with nil tracker
+	persister.StartCheckpoint("session", nil)
+	persister.Stop()
+}
+
+func TestStartCheckpoint_EmptySessionNoop(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	// Should not panic with empty session ID
+	persister.StartCheckpoint("", tracker)
+	persister.StartCheckpoint("   ", tracker)
+	persister.Stop()
+}
+
+func TestStopWithActiveCheckpoints(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	// Start multiple checkpoints
+	persister.StartCheckpoint("session-1", tracker)
+	persister.StartCheckpoint("session-2", tracker)
+	persister.StartCheckpoint("session-3", tracker)
+
+	// Stop should clean up all without panic
+	persister.Stop()
+}
+
 func TestGetTimelinePath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

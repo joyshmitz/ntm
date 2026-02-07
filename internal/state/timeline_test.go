@@ -1089,6 +1089,201 @@ func TestTimelineTrackerStopIdempotent(t *testing.T) {
 	tracker.Stop()
 }
 
+func TestComputeStateDurations_NonexistentAgent(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	durations := tracker.ComputeStateDurations("nonexistent", time.Time{}, time.Time{})
+	if durations != nil {
+		t.Errorf("expected nil for nonexistent agent, got %v", durations)
+	}
+}
+
+func TestComputeStateDurations_ZeroUntil(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	now := time.Now()
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineWorking, Timestamp: now.Add(-10 * time.Minute)})
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineIdle, Timestamp: now.Add(-5 * time.Minute)})
+
+	// zero until should default to time.Now()
+	durations := tracker.ComputeStateDurations("cc_1", now.Add(-10*time.Minute), time.Time{})
+	if durations == nil {
+		t.Fatal("expected non-nil durations")
+	}
+	if durations[TimelineWorking] != 5*time.Minute {
+		t.Errorf("expected working=5m, got %v", durations[TimelineWorking])
+	}
+	// Idle duration should be roughly 5 minutes (from -5m to now)
+	if durations[TimelineIdle] < 4*time.Minute || durations[TimelineIdle] > 6*time.Minute {
+		t.Errorf("expected idle ~5m, got %v", durations[TimelineIdle])
+	}
+}
+
+func TestComputeStateDurations_ClampedEndTime(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	now := time.Now()
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineIdle, Timestamp: now.Add(-10 * time.Minute)})
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineWorking, Timestamp: now.Add(-5 * time.Minute)})
+
+	// Query window that clamps endTime of the working state
+	// idle from -10m to -5m = 5m, working from -5m to -3m (clamped) = 2m
+	durations := tracker.ComputeStateDurations("cc_1", now.Add(-10*time.Minute), now.Add(-3*time.Minute))
+	if durations == nil {
+		t.Fatal("expected non-nil durations")
+	}
+	if durations[TimelineIdle] != 5*time.Minute {
+		t.Errorf("expected idle=5m, got %v", durations[TimelineIdle])
+	}
+	if durations[TimelineWorking] != 2*time.Minute {
+		t.Errorf("expected working=2m, got %v", durations[TimelineWorking])
+	}
+}
+
+func TestGetStateTransitions_NonexistentAgent(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	transitions := tracker.GetStateTransitions("nonexistent")
+	if transitions != nil {
+		t.Errorf("expected nil for nonexistent agent, got %v", transitions)
+	}
+}
+
+func TestGetStateTransitions_NoPreviousState(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	// First event has no PreviousState, should not create a transition
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineIdle})
+
+	transitions := tracker.GetStateTransitions("cc_1")
+	if len(transitions) != 0 {
+		t.Errorf("expected 0 transitions for single event, got %d", len(transitions))
+	}
+}
+
+func TestBackgroundPrune(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{
+		RetentionDuration: 200 * time.Millisecond,
+		PruneInterval:     50 * time.Millisecond,
+	})
+
+	// Record an old event well beyond retention
+	tracker.RecordEvent(AgentEvent{
+		AgentID:   "cc_1",
+		State:     TimelineWorking,
+		Timestamp: time.Now().Add(-500 * time.Millisecond),
+	})
+
+	// Wait for at least one prune cycle
+	time.Sleep(100 * time.Millisecond)
+
+	// Record a fresh event after waiting (within retention)
+	tracker.RecordEvent(AgentEvent{
+		AgentID: "cc_1",
+		State:   TimelineIdle,
+	})
+
+	// Wait for another prune cycle to clear the old event
+	time.Sleep(100 * time.Millisecond)
+
+	tracker.Stop()
+
+	events := tracker.GetEventsForAgent("cc_1", time.Time{})
+	if len(events) != 1 {
+		t.Errorf("expected 1 event after background prune, got %d", len(events))
+	}
+	if len(events) > 0 && events[0].State != TimelineIdle {
+		t.Errorf("expected remaining event state=idle, got %s", events[0].State)
+	}
+}
+
+func TestOnMarkerAdd_PanicRecovery(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	callCount := 0
+	// Register a callback that panics
+	tracker.OnMarkerAdd(func(marker TimelineMarker) {
+		callCount++
+		panic("test panic")
+	})
+	// Register a second callback that should still run
+	tracker.OnMarkerAdd(func(marker TimelineMarker) {
+		callCount++
+	})
+
+	// Should not panic
+	tracker.AddMarker(TimelineMarker{AgentID: "cc_1", Type: MarkerPrompt})
+
+	if callCount != 2 {
+		t.Errorf("expected both callbacks called (2), got %d", callCount)
+	}
+}
+
+func TestOnStateChange_PanicRecovery(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	callCount := 0
+	// Register a callback that panics
+	tracker.OnStateChange(func(event AgentEvent) {
+		callCount++
+		panic("test panic")
+	})
+	// Register a second callback that should still run
+	tracker.OnStateChange(func(event AgentEvent) {
+		callCount++
+	})
+
+	// Should not panic
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineWorking})
+
+	if callCount != 2 {
+		t.Errorf("expected both callbacks called (2), got %d", callCount)
+	}
+}
+
+func TestStatsOldestNewest(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	now := time.Now()
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineWorking, Timestamp: now.Add(-10 * time.Minute)})
+	tracker.RecordEvent(AgentEvent{AgentID: "cc_1", State: TimelineIdle, Timestamp: now})
+
+	stats := tracker.Stats()
+	if !stats.OldestEvent.Equal(now.Add(-10 * time.Minute)) {
+		t.Errorf("expected oldest=%v, got %v", now.Add(-10*time.Minute), stats.OldestEvent)
+	}
+	if !stats.NewestEvent.Equal(now) {
+		t.Errorf("expected newest=%v, got %v", now, stats.NewestEvent)
+	}
+}
+
+func TestStatsEmpty(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	stats := tracker.Stats()
+	if stats.TotalAgents != 0 {
+		t.Errorf("expected TotalAgents=0, got %d", stats.TotalAgents)
+	}
+	if stats.TotalEvents != 0 {
+		t.Errorf("expected TotalEvents=0, got %d", stats.TotalEvents)
+	}
+	if !stats.OldestEvent.IsZero() {
+		t.Error("expected zero OldestEvent for empty tracker")
+	}
+	if !stats.NewestEvent.IsZero() {
+		t.Error("expected zero NewestEvent for empty tracker")
+	}
+}
+
 func BenchmarkAddMarker(b *testing.B) {
 	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
 	defer tracker.Stop()
