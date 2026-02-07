@@ -416,6 +416,7 @@ type WSClient struct {
 	topics     map[string]struct{}
 	topicsMu   sync.RWMutex
 	authClaims map[string]interface{}
+	closeOnce  sync.Once
 }
 
 // WSHub manages WebSocket connections and topic routing.
@@ -4547,7 +4548,7 @@ var authContextKey = ctxKeyAuth{}
 func (c *WSClient) readPump() {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close()
+		c.closeOnce.Do(func() { c.conn.Close() })
 	}()
 
 	c.conn.SetReadLimit(wsMaxMessageSize)
@@ -4575,7 +4576,7 @@ func (c *WSClient) writePump() {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		c.closeOnce.Do(func() { c.conn.Close() })
 	}()
 
 	for {

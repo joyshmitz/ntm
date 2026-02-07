@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -429,7 +430,9 @@ func (p *TimelinePersister) StartCheckpoint(sessionID string, tracker *TimelineT
 			case <-ticker.C:
 				events := tracker.GetEventsForSession(sessionID, time.Time{})
 				if len(events) > 0 {
-					_ = p.SaveTimeline(sessionID, events)
+					if err := p.SaveTimeline(sessionID, events); err != nil {
+						slog.Warn("timeline checkpoint: save failed", "session", sessionID, "error", err)
+					}
 				}
 			case <-stop:
 				return
@@ -456,6 +459,10 @@ func (p *TimelinePersister) StopCheckpoint(sessionID string) {
 // FinalizeSession saves the final state of a session's timeline and stops checkpointing.
 func (p *TimelinePersister) FinalizeSession(sessionID string, tracker *TimelineTracker) error {
 	p.StopCheckpoint(sessionID)
+
+	if tracker == nil {
+		return nil
+	}
 
 	events := tracker.GetEventsForSession(sessionID, time.Time{})
 	if len(events) == 0 {
@@ -526,6 +533,9 @@ func (p *TimelinePersister) readHeader(path string, compressed bool) (*TimelineH
 
 	scanner := bufio.NewScanner(reader)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("reading timeline header: %w", err)
+		}
 		return nil, errors.New("empty file")
 	}
 
@@ -556,9 +566,9 @@ func (p *TimelinePersister) compressTimeline(sessionID string) error {
 	defer dst.Close()
 
 	gzWriter := gzip.NewWriter(dst)
-	defer gzWriter.Close()
 
 	if _, err := io.Copy(gzWriter, src); err != nil {
+		gzWriter.Close()
 		os.Remove(dstPath)
 		return err
 	}

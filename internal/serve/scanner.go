@@ -324,9 +324,11 @@ func (s *Server) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
 		status.LastScan = scans[0]
 	}
 
-	// Get totals
+	// Get totals (use lock to avoid data race on maps)
+	scannerStore.mu.RLock()
 	status.TotalScans = len(scannerStore.scans)
 	status.TotalFindings = len(scannerStore.findings)
+	scannerStore.mu.RUnlock()
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"available":      status.Available,
@@ -510,6 +512,9 @@ func (s *Server) handleScannerHistory(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
+			if limit > 1000 {
+				limit = 1000
+			}
 		}
 	}
 	if o := r.URL.Query().Get("offset"); o != "" {
@@ -543,6 +548,9 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
+			if limit > 1000 {
+				limit = 1000
+			}
 		}
 	}
 	if o := r.URL.Query().Get("offset"); o != "" {
