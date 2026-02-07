@@ -25,11 +25,15 @@ import (
 type EventType string
 
 const (
+	EventError          EventType = "error"            // Generic error event
+	EventAgentStarted   EventType = "agent.started"    // Agent process started
 	EventAgentError     EventType = "agent.error"      // Agent hit error state
 	EventAgentCrashed   EventType = "agent.crashed"    // Agent process exited
 	EventAgentRestarted EventType = "agent.restarted"  // Agent was auto-restarted
 	EventAgentIdle      EventType = "agent.idle"       // Agent waiting for input
 	EventRateLimit      EventType = "agent.rate_limit" // Agent hit rate limit
+	EventBeadAssigned   EventType = "bead.assigned"    // Bead assigned to an agent
+	EventBeadCompleted  EventType = "bead.completed"   // Bead completed by an agent
 	EventRotationNeeded EventType = "rotation.needed"  // Account rotation recommended
 	EventSessionCreated EventType = "session.created"  // New session spawned
 	EventSessionKilled  EventType = "session.killed"   // Session terminated
@@ -113,7 +117,7 @@ func DefaultConfig() Config {
 		Webhook: WebhookConfig{
 			Enabled:  false,
 			Method:   "POST",
-			Template: `{"text": "NTM: {{.Type}} - {{jsonEscape .Message}}"}`,
+			Template: `{"event":"{{.Type}}","message":"{{jsonEscape .Message}}","session":"{{jsonEscape .Session}}","pane":"{{jsonEscape .Pane}}","agent":"{{jsonEscape .Agent}}","agent_type":"{{jsonEscape .Agent}}","bead_id":"{{jsonEscape (detail .Details "bead_id")}}","timestamp":"{{.Timestamp}}","details":{{jsonMap .Details}}}`,
 		},
 		Shell: ShellConfig{
 			Enabled:  false,
@@ -420,17 +424,37 @@ func jsonEscape(s string) string {
 	return string(b[1 : len(b)-1])
 }
 
+func detailValue(details map[string]string, key string) string {
+	if len(details) == 0 {
+		return ""
+	}
+	return details[key]
+}
+
+func jsonMap(details map[string]string) string {
+	if len(details) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(details)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // sendWebhook sends a webhook notification
 func (n *Notifier) sendWebhook(event Event) error {
 	// Parse and execute template with JSON escape function
 	tmplStr := n.config.Webhook.Template
 	if tmplStr == "" {
 		// Default JSON template using jsonEscape for user-controlled fields
-		tmplStr = `{"event":"{{.Type}}","message":"{{jsonEscape .Message}}","session":"{{jsonEscape .Session}}","timestamp":"{{.Timestamp}}"}`
+		tmplStr = `{"event":"{{.Type}}","message":"{{jsonEscape .Message}}","session":"{{jsonEscape .Session}}","pane":"{{jsonEscape .Pane}}","agent":"{{jsonEscape .Agent}}","agent_type":"{{jsonEscape .Agent}}","bead_id":"{{jsonEscape (detail .Details "bead_id")}}","timestamp":"{{.Timestamp}}","details":{{jsonMap .Details}}}`
 	}
 
 	funcMap := template.FuncMap{
 		"jsonEscape": jsonEscape,
+		"detail":     detailValue,
+		"jsonMap":    jsonMap,
 	}
 
 	tmpl, err := template.New("webhook").Funcs(funcMap).Parse(tmplStr)
@@ -646,6 +670,28 @@ func NewAgentErrorEvent(session, pane, agent, message string) Event {
 	}
 }
 
+// NewErrorEvent creates a generic error notification event
+func NewErrorEvent(session, pane, agent, message string) Event {
+	return Event{
+		Type:    EventError,
+		Session: session,
+		Pane:    pane,
+		Agent:   agent,
+		Message: message,
+	}
+}
+
+// NewAgentStartedEvent creates an agent started notification event
+func NewAgentStartedEvent(session, pane, agent string) Event {
+	return Event{
+		Type:    EventAgentStarted,
+		Session: session,
+		Pane:    pane,
+		Agent:   agent,
+		Message: fmt.Sprintf("Agent %s started", agent),
+	}
+}
+
 // NewAgentCrashedEvent creates an agent crashed notification event
 func NewAgentCrashedEvent(session, pane, agent string) Event {
 	return Event{
@@ -667,6 +713,44 @@ func NewRateLimitEvent(session, pane, agent string, waitSeconds int) Event {
 		Message: fmt.Sprintf("Agent %s hit rate limit (wait %ds)", agent, waitSeconds),
 		Details: map[string]string{
 			"wait_seconds": fmt.Sprintf("%d", waitSeconds),
+		},
+	}
+}
+
+// NewBeadAssignedEvent creates a bead assigned notification event
+func NewBeadAssignedEvent(session, pane, agent, beadID, beadTitle string) Event {
+	message := fmt.Sprintf("Bead assigned: %s", beadID)
+	if strings.TrimSpace(beadTitle) != "" {
+		message = fmt.Sprintf("Bead assigned: %s (%s)", beadID, strings.TrimSpace(beadTitle))
+	}
+	return Event{
+		Type:    EventBeadAssigned,
+		Session: session,
+		Pane:    pane,
+		Agent:   agent,
+		Message: message,
+		Details: map[string]string{
+			"bead_id":    beadID,
+			"bead_title": beadTitle,
+		},
+	}
+}
+
+// NewBeadCompletedEvent creates a bead completed notification event
+func NewBeadCompletedEvent(session, pane, agent, beadID, beadTitle string) Event {
+	message := fmt.Sprintf("Bead completed: %s", beadID)
+	if strings.TrimSpace(beadTitle) != "" {
+		message = fmt.Sprintf("Bead completed: %s (%s)", beadID, strings.TrimSpace(beadTitle))
+	}
+	return Event{
+		Type:    EventBeadCompleted,
+		Session: session,
+		Pane:    pane,
+		Agent:   agent,
+		Message: message,
+		Details: map[string]string{
+			"bead_id":    beadID,
+			"bead_title": beadTitle,
 		},
 	}
 }
