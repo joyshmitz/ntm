@@ -47,6 +47,12 @@ internal/cli/outputs/
 *.incomplete
 *.jsonl.lock
 
+# Go build temp directories
+.tmp-go/
+
+# Coverage reports
+cli_coverage.txt
+
 # Screenshots
 Snipping_*.png
 
