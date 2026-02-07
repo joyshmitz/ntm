@@ -2690,3 +2690,504 @@ func TestValidateConfig_InvalidAuthMode(t *testing.T) {
 		t.Error("expected error for invalid auth mode")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// corsMiddlewareFunc (33.3% → target higher)
+// ---------------------------------------------------------------------------
+
+func TestCorsMiddlewareFunc_ForbiddenOrigin(t *testing.T) {
+	t.Parallel()
+	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
+	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for forbidden origin")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Origin", "https://evil.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestCorsMiddlewareFunc_AllowedOriginSetsHeaders(t *testing.T) {
+	t.Parallel()
+	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
+	called := false
+	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("Origin", "https://good.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("next handler should be called for allowed origin")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://good.com" {
+		t.Errorf("expected ACAO=https://good.com, got %q", got)
+	}
+	if got := w.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("expected Vary=Origin, got %q", got)
+	}
+}
+
+func TestCorsMiddlewareFunc_OptionsRequest(t *testing.T) {
+	t.Parallel()
+	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
+	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for OPTIONS")
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/api", nil)
+	req.Header.Set("Origin", "https://good.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for OPTIONS, got %d", w.Code)
+	}
+}
+
+func TestCorsMiddlewareFunc_NoOriginPassesThrough(t *testing.T) {
+	t.Parallel()
+	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
+	called := false
+	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	// No Origin header
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("next handler should be called when no Origin header")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// authMiddlewareFunc (40.0% → target higher)
+// ---------------------------------------------------------------------------
+
+func TestAuthMiddlewareFunc_LocalMode(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeLocal}}
+	called := false
+	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("local mode should pass through")
+	}
+}
+
+func TestAuthMiddlewareFunc_EmptyMode(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: ""}}
+	called := false
+	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("empty mode should pass through")
+	}
+}
+
+func TestAuthMiddlewareFunc_OptionsPassthrough(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
+	called := false
+	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/api", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("OPTIONS should pass through regardless of auth mode")
+	}
+}
+
+func TestAuthMiddlewareFunc_FailedAuth(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
+	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called on auth failure")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("X-API-Key", "wrong-key")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestAuthMiddlewareFunc_SuccessfulAuth(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
+	called := false
+	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api", nil)
+	req.Header.Set("X-API-Key", "secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("next handler should be called after successful auth")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// authenticateRequest (66.7% → covers unsupported mode path)
+// ---------------------------------------------------------------------------
+
+func TestAuthenticateRequest_UnsupportedMode(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: "foobar"}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	err := srv.authenticateRequest(req)
+	if err == nil {
+		t.Error("expected error for unsupported auth mode")
+	}
+	if !strings.Contains(err.Error(), "unsupported auth mode") {
+		t.Errorf("expected 'unsupported auth mode' error, got: %v", err)
+	}
+}
+
+func TestAuthenticateRequest_APIKeyPath(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "key123"}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", "key123")
+	if err := srv.authenticateRequest(req); err != nil {
+		t.Errorf("expected nil error, got: %v", err)
+	}
+}
+
+func TestAuthenticateRequest_MTLSPath(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeMTLS}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{{}},
+	}
+	if err := srv.authenticateRequest(req); err != nil {
+		t.Errorf("expected nil error for mTLS, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// authenticateAPIKey (75.0% → covers invalid key branch)
+// ---------------------------------------------------------------------------
+
+func TestAuthenticateAPIKey_InvalidKey(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "correct-key"}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", "wrong-key")
+	err := srv.authenticateAPIKey(req)
+	if err == nil || !strings.Contains(err.Error(), "invalid api key") {
+		t.Errorf("expected 'invalid api key' error, got: %v", err)
+	}
+}
+
+func TestAuthenticateAPIKey_MissingKey(t *testing.T) {
+	t.Parallel()
+	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "correct-key"}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	err := srv.authenticateAPIKey(req)
+	if err == nil || !strings.Contains(err.Error(), "missing api key") {
+		t.Errorf("expected 'missing api key' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseJWT (78.9% → covers error branches)
+// ---------------------------------------------------------------------------
+
+func TestParseJWT_InvalidFormat(t *testing.T) {
+	t.Parallel()
+	_, _, _, _, err := parseJWT("not.a.valid.jwt.too.many.parts")
+	if err == nil || !strings.Contains(err.Error(), "invalid jwt format") {
+		t.Errorf("expected 'invalid jwt format' error, got: %v", err)
+	}
+}
+
+func TestParseJWT_BadHeaderBase64(t *testing.T) {
+	t.Parallel()
+	_, _, _, _, err := parseJWT("!!!bad-base64.eyJ0ZXN0IjoxfQ.sig")
+	if err == nil || !strings.Contains(err.Error(), "decode jwt header") {
+		t.Errorf("expected header decode error, got: %v", err)
+	}
+}
+
+func TestParseJWT_BadPayloadBase64(t *testing.T) {
+	t.Parallel()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	_, _, _, _, err := parseJWT(header + ".!!!bad.sig")
+	if err == nil || !strings.Contains(err.Error(), "decode jwt payload") {
+		t.Errorf("expected payload decode error, got: %v", err)
+	}
+}
+
+func TestParseJWT_BadSignatureBase64(t *testing.T) {
+	t.Parallel()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
+	_, _, _, _, err := parseJWT(header + "." + payload + ".!!!bad")
+	if err == nil || !strings.Contains(err.Error(), "decode jwt signature") {
+		t.Errorf("expected signature decode error, got: %v", err)
+	}
+}
+
+func TestParseJWT_InvalidHeaderJSON(t *testing.T) {
+	t.Parallel()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
+	_, _, _, _, err := parseJWT(header + "." + payload + "." + sig)
+	if err == nil || !strings.Contains(err.Error(), "parse jwt header") {
+		t.Errorf("expected header parse error, got: %v", err)
+	}
+}
+
+func TestParseJWT_InvalidPayloadJSON(t *testing.T) {
+	t.Parallel()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
+	_, _, _, _, err := parseJWT(header + "." + payload + "." + sig)
+	if err == nil || !strings.Contains(err.Error(), "parse jwt payload") {
+		t.Errorf("expected payload parse error, got: %v", err)
+	}
+}
+
+func TestParseJWT_ValidToken(t *testing.T) {
+	t.Parallel()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"key1"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-123","iss":"https://example.com"}`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte(`fakesig`))
+	h, claims, signingInput, sigBytes, err := parseJWT(header + "." + payload + "." + sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if h.Alg != "RS256" {
+		t.Errorf("expected alg=RS256, got %q", h.Alg)
+	}
+	if h.Kid != "key1" {
+		t.Errorf("expected kid=key1, got %q", h.Kid)
+	}
+	if claims["sub"] != "user-123" {
+		t.Errorf("expected sub=user-123, got %v", claims["sub"])
+	}
+	if signingInput != header+"."+payload {
+		t.Errorf("unexpected signing input: %q", signingInput)
+	}
+	if len(sigBytes) == 0 {
+		t.Error("expected non-empty signature bytes")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseRSAPublicKey (72.7% → covers error branches)
+// ---------------------------------------------------------------------------
+
+func TestParseRSAPublicKey_Valid(t *testing.T) {
+	t.Parallel()
+	// Generate a real RSA key and extract n/e
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("key gen: %v", err)
+	}
+	nStr := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
+	eStr := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())
+	pub, err := parseRSAPublicKey(nStr, eStr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pub.N.Cmp(key.N) != 0 {
+		t.Error("modulus mismatch")
+	}
+	if pub.E != key.E {
+		t.Errorf("exponent mismatch: got %d, want %d", pub.E, key.E)
+	}
+}
+
+func TestParseRSAPublicKey_BadN(t *testing.T) {
+	t.Parallel()
+	_, err := parseRSAPublicKey("!!!bad-base64", base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1}))
+	if err == nil || !strings.Contains(err.Error(), "decode jwk n") {
+		t.Errorf("expected n decode error, got: %v", err)
+	}
+}
+
+func TestParseRSAPublicKey_BadE(t *testing.T) {
+	t.Parallel()
+	nStr := base64.RawURLEncoding.EncodeToString([]byte{0x01})
+	_, err := parseRSAPublicKey(nStr, "!!!bad-base64")
+	if err == nil || !strings.Contains(err.Error(), "decode jwk e") {
+		t.Errorf("expected e decode error, got: %v", err)
+	}
+}
+
+func TestParseRSAPublicKey_ZeroExponent(t *testing.T) {
+	t.Parallel()
+	nStr := base64.RawURLEncoding.EncodeToString([]byte{0x01})
+	eStr := base64.RawURLEncoding.EncodeToString([]byte{}) // empty = zero exponent
+	_, err := parseRSAPublicKey(nStr, eStr)
+	if err == nil || !strings.Contains(err.Error(), "invalid jwk exponent") {
+		t.Errorf("expected exponent error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// claimInt64 (90.0% → covers json.Number error path)
+// ---------------------------------------------------------------------------
+
+func TestClaimInt64_JsonNumberError(t *testing.T) {
+	t.Parallel()
+	claims := map[string]interface{}{
+		"val": json.Number("not-a-number"),
+	}
+	_, ok := claimInt64(claims, "val")
+	if ok {
+		t.Error("expected ok=false for non-numeric json.Number")
+	}
+}
+
+func TestClaimInt64_UnsupportedType(t *testing.T) {
+	t.Parallel()
+	claims := map[string]interface{}{
+		"val": "string-value",
+	}
+	_, ok := claimInt64(claims, "val")
+	if ok {
+		t.Error("expected ok=false for string type")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeSuccessResponse (85.7% → covers nil data + empty requestID)
+// ---------------------------------------------------------------------------
+
+func TestWriteSuccessResponse_NilData(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	writeSuccessResponse(w, http.StatusOK, nil, "")
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json decode error: %v", err)
+	}
+	if resp["success"] != true {
+		t.Error("expected success=true")
+	}
+	if _, exists := resp["request_id"]; exists {
+		t.Error("expected no request_id when empty")
+	}
+}
+
+func TestWriteSuccessResponse_WithRequestID(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	writeSuccessResponse(w, http.StatusCreated, map[string]interface{}{"foo": "bar"}, "req-123")
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json decode error: %v", err)
+	}
+	if resp["request_id"] != "req-123" {
+		t.Errorf("expected request_id=req-123, got %v", resp["request_id"])
+	}
+	if resp["foo"] != "bar" {
+		t.Errorf("expected foo=bar, got %v", resp["foo"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeErrorResponse (90.0% → covers hint extraction path)
+// ---------------------------------------------------------------------------
+
+func TestWriteErrorResponse_WithHint(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	details := map[string]interface{}{
+		"hint":  "try using a different key",
+		"extra": "detail",
+	}
+	writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "bad input", details, "req-456")
+	var resp APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json decode error: %v", err)
+	}
+	if resp.Hint != "try using a different key" {
+		t.Errorf("expected hint, got %q", resp.Hint)
+	}
+	if resp.Details == nil || resp.Details["extra"] != "detail" {
+		t.Errorf("expected extra detail preserved, got %v", resp.Details)
+	}
+}
+
+func TestWriteErrorResponse_HintOnlyDetail(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	details := map[string]interface{}{
+		"hint": "only hint, no other details",
+	}
+	writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "bad", details, "")
+	var resp APIError
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json decode error: %v", err)
+	}
+	if resp.Hint != "only hint, no other details" {
+		t.Errorf("expected hint, got %q", resp.Hint)
+	}
+	// When hint is the only detail, details should be nil after extraction
+	if resp.Details != nil {
+		t.Errorf("expected nil details after hint extraction, got %v", resp.Details)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loggingMiddleware (75.0% → covers reqID branch)
+// ---------------------------------------------------------------------------
+
+func TestLoggingMiddleware_WithRequestID(t *testing.T) {
+	t.Parallel()
+	called := false
+	handler := loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	ctx := context.WithValue(req.Context(), requestIDKey, "test-req-id")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("next handler should be called")
+	}
+}
+
+func TestLoggingMiddleware_WithoutRequestID(t *testing.T) {
+	t.Parallel()
+	called := false
+	handler := loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !called {
+		t.Error("next handler should be called")
+	}
+}
