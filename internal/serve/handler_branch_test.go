@@ -2,8 +2,12 @@ package serve
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -4190,3 +4194,579 @@ func TestHandleMemoryContext_EmptyTaskBranch(t *testing.T) {
 		t.Fatalf("status=%d, want 400; body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// =============================================================================
+// Batch 10: WebSocket stub, JWKS, context build, robot health branches
+// =============================================================================
+
+// --- handleWS branches ---
+
+func TestHandleWS_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	srv := New(Config{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/ws", nil)
+	srv.handleWS(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d, want 405; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleWS_NotWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+	srv := New(Config{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	// No Upgrade header
+	srv.handleWS(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleWS_WebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+	srv := New(Config{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	srv.handleWS(rec, req)
+	// Should return "not implemented" stub
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d, want 501; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- handleRobotHealth: method not allowed ---
+
+func TestHandleRobotHealth_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	srv := New(Config{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	srv.handleRobotHealth(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d, want 405; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- JWKS fetchJWKSKeys with mock server ---
+
+func TestFetchJWKSKeys_EmptyURL(t *testing.T) {
+	t.Parallel()
+	_, err := fetchJWKSKeys(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "jwks url missing") {
+		t.Fatalf("expected 'jwks url missing' error, got: %v", err)
+	}
+}
+
+func TestFetchJWKSKeys_ServerError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal error"))
+	}))
+	defer srv.Close()
+
+	_, err := fetchJWKSKeys(context.Background(), srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("expected status 500 error, got: %v", err)
+	}
+}
+
+func TestFetchJWKSKeys_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	_, err := fetchJWKSKeys(context.Background(), srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "parse jwks") {
+		t.Fatalf("expected parse error, got: %v", err)
+	}
+}
+
+func TestFetchJWKSKeys_NoValidKeys(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return JWKS with non-RSA key type
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "EC", "kid": "k1", "n": "", "e": ""},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := fetchJWKSKeys(context.Background(), srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "no valid RSA keys") {
+		t.Fatalf("expected 'no valid RSA keys' error, got: %v", err)
+	}
+}
+
+func TestFetchJWKSKeys_ValidKey(t *testing.T) {
+	t.Parallel()
+	// Generate a real RSA key for testing
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "test-key", "n": nB64, "e": eB64, "alg": "RS256", "use": "sig"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	keys, err := fetchJWKSKeys(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("fetchJWKSKeys: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	if _, ok := keys["test-key"]; !ok {
+		t.Error("expected key with kid 'test-key'")
+	}
+}
+
+// --- jwksCache getKey with mock server ---
+
+func TestJWKSCache_GetKey_CacheHit(t *testing.T) {
+	t.Parallel()
+	// Generate RSA key
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	fetchCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "k1", "n": nB64, "e": eB64, "alg": "RS256", "use": "sig"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cache := newJWKSCache(time.Hour)
+	ctx := context.Background()
+
+	// First call fetches from server
+	key1, err := cache.getKey(ctx, srv.URL, "k1")
+	if err != nil {
+		t.Fatalf("first getKey: %v", err)
+	}
+	if key1 == nil {
+		t.Fatal("expected non-nil key")
+	}
+
+	// Second call should use cache
+	key2, err := cache.getKey(ctx, srv.URL, "k1")
+	if err != nil {
+		t.Fatalf("second getKey: %v", err)
+	}
+	if key2 == nil {
+		t.Fatal("expected non-nil key")
+	}
+	if fetchCount != 1 {
+		t.Errorf("expected 1 fetch (cache hit), got %d", fetchCount)
+	}
+}
+
+func TestJWKSCache_GetKey_KidNotFound(t *testing.T) {
+	t.Parallel()
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "k1", "n": nB64, "e": eB64, "alg": "RS256", "use": "sig"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cache := newJWKSCache(time.Hour)
+	_, err := cache.getKey(context.Background(), srv.URL, "nonexistent")
+	if err == nil || !strings.Contains(err.Error(), "kid not found") {
+		t.Fatalf("expected 'kid not found' error, got: %v", err)
+	}
+}
+
+func TestJWKSCache_GetKey_EmptyKidSingleKey(t *testing.T) {
+	t.Parallel()
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "only-key", "n": nB64, "e": eB64, "alg": "RS256", "use": "sig"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cache := newJWKSCache(time.Hour)
+	// Empty kid with single key → should return that key
+	key, err := cache.getKey(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatalf("getKey with empty kid: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil key for empty kid with single key")
+	}
+}
+
+func TestJWKSCache_GetKey_CachedEmptyKid(t *testing.T) {
+	t.Parallel()
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	fetchCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "k1", "n": nB64, "e": eB64, "alg": "RS256", "use": "sig"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cache := newJWKSCache(time.Hour)
+	ctx := context.Background()
+
+	// First fetch populates cache
+	_, _ = cache.getKey(ctx, srv.URL, "k1")
+
+	// Second call with empty kid should use cache (single key)
+	key, err := cache.getKey(ctx, srv.URL, "")
+	if err != nil {
+		t.Fatalf("cached getKey with empty kid: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected non-nil key")
+	}
+	if fetchCount != 1 {
+		t.Errorf("expected 1 fetch (cache hit), got %d", fetchCount)
+	}
+}
+
+// --- handleContextBuildV1: valid question ---
+
+func TestHandleContextBuildV1_ValidQuestion(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := `{"question":"what does this project do?"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/context/build", strings.NewReader(body))
+	srv.handleContextBuildV1(rec, req)
+
+	// Should either succeed (200) or fail (500) depending on ensemble generator
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 200 or 500; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleContextBuildV1_WithProjectDir(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := fmt.Sprintf(`{"question":"test","project_dir":"%s"}`, t.TempDir())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/context/build", strings.NewReader(body))
+	srv.handleContextBuildV1(rec, req)
+
+	// Ensemble generator may succeed or fail
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 200 or 500; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- parseRSAPublicKey branches ---
+
+func TestParseRSAPublicKey_ValidKey_Branch(t *testing.T) {
+	t.Parallel()
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	key, err := parseRSAPublicKey(nB64, eB64)
+	if err != nil {
+		t.Fatalf("parseRSAPublicKey: %v", err)
+	}
+	if key.N.Cmp(privKey.N) != 0 {
+		t.Error("parsed key N doesn't match")
+	}
+}
+
+func TestParseRSAPublicKey_BadN_Branch(t *testing.T) {
+	t.Parallel()
+	_, err := parseRSAPublicKey("not-valid-base64!!!", "AQAB")
+	if err == nil || !strings.Contains(err.Error(), "decode jwk n") {
+		t.Fatalf("expected decode n error, got: %v", err)
+	}
+}
+
+func TestParseRSAPublicKey_BadE_Branch(t *testing.T) {
+	t.Parallel()
+	nB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(12345).Bytes())
+	_, err := parseRSAPublicKey(nB64, "not-valid-base64!!!")
+	if err == nil || !strings.Contains(err.Error(), "decode jwk e") {
+		t.Fatalf("expected decode e error, got: %v", err)
+	}
+}
+
+// --- JWKS key with no kid → default kid ---
+
+func TestFetchJWKSKeys_DefaultKid(t *testing.T) {
+	t.Parallel()
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"keys": []map[string]string{
+				{"kty": "RSA", "kid": "", "n": nB64, "e": eB64, "alg": "RS256"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	keys, err := fetchJWKSKeys(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("fetchJWKSKeys: %v", err)
+	}
+	if _, ok := keys["default"]; !ok {
+		t.Error("expected key with kid 'default' for empty kid")
+	}
+}
+
+// =============================================================================
+// Batch 11: Export checkpoint format validation + POST bad JSON
+// =============================================================================
+
+func TestHandleExportCheckpoint_GetBadFormat(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "test-session")
+	rctx.URLParams.Add("checkpointId", "nonexistent-id")
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/test-session/checkpoints/nonexistent-id/export?format=invalid", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleExportCheckpoint(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleExportCheckpoint_PostBadJSON(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "test-session")
+	rctx.URLParams.Add("checkpointId", "nonexistent-id")
+
+	req := httptest.NewRequest("POST", "/api/v1/sessions/test-session/checkpoints/nonexistent-id/export",
+		strings.NewReader("{bad json"))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleExportCheckpoint(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleExportCheckpoint_ZipFormatNotFound(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "test-session")
+	rctx.URLParams.Add("checkpointId", "nonexistent-cp-id")
+
+	// zip format branch + not found
+	req := httptest.NewRequest("GET", "/api/v1/sessions/test-session/checkpoints/nonexistent-cp-id/export?format=zip", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleExportCheckpoint(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// --- checkWSOrigin branches ---
+
+func TestCheckWSOrigin_Localhost(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	result := s.checkWSOrigin(req)
+	if !result {
+		t.Error("expected localhost origin to be allowed")
+	}
+}
+
+func TestCheckWSOrigin_LoopbackIP(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	result := s.checkWSOrigin(req)
+	if !result {
+		t.Error("expected 127.0.0.1 origin to be allowed")
+	}
+}
+
+func TestCheckWSOrigin_NoOriginNonLocal(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+	s.auth.Mode = AuthModeAPIKey
+	req := httptest.NewRequest("GET", "/ws", nil)
+	// No Origin header — should still be allowed for non-browser clients
+	result := s.checkWSOrigin(req)
+	if !result {
+		t.Error("expected no-origin request to be allowed even in non-local mode")
+	}
+}
+
+func TestCheckWSOrigin_ExternalDomain(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+	s.auth.Mode = AuthModeAPIKey // non-local mode to enable origin checking
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	result := s.checkWSOrigin(req)
+	if result {
+		t.Error("expected external domain origin to be rejected")
+	}
+}
+
+// --- AuditStore record + query with data ---
+
+func TestAuditStore_RecordAndQuery(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store, err := NewAuditStore(AuditStoreConfig{
+		DBPath:    filepath.Join(tmpDir, "audit.db"),
+		JSONLPath: filepath.Join(tmpDir, "audit.jsonl"),
+		Retention: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	defer store.Close()
+
+	// Record an entry
+	err = store.Record(&AuditRecord{
+		RequestID:  "req-001",
+		UserID:     "user1",
+		Role:       RoleAdmin,
+		Action:     AuditActionCreate,
+		Resource:   "session",
+		Method:     "POST",
+		Path:       "/api/v1/sessions",
+		StatusCode: 201,
+		Duration:   50,
+		RemoteAddr: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Query for the record
+	records, err := store.Query(AuditFilter{UserID: "user1", Limit: 10})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(records) != 1 {
+		t.Errorf("expected 1 record, got %d", len(records))
+	}
+}
+
+func TestAuditStore_QueryNoDb(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	// Create store with only JSONL, no DB
+	store, err := NewAuditStore(AuditStoreConfig{
+		JSONLPath: filepath.Join(tmpDir, "audit.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	defer store.Close()
+
+	// Query without DB should fail
+	_, err = store.Query(AuditFilter{Limit: 10})
+	if err == nil {
+		t.Error("expected error querying without db")
+	}
+}
+
+// --- handleSetPaneTitleV1 bad JSON ---
+
+func TestHandleSetPaneTitleV1_BadJSON(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "test-session")
+	rctx.URLParams.Add("paneIndex", "0")
+	req := httptest.NewRequest("PUT", "/api/v1/sessions/test-session/panes/0/title",
+		strings.NewReader("{bad json"))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleSetPaneTitleV1(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- handleStartPaneStreamV1 empty session ---
+
+func TestHandleStartPaneStreamV1_EmptySession(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	req := httptest.NewRequest("POST", "/api/v1/sessions//panes/0/stream/start", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleStartPaneStreamV1(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- handleStopPaneStreamV1 empty session ---
+
+func TestHandleStopPaneStreamV1_EmptySession(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+	rctx := chi.NewRouteContext()
+	req := httptest.NewRequest("POST", "/api/v1/sessions//panes/0/stream/stop", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	s.handleStopPaneStreamV1(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
