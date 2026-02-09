@@ -25,6 +25,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
+	"github.com/Dicklesworthstone/ntm/internal/pipeline"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
@@ -11471,6 +11472,395 @@ func TestHandleExportCheckpoint_PostTarGzFormat(t *testing.T) {
 
 	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 200 or 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// =============================================================================
+// Batch 31 — WSEventStore, AuditStore, OpenAPI, Pipeline, RBAC branches
+// =============================================================================
+
+// TestWSEventStore_StorePersistError exercises the log.Printf error path
+// in Store when the DB insert fails (line 204-206 of ws_events.go).
+func TestWSEventStore_StorePersistError(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store := NewWSEventStore(db, WSEventStoreConfig{
+		BufferSize:       64,
+		RetentionSeconds: 3600,
+		CleanupInterval:  time.Hour,
+	})
+	defer store.Stop()
+
+	// Close the DB to trigger persist error on next Store
+	db.Close()
+
+	// Store should succeed (goes to ring buffer) but persist fails silently
+	ev, err := store.Store("test.topic", "test.event", map[string]string{"key": "value"})
+	if err != nil {
+		t.Fatalf("Store should not return error (persist error is logged): %v", err)
+	}
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if ev.Topic != "test.topic" {
+		t.Errorf("topic = %q, want test.topic", ev.Topic)
+	}
+}
+
+// TestWSEventStore_RecordDroppedDBError exercises the error return path
+// in RecordDropped when the DB exec fails (line 347-348 of ws_events.go).
+func TestWSEventStore_RecordDroppedDBError(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store := NewWSEventStore(db, WSEventStoreConfig{
+		BufferSize:       64,
+		RetentionSeconds: 3600,
+		CleanupInterval:  time.Hour,
+	})
+	defer store.Stop()
+
+	// Close the DB to trigger error
+	db.Close()
+
+	err := store.RecordDropped("client-1", "test.topic", "buffer_full", 1, 10)
+	if err == nil {
+		t.Fatal("expected error from RecordDropped with closed DB")
+	}
+}
+
+// TestAuditStore_CleanupWithRecords exercises the "affected > 0" log path
+// in cleanup (line 369-370 of audit.go) by inserting old records then running cleanup.
+func TestAuditStore_CleanupWithRecords(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "audit.db")
+
+	store, err := NewAuditStore(AuditStoreConfig{
+		DBPath:          dbPath,
+		Retention:       1 * time.Second,
+		CleanupInterval: 1 * time.Hour, // won't fire during test
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	// Insert a record with old timestamp directly
+	oldTime := time.Now().Add(-1 * time.Hour).Format(time.RFC3339Nano)
+	_, err = store.db.Exec(`INSERT INTO audit_records
+		(timestamp, request_id, user_id, role, action, resource, method, path, status_code, duration_ms, remote_addr)
+		VALUES (?, 'req1', 'user1', 'admin', 'execute', '/test', 'GET', '/test', 200, 10, '127.0.0.1')`, oldTime)
+	if err != nil {
+		t.Fatalf("insert old record: %v", err)
+	}
+
+	// Verify record exists
+	var count int
+	store.db.QueryRow("SELECT COUNT(*) FROM audit_records").Scan(&count)
+	if count != 1 {
+		t.Fatalf("expected 1 record, got %d", count)
+	}
+
+	// Run cleanup — retention is 1s, record is 1h old, should be removed
+	store.cleanup()
+
+	store.db.QueryRow("SELECT COUNT(*) FROM audit_records").Scan(&count)
+	if count != 0 {
+		t.Errorf("expected 0 records after cleanup, got %d", count)
+	}
+}
+
+// TestAuditStore_CleanupDBError exercises the error log path in cleanup
+// when db.Exec fails (line 363-364 of audit.go).
+func TestAuditStore_CleanupDBError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "audit.db")
+
+	store, err := NewAuditStore(AuditStoreConfig{
+		DBPath:          dbPath,
+		Retention:       1 * time.Second,
+		CleanupInterval: 1 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer func() {
+		// Close channel only — DB already closed
+		close(store.stopCleanup)
+	}()
+
+	// Close the DB to trigger error
+	store.db.Close()
+
+	// Should not panic
+	store.cleanup()
+}
+
+// TestAuditStore_CloseWithErrors exercises the combined error path in Close
+// when both jsonlFile and db Close return errors (line 393-394 of audit.go).
+func TestAuditStore_CloseWithErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "audit.db")
+	jsonlPath := filepath.Join(tmpDir, "audit.jsonl")
+
+	store, err := NewAuditStore(AuditStoreConfig{
+		DBPath:          dbPath,
+		JSONLPath:       jsonlPath,
+		Retention:       90 * 24 * time.Hour,
+		CleanupInterval: 1 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	// Close JSONL file early to trigger error on second close
+	store.jsonlFile.Close()
+
+	// Now Close the store — jsonlFile.Close should error, db.Close should succeed
+	err = store.Close()
+	if err == nil {
+		t.Fatal("expected error from Close with pre-closed JSONL file")
+	}
+	if !strings.Contains(err.Error(), "close audit store") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestHandleOpenAPISpec_TLS exercises the HTTPS branch in handleOpenAPISpec
+// (line 386 of openapi.go) when r.TLS is non-nil.
+func TestHandleOpenAPISpec_TLS(t *testing.T) {
+	t.Parallel()
+	s := &Server{host: "localhost", port: 8080}
+
+	req := httptest.NewRequest("GET", "/api/v1/openapi.json", nil)
+	req.TLS = &tls.ConnectionState{} // non-nil → HTTPS branch
+	rec := httptest.NewRecorder()
+
+	s.handleOpenAPISpec(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://localhost:8080") {
+		t.Errorf("expected https server URL in spec, got: %s", body[:min(200, len(body))])
+	}
+}
+
+// TestHandleSwaggerUI_TLS exercises the HTTPS branch in handleSwaggerUI
+// (line 402 of openapi.go) when r.TLS is non-nil.
+func TestHandleSwaggerUI_TLS(t *testing.T) {
+	t.Parallel()
+	s := &Server{host: "localhost", port: 8080}
+
+	req := httptest.NewRequest("GET", "/api/v1/docs", nil)
+	req.TLS = &tls.ConnectionState{}
+	rec := httptest.NewRecorder()
+
+	s.handleSwaggerUI(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://localhost:8080") {
+		t.Errorf("expected https URL in swagger HTML, got snippet: %s", body[:min(200, len(body))])
+	}
+}
+
+// TestHandleListPipelines_WithFinishedAt exercises the FinishedAt != nil branch
+// in handleListPipelines (line 115-117 of pipelines.go).
+func TestHandleListPipelines_WithFinishedAt(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+
+	// Register a pipeline with FinishedAt set
+	now := time.Now()
+	finished := now.Add(10 * time.Second)
+	exec := &pipeline.PipelineExecution{
+		RunID:      "test-run-finished-" + fmt.Sprintf("%d", now.UnixNano()),
+		WorkflowID: "test-workflow",
+		Session:    "test-session",
+		Status:     "completed",
+		StartedAt:  now,
+		FinishedAt: &finished,
+		Progress:   pipeline.PipelineProgress{Total: 3, Completed: 3, Percent: 100},
+	}
+	pipeline.RegisterPipeline(exec)
+
+	req := httptest.NewRequest("GET", "/api/v1/pipelines", nil)
+	rec := httptest.NewRecorder()
+	s.handleListPipelines(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	pipelines, _ := resp["pipelines"].([]interface{})
+
+	// Find our pipeline
+	found := false
+	for _, p := range pipelines {
+		pm, _ := p.(map[string]interface{})
+		if pm["run_id"] == exec.RunID {
+			found = true
+			if pm["finished_at"] == nil || pm["finished_at"] == "" {
+				t.Error("expected non-empty finished_at")
+			}
+		}
+	}
+	if !found {
+		t.Error("registered pipeline not found in response")
+	}
+}
+
+// TestWSEventStore_GetSinceDB_TopicFilterWithLimit exercises getFromDB
+// with topic filtering and the limit truncation (lines 308-309 of ws_events.go).
+func TestWSEventStore_GetSinceDB_TopicFilterWithLimit(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store := NewWSEventStore(db, WSEventStoreConfig{
+		BufferSize:       4, // tiny buffer so events fall out
+		RetentionSeconds: 3600,
+		CleanupInterval:  time.Hour,
+	})
+	defer store.Stop()
+
+	// Store many events with different topics to overflow buffer
+	for i := 0; i < 20; i++ {
+		topic := "topicA"
+		if i%3 == 0 {
+			topic = "topicB"
+		}
+		store.Store(topic, "evt", map[string]int{"i": i})
+	}
+
+	// Query from DB with topic filter and limit=2
+	events, reset, err := store.getFromDB(0, "topicA", 2)
+	if err != nil {
+		t.Fatalf("getFromDB: %v", err)
+	}
+	if reset {
+		t.Error("unexpected reset signal")
+	}
+	if len(events) > 2 {
+		t.Errorf("expected at most 2 events, got %d", len(events))
+	}
+	for _, ev := range events {
+		if ev.Topic != "topicA" {
+			t.Errorf("expected topic=topicA, got %q", ev.Topic)
+		}
+	}
+}
+
+// TestWSEventStore_GetSinceDB_CursorTooOldBranch exercises the cursor-too-old
+// branch in getFromDB (lines 318-325 of ws_events.go) when since < minSeq-1.
+// The branch only fires when topic filtering removes all SQL results.
+func TestWSEventStore_GetSinceDB_CursorTooOldBranch(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store := NewWSEventStore(db, WSEventStoreConfig{
+		BufferSize:       4,
+		RetentionSeconds: 3600,
+		CleanupInterval:  time.Hour,
+	})
+	defer store.Stop()
+
+	// Insert high-seq events directly into DB with topic "onlyA"
+	for i := 100; i < 105; i++ {
+		db.Exec("INSERT INTO ws_events (seq, topic, event_type, data, created_at) VALUES (?, 'onlyA', 'evt', '{}', datetime('now'))", i)
+	}
+
+	// Query with since=1, topic="nonexistent" — SQL fetches events 100-104 (seq > 1),
+	// but Go topic filter removes all → len(events)=0.
+	// since=1 > 0, minSeq=100, 1 < 100-1=99 → reset=true
+	events, reset, err := store.getFromDB(1, "nonexistent", 10)
+	if err != nil {
+		t.Fatalf("getFromDB: %v", err)
+	}
+	if !reset {
+		t.Error("expected reset=true when cursor is too old for DB (topic filter)")
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events on reset, got %d", len(events))
+	}
+}
+
+// TestNewAuditStore_DBOpenError exercises the sql.Open error path
+// in NewAuditStore (lines 117-118 of audit.go) by using an invalid path.
+func TestNewAuditStore_DBOpenError(t *testing.T) {
+	// Use a path that will fail at schema init (directory as file)
+	tmpDir := t.TempDir()
+	// Create a directory where the DB file should be
+	dbAsDir := filepath.Join(tmpDir, "audit.db")
+	os.MkdirAll(dbAsDir, 0755)
+
+	_, err := NewAuditStore(AuditStoreConfig{
+		DBPath:          dbAsDir, // a directory, not a file → schema init will fail
+		Retention:       90 * 24 * time.Hour,
+		CleanupInterval: 1 * time.Hour,
+	})
+	if err == nil {
+		t.Fatal("expected error with directory as DB path")
+	}
+}
+
+// TestRoleHierarchy_UnknownRole exercises the default case in roleHierarchy
+// (line 296-297 of rbac.go).
+func TestRoleHierarchy_UnknownRole(t *testing.T) {
+	t.Parallel()
+	if got := roleHierarchy("nonexistent"); got != 0 {
+		t.Errorf("roleHierarchy(nonexistent) = %d, want 0", got)
+	}
+	if got := roleHierarchy(RoleAdmin); got != 3 {
+		t.Errorf("roleHierarchy(admin) = %d, want 3", got)
+	}
+	if got := roleHierarchy(RoleOperator); got != 2 {
+		t.Errorf("roleHierarchy(operator) = %d, want 2", got)
+	}
+	if got := roleHierarchy(RoleViewer); got != 1 {
+		t.Errorf("roleHierarchy(viewer) = %d, want 1", got)
+	}
+}
+
+// TestWriteApprovalRequired_FullResponse exercises the writeApprovalRequired function
+// output format including approval_id and error_code (lines 388-410 of rbac.go).
+func TestWriteApprovalRequired_FullResponse(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+
+	ar := &ApprovalRequired{
+		ApprovalID: "apr-123",
+		Action:     "delete",
+		Resource:   "session",
+		ExpiresAt:  "2025-12-31T23:59:59Z",
+		Message:    "Approval needed for destructive operation",
+	}
+
+	writeApprovalRequired(rec, ar, "req-456")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	if resp["success"] != false {
+		t.Error("expected success=false")
+	}
+	if resp["error_code"] != "APPROVAL_REQUIRED" {
+		t.Errorf("error_code = %v", resp["error_code"])
+	}
+	approval, _ := resp["approval"].(map[string]interface{})
+	if approval["approval_id"] != "apr-123" {
+		t.Errorf("approval_id = %v", approval["approval_id"])
 	}
 }
 
