@@ -1551,6 +1551,65 @@ func TestFormatHandoffMarkdown_Full(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// resolveAgentName tests (mail.go)
+// =============================================================================
+
+func TestResolveAgentName_AgentNameTitle(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Title: "BlueLake", Type: tmux.AgentClaude, Index: 1}
+	got := resolveAgentName(p)
+	if got != "BlueLake" {
+		t.Errorf("resolveAgentName with agent title = %q, want 'BlueLake'", got)
+	}
+}
+
+func TestResolveAgentName_ClaudeFallback(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Title: "", Type: tmux.AgentClaude, Index: 3}
+	got := resolveAgentName(p)
+	if got != "ClaudeAgent3" {
+		t.Errorf("resolveAgentName claude fallback = %q, want 'ClaudeAgent3'", got)
+	}
+}
+
+func TestResolveAgentName_CodexFallback(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Title: "pane_1", Type: tmux.AgentCodex, Index: 2}
+	got := resolveAgentName(p)
+	if got != "CodexAgent2" {
+		t.Errorf("resolveAgentName codex = %q, want 'CodexAgent2'", got)
+	}
+}
+
+func TestResolveAgentName_GeminiFallback(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Title: "", Type: tmux.AgentGemini, Index: 0}
+	got := resolveAgentName(p)
+	if got != "GeminiAgent0" {
+		t.Errorf("resolveAgentName gemini = %q, want 'GeminiAgent0'", got)
+	}
+}
+
+func TestResolveAgentName_UnknownType(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Title: "", Type: "unknown", Index: 1}
+	got := resolveAgentName(p)
+	if got != "" {
+		t.Errorf("resolveAgentName unknown = %q, want empty", got)
+	}
+}
+
+func TestResolveAgentName_NonAgentTitle(t *testing.T) {
+	t.Parallel()
+	// Title that doesn't look like an agent name → fallback
+	p := tmux.Pane{Title: "bash", Type: tmux.AgentClaude, Index: 5}
+	got := resolveAgentName(p)
+	if got != "ClaudeAgent5" {
+		t.Errorf("resolveAgentName non-agent title = %q, want 'ClaudeAgent5'", got)
+	}
+}
+
 func TestFormatHandoffMarkdown_NoOptionalSections(t *testing.T) {
 	t.Parallel()
 	h := &handoff.Handoff{
