@@ -7,7 +7,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/cli/tiers"
+	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // =============================================================================
@@ -1263,5 +1265,315 @@ func TestGenerateAssignmentsEnhanced_CommonFields(t *testing.T) {
 	}
 	if a.AssignedAt == "" {
 		t.Error("AssignedAt should not be empty")
+	}
+}
+
+// =============================================================================
+// looksLikeAgentName tests (mail.go)
+// =============================================================================
+
+func TestLooksLikeAgentName_Valid(t *testing.T) {
+	t.Parallel()
+	valid := []string{"BlueLake", "GreenCastle", "RedStone", "AB"}
+	for _, name := range valid {
+		if !looksLikeAgentName(name) {
+			t.Errorf("looksLikeAgentName(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestLooksLikeAgentName_Invalid(t *testing.T) {
+	t.Parallel()
+	invalid := []string{
+		"",            // empty
+		"bluelake",    // no uppercase
+		"Blue Lake",   // space
+		"Blue_Lake",   // underscore
+		"Blue-Lake",   // hyphen
+		"B",           // single char, no second uppercase
+		"blueLake",    // lowercase start
+		"1BlueLake",   // digit start
+	}
+	for _, name := range invalid {
+		if looksLikeAgentName(name) {
+			t.Errorf("looksLikeAgentName(%q) = true, want false", name)
+		}
+	}
+}
+
+// =============================================================================
+// parseMessageIDs tests (mail.go)
+// =============================================================================
+
+func TestParseMessageIDs_Empty(t *testing.T) {
+	t.Parallel()
+	ids, err := parseMessageIDs(nil)
+	if err != nil {
+		t.Errorf("nil input: unexpected error: %v", err)
+	}
+	if ids != nil {
+		t.Errorf("nil input: got %v, want nil", ids)
+	}
+}
+
+func TestParseMessageIDs_Valid(t *testing.T) {
+	t.Parallel()
+	ids, err := parseMessageIDs([]string{"1", "2", "42"})
+	if err != nil {
+		t.Fatalf("valid input: unexpected error: %v", err)
+	}
+	if len(ids) != 3 || ids[0] != 1 || ids[1] != 2 || ids[2] != 42 {
+		t.Errorf("valid input: got %v, want [1 2 42]", ids)
+	}
+}
+
+func TestParseMessageIDs_Invalid(t *testing.T) {
+	t.Parallel()
+	_, err := parseMessageIDs([]string{"1", "abc", "3"})
+	if err == nil {
+		t.Error("invalid input: expected error for non-numeric ID")
+	}
+	if !strings.Contains(err.Error(), "abc") {
+		t.Errorf("error should mention invalid value, got: %v", err)
+	}
+}
+
+func TestParseMessageIDs_EmptySlice(t *testing.T) {
+	t.Parallel()
+	ids, err := parseMessageIDs([]string{})
+	if err != nil {
+		t.Errorf("empty slice: unexpected error: %v", err)
+	}
+	if ids != nil {
+		t.Errorf("empty slice: got %v, want nil", ids)
+	}
+}
+
+// =============================================================================
+// renderTempBar tests (personas.go)
+// =============================================================================
+
+func TestRenderTempBar_Focused(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTempBar(0.2, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "focused") {
+		t.Errorf("renderTempBar(0.2) = %q, want 'focused'", plain)
+	}
+}
+
+func TestRenderTempBar_Balanced(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTempBar(0.5, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "balanced") {
+		t.Errorf("renderTempBar(0.5) = %q, want 'balanced'", plain)
+	}
+}
+
+func TestRenderTempBar_Creative(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTempBar(0.8, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "creative") {
+		t.Errorf("renderTempBar(0.8) = %q, want 'creative'", plain)
+	}
+}
+
+func TestRenderTempBar_Wild(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTempBar(1.5, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "wild") {
+		t.Errorf("renderTempBar(1.5) = %q, want 'wild'", plain)
+	}
+}
+
+func TestRenderTempBar_Boundaries(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	// Exact boundary values
+	if plain := stripANSI(renderTempBar(0.3, th)); !strings.Contains(plain, "focused") {
+		t.Errorf("renderTempBar(0.3) = %q, want 'focused'", plain)
+	}
+	if plain := stripANSI(renderTempBar(0.7, th)); !strings.Contains(plain, "balanced") {
+		t.Errorf("renderTempBar(0.7) = %q, want 'balanced'", plain)
+	}
+	if plain := stripANSI(renderTempBar(1.0, th)); !strings.Contains(plain, "creative") {
+		t.Errorf("renderTempBar(1.0) = %q, want 'creative'", plain)
+	}
+}
+
+// =============================================================================
+// renderTags tests (personas.go)
+// =============================================================================
+
+func TestRenderTags_Multiple(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTags([]string{"frontend", "api"}, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "#frontend") {
+		t.Errorf("renderTags should contain #frontend, got %q", plain)
+	}
+	if !strings.Contains(plain, "#api") {
+		t.Errorf("renderTags should contain #api, got %q", plain)
+	}
+}
+
+func TestRenderTags_Empty(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTags(nil, th)
+	if got != "" {
+		t.Errorf("renderTags(nil) = %q, want empty", got)
+	}
+}
+
+func TestRenderTags_Single(t *testing.T) {
+	t.Parallel()
+	th := theme.Default
+	got := renderTags([]string{"backend"}, th)
+	plain := stripANSI(got)
+	if !strings.Contains(plain, "#backend") {
+		t.Errorf("renderTags single = %q, want #backend", plain)
+	}
+}
+
+// =============================================================================
+// valueOrDefault tests (personas.go)
+// =============================================================================
+
+func TestValueOrDefault_NonEmpty(t *testing.T) {
+	t.Parallel()
+	got := valueOrDefault("hello", "default")
+	if got != "hello" {
+		t.Errorf("valueOrDefault(\"hello\", \"default\") = %q, want \"hello\"", got)
+	}
+}
+
+func TestValueOrDefault_Empty(t *testing.T) {
+	t.Parallel()
+	got := valueOrDefault("", "default")
+	if got != "default" {
+		t.Errorf("valueOrDefault(\"\", \"default\") = %q, want \"default\"", got)
+	}
+}
+
+// =============================================================================
+// formatHandoffMarkdown tests (handoff.go)
+// =============================================================================
+
+func TestFormatHandoffMarkdown_Minimal(t *testing.T) {
+	t.Parallel()
+	h := &handoff.Handoff{
+		Session: "test-session",
+		Status:  "complete",
+		Outcome: "SUCCEEDED",
+		Goal:    "Do something great",
+		Now:     "Write tests",
+	}
+	got := formatHandoffMarkdown(h)
+	if !strings.Contains(got, "# Handoff: test-session") {
+		t.Error("should contain session header")
+	}
+	if !strings.Contains(got, "complete") {
+		t.Error("should contain status")
+	}
+	if !strings.Contains(got, "Do something great") {
+		t.Error("should contain goal")
+	}
+	if !strings.Contains(got, "Write tests") {
+		t.Error("should contain now")
+	}
+}
+
+func TestFormatHandoffMarkdown_Full(t *testing.T) {
+	t.Parallel()
+	h := &handoff.Handoff{
+		Session: "full-session",
+		Status:  "partial",
+		Outcome: "PARTIAL_PLUS",
+		Goal:    "Build feature",
+		Now:     "Continue implementation",
+		DoneThisSession: []handoff.TaskRecord{
+			{Task: "Created handler"},
+			{Task: "Added tests"},
+		},
+		Next:     []string{"Deploy", "Monitor"},
+		Blockers: []string{"API not ready"},
+		Decisions: map[string]string{
+			"approach": "TDD",
+		},
+		Files: handoff.FileChanges{
+			Created:  []string{"handler.go"},
+			Modified: []string{"main.go"},
+			Deleted:  []string{"old.go"},
+		},
+	}
+	got := formatHandoffMarkdown(h)
+	if !strings.Contains(got, "## Done This Session") {
+		t.Error("should contain done section")
+	}
+	if !strings.Contains(got, "Created handler") {
+		t.Error("should contain done task")
+	}
+	if !strings.Contains(got, "## Next Steps") {
+		t.Error("should contain next section")
+	}
+	if !strings.Contains(got, "Deploy") {
+		t.Error("should contain next step")
+	}
+	if !strings.Contains(got, "## Blockers") {
+		t.Error("should contain blockers section")
+	}
+	if !strings.Contains(got, "API not ready") {
+		t.Error("should contain blocker text")
+	}
+	if !strings.Contains(got, "## Key Decisions") {
+		t.Error("should contain decisions section")
+	}
+	if !strings.Contains(got, "**approach:** TDD") {
+		t.Error("should contain decision")
+	}
+	if !strings.Contains(got, "## File Changes") {
+		t.Error("should contain file changes section")
+	}
+	if !strings.Contains(got, "handler.go") {
+		t.Error("should contain created file")
+	}
+	if !strings.Contains(got, "old.go") {
+		t.Error("should contain deleted file")
+	}
+}
+
+func TestFormatHandoffMarkdown_NoOptionalSections(t *testing.T) {
+	t.Parallel()
+	h := &handoff.Handoff{
+		Session: "s",
+		Status:  "complete",
+		Outcome: "SUCCEEDED",
+		Goal:    "g",
+		Now:     "n",
+	}
+	got := formatHandoffMarkdown(h)
+	if strings.Contains(got, "## Done This Session") {
+		t.Error("should not contain empty done section")
+	}
+	if strings.Contains(got, "## Next Steps") {
+		t.Error("should not contain empty next section")
+	}
+	if strings.Contains(got, "## Blockers") {
+		t.Error("should not contain empty blockers section")
+	}
+	if strings.Contains(got, "## Key Decisions") {
+		t.Error("should not contain empty decisions section")
+	}
+	if strings.Contains(got, "## File Changes") {
+		t.Error("should not contain empty file changes section")
 	}
 }
