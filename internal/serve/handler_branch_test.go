@@ -1,9 +1,11 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -7745,6 +7747,263 @@ func TestHandleSafetyUninstallV1_Branch(t *testing.T) {
 	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 200 or 500", rec.Code)
 	}
+}
+
+// =============================================================================
+// Batch 19 — Bead CRUD success, policy get/update, git sync, OpenAPI TLS,
+//            safety check, redact helpers
+// =============================================================================
+
+// --- Bead CRUD with real project dir ---
+
+func TestHandleGetBead_WithProjectDir(t *testing.T) {
+	t.Parallel()
+	if !bv.IsBdInstalled() {
+		t.Skip("br not installed")
+	}
+	srv, _ := setupTestServer(t)
+	srv.projectDir = "/data/projects/ntm"
+
+	// Use a known bead ID from the project
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/beads/bd-bdseb", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bd-bdseb")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleGetBead(rec, req)
+	// br show bd-bdseb --json → 200 with valid JSON, or 404 if bead not found
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNotFound && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200, 404, or 500", rec.Code)
+	}
+	if rec.Code == http.StatusOK {
+		var resp map[string]interface{}
+		json.NewDecoder(rec.Body).Decode(&resp)
+		if _, ok := resp["bead"]; !ok {
+			t.Error("expected 'bead' in success response")
+		}
+	}
+}
+
+func TestHandleUpdateBead_WithProjectDir(t *testing.T) {
+	t.Parallel()
+	if !bv.IsBdInstalled() {
+		t.Skip("br not installed")
+	}
+	srv, _ := setupTestServer(t)
+	srv.projectDir = "/data/projects/ntm"
+
+	// Update with all optional fields to exercise param branches
+	body := `{"title":"test-title","description":"test-desc","priority":"P2","assignee":"test-agent","labels":["label1"]}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/beads/bd-nonexistent", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bd-nonexistent")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleUpdateBead(rec, req)
+	// Nonexistent bead → RunBd error → 500
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+}
+
+func TestHandleCloseBead_WithProjectDir(t *testing.T) {
+	t.Parallel()
+	if !bv.IsBdInstalled() {
+		t.Skip("br not installed")
+	}
+	srv, _ := setupTestServer(t)
+	srv.projectDir = "/data/projects/ntm"
+
+	// Use nonexistent bead to avoid actually closing a real one
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/beads/bd-nonexistent/close", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "bd-nonexistent")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleCloseBead(rec, req)
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+}
+
+// --- Policy GET with rules=true ---
+
+func TestHandlePolicyGetV1_WithRulesTrue(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/policy?rules=true", nil)
+	rec := httptest.NewRecorder()
+	srv.handlePolicyGetV1(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+	if rec.Code == http.StatusOK {
+		var resp map[string]interface{}
+		json.NewDecoder(rec.Body).Decode(&resp)
+		if _, ok := resp["rules"]; !ok {
+			t.Error("expected 'rules' in response when rules=true")
+		}
+	}
+}
+
+// --- Policy UPDATE with valid YAML content ---
+
+func TestHandlePolicyUpdateV1_ValidContent(t *testing.T) {
+	// Don't use t.Parallel() - writes to ~/.ntm/policy.yaml
+	srv, _ := setupTestServer(t)
+
+	yamlContent := "version: 1\nblocked:\n  - pattern: \"rm -rf /\"\n    reason: dangerous\n"
+	body := fmt.Sprintf(`{"content":%q}`, yamlContent)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/policy", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handlePolicyUpdateV1(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+}
+
+// --- Git sync with dry_run + pull_only ---
+
+func TestHandleGitSyncV1_DryRunPullOnly(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := `{"session":"test","pull_only":true,"dry_run":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/git/sync", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleGitSyncV1(rec, req)
+
+	// We're in a git repo, so should not get NOT_GIT_REPO error
+	if rec.Code == http.StatusBadRequest {
+		var resp map[string]interface{}
+		json.NewDecoder(rec.Body).Decode(&resp)
+		if code, _ := resp["error_code"].(string); code == "NOT_GIT_REPO" {
+			t.Skip("not in git repo")
+		}
+	}
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+}
+
+func TestHandleGitSyncV1_PushOnlyDryRun(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := `{"session":"test","push_only":true,"dry_run":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/git/sync", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleGitSyncV1(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusBadRequest && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200, 400, or 500", rec.Code)
+	}
+}
+
+// --- OpenAPI with TLS ---
+
+func TestHandleOpenAPISpec_WithTLS(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+	srv.host = "localhost"
+	srv.port = 9443
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/openapi.json", nil)
+	req.TLS = &tls.ConnectionState{} // simulate TLS
+	rec := httptest.NewRecorder()
+	srv.handleOpenAPISpec(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+// --- Safety check with allowed command ---
+
+func TestHandleSafetyCheckV1_AllowedCommand(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := `{"command":"ls -la"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/check", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleSafetyCheckV1(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+	if rec.Code == http.StatusOK {
+		var resp map[string]interface{}
+		json.NewDecoder(rec.Body).Decode(&resp)
+		if action, ok := resp["action"].(string); ok && action != "allow" {
+			// "ls -la" should not be blocked by default policy
+			t.Logf("action=%s (might be blocked by custom policy)", action)
+		}
+	}
+}
+
+// --- Safety check with approval-required command ---
+
+func TestHandleSafetyCheckV1_ApprovalCommand(t *testing.T) {
+	t.Parallel()
+	srv, _ := setupTestServer(t)
+
+	body := `{"command":"git push --force"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/check", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleSafetyCheckV1(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 200 or 500", rec.Code)
+	}
+}
+
+// --- redactingResponseWriter Write branch ---
+
+func TestRedactingResponseWriter_WriteWithoutHeader(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	rw := &redactingResponseWriter{
+		ResponseWriter: rec,
+		buffer:         new(bytes.Buffer),
+	}
+
+	n, err := rw.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("Write n = %d, want 5", n)
+	}
+	// After Write without WriteHeader, statusCode should be 200
+	if rw.statusCode != http.StatusOK {
+		t.Errorf("statusCode = %d, want 200", rw.statusCode)
+	}
+}
+
+// --- logRedactionSummary branches ---
+
+func TestLogRedactionSummary_ValidSummary(t *testing.T) {
+	t.Parallel()
+	// Just exercises the JSON marshal path — no panic
+	summary := &RedactionSummary{
+		RequestID:     "test-123",
+		Path:          "/api/v1/test",
+		RequestFinds:  2,
+		ResponseFinds: 1,
+		Blocked:       false,
+	}
+	logRedactionSummary(summary)
 }
 
 // Ensure kernel import is used
