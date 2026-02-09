@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/cli/tiers"
 )
 
@@ -681,5 +683,183 @@ func TestRuneWidth_Empty(t *testing.T) {
 	got := runeWidth("")
 	if got != 0 {
 		t.Errorf("runeWidth(\"\") = %d, want 0", got)
+	}
+}
+
+// =============================================================================
+// calculateMatchConfidence tests
+// =============================================================================
+
+func TestCalculateMatchConfidence_ClaudeAnalysis(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b1", Title: "Analyze performance bottleneck", Priority: "P1"}
+	got := calculateMatchConfidence("claude", bead, "balanced")
+	if got < 0.8 {
+		t.Errorf("claude+analysis confidence = %.2f, want >= 0.8", got)
+	}
+}
+
+func TestCalculateMatchConfidence_CodexFeature(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b2", Title: "Implement user login feature", Priority: "P1"}
+	got := calculateMatchConfidence("codex", bead, "balanced")
+	if got < 0.8 {
+		t.Errorf("codex+feature confidence = %.2f, want >= 0.8", got)
+	}
+}
+
+func TestCalculateMatchConfidence_GeminiDocs(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b3", Title: "Update documentation for API", Priority: "P2"}
+	got := calculateMatchConfidence("gemini", bead, "balanced")
+	if got < 0.8 {
+		t.Errorf("gemini+docs confidence = %.2f, want >= 0.8", got)
+	}
+}
+
+func TestCalculateMatchConfidence_SpeedStrategy(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b4", Title: "Generic task", Priority: "P2"}
+	got := calculateMatchConfidence("claude", bead, "speed")
+	if got < 0.7 {
+		t.Errorf("speed strategy confidence = %.2f, want >= 0.7", got)
+	}
+}
+
+func TestCalculateMatchConfidence_DependencyHighPriority(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b5", Title: "Generic task", Priority: "P0"}
+	got := calculateMatchConfidence("claude", bead, "dependency")
+	if got < 0.7 {
+		t.Errorf("dependency+P0 confidence = %.2f, want >= 0.7", got)
+	}
+}
+
+func TestCalculateMatchConfidence_UnknownAgent(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b6", Title: "Some task", Priority: "P2"}
+	got := calculateMatchConfidence("unknown_agent", bead, "balanced")
+	if got < 0.5 || got > 0.8 {
+		t.Errorf("unknown agent confidence = %.2f, want ~0.7 (base)", got)
+	}
+}
+
+func TestCalculateMatchConfidence_BugTask(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b7", Title: "Fix broken login", Priority: "P1"}
+	got := calculateMatchConfidence("codex", bead, "balanced")
+	if got < 0.7 {
+		t.Errorf("codex+bug confidence = %.2f, want >= 0.7", got)
+	}
+}
+
+func TestCalculateMatchConfidence_TestingTask(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "b8", Title: "Add test coverage", Priority: "P2"}
+	got := calculateMatchConfidence("claude", bead, "balanced")
+	// "test" → testing, claude has no specific testing strength → base
+	if got < 0.5 {
+		t.Errorf("claude+testing confidence = %.2f, want >= 0.5", got)
+	}
+}
+
+// parsePriorityString already tested in assign_test.go
+
+// =============================================================================
+// buildReasoning tests
+// =============================================================================
+
+func TestBuildReasoning_ClaudeRefactor(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "r1", Title: "Refactor authentication module", Priority: "P0"}
+	got := buildReasoning("claude", bead, "balanced")
+	if !strings.Contains(got, "Claude excels") {
+		t.Errorf("buildReasoning(claude+refactor) = %q, want Claude excels mention", got)
+	}
+	if !strings.Contains(got, "critical priority") {
+		t.Errorf("buildReasoning(P0) = %q, want critical priority", got)
+	}
+}
+
+func TestBuildReasoning_CodexImplement(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "r2", Title: "Implement new feature", Priority: "P1"}
+	got := buildReasoning("codex", bead, "speed")
+	if !strings.Contains(got, "Codex excels") {
+		t.Errorf("buildReasoning(codex+implement) = %q, want Codex excels", got)
+	}
+	if !strings.Contains(got, "speed") {
+		t.Errorf("buildReasoning(speed) = %q, want speed mention", got)
+	}
+}
+
+func TestBuildReasoning_GeminiDoc(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "r3", Title: "Update docs", Priority: "P2"}
+	got := buildReasoning("gemini", bead, "quality")
+	if !strings.Contains(got, "Gemini excels") {
+		t.Errorf("buildReasoning(gemini+doc) = %q, want Gemini excels", got)
+	}
+}
+
+func TestBuildReasoning_NoMatch(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "r4", Title: "Generic task", Priority: "P3"}
+	got := buildReasoning("unknown", bead, "round_robin")
+	if got != "available agent matched to available work" {
+		t.Errorf("buildReasoning(no match) = %q", got)
+	}
+}
+
+func TestBuildReasoning_DependencyStrategy(t *testing.T) {
+	t.Parallel()
+	bead := bv.BeadPreview{ID: "r5", Title: "Generic work", Priority: "P2"}
+	got := buildReasoning("claude", bead, "dependency")
+	if !strings.Contains(got, "unblocks") {
+		t.Errorf("buildReasoning(dependency) = %q, want unblocks mention", got)
+	}
+}
+
+// inferTaskTypeFromBead already tested in helpers_batch3_test.go
+
+// IsBeadInCycle already tested in assign_pure_test.go
+
+// assignmentAgentName already tested in cli_helpers_test.go
+
+// formatTokenCount already tested in assign_detect_test.go
+
+// =============================================================================
+// summarizeAssignmentCounts tests
+// =============================================================================
+
+func TestSummarizeAssignmentCounts_Empty(t *testing.T) {
+	t.Parallel()
+	got := summarizeAssignmentCounts(nil)
+	if got.total != 0 || got.working != 0 || got.assigned != 0 || got.failed != 0 {
+		t.Errorf("summarizeAssignmentCounts(nil) = %+v, want all zeros", got)
+	}
+}
+
+func TestSummarizeAssignmentCounts_Mixed(t *testing.T) {
+	t.Parallel()
+	assignments := []checkpoint.AssignmentSnapshot{
+		{Status: "working"},
+		{Status: "working"},
+		{Status: "assigned"},
+		{Status: "failed"},
+		{Status: "unknown"},
+	}
+	got := summarizeAssignmentCounts(assignments)
+	if got.total != 5 {
+		t.Errorf("total = %d, want 5", got.total)
+	}
+	if got.working != 2 {
+		t.Errorf("working = %d, want 2", got.working)
+	}
+	if got.assigned != 1 {
+		t.Errorf("assigned = %d, want 1", got.assigned)
+	}
+	if got.failed != 1 {
+		t.Errorf("failed = %d, want 1", got.failed)
 	}
 }
