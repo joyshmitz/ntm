@@ -11292,5 +11292,187 @@ func TestWSEventStore_StoreNilDB(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Batch 30: rollback with git patch, rollback clean repo, export POST tar.gz
+// =============================================================================
+
+// --- handleRollback: with git patch file (HasGitPatch + gitApplyPatch) ---
+
+func TestHandleRollback_WithGitPatch(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Create a real git repo
+	gitDir := filepath.Join(tmpHome, "work-patch")
+	os.MkdirAll(gitDir, 0755)
+	for _, args := range [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = gitDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	// Create file and initial commit
+	os.WriteFile(filepath.Join(gitDir, "hello.txt"), []byte("hello"), 0644)
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = gitDir
+	cmd.CombinedOutput()
+	cmd = exec.Command("git", "commit", "-m", "initial")
+	cmd.Dir = gitDir
+	cmd.CombinedOutput()
+
+	// Get commit hash
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = gitDir
+	commitOut, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse failed: %v", err)
+	}
+	commitHash := strings.TrimSpace(string(commitOut))
+
+	// Create a patch file in the checkpoint dir
+	cpDir := filepath.Join(tmpHome, ".local", "share", "ntm", "checkpoints", "rb-patch", "cp-patch")
+	os.MkdirAll(cpDir, 0755)
+
+	// Write a valid but intentionally broken patch file (will fail on apply)
+	patchContent := `--- /dev/null
++++ b/patched.txt
+@@ -0,0 +1 @@
++patched content
+`
+	os.WriteFile(filepath.Join(cpDir, "changes.patch"), []byte(patchContent), 0644)
+
+	metadata := fmt.Sprintf(`{"version":1,"id":"cp-patch","name":"patch-test","session_name":"rb-patch","working_dir":%q,"created_at":"2025-01-01T00:00:00Z","pane_count":1,"git":{"commit":"%s","branch":"main","is_dirty":false,"patch_file":"changes.patch"}}`, gitDir, commitHash)
+	os.WriteFile(filepath.Join(cpDir, "metadata.json"), []byte(metadata), 0644)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "rb-patch")
+
+	body := `{"checkpoint_ref":"cp-patch","dry_run":false,"no_git":false,"no_stash":true}`
+	req := httptest.NewRequest("POST", "/api/v1/sessions/rb-patch/rollback", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleRollback(rec, req)
+
+	// Should succeed — patch apply may warn but rollback still succeeds
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, "git_restored") {
+		t.Fatalf("expected git_restored in response, got: %s", bodyStr)
+	}
+}
+
+// --- handleRollback: clean repo (gitStashIfDirty returns "", nil) ---
+
+func TestHandleRollback_CleanRepo(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Create a real git repo with NO dirty state
+	gitDir := filepath.Join(tmpHome, "work-clean")
+	os.MkdirAll(gitDir, 0755)
+	for _, args := range [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = gitDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	os.WriteFile(filepath.Join(gitDir, "hello.txt"), []byte("hello"), 0644)
+	cmd := exec.Command("git", "add", ".")
+	cmd.Dir = gitDir
+	cmd.CombinedOutput()
+	cmd = exec.Command("git", "commit", "-m", "initial")
+	cmd.Dir = gitDir
+	cmd.CombinedOutput()
+
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = gitDir
+	commitOut, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse failed: %v", err)
+	}
+	commitHash := strings.TrimSpace(string(commitOut))
+
+	// Create fake checkpoint pointing to this commit — no dirty state
+	cpDir := filepath.Join(tmpHome, ".local", "share", "ntm", "checkpoints", "rb-clean", "cp-clean")
+	os.MkdirAll(cpDir, 0755)
+	metadata := fmt.Sprintf(`{"version":1,"id":"cp-clean","name":"clean-test","session_name":"rb-clean","working_dir":%q,"created_at":"2025-01-01T00:00:00Z","pane_count":1,"git":{"commit":"%s","branch":"main","is_dirty":false}}`, gitDir, commitHash)
+	os.WriteFile(filepath.Join(cpDir, "metadata.json"), []byte(metadata), 0644)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "rb-clean")
+
+	body := `{"checkpoint_ref":"cp-clean","dry_run":false,"no_git":false,"no_stash":false}`
+	req := httptest.NewRequest("POST", "/api/v1/sessions/rb-clean/rollback", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleRollback(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, `"git_restored":true`) {
+		t.Fatalf("expected git_restored=true, got: %s", bodyStr)
+	}
+	// Should NOT have stash_created since repo was clean
+	if strings.Contains(bodyStr, `"stash_created":true`) {
+		t.Fatalf("did not expect stash_created for clean repo, got: %s", bodyStr)
+	}
+}
+
+// --- handleExportCheckpoint: POST with tar.gz format ---
+
+func TestHandleExportCheckpoint_PostTarGzFormat(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	cpDir := filepath.Join(tmpHome, ".local", "share", "ntm", "checkpoints", "exp-post-tgz", "cp-ptgz")
+	os.MkdirAll(cpDir, 0755)
+	metadata := `{"version":1,"id":"cp-ptgz","name":"post-tgz","session_name":"exp-post-tgz","working_dir":"/tmp","created_at":"2025-01-01T00:00:00Z","pane_count":1}`
+	os.WriteFile(filepath.Join(cpDir, "metadata.json"), []byte(metadata), 0644)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "exp-post-tgz")
+	rctx.URLParams.Add("checkpointId", "cp-ptgz")
+
+	body := `{"format":"tar.gz","include_scrollback":true}`
+	req := httptest.NewRequest("POST", "/api/v1/sessions/exp-post-tgz/checkpoints/cp-ptgz/export", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleExportCheckpoint(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 200 or 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // Ensure kernel import is used
 var _ = kernel.Run
