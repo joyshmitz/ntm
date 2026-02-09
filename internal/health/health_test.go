@@ -292,6 +292,7 @@ func TestStatusSeverity(t *testing.T) {
 func TestDetectProcessStatus(t *testing.T) {
 	t.Parallel()
 
+	// These tests use shellPID=0 to exercise the text-based fallback path.
 	tests := []struct {
 		name    string
 		output  string
@@ -314,11 +315,24 @@ func TestDetectProcessStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := detectProcessStatus(tt.output, tt.command)
+			got := detectProcessStatus(tt.output, tt.command, 0)
 			if got != tt.want {
-				t.Errorf("detectProcessStatus(%q, %q) = %v, want %v", tt.output, tt.command, got, tt.want)
+				t.Errorf("detectProcessStatus(%q, %q, 0) = %v, want %v", tt.output, tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDetectProcessStatus_PIDBasedCurrentProcess(t *testing.T) {
+	t.Parallel()
+
+	// Use the current process PID as the "shell". The test runner is our
+	// child, so HasChildAlive should return true for any PID that has
+	// children. We use PID 1 (init/systemd) which always has children.
+	// With a valid shell PID that has children, text patterns are ignored.
+	got := detectProcessStatus("exit status 1", "python", 1)
+	if got != ProcessRunning {
+		t.Errorf("detectProcessStatus with PID 1 (has children) = %v, want ProcessRunning", got)
 	}
 }
 

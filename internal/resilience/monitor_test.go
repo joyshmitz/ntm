@@ -1074,3 +1074,68 @@ func TestMonitorStart_NilContextAndDoubleStartAreSafe(t *testing.T) {
 		t.Fatal("Stop() hung after Start(nil) + Start()")
 	}
 }
+
+func TestCheckHealthIsWorkingGuardSkipsCrash(t *testing.T) {
+	// When the health check reports StatusError/ProcessExited but the agent
+	// is still actively producing output (ActivityActive), the IsWorking
+	// guard should prevent handleCrash from being called. This addresses
+	// issue #48 where AI agents printing "exit status" in normal output
+	// caused false-positive crash detection.
+	restore := saveHooks()
+	defer restore()
+
+	var restartAttempted bool
+	setHooksLocked(func() {
+		checkSessionFn = func(ctx context.Context, session string) (*health.SessionHealth, error) {
+			return &health.SessionHealth{
+				Session: session,
+				Agents: []health.AgentHealth{
+					{
+						PaneID:        "pane-1",
+						Status:        health.StatusError,
+						ProcessStatus: health.ProcessExited,
+						Activity:      health.ActivityActive, // Agent is working!
+						Issues:        []health.Issue{{Type: "crash", Message: "Process exited"}},
+					},
+				},
+			}, nil
+		}
+
+		sleepFn = func(d time.Duration) {}
+		sendKeysFn = func(paneID, cmd string, enter bool) error {
+			restartAttempted = true
+			return nil
+		}
+		buildPaneCmdFn = func(projectDir, agentCmd string) (string, error) {
+			return agentCmd, nil
+		}
+	})
+
+	cfg := config.Default()
+	cfg.Resilience.AutoRestart = true
+	cfg.Resilience.MaxRestarts = 3
+	cfg.Resilience.RestartDelaySeconds = 0
+
+	m := NewMonitor("test-session", "/tmp/project", cfg, true)
+	m.RegisterAgent("pane-1", 1, "cc", "opus", "claude")
+
+	m.checkHealth(context.Background())
+
+	// Give async goroutine time (should NOT run)
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.RLock()
+	healthy := m.agents["pane-1"].Healthy
+	restartCount := m.agents["pane-1"].RestartCount
+	m.mu.RUnlock()
+
+	if !healthy {
+		t.Error("agent should remain healthy when IsWorking guard fires")
+	}
+	if restartCount != 0 {
+		t.Errorf("expected restart count 0 (IsWorking guard), got %d", restartCount)
+	}
+	if restartAttempted {
+		t.Error("restart should not have been attempted for actively working agent")
+	}
+}
