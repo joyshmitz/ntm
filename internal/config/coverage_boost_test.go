@@ -775,3 +775,779 @@ func TestDirWritable_WritableDir(t *testing.T) {
 		t.Error("dirWritable should return true for writable temp dir")
 	}
 }
+
+// =============================================================================
+// ValidateProcessTriageConfig tests (71.4% → target >90%)
+// =============================================================================
+
+func TestValidateProcessTriageConfig_Nil(t *testing.T) {
+	t.Parallel()
+	if err := ValidateProcessTriageConfig(nil); err != nil {
+		t.Errorf("ValidateProcessTriageConfig(nil) = %v, want nil", err)
+	}
+}
+
+func TestValidateProcessTriageConfig_Unconfigured(t *testing.T) {
+	t.Parallel()
+	// All zero values → skip validation
+	cfg := &ProcessTriageConfig{}
+	if err := ValidateProcessTriageConfig(cfg); err != nil {
+		t.Errorf("ValidateProcessTriageConfig(zero) = %v, want nil", err)
+	}
+}
+
+func TestValidateProcessTriageConfig_BinaryNotExists(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		BinaryPath:     "/nonexistent/pt",
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 120,
+		OnStuck:        "alert",
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for nonexistent binary")
+	}
+}
+
+func TestValidateProcessTriageConfig_BinaryIsDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		BinaryPath:     dir,
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 120,
+		OnStuck:        "alert",
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for directory as binary")
+	}
+}
+
+func TestValidateProcessTriageConfig_CheckIntervalTooLow(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  4, // below minimum of 5
+		IdleThreshold:  60,
+		StuckThreshold: 120,
+		OnStuck:        "alert",
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for check_interval < 5")
+	}
+}
+
+func TestValidateProcessTriageConfig_CheckIntervalBoundary(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  5, // exactly at boundary
+		IdleThreshold:  30,
+		StuckThreshold: 60,
+		OnStuck:        "alert",
+	}
+	if err := ValidateProcessTriageConfig(cfg); err != nil {
+		t.Errorf("check_interval=5 should be valid: %v", err)
+	}
+}
+
+func TestValidateProcessTriageConfig_IdleThresholdTooLow(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  10,
+		IdleThreshold:  29, // below minimum of 30
+		StuckThreshold: 120,
+		OnStuck:        "alert",
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for idle_threshold < 30")
+	}
+}
+
+func TestValidateProcessTriageConfig_IdleThresholdBoundary(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  10,
+		IdleThreshold:  30, // exactly at boundary
+		StuckThreshold: 60,
+		OnStuck:        "alert",
+	}
+	if err := ValidateProcessTriageConfig(cfg); err != nil {
+		t.Errorf("idle_threshold=30 should be valid: %v", err)
+	}
+}
+
+func TestValidateProcessTriageConfig_StuckLessThanIdle(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 50, // less than idle
+		OnStuck:        "alert",
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for stuck_threshold < idle_threshold")
+	}
+}
+
+func TestValidateProcessTriageConfig_StuckEqualIdle(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 60, // equal to idle — valid (>=)
+		OnStuck:        "alert",
+	}
+	if err := ValidateProcessTriageConfig(cfg); err != nil {
+		t.Errorf("stuck_threshold=idle_threshold should be valid: %v", err)
+	}
+}
+
+func TestValidateProcessTriageConfig_InvalidOnStuck(t *testing.T) {
+	t.Parallel()
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 120,
+		OnStuck:        "restart", // not in valid set
+	}
+	err := ValidateProcessTriageConfig(cfg)
+	if err == nil {
+		t.Error("should error for invalid on_stuck action")
+	}
+}
+
+func TestValidateProcessTriageConfig_AllValidActions(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"alert", "kill", "ignore"} {
+		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+			cfg := &ProcessTriageConfig{
+				Enabled:        true,
+				CheckInterval:  10,
+				IdleThreshold:  60,
+				StuckThreshold: 120,
+				OnStuck:        action,
+			}
+			if err := ValidateProcessTriageConfig(cfg); err != nil {
+				t.Errorf("on_stuck=%q should be valid: %v", action, err)
+			}
+		})
+	}
+}
+
+func TestValidateProcessTriageConfig_ValidBinary(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "pt")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &ProcessTriageConfig{
+		Enabled:        true,
+		BinaryPath:     binPath,
+		CheckInterval:  10,
+		IdleThreshold:  60,
+		StuckThreshold: 120,
+		OnStuck:        "alert",
+	}
+	if err := ValidateProcessTriageConfig(cfg); err != nil {
+		t.Errorf("valid config should pass: %v", err)
+	}
+}
+
+// =============================================================================
+// Validate (main aggregator) tests (64.6% → target >80%)
+// =============================================================================
+
+func TestValidate_NilConfig(t *testing.T) {
+	t.Parallel()
+	errs := Validate(nil)
+	if len(errs) == 0 {
+		t.Error("Validate(nil) should return errors")
+	}
+}
+
+func TestValidate_DefaultConfig(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	errs := Validate(cfg)
+	if len(errs) != 0 {
+		t.Errorf("Validate(Default()) returned %d errors: %v", len(errs), errs)
+	}
+}
+
+func TestValidate_RelativeProjectsBase(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.ProjectsBase = "relative/path"
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "projects_base") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for relative projects_base")
+	}
+}
+
+func TestValidate_AbsoluteProjectsBase(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.ProjectsBase = "/tmp/ntm-test"
+	errs := Validate(cfg)
+	for _, e := range errs {
+		if errContains(e.Error(), "projects_base") {
+			t.Errorf("should not error for absolute projects_base: %v", e)
+		}
+	}
+}
+
+func TestValidate_InvalidHelpVerbosity(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.HelpVerbosity = "verbose" // invalid
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "help_verbosity") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for invalid help_verbosity")
+	}
+}
+
+func TestValidate_ValidHelpVerbosity(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"minimal", "full", "Minimal", "FULL"} {
+		t.Run(v, func(t *testing.T) {
+			t.Parallel()
+			cfg := Default()
+			cfg.HelpVerbosity = v
+			errs := Validate(cfg)
+			for _, e := range errs {
+				if errContains(e.Error(), "help_verbosity") {
+					t.Errorf("help_verbosity=%q should be valid: %v", v, e)
+				}
+			}
+		})
+	}
+}
+
+func TestValidate_NegativeAlerts(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Alerts.AgentStuckMinutes = -1
+	cfg.Alerts.DiskLowThresholdGB = -0.5
+	errs := Validate(cfg)
+	alertCount := 0
+	for _, e := range errs {
+		if errContains(e.Error(), "alerts.") {
+			alertCount++
+		}
+	}
+	if alertCount < 2 {
+		t.Errorf("expected at least 2 alert errors, got %d", alertCount)
+	}
+}
+
+func TestValidate_NegativeCheckpoints(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Checkpoints.MaxAutoCheckpoints = -1
+	cfg.Checkpoints.ScrollbackLines = -1
+	cfg.Checkpoints.IntervalMinutes = -1
+	errs := Validate(cfg)
+	cpCount := 0
+	for _, e := range errs {
+		if errContains(e.Error(), "checkpoints.") {
+			cpCount++
+		}
+	}
+	if cpCount < 3 {
+		t.Errorf("expected at least 3 checkpoint errors, got %d", cpCount)
+	}
+}
+
+func TestValidate_NegativeResilience(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Resilience.MaxRestarts = -1
+	cfg.Resilience.RestartDelaySeconds = -1
+	errs := Validate(cfg)
+	rCount := 0
+	for _, e := range errs {
+		if errContains(e.Error(), "resilience.") {
+			rCount++
+		}
+	}
+	if rCount < 2 {
+		t.Errorf("expected at least 2 resilience errors, got %d", rCount)
+	}
+}
+
+func TestValidate_NegativeCASSTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.CASS.Timeout = -1
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "cass.timeout") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for negative CASS timeout")
+	}
+}
+
+func TestValidate_CASSContextMinRelevanceOutOfRange(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.CASS.Context.MinRelevance = 1.5 // above 1.0
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "min_relevance") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for min_relevance > 1.0")
+	}
+}
+
+func TestValidate_CASSContextSkipAboveOutOfRange(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.CASS.Context.SkipIfContextAbove = 101 // above 100
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "skip_if_context_above") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for skip_if_context_above > 100")
+	}
+}
+
+func TestValidate_CASSContextNegatives(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.CASS.Context.MaxSessions = -1
+	cfg.CASS.Context.MaxTokens = -1
+	cfg.CASS.Context.LookbackDays = -1
+	errs := Validate(cfg)
+	cassCount := 0
+	for _, e := range errs {
+		if errContains(e.Error(), "cass.context.") {
+			cassCount++
+		}
+	}
+	if cassCount < 3 {
+		t.Errorf("expected at least 3 CASS context errors, got %d", cassCount)
+	}
+}
+
+func TestValidate_TmuxDefaultPanesZero(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Tmux.DefaultPanes = 0 // below minimum of 1
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "tmux.default_panes") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for tmux.default_panes < 1")
+	}
+}
+
+func TestValidate_TmuxPaneInitDelayNegative(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Tmux.PaneInitDelayMs = -1
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "tmux.pane_init_delay_ms") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should error for negative pane_init_delay_ms")
+	}
+}
+
+func TestValidate_InvalidContextRotation(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.ContextRotation.WarningThreshold = 2.0 // out of 0.0-1.0 range
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "context_rotation") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should report context_rotation error")
+	}
+}
+
+func TestValidate_InvalidRobotOutput(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Robot.Output.Format = "yaml" // invalid format
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "robot.output") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should report robot.output error")
+	}
+}
+
+func TestValidate_InvalidSafetyProfile(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Safety.Profile = "nonexistent-profile"
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "safety") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should report safety error")
+	}
+}
+
+func TestValidate_InvalidRedactionMode(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Redaction.Mode = "scramble" // invalid mode
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "redaction") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should report redaction error")
+	}
+}
+
+func TestValidate_InvalidEncryption(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Encryption.Enabled = true
+	cfg.Encryption.KeySource = "magic" // invalid key source
+	errs := Validate(cfg)
+	found := false
+	for _, e := range errs {
+		if errContains(e.Error(), "encryption") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Validate should report encryption error")
+	}
+}
+
+func TestValidate_MultipleErrors(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.ProjectsBase = "relative"
+	cfg.HelpVerbosity = "debug"
+	cfg.Alerts.AgentStuckMinutes = -5
+	cfg.Checkpoints.MaxAutoCheckpoints = -1
+	cfg.Resilience.MaxRestarts = -1
+	cfg.CASS.Timeout = -1
+	cfg.Tmux.DefaultPanes = 0
+	errs := Validate(cfg)
+	if len(errs) < 7 {
+		t.Errorf("expected at least 7 errors, got %d: %v", len(errs), errs)
+	}
+}
+
+// =============================================================================
+// MergeConfig tests (42.9% → target >70%)
+// =============================================================================
+
+func TestMergeConfig_EmptyProject(t *testing.T) {
+	t.Parallel()
+	global := Default()
+	project := &ProjectConfig{}
+	result := MergeConfig(global, project, t.TempDir())
+	if result != global {
+		t.Error("MergeConfig should return the global config pointer")
+	}
+}
+
+func TestMergeConfig_ProjectDefaults(t *testing.T) {
+	t.Parallel()
+	global := Default()
+	project := &ProjectConfig{
+		Defaults: ProjectDefaults{
+			Agents: map[string]int{"cc": 3, "cod": 1},
+		},
+	}
+	result := MergeConfig(global, project, t.TempDir())
+	if result.ProjectDefaults["cc"] != 3 {
+		t.Errorf("ProjectDefaults[cc] = %d, want 3", result.ProjectDefaults["cc"])
+	}
+	if result.ProjectDefaults["cod"] != 1 {
+		t.Errorf("ProjectDefaults[cod] = %d, want 1", result.ProjectDefaults["cod"])
+	}
+}
+
+func TestMergeConfig_PaletteFileTraversal(t *testing.T) {
+	t.Parallel()
+	global := Default()
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "../../../etc/passwd"},
+	}
+	// Should silently ignore the traversal attempt
+	result := MergeConfig(global, project, t.TempDir())
+	_ = result // just verify no panic
+}
+
+func TestMergeConfig_PaletteFileAbsolute(t *testing.T) {
+	t.Parallel()
+	global := Default()
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "/etc/passwd"},
+	}
+	// Absolute path should be ignored (unsafe)
+	result := MergeConfig(global, project, t.TempDir())
+	_ = result // just verify no panic
+}
+
+func TestMergeConfig_PaletteFileFromNtmDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Create .ntm/palette.md with a valid command
+	ntmDir := filepath.Join(dir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paletteContent := "## Testing\n### test-cmd | Test Command\nDo something cool\n"
+	if err := os.WriteFile(filepath.Join(ntmDir, "palette.md"), []byte(paletteContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	global := Default()
+	global.Palette = []PaletteCmd{{Key: "existing", Label: "Existing", Prompt: "do existing"}}
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "palette.md"},
+	}
+	result := MergeConfig(global, project, dir)
+	if len(result.Palette) < 2 {
+		t.Errorf("expected at least 2 palette commands, got %d", len(result.Palette))
+	}
+	// Project commands should come first
+	if len(result.Palette) > 0 && result.Palette[0].Key != "test-cmd" {
+		t.Errorf("first palette cmd key = %q, want test-cmd", result.Palette[0].Key)
+	}
+}
+
+func TestMergeConfig_PaletteFileFallbackToRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Don't create .ntm/ dir — should fall back to project root
+	paletteContent := "## Testing\n### root-cmd | Root Command\nFrom root\n"
+	if err := os.WriteFile(filepath.Join(dir, "palette.md"), []byte(paletteContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	global := Default()
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "palette.md"},
+	}
+	result := MergeConfig(global, project, dir)
+	if len(result.Palette) < 1 {
+		t.Errorf("expected at least 1 palette command from root, got %d", len(result.Palette))
+	}
+}
+
+func TestMergeConfig_PaletteFileDeduplicates(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ntmDir := filepath.Join(dir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paletteContent := "## Testing\n### dup-key | Project Cmd\nProject prompt\n"
+	if err := os.WriteFile(filepath.Join(ntmDir, "palette.md"), []byte(paletteContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	global := Default()
+	global.Palette = []PaletteCmd{{Key: "dup-key", Label: "Global Cmd", Prompt: "global prompt"}}
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "palette.md"},
+	}
+	result := MergeConfig(global, project, dir)
+	// Should deduplicate — project cmd takes precedence
+	dupCount := 0
+	for _, cmd := range result.Palette {
+		if cmd.Key == "dup-key" {
+			dupCount++
+		}
+	}
+	if dupCount != 1 {
+		t.Errorf("expected 1 entry for dup-key, got %d", dupCount)
+	}
+	// First one should be from project (takes precedence)
+	if result.Palette[0].Label != "Project Cmd" {
+		t.Errorf("first dup-key label = %q, want 'Project Cmd'", result.Palette[0].Label)
+	}
+}
+
+func TestMergeConfig_PaletteFileNotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	global := Default()
+	origLen := len(global.Palette)
+	project := &ProjectConfig{
+		Palette: ProjectPalette{File: "nonexistent.md"},
+	}
+	result := MergeConfig(global, project, dir)
+	// Palette should remain unchanged
+	if len(result.Palette) != origLen {
+		t.Errorf("palette changed unexpectedly: %d → %d", origLen, len(result.Palette))
+	}
+}
+
+func TestMergeConfig_PaletteStatePreferFirst(t *testing.T) {
+	t.Parallel()
+	global := Default()
+	global.PaletteState.Pinned = []string{"global-pin"}
+	global.PaletteState.Favorites = []string{"global-fav"}
+	project := &ProjectConfig{
+		PaletteState: PaletteState{
+			Pinned:    []string{"project-pin"},
+			Favorites: []string{"project-fav"},
+		},
+	}
+	result := MergeConfig(global, project, t.TempDir())
+	// Project entries come first
+	if len(result.PaletteState.Pinned) < 2 {
+		t.Errorf("expected at least 2 pinned entries, got %d", len(result.PaletteState.Pinned))
+	}
+	if result.PaletteState.Pinned[0] != "project-pin" {
+		t.Errorf("first pinned should be project-pin, got %q", result.PaletteState.Pinned[0])
+	}
+}
+
+// =============================================================================
+// mergeStringListPreferFirst tests
+// =============================================================================
+
+func TestMergeStringListPreferFirst_BothEmpty(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst(nil, nil)
+	if got != nil {
+		t.Errorf("mergeStringListPreferFirst(nil, nil) = %v, want nil", got)
+	}
+}
+
+func TestMergeStringListPreferFirst_PrimaryOnly(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst([]string{"a", "b"}, nil)
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("mergeStringListPreferFirst(primary, nil) = %v", got)
+	}
+}
+
+func TestMergeStringListPreferFirst_SecondaryOnly(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst(nil, []string{"x", "y"})
+	if len(got) != 2 || got[0] != "x" || got[1] != "y" {
+		t.Errorf("mergeStringListPreferFirst(nil, secondary) = %v", got)
+	}
+}
+
+func TestMergeStringListPreferFirst_Duplicates(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst([]string{"a", "b"}, []string{"b", "c"})
+	if len(got) != 3 {
+		t.Errorf("expected 3 unique items, got %d: %v", len(got), got)
+	}
+	// "a" should come first (from primary)
+	if got[0] != "a" {
+		t.Errorf("first item should be 'a', got %q", got[0])
+	}
+}
+
+func TestMergeStringListPreferFirst_WhitespaceAndEmpty(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst([]string{" a ", "", "  "}, []string{" a ", "b"})
+	// " a " trimmed to "a", empty strings skipped, deduped
+	if len(got) != 2 {
+		t.Errorf("expected 2 items, got %d: %v", len(got), got)
+	}
+}
+
+func TestMergeStringListPreferFirst_AllEmpty(t *testing.T) {
+	t.Parallel()
+	got := mergeStringListPreferFirst([]string{"", " "}, []string{"", " "})
+	if got != nil {
+		t.Errorf("all empty/whitespace should return nil, got %v", got)
+	}
+}
+
+// helper for string contains check (prefixed to avoid conflict with swarm_test.go)
+func errContains(s, substr string) bool {
+	return len(s) >= len(substr) && errSearch(s, substr)
+}
+
+func errSearch(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
