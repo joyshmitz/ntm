@@ -12385,5 +12385,407 @@ func TestHandleCancelPipeline_MissingRunID(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// BATCH 34 — Policy reset error branches, approval SLB/expired, blocked truncation
+// =============================================================================
+
+// TestHandlePolicyResetV1_MkdirAllError exercises the MkdirAll error branch
+// in handlePolicyResetV1 (line 736). Setting HOME so .ntm is a file blocks
+// directory creation.
+func TestHandlePolicyResetV1_MkdirAllError(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	// Create a regular file at .ntm so MkdirAll can't create a directory there
+	os.WriteFile(filepath.Join(tmpHome, ".ntm"), []byte("blocker"), 0644)
+	t.Setenv("HOME", tmpHome)
+
+	req := httptest.NewRequest("POST", "/api/v1/safety/policy/reset", nil)
+	rec := httptest.NewRecorder()
+
+	s.handlePolicyResetV1(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(fmt.Sprint(resp["error"]), "directory") {
+		t.Errorf("error should mention directory, got %v", resp["error"])
+	}
+}
+
+// TestHandlePolicyResetV1_WriteFileError exercises the writeDefaultPolicyFile
+// error branch in handlePolicyResetV1 (line 743). Making .ntm dir read-only
+// prevents file creation.
+func TestHandlePolicyResetV1_WriteFileError(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	ntmDir := filepath.Join(tmpHome, ".ntm")
+	os.MkdirAll(ntmDir, 0555) // read-only dir
+	t.Setenv("HOME", tmpHome)
+
+	req := httptest.NewRequest("POST", "/api/v1/safety/policy/reset", nil)
+	rec := httptest.NewRecorder()
+
+	s.handlePolicyResetV1(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestApprovalApproveV1_SLBSelfApproval exercises the SLB self-approval block
+// in handleApprovalApproveV1 (line 1103). When SLBRequired=true and the approver
+// is the same as the requestor, it should return 403 Forbidden.
+func TestApprovalApproveV1_SLBSelfApproval(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	// Insert an SLB-requiring approval with a known requestor
+	approvalsLock.Lock()
+	approvalIDSeq++
+	id := fmt.Sprintf("apr-slb-%d", approvalIDSeq)
+	approvals[id] = &Approval{
+		ID:          id,
+		Action:      "force_release lock-xyz",
+		Requestor:   "agent-1",
+		SLBRequired: true,
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}
+	approvalsLock.Unlock()
+
+	// Clean up after test
+	defer func() {
+		approvalsLock.Lock()
+		delete(approvals, id)
+		approvalsLock.Unlock()
+	}()
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", id)
+	req := httptest.NewRequest("POST", "/api/v1/safety/approvals/"+id+"/approve", nil)
+	// Set RBAC context with same user as requestor
+	ctx := withRoleContext(req.Context(), &RoleContext{
+		Role:   RoleAdmin,
+		UserID: "agent-1",
+	})
+	req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalApproveV1(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for SLB self-approval, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(fmt.Sprint(resp["error"]), "SLB") {
+		t.Errorf("error should mention SLB, got %v", resp["error"])
+	}
+}
+
+// TestApprovalsListV1_ExpiredTransition exercises the expired-transition path
+// in handleApprovalsListV1 (line 943). When listing, pending approvals that have
+// expired should auto-transition to "expired" status.
+func TestApprovalsListV1_ExpiredTransition(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	// Insert an expired pending approval
+	approvalsLock.Lock()
+	approvalIDSeq++
+	id := fmt.Sprintf("apr-exp-%d", approvalIDSeq)
+	approvals[id] = &Approval{
+		ID:        id,
+		Action:    "test-expired-action",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		ExpiresAt: time.Now().Add(-1 * time.Hour), // expired
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		delete(approvals, id)
+		approvalsLock.Unlock()
+	}()
+
+	req := httptest.NewRequest("GET", "/api/v1/approvals?status=expired", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalsListV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	// The expired approval should have been auto-transitioned and included
+	approvalsArr, ok := resp["approvals"].([]interface{})
+	if !ok {
+		t.Fatalf("expected approvals array, got %T", resp["approvals"])
+	}
+
+	found := false
+	for _, a := range approvalsArr {
+		m, _ := a.(map[string]interface{})
+		if m["id"] == id && m["status"] == "expired" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expired approval %s not found in list with status=expired filter", id)
+	}
+}
+
+// TestApprovalsHistoryV1_LimitTruncation exercises the limit truncation branch
+// in handleApprovalsHistoryV1 (lines 997-998). Creates many resolved approvals
+// and verifies limit parameter caps the results.
+func TestApprovalsHistoryV1_LimitTruncation(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	// Insert 5 resolved approvals
+	var ids []string
+	approvalsLock.Lock()
+	for i := 0; i < 5; i++ {
+		approvalIDSeq++
+		id := fmt.Sprintf("apr-hist-%d", approvalIDSeq)
+		approvals[id] = &Approval{
+			ID:        id,
+			Action:    fmt.Sprintf("action-%d", i),
+			Status:    "approved",
+			CreatedAt: time.Now().Add(-time.Duration(i) * time.Minute),
+			ExpiresAt: time.Now().Add(1 * time.Hour),
+		}
+		ids = append(ids, id)
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		for _, id := range ids {
+			delete(approvals, id)
+		}
+		approvalsLock.Unlock()
+	}()
+
+	req := httptest.NewRequest("GET", "/api/v1/approvals/history?limit=2", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalsHistoryV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	count, _ := resp["count"].(float64)
+	if count > 2 {
+		t.Errorf("expected at most 2 results with limit=2, got %v", count)
+	}
+}
+
+// TestApprovalGetV1_ExpiredAutoTransition exercises the expired-auto-transition
+// in handleApprovalGetV1 (line 1036). Getting a pending approval that has expired
+// should auto-transition its status to "expired".
+func TestApprovalGetV1_ExpiredAutoTransition(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	approvalsLock.Lock()
+	approvalIDSeq++
+	id := fmt.Sprintf("apr-getexp-%d", approvalIDSeq)
+	approvals[id] = &Approval{
+		ID:        id,
+		Action:    "test-get-expired",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		ExpiresAt: time.Now().Add(-30 * time.Minute), // expired
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		delete(approvals, id)
+		approvalsLock.Unlock()
+	}()
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", id)
+	req := httptest.NewRequest("GET", "/api/v1/safety/approvals/"+id, nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalGetV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["status"] != "expired" {
+		t.Errorf("expected status=expired, got %v", resp["status"])
+	}
+}
+
+// TestApprovalApproveV1_WithRBACContext exercises the RBAC context branch
+// in handleApprovalApproveV1 (line 1073). When rc != nil, the approver
+// should be set to rc.UserID instead of "unknown".
+func TestApprovalApproveV1_WithRBACContext(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	// Create approval request
+	approvalsLock.Lock()
+	approvalIDSeq++
+	id := fmt.Sprintf("apr-rbac-%d", approvalIDSeq)
+	approvals[id] = &Approval{
+		ID:        id,
+		Action:    "deploy-v2",
+		Requestor: "agent-req",
+		Status:    "pending",
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		delete(approvals, id)
+		approvalsLock.Unlock()
+	}()
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", id)
+	req := httptest.NewRequest("POST", "/api/v1/safety/approvals/"+id+"/approve", nil)
+	ctx := withRoleContext(req.Context(), &RoleContext{
+		Role:   RoleAdmin,
+		UserID: "admin-approver",
+	})
+	req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalApproveV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the approval was set with correct approver
+	approvalsLock.RLock()
+	a := approvals[id]
+	approvalsLock.RUnlock()
+	if a.ApprovedBy != "admin-approver" {
+		t.Errorf("expected approved_by=admin-approver, got %s", a.ApprovedBy)
+	}
+}
+
+// TestHandleSafetyBlockedV1_TruncationBranch exercises the limit truncation
+// branch in handleSafetyBlockedV1 (lines 151-153). Creates blocked log entries
+// and uses ?limit=1 to trigger truncation.
+func TestHandleSafetyBlockedV1_TruncationBranch(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Create blocked log with multiple recent entries
+	logsDir := filepath.Join(tmpHome, ".ntm", "logs")
+	os.MkdirAll(logsDir, 0755)
+
+	now := time.Now()
+	var lines []string
+	for i := 0; i < 5; i++ {
+		ts := now.Add(-time.Duration(i) * time.Minute)
+		entry := fmt.Sprintf(`{"timestamp":"%s","command":"danger-%d","pattern":"danger*","reason":"blocked","action":"block"}`,
+			ts.Format(time.RFC3339), i)
+		lines = append(lines, entry)
+	}
+	os.WriteFile(filepath.Join(logsDir, "blocked.jsonl"),
+		[]byte(strings.Join(lines, "\n")+"\n"), 0644)
+
+	req := httptest.NewRequest("GET", "/api/v1/safety/blocked?limit=2", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleSafetyBlockedV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	count, _ := resp["count"].(float64)
+	if count > 2 {
+		t.Errorf("expected at most 2 entries with limit=2, got %v", count)
+	}
+}
+
+// TestHandlePolicyValidateV1_FileBasedUnreadable exercises the file-read error
+// branch in handlePolicyValidateV1 (lines 672-680). Making the policy file
+// unreadable triggers the read error path.
+func TestHandlePolicyValidateV1_FileBasedUnreadable(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Create policy file but make it unreadable
+	policyDir := filepath.Join(tmpHome, ".ntm")
+	os.MkdirAll(policyDir, 0755)
+	policyPath := filepath.Join(policyDir, "policy.yaml")
+	os.WriteFile(policyPath, []byte("version: 1"), 0644)
+	os.Chmod(policyPath, 0000) // make unreadable
+
+	// Empty body = file-based validation
+	req := httptest.NewRequest("POST", "/api/v1/safety/policy/validate", nil)
+	req.ContentLength = 0
+	rec := httptest.NewRecorder()
+
+	s.handlePolicyValidateV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["valid"] != false {
+		t.Errorf("expected valid=false for unreadable file, got %v", resp["valid"])
+	}
+
+	// Restore permissions for cleanup
+	os.Chmod(policyPath, 0644)
+}
+
+// TestHandlePolicyUpdateV1_MkdirAllError exercises the MkdirAll error branch
+// in handlePolicyUpdateV1 (line 548). Setting HOME so .ntm is a file blocks
+// directory creation.
+func TestHandlePolicyUpdateV1_MkdirAllError(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	// Create a regular file at .ntm to block directory creation
+	os.WriteFile(filepath.Join(tmpHome, ".ntm"), []byte("blocker"), 0644)
+	t.Setenv("HOME", tmpHome)
+
+	body := `{"content":"version: 1\nblocked:\n  - pattern: \"test\"\n"}`
+	req := httptest.NewRequest("PUT", "/api/v1/safety/policy", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	s.handlePolicyUpdateV1(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // Ensure kernel import is used
 var _ = kernel.Run
