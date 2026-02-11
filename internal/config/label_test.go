@@ -167,6 +167,206 @@ func TestValidateLabel(t *testing.T) {
 	}
 }
 
+// TestParseSessionLabel_EmptyInput ensures empty string is handled gracefully.
+func TestParseSessionLabel_EmptyInput(t *testing.T) {
+	base, label := ParseSessionLabel("")
+	if base != "" {
+		t.Errorf("ParseSessionLabel(%q) base = %q, want %q", "", base, "")
+	}
+	if label != "" {
+		t.Errorf("ParseSessionLabel(%q) label = %q, want %q", "", label, "")
+	}
+}
+
+// TestFormatSessionName_RoundTrip_Extended verifies round-trip for more cases,
+// including multiple separators, and documents that degenerate inputs do NOT round-trip.
+func TestFormatSessionName_RoundTrip_Extended(t *testing.T) {
+	// These should all round-trip: FormatSessionName(ParseSessionLabel(x)) == x
+	roundTrips := []string{
+		"simple",
+		"a--b",
+		"my-project--backend",
+		"foo--bar--baz",           // multi-separator preserves as label="bar--baz"
+		"x--y-z",                  // label with single dash
+		"proj--label_underscore",  // label with underscore
+	}
+	for _, input := range roundTrips {
+		t.Run("roundtrip/"+input, func(t *testing.T) {
+			base, label := ParseSessionLabel(input)
+			got := FormatSessionName(base, label)
+			if got != input {
+				t.Errorf("round-trip failed: input=%q, base=%q, label=%q, got=%q",
+					input, base, label, got)
+			}
+		})
+	}
+
+	// Degenerate cases that do NOT round-trip (documenting expected behavior)
+	nonRoundTrips := []struct {
+		input    string
+		expected string // what FormatSessionName(Parse(x)) actually returns
+	}{
+		// "--frontend" -> base="", label="frontend" -> Format("","frontend") = "--frontend"
+		// Actually this DOES round-trip because Format("","frontend") = "" + "--" + "frontend" = "--frontend"
+		{"--frontend", "--frontend"},
+		// "myproject--" -> base="myproject", label="" -> Format("myproject","") = "myproject"
+		// This does NOT round-trip.
+		{"myproject--", "myproject"},
+	}
+	for _, tt := range nonRoundTrips {
+		t.Run("degenerate/"+tt.input, func(t *testing.T) {
+			base, label := ParseSessionLabel(tt.input)
+			got := FormatSessionName(base, label)
+			if got != tt.expected {
+				t.Errorf("degenerate: input=%q, base=%q, label=%q, got=%q, want=%q",
+					tt.input, base, label, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestHasLabel_Extended adds edge cases not covered by the main table.
+func TestHasLabel_Extended(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"", false},            // empty string
+		{"myproject--", true},  // degenerate: trailing separator
+		{"---", true},          // triple dash has "--" inside
+		{"a-b", false},         // single dash only
+	}
+	for _, tt := range tests {
+		name := tt.input
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			got := HasLabel(tt.input)
+			if got != tt.want {
+				t.Errorf("HasLabel(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSessionBase_Extended adds degenerate and edge cases.
+func TestSessionBase_Extended(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},                // empty string
+		{"--frontend", ""},     // degenerate: empty base
+		{"myproject--", "myproject"}, // degenerate: trailing separator
+		{"---", ""},            // triple dash: first "--" at index 0
+	}
+	for _, tt := range tests {
+		name := tt.input
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			got := SessionBase(tt.input)
+			if got != tt.want {
+				t.Errorf("SessionBase(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateLabel_Extended adds boundary and additional invalid-pattern tests.
+func TestValidateLabel_Extended(t *testing.T) {
+	valid := []string{
+		strings.Repeat("a", 50),  // exactly 50 chars: boundary
+		"a-",                     // trailing dash is valid per regex
+		"a_",                     // trailing underscore is valid
+		"Z",                      // single uppercase
+		"9",                      // single digit
+		"abc-def_ghi",            // mixed separators
+	}
+	for _, label := range valid {
+		name := label
+		if len(name) > 20 {
+			name = name[:20] + "..."
+		}
+		t.Run("valid_ext/"+name, func(t *testing.T) {
+			if err := ValidateLabel(label); err != nil {
+				t.Errorf("ValidateLabel(%q) unexpected error: %v", label, err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		label       string
+		errContains string
+	}{
+		{"my.label", "alphanumeric"},         // dot not allowed
+		{"foo/bar", "alphanumeric"},           // slash not allowed
+		{"hello\tworld", "alphanumeric"},      // tab not allowed
+		{".hidden", "alphanumeric"},           // starts with dot
+		{"foo--bar", "separator"},             // double-dash in middle
+		{strings.Repeat("b", 51), "50 characters"}, // 51 chars
+		{"bad@label", "alphanumeric"},         // at sign
+		{"a b", "alphanumeric"},               // internal space
+	}
+	for _, tt := range invalid {
+		name := tt.label
+		if len(name) > 20 {
+			name = name[:20] + "..."
+		}
+		// Sanitize the test name for subtests (avoid slashes, etc.)
+		name = strings.ReplaceAll(name, "/", "_slash_")
+		name = strings.ReplaceAll(name, "\t", "_tab_")
+		t.Run("invalid_ext/"+name, func(t *testing.T) {
+			err := ValidateLabel(tt.label)
+			if err == nil {
+				t.Errorf("ValidateLabel(%q) expected error containing %q, got nil", tt.label, tt.errContains)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.errContains) {
+				t.Errorf("ValidateLabel(%q) error = %q, want containing %q", tt.label, err.Error(), tt.errContains)
+			}
+		})
+	}
+}
+
+// TestGetProjectDir_WithLabel_TableDriven provides table-driven coverage for label stripping
+// in GetProjectDir, complementing the inline assertions below.
+func TestGetProjectDir_WithLabel_TableDriven(t *testing.T) {
+	c := &Config{ProjectsBase: "/srv/projects"}
+
+	tests := []struct {
+		session string
+		want    string
+	}{
+		{"alpha", "/srv/projects/alpha"},
+		{"alpha--frontend", "/srv/projects/alpha"},
+		{"alpha--backend", "/srv/projects/alpha"},
+		{"beta", "/srv/projects/beta"},
+		{"beta--v2", "/srv/projects/beta"},
+		{"my-app--feature-x", "/srv/projects/my-app"},
+		{"my-app", "/srv/projects/my-app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.session, func(t *testing.T) {
+			got := c.GetProjectDir(tt.session)
+			if got != tt.want {
+				t.Errorf("GetProjectDir(%q) = %q, want %q", tt.session, got, tt.want)
+			}
+		})
+	}
+
+	// Verify that labeled variants of the same project all resolve identically.
+	variants := []string{"myproject", "myproject--a", "myproject--z", "myproject--foo-bar"}
+	first := c.GetProjectDir(variants[0])
+	for _, v := range variants[1:] {
+		if got := c.GetProjectDir(v); got != first {
+			t.Errorf("GetProjectDir(%q) = %q, want same as %q (%q)", v, got, variants[0], first)
+		}
+	}
+}
+
 func TestGetProjectDir_WithLabel(t *testing.T) {
 	cfg := &Config{ProjectsBase: "/home/user/projects"}
 

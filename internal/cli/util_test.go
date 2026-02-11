@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -429,4 +432,154 @@ func TestOrderSessionsForSelection(t *testing.T) {
 	if sessions[0].Name != "beta" {
 		t.Errorf("original slice was mutated: sessions[0].Name = %q, want 'beta'", sessions[0].Name)
 	}
+}
+
+// =============================================================================
+// inferSessionFromCWD — label disambiguation (three-tier logic from bd-3cu02.8)
+// =============================================================================
+
+func TestInferSessionFromCWD_LabelDisambiguation(t *testing.T) {
+	// Save and restore global state that inferSessionFromCWD reads.
+	origCfg := cfg
+	origRemote := tmux.DefaultClient.Remote
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		tmux.DefaultClient.Remote = origRemote
+		os.Chdir(origDir) //nolint:errcheck
+	})
+
+	// Ensure we are not in "remote" mode.
+	tmux.DefaultClient.Remote = ""
+
+	// Create a temp directory tree: projectsBase/myproject/
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "myproject")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Point config at our temp projects base.
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	// chdir into the project directory so inferSessionFromCWD can match.
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	t.Run("single_match_returns_it", func(t *testing.T) {
+		sessions := []tmux.Session{
+			{Name: "myproject"},
+			{Name: "other"},
+		}
+		got, reason := inferSessionFromCWD(sessions)
+		if got != "myproject" {
+			t.Errorf("got %q, want %q", got, "myproject")
+		}
+		if reason != "current directory" {
+			t.Errorf("reason = %q, want %q", reason, "current directory")
+		}
+	})
+
+	t.Run("single_labeled_match_returns_it", func(t *testing.T) {
+		sessions := []tmux.Session{
+			{Name: "myproject--frontend"},
+			{Name: "other"},
+		}
+		got, reason := inferSessionFromCWD(sessions)
+		if got != "myproject--frontend" {
+			t.Errorf("got %q, want %q", got, "myproject--frontend")
+		}
+		if reason != "current directory" {
+			t.Errorf("reason = %q, want %q", reason, "current directory")
+		}
+	})
+
+	t.Run("tier1_unlabeled_preferred_over_labeled", func(t *testing.T) {
+		// Multiple matches: unlabeled session should be preferred (tier 1).
+		sessions := []tmux.Session{
+			{Name: "myproject--frontend"},
+			{Name: "myproject"},
+			{Name: "myproject--backend"},
+		}
+		got, reason := inferSessionFromCWD(sessions)
+		if got != "myproject" {
+			t.Errorf("got %q, want %q (unlabeled should be preferred)", got, "myproject")
+		}
+		if !strings.Contains(reason, "base session preferred") {
+			t.Errorf("reason = %q, want containing %q", reason, "base session preferred")
+		}
+	})
+
+	t.Run("tier2_all_labeled_picks_first_alphabetically", func(t *testing.T) {
+		// All labeled, no unlabeled base: pick first alphabetically (tier 2).
+		sessions := []tmux.Session{
+			{Name: "myproject--frontend"},
+			{Name: "myproject--backend"},
+			{Name: "myproject--api"},
+		}
+		got, reason := inferSessionFromCWD(sessions)
+		if got != "myproject--api" {
+			t.Errorf("got %q, want %q (first alphabetically)", got, "myproject--api")
+		}
+		if !strings.Contains(reason, "first labeled session") {
+			t.Errorf("reason = %q, want containing %q", reason, "first labeled session")
+		}
+	})
+
+	t.Run("no_matching_sessions", func(t *testing.T) {
+		sessions := []tmux.Session{
+			{Name: "other-project"},
+			{Name: "something-else"},
+		}
+		got, _ := inferSessionFromCWD(sessions)
+		if got != "" {
+			t.Errorf("got %q, want empty (no match)", got)
+		}
+	})
+
+	t.Run("remote_mode_skips_inference", func(t *testing.T) {
+		tmux.DefaultClient.Remote = "user@host"
+		defer func() { tmux.DefaultClient.Remote = "" }()
+
+		sessions := []tmux.Session{
+			{Name: "myproject"},
+		}
+		got, _ := inferSessionFromCWD(sessions)
+		if got != "" {
+			t.Errorf("got %q, want empty (remote mode should skip)", got)
+		}
+	})
+
+	t.Run("empty_session_list", func(t *testing.T) {
+		got, _ := inferSessionFromCWD(nil)
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	// Test from a subdirectory of the project.
+	subDir := filepath.Join(projectDir, "src", "pkg")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	t.Run("subdirectory_matches_project", func(t *testing.T) {
+		if err := os.Chdir(subDir); err != nil {
+			t.Fatalf("chdir subdir: %v", err)
+		}
+		defer os.Chdir(projectDir) //nolint:errcheck
+
+		sessions := []tmux.Session{
+			{Name: "myproject--frontend"},
+			{Name: "myproject"},
+		}
+		got, reason := inferSessionFromCWD(sessions)
+		if got != "myproject" {
+			t.Errorf("got %q, want %q (unlabeled preferred from subdir)", got, "myproject")
+		}
+		if !strings.Contains(reason, "base session preferred") {
+			t.Errorf("reason = %q, want containing %q", reason, "base session preferred")
+		}
+	})
 }
