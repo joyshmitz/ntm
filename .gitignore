@@ -67,3 +67,6 @@ test_screenshot.png
 
 # E2E runtime lockfiles
 e2e/*.lock
+
+# Go test coverage profiles
+*.cover
