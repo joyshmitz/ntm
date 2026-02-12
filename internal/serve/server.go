@@ -3024,6 +3024,7 @@ type AgentSpawnRequest struct {
 	GmiCount  int    `json:"gmi_count,omitempty"`
 	Preset    string `json:"preset,omitempty"`
 	WaitReady bool   `json:"wait_ready,omitempty"`
+	Label     string `json:"label,omitempty"` // Goal label for multi-session support
 }
 
 // handleAgentSpawnV1 handles POST /api/v1/sessions/{sessionId}/agents/spawn.
@@ -3050,6 +3051,7 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 
 	opts := robot.SpawnOptions{
 		Session:   sessionID,
+		Label:     req.Label,
 		CCCount:   req.CCCount,
 		CodCount:  req.CodCount,
 		GmiCount:  req.GmiCount,

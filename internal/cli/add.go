@@ -46,6 +46,7 @@ func newAddCmd() *cobra.Command {
 	var contextLimit int
 	var contextDays int
 	var prompt string
+	var label string
 
 	cmd := &cobra.Command{
 		Use:   "add <session-name>",
@@ -56,6 +57,9 @@ func newAddCmd() *cobra.Command {
 	  ntm add myproject --cc=2           # Add 2 Claude agents (default model)
 	  ntm add myproject --cc=1:opus      # Add 1 Claude Opus agent
 	  ntm add myproject --cod=1 --gmi=1  # Add 1 Codex, 1 Gemini
+
+		With --label, target a labeled session:
+	  ntm add myproject --label frontend --cc=1  # Add to myproject--frontend
 
 		Persona mode:
 	  Use --persona to add agents with predefined roles and system prompts.
@@ -71,6 +75,15 @@ func newAddCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionName := args[0]
+
+			// Apply goal label to session name (bd-1933u)
+			if label != "" {
+				if err := config.ValidateLabel(label); err != nil {
+					return fmt.Errorf("invalid label: %w", err)
+				}
+				sessionName = config.FormatSessionName(sessionName, label)
+			}
+
 			dir := cfg.GetProjectDir(sessionName)
 
 			// Update CASS config from flags
@@ -141,6 +154,9 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAider, &agentSpecs), "aider", "Aider agents (N or N:model)")
 	cmd.Flags().Var(&personaSpecs, "persona", "Persona-defined agents (name or name:count)")
+
+	// Goal label for multi-session support (bd-1933u)
+	cmd.Flags().StringVarP(&label, "label", "l", "", "Goal label for multi-session support (e.g., --label frontend targets session PROJECT--frontend)")
 
 	// CASS context flags
 	cmd.Flags().StringVar(&contextQuery, "cass-context", "", "Explicit context query for CASS")

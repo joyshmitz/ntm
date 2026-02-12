@@ -17,6 +17,7 @@ import (
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
 	Session        string
+	Label          string // Session label — constructs "{Session}--{Label}" if set
 	CCCount        int    // Claude agents
 	CodCount       int    // Codex agents
 	GmiCount       int    // Gemini agents
@@ -96,6 +97,19 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	auditWorkingDir := ""
 	auditSessionCreated := false
 	auditPanesAdded := 0
+
+	// Apply goal label to session name (bd-1933u)
+	if opts.Label != "" {
+		if err := config.ValidateLabel(opts.Label); err != nil {
+			errOutput := &SpawnOutput{
+				RobotResponse: NewErrorResponse(fmt.Errorf("invalid label: %w", err), ErrCodeInvalidFlag, "Use a valid label (alphanumeric, dash, underscore)"),
+				Session:       opts.Session,
+				Error:         fmt.Sprintf("invalid label: %v", err),
+			}
+			return errOutput, nil
+		}
+		opts.Session = config.FormatSessionName(opts.Session, opts.Label)
+	}
 
 	output := &SpawnOutput{
 		RobotResponse: NewRobotResponse(true),
