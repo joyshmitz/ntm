@@ -1970,6 +1970,7 @@ func Default() *Config {
 		Redaction:       DefaultRedactionConfig(),
 		Privacy:         DefaultPrivacyConfig(),
 		Encryption:      DefaultEncryptionConfig(),
+		SpawnPacing:     DefaultSpawnPacingConfig(),
 	}
 
 	// Apply safety profile defaults (standard/safe/paranoid).
@@ -3563,6 +3564,11 @@ func Validate(cfg *Config) []error {
 	// Validate encryption configuration
 	if err := ValidateEncryptionConfig(&cfg.Encryption); err != nil {
 		errs = append(errs, fmt.Errorf("encryption: %w", err))
+	}
+
+	// Validate spawn pacing config
+	if err := ValidateSpawnPacingConfig(&cfg.SpawnPacing); err != nil {
+		errs = append(errs, fmt.Errorf("spawn_pacing: %w", err))
 	}
 
 	// Validate projects_base if set
