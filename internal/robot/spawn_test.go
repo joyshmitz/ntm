@@ -2,12 +2,40 @@ package robot
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestGetSpawnRejectsProjectNameWithLabelSeparator(t *testing.T) {
+	t.Parallel()
+
+	opts := SpawnOptions{
+		Session: "my--project",
+		CCCount: 1,
+		DryRun:  true,
+	}
+
+	out, err := GetSpawn(opts, config.Default())
+	if err != nil {
+		t.Fatalf("GetSpawn returned unexpected error: %v", err)
+	}
+	if out == nil {
+		t.Fatal("GetSpawn returned nil output")
+	}
+	if out.RobotResponse.Success {
+		t.Fatalf("expected spawn validation failure for session %q", opts.Session)
+	}
+	if out.RobotResponse.ErrorCode != ErrCodeInvalidFlag {
+		t.Fatalf("error_code = %q, want %q", out.RobotResponse.ErrorCode, ErrCodeInvalidFlag)
+	}
+	if !strings.Contains(out.RobotResponse.Error, "contains '--'") {
+		t.Fatalf("error = %q, expected project-name separator validation message", out.RobotResponse.Error)
+	}
+}
 
 func TestPrintSpawn(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)

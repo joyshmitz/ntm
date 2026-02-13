@@ -17,19 +17,19 @@ import (
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
 	Session        string
-	Label          string // Session label — constructs "{Session}--{Label}" if set
-	CCCount        int    // Claude agents
-	CodCount       int    // Codex agents
-	GmiCount       int    // Gemini agents
-	Preset         string // Recipe/preset name
-	NoUserPane     bool   // Don't create user pane
-	WorkingDir     string // Override working directory
-	WaitReady      bool   // Wait for agents to be ready
-	ReadyTimeout   int    // Timeout in seconds for ready detection
-	DryRun         bool   // Preview mode: show what would happen without executing
-	Safety         bool   // Fail if session already exists
-	AssignWork     bool   // Enable orchestrator work assignment mode
-	AssignStrategy string // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
+	Label          string   // Session label — constructs "{Session}--{Label}" if set
+	CCCount        int      // Claude agents
+	CodCount       int      // Codex agents
+	GmiCount       int      // Gemini agents
+	Preset         string   // Recipe/preset name
+	NoUserPane     bool     // Don't create user pane
+	WorkingDir     string   // Override working directory
+	WaitReady      bool     // Wait for agents to be ready
+	ReadyTimeout   int      // Timeout in seconds for ready detection
+	DryRun         bool     // Preview mode: show what would happen without executing
+	Safety         bool     // Fail if session already exists
+	AssignWork     bool     // Enable orchestrator work assignment mode
+	AssignStrategy string   // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
 	CustomNames    []string // Custom agent names (used in order, then NATO alphabet)
 }
 
@@ -98,16 +98,18 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	auditSessionCreated := false
 	auditPanesAdded := 0
 
+	// Validate project name unconditionally: "--" is reserved for labels.
+	if err := config.ValidateProjectName(opts.Session); err != nil {
+		errOutput := &SpawnOutput{
+			RobotResponse: NewErrorResponse(err, ErrCodeInvalidFlag, "Project names cannot contain '--' (reserved as label separator)"),
+			Session:       opts.Session,
+			Error:         err.Error(),
+		}
+		return errOutput, nil
+	}
+
 	// Apply goal label to session name (bd-1933u)
 	if opts.Label != "" {
-		if err := config.ValidateProjectName(opts.Session); err != nil {
-			errOutput := &SpawnOutput{
-				RobotResponse: NewErrorResponse(err, ErrCodeInvalidFlag, "Project names cannot contain '--' (reserved as label separator)"),
-				Session:       opts.Session,
-				Error:         err.Error(),
-			}
-			return errOutput, nil
-		}
 		if err := config.ValidateLabel(opts.Label); err != nil {
 			errOutput := &SpawnOutput{
 				RobotResponse: NewErrorResponse(fmt.Errorf("invalid label: %w", err), ErrCodeInvalidFlag, "Use a valid label (alphanumeric, dash, underscore)"),

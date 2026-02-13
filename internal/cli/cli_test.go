@@ -370,6 +370,39 @@ func TestSpawnValidation(t *testing.T) {
 	}
 }
 
+func TestAddValidationRejectsReservedLabelSeparatorInProjectName(t *testing.T) {
+	cfg = config.Default()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "without label",
+			args: []string{"add", "my--project", "--cc=1"},
+		},
+		{
+			name: "with label",
+			args: []string{"add", "my--project", "--label", "frontend", "--cc=1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags()
+			rootCmd.SetArgs(tt.args)
+
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), "contains '--'") {
+				t.Fatalf("expected reserved-separator validation error, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestIsJSONOutput tests the JSON output detection
 func TestIsJSONOutput(t *testing.T) {
 	// Save original value

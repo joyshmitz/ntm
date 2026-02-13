@@ -76,11 +76,13 @@ func newAddCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionName := args[0]
 
-			// When --label is provided, validate project name doesn't contain "--" (bd-1933u)
+			// Validate project name unconditionally: "--" is reserved for labels.
+			if err := config.ValidateProjectName(sessionName); err != nil {
+				return err
+			}
+
+			// Apply and validate optional label (bd-1933u)
 			if label != "" {
-				if err := config.ValidateProjectName(sessionName); err != nil {
-					return err
-				}
 				if err := config.ValidateLabel(label); err != nil {
 					return fmt.Errorf("invalid label: %w", err)
 				}

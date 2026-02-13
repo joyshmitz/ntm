@@ -1,6 +1,7 @@
 package context
 
 import (
+	stdcontext "context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -745,8 +746,9 @@ func TestExtractTopMSSkills_EnvelopeSkipsNoID(t *testing.T) {
 
 func TestBuildMSComponent_InsufficientBudget(t *testing.T) {
 	t.Parallel()
+	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
-	comp := b.buildMSComponent(nil, "test query", 0)
+	comp := b.buildMSComponent(ctx, "test query", 0)
 	if comp.Error != "insufficient token budget" {
 		t.Errorf("expected 'insufficient token budget', got %q", comp.Error)
 	}
@@ -757,8 +759,9 @@ func TestBuildMSComponent_InsufficientBudget(t *testing.T) {
 
 func TestBuildMSComponent_NegativeBudget(t *testing.T) {
 	t.Parallel()
+	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
-	comp := b.buildMSComponent(nil, "test query", -100)
+	comp := b.buildMSComponent(ctx, "test query", -100)
 	if comp.Error != "insufficient token budget" {
 		t.Errorf("expected 'insufficient token budget', got %q", comp.Error)
 	}
@@ -766,8 +769,9 @@ func TestBuildMSComponent_NegativeBudget(t *testing.T) {
 
 func TestBuildMSComponent_EmptyQuery(t *testing.T) {
 	t.Parallel()
+	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
-	comp := b.buildMSComponent(nil, "", 500)
+	comp := b.buildMSComponent(ctx, "", 500)
 	if comp.Error != "no query provided" {
 		t.Errorf("expected 'no query provided', got %q", comp.Error)
 	}
@@ -775,8 +779,9 @@ func TestBuildMSComponent_EmptyQuery(t *testing.T) {
 
 func TestBuildMSComponent_WhitespaceQuery(t *testing.T) {
 	t.Parallel()
+	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
-	comp := b.buildMSComponent(nil, "   \t\n  ", 500)
+	comp := b.buildMSComponent(ctx, "   \t\n  ", 500)
 	if comp.Error != "no query provided" {
 		t.Errorf("expected 'no query provided', got %q", comp.Error)
 	}
@@ -784,9 +789,10 @@ func TestBuildMSComponent_WhitespaceQuery(t *testing.T) {
 
 func TestBuildMSComponent_MSNotInstalled(t *testing.T) {
 	t.Parallel()
+	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
 	// ms tool is almost certainly not installed in the test environment
-	comp := b.buildMSComponent(nil, "test query", 500)
+	comp := b.buildMSComponent(ctx, "test query", 500)
 	if comp.Error != "ms not installed" {
 		// If ms IS installed, this test path won't trigger, but that's fine
 		t.Logf("ms detection returned: %q (ms may be installed)", comp.Error)
