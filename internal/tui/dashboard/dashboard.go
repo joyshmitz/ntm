@@ -595,6 +595,14 @@ type Model struct {
 	baseTick      time.Duration // Base tick interval when active (default 100ms)
 	idleTick      time.Duration // Tick interval when idle (default 500ms)
 	idleTimeout   time.Duration // Time before entering idle state (default 5s)
+
+	// Post-quit action: tells the caller what to do after the TUI exits.
+	postQuitAction *PostQuitAction
+}
+
+// PostQuitAction describes what the caller should do after the dashboard TUI exits.
+type PostQuitAction struct {
+	AttachSession string // Non-empty: attach/switch to this tmux session.
 }
 
 // PaneStatus tracks the status of a pane including compaction state
@@ -2309,7 +2317,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case synthtui.ZoomMsg:
-		_ = tmux.ZoomPane(m.session, msg.PaneIndex)
+		if err := tmux.ZoomPane(m.session, msg.PaneIndex); err != nil {
+			m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
+			return m, nil
+		}
+		m.postQuitAction = &PostQuitAction{AttachSession: m.session}
 		return m, tea.Quit
 
 	case EnsembleModesDataMsg:
@@ -3343,11 +3355,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, dashKeys.Zoom):
 			if (m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail) && len(m.panes) > 0 && m.cursor < len(m.panes) {
-				// Zoom to selected pane
 				p := m.panes[m.cursor]
-				_ = tmux.ZoomPane(m.session, p.Index)
+				if err := tmux.ZoomPane(m.session, p.Index); err != nil {
+					m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
+					return m, nil
+				}
+				m.postQuitAction = &PostQuitAction{AttachSession: m.session}
 				return m, tea.Quit
 			}
+			return m, nil
 
 		// Number quick-select
 		case key.Matches(msg, dashKeys.Num1):
@@ -6686,9 +6702,15 @@ func (m Model) executeReplay(entry history.HistoryEntry) tea.Cmd {
 }
 
 // Run starts the dashboard
-func Run(session, projectDir string) error {
+func Run(session, projectDir string) (*PostQuitAction, error) {
 	model := New(session, projectDir)
 	p := tea.NewProgram(model, tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	finalModel, err := p.Run()
+	if err != nil {
+		return nil, err
+	}
+	if m, ok := finalModel.(Model); ok && m.postQuitAction != nil {
+		return m.postQuitAction, nil
+	}
+	return nil, nil
 }

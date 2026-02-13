@@ -342,5 +342,12 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool) error
 		cancel()
 	}
 
-	return dashboard.Run(session, projectDir)
+	action, err := dashboard.Run(session, projectDir)
+	if err != nil {
+		return err
+	}
+	if action != nil && action.AttachSession != "" {
+		return tmux.AttachOrSwitch(action.AttachSession)
+	}
+	return nil
 }
