@@ -1227,7 +1227,7 @@ func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Idempotent-Replay", "true")
 			w.WriteHeader(status)
-			w.Write(cached)
+			_, _ = w.Write(cached) // Best-effort: client may have disconnected
 			return
 		}
 
@@ -1652,8 +1652,10 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial connection event
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"time\":\"%s\"}\n\n",
-		time.Now().UTC().Format(time.RFC3339))
+	if _, err := fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"time\":\"%s\"}\n\n",
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	// Stream events
@@ -1671,7 +1673,9 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.EventType(), data)
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.EventType(), data); err != nil {
+				return // Client disconnected
+			}
 			flusher.Flush()
 		}
 	}
@@ -4377,6 +4381,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 // executeJob runs a job asynchronously.
 func (s *Server) executeJob(jobID string, req CreateJobRequest) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.jobStore.Update(jobID, JobStatusFailed, 0, nil, fmt.Sprintf("panic: %v", r))
+		}
+	}()
 	s.jobStore.Update(jobID, JobStatusRunning, 0, nil, "")
 
 	// Simulate job execution - in production, this would dispatch to actual handlers
@@ -4595,13 +4604,19 @@ func (c *WSClient) writePump() {
 			if err != nil {
 				return
 			}
-			w.Write(message)
+			if _, err := w.Write(message); err != nil {
+				return
+			}
 
 			// Drain queued messages
 			n := len(c.send)
 			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.send)
+				if _, err := w.Write([]byte{'\n'}); err != nil {
+					return
+				}
+				if _, err := w.Write(<-c.send); err != nil {
+					return
+				}
 			}
 
 			if err := w.Close(); err != nil {
