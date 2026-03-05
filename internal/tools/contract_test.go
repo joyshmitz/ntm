@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1012,6 +1013,18 @@ func TestBDAdapterWithFakeTools(t *testing.T) {
 	cleanup := withFakeTools(t)
 	defer cleanup()
 
+	fakePath := fakeToolsPath(t)
+	if fakePath == "" {
+		t.Skip("testdata/faketools not found")
+	}
+	tempPath := t.TempDir()
+	if err := os.Symlink(filepath.Join(fakePath, "bd"), filepath.Join(tempPath, "br")); err != nil {
+		t.Fatalf("symlink fake br: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", tempPath+":"+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
 	adapter := NewBDAdapter()
 	ctx := context.Background()
 
@@ -1040,6 +1053,31 @@ func TestBDAdapterWithFakeTools(t *testing.T) {
 	}
 	if !health.Healthy {
 		t.Errorf("Health() = unhealthy: %s", health.Message)
+	}
+}
+
+func TestBDAdapterPrefersBrWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	brPath := filepath.Join(tmpDir, "br")
+	script := "#!/bin/sh\necho 'br 9.9.9'\n"
+	if err := os.WriteFile(brPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", tmpDir+":"+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	adapter := NewBDAdapter()
+
+	path, installed := adapter.Detect()
+	if !installed {
+		t.Fatal("Detect() should find fake br")
+	}
+	if !strings.HasSuffix(path, string(filepath.Separator)+"br") && filepath.Base(path) != "br" {
+		t.Fatalf("Detect() should prefer br, got %q", path)
 	}
 }
 

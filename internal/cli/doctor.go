@@ -234,8 +234,13 @@ func checkTools(ctx context.Context) []ToolCheck {
 			continue
 		}
 
+		displayName := string(toolName)
+		if toolName == tools.ToolBD {
+			displayName = "br"
+		}
+
 		check := ToolCheck{
-			Name:     string(toolName),
+			Name:     displayName,
 			Required: requiredTools[toolName],
 		}
 

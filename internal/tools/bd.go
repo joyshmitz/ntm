@@ -22,13 +22,30 @@ func NewBDAdapter() *BDAdapter {
 	}
 }
 
+func (a *BDAdapter) resolveBinary() string {
+	for _, candidate := range []string{"br", a.BinaryName()} {
+		if candidate == "" {
+			continue
+		}
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	return a.BinaryName()
+}
+
 // Detect checks if bd is installed
 func (a *BDAdapter) Detect() (string, bool) {
-	path, err := exec.LookPath(a.BinaryName())
-	if err != nil {
-		return "", false
+	for _, candidate := range []string{"br", a.BinaryName()} {
+		if candidate == "" {
+			continue
+		}
+		path, err := exec.LookPath(candidate)
+		if err == nil {
+			return path, true
+		}
 	}
-	return path, true
+	return "", false
 }
 
 // Version returns the installed bd version
@@ -36,12 +53,12 @@ func (a *BDAdapter) Version(ctx context.Context) (Version, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.BinaryName(), "--version")
+	cmd := exec.CommandContext(ctx, a.resolveBinary(), "--version")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
 	if err := cmd.Run(); err != nil {
-		return Version{}, fmt.Errorf("failed to get bd version: %w", err)
+		return Version{}, fmt.Errorf("failed to get beads_rust version: %w", err)
 	}
 
 	return ParseStandardVersion(stdout.String())
@@ -72,7 +89,7 @@ func (a *BDAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	if !installed {
 		return &HealthStatus{
 			Healthy:     false,
-			Message:     "bd not installed",
+			Message:     "beads_rust (br) not installed",
 			LastChecked: time.Now(),
 		}, nil
 	}
@@ -84,7 +101,7 @@ func (a *BDAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	if err != nil {
 		return &HealthStatus{
 			Healthy:     false,
-			Message:     fmt.Sprintf("bd at %s not responding", path),
+			Message:     fmt.Sprintf("beads_rust at %s not responding", path),
 			Error:       err.Error(),
 			LastChecked: time.Now(),
 			Latency:     latency,
@@ -93,7 +110,7 @@ func (a *BDAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 
 	return &HealthStatus{
 		Healthy:     true,
-		Message:     "bd is healthy",
+		Message:     "beads_rust is healthy",
 		LastChecked: time.Now(),
 		Latency:     latency,
 	}, nil
@@ -154,7 +171,7 @@ func (a *BDAdapter) runCommand(ctx context.Context, dir string, args ...string) 
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
+	cmd := exec.CommandContext(ctx, a.resolveBinary(), args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -170,15 +187,15 @@ func (a *BDAdapter) runCommand(ctx context.Context, dir string, args ...string) 
 			return nil, ErrTimeout
 		}
 		if strings.Contains(err.Error(), ErrOutputLimitExceeded.Error()) {
-			return nil, fmt.Errorf("bd output exceeded 10MB limit")
+			return nil, fmt.Errorf("beads_rust output exceeded 10MB limit")
 		}
-		return nil, fmt.Errorf("bd %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
+		return nil, fmt.Errorf("beads_rust %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
 	}
 
 	// Validate JSON
 	output := stdout.Bytes()
 	if len(output) > 0 && !json.Valid(output) {
-		return nil, fmt.Errorf("%w: invalid JSON from bd", ErrSchemaValidation)
+		return nil, fmt.Errorf("%w: invalid JSON from beads_rust", ErrSchemaValidation)
 	}
 
 	return output, nil
