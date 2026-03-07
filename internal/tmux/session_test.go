@@ -1419,7 +1419,7 @@ func TestNeedsBufferSend(t *testing.T) {
 			name:      "claude with newline",
 			agentType: AgentClaude,
 			content:   "line1\nline2",
-			want:      false,
+			want:      true,
 		},
 		{
 			name:      "claude long content",

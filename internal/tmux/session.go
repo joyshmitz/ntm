@@ -1008,6 +1008,11 @@ func needsBufferSend(agentType AgentType, content string) bool {
 	// Codex uses bracketed paste mode and shows "[Pasted Content N chars]" instead of
 	// actual content when receiving large send-keys input, and may not auto-execute.
 	switch agentType {
+	case AgentClaude:
+		// Use buffer if content contains newlines — send-keys -l silently strips
+		// newlines (tmux 3.6+), while paste-buffer converts them to CR which
+		// Claude Code interprets as Enter, enabling multi-line prompt submission.
+		return strings.Contains(content, "\n")
 	case AgentGemini:
 		// Use buffer if content contains newlines
 		return strings.Contains(content, "\n")
