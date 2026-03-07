@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -92,11 +93,22 @@ func memLimitMB() string {
 	return fmt.Sprintf("%d", limitMB)
 }
 
+// hasSystemdUserSession checks whether a systemd user session is available.
+// In Docker containers, devcontainers, WSL1, etc., systemd-run --user fails
+// because there is no user session bus. We detect this by checking for the
+// per-user systemd private socket.
+var hasSystemdUserSession = sync.OnceValue(func() bool {
+	uid := os.Getuid()
+	_, err := os.Stat(fmt.Sprintf("/run/user/%d/systemd/private", uid))
+	return err == nil
+})
+
 // memLimitPrefix returns a command prefix that enforces a real memory limit.
-// On Linux, uses systemd-run --user --scope -p MemoryMax= (cgroup v2).
-// On other platforms, returns an empty string (no OS-level limiting available).
+// On Linux with a systemd user session, uses systemd-run --user --scope -p
+// MemoryMax= (cgroup v2). On other platforms or when systemd is unavailable
+// (e.g., Docker containers, WSL1), returns an empty string.
 func memLimitPrefix() string {
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" && hasSystemdUserSession() {
 		return fmt.Sprintf("systemd-run --user --scope -q -p MemoryMax=%sM", memLimitMB())
 	}
 	return ""
