@@ -26,7 +26,13 @@ func TestNewCheckpointCmd(t *testing.T) {
 		names[sub.Use] = true
 	}
 
-	expected := []string{"save <session>", "list [session]", "show <session> <id>", "delete <session> <id>"} // restore not yet implemented
+	expected := []string{
+		"save <session>",
+		"list [session]",
+		"show <session> <id>",
+		"restore <session> [checkpoint-id]",
+		"delete <session> <id>",
+	}
 	for _, exp := range expected {
 		if !names[exp] {
 			t.Errorf("missing subcommand %q", exp)
@@ -80,7 +86,11 @@ func TestNewCheckpointDeleteCmd(t *testing.T) {
 }
 
 func TestNewCheckpointRestoreCmd(t *testing.T) {
-	t.Skip("newCheckpointRestoreCmd not yet implemented")
+	cmd := newCheckpointRestoreCmd()
+
+	if cmd.Use != "restore <session> [checkpoint-id]" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "restore <session> [checkpoint-id]")
+	}
 }
 
 func TestFormatAge(t *testing.T) {
@@ -238,7 +248,20 @@ func listCheckpointSessionsWithDir(baseDir string) ([]string, error) {
 }
 
 func TestCheckpointRestoreCmdArgs(t *testing.T) {
-	t.Skip("newCheckpointRestoreCmd not yet implemented")
+	cmd := newCheckpointRestoreCmd()
+
+	if err := cmd.Args(cmd, []string{"myproject"}); err != nil {
+		t.Errorf("Args(1 arg) returned error: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"myproject", "last"}); err != nil {
+		t.Errorf("Args(2 args) returned error: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Error("Args(0 args) = nil, want error")
+	}
+	if err := cmd.Args(cmd, []string{"myproject", "last", "extra"}); err == nil {
+		t.Error("Args(3 args) = nil, want error")
+	}
 }
 
 func TestCheckpointCmdJSONOutput(t *testing.T) {
@@ -293,5 +316,25 @@ func TestCheckpointSaveCmdFlags(t *testing.T) {
 }
 
 func TestCheckpointRestoreCmdFlags(t *testing.T) {
-	t.Skip("newCheckpointRestoreCmd not yet implemented")
+	cmd := newCheckpointRestoreCmd()
+
+	flags := []string{
+		"force",
+		"attach",
+		"skip-git-check",
+		"inject-context",
+		"dry-run",
+		"directory",
+		"scrollback",
+	}
+	for _, flag := range flags {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Errorf("missing flag: %s", flag)
+		}
+	}
+
+	scrollback := cmd.Flags().Lookup("scrollback")
+	if scrollback.DefValue != "0" {
+		t.Errorf("scrollback default = %s, want 0", scrollback.DefValue)
+	}
 }

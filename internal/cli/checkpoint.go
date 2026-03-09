@@ -33,17 +33,18 @@ Examples:
   ntm checkpoint list                     # List all checkpoints
   ntm checkpoint list myproject           # List checkpoints for session
   ntm checkpoint show myproject <id>      # Show checkpoint details
+  ntm checkpoint restore myproject        # Restore the latest checkpoint
   ntm checkpoint delete myproject <id>    # Delete a checkpoint`,
 	}
 
 	cmd.AddCommand(newCheckpointSaveCmd())
 	cmd.AddCommand(newCheckpointListCmd())
 	cmd.AddCommand(newCheckpointShowCmd())
+	cmd.AddCommand(newCheckpointRestoreCmd())
 	cmd.AddCommand(newCheckpointDeleteCmd())
 	cmd.AddCommand(newCheckpointVerifyCmd())
 	cmd.AddCommand(newCheckpointExportCmd())
 	cmd.AddCommand(newCheckpointImportCmd())
-	// TODO: newCheckpointRestoreCmd() not yet implemented
 
 	return cmd
 }
@@ -438,6 +439,199 @@ Examples:
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation")
+
+	return cmd
+}
+
+func newCheckpointRestoreCmd() *cobra.Command {
+	var (
+		force           bool
+		attach          bool
+		skipGitCheck    bool
+		injectContext   bool
+		dryRun          bool
+		customDirectory string
+		scrollbackLines int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "restore <session> [checkpoint-id]",
+		Short: "Restore a session from a checkpoint",
+		Long: `Restore a tmux session from a checkpoint.
+
+If checkpoint-id is omitted, the most recent checkpoint is restored.
+
+The checkpoint-id can be:
+- A full checkpoint ID (e.g. 20251210-143052)
+- A partial ID prefix or checkpoint name
+- "last", "latest", "~1", or "~N" for historical selection
+
+Examples:
+  ntm checkpoint restore myproject
+  ntm checkpoint restore myproject 20251210-143052
+  ntm checkpoint restore myproject ~2 --dry-run
+  ntm checkpoint restore myproject --inject-context
+  ntm checkpoint restore myproject last --force`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOutput && attach {
+				return fmt.Errorf("--attach cannot be used with --json")
+			}
+			if dryRun && attach {
+				return fmt.Errorf("--attach cannot be used with --dry-run")
+			}
+			if scrollbackLines < 0 {
+				return fmt.Errorf("--scrollback must be >= 0")
+			}
+
+			sessionName := args[0]
+			checkpointRef := "last"
+			if len(args) == 2 {
+				checkpointRef = args[1]
+			}
+
+			capturer := checkpoint.NewCapturer()
+			cp, err := capturer.ParseCheckpointRef(sessionName, checkpointRef)
+			if err != nil {
+				if jsonOutput {
+					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+						"success":        false,
+						"session":        sessionName,
+						"checkpoint_ref": checkpointRef,
+						"error":          err.Error(),
+					})
+				}
+				return fmt.Errorf("finding checkpoint: %w", err)
+			}
+
+			if !dryRun {
+				if err := tmux.EnsureInstalled(); err != nil {
+					return err
+				}
+			}
+
+			opts := checkpoint.RestoreOptions{
+				Force:           force,
+				SkipGitCheck:    skipGitCheck,
+				InjectContext:   injectContext,
+				DryRun:          dryRun,
+				CustomDirectory: customDirectory,
+				ScrollbackLines: scrollbackLines,
+			}
+
+			restorer := checkpoint.NewRestorer()
+			result, err := restorer.RestoreFromCheckpoint(cp, opts)
+			if err != nil {
+				if jsonOutput {
+					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+						"success":        false,
+						"session":        sessionName,
+						"checkpoint_ref": checkpointRef,
+						"checkpoint_id":  cp.ID,
+						"error":          err.Error(),
+					})
+				}
+				return fmt.Errorf("restoring checkpoint: %w", err)
+			}
+
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					"success":           true,
+					"session":           result.SessionName,
+					"checkpoint_id":     cp.ID,
+					"checkpoint_ref":    checkpointRef,
+					"created_at":        cp.CreatedAt,
+					"description":       cp.Description,
+					"panes_restored":    result.PanesRestored,
+					"context_injected":  result.ContextInjected,
+					"dry_run":           result.DryRun,
+					"warnings":          result.Warnings,
+					"assignments_count": len(result.Assignments),
+					"assignments":       result.Assignments,
+					"bv_summary":        result.BVSummary,
+				})
+			}
+
+			t := theme.Current()
+			if dryRun {
+				fmt.Printf("%sRestore Preview (dry-run)%s\n", "\033[1m", "\033[0m")
+				fmt.Printf("%s%s%s\n\n", "\033[2m", strings.Repeat("\u2500", 50), "\033[0m")
+				fmt.Printf("  Session: %s\n", result.SessionName)
+				fmt.Printf("  Checkpoint: %s\n", cp.ID)
+				fmt.Printf("  Created: %s (%s)\n", cp.CreatedAt.Format(time.RFC3339), formatAge(cp.CreatedAt))
+				if cp.Description != "" {
+					fmt.Printf("  Description: %s\n", cp.Description)
+				}
+				fmt.Printf("  Panes to restore: %d\n", result.PanesRestored)
+				if injectContext {
+					fmt.Printf("  Context Injection: enabled")
+					if scrollbackLines > 0 {
+						fmt.Printf(" (%d lines)\n", scrollbackLines)
+					} else {
+						fmt.Printf(" (all captured lines)\n")
+					}
+				} else {
+					fmt.Printf("  Context Injection: disabled\n")
+				}
+				if summary := summarizeAssignmentCounts(result.Assignments); summary.total > 0 {
+					fmt.Printf("  Assignments: %d total (%d working, %d assigned, %d failed)\n",
+						summary.total, summary.working, summary.assigned, summary.failed)
+				}
+				if result.BVSummary != nil {
+					fmt.Printf("  Beads: %d ready, %d blocked, %d in progress\n",
+						result.BVSummary.ActionableCount, result.BVSummary.BlockedCount, result.BVSummary.InProgressCount)
+				}
+				if len(result.Warnings) > 0 {
+					fmt.Printf("\n  %sWarnings:%s\n", colorize(t.Warning), "\033[0m")
+					for _, warning := range result.Warnings {
+						fmt.Printf("    • %s\n", warning)
+					}
+				}
+				fmt.Println()
+				fmt.Printf("  %sNo changes made (dry-run mode)%s\n", colorize(t.Info), "\033[0m")
+				return nil
+			}
+
+			fmt.Printf("%s✓%s Restored checkpoint: %s\n", colorize(t.Success), "\033[0m", cp.ID)
+			fmt.Printf("  Session: %s\n", result.SessionName)
+			fmt.Printf("  Created: %s (%s)\n", cp.CreatedAt.Format(time.RFC3339), formatAge(cp.CreatedAt))
+			if cp.Description != "" {
+				fmt.Printf("  Description: %s\n", cp.Description)
+			}
+			fmt.Printf("  Panes Restored: %d\n", result.PanesRestored)
+			if result.ContextInjected {
+				fmt.Printf("  Context Injection: enabled\n")
+			}
+			if summary := summarizeAssignmentCounts(result.Assignments); summary.total > 0 {
+				fmt.Printf("  Assignments: %d total (%d working, %d assigned, %d failed)\n",
+					summary.total, summary.working, summary.assigned, summary.failed)
+			}
+			if result.BVSummary != nil {
+				fmt.Printf("  Beads: %d ready, %d blocked, %d in progress\n",
+					result.BVSummary.ActionableCount, result.BVSummary.BlockedCount, result.BVSummary.InProgressCount)
+			}
+			if len(result.Warnings) > 0 {
+				fmt.Printf("\n  %sWarnings:%s\n", colorize(t.Warning), "\033[0m")
+				for _, warning := range result.Warnings {
+					fmt.Printf("    • %s\n", warning)
+				}
+			}
+
+			if attach {
+				return tmux.AttachOrSwitch(result.SessionName)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite an existing tmux session")
+	cmd.Flags().BoolVarP(&attach, "attach", "a", false, "attach after restore")
+	cmd.Flags().BoolVar(&skipGitCheck, "skip-git-check", false, "skip git branch and commit mismatch warnings")
+	cmd.Flags().BoolVar(&injectContext, "inject-context", false, "inject captured scrollback into restored panes")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview the restore without making changes")
+	cmd.Flags().StringVar(&customDirectory, "directory", "", "override the checkpoint working directory")
+	cmd.Flags().IntVar(&scrollbackLines, "scrollback", 0, "lines of captured scrollback to inject (0 = all captured)")
 
 	return cmd
 }
