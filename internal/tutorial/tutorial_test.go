@@ -115,6 +115,24 @@ func TestNewTutorialModel(t *testing.T) {
 	}
 }
 
+func TestNewTutorialModelAutoSkipsAnimationsInTmux(t *testing.T) {
+	t.Setenv("NTM_ANIMATIONS", "")
+	t.Setenv("NTM_REDUCE_MOTION", "")
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("STY", "")
+	t.Setenv("CI", "")
+	t.Setenv("TERM", "tmux-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
+	m := New()
+	if !m.skipAnimations {
+		t.Fatal("expected tutorial to auto-skip animations inside tmux")
+	}
+	if cmd := m.Init(); cmd != nil {
+		t.Fatal("expected tutorial init to avoid scheduling a tick when animations are skipped")
+	}
+}
+
 func TestNewTutorialModelWithOptions(t *testing.T) {
 	m := New(WithSkipAnimations(), WithStartSlide(SlideCommands))
 

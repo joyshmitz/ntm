@@ -32,6 +32,10 @@ func (m Model) effectiveWidth() int {
 func (m Model) renderSlide() string {
 	state := m.slideStates[m.currentSlide]
 	tick := state.localTick
+	if m.skipAnimations {
+		// Render the fully revealed frame immediately when motion is disabled.
+		tick = 1000
+	}
 
 	var content string
 

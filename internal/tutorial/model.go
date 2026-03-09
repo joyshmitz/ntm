@@ -8,6 +8,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
+	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
@@ -109,15 +110,16 @@ type SlideState struct {
 func New(opts ...Option) Model {
 	t := theme.Current()
 	m := Model{
-		width:        80,
-		height:       24,
-		tier:         layout.TierForWidth(80),
-		currentSlide: SlideWelcome,
-		slideStates:  make(map[SlideID]*SlideState),
-		theme:        t,
-		styles:       theme.NewStyles(t),
-		icons:        icons.Current(),
-		particles:    make([]Particle, 0),
+		width:          80,
+		height:         24,
+		tier:           layout.TierForWidth(80),
+		currentSlide:   SlideWelcome,
+		slideStates:    make(map[SlideID]*SlideState),
+		skipAnimations: styles.ReducedMotionEnabled(),
+		theme:          t,
+		styles:         theme.NewStyles(t),
+		icons:          icons.Current(),
+		particles:      make([]Particle, 0),
 	}
 
 	// Initialize slide states
@@ -152,10 +154,10 @@ func WithStartSlide(slide SlideID) Option {
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.tick(),
-		tea.EnterAltScreen,
-	)
+	if m.skipAnimations {
+		return nil
+	}
+	return m.tick()
 }
 
 func (m Model) tick() tea.Cmd {
@@ -174,6 +176,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case TickMsg:
+		if m.skipAnimations {
+			return m, nil
+		}
 		m.animTick++
 
 		// Update current slide's local tick
