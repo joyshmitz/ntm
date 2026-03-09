@@ -121,6 +121,13 @@ func TestUpdateWindowSize(t *testing.T) {
 }
 
 func TestUpdateAnimationTick(t *testing.T) {
+	t.Setenv("NTM_ANIMATIONS", "1")
+	t.Setenv("TMUX", "")
+	t.Setenv("STY", "")
+	t.Setenv("CI", "")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
 	m := New("test-session", testCommands)
 	initialTick := m.animTick
 
@@ -135,6 +142,30 @@ func TestUpdateAnimationTick(t *testing.T) {
 	// Should return a new tick command
 	if cmd == nil {
 		t.Error("Animation tick should return next tick command")
+	}
+}
+
+func TestNew_DisablesAnimationInTmuxByDefault(t *testing.T) {
+	t.Setenv("NTM_ANIMATIONS", "")
+	t.Setenv("NTM_REDUCE_MOTION", "")
+	t.Setenv("TMUX", "/tmp/tmux-123/default,1,0")
+	t.Setenv("STY", "")
+	t.Setenv("CI", "")
+	t.Setenv("TERM", "tmux-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
+	m := New("test-session", testCommands)
+	if m.animate {
+		t.Fatal("expected palette animations to auto-disable inside tmux")
+	}
+
+	newModel, cmd := m.Update(AnimationTickMsg{})
+	updated := newModel.(Model)
+	if updated.animTick != 0 {
+		t.Fatalf("expected animation tick to remain stable, got %d", updated.animTick)
+	}
+	if cmd != nil {
+		t.Fatal("expected no follow-up tick command when animation is disabled")
 	}
 }
 
@@ -703,6 +734,13 @@ func TestNewSessionSelectorEmpty(t *testing.T) {
 }
 
 func TestSessionSelectorInit(t *testing.T) {
+	t.Setenv("NTM_ANIMATIONS", "1")
+	t.Setenv("TMUX", "")
+	t.Setenv("STY", "")
+	t.Setenv("CI", "")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+
 	s := NewSessionSelector(testSessions)
 	cmd := s.Init()
 

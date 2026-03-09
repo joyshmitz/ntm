@@ -99,6 +99,7 @@ type Model struct {
 
 	// Animation state
 	animTick    int
+	animate     bool
 	showPreview bool
 	showHelp    bool
 
@@ -289,6 +290,7 @@ func NewWithOptions(session string, commands []config.PaletteCmd, opts Options) 
 		phase:        PhaseCommand,
 		width:        80,
 		height:       24,
+		animate:      styles.AnimationsEnabled(),
 		showPreview:  true,
 		theme:        t,
 		styles:       s,
@@ -312,18 +314,22 @@ func NewWithOptions(session string, commands []config.PaletteCmd, opts Options) 
 
 	// Build initial visual order mapping
 	m.buildVisualOrder()
+	m.syncListViewport()
 
 	return m
 }
 
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textinput.Blink,
-		m.tick(),
 		m.fetchPaneCounts(),
 		m.fetchRecents(),
-	)
+	}
+	if m.animate {
+		cmds = append(cmds, m.tick())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) tick() tea.Cmd {
@@ -434,6 +440,71 @@ func (m Model) fetchPaneCounts() tea.Cmd {
 	}
 }
 
+func (m Model) commandPhaseLayout() (listWidth, previewWidth int, showSplitView bool) {
+	const (
+		minColumnWidth  = 35
+		maxListWidth    = 70
+		maxPreviewWidth = 100
+	)
+
+	showSplitView = m.tier >= layout.TierSplit
+	if !showSplitView {
+		listWidth = m.width - 4
+		previewWidth = 0
+	} else {
+		left, right := layout.SplitProportions(m.width)
+		listWidth = left - 2
+		previewWidth = right - 2
+
+		if listWidth > maxListWidth {
+			listWidth = maxListWidth
+		}
+		if previewWidth > maxPreviewWidth {
+			previewWidth = maxPreviewWidth
+		}
+	}
+
+	if listWidth < minColumnWidth {
+		listWidth = minColumnWidth
+	}
+	if showSplitView && previewWidth < minColumnWidth {
+		previewWidth = minColumnWidth
+	}
+
+	return listWidth, previewWidth, showSplitView
+}
+
+func (m Model) commandListBoxHeight() int {
+	listBoxHeight := m.height - 14
+	if listBoxHeight < 5 {
+		listBoxHeight = 5
+	}
+	return listBoxHeight
+}
+
+func (m *Model) syncListViewport() {
+	if m == nil {
+		return
+	}
+
+	listWidth, _, _ := m.commandPhaseLayout()
+	listBoxHeight := m.commandListBoxHeight()
+
+	viewportWidth := listWidth - 6
+	if viewportWidth < 1 {
+		viewportWidth = 1
+	}
+	viewportHeight := listBoxHeight - 2
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+
+	m.listViewport.Width = viewportWidth
+	m.listViewport.Height = viewportHeight
+	m.listViewport.SetContent(m.renderCommandList(max(viewportWidth+2, 1)))
+	m.ensureCursorVisible()
+}
+
 // Update implements tea.Model
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -445,19 +516,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filter.Width < 20 {
 			m.filter.Width = 20
 		}
-		// Update viewport dimensions (list height minus chrome)
-		// Account for header (~4 lines), filter (~3 lines), help bar (~2 lines), borders (~4 lines)
-		// The -2 matches what View() uses for the actual rendered viewport height
-		listBoxHeight := m.height - 14
-		if listBoxHeight < 5 {
-			listBoxHeight = 5
-		}
-		m.listViewport.Width = m.width - 8
-		m.listViewport.Height = listBoxHeight - 2 // Must match View() calculation
+		m.syncListViewport()
 		return m, nil
 
 	case AnimationTickMsg:
+		if !m.animate {
+			return m, nil
+		}
 		m.animTick++
+		m.syncListViewport()
 		return m, m.tick()
 
 	case paneCountsMsg:
@@ -476,6 +543,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.recents = msg.keys
 			m.buildVisualOrder()
 			m.listViewport.GotoTop()
+			m.syncListViewport()
 		}
 		return m, nil
 
@@ -672,6 +740,7 @@ func (m *Model) updateCommandPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.paletteState.Favorites = ensureListKey(m.paletteState.Favorites, selectedKey, true)
 				}
 				m.buildVisualOrder()
+				m.syncListViewport()
 				return *m, m.savePaletteState()
 			}
 		}
@@ -687,6 +756,7 @@ func (m *Model) updateCommandPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.paletteState.Pinned = removeListKey(m.paletteState.Pinned, selectedKey)
 				}
 				m.buildVisualOrder()
+				m.syncListViewport()
 				return *m, m.savePaletteState()
 			}
 		}
@@ -752,6 +822,7 @@ func (m *Model) updateCommandPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return *m, cmd
 	}
 
+	m.syncListViewport()
 	return *m, nil
 }
 
@@ -837,6 +908,7 @@ func (m *Model) updateFiltered() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	m.syncListViewport()
 }
 
 func (m Model) cursorVisualPos() int {
@@ -947,24 +1019,17 @@ func (m *Model) ensureCursorVisible() {
 	pos := m.cursorVisualPos()
 	linePos := m.visualPosToLineNum(pos)
 
-	// If cursor is above the visible area, scroll up.
-	// Assign YOffset directly rather than calling SetYOffset: SetYOffset clamps to
-	// maxYOffset() = max(0, len(lines)-Height), but lines is nil here because
-	// SetContent only runs inside View() which is a value receiver (its mutations
-	// are discarded). Assigning directly lets the next View() call re-clamp safely.
 	if linePos < m.listViewport.YOffset {
-		m.listViewport.YOffset = linePos
+		m.listViewport.SetYOffset(linePos)
 	}
 
-	// If cursor is below the visible area, scroll down.
-	// Leave a small margin at the bottom.
 	visibleBottom := m.listViewport.YOffset + m.listViewport.Height - 2
 	if linePos > visibleBottom {
 		newOffset := linePos - m.listViewport.Height + 3
 		if newOffset < 0 {
 			newOffset = 0
 		}
-		m.listViewport.YOffset = newOffset
+		m.listViewport.SetYOffset(newOffset)
 	}
 }
 
@@ -1234,39 +1299,7 @@ func (m Model) viewCommandPhase() string {
 
 	var b strings.Builder
 
-	// Calculate layout dimensions using shared tiers and split proportions
-	const (
-		minColumnWidth  = 35  // Minimum column width
-		maxListWidth    = 70  // Maximum list width
-		maxPreviewWidth = 100 // Maximum preview width
-	)
-
-	showSplitView := m.tier >= layout.TierSplit
-	var listWidth, previewWidth int
-
-	if !showSplitView {
-		listWidth = m.width - 4
-		previewWidth = 0
-	} else {
-		left, right := layout.SplitProportions(m.width)
-		listWidth = left - 2 // borders/padding allowance
-		previewWidth = right - 2
-
-		if listWidth > maxListWidth {
-			listWidth = maxListWidth
-		}
-		if previewWidth > maxPreviewWidth {
-			previewWidth = maxPreviewWidth
-		}
-	}
-
-	// Ensure minimums
-	if listWidth < minColumnWidth {
-		listWidth = minColumnWidth
-	}
-	if showSplitView && previewWidth < minColumnWidth {
-		previewWidth = minColumnWidth
-	}
+	listWidth, previewWidth, showSplitView := m.commandPhaseLayout()
 
 	// ═══════════════════════════════════════════════════════════════
 	// HEADER with animated gradient
@@ -1305,18 +1338,7 @@ func (m Model) viewCommandPhase() string {
 	// ═══════════════════════════════════════════════════════════════
 	// RESPONSIVE LAYOUT: Adapts to terminal width
 	// ═══════════════════════════════════════════════════════════════
-	listContent := m.renderCommandList(listWidth - 4)
-
-	// Calculate list box height
-	listBoxHeight := m.height - 14
-	if listBoxHeight < 5 {
-		listBoxHeight = 5
-	}
-
-	// Update viewport content and dimensions for scrolling
-	m.listViewport.Width = listWidth - 6 // Account for borders and padding
-	m.listViewport.Height = listBoxHeight - 2
-	m.listViewport.SetContent(listContent)
+	listBoxHeight := m.commandListBoxHeight()
 
 	// Render scroll indicator if content overflows
 	scrollIndicator := ""
@@ -1336,7 +1358,7 @@ func (m Model) viewCommandPhase() string {
 	listBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Surface2).
-		Width(listWidth - 2).
+		Width(listWidth-2).
 		Padding(1, 1)
 
 	var columns string

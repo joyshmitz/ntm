@@ -25,6 +25,7 @@ type SessionSelector struct {
 	width    int
 	height   int
 	animTick int
+	animate  bool
 
 	// Theme
 	theme theme.Theme
@@ -82,6 +83,7 @@ func NewSessionSelector(sessions []tmux.Session) SessionSelector {
 		sessions: sessions,
 		width:    60,
 		height:   20,
+		animate:  styles.AnimationsEnabled(),
 		theme:    theme.Current(),
 		icons:    icons.Current(),
 	}
@@ -89,6 +91,9 @@ func NewSessionSelector(sessions []tmux.Session) SessionSelector {
 
 // Init implements tea.Model
 func (s SessionSelector) Init() tea.Cmd {
+	if !s.animate {
+		return nil
+	}
 	return s.tick()
 }
 
@@ -107,6 +112,9 @@ func (s SessionSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case AnimationTickMsg:
+		if !s.animate {
+			return s, nil
+		}
 		s.animTick++
 		return s, s.tick()
 
