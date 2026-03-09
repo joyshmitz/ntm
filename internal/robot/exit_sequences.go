@@ -115,7 +115,7 @@ func sendKeys(session string, pane int, keys string) error {
 
 // formatTarget creates a tmux target string for a session and pane.
 func formatTarget(session string, pane int) string {
-	return session + ":" + strconv.Itoa(pane)
+	return session + ":1." + strconv.Itoa(pane)
 }
 
 // runTmuxCommand executes a tmux command.

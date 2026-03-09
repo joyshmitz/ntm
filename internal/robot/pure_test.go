@@ -105,9 +105,9 @@ func TestFormatTarget(t *testing.T) {
 		pane    int
 		want    string
 	}{
-		{"basic", "mysession", 0, "mysession:0"},
-		{"pane 5", "test", 5, "test:5"},
-		{"complex session name", "my-ai-session", 12, "my-ai-session:12"},
+		{"basic", "mysession", 0, "mysession:1.0"},
+		{"pane 5", "test", 5, "test:1.5"},
+		{"complex session name", "my-ai-session", 12, "my-ai-session:1.12"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
