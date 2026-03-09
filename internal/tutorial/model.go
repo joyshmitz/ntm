@@ -155,9 +155,9 @@ func WithStartSlide(slide SlideID) Option {
 // Init implements tea.Model
 func (m Model) Init() tea.Cmd {
 	if m.skipAnimations {
-		return nil
+		return tea.EnterAltScreen
 	}
-	return m.tick()
+	return tea.Batch(m.tick(), tea.EnterAltScreen)
 }
 
 func (m Model) tick() tea.Cmd {

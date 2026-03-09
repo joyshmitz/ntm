@@ -492,12 +492,13 @@ Examples:
 			cp, err := capturer.ParseCheckpointRef(sessionName, checkpointRef)
 			if err != nil {
 				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
 						"success":        false,
 						"session":        sessionName,
 						"checkpoint_ref": checkpointRef,
 						"error":          err.Error(),
 					})
+					return fmt.Errorf("finding checkpoint: %w", err)
 				}
 				return fmt.Errorf("finding checkpoint: %w", err)
 			}
@@ -521,13 +522,14 @@ Examples:
 			result, err := restorer.RestoreFromCheckpoint(cp, opts)
 			if err != nil {
 				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+					_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
 						"success":        false,
 						"session":        sessionName,
 						"checkpoint_ref": checkpointRef,
 						"checkpoint_id":  cp.ID,
 						"error":          err.Error(),
 					})
+					return fmt.Errorf("restoring checkpoint: %w", err)
 				}
 				return fmt.Errorf("restoring checkpoint: %w", err)
 			}

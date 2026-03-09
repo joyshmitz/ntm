@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 )
 
@@ -874,6 +875,27 @@ func BenchmarkDependencyGraphScheduling(b *testing.B) {
 	}
 }
 
+func BenchmarkDependencyGraphSchedulingNaiveBaseline(b *testing.B) {
+	workflow := benchmarkDependencyWorkflow(32, 16)
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		graph := NewDependencyGraph(workflow)
+		for {
+			ready := getReadyStepsNaive(graph)
+			if len(ready) == 0 {
+				if graph.executedCount == graph.Size() {
+					break
+				}
+				b.Fatalf("naive scheduler stalled with %d/%d executed", graph.executedCount, graph.Size())
+			}
+			for _, id := range ready {
+				markExecutedNaive(graph, id)
+			}
+		}
+	}
+}
+
 func benchmarkDependencyWorkflow(levels, width int) *Workflow {
 	steps := make([]Step, 0, levels*width)
 	for level := 0; level < levels; level++ {
@@ -891,4 +913,35 @@ func benchmarkDependencyWorkflow(levels, width int) *Workflow {
 		}
 	}
 	return &Workflow{Steps: steps}
+}
+
+func getReadyStepsNaive(g *DependencyGraph) []string {
+	var ready []string
+	for id := range g.steps {
+		if g.executed[id] {
+			continue
+		}
+
+		allDepsExecuted := true
+		for _, dep := range g.edges[id] {
+			if !g.executed[dep] {
+				allDepsExecuted = false
+				break
+			}
+		}
+
+		if allDepsExecuted {
+			ready = append(ready, id)
+		}
+	}
+	sort.Strings(ready)
+	return ready
+}
+
+func markExecutedNaive(g *DependencyGraph, id string) {
+	if g.executed[id] {
+		return
+	}
+	g.executed[id] = true
+	g.executedCount++
 }
