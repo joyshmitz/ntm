@@ -509,8 +509,12 @@ Use --files to override the file list.`,
 
 // getRepoRev returns the current git HEAD revision
 func getRepoRev(dir string) string {
-	// Try to get git HEAD
-	headPath := filepath.Join(dir, ".git", "HEAD")
+	gitDir, err := resolveGitDir(dir)
+	if err != nil {
+		return "unknown"
+	}
+
+	headPath := filepath.Join(gitDir, "HEAD")
 	data, err := os.ReadFile(headPath)
 	if err != nil {
 		return "unknown"
@@ -518,16 +522,15 @@ func getRepoRev(dir string) string {
 
 	head := strings.TrimSpace(string(data))
 	if strings.HasPrefix(head, "ref: ") {
-		// Symbolic ref - read the actual ref
-		refPath := filepath.Join(dir, ".git", head[5:])
-		refData, err := os.ReadFile(refPath)
+		ref := strings.TrimSpace(head[5:])
+		if ref == "" {
+			return "unknown"
+		}
+		rev, err := readGitRevision(gitDir, ref)
 		if err == nil {
-			rev := strings.TrimSpace(string(refData))
-			if len(rev) > 40 {
-				rev = rev[:40]
-			}
 			return rev
 		}
+		return "unknown"
 	}
 
 	// Direct SHA
@@ -536,4 +539,72 @@ func getRepoRev(dir string) string {
 	}
 
 	return "unknown"
+}
+
+func resolveGitDir(dir string) (string, error) {
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return gitPath, nil
+	}
+
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", err
+	}
+
+	content := strings.TrimSpace(string(data))
+	const gitDirPrefix = "gitdir:"
+	if !strings.HasPrefix(content, gitDirPrefix) {
+		return "", fmt.Errorf("unsupported .git file format")
+	}
+
+	gitDir := strings.TrimSpace(strings.TrimPrefix(content, gitDirPrefix))
+	if gitDir == "" {
+		return "", fmt.Errorf("empty gitdir")
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	return filepath.Clean(gitDir), nil
+}
+
+func readGitRevision(gitDir, ref string) (string, error) {
+	refPath := filepath.Join(gitDir, filepath.FromSlash(ref))
+	if refData, err := os.ReadFile(refPath); err == nil {
+		rev := strings.TrimSpace(string(refData))
+		if len(rev) > 40 {
+			rev = rev[:40]
+		}
+		return rev, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	packedRefsPath := filepath.Join(gitDir, "packed-refs")
+	packedRefs, err := os.ReadFile(packedRefsPath)
+	if err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(string(packedRefs), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != ref {
+			continue
+		}
+		rev := fields[0]
+		if len(rev) > 40 {
+			rev = rev[:40]
+		}
+		return rev, nil
+	}
+
+	return "", fmt.Errorf("git ref %q not found", ref)
 }

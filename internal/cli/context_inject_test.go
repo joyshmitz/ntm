@@ -263,6 +263,76 @@ func TestSelectContextInjectTargetPanes(t *testing.T) {
 	})
 }
 
+func TestGetRepoRev_DirectoryGitDir(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	refDir := filepath.Join(gitDir, "refs", "heads")
+	if err := os.MkdirAll(refDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	const rev = "1234567890abcdef1234567890abcdef12345678"
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refDir, "main"), []byte(rev+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getRepoRev(dir); got != rev {
+		t.Fatalf("getRepoRev() = %q, want %q", got, rev)
+	}
+}
+
+func TestGetRepoRev_WorktreeGitDirFile(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := filepath.Join(root, "worktree")
+	actualGitDir := filepath.Join(root, "gitdir")
+	refDir := filepath.Join(actualGitDir, "refs", "heads")
+	if err := os.MkdirAll(refDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	const rev = "abcdef1234567890abcdef1234567890abcdef12"
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".git"), []byte("gitdir: ../gitdir\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actualGitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refDir, "main"), []byte(rev+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getRepoRev(worktreeDir); got != rev {
+		t.Fatalf("getRepoRev() = %q, want %q", got, rev)
+	}
+}
+
+func TestGetRepoRev_PackedRefsFallback(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	const rev = "fedcba0987654321fedcba0987654321fedcba09"
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	packedRefs := "# pack-refs with: peeled fully-peeled sorted\n" + rev + " refs/heads/main\n"
+	if err := os.WriteFile(filepath.Join(gitDir, "packed-refs"), []byte(packedRefs), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := getRepoRev(dir); got != rev {
+		t.Fatalf("getRepoRev() = %q, want %q", got, rev)
+	}
+}
+
 func TestFormatContextInjectContent_NestedFiles(t *testing.T) {
 	dir := t.TempDir()
 

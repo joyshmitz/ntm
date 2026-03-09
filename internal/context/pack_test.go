@@ -40,14 +40,14 @@ func TestCacheKey(t *testing.T) {
 		BeadID:    "bd-test",
 		AgentType: "cc",
 	}
-	key := cacheKey(opts)
+	key := cacheKey(opts, DefaultBudgetAllocation())
 
 	if len(key) != 16 {
 		t.Errorf("cacheKey length = %d, want 16", len(key))
 	}
 
 	// Same options should produce the same key
-	key2 := cacheKey(opts)
+	key2 := cacheKey(opts, DefaultBudgetAllocation())
 	if key != key2 {
 		t.Errorf("same options produced different keys: %q vs %q", key, key2)
 	}
@@ -58,7 +58,7 @@ func TestCacheKey(t *testing.T) {
 		BeadID:    "bd-test",
 		AgentType: "cc",
 	}
-	key3 := cacheKey(opts2)
+	key3 := cacheKey(opts2, DefaultBudgetAllocation())
 	if key == key3 {
 		t.Errorf("different options produced same key: %q", key)
 	}
@@ -76,10 +76,118 @@ func TestCacheKey(t *testing.T) {
 		AgentType:       "cc",
 		IncludeMSSkills: true,
 	}
-	keyMSOff := cacheKey(optsMSOff)
-	keyMSOn := cacheKey(optsMSOn)
+	keyMSOff := cacheKey(optsMSOff, DefaultBudgetAllocation())
+	keyMSOn := cacheKey(optsMSOn, DefaultBudgetAllocation())
 	if keyMSOff == keyMSOn {
 		t.Fatalf("cacheKey should differ when IncludeMSSkills flips: %q == %q", keyMSOff, keyMSOn)
+	}
+
+	optsTask2 := opts
+	optsTask2.Task = "another task"
+	if key == cacheKey(optsTask2, DefaultBudgetAllocation()) {
+		t.Fatal("cacheKey should differ when Task changes")
+	}
+
+	optsFiles := opts
+	optsFiles.Files = []string{"internal/context/pack.go", "README.md"}
+	if key == cacheKey(optsFiles, DefaultBudgetAllocation()) {
+		t.Fatal("cacheKey should differ when Files change")
+	}
+
+	optsProject := opts
+	optsProject.ProjectDir = "/tmp/project-a"
+	if key == cacheKey(optsProject, DefaultBudgetAllocation()) {
+		t.Fatal("cacheKey should differ when ProjectDir changes")
+	}
+
+	optsSession := opts
+	optsSession.SessionID = "session-a"
+	if key == cacheKey(optsSession, DefaultBudgetAllocation()) {
+		t.Fatal("cacheKey should differ when SessionID changes")
+	}
+
+	optsCorrelation := opts
+	optsCorrelation.CorrelationID = "corr-a"
+	if key == cacheKey(optsCorrelation, DefaultBudgetAllocation()) {
+		t.Fatal("cacheKey should differ when CorrelationID changes")
+	}
+
+	alloc2 := BudgetAllocation{Triage: 20, CM: 5, CASS: 15, S2P: 60}
+	if key == cacheKey(opts, alloc2) {
+		t.Fatal("cacheKey should differ when allocation changes")
+	}
+}
+
+func TestBuildDoesNotReuseCacheAcrossDistinctInputs(t *testing.T) {
+	// Not parallel since it mutates global cache and PATH.
+	t.Setenv("PATH", t.TempDir())
+
+	b := NewContextPackBuilder(nil)
+	b.ClearCache()
+	defer b.ClearCache()
+
+	projectDir := t.TempDir()
+	opts := BuildOptions{
+		RepoRev:       "abc123",
+		BeadID:        "bd-test",
+		AgentType:     "cc",
+		Task:          "first task",
+		CorrelationID: "corr-1",
+		ProjectDir:    projectDir,
+		SessionID:     "session-1",
+	}
+
+	pack1, err := b.Build(stdcontext.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Build failed: %v", err)
+	}
+
+	opts.Task = "second task"
+	opts.CorrelationID = "corr-2"
+	pack2, err := b.Build(stdcontext.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Build failed: %v", err)
+	}
+
+	if pack1 == pack2 {
+		t.Fatal("Build reused cached pack for distinct task/correlation inputs")
+	}
+	if pack2.CorrelationID != "corr-2" {
+		t.Fatalf("CorrelationID = %q, want corr-2", pack2.CorrelationID)
+	}
+}
+
+func TestBuildDoesNotReuseCacheAcrossAllocationChanges(t *testing.T) {
+	// Not parallel since it mutates global cache and PATH.
+	t.Setenv("PATH", t.TempDir())
+
+	builderA := NewContextPackBuilder(nil)
+	builderB := NewContextPackBuilder(nil)
+	builderA.ClearCache()
+	defer builderA.ClearCache()
+
+	builderB.SetAllocation(BudgetAllocation{Triage: 20, CM: 5, CASS: 15, S2P: 60})
+
+	opts := BuildOptions{
+		RepoRev:    "abc123",
+		BeadID:     "bd-test",
+		AgentType:  "cc",
+		Task:       "same task",
+		ProjectDir: t.TempDir(),
+		SessionID:  "session-1",
+	}
+
+	pack1, err := builderA.Build(stdcontext.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Build failed: %v", err)
+	}
+	pack2, err := builderB.Build(stdcontext.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Build failed: %v", err)
+	}
+
+	if pack1 == pack2 {
+		t.Fatal("Build reused cached pack across distinct allocation settings")
 	}
 }
 

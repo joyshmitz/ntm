@@ -102,24 +102,38 @@ func (b *ContextPackBuilder) SetAllocation(alloc BudgetAllocation) {
 	b.allocation = alloc
 }
 
-// cacheKey generates a cache key from build options
-func cacheKey(opts BuildOptions) string {
+// cacheKey generates a cache key from all build inputs that affect either the
+// rendered prompt or the stored metadata on the returned pack.
+func cacheKey(opts BuildOptions, alloc BudgetAllocation) string {
 	h := sha256.New()
-	h.Write([]byte(opts.RepoRev))
-	h.Write([]byte(opts.BeadID))
-	h.Write([]byte(opts.AgentType))
-	if opts.IncludeMSSkills {
-		h.Write([]byte("ms:on"))
-	} else {
-		h.Write([]byte("ms:off"))
+	writePart := func(part string) {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
 	}
+
+	writePart(opts.RepoRev)
+	writePart(opts.BeadID)
+	writePart(opts.AgentType)
+	writePart(opts.Task)
+	writePart(opts.CorrelationID)
+	writePart(opts.ProjectDir)
+	writePart(opts.SessionID)
+	if opts.IncludeMSSkills {
+		writePart("ms:on")
+	} else {
+		writePart("ms:off")
+	}
+	for _, file := range opts.Files {
+		writePart(file)
+	}
+	writePart(fmt.Sprintf("%d:%d:%d:%d", alloc.Triage, alloc.CM, alloc.CASS, alloc.S2P))
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
 // Build constructs a context pack for a task
 func (b *ContextPackBuilder) Build(ctx context.Context, opts BuildOptions) (*ContextPackFull, error) {
 	// Check cache
-	key := cacheKey(opts)
+	key := cacheKey(opts, b.allocation)
 	globalCacheMu.RLock()
 	if cached, ok := globalCache[key]; ok {
 		globalCacheMu.RUnlock()
