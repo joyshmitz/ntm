@@ -5,6 +5,7 @@ package recovery
 import (
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -115,10 +116,11 @@ func FormatHandoffContext(h *HandoffContext) string {
 	if len(h.Decisions) > 0 && remaining > 80 {
 		b.WriteString("**Key decisions made:**\n")
 		count := 0
-		for k, v := range h.Decisions {
+		for _, k := range sortedMapKeys(h.Decisions) {
 			if remaining < 40 || count >= 3 {
 				break
 			}
+			v := h.Decisions[k]
 			text := fmt.Sprintf("- %s: %s\n", k, truncateToTokens(v, 40))
 			b.WriteString(text)
 			remaining -= len(text)
@@ -131,10 +133,11 @@ func FormatHandoffContext(h *HandoffContext) string {
 	if len(h.Findings) > 0 && remaining > 80 {
 		b.WriteString("**Key findings:**\n")
 		count := 0
-		for k, v := range h.Findings {
+		for _, k := range sortedMapKeys(h.Findings) {
 			if remaining < 40 || count >= 2 {
 				break
 			}
+			v := h.Findings[k]
 			text := fmt.Sprintf("- %s: %s\n", k, truncateToTokens(v, 40))
 			b.WriteString(text)
 			remaining -= len(text)
@@ -166,6 +169,15 @@ func FormatHandoffContext(h *HandoffContext) string {
 	)
 
 	return result
+}
+
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // FormatMinimalHandoff creates just goal/now for compact injection.

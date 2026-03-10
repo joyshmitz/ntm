@@ -614,6 +614,29 @@ func TestBuildPaneTableRows_Empty(t *testing.T) {
 	}
 }
 
+func TestBuildPaneTableRows_FileChangesByPaneID(t *testing.T) {
+	t.Parallel()
+	th := theme.Current()
+
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, Type: tmux.AgentClaude, Title: "agent-a"},
+	}
+
+	changes := []tracker.RecordedFileChange{
+		{Agents: []string{"%1"}},
+		{Agents: []string{"%1", "agent-a", "other"}},
+		{Agents: []string{"agent-a"}},
+	}
+
+	rows := BuildPaneTableRows(panes, nil, nil, nil, changes, nil, 0, th)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].FileChanges != 3 {
+		t.Fatalf("rows[0].FileChanges = %d, want 3", rows[0].FileChanges)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // currentBeadForPane (75% covered — test nil beads edge case)
 // ---------------------------------------------------------------------------

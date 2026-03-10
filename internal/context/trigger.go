@@ -376,13 +376,7 @@ func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType 
 
 // sendCompactionCommand sends a compaction command to a pane.
 func (t *CompactionTrigger) sendCompactionCommand(paneID string, cmd CompactionCommand) error {
-	// For slash commands, just send the command
-	if !cmd.IsPrompt {
-		return tmux.SendKeys(paneID, cmd.Command, true)
-	}
-
-	// For prompts, send with proper handling
-	return tmux.SendKeys(paneID, cmd.Command, true)
+	return sendCompactionCommandToPane(tmuxPaneInputSender{}, paneID, cmd)
 }
 
 // injectRecoveryContext injects recovery context after successful compaction.

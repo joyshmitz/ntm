@@ -308,7 +308,7 @@ func BuildPaneTableRows(
 			Status:        "unknown",
 			HealthClass:   pt.ClassUnknown,
 			Command:       pane.Command,
-			FileChanges:   changeCounts[pane.Title],
+			FileChanges:   changeCounts[paneKey(pane)],
 			TokenVelocity: 0,
 			LocalTokensPS: 0,
 			ContextPct:    ps.ContextPercent,
@@ -353,21 +353,38 @@ func fileChangesByPane(panes []tmux.Pane, changes []tracker.RecordedFileChange) 
 		return counts
 	}
 
-	paneTitles := make(map[string]struct{}, len(panes))
+	lookup := make(map[string]string, len(panes)*2)
 	for _, p := range panes {
-		paneTitles[p.Title] = struct{}{}
-		paneTitles[p.ID] = struct{}{}
+		key := paneKey(p)
+		if p.Title != "" {
+			lookup[p.Title] = key
+		}
+		if p.ID != "" {
+			lookup[p.ID] = key
+		}
 	}
 
 	for _, ch := range changes {
+		matched := make(map[string]struct{}, len(ch.Agents))
 		for _, agent := range ch.Agents {
-			if _, ok := paneTitles[agent]; ok {
-				counts[agent]++
+			if key, ok := lookup[agent]; ok {
+				if _, seen := matched[key]; seen {
+					continue
+				}
+				counts[key]++
+				matched[key] = struct{}{}
 			}
 		}
 	}
 
 	return counts
+}
+
+func paneKey(pane tmux.Pane) string {
+	if pane.Title != "" {
+		return pane.Title
+	}
+	return pane.ID
 }
 
 func currentBeadForPane(pane tmux.Pane, beads *bv.BeadsSummary) string {
@@ -476,14 +493,7 @@ func BuildPaneTableRow(pane tmux.Pane, ps PaneStatus, beads []bv.BeadPreview, fi
 	}
 
 	// Count file changes mentioning this pane's agent.
-	for _, fc := range fileChanges {
-		for _, agent := range fc.Agents {
-			if agent == pane.Title || agent == pane.ID || strings.Contains(agent, string(pane.Type)) {
-				row.FileChanges++
-				break
-			}
-		}
-	}
+	row.FileChanges = fileChangesByPane([]tmux.Pane{pane}, fileChanges)[paneKey(pane)]
 
 	// Approximate token velocity using recent command text as a proxy.
 	if pane.Command != "" {

@@ -70,6 +70,10 @@ func (m *mockPaneSpawner) SendKeys(paneID, text string, enter bool) error {
 	return m.sendKeysErr
 }
 
+func (m *mockPaneSpawner) SendBuffer(paneID, text string, enter bool) error {
+	return m.SendKeys(paneID, text, enter)
+}
+
 func (m *mockPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

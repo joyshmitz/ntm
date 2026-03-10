@@ -14,6 +14,7 @@ type MockPaneSpawner struct {
 	spawnedPanes []string
 	killedPanes  []string
 	sentKeys     map[string][]string
+	sentBuffers  map[string][]string
 	panes        []tmux.Pane
 	spawnError   error
 	killError    error
@@ -23,8 +24,9 @@ type MockPaneSpawner struct {
 
 func NewMockPaneSpawner() *MockPaneSpawner {
 	return &MockPaneSpawner{
-		sentKeys: make(map[string][]string),
-		panes:    []tmux.Pane{},
+		sentKeys:    make(map[string][]string),
+		sentBuffers: make(map[string][]string),
+		panes:       []tmux.Pane{},
 	}
 }
 
@@ -50,6 +52,14 @@ func (m *MockPaneSpawner) SendKeys(paneID, text string, enter bool) error {
 		return m.sendError
 	}
 	m.sentKeys[paneID] = append(m.sentKeys[paneID], text)
+	return nil
+}
+
+func (m *MockPaneSpawner) SendBuffer(paneID, text string, enter bool) error {
+	if m.sendError != nil {
+		return m.sendError
+	}
+	m.sentBuffers[paneID] = append(m.sentBuffers[paneID], text)
 	return nil
 }
 
@@ -523,6 +533,74 @@ func TestDefaultPaneSpawnerGetAgentCommand(t *testing.T) {
 	}
 	if got := spawner2.getAgentCommand("gemini"); got != "custom-gemini" {
 		t.Errorf("expected custom-gemini, got %q", got)
+	}
+}
+
+func TestSendCompactionCommandToPane_UsesBufferForPrompts(t *testing.T) {
+	t.Parallel()
+
+	spawner := NewMockPaneSpawner()
+	cmd := CompactionCommand{
+		Command:  CompactionPromptTemplate,
+		IsPrompt: true,
+	}
+
+	if err := sendCompactionCommandToPane(spawner, "%1", cmd); err != nil {
+		t.Fatalf("sendCompactionCommandToPane() error = %v", err)
+	}
+
+	if got := len(spawner.sentBuffers["%1"]); got != 1 {
+		t.Fatalf("buffer sends = %d, want 1", got)
+	}
+	if got := len(spawner.sentKeys["%1"]); got != 0 {
+		t.Fatalf("key sends = %d, want 0", got)
+	}
+	if got := spawner.sentBuffers["%1"][0]; got != CompactionPromptTemplate {
+		t.Fatalf("buffer payload mismatch: got %q", got)
+	}
+}
+
+func TestSendCompactionCommandToPane_UsesKeysForCommands(t *testing.T) {
+	t.Parallel()
+
+	spawner := NewMockPaneSpawner()
+	cmd := CompactionCommand{
+		Command: "/compact",
+	}
+
+	if err := sendCompactionCommandToPane(spawner, "%2", cmd); err != nil {
+		t.Fatalf("sendCompactionCommandToPane() error = %v", err)
+	}
+
+	if got := len(spawner.sentKeys["%2"]); got != 1 {
+		t.Fatalf("key sends = %d, want 1", got)
+	}
+	if got := len(spawner.sentBuffers["%2"]); got != 0 {
+		t.Fatalf("buffer sends = %d, want 0", got)
+	}
+	if got := spawner.sentKeys["%2"][0]; got != "/compact" {
+		t.Fatalf("key payload mismatch: got %q", got)
+	}
+}
+
+func TestSendRotationPrompt_UsesBuffer(t *testing.T) {
+	t.Parallel()
+
+	spawner := NewMockPaneSpawner()
+	prompt := SummaryPromptTemplate
+
+	if err := sendRotationPrompt(spawner, "%3", prompt); err != nil {
+		t.Fatalf("sendRotationPrompt() error = %v", err)
+	}
+
+	if got := len(spawner.sentBuffers["%3"]); got != 1 {
+		t.Fatalf("buffer sends = %d, want 1", got)
+	}
+	if got := len(spawner.sentKeys["%3"]); got != 0 {
+		t.Fatalf("key sends = %d, want 0", got)
+	}
+	if got := spawner.sentBuffers["%3"][0]; got != prompt {
+		t.Fatalf("buffer payload mismatch: got %q", got)
 	}
 }
 

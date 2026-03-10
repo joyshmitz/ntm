@@ -144,9 +144,18 @@ type PaneSpawner interface {
 	KillPane(paneID string) error
 	// SendKeys sends text to a pane.
 	SendKeys(paneID, text string, enter bool) error
+	// SendBuffer pastes text into a pane using tmux's buffer mechanism.
+	SendBuffer(paneID, text string, enter bool) error
 	// GetPanes returns all panes in a session.
 	GetPanes(session string) ([]tmux.Pane, error)
 }
+
+type paneInputSender interface {
+	SendKeys(paneID, text string, enter bool) error
+	SendBuffer(paneID, text string, enter bool) error
+}
+
+type tmuxPaneInputSender struct{}
 
 // DefaultPaneSpawner implements PaneSpawner using the tmux package.
 type DefaultPaneSpawner struct {
@@ -201,6 +210,11 @@ func (s *DefaultPaneSpawner) SendKeys(paneID, text string, enter bool) error {
 	return tmux.SendKeys(paneID, text, enter)
 }
 
+// SendBuffer pastes text into a pane using tmux's buffer mechanism.
+func (s *DefaultPaneSpawner) SendBuffer(paneID, text string, enter bool) error {
+	return tmux.SendBuffer(paneID, text, enter)
+}
+
 // GetPanes returns all panes in a session.
 func (s *DefaultPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
 	return tmux.GetPanes(session)
@@ -235,6 +249,25 @@ func (s *DefaultPaneSpawner) getAgentCommand(agentType string) string {
 	}
 
 	return defaults[agentType]
+}
+
+func (tmuxPaneInputSender) SendKeys(paneID, text string, enter bool) error {
+	return tmux.SendKeys(paneID, text, enter)
+}
+
+func (tmuxPaneInputSender) SendBuffer(paneID, text string, enter bool) error {
+	return tmux.SendBuffer(paneID, text, enter)
+}
+
+func sendCompactionCommandToPane(sender paneInputSender, paneID string, cmd CompactionCommand) error {
+	if cmd.IsPrompt {
+		return sender.SendBuffer(paneID, cmd.Command, true)
+	}
+	return sender.SendKeys(paneID, cmd.Command, true)
+}
+
+func sendRotationPrompt(spawner PaneSpawner, paneID, prompt string) error {
+	return spawner.SendBuffer(paneID, prompt, true)
 }
 
 // agentTypeShort returns the short form for pane naming.
@@ -534,7 +567,7 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
 
 	// Request handoff summary from the old agent
 	summaryPrompt := r.summary.GeneratePrompt()
-	if err := r.spawner.SendKeys(oldPane.ID, summaryPrompt, true); err != nil {
+	if err := sendRotationPrompt(r.spawner, oldPane.ID, summaryPrompt); err != nil {
 		result.Success = false
 		result.State = RotationStateFailed
 		result.Error = fmt.Sprintf("failed to request summary: %v", err)
@@ -602,7 +635,7 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
 
 	// Send handoff context to new agent
 	handoffContext := handoffSummary.FormatForNewAgent()
-	if err := r.spawner.SendKeys(newPaneID, handoffContext, true); err != nil {
+	if err := sendRotationPrompt(r.spawner, newPaneID, handoffContext); err != nil {
 		// Non-fatal: agent is spawned but may not have context
 		result.Error = fmt.Sprintf("warning: failed to send handoff context: %v", err)
 	}
@@ -692,7 +725,7 @@ func (r *Rotator) tryCompaction(agentID, paneID string) *CompactionResult {
 	// Try the first compaction command (builtin if available)
 	cmd := cmds[0]
 	// Both slash commands and prompts need enter=true to be submitted
-	if err := tmux.SendKeys(paneID, cmd.Command, true); err != nil {
+	if err := sendCompactionCommandToPane(tmuxPaneInputSender{}, paneID, cmd); err != nil {
 		return &CompactionResult{Success: false, Error: fmt.Sprintf("failed to send compaction command: %v", err)}
 	}
 

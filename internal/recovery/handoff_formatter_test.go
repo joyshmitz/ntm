@@ -462,6 +462,50 @@ func TestTokenBudgetEnforcement(t *testing.T) {
 	}
 }
 
+func TestFormatHandoffContext_DeterministicMapOrder(t *testing.T) {
+	t.Log("RECOVERY_TEST: FormatHandoffContext_DeterministicMapOrder | Testing sorted map output")
+
+	ctx := &HandoffContext{
+		Goal: "Completed audit",
+		Now:  "Apply fixes",
+		Decisions: map[string]string{
+			"zeta":  "last",
+			"alpha": "first",
+			"mid":   "middle",
+		},
+		Findings: map[string]string{
+			"omega": "later",
+			"beta":  "earlier",
+		},
+	}
+
+	first := FormatHandoffContext(ctx)
+	second := FormatHandoffContext(ctx)
+
+	if first != second {
+		t.Fatalf("FormatHandoffContext() should be deterministic across calls")
+	}
+
+	alphaIndex := strings.Index(first, "- alpha: first")
+	midIndex := strings.Index(first, "- mid: middle")
+	zetaIndex := strings.Index(first, "- zeta: last")
+	betaIndex := strings.Index(first, "- beta: earlier")
+	omegaIndex := strings.Index(first, "- omega: later")
+
+	if alphaIndex == -1 || midIndex == -1 || zetaIndex == -1 {
+		t.Fatalf("decision lines missing from output:\n%s", first)
+	}
+	if betaIndex == -1 || omegaIndex == -1 {
+		t.Fatalf("finding lines missing from output:\n%s", first)
+	}
+	if !(alphaIndex < midIndex && midIndex < zetaIndex) {
+		t.Fatalf("decisions not sorted lexicographically:\n%s", first)
+	}
+	if !(betaIndex < omegaIndex) {
+		t.Fatalf("findings not sorted lexicographically:\n%s", first)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
