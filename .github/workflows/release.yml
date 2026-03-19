@@ -102,22 +102,31 @@ jobs:
             exit 0
           fi
 
-          # Build the replacement caveats block using heredoc syntax
+          # Build the replacement caveats block using heredoc syntax.
+          # GoReleaser renders caveats as a double-quoted Ruby string (not do/end),
+          # so we match BOTH forms: 'caveats "..."' and 'caveats do ... end'.
           python3 - "$CASK" <<'PYEOF'
           import sys, re
 
           path = sys.argv[1]
           text = open(path).read()
 
-          # Match the entire caveats block: "caveats do\n ... \n  end"
-          pattern = re.compile(
-              r'(?P<indent>[ \t]*)caveats\s+do\n'   # opening line
-              r'(?P<body>.*?)\n'                      # body (non-greedy)
-              r'(?P=indent)end',                      # closing end
+          # Form 1: double-quoted string — GoReleaser's default for caveats: | config
+          #   e.g.  caveats "To enable shell integration...\n  eval \"$(ntm init zsh)\"\n"
+          string_pattern = re.compile(
+              r'(?P<indent>[ \t]*)caveats\s+"(?P<body>(?:[^"\\]|\\.)*)"',
+          )
+
+          # Form 2: do/end block (used by some GoReleaser versions or manual edits)
+          #   e.g.  caveats do\n  ...\n  end
+          block_pattern = re.compile(
+              r'(?P<indent>[ \t]*)caveats\s+do\n'
+              r'(?P<body>.*?)\n'
+              r'(?P=indent)end',
               re.DOTALL,
           )
 
-          m = pattern.search(text)
+          m = string_pattern.search(text) or block_pattern.search(text)
           if not m:
               print("::warning::Could not locate caveats block — skipping patch")
               sys.exit(0)
