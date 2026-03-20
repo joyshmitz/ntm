@@ -166,7 +166,8 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 			Bold(true).
 			Render(icon)
 
-		// Truncate message to fit
+		// Truncate message to fit by visual width (not rune count),
+		// so wide characters (CJK, emojis) are handled correctly.
 		msg := toast.Message
 		msgMaxWidth := toastWidth - 6 // icon + padding + border
 		if msgMaxWidth < 10 {
@@ -174,9 +175,17 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 		}
 		if lipgloss.Width(msg) > msgMaxWidth {
 			runes := []rune(msg)
-			if len(runes) > msgMaxWidth-1 {
-				msg = string(runes[:msgMaxWidth-1]) + "…"
+			truncated := make([]rune, 0, len(runes))
+			visWidth := 0
+			for _, r := range runes {
+				rw := lipgloss.Width(string(r))
+				if visWidth+rw+1 > msgMaxWidth { // +1 for "…"
+					break
+				}
+				truncated = append(truncated, r)
+				visWidth += rw
 			}
+			msg = string(truncated) + "…"
 		}
 
 		msgStyled := lipgloss.NewStyle().
@@ -193,7 +202,6 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 			Width(toastWidth).
 			Render(content)
 
-		_ = bgColor // used in style above
 		rendered = append(rendered, toastBox)
 	}
 

@@ -357,6 +357,9 @@ func RunSessionSelector(sessions []tmux.Session) (string, error) {
 		return "", err
 	}
 
-	result := finalModel.(SessionSelector)
+	result, ok := finalModel.(SessionSelector)
+	if !ok {
+		return "", fmt.Errorf("unexpected model type from session selector")
+	}
 	return result.Selected(), nil
 }

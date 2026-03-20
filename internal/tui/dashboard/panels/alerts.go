@@ -34,9 +34,10 @@ const newAlertPulseDuration = 3 * time.Second
 
 type AlertsPanel struct {
 	PanelBase
-	alerts   []alerts.Alert
-	err      error
-	viewport viewport.Model
+	alerts       []alerts.Alert
+	err          error
+	viewport     viewport.Model
+	lastBodyHash string // Track content changes to preserve scroll position
 
 	firstSeen map[string]time.Time
 	now       func() time.Time
@@ -263,12 +264,16 @@ func (m *AlertsPanel) View() string {
 	}
 	m.viewport.Width = w
 	m.viewport.Height = vpHeight
-	m.viewport.SetContent(body.String())
+	bodyStr := body.String()
+	if bodyStr != m.lastBodyHash {
+		m.viewport.SetContent(bodyStr)
+		m.lastBodyHash = bodyStr
+	}
 
 	content.WriteString(m.viewport.View())
 
 	// Show scroll indicator if content overflows
-	totalLines := lipgloss.Height(body.String())
+	totalLines := lipgloss.Height(bodyStr)
 	if totalLines > vpHeight {
 		scrollPct := int(m.viewport.ScrollPercent() * 100)
 		scrollHint := lipgloss.NewStyle().Foreground(t.Overlay).Render(fmt.Sprintf(" ↕ %d%%", scrollPct))

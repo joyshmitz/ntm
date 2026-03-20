@@ -31,11 +31,11 @@ func beadsConfig() PanelConfig {
 
 type BeadsPanel struct {
 	PanelBase
-	summary  bv.BeadsSummary
-	ready    []bv.BeadPreview
-	err      error
-	viewport viewport.Model
-	vpReady  bool
+	summary      bv.BeadsSummary
+	ready        []bv.BeadPreview
+	err          error
+	viewport     viewport.Model
+	lastBodyHash string // Track content changes to avoid resetting scroll position
 }
 
 func NewBeadsPanel() *BeadsPanel {
@@ -239,7 +239,8 @@ func (m *BeadsPanel) View() string {
 		body.WriteString(lipgloss.NewStyle().Foreground(t.Overlay).Italic(true).Padding(0, 1).Render("  (Pipeline unavailable)") + "\n")
 	}
 
-	// Update viewport dimensions and content
+	// Update viewport dimensions; only reset content when it actually changes
+	// to preserve the user's scroll position across refreshes.
 	usedHeight := lipgloss.Height(header) + lipgloss.Height(statsStyled) + 3 // +3 for newlines + scroll indicator
 	vpHeight := h - usedHeight
 	if vpHeight < 3 {
@@ -247,7 +248,11 @@ func (m *BeadsPanel) View() string {
 	}
 	m.viewport.Width = w
 	m.viewport.Height = vpHeight
-	m.viewport.SetContent(body.String())
+	bodyStr := body.String()
+	if bodyStr != m.lastBodyHash {
+		m.viewport.SetContent(bodyStr)
+		m.lastBodyHash = bodyStr
+	}
 
 	content.WriteString(m.viewport.View())
 

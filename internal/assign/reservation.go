@@ -45,6 +45,14 @@ func (m *FileReservationManager) SetTTL(seconds int) {
 	}
 }
 
+// Pre-compiled regexes for file path extraction (avoid recompilation per call).
+var (
+	filePathRegex = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+)+)(?:\:\d+(?::\d+)?)?(?:\s|[)\]"']|$)`)
+	dotfileRegex  = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])(\.[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9]+)*)(?:\s|[)\]"']|$)`)
+	dirPathRegex  = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)+)(?:\s|[)\]"']|$)`)
+	globRegex     = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./*-]+\*[a-zA-Z0-9_./*-]*)(?:\s|[)\]"']|$)`)
+)
+
 // ExtractFilePaths extracts file paths from a bead title and description.
 // Patterns detected:
 // - Explicit paths: src/api/handler.go, lib/utils.ts
@@ -55,22 +63,6 @@ func ExtractFilePaths(title, description string) []string {
 
 	var paths []string
 	seen := make(map[string]bool)
-
-	// Pattern for file paths with extensions
-	// Matches: src/api/handler.go, lib/utils.ts, config.json, internal/file.go:123
-	filePathRegex := regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+)+)(?:\:\d+(?::\d+)?)?(?:\s|[)\]"']|$)`)
-
-	// Pattern for dotfiles (.env, .env.local, .gitignore)
-	// Matches: .env, .env.local, .gitignore, .eslintrc.js
-	dotfileRegex := regexp.MustCompile(`(?m)(?:^|\s|[(\["'])(\.[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9]+)*)(?:\s|[)\]"']|$)`)
-
-	// Pattern for directory/package paths
-	// Matches: internal/cli, pkg/api, src/components
-	dirPathRegex := regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)+)(?:\s|[)\]"']|$)`)
-
-	// Pattern for glob patterns
-	// Matches: **/*.go, src/**/*.ts, *.json
-	globRegex := regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./*-]+\*[a-zA-Z0-9_./*-]*)(?:\s|[)\]"']|$)`)
 
 	// Extract file paths
 	for _, match := range filePathRegex.FindAllStringSubmatch(combined, -1) {

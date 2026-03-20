@@ -2394,12 +2394,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fetchingAlerts = false
 		m.alertsError = msg.Err
 		if msg.Err == nil {
-			// Push toasts for new critical/warning alerts
-			prevCount := len(m.activeAlerts)
+			// Build set of previous alert IDs to detect truly new alerts
+			prevIDs := make(map[string]struct{}, len(m.activeAlerts))
+			for _, a := range m.activeAlerts {
+				prevIDs[a.ID] = struct{}{}
+			}
 			m.activeAlerts = msg.Alerts
 			m.markUpdated(refreshAlerts, time.Now())
-			if len(msg.Alerts) > prevCount && m.toasts != nil {
-				for _, a := range msg.Alerts[prevCount:] {
+			// Push toasts only for alerts not seen in the previous update
+			if m.toasts != nil {
+				for _, a := range msg.Alerts {
+					if _, existed := prevIDs[a.ID]; existed {
+						continue
+					}
 					level := components.ToastInfo
 					switch a.Severity {
 					case alerts.SeverityCritical:
@@ -3669,28 +3676,25 @@ func (m Model) View() string {
 		content = lipgloss.NewStyle().Height(available).MaxHeight(available).Render(content)
 	}
 
-	result := header + content + footer
-
-	// Overlay toast notifications in the bottom-right corner
+	// Render toast notifications inline, right-aligned above the footer.
+	// We avoid pixel-level overlay (placeOverlay) because ANSI escape sequences
+	// in lipgloss-rendered text make rune-based splicing corrupt the output.
+	toastSection := ""
 	if m.toasts != nil && m.toasts.Count() > 0 {
 		toastStr := m.toasts.RenderToasts(m.width / 3)
 		if toastStr != "" {
-			toastHeight := lipgloss.Height(toastStr)
 			toastWidth := lipgloss.Width(toastStr)
-			// Position toasts in bottom-right, above the footer
-			x := m.width - toastWidth - 2
-			y := m.height - toastHeight - lipgloss.Height(footer) - 1
-			if x < 0 {
-				x = 0
+			rightPad := m.width - toastWidth - 2
+			if rightPad < 0 {
+				rightPad = 0
 			}
-			if y < 0 {
-				y = 0
-			}
-			result = placeOverlay(x, y, toastStr, result)
+			toastSection = lipgloss.NewStyle().
+				PaddingLeft(rightPad).
+				Render(toastStr) + "\n"
 		}
 	}
 
-	return result
+	return header + content + toastSection + footer
 }
 
 func (m Model) renderHeaderSection() string {
@@ -5254,34 +5258,6 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// placeOverlay renders an overlay string on top of a background string at (x, y).
-// Lines of the overlay replace corresponding portions of the background.
-func placeOverlay(x, y int, overlay, background string) string {
-	bgLines := strings.Split(background, "\n")
-	ovLines := strings.Split(overlay, "\n")
-
-	for i, ovLine := range ovLines {
-		row := y + i
-		if row < 0 || row >= len(bgLines) {
-			continue
-		}
-		bgLine := bgLines[row]
-		bgRunes := []rune(bgLine)
-		ovRunes := []rune(ovLine)
-
-		// Ensure background line is wide enough
-		for len(bgRunes) < x+len(ovRunes) {
-			bgRunes = append(bgRunes, ' ')
-		}
-
-		// Replace portion
-		copy(bgRunes[x:x+len(ovRunes)], ovRunes)
-		bgLines[row] = string(bgRunes)
-	}
-
-	return strings.Join(bgLines, "\n")
 }
 
 func contentHeightFor(total int) int {

@@ -3,6 +3,7 @@ package components
 
 import (
 	"math"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -41,14 +42,17 @@ func Sparkline(values []float64, width int) string {
 
 	// Build sparkline string
 	rng := maxVal - minVal
-	if rng == 0 {
-		rng = 1 // Avoid division by zero; flat line shows at half height
-	}
 
 	runes := make([]rune, len(visible))
 	for i, v := range visible {
-		normalized := (v - minVal) / rng
-		idx := int(math.Round(normalized * 8))
+		var idx int
+		if rng == 0 {
+			// All values identical: show flat line at half height
+			idx = 4
+		} else {
+			normalized := (v - minVal) / rng
+			idx = int(math.Round(normalized * 8))
+		}
 		if idx < 0 {
 			idx = 0
 		}
@@ -89,15 +93,20 @@ func SparklineStyled(values []float64, width int) string {
 	}
 
 	rng := maxVal - minVal
-	if rng == 0 {
-		rng = 1
-	}
 
 	// Render each character with color based on value
-	var result string
+	var result strings.Builder
 	for _, v := range visible {
-		normalized := (v - minVal) / rng
-		idx := int(math.Round(normalized * 8))
+		var idx int
+		var normalized float64
+		if rng == 0 {
+			// All values identical: flat line at half height, use green
+			idx = 4
+			normalized = 0
+		} else {
+			normalized = (v - minVal) / rng
+			idx = int(math.Round(normalized * 8))
+		}
 		if idx < 0 {
 			idx = 0
 		}
@@ -117,10 +126,10 @@ func SparklineStyled(values []float64, width int) string {
 		}
 
 		style := lipgloss.NewStyle().Foreground(color)
-		result += style.Render(string(sparkBlocks[idx]))
+		result.WriteString(style.Render(string(sparkBlocks[idx])))
 	}
 
-	return result
+	return result.String()
 }
 
 // SparklineWithLabel renders a sparkline prefixed with a label and current value.
