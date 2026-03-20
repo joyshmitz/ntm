@@ -1258,12 +1258,10 @@ func runSendInternal(opts SendOptions) (err error) {
 				fmt.Println("Aborted.")
 				return nil
 			}
-			if strings.Contains(err.Error(), "cass not installed") || strings.Contains(err.Error(), "connection refused") {
-				if !jsonOutput {
-					fmt.Printf("Warning: CASS duplicate check failed: %v\n", err)
-				}
-			} else {
-				return outputError(err)
+			// CASS is advisory — never block prompt delivery on cass failures.
+			// Common transient errors: WAL corruption, signal killed, timeouts.
+			if !jsonOutput {
+				fmt.Printf("Warning: CASS duplicate check failed: %v\n", err)
 			}
 		}
 	}

@@ -3617,13 +3617,12 @@ func (m Model) renderHeaderSection() string {
 	b.WriteString("\n")
 
 	// ═══════════════════════════════════════════════════════════════
-	// HEADER — centered block with consistent left edge
+	// HEADER — left-aligned block, centered as a unit
 	//
-	// All header elements are collected, measured, then rendered as a
-	// block centered on the widest element. Within the block, the logo
-	// is centered while text lines are also centered. This avoids the
-	// "staircase" effect of independently centering lines of different
-	// widths.
+	// All header elements share a common left edge. The block width
+	// is the widest element; the block is horizontally centered in
+	// the terminal. This avoids the "staircase" that results from
+	// independently centering lines of different widths.
 	// ═══════════════════════════════════════════════════════════════
 
 	// 1. Build all header lines (plain + ANSI-decorated)
