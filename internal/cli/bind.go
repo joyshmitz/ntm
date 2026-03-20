@@ -19,25 +19,34 @@ var validKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9\-\^]+$`)
 
 func newBindCmd() *cobra.Command {
 	var (
-		key      string
-		unbind   bool
+		key     string
+		unbind  bool
 		showOnly bool
+		overlay bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "bind",
-		Short: "Set up tmux keybinding for command palette",
-		Long: `Configure a tmux keybinding to open the NTM command palette in a popup.
+		Short: "Set up tmux keybinding for command palette or overlay",
+		Long: `Configure a tmux keybinding to open the NTM command palette or dashboard overlay.
 
 By default, binds F6 to open a floating popup with the command palette.
-The binding is added to both the current tmux server and ~/.tmux.conf.
+With --overlay, binds F12 to toggle the dashboard overlay above agent panes.
+Bindings are added to both the current tmux server and ~/.tmux.conf.
 
 Examples:
-  ntm bind              # Bind F6 (default)
-  ntm bind --key=F5     # Bind F5 instead
-  ntm bind --show       # Show current binding
-  ntm bind --unbind     # Remove the binding`,
+  ntm bind                  # Bind F6 for palette (default)
+  ntm bind --overlay        # Bind F12 for dashboard overlay
+  ntm bind --key=F5         # Bind F5 for palette
+  ntm bind --overlay -k F11 # Bind F11 for overlay
+  ntm bind --show           # Show current binding
+  ntm bind --unbind         # Remove the binding`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if overlay && !cmd.Flags().Changed("key") {
+				// Default overlay key is F12 (not F6 which is the palette default)
+				key = "F12"
+			}
+
 			// Validate key to prevent injection
 			// Allowed: alphanumeric, -, ^ (for Ctrl)
 			if !validKeyRegex.MatchString(key) {
@@ -50,13 +59,17 @@ Examples:
 			if unbind {
 				return removeBinding(key)
 			}
+			if overlay {
+				return setupOverlayBinding(key)
+			}
 			return setupBinding(key)
 		},
 	}
 
-	cmd.Flags().StringVarP(&key, "key", "k", "F6", "Key to bind (e.g., F5, F6, F7)")
+	cmd.Flags().StringVarP(&key, "key", "k", "F6", "Key to bind (e.g., F5, F6, F7, F12)")
 	cmd.Flags().BoolVar(&unbind, "unbind", false, "Remove the binding")
 	cmd.Flags().BoolVar(&showOnly, "show", false, "Show current binding")
+	cmd.Flags().BoolVar(&overlay, "overlay", false, "Bind the dashboard overlay toggle instead of palette")
 
 	return cmd
 }
@@ -138,6 +151,87 @@ func setupBinding(key string) error {
 	return nil
 }
 
+func setupOverlayBinding(key string) error {
+	t := theme.Current()
+
+	// The binding: launch ntm dashboard in popup mode for the current session.
+	// #{session_name} is expanded by tmux at trigger time.
+	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 95%% -h 95%% "ntm dashboard --popup #{session_name}"`, key)
+
+	// Apply to current tmux server
+	inTmux := os.Getenv("TMUX") != ""
+	if inTmux {
+		cmd := exec.Command(tmux.BinaryPath(),
+			"bind-key", "-n", key,
+			"display-popup", "-E", "-w", "95%", "-h", "95%",
+			"ntm dashboard --popup #{session_name}",
+		)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
+		} else {
+			fmt.Printf("%s✓%s Bound %s for dashboard overlay in current tmux server\n", colorize(t.Success), colorize(t.Text), key)
+		}
+	} else {
+		fmt.Printf("%s→%s Not in tmux, will only update config file\n", colorize(t.Info), colorize(t.Text))
+	}
+
+	// Update tmux.conf
+	tmuxConf := filepath.Join(os.Getenv("HOME"), ".tmux.conf")
+
+	existing := ""
+	if data, err := os.ReadFile(tmuxConf); err == nil {
+		existing = string(data)
+	}
+
+	lines := strings.Split(existing, "\n")
+	found := false
+	var newLines []string
+
+	for _, line := range lines {
+		if isBindingLine(line, key) {
+			newLines = append(newLines, bindCmd)
+			found = true
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+
+	if found {
+		if err := os.WriteFile(tmuxConf, []byte(strings.Join(newLines, "\n")), 0600); err != nil {
+			return fmt.Errorf("failed to update tmux.conf: %w", err)
+		}
+		fmt.Printf("%s✓%s Updated existing %s binding in %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
+	} else {
+		f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to open tmux.conf: %w", err)
+		}
+		defer func() { _ = f.Close() }()
+
+		addition := fmt.Sprintf("\n# NTM Dashboard Overlay (added by 'ntm bind --overlay')\n%s\n", bindCmd)
+		if _, err := f.WriteString(addition); err != nil {
+			return fmt.Errorf("failed to write tmux.conf: %w", err)
+		}
+		fmt.Printf("%s✓%s Added %s overlay binding to %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
+	}
+
+	fmt.Println()
+	fmt.Printf("  Press %s%s%s in tmux to toggle the dashboard overlay.\n",
+		colorize(t.Primary), key, colorize(t.Text))
+	fmt.Printf("  Press %sEscape%s inside the overlay to dismiss it.\n",
+		colorize(t.Primary), colorize(t.Text))
+	fmt.Printf("  Press %sz/Enter%s on a pane to zoom into it.\n",
+		colorize(t.Primary), colorize(t.Text))
+
+	if !inTmux {
+		fmt.Printf("\n  %sNote:%s Run %stmux source ~/.tmux.conf%s to reload config.\n",
+			colorize(t.Info), colorize(t.Text),
+			colorize(t.Primary), colorize(t.Text))
+	}
+
+	return nil
+}
+
 func removeBinding(key string) error {
 	t := theme.Current()
 
@@ -170,8 +264,8 @@ func removeBinding(key string) error {
 	skipNext := false
 
 	for _, line := range lines {
-		// Skip comment line before binding
-		if strings.Contains(line, "NTM Command Palette") {
+		// Skip NTM comment lines before bindings (palette or overlay)
+		if strings.Contains(line, "NTM Command Palette") || strings.Contains(line, "NTM Dashboard Overlay") {
 			skipNext = true
 			continue
 		}

@@ -3351,6 +3351,7 @@ func init() {
 		newResumeCmd(),
 
 		// Utilities
+		newOverlayCmd(),
 		newPaletteCmd(),
 		newBindCmd(),
 		newDepsCmd(),

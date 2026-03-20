@@ -23,6 +23,7 @@ func newDashboardCmd() *cobra.Command {
 	var noTUI bool
 	var jsonOutput bool
 	var debug bool
+	var popup bool
 
 	cmd := &cobra.Command{
 		Use:     "dashboard [session-name]",
@@ -84,13 +85,14 @@ Examples:
 			if noTUI {
 				return runDashboardPlain(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 			}
-			return runDashboard(cmd.OutOrStdout(), cmd.ErrOrStderr(), session, debug)
+			return runDashboard(cmd.OutOrStdout(), cmd.ErrOrStderr(), session, debug, popup)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Plain text output (no interactive UI)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output (implies --no-tui)")
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable debug mode with state inspection")
+	cmd.Flags().BoolVar(&popup, "popup", false, "Run in popup/overlay mode (Esc closes, zoom focuses pane)")
 	cmd.ValidArgsFunction = completeSessionArgs
 
 	return cmd
@@ -246,7 +248,7 @@ func runDashboardPlain(w io.Writer, errW io.Writer, session string) error {
 	return nil
 }
 
-func runDashboard(w io.Writer, errW io.Writer, session string, debug bool) error {
+func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -342,9 +344,19 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool) error
 		cancel()
 	}
 
-	action, err := dashboard.Run(session, projectDir)
-	if err != nil {
-		return err
+	var action *dashboard.PostQuitAction
+	if popup {
+		a, e := dashboard.RunPopup(session, projectDir)
+		if e != nil {
+			return e
+		}
+		action = a
+	} else {
+		a, e := dashboard.Run(session, projectDir)
+		if e != nil {
+			return e
+		}
+		action = a
 	}
 	if action != nil && action.AttachSession != "" {
 		return tmux.AttachOrSwitch(action.AttachSession)

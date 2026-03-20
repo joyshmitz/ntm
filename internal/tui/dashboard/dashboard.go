@@ -598,6 +598,10 @@ type Model struct {
 
 	// Post-quit action: tells the caller what to do after the TUI exits.
 	postQuitAction *PostQuitAction
+
+	// Popup/overlay mode: dashboard is running inside a tmux display-popup.
+	// Escape closes the popup; zoom doesn't re-attach (we're already in-session).
+	popupMode bool
 }
 
 // PostQuitAction describes what the caller should do after the dashboard TUI exits.
@@ -2335,7 +2339,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
 			return m, nil
 		}
-		m.postQuitAction = &PostQuitAction{AttachSession: m.session}
+		if !m.popupMode {
+			m.postQuitAction = &PostQuitAction{AttachSession: m.session}
+		}
 		return m, tea.Quit
 
 	case EnsembleModesDataMsg:
@@ -3230,6 +3236,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		// Popup mode: Escape closes the overlay (exits cleanly)
+		if m.popupMode && msg.String() == "esc" {
+			m.quitting = true
+			return m, tea.Quit
+		}
+
 		switch {
 		case key.Matches(msg, dashKeys.NextPanel):
 			m.cycleFocus(1)
@@ -3321,7 +3333,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
 					return m, nil
 				}
-				m.postQuitAction = &PostQuitAction{AttachSession: m.session}
+				// In popup mode, the popup closes on exit and the zoomed pane
+				// is already visible underneath — no need to re-attach.
+				if !m.popupMode {
+					m.postQuitAction = &PostQuitAction{AttachSession: m.session}
+				}
 				return m, tea.Quit
 			}
 			return m, nil
@@ -6828,7 +6844,19 @@ func (m Model) executeReplay(entry history.HistoryEntry) tea.Cmd {
 
 // Run starts the dashboard
 func Run(session, projectDir string) (*PostQuitAction, error) {
+	return RunWithOptions(session, projectDir, false)
+}
+
+// RunPopup starts the dashboard in popup/overlay mode.
+// Escape closes the popup; zoom doesn't re-attach.
+func RunPopup(session, projectDir string) (*PostQuitAction, error) {
+	return RunWithOptions(session, projectDir, true)
+}
+
+// RunWithOptions starts the dashboard with configurable options.
+func RunWithOptions(session, projectDir string, popupMode bool) (*PostQuitAction, error) {
 	model := New(session, projectDir)
+	model.popupMode = popupMode
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
