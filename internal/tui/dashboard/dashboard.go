@@ -487,6 +487,9 @@ type Model struct {
 	// Help verbosity (minimal/full), sourced from config (help_verbosity)
 	helpVerbosity string
 
+	// Toast notifications (ephemeral bottom-right overlays)
+	toasts *components.ToastManager
+
 	// Panels
 	beadsPanel           *panels.BeadsPanel
 	alertsPanel          *panels.AlertsPanel
@@ -810,6 +813,7 @@ func New(session, projectDir string) Model {
 			}
 		}),
 		ensembleModes:        synthtui.NewModeVisualization(),
+		toasts:               components.NewToastManager(),
 		beadsPanel:           panels.NewBeadsPanel(),
 		alertsPanel:          panels.NewAlertsPanel(),
 		costPanel:            panels.NewCostPanel(),
@@ -2389,8 +2393,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fetchingAlerts = false
 		m.alertsError = msg.Err
 		if msg.Err == nil {
+			// Push toasts for new critical/warning alerts
+			prevCount := len(m.activeAlerts)
 			m.activeAlerts = msg.Alerts
 			m.markUpdated(refreshAlerts, time.Now())
+			if len(msg.Alerts) > prevCount && m.toasts != nil {
+				for _, a := range msg.Alerts[prevCount:] {
+					level := components.ToastInfo
+					switch a.Severity {
+					case alerts.SeverityCritical:
+						level = components.ToastError
+					case alerts.SeverityWarning:
+						level = components.ToastWarning
+					}
+					m.toasts.Push(components.Toast{
+						ID:      "alert-" + a.ID,
+						Message: a.Message,
+						Level:   level,
+					})
+				}
+			}
 		}
 		m.alertsPanel.SetData(m.activeAlerts, m.alertsError)
 		return m, nil
@@ -2398,6 +2420,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case FileConflictMsg:
 		// Add the conflict to the conflicts panel
 		m.conflictsPanel.AddConflict(msg.Conflict)
+		if m.toasts != nil {
+			m.toasts.Push(components.Toast{
+				ID:      "conflict-" + msg.Conflict.Path,
+				Message: "File conflict: " + msg.Conflict.Path,
+				Level:   components.ToastWarning,
+			})
+		}
 		return m, nil
 
 	case panels.ConflictActionResultMsg:
@@ -2568,6 +2597,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Update ticker panel with current data and animation tick
 		m.updateTickerData()
+
+		// Prune expired toasts
+		if m.toasts != nil {
+			m.toasts.Tick()
+		}
 
 		// Drive staggered refreshes on the animation ticker to avoid a single heavy burst.
 		if !m.refreshPaused {
@@ -3632,7 +3666,28 @@ func (m Model) View() string {
 		content = lipgloss.NewStyle().Height(available).MaxHeight(available).Render(content)
 	}
 
-	return header + content + footer
+	result := header + content + footer
+
+	// Overlay toast notifications in the bottom-right corner
+	if m.toasts != nil && m.toasts.Count() > 0 {
+		toastStr := m.toasts.RenderToasts(m.width / 3)
+		if toastStr != "" {
+			toastHeight := lipgloss.Height(toastStr)
+			toastWidth := lipgloss.Width(toastStr)
+			// Position toasts in bottom-right, above the footer
+			x := m.width - toastWidth - 2
+			y := m.height - toastHeight - lipgloss.Height(footer) - 1
+			if x < 0 {
+				x = 0
+			}
+			if y < 0 {
+				y = 0
+			}
+			result = placeOverlay(x, y, toastStr, result)
+		}
+	}
+
+	return result
 }
 
 func (m Model) renderHeaderSection() string {
@@ -3786,6 +3841,65 @@ func (m Model) renderMainContentSection() string {
 	}
 
 	return b.String()
+}
+
+// renderPanelTabBar renders a tab bar showing the visible panels and the focused one.
+func (m Model) renderPanelTabBar(width int) string {
+	visible := m.visiblePanelsForHelpVerbosity()
+
+	panelIDStr := func(id PanelID) string {
+		switch id {
+		case PanelPaneList:
+			return "panes"
+		case PanelDetail:
+			return "detail"
+		case PanelBeads:
+			return "beads"
+		case PanelAlerts:
+			return "alerts"
+		case PanelConflicts:
+			return "conflicts"
+		case PanelMetrics:
+			return "metrics"
+		case PanelHistory:
+			return "history"
+		case PanelSidebar:
+			return "sidebar"
+		default:
+			return "unknown"
+		}
+	}
+
+	var tabs []components.Tab
+	for _, pid := range visible {
+		idStr := panelIDStr(pid)
+		badge := 0
+		hasErr := false
+
+		// Set notification badges for panels with updates
+		switch pid {
+		case PanelAlerts:
+			badge = len(m.activeAlerts)
+			hasErr = m.alertsPanel.HasError()
+		case PanelBeads:
+			badge = m.beadsSummary.InProgress
+			hasErr = m.beadsPanel.HasError()
+		case PanelConflicts:
+			badge = m.conflictsPanel.ConflictCount()
+		}
+
+		tabs = append(tabs, components.PanelIDToTab(idStr, badge, hasErr))
+	}
+
+	activeID := panelIDStr(m.focusedPanel)
+
+	return components.RenderTabBar(components.TabBarOptions{
+		Tabs:       tabs,
+		ActiveID:   activeID,
+		Width:      width,
+		Focused:    true,
+		ShowBadges: true,
+	})
 }
 
 func (m Model) renderFooterSection() string {
@@ -5139,6 +5253,34 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// placeOverlay renders an overlay string on top of a background string at (x, y).
+// Lines of the overlay replace corresponding portions of the background.
+func placeOverlay(x, y int, overlay, background string) string {
+	bgLines := strings.Split(background, "\n")
+	ovLines := strings.Split(overlay, "\n")
+
+	for i, ovLine := range ovLines {
+		row := y + i
+		if row < 0 || row >= len(bgLines) {
+			continue
+		}
+		bgLine := bgLines[row]
+		bgRunes := []rune(bgLine)
+		ovRunes := []rune(ovLine)
+
+		// Ensure background line is wide enough
+		for len(bgRunes) < x+len(ovRunes) {
+			bgRunes = append(bgRunes, ' ')
+		}
+
+		// Replace portion
+		copy(bgRunes[x:x+len(ovRunes)], ovRunes)
+		bgLines[row] = string(bgRunes)
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
 func contentHeightFor(total int) int {
 	contentHeight := total - 14
 	if contentHeight < 5 {
@@ -5932,8 +6074,10 @@ func (m Model) renderSplitView() string {
 		Padding(0, 1).
 		Render(listContent)
 
-	// Build right panel (detail view)
+	// Build right panel (tab bar + detail view)
+	tabBar := m.renderPanelTabBar(rightWidth - 4)
 	detailContent := m.renderPaneDetail(rightWidth - 4)
+	rightContent := tabBar + "\n" + detailContent
 	detailPanel := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(detailBorder). // Accent color for detail
@@ -5941,7 +6085,7 @@ func (m Model) renderSplitView() string {
 		Height(contentHeight).
 		MaxHeight(contentHeight).
 		Padding(0, 1).
-		Render(detailContent)
+		Render(rightContent)
 
 	// Join panels horizontally
 	return "  " + lipgloss.JoinHorizontal(lipgloss.Top, listPanel, detailPanel)
@@ -5982,7 +6126,9 @@ func (m Model) renderUltraLayout() string {
 		Padding(0, 1).
 		Render(listContent)
 
+	tabBar := m.renderPanelTabBar(centerWidth - 4)
 	detailContent := m.renderPaneDetail(centerWidth - 4)
+	centerContent := tabBar + "\n" + detailContent
 	detailPanel := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(detailBorder).
@@ -5990,7 +6136,7 @@ func (m Model) renderUltraLayout() string {
 		Height(contentHeight).
 		MaxHeight(contentHeight).
 		Padding(0, 1).
-		Render(detailContent)
+		Render(centerContent)
 
 	sidebarContent := m.renderSidebar(rightWidth-4, contentHeight-2)
 	sidebarPanel := lipgloss.NewStyle().
@@ -6271,12 +6417,13 @@ func (m Model) renderMegaLayout() string {
 		Padding(0, 1).
 		Render(m.renderPaneList(p1Inner))
 
+	megaTabBar := m.renderPanelTabBar(p2Inner)
 	panel2 := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(detailBorder).
 		Width(p2).Height(contentHeight).MaxHeight(contentHeight).
 		Padding(0, 1).
-		Render(m.renderPaneDetail(p2Inner))
+		Render(megaTabBar + "\n" + m.renderPaneDetail(p2Inner))
 
 	panel3 := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
