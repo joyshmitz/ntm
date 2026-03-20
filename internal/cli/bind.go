@@ -156,7 +156,7 @@ func setupOverlayBinding(key string) error {
 
 	// The binding: launch ntm dashboard in popup mode for the current session.
 	// #{session_name} is expanded by tmux at trigger time.
-	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 95%% -h 95%% "ntm dashboard --popup #{session_name}"`, key)
+	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 95%% -h 95%% "NTM_POPUP=1 ntm dashboard --popup #{session_name}"`, key)
 
 	// Apply to current tmux server
 	inTmux := os.Getenv("TMUX") != ""
@@ -164,7 +164,7 @@ func setupOverlayBinding(key string) error {
 		cmd := exec.Command(tmux.BinaryPath(),
 			"bind-key", "-n", key,
 			"display-popup", "-E", "-w", "95%", "-h", "95%",
-			"ntm dashboard --popup #{session_name}",
+			"NTM_POPUP=1 ntm dashboard --popup #{session_name}",
 		)
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
@@ -257,31 +257,27 @@ func removeBinding(key string) error {
 		return err
 	}
 
-	// Remove the binding lines
+	// Remove the binding lines (and their preceding NTM comment, if any).
+	// Uses look-ahead so we only skip a comment when the NEXT line is the
+	// target binding — avoids orphaning comments for other NTM bindings.
 	lines := strings.Split(string(data), "\n")
 	var newLines []string
 	found := false
-	skipNext := false
 
-	for _, line := range lines {
-		// Skip NTM comment lines before bindings (palette or overlay)
-		if strings.Contains(line, "NTM Command Palette") || strings.Contains(line, "NTM Dashboard Overlay") {
-			skipNext = true
+	isNTMComment := func(s string) bool {
+		return strings.Contains(s, "NTM Command Palette") || strings.Contains(s, "NTM Dashboard Overlay")
+	}
+
+	for i, line := range lines {
+		// Skip NTM comment only if the next line is a binding for our key
+		if isNTMComment(line) && i+1 < len(lines) && isBindingLine(lines[i+1], key) {
 			continue
 		}
-		if skipNext && isBindingLine(line, key) {
-			found = true
-			skipNext = false
-			continue
-		}
-		// Also catch manual bindings without the comment
+		// Skip the binding itself
 		if isBindingLine(line, key) {
 			found = true
-			skipNext = false
 			continue
 		}
-
-		skipNext = false
 		newLines = append(newLines, line)
 	}
 
@@ -329,6 +325,22 @@ func showBinding(key string) error {
 	}
 
 	return nil
+}
+
+// isOverlayKeyBound checks if the given key already has an NTM overlay binding
+// in tmux.conf. Returns true if found.
+func isOverlayKeyBound(key string) bool {
+	tmuxConf := filepath.Join(os.Getenv("HOME"), ".tmux.conf")
+	data, err := os.ReadFile(tmuxConf)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if isBindingLine(line, key) && strings.Contains(line, "ntm") {
+			return true
+		}
+	}
+	return false
 }
 
 // isBindingLine checks if a line is a tmux binding for the given key.

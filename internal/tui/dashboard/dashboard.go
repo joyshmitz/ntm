@@ -2339,7 +2339,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
 			return m, nil
 		}
-		if !m.popupMode {
+		if m.popupMode {
+			_ = tmux.DisplayMessage(m.session,
+				"F12 → dashboard overlay · prefix+z → unzoom", 4000)
+		} else {
 			m.postQuitAction = &PostQuitAction{AttachSession: m.session}
 		}
 		return m, tea.Quit
@@ -3337,9 +3340,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
 					return m, nil
 				}
-				// In popup mode, the popup closes on exit and the zoomed pane
-				// is already visible underneath — no need to re-attach.
-				if !m.popupMode {
+				if m.popupMode {
+					// Show a brief hint so the user knows how to return.
+					_ = tmux.DisplayMessage(m.session,
+						"F12 → dashboard overlay · prefix+z → unzoom", 4000)
+				} else {
 					m.postQuitAction = &PostQuitAction{AttachSession: m.session}
 				}
 				return m, tea.Quit
@@ -5177,7 +5182,9 @@ func dashboardDebugEnabled(m *Model) bool {
 }
 
 func (m Model) dashboardHelpOptions() components.DashboardHelpOptions {
-	return components.DashboardHelpOptionsFrom(m.helpVerbosity, dashboardDebugEnabled(&m))
+	opts := components.DashboardHelpOptionsFrom(m.helpVerbosity, dashboardDebugEnabled(&m))
+	opts.PopupMode = m.popupMode
+	return opts
 }
 
 func (m *Model) visiblePanelsForHelpVerbosity() []PanelID {

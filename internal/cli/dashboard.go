@@ -272,6 +272,17 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
+	// Auto-popup: if we're inside tmux AND inside the same session we're
+	// monitoring, launch as an overlay popup instead of consuming a pane.
+	// Skip if already in popup mode (--popup flag or NTM_POPUP env) to
+	// prevent nested popups.
+	if !popup && os.Getenv("NTM_POPUP") != "1" && tmux.InTmux() {
+		currentSession := tmux.GetCurrentSession()
+		if currentSession == session {
+			return launchOverlayPopup(session, "")
+		}
+	}
+
 	projectDir := ""
 	if cfg != nil {
 		projectDir = cfg.GetProjectDir(session)

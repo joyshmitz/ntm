@@ -72,11 +72,16 @@ Examples:
 func launchOverlayPopup(session, bindKey string) error {
 	t := theme.Current()
 
-	// Optionally set up the toggle keybinding
+	// Auto-setup: if the overlay key isn't bound yet, set it up on first use.
+	// Uses the explicit --bind-key if provided, otherwise defaults to F12.
+	overlayKey := "F12"
 	if bindKey != "" {
-		if err := setupOverlayBinding(bindKey); err != nil {
-			fmt.Fprintf(os.Stderr, "%s⚠%s Could not set up %s binding: %v\n",
-				colorize(t.Warning), colorize(t.Text), bindKey, err)
+		overlayKey = bindKey
+	}
+	if !isOverlayKeyBound(overlayKey) {
+		if err := setupOverlayBinding(overlayKey); err != nil {
+			fmt.Fprintf(os.Stderr, "%s⚠%s Could not auto-setup %s binding: %v\n",
+				colorize(t.Warning), colorize(t.Text), overlayKey, err)
 		}
 	}
 
@@ -87,7 +92,7 @@ func launchOverlayPopup(session, bindKey string) error {
 	if err != nil {
 		ntmBin = "ntm"
 	}
-	innerCmd := fmt.Sprintf("'%s' dashboard --popup '%s'", ntmBin, session)
+	innerCmd := fmt.Sprintf("NTM_POPUP=1 '%s' dashboard --popup '%s'", ntmBin, session)
 
 	// Launch the popup — this blocks until the popup is dismissed
 	tmuxArgs := []string{

@@ -27,6 +27,7 @@ const (
 type DashboardHelpOptions struct {
 	Verbosity DashboardHelpVerbosity
 	Debug     bool
+	PopupMode bool // Dashboard is running in a tmux popup overlay
 }
 
 func DashboardHelpOptionsFrom(verbosity string, debug bool) DashboardHelpOptions {
@@ -304,17 +305,23 @@ func DefaultDashboardHints() []KeyHint {
 // Order matters: RenderHelpBar truncates from right-to-left, so the most important hints
 // must come first.
 func DashboardHelpBarHints(opts DashboardHelpOptions) []KeyHint {
+	// In popup mode, lead with "Esc close" instead of "q quit"
+	quitHint := KeyHint{Key: "q", Desc: "quit"}
+	if opts.PopupMode {
+		quitHint = KeyHint{Key: "Esc", Desc: "close"}
+	}
+
 	switch opts.Verbosity {
 	case DashboardHelpVerbosityMinimal:
 		return []KeyHint{
-			{Key: "q", Desc: "quit"},
+			quitHint,
 			{Key: "?", Desc: "help"},
 			{Key: "↑↓", Desc: "navigate"},
 			{Key: "1-9", Desc: "select"},
 		}
 	default:
 		hints := []KeyHint{
-			{Key: "q", Desc: "quit"},
+			quitHint,
 			{Key: "?", Desc: "help"},
 			{Key: "↑↓", Desc: "navigate"},
 			{Key: "Tab", Desc: "panels"},
