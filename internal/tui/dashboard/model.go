@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -25,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
+	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	synthtui "github.com/Dicklesworthstone/ntm/internal/tui/synthesizer"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -466,4 +468,320 @@ func (m *Model) initRenderer(width int) {
 		glamour.WithWordWrap(width),
 	)
 	m.renderer = r
+}
+
+// New creates a new dashboard model.
+func New(session, projectDir string) Model {
+	t := theme.Current()
+	ic := icons.Current()
+
+	m := Model{
+		session:                    session,
+		projectDir:                 projectDir,
+		width:                      80,
+		height:                     24,
+		tier:                       layout.TierForWidth(80),
+		theme:                      t,
+		icons:                      ic,
+		compaction:                 status.NewCompactionRecoveryIntegrationDefault(),
+		paneStatus:                 make(map[int]PaneStatus),
+		detector:                   status.NewDetector(),
+		agentStatuses:              make(map[string]status.AgentStatus),
+		costInputTokens:            make(map[string]int),
+		costOutputTokens:           make(map[string]int),
+		costModels:                 make(map[string]string),
+		costLastCosts:              make(map[string]float64),
+		refreshInterval:            DefaultRefreshInterval,
+		paneRefreshInterval:        PaneRefreshInterval,
+		contextRefreshInterval:     ContextRefreshInterval,
+		alertsRefreshInterval:      AlertsRefreshInterval,
+		attentionRefreshInterval:   AttentionRefreshInterval,
+		beadsRefreshInterval:       BeadsRefreshInterval,
+		cassContextRefreshInterval: CassContextRefreshInterval,
+		scanRefreshInterval:        ScanRefreshInterval,
+		ranoNetworkRefreshInterval: 1 * time.Second,
+		rchRefreshInterval:         RCHIdleRefreshInterval,
+		dcgRefreshInterval:         DCGRefreshInterval,
+		checkpointRefreshInterval:  CheckpointRefreshInterval,
+		handoffRefreshInterval:     HandoffRefreshInterval,
+		spawnRefreshInterval:       SpawnIdleRefreshInterval,
+		mailInboxRefreshInterval:   MailInboxRefreshInterval,
+		paneOutputLines:            50,
+		paneOutputCaptureBudget:    20,
+		paneOutputCaptureCursor:    0,
+		paneOutputCache:            make(map[string]string),
+		paneOutputLastCaptured:     make(map[string]time.Time),
+		renderedOutputCache:        make(map[string]string),
+		healthStatus:               "unknown",
+		healthMessage:              "",
+		agentMailInbox:             make(map[string][]agentmail.InboxMessage),
+		agentMailInboxErrors:       make(map[string]error),
+		agentMailAgents:            make(map[string]string),
+		seenMailAttentionIDs:       make(map[int]struct{}),
+		helpVerbosity:              "full",
+		helpModel:                  newHelpModel(t),
+		cassSearch: components.NewCassSearch(func(hit cass.SearchHit) tea.Cmd {
+			return func() tea.Msg {
+				return CassSelectMsg{Hit: hit}
+			}
+		}),
+		ensembleModes:        synthtui.NewModeVisualization(),
+		toasts:               components.NewToastManager(),
+		beadsPanel:           panels.NewBeadsPanel(),
+		alertsPanel:          panels.NewAlertsPanel(),
+		attentionPanel:       panels.NewAttentionPanel(),
+		costPanel:            panels.NewCostPanel(),
+		ranoNetworkPanel:     panels.NewRanoNetworkPanel(),
+		rchPanel:             panels.NewRCHPanel(),
+		metricsPanel:         panels.NewMetricsPanel(),
+		historyPanel:         panels.NewHistoryPanel(),
+		cassPanel:            panels.NewCASSPanel(),
+		filesPanel:           panels.NewFilesPanel(),
+		timelinePanel:        panels.NewTimelinePanel(),
+		tickerPanel:          panels.NewTickerPanel(),
+		spawnPanel:           panels.NewSpawnPanel(),
+		conflictsPanel:       panels.NewConflictsPanel(),
+		rotationConfirmPanel: panels.NewRotationConfirmPanel(),
+
+		// Init() kicks off these fetches immediately; mark as fetching so the tick loop
+		// doesn't pile on duplicates if the first round is still in flight.
+		fetchingSession:     true,
+		fetchingContext:     true,
+		fetchingAlerts:      true,
+		fetchingAttention:   true,
+		fetchingBeads:       true,
+		fetchingCassContext: true,
+		fetchingMetrics:     true,
+		fetchingRouting:     true,
+		fetchingHistory:     true,
+		fetchingFileChanges: true,
+		fetchingCheckpoint:  true,
+		fetchingHandoff:     true,
+		fetchingMailInbox:   true,
+		fetchingRanoNetwork: true,
+		fetchingRCH:         true,
+		fetchingDCG:         true,
+	}
+
+	m.paneDelegate = newPaneDelegate(t, CalculateLayout(40, 1))
+	m.paneList = list.New(nil, m.paneDelegate, 40, 8)
+	m.paneList.DisableQuitKeybindings()
+	m.paneList.SetShowFilter(true)
+	m.paneList.SetShowTitle(false)
+	m.paneList.SetShowHelp(false)
+	m.paneList.SetShowPagination(false)
+	m.paneList.SetShowStatusBar(true)
+	m.paneList.SetStatusBarItemName("pane", "panes")
+	m.paneList.SetFilteringEnabled(true)
+
+	// Initialize last-fetch timestamps to start cadence after the initial fetches from Init.
+	now := time.Now()
+	m.lastPaneFetch = now
+	m.lastContextFetch = now
+	m.lastAlertsFetch = now
+	m.lastAttentionFetch = now
+	m.lastBeadsFetch = now
+	m.lastCassContextFetch = now
+	m.lastScanFetch = now
+	m.lastRanoNetworkFetch = now
+	m.lastRCHFetch = now
+	m.lastDCGFetch = now
+	m.lastCheckpointFetch = now
+	m.lastHandoffFetch = now
+	m.lastSpawnFetch = now
+	m.lastMailInboxFetch = now
+
+	// Initialize activity tracking for adaptive tick rate (fixes #32)
+	m.lastActivity = now
+	m.activityState = StateActive
+	m.reduceMotion = styles.ReducedMotionEnabled()
+	m.baseTick = 100 * time.Millisecond
+	m.idleTick = 500 * time.Millisecond
+	if m.reduceMotion {
+		m.baseTick = 250 * time.Millisecond
+		m.idleTick = 1 * time.Second
+	}
+	m.idleTimeout = 5 * time.Second
+
+	applyDashboardEnvOverrides(&m)
+	m.syncFocusRing()
+
+	// Set up conflict action handler for the conflicts panel
+	m.conflictsPanel.SetActionHandler(m.handleConflictAction)
+
+	// Setup config watcher
+	m.configSub = make(chan *config.Config, 1)
+	// We capture the channel in the closure. Since Model is copied, we must ensure
+	// we use the channel we just created, which is what m.configSub holds.
+	sub := m.configSub
+	closer, err := config.Watch(func(cfg *config.Config) {
+		select {
+		case sub <- cfg:
+		default:
+			// If channel full, drop oldest
+			select {
+			case <-sub:
+			default:
+			}
+			select {
+			case sub <- cfg:
+			default:
+			}
+		}
+	})
+	if err == nil {
+		m.configCloser = closer
+	}
+
+	m.initRenderer(40)
+	return m
+}
+
+// cleanup releases resources held by the dashboard model.
+// Must be called before tea.Quit to prevent goroutine leaks.
+func (m *Model) cleanup() {
+	if m.configCloser != nil {
+		m.configCloser()
+		m.configCloser = nil
+	}
+}
+
+func (m *Model) selectedPaneID() string {
+	if selected := m.paneList.SelectedItem(); selected != nil {
+		if item, ok := selected.(paneItem); ok {
+			return item.pane.ID
+		}
+	}
+	if m.cursor >= 0 && m.cursor < len(m.panes) {
+		return m.panes[m.cursor].ID
+	}
+	return ""
+}
+
+func (m *Model) syncCursorFromPaneList() {
+	selectedID := m.selectedPaneID()
+	if selectedID != "" {
+		for i := range m.panes {
+			if m.panes[i].ID == selectedID {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	if len(m.panes) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(m.panes) {
+		m.cursor = len(m.panes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func (m *Model) setPaneListSelectionByPaneID(paneID string) {
+	if paneID != "" {
+		if idx := findPaneIndexByID(m.paneList.Items(), paneID); idx >= 0 {
+			m.paneList.Select(idx)
+			m.syncCursorFromPaneList()
+			return
+		}
+	}
+	if len(m.panes) == 0 {
+		m.paneList.ResetSelected()
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(m.panes) {
+		m.cursor = len(m.panes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	m.paneList.Select(m.cursor)
+}
+
+func (m *Model) rebuildPaneList() tea.Cmd {
+	listWidth := maxInt(m.width/4-4, 24)
+	listHeight := contentHeightFor(m.height)
+	if listHeight < 6 {
+		listHeight = 6
+	}
+	if rowCount := len(m.panes) + 4; rowCount < listHeight {
+		listHeight = rowCount
+	}
+
+	m.paneDelegate.SetDims(CalculateLayout(listWidth, 1))
+	m.paneDelegate.SetTick(m.animTick)
+	m.paneList.SetDelegate(m.paneDelegate)
+	m.paneList.SetSize(listWidth, listHeight)
+
+	prevSelectedID := m.selectedPaneID()
+	cmd := m.paneList.SetItems(toPaneItems(m.panes, m.paneStatus, m.beadsReady, m.theme))
+	m.setPaneListSelectionByPaneID(prevSelectedID)
+	return cmd
+}
+
+// NewWithInterval creates a dashboard with custom refresh interval.
+func NewWithInterval(session, projectDir string, interval time.Duration) Model {
+	m := New(session, projectDir)
+	m.refreshInterval = interval
+	return m
+}
+
+// Init implements tea.Model.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		m.tick(),
+		m.fetchSessionDataWithOutputs(),
+		m.fetchTimelineCmd(),
+		m.fetchHealthStatus(),
+		m.fetchStatuses(),
+		m.fetchHealthCmd(),
+		m.fetchAgentMailStatus(),
+		m.fetchAgentMailInboxes(),
+		m.fetchBeadsCmd(),
+		m.fetchAlertsCmd(),
+		m.fetchAttentionCmd(),
+		m.fetchMetricsCmd(),
+		m.fetchRoutingCmd(),
+		m.fetchHistoryCmd(),
+		m.fetchFileChangesCmd(),
+		m.fetchCASSContextCmd(),
+		m.fetchCheckpointStatus(),
+		m.fetchHandoffCmd(),
+		m.fetchRanoNetworkStats(),
+		m.fetchRCHStatus(),
+		m.fetchDCGStatus(),
+		m.fetchPendingRotations(),
+		m.fetchPTHealthStatesCmd(),
+		m.subscribeToConfig(),
+	)
+}
+
+func (m *Model) nextGen(src refreshSource) uint64 {
+	m.refreshSeq[src]++
+	return m.refreshSeq[src]
+}
+
+func (m *Model) isStale(src refreshSource, gen uint64) bool {
+	return gen > 0 && gen < m.refreshSeq[src]
+}
+
+func (m *Model) markUpdated(src refreshSource, t time.Time) {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	m.lastUpdated[src] = t
+}
+
+func (m *Model) acceptUpdate(src refreshSource, gen uint64) bool {
+	if m.isStale(src, gen) {
+		return false
+	}
+	if gen > m.refreshSeq[src] {
+		m.refreshSeq[src] = gen
+	}
+	return true
 }
