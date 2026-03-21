@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,25 @@ func TestIdempotencyStoreExpiry(t *testing.T) {
 	_, _, ok := store.Get("ephemeral")
 	if ok {
 		t.Error("expected expired entry to not be found")
+	}
+}
+
+func TestNewIdempotencyStore_DoesNotSpawnCleanupGoroutine(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	stores := make([]*IdempotencyStore, 0, 64)
+	for i := 0; i < cap(stores); i++ {
+		stores = append(stores, NewIdempotencyStore(time.Hour))
+	}
+	for _, store := range stores {
+		defer store.Stop()
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	after := runtime.NumGoroutine()
+	if after > before+8 {
+		t.Fatalf("NewIdempotencyStore spawned unexpected background goroutines: before=%d after=%d", before, after)
 	}
 }
 

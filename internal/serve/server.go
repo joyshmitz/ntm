@@ -177,11 +177,12 @@ const (
 
 // IdempotencyStore caches responses by idempotency key.
 type IdempotencyStore struct {
-	mu       sync.RWMutex
-	entries  map[string]*idempotencyEntry
-	ttl      time.Duration
-	stop     chan struct{}
-	stopOnce sync.Once
+	mu        sync.RWMutex
+	entries   map[string]*idempotencyEntry
+	ttl       time.Duration
+	stop      chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 type idempotencyEntry struct {
@@ -195,14 +196,17 @@ func NewIdempotencyStore(ttl time.Duration) *IdempotencyStore {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	store := &IdempotencyStore{
+	return &IdempotencyStore{
 		entries: make(map[string]*idempotencyEntry),
 		ttl:     ttl,
 		stop:    make(chan struct{}),
 	}
-	// Start cleanup goroutine
-	go store.cleanup()
-	return store
+}
+
+func (s *IdempotencyStore) startCleanup() {
+	s.startOnce.Do(func() {
+		go s.cleanup()
+	})
 }
 
 // Stop terminates the cleanup goroutine. Call this when the store is no longer needed.
@@ -445,6 +449,7 @@ type WSHub struct {
 	seq          int64
 	seqMu        sync.Mutex
 	done         chan struct{}
+	stopOnce     sync.Once
 	redactionCfg *RedactionConfig
 	redactionMu  sync.RWMutex
 }
@@ -469,16 +474,18 @@ func (h *WSHub) Run() {
 		case client := <-h.register:
 			h.clientsMu.Lock()
 			h.clients[client] = struct{}{}
+			total := len(h.clients)
 			h.clientsMu.Unlock()
-			log.Printf("ws client connected id=%s total=%d", client.id, len(h.clients))
+			log.Printf("ws client connected id=%s total=%d", client.id, total)
 		case client := <-h.unregister:
 			h.clientsMu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
+			total := len(h.clients)
 			h.clientsMu.Unlock()
-			log.Printf("ws client disconnected id=%s total=%d", client.id, len(h.clients))
+			log.Printf("ws client disconnected id=%s total=%d", client.id, total)
 		case event := <-h.broadcast:
 			h.broadcastEvent(event)
 		}
@@ -487,7 +494,15 @@ func (h *WSHub) Run() {
 
 // Stop shuts down the hub.
 func (h *WSHub) Stop() {
-	close(h.done)
+	h.stopOnce.Do(func() {
+		close(h.done)
+		h.clientsMu.Lock()
+		defer h.clientsMu.Unlock()
+		for client := range h.clients {
+			delete(h.clients, client)
+			close(client.send)
+		}
+	})
 }
 
 // nextSeq returns the next sequence number.
@@ -569,9 +584,34 @@ func (h *WSHub) Publish(topic, eventType string, data interface{}) {
 		Data:      data,
 	}
 	select {
+	case <-h.done:
+		return
 	case h.broadcast <- event:
 	default:
 		log.Printf("ws broadcast buffer full, dropping event topic=%s", topic)
+	}
+}
+
+func (h *WSHub) RegisterClient(client *WSClient) bool {
+	if client == nil {
+		return false
+	}
+	select {
+	case <-h.done:
+		return false
+	case h.register <- client:
+		return true
+	}
+}
+
+func (h *WSHub) UnregisterClient(client *WSClient) {
+	if client == nil {
+		return
+	}
+	select {
+	case <-h.done:
+		return
+	case h.unregister <- client:
 	}
 }
 
@@ -784,6 +824,7 @@ func New(cfg Config) *Server {
 		jobStore:           NewJobStore(),
 		wsHub:              NewWSHub(),
 	}
+	s.idempotencyStore.startCleanup()
 
 	// Initialize pane output streaming
 	streamCfg := tmux.DefaultPaneStreamerConfig()
@@ -1303,20 +1344,27 @@ func sanitizeRequestID(id string) string {
 	if id == "" {
 		return ""
 	}
-	// Allow alphanumeric and common separators
-	// Truncate to reasonable length (e.g., 64 chars)
-	if len(id) > 64 {
-		id = id[:64]
+	var b strings.Builder
+	b.Grow(min(len(id), 64))
+	for _, r := range id {
+		if b.Len() >= 64 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.' || r == '/':
+			b.WriteRune(r)
+		case r == ':':
+			// Preserve namespace-like IDs while avoiding colon semantics in logs/headers.
+			b.WriteByte('.')
+		}
 	}
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		if r == '-' || r == '_' || r == '.' || r == '/' || r == ':' {
-			return '-'
-		}
-		return -1 // Drop invalid chars
-	}, id)
+	return b.String()
 }
 
 // loggingMiddleware logs HTTP requests.
@@ -3510,7 +3558,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register client with hub
-	s.wsHub.register <- client
+	if !s.wsHub.RegisterClient(client) {
+		if err := conn.Close(); err != nil {
+			log.Printf("ws close after failed register id=%s: %v", clientID, err)
+		}
+		return
+	}
 
 	// Start read and write pumps
 	go client.writePump()
@@ -3537,7 +3590,7 @@ var authContextKey = ctxKeyAuth{}
 // readPump reads messages from the WebSocket connection.
 func (c *WSClient) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		c.hub.UnregisterClient(c)
 		c.closeOnce.Do(func() {
 			if err := c.conn.Close(); err != nil {
 				log.Printf("ws close error id=%s: %v", c.id, err)
@@ -3773,6 +3826,23 @@ func (c *WSClient) canSubscribe(topic string) bool {
 	return true
 }
 
+func (c *WSClient) trySend(data []byte, onDrop func()) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	select {
+	case c.send <- data:
+		return true
+	default:
+		if onDrop != nil {
+			onDrop()
+		}
+		return false
+	}
+}
+
 // sendError sends a WebSocket error frame.
 func (c *WSClient) sendError(requestID, code, message string) {
 	errMsg := WSError{
@@ -3786,11 +3856,9 @@ func (c *WSClient) sendError(requestID, code, message string) {
 	if err != nil {
 		return
 	}
-	select {
-	case c.send <- data:
-	default:
+	c.trySend(data, func() {
 		log.Printf("ws client buffer full, dropping error id=%s", c.id)
-	}
+	})
 }
 
 // sendAck sends a WebSocket acknowledgment frame.
@@ -3805,11 +3873,9 @@ func (c *WSClient) sendAck(requestID string, data map[string]interface{}) {
 	if err != nil {
 		return
 	}
-	select {
-	case c.send <- msg:
-	default:
+	c.trySend(msg, func() {
 		log.Printf("ws client buffer full, dropping ack id=%s", c.id)
-	}
+	})
 }
 
 // sendPong sends a WebSocket pong response.
@@ -3823,11 +3889,9 @@ func (c *WSClient) sendPong(requestID string) {
 	if err != nil {
 		return
 	}
-	select {
-	case c.send <- data:
-	default:
+	c.trySend(data, func() {
 		// Buffer full, skip
-	}
+	})
 }
 
 // WSHub returns the WebSocket hub for testing.
@@ -4316,5 +4380,11 @@ func parseCSVParam(value string) []string {
 func (s *Server) Stop() {
 	if s.idempotencyStore != nil {
 		s.idempotencyStore.Stop()
+	}
+	if s.wsHub != nil {
+		s.wsHub.Stop()
+	}
+	if s.streamManager != nil {
+		s.streamManager.StopAll()
 	}
 }

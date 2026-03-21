@@ -1490,6 +1490,75 @@ func TestWSHub(t *testing.T) {
 	}
 }
 
+func TestWSHubRegisterClientAfterStop(t *testing.T) {
+	hub := NewWSHub()
+	hub.Stop()
+
+	client := &WSClient{
+		id:     "stopped-client",
+		hub:    hub,
+		send:   make(chan []byte, 1),
+		topics: make(map[string]struct{}),
+	}
+
+	if ok := hub.RegisterClient(client); ok {
+		t.Fatal("RegisterClient() on stopped hub = true, want false")
+	}
+}
+
+func TestWSHubUnregisterClientAfterStopDoesNotBlock(t *testing.T) {
+	hub := NewWSHub()
+	hub.Stop()
+
+	client := &WSClient{
+		id:     "stopped-client",
+		hub:    hub,
+		send:   make(chan []byte, 1),
+		topics: make(map[string]struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		hub.UnregisterClient(client)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("UnregisterClient() blocked after hub stop")
+	}
+}
+
+func TestWSHubStopClosesClientChannelsAndClearsClients(t *testing.T) {
+	hub := NewWSHub()
+	client := &WSClient{
+		id:     "stop-client",
+		hub:    hub,
+		send:   make(chan []byte, 1),
+		topics: make(map[string]struct{}),
+	}
+
+	hub.clientsMu.Lock()
+	hub.clients[client] = struct{}{}
+	hub.clientsMu.Unlock()
+
+	hub.Stop()
+
+	if got := hub.ClientCount(); got != 0 {
+		t.Fatalf("ClientCount() after Stop = %d, want 0", got)
+	}
+
+	select {
+	case _, ok := <-client.send:
+		if ok {
+			t.Fatal("client send channel still open after Stop")
+		}
+	default:
+		t.Fatal("client send channel was not closed by Stop")
+	}
+}
+
 func TestTopicMatching(t *testing.T) {
 	tests := []struct {
 		pattern string

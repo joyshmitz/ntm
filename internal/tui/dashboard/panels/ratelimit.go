@@ -158,6 +158,10 @@ func (m *RateLimitPanel) View() string {
 
 // formatAgentRow formats a single agent's status line
 func (m *RateLimitPanel) formatAgentRow(agent robot.AgentOAuthHealth, width int, t theme.Theme) string {
+	if width <= 0 {
+		return ""
+	}
+
 	// Format: "cc-1: OAuth=✓ Rate=OK  Last=2m ago"
 	var sb strings.Builder
 
@@ -194,13 +198,7 @@ func (m *RateLimitPanel) formatAgentRow(agent robot.AgentOAuthHealth, width int,
 		sb.WriteString(countStyle.Render(fmt.Sprintf(" (%d limits)", agent.RateLimitCount)))
 	}
 
-	// Truncate to width
-	line := sb.String()
-	if len(line) > width-2 {
-		line = line[:width-5] + "..."
-	}
-
-	return line
+	return layout.TruncateWidthDefault(sb.String(), max(1, width-2))
 }
 
 // shortAgentType returns a short agent type identifier

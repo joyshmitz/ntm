@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,9 +26,80 @@ import (
 )
 
 const (
-	attentionPanelMaxItems   = 10
-	attentionPanelReplayHint = 64
+	attentionPanelMaxItems     = 10
+	attentionPanelReplayHint   = 64
+	spawnWizardProgressToastID = "spawn-wizard-progress"
 )
+
+var dashboardRunAddAgents = func(ctx context.Context, projectDir, session string, result panels.SpawnWizardResult) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate ntm executable: %w", err)
+	}
+
+	args := []string{"add", session}
+	if result.CCCount > 0 {
+		args = append(args, fmt.Sprintf("--cc=%d", result.CCCount))
+	}
+	if result.CodCount > 0 {
+		args = append(args, fmt.Sprintf("--cod=%d", result.CodCount))
+	}
+	if result.GmiCount > 0 {
+		args = append(args, fmt.Sprintf("--gmi=%d", result.GmiCount))
+	}
+	if len(args) == 2 {
+		return "", fmt.Errorf("no agents requested")
+	}
+
+	cmd := exec.CommandContext(ctx, exe, args...)
+	if strings.TrimSpace(projectDir) != "" {
+		cmd.Dir = projectDir
+	}
+	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed != "" {
+			return trimmed, fmt.Errorf("ntm add failed: %w", err)
+		}
+		return trimmed, fmt.Errorf("ntm add failed: %w", err)
+	}
+	return trimmed, nil
+}
+
+func (m Model) runSpawnWizardAdd(result panels.SpawnWizardResult) tea.Cmd {
+	session := m.session
+	projectDir := m.projectDir
+	added := result.CCCount + result.CodCount + result.GmiCount
+
+	return func() tea.Msg {
+		if added <= 0 {
+			return SpawnWizardExecResultMsg{
+				Err: fmt.Errorf("no agents requested"),
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		output, err := dashboardRunAddAgents(ctx, projectDir, session, result)
+		return SpawnWizardExecResultMsg{
+			Added:  added,
+			Output: output,
+			Err:    err,
+		}
+	}
+}
+
+func summarizeSpawnWizardOutput(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return line
+	}
+	return ""
+}
 
 // fetchBeadsCmd calls bv.GetBeadsSummary
 func (m *Model) fetchBeadsCmd() tea.Cmd {

@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 func TestMin(t *testing.T) {
@@ -210,6 +213,29 @@ func TestRateLimitPanel_SetData(t *testing.T) {
 	}
 	if p.err != nil {
 		t.Error("err should be nil")
+	}
+}
+
+func TestRateLimitPanel_FormatAgentRow_TruncatesSafelyForNarrowWidth(t *testing.T) {
+	t.Parallel()
+
+	p := NewRateLimitPanel()
+	agent := robot.AgentOAuthHealth{
+		AgentType:         "claude",
+		Pane:              12,
+		OAuthStatus:       robot.OAuthExpired,
+		RateLimitStatus:   robot.RateLimitLimited,
+		LastActivitySec:   90,
+		CooldownRemaining: 45,
+		RateLimitCount:    3,
+	}
+
+	got := p.formatAgentRow(agent, 4, theme.Current())
+	if got == "" {
+		t.Fatal("expected non-empty truncated row")
+	}
+	if lipgloss.Width(got) > 4 {
+		t.Fatalf("expected row width <= 4, got %d for %q", lipgloss.Width(got), got)
 	}
 }
 

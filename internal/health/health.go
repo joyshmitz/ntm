@@ -184,8 +184,7 @@ func isSessionMissing(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "can't find session") ||
 		strings.Contains(msg, "no server running") ||
-		strings.Contains(msg, "no sessions") ||
-		strings.Contains(msg, "error connecting to")
+		strings.Contains(msg, "no sessions")
 }
 
 // checkAgent performs health checks on a single agent pane

@@ -231,6 +231,12 @@ func RenderMiniBar(value float64, width int, t theme.Theme) string {
 // RenderContextMiniBar renders context usage with warning indicator
 // When context is >80%, warning indicators shimmer to draw attention
 func RenderContextMiniBar(percent float64, width int, tick int, t theme.Theme) string {
+	return RenderContextMiniBarWithHistory(percent, nil, width, tick, t)
+}
+
+// RenderContextMiniBarWithHistory renders context usage with optional trend sparkline
+// [tui-upgrade: bd-3btd6] - Enhanced progress bar with gradient and sparkline trend
+func RenderContextMiniBarWithHistory(percent float64, history []float64, width int, tick int, t theme.Theme) string {
 	if percent > 100 {
 		percent = 100
 	}
@@ -238,21 +244,51 @@ func RenderContextMiniBar(percent float64, width int, tick int, t theme.Theme) s
 		percent = 0
 	}
 
-	bar := styles.ShimmerProgressBar(percent/100, width-4, "█", "░", tick, string(t.Green), string(t.Blue), string(t.Yellow), string(t.Red))
+	// Calculate bar and sparkline widths
+	barWidth := width - 4 // Reserve 4 chars for warning indicator
+	sparkWidth := 0
+	if len(history) >= 3 && barWidth > 12 {
+		sparkWidth = min(6, len(history), barWidth/3)
+		barWidth = barWidth - sparkWidth - 1 // -1 for space separator
+	}
+
+	// Create gradient colors based on usage level.
+	// Keep this to two colors so styles.ProgressBar uses bubbles/progress.
+	var gradientColors []string
+	switch {
+	case percent >= 90:
+		gradientColors = []string{string(t.Peach), string(t.Red)}
+	case percent >= 80:
+		gradientColors = []string{string(t.Yellow), string(t.Peach)}
+	case percent >= 60:
+		gradientColors = []string{string(t.Blue), string(t.Yellow)}
+	default:
+		gradientColors = []string{string(t.Green), string(t.Teal)}
+	}
+
+	bar := styles.ProgressBar(percent/100, barWidth, "█", "░", gradientColors...)
+
+	// Add mini sparkline for context growth trend if history available
+	var sparkline string
+	if sparkWidth > 0 {
+		spark := components.SparklineStyled(history, sparkWidth)
+		sparkline = " " + spark
+	}
 
 	// Add warning icon for high usage with shimmer effect
 	var suffix string
-	if percent >= 90 {
+	switch {
+	case percent >= 90:
 		// Critical: shimmer the warning in red/orange gradient
 		suffix = " " + styles.Shimmer("!!", tick, string(t.Red), string(t.Maroon), string(t.Red))
-	} else if percent >= 80 {
+	case percent >= 80:
 		// Warning: shimmer the warning in yellow/orange gradient
 		suffix = " " + styles.Shimmer("!", tick, string(t.Yellow), string(t.Peach), string(t.Yellow))
-	} else {
+	default:
 		suffix = "  "
 	}
 
-	return bar + suffix
+	return bar + sparkline + suffix
 }
 
 // PaneTableRow represents a single row in the pane table
@@ -266,6 +302,7 @@ type PaneTableRow struct {
 	HealthClass      pt.Classification // Health classification from process_triage
 	HealthSince      time.Time         // When this health state started
 	ContextPct       float64
+	ContextHistory   []float64 // Context usage history for trend sparkline [tui-upgrade: bd-3btd6]
 	Model            string
 	Command          string
 	CurrentBead      string
@@ -300,22 +337,23 @@ func BuildPaneTableRows(
 		st, hasStatus := statuses[pane.ID]
 		ps := paneStatus[pane.Index]
 		row := PaneTableRow{
-			Tick:          tick,
-			Index:         pane.Index,
-			Type:          string(pane.Type),
-			Variant:       pane.Variant,
-			ModelVariant:  pane.Variant,
-			Title:         pane.Title,
-			Status:        "unknown",
-			HealthClass:   pt.ClassUnknown,
-			Command:       pane.Command,
-			FileChanges:   changeCounts[paneKey(pane)],
-			TokenVelocity: 0,
-			LocalTokensPS: 0,
-			ContextPct:    ps.ContextPercent,
-			Model:         ps.ContextModel,
-			IsCompacted:   ps.LastCompaction != nil,
-			BorderColor:   AgentBorderColor(string(pane.Type), t),
+			Tick:           tick,
+			Index:          pane.Index,
+			Type:           string(pane.Type),
+			Variant:        pane.Variant,
+			ModelVariant:   pane.Variant,
+			Title:          pane.Title,
+			Status:         "unknown",
+			HealthClass:    pt.ClassUnknown,
+			Command:        pane.Command,
+			FileChanges:    changeCounts[paneKey(pane)],
+			TokenVelocity:  0,
+			LocalTokensPS:  0,
+			ContextPct:     ps.ContextPercent,
+			ContextHistory: append([]float64(nil), ps.ContextHistory...), // [tui-upgrade: bd-3btd6]
+			Model:          ps.ContextModel,
+			IsCompacted:    ps.LastCompaction != nil,
+			BorderColor:    AgentBorderColor(string(pane.Type), t),
 		}
 
 		// Populate health classification from process_triage
@@ -470,16 +508,17 @@ func activityCountBadge(state string, count int, t theme.Theme) string {
 // when upstream data is unavailable.
 func BuildPaneTableRow(pane tmux.Pane, ps PaneStatus, beads []bv.BeadPreview, fileChanges []tracker.RecordedFileChange) PaneTableRow {
 	row := PaneTableRow{
-		Index:        pane.Index,
-		Type:         string(pane.Type),
-		Variant:      pane.Variant,
-		ModelVariant: pane.Variant,
-		Title:        pane.Title,
-		Status:       ps.State,
-		ContextPct:   ps.ContextPercent,
-		Model:        ps.ContextModel,
-		Command:      pane.Command,
-		IsCompacted:  ps.State == "compacted",
+		Index:          pane.Index,
+		Type:           string(pane.Type),
+		Variant:        pane.Variant,
+		ModelVariant:   pane.Variant,
+		Title:          pane.Title,
+		Status:         ps.State,
+		ContextPct:     ps.ContextPercent,
+		ContextHistory: append([]float64(nil), ps.ContextHistory...),
+		Model:          ps.ContextModel,
+		Command:        pane.Command,
+		IsCompacted:    ps.State == "compacted",
 	}
 
 	// Prefer context model as variant when pane title lacks one.
@@ -640,9 +679,9 @@ func RenderPaneRow(row PaneTableRow, dims LayoutDimensions, t theme.Theme) strin
 	}
 	parts = append(parts, titleStyle.Width(titleWidth).Render(title))
 
-	// Context bar (tablet and up)
+	// Context bar (tablet and up) [tui-upgrade: bd-3btd6]
 	if dims.ShowContextCol {
-		contextBar := RenderContextMiniBar(row.ContextPct, 10, row.Tick, t)
+		contextBar := RenderContextMiniBarWithHistory(row.ContextPct, row.ContextHistory, 10, row.Tick, t)
 		parts = append(parts, contextBar)
 	}
 
@@ -677,7 +716,7 @@ func RenderPaneRow(row PaneTableRow, dims LayoutDimensions, t theme.Theme) strin
 
 	// Render second line for rich content (Wide+)
 	// Show bead info, file changes, etc.
-	if dims.Mode >= LayoutWide && (row.CurrentBead != "" || row.FileChanges > 0 || row.TokenVelocity > 0 || row.LocalTokensPS > 0 || row.LocalMemoryBytes > 0) {
+	if dims.Mode >= LayoutWide && (row.CurrentBead != "" || row.FileChanges > 0 || row.TokenVelocity > 0 || row.LocalTokensPS > 0 || row.LocalMemoryBytes > 0 || len(row.ContextHistory) >= 3) {
 		var subParts []string
 
 		// Indent to align with title (approx 8 chars: sel(1)+space+idx(2)+icon(1)+status(1)+spaces)
@@ -685,6 +724,9 @@ func RenderPaneRow(row PaneTableRow, dims LayoutDimensions, t theme.Theme) strin
 
 		if badge := activityBadge(row.Status, t); badge != "" {
 			subParts = append(subParts, badge)
+		}
+		if len(row.ContextHistory) >= 3 {
+			subParts = append(subParts, components.SparklineWithLabel("ctx", row.ContextHistory, 18, fmt.Sprintf("%.0f%%", row.ContextPct)))
 		}
 		if row.CurrentBead != "" {
 			beadText := row.CurrentBead

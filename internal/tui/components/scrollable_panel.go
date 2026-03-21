@@ -2,8 +2,14 @@
 package components
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // ScrollablePanel wraps bubbles/viewport for scrollable content areas.
@@ -14,8 +20,17 @@ type ScrollablePanel struct {
 	lastContent string // Track content for change detection
 }
 
+func clampViewportDimension(value int) int {
+	if value < 1 {
+		return 1
+	}
+	return value
+}
+
 // NewScrollablePanel creates a new scrollable panel with the given dimensions.
 func NewScrollablePanel(width, height int) *ScrollablePanel {
+	width = clampViewportDimension(width)
+	height = clampViewportDimension(height)
 	vp := viewport.New(width, height)
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = 3
@@ -37,6 +52,8 @@ func (sp *ScrollablePanel) SetContent(s string) {
 
 // SetSize updates the viewport dimensions.
 func (sp *ScrollablePanel) SetSize(width, height int) {
+	width = clampViewportDimension(width)
+	height = clampViewportDimension(height)
 	if width == sp.vp.Width && height == sp.vp.Height {
 		return
 	}
@@ -139,6 +156,14 @@ func (sp *ScrollablePanel) YOffset() int {
 	return sp.vp.YOffset
 }
 
+// SetYOffset updates the current vertical scroll position.
+func (sp *ScrollablePanel) SetYOffset(offset int) {
+	if offset < 0 {
+		offset = 0
+	}
+	sp.vp.SetYOffset(offset)
+}
+
 // LineDown scrolls down by n lines.
 func (sp *ScrollablePanel) LineDown(n int) {
 	sp.vp.LineDown(n)
@@ -188,4 +213,80 @@ func (sp *ScrollablePanel) ScrollState() ScrollState {
 // Uses the existing ScrollState helper for consistency.
 func (sp *ScrollablePanel) ScrollIndicator() string {
 	return sp.ScrollState().Indicator()
+}
+
+// ScrollPercentLabel returns a compact percent badge for the current position.
+// When includeIndicator is true, the badge also carries the current arrow cue.
+func (sp *ScrollablePanel) ScrollPercentLabel(includeIndicator bool) string {
+	if !sp.NeedsScroll() {
+		return ""
+	}
+
+	pct := int(math.Round(sp.ScrollPercent() * 100))
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+
+	label := fmt.Sprintf("%3d%%", pct)
+	if includeIndicator {
+		if indicator := sp.ScrollIndicator(); indicator != "" {
+			label = indicator + " " + label
+		}
+	}
+
+	t := theme.Current()
+	return lipgloss.NewStyle().
+		Foreground(t.Base).
+		Background(t.Surface2).
+		Bold(true).
+		Padding(0, 1).
+		Render(label)
+}
+
+// RenderWithIndicators returns the viewport content with a right-aligned
+// overflow footer that includes both directional arrows and a percent badge.
+func (sp *ScrollablePanel) RenderWithIndicators(width int) string {
+	view := sp.View()
+	if !sp.NeedsScroll() {
+		return view
+	}
+
+	if width <= 0 {
+		width = sp.Width()
+	}
+	if width < 1 {
+		width = 1
+	}
+
+	footer := ScrollFooter(sp.ScrollState(), width)
+	badge := sp.ScrollPercentLabel(false)
+	if badge != "" {
+		badgeWidth := lipgloss.Width(badge)
+		footerWidth := lipgloss.Width(footer)
+		switch {
+		case footer == "":
+			footer = badge
+		case width > badgeWidth+1 && footerWidth+badgeWidth+1 <= width:
+			leftWidth := width - badgeWidth - 1
+			footer = lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				lipgloss.NewStyle().Width(leftWidth).Render(footer),
+				" ",
+				badge,
+			)
+		default:
+			footer = sp.ScrollPercentLabel(true)
+		}
+	}
+
+	if footer == "" {
+		return view
+	}
+	if view == "" {
+		return footer
+	}
+	return view + "\n" + footer
 }

@@ -39,6 +39,8 @@ type MetricsPanel struct {
 	expanded   map[string]bool
 	lastLogged MetricsData
 	theme      theme.Theme
+	scroll     *components.ScrollablePanel
+	lastBody   string
 }
 
 // metricsConfig returns the configuration for the metrics panel.
@@ -60,6 +62,7 @@ func NewMetricsPanel() *MetricsPanel {
 		PanelBase: NewPanelBase(metricsConfig()),
 		theme:     theme.Current(),
 		expanded:  map[string]bool{},
+		scroll:    components.NewScrollablePanel(30, 8),
 	}
 }
 
@@ -70,23 +73,37 @@ func (m *MetricsPanel) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *MetricsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if !m.IsFocused() {
+		return m, nil
+	}
+
+	handled := false
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if !m.IsFocused() {
-			return m, nil
-		}
 		switch strings.ToLower(msg.String()) {
 		case "c":
 			m.toggleExpanded("coverage")
+			handled = true
 		case "r":
 			m.toggleExpanded("redundancy")
+			handled = true
 		case "v":
 			m.toggleExpanded("velocity")
+			handled = true
 		case "x":
 			m.toggleExpanded("conflicts")
+			handled = true
 		}
 	}
-	return m, nil
+	if handled {
+		return m, nil
+	}
+	if m.scroll == nil {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.scroll, cmd = m.scroll.Update(msg)
+	return m, cmd
 }
 
 // SetData updates the panel data.
@@ -132,6 +149,11 @@ func (m *MetricsPanel) Keybindings() []Keybinding {
 			Action:      "toggle_conflicts",
 		},
 	}
+}
+
+// HandlesOwnHeight returns true because metrics content is viewport-managed.
+func (m *MetricsPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 // View renders the panel.
@@ -183,20 +205,38 @@ func (m *MetricsPanel) View() string {
 		content.WriteString(components.ErrorState(m.err.Error(), "Press r to retry", w-4) + "\n")
 	}
 
-	sections := []string{
+	bodySections := []string{
 		m.renderCoverageMap(),
 		m.renderRedundancy(),
 		m.renderVelocity(),
 		m.renderConflicts(),
 	}
+	body := strings.Join(bodySections, "\n\n")
 
-	content.WriteString(strings.Join(sections, "\n\n") + "\n")
-
-	if footer := components.RenderFreshnessFooter(components.FreshnessOptions{
+	footer := components.RenderFreshnessFooter(components.FreshnessOptions{
 		LastUpdate:      m.LastUpdate(),
 		RefreshInterval: m.Config().RefreshInterval,
 		Width:           w - 4,
-	}); footer != "" {
+	})
+
+	bodyHeight := h - lipgloss.Height(headerStyle.Render(title)) - 4
+	if footer != "" {
+		bodyHeight -= lipgloss.Height(footer) + 1
+	}
+	if bodyHeight < 3 {
+		bodyHeight = 3
+	}
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(w-4, bodyHeight)
+	}
+	m.scroll.SetSize(w-4, bodyHeight)
+	if body != m.lastBody {
+		m.scroll.SetContent(body)
+		m.lastBody = body
+	}
+	content.WriteString(m.scroll.RenderWithIndicators(w-4) + "\n")
+
+	if footer != "" {
 		content.WriteString(footer + "\n")
 	}
 

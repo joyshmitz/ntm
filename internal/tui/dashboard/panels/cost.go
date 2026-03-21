@@ -60,6 +60,8 @@ type CostPanel struct {
 	err       error
 	table     table.Model
 	tableInit bool
+	scroll    *components.ScrollablePanel
+	lastBody  string
 }
 
 func costConfig() PanelConfig {
@@ -78,13 +80,19 @@ func NewCostPanel() *CostPanel {
 	return &CostPanel{
 		PanelBase: NewPanelBase(costConfig()),
 		theme:     theme.Current(),
+		scroll:    components.NewScrollablePanel(30, 8),
 	}
 }
 
 func (c *CostPanel) Init() tea.Cmd { return nil }
 
 func (c *CostPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	return c, nil
+	if !c.IsFocused() || c.scroll == nil {
+		return c, nil
+	}
+	var cmd tea.Cmd
+	c.scroll, cmd = c.scroll.Update(msg)
+	return c, cmd
 }
 
 func (c *CostPanel) SetData(data CostPanelData, err error) {
@@ -118,6 +126,11 @@ func (c *CostPanel) HasData() bool {
 		return true
 	}
 	return false
+}
+
+// HandlesOwnHeight returns true because the cost table is viewport-managed.
+func (c *CostPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 func (c *CostPanel) View() string {
@@ -189,36 +202,20 @@ func (c *CostPanel) View() string {
 		return boxStyle.Render(FitToHeight(content.String(), h-4))
 	}
 
-	content.WriteString("\n")
-
 	innerWidth := w - 4
 	tableWidth := innerWidth
 	if tableWidth < 0 {
 		tableWidth = 0
 	}
 
-	// Height budget: header + totals + footer; keep the table compact.
-	availRows := h - 7
-	if availRows < 1 {
-		availRows = 1
-	}
-
-	// Build table columns and rows using bubbles/table
-	c.initCostTable(tableWidth, availRows)
-	content.WriteString(c.table.View() + "\n")
-
-	if overflow := len(c.data.Agents) - availRows; overflow > 0 {
-		content.WriteString(lipgloss.NewStyle().Foreground(t.Overlay).Render(fmt.Sprintf("+%d more", overflow)) + "\n")
-	}
-
-	content.WriteString("\n")
-
 	// Totals
 	totalLine := fmt.Sprintf("Session Total: %s", cost.FormatCost(c.data.SessionTotalUSD))
 	if c.data.LastHourUSD > 0 {
 		totalLine += fmt.Sprintf("  (1h: %s)", cost.FormatCost(c.data.LastHourUSD))
 	}
-	content.WriteString(lipgloss.NewStyle().Foreground(t.Text).Bold(true).Render(totalLine) + "\n")
+	totals := []string{
+		lipgloss.NewStyle().Foreground(t.Text).Bold(true).Render(totalLine),
+	}
 
 	if c.data.DailyBudgetUSD > 0 {
 		remaining := c.data.DailyBudgetUSD - c.data.BudgetUsedUSD
@@ -237,14 +234,44 @@ func (c *CostPanel) View() string {
 		}
 
 		budgetLine := fmt.Sprintf("Budget Left: %s  (limit: %s)", remainingStr, cost.FormatCost(c.data.DailyBudgetUSD))
-		content.WriteString(lipgloss.NewStyle().Foreground(budgetColor).Bold(true).Render(budgetLine) + "\n")
+		totals = append(totals, lipgloss.NewStyle().Foreground(budgetColor).Bold(true).Render(budgetLine))
 	}
 
-	if footer := components.RenderFreshnessFooter(components.FreshnessOptions{
+	footer := components.RenderFreshnessFooter(components.FreshnessOptions{
 		LastUpdate:      c.LastUpdate(),
 		RefreshInterval: c.Config().RefreshInterval,
 		Width:           w - 4,
-	}); footer != "" {
+	})
+
+	innerHeight := h - 4
+	headerHeight := lipgloss.Height(headerStyle.Render(title)) + 1
+	reservedHeight := headerHeight + len(totals) + 1
+	if footer != "" {
+		reservedHeight += lipgloss.Height(footer)
+	}
+	bodyHeight := innerHeight - reservedHeight
+	if bodyHeight < 3 {
+		bodyHeight = 3
+	}
+
+	// Build the full table and let the shared scrollable viewport handle overflow.
+	c.initCostTable(tableWidth, len(c.data.Agents))
+	if c.scroll == nil {
+		c.scroll = components.NewScrollablePanel(innerWidth, bodyHeight)
+	}
+	c.scroll.SetSize(innerWidth, bodyHeight)
+	body := c.table.View()
+	if body != c.lastBody {
+		c.scroll.SetContent(body)
+		c.lastBody = body
+	}
+	content.WriteString(c.scroll.RenderWithIndicators(innerWidth) + "\n")
+
+	for _, line := range totals {
+		content.WriteString(line + "\n")
+	}
+
+	if footer != "" {
 		content.WriteString(footer + "\n")
 	}
 

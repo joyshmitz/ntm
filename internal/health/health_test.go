@@ -1,6 +1,7 @@
 package health
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -129,6 +130,32 @@ func TestCalculateStatus(t *testing.T) {
 	h.Activity = ActivityStale
 	if s := calculateStatus(h); s != StatusWarning {
 		t.Errorf("Expected Warning for stale activity, got %v", s)
+	}
+}
+
+func TestIsSessionMissing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "cant find session", err: errors.New("can't find session: ntm"), want: true},
+		{name: "no server running", err: errors.New("no server running on /tmp/tmux-1000/default"), want: true},
+		{name: "no sessions", err: errors.New("no sessions"), want: true},
+		{name: "transport failure", err: errors.New("error connecting to host"), want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSessionMissing(tt.err); got != tt.want {
+				t.Fatalf("isSessionMissing(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

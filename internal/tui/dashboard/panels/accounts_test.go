@@ -1,6 +1,7 @@
 package panels
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -256,5 +257,43 @@ func TestAccountsPanel_ViewErrorState(t *testing.T) {
 	view := panel.View()
 	if view == "" {
 		t.Error("View should not be empty for error state")
+	}
+}
+
+func TestAccountsPanel_ViewTruncatesLongEmailOnNarrowWidth(t *testing.T) {
+	panel := NewAccountsPanel()
+	panel.SetSize(22, 12)
+
+	longEmail := "very-long-email-address@example.com"
+	panel.SetData(AccountsData{
+		Status: &tools.CAAMStatus{
+			Available:     true,
+			AccountsCount: 1,
+			Providers:     []string{"claude"},
+			Accounts: []tools.CAAMAccount{
+				{ID: "acc1", Provider: "claude", Email: longEmail, Active: true},
+			},
+		},
+		Available: true,
+	})
+
+	view := panel.View()
+	if view == "" {
+		t.Fatal("View should not be empty")
+	}
+	if strings.Contains(view, longEmail) {
+		t.Fatalf("expected long email to be truncated in %q", view)
+	}
+	if !strings.Contains(view, "…") {
+		t.Fatalf("expected truncated email indicator in %q", view)
+	}
+}
+
+func TestAccountsPanel_ViewZeroSize(t *testing.T) {
+	panel := NewAccountsPanel()
+	panel.SetSize(0, 0)
+
+	if view := panel.View(); view != "" {
+		t.Fatalf("expected empty view for zero-size panel, got %q", view)
 	}
 }

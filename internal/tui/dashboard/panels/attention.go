@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -41,12 +40,19 @@ type AttentionItem struct {
 	Cursor        int64  // Event cursor for tracking
 }
 
+type attentionLineRange struct {
+	start int
+	end   int
+}
+
 // AttentionPanel displays attention feed items requiring operator response.
 type AttentionPanel struct {
 	PanelBase
 	items         []AttentionItem
 	feedAvailable bool
-	viewport      viewport.Model
+	scroll        *components.ScrollablePanel
+	lastBodyHash  string
+	lineRanges    []attentionLineRange
 	cursor        int // Selected item index
 
 	now func() time.Time
@@ -54,10 +60,9 @@ type AttentionPanel struct {
 
 // NewAttentionPanel creates a new attention panel.
 func NewAttentionPanel() *AttentionPanel {
-	vp := viewport.New(25, 6)
 	return &AttentionPanel{
 		PanelBase:     NewPanelBase(attentionConfig()),
-		viewport:      vp,
+		scroll:        components.NewScrollablePanel(25, 6),
 		feedAvailable: false,
 		now:           time.Now,
 	}
@@ -173,6 +178,7 @@ func (m *AttentionPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	handled := false
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -180,21 +186,33 @@ func (m *AttentionPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 			}
+			handled = true
 		case "down", "j":
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 			}
+			handled = true
 		case "home", "g":
 			m.cursor = 0
+			handled = true
 		case "end", "G":
 			if len(m.items) > 0 {
 				m.cursor = len(m.items) - 1
 			}
+			handled = true
 		}
 	}
 
+	if handled {
+		m.syncScrollToCursor()
+		return m, nil
+	}
+
+	if m.scroll == nil {
+		return m, nil
+	}
 	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
+	m.scroll, cmd = m.scroll.Update(msg)
 	return m, cmd
 }
 
@@ -291,19 +309,61 @@ func (m *AttentionPanel) View() string {
 
 	// Render items
 	var body strings.Builder
+	m.lineRanges = m.lineRanges[:0]
+	currentLine := 0
 	for i, item := range m.items {
 		line := m.renderItem(item, i == m.cursor, w, now, t)
 		body.WriteString(line + "\n")
+		lineCount := 1 + strings.Count(line, "\n")
+		m.lineRanges = append(m.lineRanges, attentionLineRange{
+			start: currentLine,
+			end:   currentLine + lineCount - 1,
+		})
+		currentLine += lineCount
 	}
 
-	// Update viewport content
-	m.viewport.SetContent(body.String())
-	m.viewport.Width = w
-	m.viewport.Height = h - 4 // Account for header and stats
-
-	content.WriteString(m.viewport.View())
+	vpHeight := h - (lipgloss.Height(header) + lipgloss.Height(statsStyled) + 4)
+	if vpHeight < 3 {
+		vpHeight = 3
+	}
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(w, vpHeight)
+	}
+	m.scroll.SetSize(w, vpHeight)
+	bodyStr := body.String()
+	if bodyStr != m.lastBodyHash {
+		m.scroll.SetContent(bodyStr)
+		m.lastBodyHash = bodyStr
+	}
+	m.syncScrollToCursor()
+	content.WriteString(m.scroll.RenderWithIndicators(w))
 
 	return boxStyle.Render(FitToHeight(content.String(), h))
+}
+
+func (m *AttentionPanel) syncScrollToCursor() {
+	if m.scroll == nil || len(m.lineRanges) == 0 || m.cursor < 0 || m.cursor >= len(m.lineRanges) {
+		return
+	}
+
+	visible := m.scroll.VisibleLines()
+	if visible <= 0 {
+		return
+	}
+
+	target := m.lineRanges[m.cursor]
+	top := m.scroll.YOffset()
+	bottom := top + visible - 1
+	switch {
+	case target.start < top:
+		m.scroll.SetYOffset(target.start)
+	case target.end > bottom:
+		nextTop := target.end - visible + 1
+		if nextTop < 0 {
+			nextTop = 0
+		}
+		m.scroll.SetYOffset(nextTop)
+	}
 }
 
 func (m *AttentionPanel) renderItem(item AttentionItem, selected bool, width int, now time.Time, t theme.Theme) string {

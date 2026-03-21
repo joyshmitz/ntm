@@ -410,6 +410,12 @@ func (m *HistoryPanel) Keybindings() []Keybinding {
 	}
 }
 
+// HandlesOwnHeight returns true because the history table manages its own
+// visible window and now renders explicit scroll state.
+func (m *HistoryPanel) HandlesOwnHeight() bool {
+	return true
+}
+
 func (m *HistoryPanel) contentHeight() int {
 	return m.Height() - 4 // borders + header
 }
@@ -518,9 +524,17 @@ func (m *HistoryPanel) applyFilters() {
 }
 
 func (m *HistoryPanel) historyTableHeight() int {
-	height := m.Height() - 5
+	height := m.Height() - 6
 	if height < 3 {
 		height = 3
+	}
+	return height
+}
+
+func (m *HistoryPanel) effectiveTableHeight() int {
+	height := m.historyTableHeight()
+	if len(m.visibleEntries) > max(1, height-1) && height > 3 {
+		height--
 	}
 	return height
 }
@@ -893,6 +907,34 @@ func (m *HistoryPanel) renderPreviewOverlay(width, height int) string {
 	return boxStyle.Render(b.String())
 }
 
+func (m *HistoryPanel) scrollState() components.ScrollState {
+	total := len(m.visibleEntries)
+	if total == 0 {
+		return components.ScrollState{}
+	}
+
+	visible := m.effectiveTableHeight() - 1 // account for header row
+	if visible < 1 {
+		visible = 1
+	}
+	first := m.offset
+	if first < 0 {
+		first = 0
+	}
+	if first >= total {
+		first = total - 1
+	}
+	last := first + visible - 1
+	if last >= total {
+		last = total - 1
+	}
+	return components.ScrollState{
+		FirstVisible: first,
+		LastVisible:  last,
+		TotalItems:   total,
+	}
+}
+
 // View renders the panel
 func (m *HistoryPanel) View() string {
 	t := m.theme
@@ -979,12 +1021,15 @@ func (m *HistoryPanel) View() string {
 	}
 
 	// Update table dimensions for rendering
-	m.table.SetHeight(m.historyTableHeight())
+	m.table.SetHeight(m.effectiveTableHeight())
 	m.table.SetWidth(max(10, w-6))
 	m.rebuildTableRows()
 
 	// Render the table
 	content.WriteString(m.table.View() + "\n")
+	if footer := components.ScrollFooter(m.scrollState(), w-4); footer != "" {
+		content.WriteString(footer + "\n")
+	}
 
 	mainContent := boxStyle.Render(FitToHeight(content.String(), h-4))
 

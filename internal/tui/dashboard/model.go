@@ -275,7 +275,12 @@ type Model struct {
 	helpVerbosity string
 
 	// Toast notifications (ephemeral bottom-right overlays)
-	toasts *components.ToastManager
+	toasts           *components.ToastManager
+	showToastHistory bool // [tui-upgrade: bd-0pcdg] toggle toast history overlay with 'n' key
+
+	// Spawn wizard overlay [tui-upgrade: bd-uz09d]
+	showSpawnWizard bool
+	spawnWizard     *panels.SpawnWizard
 
 	// Shared dashboard animation state for focus and other spring-driven UI.
 	dashboardSprings *components.SpringManager
@@ -403,6 +408,12 @@ type Model struct {
 	// Escape closes the popup; zoom doesn't re-attach (we're already in-session).
 	popupMode       bool
 	overlayOpenedAt time.Time
+
+	// Table view toggle for pane list (Split+ tiers) [tui-upgrade: bd-ijnu3]
+	showTableView            bool
+	paneTable                *components.PaneTable
+	aggregateVelocityHistory []float64            // [tui-upgrade: bd-gk9l7] recent aggregate token-velocity samples for the status bar trend
+	velocityByType           map[string][]float64 // [tui-upgrade: bd-gk9l7] recent token-velocity samples grouped by agent type
 }
 
 // PostQuitAction describes what the caller should do after the dashboard TUI exits.
@@ -443,8 +454,9 @@ type PaneStatus struct {
 	UptimeSeconds int      // Seconds since agent started (negative = uptime from tracker)
 
 	// Rotation tracking
-	IsRotating bool       // True when agent rotation is in progress
-	RotatedAt  *time.Time // When agent was last rotated (nil if never)
+	IsRotating     bool       // True when agent rotation is in progress
+	RotatedAt      *time.Time // When agent was last rotated (nil if never)
+	ContextHistory []float64  // [tui-upgrade: bd-3btd6] ring buffer of recent context percentages for trend rendering
 }
 
 // DefaultRefreshInterval is the default auto-refresh interval.
@@ -565,6 +577,7 @@ func New(session, projectDir string) Model {
 		spawnPanel:           panels.NewSpawnPanel(),
 		conflictsPanel:       panels.NewConflictsPanel(),
 		rotationConfirmPanel: panels.NewRotationConfirmPanel(),
+		velocityByType:       make(map[string][]float64),
 
 		// Init() only kicks off the critical first-paint session fetch. Everything
 		// else warms in after the UI is already visible.
@@ -572,6 +585,7 @@ func New(session, projectDir string) Model {
 	}
 
 	m.paneDelegate = newPaneDelegate(t, CalculateLayout(40, 1))
+	m.paneTable = components.NewPaneTable(t)
 	m.paneList = list.New(nil, m.paneDelegate, 40, 8)
 	m.paneList.DisableQuitKeybindings()
 	m.paneList.SetShowFilter(true)

@@ -193,6 +193,28 @@ func TestMetricsPanelViewShowsErrorState(t *testing.T) {
 	}
 }
 
+func TestMetricsPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewMetricsPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Fatal("expected metrics panel to manage its own height")
+	}
+}
+
+func TestMetricsPanelViewShowsScrollIndicatorWhenOverflowing(t *testing.T) {
+	panel := NewMetricsPanel()
+	panel.SetSize(48, 10)
+	panel.SetData(sampleMetricsData(), nil)
+	panel.expanded["coverage"] = true
+	panel.expanded["redundancy"] = true
+	panel.expanded["velocity"] = true
+	panel.expanded["conflicts"] = true
+
+	view := panel.View()
+	if !strings.Contains(view, "%") {
+		t.Fatalf("expected overflowing metrics panel to show percent badge, got %q", view)
+	}
+}
+
 func sampleMetricsData() MetricsData {
 	coverage := &ensemble.CoverageReport{
 		Overall: 0.5,
