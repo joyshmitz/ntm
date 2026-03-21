@@ -442,6 +442,9 @@ type AgentActivity struct {
 	// Hysteresis tracking - prevents rapid state flapping
 	PendingState AgentState `json:"pending_state,omitempty"`
 	PendingSince time.Time  `json:"pending_since,omitempty"`
+
+	// RateLimited indicates the agent has hit provider rate limits.
+	RateLimited bool `json:"rate_limited,omitempty"`
 }
 
 // StateClassifier combines velocity and pattern signals to classify agent state.

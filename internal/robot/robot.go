@@ -3483,9 +3483,47 @@ type SnapshotOutput struct {
 	MailUnread               int                      `json:"mail_unread,omitempty"`
 	Tools                    []ToolInfoOutput         `json:"tools,omitempty"`           // Flywheel tool inventory and health
 	Swarm                    *SwarmSnapshot           `json:"swarm,omitempty"`           // Active swarm orchestration state (optional)
-	Alerts                   []string                 `json:"alerts"`                    // Legacy: simple string alerts
-	AlertsDetailed           []AlertInfo              `json:"alerts_detailed,omitempty"` // Rich alert objects
-	AlertSummary             *AlertSummaryInfo        `json:"alert_summary,omitempty"`
+	Alerts                   []string                   `json:"alerts"`                       // Legacy: simple string alerts
+	AlertsDetailed           []AlertInfo                `json:"alerts_detailed,omitempty"`    // Rich alert objects
+	AlertSummary             *AlertSummaryInfo          `json:"alert_summary,omitempty"`
+	AttentionSummary         *SnapshotAttentionSummary  `json:"attention_summary,omitempty"`  // Compact feed summary for bootstrap orientation
+}
+
+// SnapshotAttentionSummary provides a compact orientation summary from the
+// attention feed at snapshot time. Helps operators choose the next targeted
+// command without rereading the entire snapshot or waiting for a digest.
+type SnapshotAttentionSummary struct {
+	// TotalEvents is the number of events currently in the journal.
+	TotalEvents int `json:"total_events"`
+
+	// ActionRequiredCount is events needing operator action.
+	ActionRequiredCount int `json:"action_required_count"`
+
+	// InterestingCount is events worth noting but not urgent.
+	InterestingCount int `json:"interesting_count"`
+
+	// TopItems surfaces the most recent action_required events (up to 3)
+	// so operators can immediately see what needs attention.
+	TopItems []SnapshotAttentionItem `json:"top_items,omitempty"`
+
+	// ByCategoryCount groups events by category for orientation.
+	ByCategoryCount map[string]int `json:"by_category,omitempty"`
+
+	// UnsupportedSignals lists signals that were considered but are
+	// deliberately not supported, so operators know what to expect.
+	UnsupportedSignals []string `json:"unsupported_signals,omitempty"`
+
+	// NextSteps are mechanical suggestions for what to do next.
+	NextSteps []NextAction `json:"next_steps,omitempty"`
+}
+
+// SnapshotAttentionItem is a compact representation of a top attention item.
+type SnapshotAttentionItem struct {
+	Cursor        int64  `json:"cursor"`
+	Category      string `json:"category"`
+	Actionability string `json:"actionability"`
+	Severity      string `json:"severity"`
+	Summary       string `json:"summary"`
 }
 
 // SnapshotReplayWindowInfo describes the currently replayable cursor window.
@@ -3845,6 +3883,9 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 			ByType:      summary.ByType,
 		}
 	}
+
+	// Build attention summary for operator orientation (br-slg9g)
+	output.AttentionSummary = buildSnapshotAttentionSummary(feed)
 
 	if paged, page := ApplyPagination(output.Sessions, opts); page != nil {
 		output.Sessions = paged

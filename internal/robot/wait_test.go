@@ -13,13 +13,32 @@ func TestIsValidWaitCondition(t *testing.T) {
 		condition string
 		want      bool
 	}{
+		// Pane-based conditions
 		{"idle valid", "idle", true},
 		{"complete valid", "complete", true},
 		{"generating valid", "generating", true},
 		{"healthy valid", "healthy", true},
+		{"stalled valid", "stalled", true},
+		{"rate_limited valid", "rate_limited", true},
+
+		// Attention-based conditions
+		{"attention valid", "attention", true},
+		{"action_required valid", "action_required", true},
+		{"mail_pending valid", "mail_pending", true},
+		{"mail_ack_required valid", "mail_ack_required", true},
+		{"context_hot valid", "context_hot", true},
+		{"reservation_conflict valid", "reservation_conflict", true},
+		{"file_conflict valid", "file_conflict", true},
+		{"session_changed valid", "session_changed", true},
+		{"pane_changed valid", "pane_changed", true},
+
+		// Composed conditions
 		{"composed valid", "idle,healthy", true},
 		{"composed with spaces", "idle, healthy", true},
 		{"three conditions", "idle,healthy,complete", true},
+		{"mixed pane and attention", "idle,action_required", true},
+
+		// Invalid conditions
 		{"invalid condition", "invalid", false},
 		{"empty string", "", false},
 		{"partial invalid", "idle,invalid", false},
@@ -30,6 +49,31 @@ func TestIsValidWaitCondition(t *testing.T) {
 			got := isValidWaitCondition(tt.condition)
 			if got != tt.want {
 				t.Errorf("isValidWaitCondition(%q) = %v, want %v", tt.condition, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasAttentionBasedConditions(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions []string
+		want       bool
+	}{
+		{"pane only", []string{"idle", "healthy"}, false},
+		{"attention only", []string{"action_required", "mail_pending"}, true},
+		{"mixed", []string{"idle", "action_required"}, true},
+		{"single pane", []string{"idle"}, false},
+		{"single attention", []string{"attention"}, true},
+		{"empty", []string{}, false},
+		{"all attention types", []string{"attention", "action_required", "mail_pending", "context_hot"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasAttentionBasedConditions(tt.conditions)
+			if got != tt.want {
+				t.Errorf("hasAttentionBasedConditions(%v) = %v, want %v", tt.conditions, got, tt.want)
 			}
 		})
 	}

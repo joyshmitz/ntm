@@ -13,7 +13,7 @@ import (
 // WaitOptions configures the robot wait operation.
 type WaitOptions struct {
 	Session           string
-	Condition         string // idle, complete, generating, healthy
+	Condition         string // idle, complete, generating, healthy, attention, action_required, etc.
 	Timeout           time.Duration
 	PollInterval      time.Duration
 	PaneIndices       []int  // Empty = all panes
@@ -22,6 +22,7 @@ type WaitOptions struct {
 	ExitOnError       bool   // If true, exit immediately on ERROR state
 	CountN            int    // With WaitForAny, wait for at least N agents (default 1)
 	RequireTransition bool   // If true, agents must leave and return to target state
+	SinceCursor       int64  // Attention-based conditions only fire for events after this cursor
 }
 
 // WaitResponse is the JSON output for --robot-wait.
@@ -32,6 +33,39 @@ type WaitResponse struct {
 	WaitedSeconds float64         `json:"waited_seconds"`
 	Agents        []WaitAgentInfo `json:"agents,omitempty"`
 	AgentsPending []string        `json:"agents_pending,omitempty"`
+
+	// WakePayload contains details about what triggered the wakeup (for attention conditions).
+	WakePayload *WaitWakePayload `json:"wake_payload,omitempty"`
+
+	// CursorInfo provides cursor handoff for attention-based conditions.
+	CursorInfo *WaitCursorInfo `json:"cursor_info,omitempty"`
+}
+
+// WaitWakePayload describes what triggered the wait to complete (for attention conditions).
+type WaitWakePayload struct {
+	// MatchedCondition is the specific condition that triggered the wake.
+	MatchedCondition string `json:"matched_condition"`
+
+	// TriggerEvent is the attention event that caused the wake (if applicable).
+	TriggerEvent *AttentionEvent `json:"trigger_event,omitempty"`
+
+	// TriggerCount is the count of events matching the condition (for aggregates).
+	TriggerCount int `json:"trigger_count,omitempty"`
+
+	// Details provides condition-specific context.
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// WaitCursorInfo provides cursor handoff information for follow-up commands.
+type WaitCursorInfo struct {
+	// ObservedCursor is the cursor value when the condition was detected.
+	ObservedCursor int64 `json:"observed_cursor"`
+
+	// NextCursor is the cursor to use for follow-up commands.
+	NextCursor int64 `json:"next_cursor"`
+
+	// OldestCursor is the oldest cursor still available in the feed.
+	OldestCursor int64 `json:"oldest_cursor,omitempty"`
 }
 
 // WaitAgentInfo describes an agent's state when the wait completed or timed out.
@@ -42,12 +76,27 @@ type WaitAgentInfo struct {
 	AgentType string `json:"agent_type,omitempty"`
 }
 
-// Wait condition constants
+// Wait condition constants - pane-based conditions
 const (
-	WaitConditionIdle       = "idle"
-	WaitConditionComplete   = "complete"
-	WaitConditionGenerating = "generating"
-	WaitConditionHealthy    = "healthy"
+	WaitConditionIdle        = "idle"
+	WaitConditionComplete    = "complete"
+	WaitConditionGenerating  = "generating"
+	WaitConditionHealthy     = "healthy"
+	WaitConditionStalled     = "stalled"
+	WaitConditionRateLimited = "rate_limited"
+)
+
+// Wait condition constants - attention-based conditions (require --since-cursor)
+const (
+	WaitConditionAttention           = "attention"
+	WaitConditionActionRequired      = "action_required"
+	WaitConditionMailPending         = "mail_pending"
+	WaitConditionMailAckRequired     = "mail_ack_required"
+	WaitConditionContextHot          = "context_hot"
+	WaitConditionReservationConflict = "reservation_conflict"
+	WaitConditionFileConflict        = "file_conflict"
+	WaitConditionSessionChanged      = "session_changed"
+	WaitConditionPaneChanged         = "pane_changed"
 )
 
 // CompleteIdleThreshold is the time without activity to consider "complete".
@@ -71,14 +120,15 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 
 	// Validate condition — check for unsupported conditions with specific guidance
 	if !isValidWaitCondition(opts.Condition) {
-		hint := "Valid conditions: idle, complete, generating, healthy"
+		hint := "Valid conditions: idle, complete, generating, healthy, stalled, rate_limited, " +
+			"attention, action_required, mail_pending, mail_ack_required, context_hot, " +
+			"reservation_conflict, file_conflict, session_changed, pane_changed"
 		errMsg := fmt.Sprintf("invalid condition '%s'", opts.Condition)
 
 		// Provide specific guidance for known unsupported conditions
 		if isUnsupportedWaitCondition(opts.Condition) {
 			hint = fmt.Sprintf("Condition '%s' is deliberately unsupported. "+
-				"Use --robot-capabilities to see rationale. "+
-				"Available conditions: idle, complete, generating, healthy", opts.Condition)
+				"Use --robot-capabilities to see rationale.", opts.Condition)
 			errMsg = fmt.Sprintf("unsupported condition '%s'", opts.Condition)
 		}
 
@@ -93,6 +143,10 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 		}, 2
 	}
 
+	// Parse conditions once so composite waits can mix standard and attention-based checks.
+	conditions := strings.Split(opts.Condition, ",")
+	hasAttention := hasAttentionBasedConditions(conditions)
+
 	// Set default count for --any mode
 	if opts.WaitForAny && opts.CountN <= 0 {
 		opts.CountN = 1
@@ -104,9 +158,6 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 
 	// Create activity monitor
 	monitor := NewActivityMonitor(nil)
-
-	// Parse conditions once for transition tracking
-	conditions := strings.Split(opts.Condition, ",")
 
 	// Track state transitions when RequireTransition is enabled
 	// Key: paneID, Value: true if agent was in target state at start AND has since left it
@@ -222,7 +273,31 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 			}
 		}
 
-		// Check if condition is met
+		// Check attention-based conditions first (if any)
+		if hasAttention {
+			attResult := checkAttentionConditions(conditions, opts.SinceCursor, opts.Session)
+			if attResult != nil && attResult.Met {
+				elapsed := time.Since(startTime)
+				return &WaitResponse{
+					RobotResponse: NewRobotResponse(true),
+					Session:       opts.Session,
+					Condition:     opts.Condition,
+					WaitedSeconds: elapsed.Seconds(),
+					WakePayload: &WaitWakePayload{
+						MatchedCondition: attResult.Condition,
+						TriggerEvent:     attResult.TriggerEvent,
+						TriggerCount:     attResult.TriggerCount,
+						Details:          attResult.Details,
+					},
+					CursorInfo: &WaitCursorInfo{
+						ObservedCursor: attResult.ObservedCursor,
+						NextCursor:     attResult.NextCursor,
+					},
+				}, 0
+			}
+		}
+
+		// Check pane-based conditions
 		met, matching, pending := checkWaitConditionMetWithTransition(activities, opts, conditions, initiallyInTarget, sawTransition)
 		if met {
 			elapsed := time.Since(startTime)
@@ -274,14 +349,50 @@ func isValidWaitCondition(condition string) bool {
 	parts := strings.Split(condition, ",")
 	for _, part := range parts {
 		p := strings.TrimSpace(part)
-		switch p {
-		case WaitConditionIdle, WaitConditionComplete, WaitConditionGenerating, WaitConditionHealthy:
-			// Valid
-		default:
+		if !isSingleValidWaitCondition(p) {
 			return false
 		}
 	}
 	return len(parts) > 0
+}
+
+// isSingleValidWaitCondition checks if a single condition name is valid.
+func isSingleValidWaitCondition(condition string) bool {
+	switch condition {
+	// Pane-based conditions
+	case WaitConditionIdle, WaitConditionComplete, WaitConditionGenerating, WaitConditionHealthy,
+		WaitConditionStalled, WaitConditionRateLimited:
+		return true
+	// Attention-based conditions
+	case WaitConditionAttention, WaitConditionActionRequired, WaitConditionMailPending,
+		WaitConditionMailAckRequired, WaitConditionContextHot, WaitConditionReservationConflict,
+		WaitConditionFileConflict, WaitConditionSessionChanged, WaitConditionPaneChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// isAttentionBasedCondition returns true if the condition requires the attention feed.
+func isAttentionBasedCondition(condition string) bool {
+	switch condition {
+	case WaitConditionAttention, WaitConditionActionRequired, WaitConditionMailPending,
+		WaitConditionMailAckRequired, WaitConditionContextHot, WaitConditionReservationConflict,
+		WaitConditionFileConflict, WaitConditionSessionChanged, WaitConditionPaneChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// hasAttentionBasedConditions returns true if any of the conditions require the attention feed.
+func hasAttentionBasedConditions(conditions []string) bool {
+	for _, c := range conditions {
+		if isAttentionBasedCondition(strings.TrimSpace(c)) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterWaitPanes filters panes based on wait options.
@@ -429,7 +540,8 @@ func meetsAllWaitConditions(activity *AgentActivity, conditions []string) bool {
 	return true
 }
 
-// meetsSingleWaitCondition checks if an activity meets a single condition.
+// meetsSingleWaitCondition checks if an activity meets a single pane-based condition.
+// Attention-based conditions are handled separately via checkAttentionCondition.
 func meetsSingleWaitCondition(activity *AgentActivity, condition string) bool {
 	switch condition {
 	case WaitConditionIdle:
@@ -453,7 +565,233 @@ func meetsSingleWaitCondition(activity *AgentActivity, condition string) bool {
 		// Not ERROR and not STALLED
 		return activity.State != StateError && activity.State != StateStalled
 
+	case WaitConditionStalled:
+		return activity.State == StateStalled
+
+	case WaitConditionRateLimited:
+		// Rate limited is detected via specific patterns in the agent output
+		// For now, we map it to the stalled state with rate-limit indicators
+		// This is a placeholder until we have proper rate-limit detection
+		return activity.State == StateError && activity.RateLimited
+
 	default:
+		// Attention-based conditions don't apply to individual pane activity
 		return false
 	}
+}
+
+// =============================================================================
+// Attention-Based Condition Checking
+// =============================================================================
+
+// AttentionConditionResult holds the result of checking attention-based conditions.
+type AttentionConditionResult struct {
+	Met            bool
+	Condition      string
+	TriggerEvent   *AttentionEvent
+	TriggerCount   int
+	Details        map[string]any
+	ObservedCursor int64
+	NextCursor     int64
+}
+
+// checkAttentionConditions checks if any attention-based conditions are met.
+// Returns the first matching condition result, or nil if none match.
+func checkAttentionConditions(conditions []string, sinceCursor int64, session string) *AttentionConditionResult {
+	feed := GetAttentionFeed()
+	if feed == nil {
+		return nil
+	}
+
+	// Replay events since the cursor
+	events, _, err := feed.Replay(sinceCursor, 1000)
+	if err != nil {
+		return nil
+	}
+
+	// Filter by session if specified
+	if session != "" {
+		filtered := make([]AttentionEvent, 0)
+		for _, ev := range events {
+			if ev.Session == session {
+				filtered = append(filtered, ev)
+			}
+		}
+		events = filtered
+	}
+
+	for _, cond := range conditions {
+		c := strings.TrimSpace(cond)
+		if !isAttentionBasedCondition(c) {
+			continue
+		}
+
+		result := checkSingleAttentionCondition(c, events, sinceCursor)
+		if result != nil && result.Met {
+			return result
+		}
+	}
+
+	return nil
+}
+
+// checkSingleAttentionCondition checks a single attention-based condition.
+func checkSingleAttentionCondition(condition string, events []AttentionEvent, sinceCursor int64) *AttentionConditionResult {
+	result := &AttentionConditionResult{
+		Condition:      condition,
+		ObservedCursor: sinceCursor,
+		Details:        make(map[string]any),
+	}
+
+	switch condition {
+	case WaitConditionAttention:
+		// Any attention event (action_required or interesting, not just background)
+		for _, ev := range events {
+			if ev.Actionability == ActionabilityActionRequired || ev.Actionability == ActionabilityInteresting {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = 1
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionActionRequired:
+		// Events with action_required actionability
+		for _, ev := range events {
+			if ev.Actionability == ActionabilityActionRequired {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByActionability(events, ActionabilityActionRequired)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionMailPending:
+		// Mail-related events (received/unread)
+		for _, ev := range events {
+			if ev.Category == EventCategoryMail && ev.Type == EventTypeMailReceived {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByType(events, EventTypeMailReceived)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionMailAckRequired:
+		// Mail events requiring acknowledgment
+		for _, ev := range events {
+			if ev.Category == EventCategoryMail && ev.Type == EventTypeMailAckRequired {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByType(events, EventTypeMailAckRequired)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionContextHot:
+		// Context hot events (agent context is filling up)
+		// This is indicated by the "signal" detail field
+		for _, ev := range events {
+			if ev.Details != nil {
+				if signal, ok := ev.Details["signal"]; ok && signal == "context_hot" {
+					result.Met = true
+					result.TriggerEvent = &ev
+					result.TriggerCount = 1
+					result.NextCursor = ev.Cursor
+					return result
+				}
+			}
+		}
+
+	case WaitConditionReservationConflict:
+		// Reservation conflicts are file conflicts with conflict_kind=reservation
+		for _, ev := range events {
+			if ev.Type == EventTypeFileConflict {
+				if ev.Details != nil {
+					if kind, ok := ev.Details["conflict_kind"]; ok && kind == "reservation" {
+						result.Met = true
+						result.TriggerEvent = &ev
+						result.TriggerCount = 1
+						result.NextCursor = ev.Cursor
+						return result
+					}
+				}
+			}
+		}
+
+	case WaitConditionFileConflict:
+		// File conflict events
+		for _, ev := range events {
+			if ev.Type == EventTypeFileConflict {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByType(events, EventTypeFileConflict)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionSessionChanged:
+		// Session structure change events
+		for _, ev := range events {
+			if ev.Category == EventCategorySession {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByCategory(events, EventCategorySession)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+
+	case WaitConditionPaneChanged:
+		// Pane change events
+		for _, ev := range events {
+			if ev.Category == EventCategoryPane {
+				result.Met = true
+				result.TriggerEvent = &ev
+				result.TriggerCount = countByCategory(events, EventCategoryPane)
+				result.NextCursor = ev.Cursor
+				return result
+			}
+		}
+	}
+
+	return result
+}
+
+// countByActionability counts events with a specific actionability level.
+func countByActionability(events []AttentionEvent, level Actionability) int {
+	count := 0
+	for _, ev := range events {
+		if ev.Actionability == level {
+			count++
+		}
+	}
+	return count
+}
+
+// countByType counts events with a specific event type.
+func countByType(events []AttentionEvent, eventType EventType) int {
+	count := 0
+	for _, ev := range events {
+		if ev.Type == eventType {
+			count++
+		}
+	}
+	return count
+}
+
+// countByCategory counts events with a specific category.
+func countByCategory(events []AttentionEvent, category EventCategory) int {
+	count := 0
+	for _, ev := range events {
+		if ev.Category == category {
+			count++
+		}
+	}
+	return count
 }

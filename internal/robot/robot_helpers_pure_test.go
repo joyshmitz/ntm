@@ -1,10 +1,13 @@
 package robot
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // =============================================================================
@@ -316,6 +319,110 @@ func TestBuildEnsembleHints_Actions(t *testing.T) {
 			t.Error("expected empty summary with zero modes")
 		}
 	})
+}
+
+func TestOverlayPopupInnerCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ntmBin  string
+		session string
+		cursor  int64
+	}{
+		{
+			name:    "without cursor",
+			ntmBin:  "/usr/local/bin/ntm",
+			session: "proj",
+		},
+		{
+			name:    "with cursor and shell quoting",
+			ntmBin:  "/tmp/odd path/ntm's",
+			session: "proj's main",
+			cursor:  42,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			want := "NTM_POPUP=1 " + tmux.ShellQuote(tt.ntmBin) + " dashboard --popup"
+			if tt.cursor > 0 {
+				want += fmt.Sprintf(" --attention-cursor %d", tt.cursor)
+			}
+			want += " " + tmux.ShellQuote(tt.session)
+
+			if got := overlayPopupInnerCommand(tt.ntmBin, tt.session, tt.cursor); got != want {
+				t.Fatalf("overlayPopupInnerCommand() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestOverlayPopupArgs(t *testing.T) {
+	t.Parallel()
+
+	args := overlayPopupArgs("/usr/local/bin/ntm", "proj", 9)
+	if len(args) != 7 {
+		t.Fatalf("len(args) = %d, want 7", len(args))
+	}
+	if args[0] != "display-popup" || args[1] != "-E" {
+		t.Fatalf("unexpected tmux popup prefix: %v", args[:2])
+	}
+	if args[2] != "-w" || args[3] != "95%" || args[4] != "-h" || args[5] != "95%" {
+		t.Fatalf("unexpected popup sizing args: %v", args[2:6])
+	}
+	wantCmd := "NTM_POPUP=1 " + tmux.ShellQuote("/usr/local/bin/ntm") + " dashboard --popup --attention-cursor 9 " + tmux.ShellQuote("proj")
+	if args[6] != wantCmd {
+		t.Fatalf("args[6] = %q, want %q", args[6], wantCmd)
+	}
+}
+
+func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     OverlayOptions
+		wantCode string
+		wantHint string
+	}{
+		{
+			name:     "missing session",
+			opts:     OverlayOptions{},
+			wantCode: ErrCodeInvalidFlag,
+			wantHint: "Pass --robot-overlay=<session>",
+		},
+		{
+			name:     "negative cursor",
+			opts:     OverlayOptions{Session: "proj", Cursor: -1},
+			wantCode: ErrCodeInvalidFlag,
+			wantHint: "Use --overlay-cursor with a non-negative event cursor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := captureStdout(t, func() error {
+				return PrintOverlay(tt.opts)
+			})
+			if err != nil {
+				t.Fatalf("PrintOverlay returned error: %v", err)
+			}
+
+			var resp OverlayOutput
+			if err := json.Unmarshal([]byte(out), &resp); err != nil {
+				t.Fatalf("unmarshal output: %v\nraw: %s", err, out)
+			}
+			if resp.Success {
+				t.Fatalf("expected failure response, got success: %+v", resp)
+			}
+			if resp.ErrorCode != tt.wantCode {
+				t.Fatalf("error_code = %q, want %q", resp.ErrorCode, tt.wantCode)
+			}
+			if resp.Hint != tt.wantHint {
+				t.Fatalf("hint = %q, want %q", resp.Hint, tt.wantHint)
+			}
+		})
+	}
 }
 
 // =============================================================================

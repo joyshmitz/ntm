@@ -3818,3 +3818,131 @@ func TestIsAgentMailDBLockError(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// Snapshot Attention Summary Tests (br-slg9g)
+// =============================================================================
+
+func TestBuildSnapshotAttentionSummary_NilFeed(t *testing.T) {
+	t.Parallel()
+	summary := buildSnapshotAttentionSummary(nil)
+	if summary != nil {
+		t.Error("expected nil summary for nil feed")
+	}
+}
+
+func TestBuildSnapshotAttentionSummary_EmptyFeed(t *testing.T) {
+	t.Parallel()
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if summary == nil {
+		t.Fatal("expected non-nil summary even for empty feed")
+	}
+	if summary.TotalEvents != 0 {
+		t.Errorf("TotalEvents = %d, want 0", summary.TotalEvents)
+	}
+	if len(summary.UnsupportedSignals) == 0 {
+		t.Error("expected unsupported signals to be listed")
+	}
+	if len(summary.NextSteps) == 0 {
+		t.Error("expected next-step hints even for empty feed")
+	}
+}
+
+func TestBuildSnapshotAttentionSummary_WithEvents(t *testing.T) {
+	t.Parallel()
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	// Add some events with different actionability levels
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStalled,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       "agent cc_1 stalled",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryPane,
+		Type:          EventTypePaneOutput,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "pane output update",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAlert,
+		Type:          EventTypeAlertWarning,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityError,
+		Summary:       "context at 95%",
+	})
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.TotalEvents != 3 {
+		t.Errorf("TotalEvents = %d, want 3", summary.TotalEvents)
+	}
+	if summary.ActionRequiredCount != 2 {
+		t.Errorf("ActionRequiredCount = %d, want 2", summary.ActionRequiredCount)
+	}
+	if summary.InterestingCount != 1 {
+		t.Errorf("InterestingCount = %d, want 1", summary.InterestingCount)
+	}
+	if len(summary.TopItems) != 2 {
+		t.Errorf("TopItems count = %d, want 2", len(summary.TopItems))
+	}
+	if summary.ByCategoryCount["agent"] != 1 {
+		t.Errorf("ByCategoryCount[agent] = %d, want 1", summary.ByCategoryCount["agent"])
+	}
+	if summary.ByCategoryCount["alert"] != 1 {
+		t.Errorf("ByCategoryCount[alert] = %d, want 1", summary.ByCategoryCount["alert"])
+	}
+	// Should suggest reviewing action-required events
+	if len(summary.NextSteps) == 0 {
+		t.Error("expected next-step hints when action-required events exist")
+	}
+	if len(summary.UnsupportedSignals) == 0 {
+		t.Error("expected unsupported signals listed for honest representation")
+	}
+}
+
+func TestBuildSnapshotAttentionSummary_TopItemsCapped(t *testing.T) {
+	t.Parallel()
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	// Add 5 action-required events
+	for i := 0; i < 5; i++ {
+		feed.Append(AttentionEvent{
+			Category:      EventCategoryAlert,
+			Actionability: ActionabilityActionRequired,
+			Severity:      SeverityWarning,
+			Summary:       fmt.Sprintf("alert %d", i),
+		})
+	}
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if len(summary.TopItems) != 3 {
+		t.Errorf("TopItems should be capped at 3, got %d", len(summary.TopItems))
+	}
+	// Should be the 3 most recent (alerts 2, 3, 4)
+	if summary.TopItems[0].Summary != "alert 2" {
+		t.Errorf("first top item should be 'alert 2', got %q", summary.TopItems[0].Summary)
+	}
+}
