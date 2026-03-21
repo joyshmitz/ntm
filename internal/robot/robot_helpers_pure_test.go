@@ -657,3 +657,116 @@ func TestResolveEnsembleBudget_WhitespacePreset(t *testing.T) {
 		t.Errorf("MaxTotalTokens = %d, want %d", budget.MaxTotalTokens, defaults.MaxTotalTokens)
 	}
 }
+
+// =============================================================================
+// snapshot attention summary tests
+// =============================================================================
+
+func TestBuildSnapshotAttentionSummary_UsesReplayWindowAndEventActions(t *testing.T) {
+	t.Parallel()
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       2,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	feed.Append(AttentionEvent{
+		Category:      EventCategorySystem,
+		Actionability: ActionabilityBackground,
+		Severity:      SeverityInfo,
+		Summary:       "older bootstrap event",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "agent resumed output",
+	})
+	expectedAction := NextAction{
+		Action: "robot-tail",
+		Args:   "--robot-tail=proj --panes=2 --lines=50",
+		Reason: "Inspect the failing agent output",
+	}
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAlert,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityError,
+		Summary:       "agent failed in proj pane 2",
+		NextActions:   []NextAction{expectedAction},
+	})
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.TotalEvents != 2 {
+		t.Fatalf("TotalEvents = %d, want 2 (only replayable events)", summary.TotalEvents)
+	}
+	if _, ok := summary.ByCategoryCount[string(EventCategorySystem)]; ok {
+		t.Fatalf("expected evicted category to be absent from replay-window summary, got %+v", summary.ByCategoryCount)
+	}
+	if summary.ActionRequiredCount != 1 {
+		t.Fatalf("ActionRequiredCount = %d, want 1", summary.ActionRequiredCount)
+	}
+	if len(summary.TopItems) != 1 || summary.TopItems[0].Summary != "agent failed in proj pane 2" {
+		t.Fatalf("TopItems = %+v, want single latest action-required item", summary.TopItems)
+	}
+	if len(summary.NextSteps) == 0 {
+		t.Fatal("expected mechanical next steps")
+	}
+	if summary.NextSteps[0].Action != expectedAction.Action || summary.NextSteps[0].Args != expectedAction.Args {
+		t.Fatalf("first next step = %+v, want event-provided action %+v", summary.NextSteps[0], expectedAction)
+	}
+	if !hasSnapshotNextAction(summary.NextSteps, "robot-events", "--robot-events --since=3 --limit=20") {
+		t.Fatalf("expected follow-cursor next step in %+v", summary.NextSteps)
+	}
+}
+
+func TestBuildSnapshotAttentionSummary_UsesDigestWhenOnlyInterestingEventsExist(t *testing.T) {
+	t.Parallel()
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       8,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "agent switched profiles",
+	})
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.ActionRequiredCount != 0 {
+		t.Fatalf("ActionRequiredCount = %d, want 0", summary.ActionRequiredCount)
+	}
+	if summary.InterestingCount != 1 {
+		t.Fatalf("InterestingCount = %d, want 1", summary.InterestingCount)
+	}
+	if len(summary.TopItems) != 0 {
+		t.Fatalf("TopItems = %+v, want none when no action-required events exist", summary.TopItems)
+	}
+	if !hasSnapshotNextAction(summary.NextSteps, "robot-digest", "--robot-digest") {
+		t.Fatalf("expected digest handoff in %+v", summary.NextSteps)
+	}
+	if !hasSnapshotNextAction(summary.NextSteps, "robot-snapshot", "--robot-snapshot") {
+		t.Fatalf("expected resync handoff in %+v", summary.NextSteps)
+	}
+}
+
+func hasSnapshotNextAction(actions []NextAction, action, args string) bool {
+	for _, candidate := range actions {
+		if candidate.Action == action && candidate.Args == args {
+			return true
+		}
+	}
+	return false
+}

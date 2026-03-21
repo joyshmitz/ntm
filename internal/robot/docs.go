@@ -196,7 +196,7 @@ func getCommandsContent() *DocsContent {
 				Heading: "Agent Control",
 				Body: `--robot-send=SESSION: Send message to panes
 --robot-interrupt=SESSION: Send Ctrl+C to agents
---robot-wait=SESSION: Wait for specific state
+--robot-wait=SESSION: Wait for pane state or attention-feed condition
 --robot-route=SESSION: Get routing recommendation`,
 			},
 			{
@@ -310,6 +310,12 @@ func getExamplesContent() *DocsContent {
 				Description: "Wait for all agents to become idle",
 				Command:     "ntm --robot-wait=proj --wait-until=idle --wait-timeout=5m",
 				Notes:       "Blocks until condition met or timeout",
+			},
+			{
+				Name:        "wait_for_attention",
+				Description: "Wait for the next action-required attention signal",
+				Command:     "ntm --robot-wait=proj --wait-until=action_required --wait-timeout=2m",
+				Notes:       "Useful after taking a snapshot when you want the next operator-relevant wakeup",
 			},
 			// Recovery
 			{

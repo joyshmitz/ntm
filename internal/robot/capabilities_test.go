@@ -1,6 +1,9 @@
 package robot
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // =============================================================================
 // categoryIndex tests
@@ -311,11 +314,11 @@ func TestIsUnsupportedWaitCondition(t *testing.T) {
 		want      bool
 	}{
 		{AttentionSignalBeadOrphaned, true},
-		{"bead_orphaned", true},           // explicit string match
-		{"idle", false},                   // valid condition
-		{"complete", false},               // valid condition
-		{"nonexistent_garbage", false},     // unknown condition
-		{"bead_orphaned,idle", true},      // unsupported in composed condition
+		{"bead_orphaned", true},        // explicit string match
+		{"idle", false},                // valid condition
+		{"complete", false},            // valid condition
+		{"nonexistent_garbage", false}, // unknown condition
+		{"bead_orphaned,idle", true},   // unsupported in composed condition
 	}
 
 	for _, tt := range tests {
@@ -323,6 +326,124 @@ func TestIsUnsupportedWaitCondition(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isUnsupportedWaitCondition(%q) = %v, want %v", tt.condition, got, tt.want)
 		}
+	}
+}
+
+func TestBuildCommandRegistryWaitCommandReflectsExtendedConditions(t *testing.T) {
+	t.Parallel()
+
+	commands := buildCommandRegistry()
+
+	var waitCmd *RobotCommandInfo
+	for i := range commands {
+		if commands[i].Name == "wait" {
+			waitCmd = &commands[i]
+			break
+		}
+	}
+	if waitCmd == nil {
+		t.Fatal("expected wait command in registry")
+	}
+
+	if !strings.Contains(waitCmd.Description, "attention-feed conditions") {
+		t.Fatalf("wait description %q should mention attention-feed conditions", waitCmd.Description)
+	}
+
+	var untilParam *RobotParameter
+	var transitionParam *RobotParameter
+	for i := range waitCmd.Parameters {
+		param := &waitCmd.Parameters[i]
+		switch param.Flag {
+		case "--wait-until":
+			untilParam = param
+		case "--wait-transition":
+			transitionParam = param
+		}
+	}
+	if untilParam == nil {
+		t.Fatal("expected --wait-until parameter")
+	}
+	if transitionParam == nil {
+		t.Fatal("expected --wait-transition parameter")
+	}
+
+	for _, cond := range []string{
+		"stalled",
+		"rate_limited",
+		"attention",
+		"action_required",
+		"mail_pending",
+		"mail_ack_required",
+		"context_hot",
+		"reservation_conflict",
+		"file_conflict",
+		"session_changed",
+		"pane_changed",
+		"bead_orphaned",
+	} {
+		if !strings.Contains(untilParam.Description, cond) {
+			t.Errorf("--wait-until description missing %q: %q", cond, untilParam.Description)
+		}
+	}
+
+	if !strings.Contains(transitionParam.Description, "pane-state conditions") {
+		t.Errorf("--wait-transition description should clarify pane-state scope, got %q", transitionParam.Description)
+	}
+
+	foundAttentionExample := false
+	for _, example := range waitCmd.Examples {
+		if strings.Contains(example, "--wait-until=action_required") {
+			foundAttentionExample = true
+			break
+		}
+	}
+	if !foundAttentionExample {
+		t.Error("expected wait command examples to include an action_required attention wait")
+	}
+}
+
+func TestDocsContentMentionsAttentionWait(t *testing.T) {
+	t.Parallel()
+
+	commands := getCommandsContent()
+	if commands == nil {
+		t.Fatal("getCommandsContent() returned nil")
+	}
+
+	foundAgentControl := false
+	for _, section := range commands.Sections {
+		if section.Heading != "Agent Control" {
+			continue
+		}
+		foundAgentControl = true
+		if !strings.Contains(section.Body, "pane state or attention-feed condition") {
+			t.Fatalf("Agent Control docs should mention attention-feed wait conditions, got %q", section.Body)
+		}
+	}
+	if !foundAgentControl {
+		t.Fatal("Agent Control section not found")
+	}
+
+	examples := getExamplesContent()
+	if examples == nil {
+		t.Fatal("getExamplesContent() returned nil")
+	}
+
+	found := false
+	for _, example := range examples.Examples {
+		if example.Name != "wait_for_attention" {
+			continue
+		}
+		found = true
+		if !strings.Contains(example.Command, "--wait-until=action_required") {
+			t.Errorf("wait_for_attention command = %q, want action_required wait", example.Command)
+		}
+		if !strings.Contains(example.Notes, "operator-relevant wakeup") {
+			t.Errorf("wait_for_attention notes = %q, want operator wakeup guidance", example.Notes)
+		}
+	}
+	if !found {
+		t.Fatal("expected wait_for_attention example")
 	}
 }
 
