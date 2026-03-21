@@ -308,6 +308,12 @@ func (r *AutoRespawner) Stop() {
 		r.cancel = nil
 	}
 
+	// Close the event channel to unblock readers
+	if r.eventChan != nil {
+		close(r.eventChan)
+		r.eventChan = nil
+	}
+
 	r.logger().Info("[AutoRespawner] stopped")
 }
 
