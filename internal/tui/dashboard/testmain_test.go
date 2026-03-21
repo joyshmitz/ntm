@@ -2,8 +2,16 @@ package dashboard
 
 import (
 	"os"
+	"sync"
 	"testing"
 )
+
+var attentionFeedTestMu sync.Mutex
+
+func lockAttentionFeedForTest(t *testing.T) {
+	attentionFeedTestMu.Lock()
+	t.Cleanup(attentionFeedTestMu.Unlock)
+}
 
 func TestMain(m *testing.M) {
 	// Many dashboard rendering helpers assume colors are enabled.

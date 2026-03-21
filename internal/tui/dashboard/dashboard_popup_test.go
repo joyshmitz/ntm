@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
+	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 )
 
 // TestAutoPopupDetection tests the NTM_POPUP environment variable detection logic.
@@ -168,6 +169,52 @@ func TestPopupEscapeQuitsDashboard(t *testing.T) {
 	t.Logf("popup escape -> quitting=%v postQuitAction=%+v", updated.quitting, updated.postQuitAction)
 }
 
+func TestRequestedAttentionCursorSelectsExactItem(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(120)
+	m.requestAttentionCursor(42)
+
+	items := []panels.AttentionItem{
+		{Summary: "older", Cursor: 40, Timestamp: time.Now().Add(-2 * time.Minute)},
+		{Summary: "target", Cursor: 42, Timestamp: time.Now()},
+	}
+
+	updatedModel, _ := m.Update(AttentionUpdateMsg{Items: items, FeedAvailable: true})
+	updated := updatedModel.(Model)
+
+	if updated.focusedPanel != PanelAttention {
+		t.Fatalf("focusedPanel = %v, want PanelAttention", updated.focusedPanel)
+	}
+	selected := updated.attentionPanel.SelectedItem()
+	if selected == nil || selected.Cursor != 42 {
+		t.Fatalf("selected item = %+v, want cursor 42", selected)
+	}
+}
+
+func TestRequestedAttentionCursorFallsBackToNearestItem(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(120)
+	m.requestAttentionCursor(42)
+
+	items := []panels.AttentionItem{
+		{Summary: "older", Cursor: 40, Timestamp: time.Now().Add(-3 * time.Minute)},
+		{Summary: "newer", Cursor: 44, Timestamp: time.Now()},
+	}
+
+	updatedModel, _ := m.Update(AttentionUpdateMsg{Items: items, FeedAvailable: true})
+	updated := updatedModel.(Model)
+
+	selected := updated.attentionPanel.SelectedItem()
+	if selected == nil || selected.Cursor != 44 {
+		t.Fatalf("selected item = %+v, want nearest cursor 44", selected)
+	}
+	if !strings.Contains(updated.healthMessage, "nearest surviving item") {
+		t.Fatalf("healthMessage = %q, want degraded cursor fallback note", updated.healthMessage)
+	}
+}
+
 func TestPopupEscapeClosesHelpBeforeQuitting(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +353,8 @@ func TestActivatePopupModeSetsOverlayOpenedAt(t *testing.T) {
 }
 
 func TestPopupZoomPublishesHumanZoomAndDisplaysCursorHint(t *testing.T) {
+	lockAttentionFeedForTest(t)
+
 	oldFeed := robot.GetAttentionFeed()
 	oldZoomPane := dashboardZoomPane
 	oldDisplayMessage := dashboardDisplayMessage
@@ -438,7 +487,7 @@ func TestHandleAttentionZoomUsesPaneIndexLookup(t *testing.T) {
 	}
 	m.rebuildPaneList()
 
-	cmd := m.handleAttentionZoom(3)
+	cmd := m.handleAttentionZoom(3, 0)
 	if cmd == nil {
 		t.Fatal("expected handleAttentionZoom to return a zoom command for an existing pane index")
 	}
@@ -470,7 +519,7 @@ func TestHandleAttentionZoomMissingPaneShowsHealthMessage(t *testing.T) {
 	}
 	m.rebuildPaneList()
 
-	cmd := m.handleAttentionZoom(99)
+	cmd := m.handleAttentionZoom(99, 0)
 	if cmd != nil {
 		t.Fatalf("expected no zoom command for a missing pane, got %v", cmd)
 	}
@@ -485,7 +534,91 @@ func TestHandleAttentionZoomMissingPaneShowsHealthMessage(t *testing.T) {
 	}
 }
 
+func TestHandleAttentionZoomPopupUsesSelectedItemCursor(t *testing.T) {
+	lockAttentionFeedForTest(t)
+
+	oldFeed := robot.GetAttentionFeed()
+	oldZoomPane := dashboardZoomPane
+	oldDisplayMessage := dashboardDisplayMessage
+	oldPublishEvent := dashboardPublishBusEvent
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		dashboardZoomPane = oldZoomPane
+		dashboardDisplayMessage = oldDisplayMessage
+		dashboardPublishBusEvent = oldPublishEvent
+	})
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{JournalSize: 16, RetentionPeriod: time.Hour})
+	feed.Append(robot.AttentionEvent{Summary: "seed"})
+	feed.Append(robot.AttentionEvent{Summary: "seed-2"})
+	feed.Append(robot.AttentionEvent{Summary: "seed-3"})
+	robot.SetAttentionFeed(feed)
+
+	var zoomSession string
+	var zoomPane int
+	dashboardZoomPane = func(session string, paneIndex int) error {
+		zoomSession = session
+		zoomPane = paneIndex
+		return nil
+	}
+
+	var displayed string
+	dashboardDisplayMessage = func(session, msg string, durationMs int) error {
+		if session != "test" {
+			t.Fatalf("display session = %q, want test", session)
+		}
+		if durationMs != 4000 {
+			t.Fatalf("display duration = %d, want 4000", durationMs)
+		}
+		displayed = msg
+		return nil
+	}
+
+	var published ntmevents.BusEvent
+	dashboardPublishBusEvent = func(event ntmevents.BusEvent) {
+		published = event
+	}
+
+	m := New("test", "")
+	m.width = 140
+	m.height = 30
+	m.popupMode = true
+	m.overlayOpenedAt = time.Now().Add(-2 * time.Second)
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 1, Title: "test__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-3", Index: 3, Title: "test__cod_1", Type: tmux.AgentCodex},
+	}
+	m.rebuildPaneList()
+
+	cmd := m.handleAttentionZoom(3, 2)
+	if cmd == nil {
+		t.Fatal("expected popup attention zoom to return a quit command")
+	}
+	if !m.quitting {
+		t.Fatal("expected popup attention zoom to mark the overlay as quitting")
+	}
+	if zoomSession != "test" || zoomPane != 3 {
+		t.Fatalf("zoom called with session=%q pane=%d, want test/3", zoomSession, zoomPane)
+	}
+	if !strings.Contains(displayed, "cursor:2") {
+		t.Fatalf("expected zoom hint to include selected item cursor, got %q", displayed)
+	}
+	if strings.Contains(displayed, "cursor:3") {
+		t.Fatalf("did not expect popup zoom hint to use the feed tail cursor, got %q", displayed)
+	}
+
+	zoomEvent, ok := published.(ntmevents.WebhookEvent)
+	if !ok {
+		t.Fatalf("expected WebhookEvent, got %T", published)
+	}
+	if got := zoomEvent.Details["cursor"]; got != "2" {
+		t.Fatalf("cursor detail = %q, want 2", got)
+	}
+}
+
 func TestPopupEscapePublishesOverlayDismissDuration(t *testing.T) {
+	lockAttentionFeedForTest(t)
+
 	oldFeed := robot.GetAttentionFeed()
 	oldNow := dashboardNow
 	oldPublishEvent := dashboardPublishBusEvent
@@ -860,6 +993,8 @@ func TestPostQuitActionSemantics(t *testing.T) {
 }
 
 func TestPublishHumanZoomEventUsesWebhookEventAndBackgroundAttention(t *testing.T) {
+	lockAttentionFeedForTest(t)
+
 	oldFeed := robot.GetAttentionFeed()
 	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
 		JournalSize:       8,
@@ -925,6 +1060,8 @@ func TestPublishHumanZoomEventUsesWebhookEventAndBackgroundAttention(t *testing.
 }
 
 func TestPublishHumanOverlayDismissIncludesDurationAndBackgroundAttention(t *testing.T) {
+	lockAttentionFeedForTest(t)
+
 	oldFeed := robot.GetAttentionFeed()
 	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
 		JournalSize:       8,

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -867,6 +868,213 @@ func TestRenderStatsBar(t *testing.T) {
 		}
 		if !strings.Contains(got, "healthy") {
 			t.Error("expected health badge in stats bar")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// renderAttentionBadge — Model method, value receiver
+// ---------------------------------------------------------------------------
+
+func TestRenderAttentionBadge(t *testing.T) {
+	t.Parallel()
+
+	th := theme.Current()
+	ic := icons.Current()
+
+	t.Run("empty when no attention panel", func(t *testing.T) {
+		t.Parallel()
+		m := Model{theme: th, icons: ic, attentionPanel: nil, attentionFeedOK: true}
+		got := m.renderAttentionBadge()
+		if got != "" {
+			t.Errorf("expected empty badge when no attention panel, got %q", got)
+		}
+	})
+
+	t.Run("empty when feed not available", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "test", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: false}
+		got := m.renderAttentionBadge()
+		if got != "" {
+			t.Errorf("expected empty badge when feed unavailable, got %q", got)
+		}
+	})
+
+	t.Run("empty when no items", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData(nil, true)
+		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderAttentionBadge()
+		if got != "" {
+			t.Errorf("expected empty badge when no items, got %q", got)
+		}
+	})
+
+	t.Run("shows action required count", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "critical1", Actionability: robot.ActionabilityActionRequired},
+			{Summary: "critical2", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderAttentionBadge()
+		if !strings.Contains(got, "2") {
+			t.Errorf("expected action count '2', got %q", got)
+		}
+		if !strings.Contains(got, "●") {
+			t.Errorf("expected action icon ●, got %q", got)
+		}
+	})
+
+	t.Run("shows interesting count", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "interesting1", Actionability: robot.ActionabilityInteresting},
+			{Summary: "interesting2", Actionability: robot.ActionabilityInteresting},
+			{Summary: "interesting3", Actionability: robot.ActionabilityInteresting},
+		}, true)
+		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderAttentionBadge()
+		if !strings.Contains(got, "3") {
+			t.Errorf("expected interesting count '3', got %q", got)
+		}
+		if !strings.Contains(got, "▲") {
+			t.Errorf("expected interesting icon ▲, got %q", got)
+		}
+	})
+
+	t.Run("shows both action and interesting counts", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "action", Actionability: robot.ActionabilityActionRequired},
+			{Summary: "interesting1", Actionability: robot.ActionabilityInteresting},
+			{Summary: "interesting2", Actionability: robot.ActionabilityInteresting},
+		}, true)
+		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderAttentionBadge()
+		if !strings.Contains(got, "●") || !strings.Contains(got, "▲") {
+			t.Errorf("expected both action and interesting icons, got %q", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// overlay badge attention state — renderStatsBar integration
+// ---------------------------------------------------------------------------
+
+func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
+	t.Parallel()
+
+	th := theme.Current()
+	ic := icons.Current()
+
+	t.Run("overlay badge calm when no attention items", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData(nil, true)
+		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderStatsBar()
+		// Should just say "overlay" without counts
+		if !strings.Contains(got, "overlay") {
+			t.Errorf("expected overlay badge, got %q", got)
+		}
+		// Should not contain attention counts
+		if strings.Contains(got, "●") || strings.Contains(got, "▲") {
+			t.Errorf("did not expect attention icons in calm overlay, got %q", got)
+		}
+	})
+
+	t.Run("overlay badge shows action count", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "critical", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderStatsBar()
+		// Should show overlay with action count
+		if !strings.Contains(got, "overlay") {
+			t.Errorf("expected overlay badge, got %q", got)
+		}
+		if !strings.Contains(got, "●") || !strings.Contains(got, "1") {
+			t.Errorf("expected overlay badge with action count, got %q", got)
+		}
+	})
+
+	t.Run("overlay badge shows interesting count when no action items", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "interesting", Actionability: robot.ActionabilityInteresting},
+		}, true)
+		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderStatsBar()
+		if !strings.Contains(got, "▲") || !strings.Contains(got, "1") {
+			t.Errorf("expected overlay badge with interesting count, got %q", got)
+		}
+	})
+
+	t.Run("overlay badge stays calm when feed is unavailable", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "critical", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: false}
+		got := m.renderStatsBar()
+		if !strings.Contains(got, "overlay") {
+			t.Errorf("expected overlay badge, got %q", got)
+		}
+		if strings.Contains(got, "●") || strings.Contains(got, "▲") {
+			t.Errorf("did not expect attention counts in degraded overlay badge, got %q", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// attention badge in non-popup stats bar
+// ---------------------------------------------------------------------------
+
+func TestStatsBarIncludesAttentionBadgeWhenNotPopup(t *testing.T) {
+	t.Parallel()
+
+	th := theme.Current()
+	ic := icons.Current()
+
+	t.Run("attention badge shown in non-popup mode", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "action", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, popupMode: false, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderStatsBar()
+		if !strings.Contains(got, "●") {
+			t.Errorf("expected attention badge in non-popup stats bar, got %q", got)
+		}
+	})
+
+	t.Run("attention badge not duplicated in popup mode", func(t *testing.T) {
+		t.Parallel()
+		ap := panels.NewAttentionPanel()
+		ap.SetData([]panels.AttentionItem{
+			{Summary: "action", Actionability: robot.ActionabilityActionRequired},
+		}, true)
+		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: true}
+		got := m.renderStatsBar()
+		// Should only show overlay badge with count, not a separate attention badge
+		// Count the number of ● occurrences - should be exactly 1 (in overlay badge)
+		count := strings.Count(got, "●")
+		if count != 1 {
+			t.Errorf("expected exactly 1 action indicator in popup mode, got %d in %q", count, got)
 		}
 	})
 }
