@@ -109,7 +109,12 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 		PaletteState:     cfg.PaletteState,
 		PaletteStatePath: statePath,
 	})
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	// Enable mouse support unless NTM_MOUSE=0
+	if v, ok := os.LookupEnv("NTM_MOUSE"); !ok || (v != "0" && v != "false") {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(model, opts...)
 
 	// Watch config/palette for live reloads while the palette is open
 	stopWatchers, err := watchPaletteConfig(p)

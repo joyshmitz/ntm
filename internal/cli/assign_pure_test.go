@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -250,5 +252,200 @@ func TestMarshalAssignOutput_Nil(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Error("expected non-empty JSON")
+	}
+}
+
+func TestShouldOfferAssignWatchOverlay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		session        string
+		inTmux         bool
+		currentSession string
+		want           bool
+	}{
+		{name: "matching tmux session", session: "proj", inTmux: true, currentSession: "proj", want: true},
+		{name: "outside tmux", session: "proj", inTmux: false, currentSession: "proj", want: false},
+		{name: "different tmux session", session: "proj", inTmux: true, currentSession: "other", want: false},
+		{name: "missing target session", session: "", inTmux: true, currentSession: "proj", want: false},
+		{name: "missing current session", session: "proj", inTmux: true, currentSession: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldOfferAssignWatchOverlay(tt.session, tt.inTmux, tt.currentSession); got != tt.want {
+				t.Fatalf("shouldOfferAssignWatchOverlay(%q, %v, %q) = %v, want %v", tt.session, tt.inTmux, tt.currentSession, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildAssignWatchOverlayHint(t *testing.T) {
+	t.Parallel()
+
+	if got := buildAssignWatchOverlayHint("F12", false); got != "Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running." {
+		t.Fatalf("existing binding hint = %q", got)
+	}
+
+	if got := buildAssignWatchOverlayHint("F12", true); got != "Hint: installed the F12 overlay binding. Press F12 for the attention-aware dashboard overlay while assign --watch is running." {
+		t.Fatalf("installed binding hint = %q", got)
+	}
+}
+
+func TestBuildAssignWatchOverlayWarning(t *testing.T) {
+	t.Parallel()
+
+	got := buildAssignWatchOverlayWarning("F12", errors.New("boom"))
+	want := "Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut."
+	if got != want {
+		t.Fatalf("buildAssignWatchOverlayWarning() = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareAssignWatchOverlay_SkipsOutsideUsefulContext(t *testing.T) {
+	t.Parallel()
+
+	boundCalls := 0
+	ensureCalls := 0
+	prep := prepareAssignWatchOverlay(
+		"proj",
+		false,
+		"proj",
+		func(string) bool {
+			boundCalls++
+			return false
+		},
+		func(string) error {
+			ensureCalls++
+			return nil
+		},
+	)
+	t.Logf("outside useful context => prep=%+v boundCalls=%d ensureCalls=%d", prep, boundCalls, ensureCalls)
+
+	if prep.Hint != "" || prep.Warning != "" {
+		t.Fatalf("unexpected prep outside tmux: %+v", prep)
+	}
+	if boundCalls != 0 {
+		t.Fatalf("isBound called %d times, want 0", boundCalls)
+	}
+	if ensureCalls != 0 {
+		t.Fatalf("ensureBinding called %d times, want 0", ensureCalls)
+	}
+}
+
+func TestPrepareAssignWatchOverlay_UsesExistingBinding(t *testing.T) {
+	t.Parallel()
+
+	boundCalls := 0
+	ensureCalls := 0
+	prep := prepareAssignWatchOverlay(
+		"proj",
+		true,
+		"proj",
+		func(key string) bool {
+			boundCalls++
+			if key != assignWatchOverlayKey {
+				t.Fatalf("unexpected key %q", key)
+			}
+			return true
+		},
+		func(string) error {
+			ensureCalls++
+			return nil
+		},
+	)
+	t.Logf("existing binding => prep=%+v boundCalls=%d ensureCalls=%d", prep, boundCalls, ensureCalls)
+
+	if prep.Warning != "" {
+		t.Fatalf("unexpected warning: %q", prep.Warning)
+	}
+	if prep.Hint != "Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running." {
+		t.Fatalf("unexpected hint: %q", prep.Hint)
+	}
+	if strings.Contains(prep.Hint, "installed") {
+		t.Fatalf("did not expect install hint: %q", prep.Hint)
+	}
+	if boundCalls != 1 {
+		t.Fatalf("isBound called %d times, want 1", boundCalls)
+	}
+	if ensureCalls != 0 {
+		t.Fatalf("ensureBinding called %d times, want 0", ensureCalls)
+	}
+}
+
+func TestPrepareAssignWatchOverlay_InstallsMissingBinding(t *testing.T) {
+	t.Parallel()
+
+	boundCalls := 0
+	ensureCalls := 0
+	prep := prepareAssignWatchOverlay(
+		"proj",
+		true,
+		"proj",
+		func(key string) bool {
+			boundCalls++
+			if key != assignWatchOverlayKey {
+				t.Fatalf("unexpected key %q", key)
+			}
+			return false
+		},
+		func(key string) error {
+			ensureCalls++
+			if key != assignWatchOverlayKey {
+				t.Fatalf("unexpected key %q", key)
+			}
+			return nil
+		},
+	)
+	t.Logf("missing binding => prep=%+v boundCalls=%d ensureCalls=%d", prep, boundCalls, ensureCalls)
+
+	if prep.Warning != "" {
+		t.Fatalf("unexpected warning: %q", prep.Warning)
+	}
+	if prep.Hint != "Hint: installed the F12 overlay binding. Press F12 for the attention-aware dashboard overlay while assign --watch is running." {
+		t.Fatalf("unexpected install hint: %q", prep.Hint)
+	}
+	if boundCalls != 1 {
+		t.Fatalf("isBound called %d times, want 1", boundCalls)
+	}
+	if ensureCalls != 1 {
+		t.Fatalf("ensureBinding called %d times, want 1", ensureCalls)
+	}
+}
+
+func TestPrepareAssignWatchOverlay_ReportsBindingSetupFailure(t *testing.T) {
+	t.Parallel()
+
+	boundCalls := 0
+	ensureCalls := 0
+	prep := prepareAssignWatchOverlay(
+		"proj",
+		true,
+		"proj",
+		func(string) bool {
+			boundCalls++
+			return false
+		},
+		func(string) error {
+			ensureCalls++
+			return errors.New("boom")
+		},
+	)
+	t.Logf("binding setup failure => prep=%+v boundCalls=%d ensureCalls=%d", prep, boundCalls, ensureCalls)
+
+	if prep.Hint != "" {
+		t.Fatalf("unexpected hint: %q", prep.Hint)
+	}
+	want := "Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut."
+	if prep.Warning != want {
+		t.Fatalf("warning = %q, want %q", prep.Warning, want)
+	}
+	if boundCalls != 1 {
+		t.Fatalf("isBound called %d times, want 1", boundCalls)
+	}
+	if ensureCalls != 1 {
+		t.Fatalf("ensureBinding called %d times, want 1", ensureCalls)
 	}
 }

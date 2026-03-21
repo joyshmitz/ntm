@@ -76,6 +76,8 @@ var (
 	assignRetryFailed bool   // Retry all failed assignments
 )
 
+const assignWatchOverlayKey = "F12"
+
 // assignAgentInfo holds information about an agent pane for assignment matching
 type assignAgentInfo struct {
 	pane      tmux.Pane
@@ -421,6 +423,20 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 	// Create watch loop
 	watchLoop := NewWatchLoop(session, store, opts)
 
+	overlayPrep := prepareAssignWatchOverlay(
+		session,
+		tmux.InTmux(),
+		tmux.GetCurrentSession(),
+		isOverlayKeyBound,
+		setupOverlayBindingQuiet,
+	)
+	if overlayPrep.Warning != "" {
+		watchLoop.logf("%s", overlayPrep.Warning)
+	}
+	if overlayPrep.Hint != "" {
+		watchLoop.logf("%s", overlayPrep.Hint)
+	}
+
 	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -495,6 +511,48 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 	}
 
 	return nil
+}
+
+type assignWatchOverlayPreparation struct {
+	Hint    string
+	Warning string
+}
+
+func prepareAssignWatchOverlay(session string, inTmux bool, currentSession string, isBound func(string) bool, ensureBinding func(string) error) assignWatchOverlayPreparation {
+	if !shouldOfferAssignWatchOverlay(session, inTmux, currentSession) {
+		return assignWatchOverlayPreparation{}
+	}
+
+	if isBound(assignWatchOverlayKey) {
+		return assignWatchOverlayPreparation{
+			Hint: buildAssignWatchOverlayHint(assignWatchOverlayKey, false),
+		}
+	}
+
+	if err := ensureBinding(assignWatchOverlayKey); err != nil {
+		return assignWatchOverlayPreparation{
+			Warning: buildAssignWatchOverlayWarning(assignWatchOverlayKey, err),
+		}
+	}
+
+	return assignWatchOverlayPreparation{
+		Hint: buildAssignWatchOverlayHint(assignWatchOverlayKey, true),
+	}
+}
+
+func shouldOfferAssignWatchOverlay(session string, inTmux bool, currentSession string) bool {
+	return inTmux && session != "" && currentSession != "" && currentSession == session
+}
+
+func buildAssignWatchOverlayHint(key string, installedNow bool) string {
+	if installedNow {
+		return fmt.Sprintf("Hint: installed the %s overlay binding. Press %s for the attention-aware dashboard overlay while assign --watch is running.", key, key)
+	}
+	return fmt.Sprintf("Hint: press %s for the attention-aware dashboard overlay while assign --watch is running.", key)
+}
+
+func buildAssignWatchOverlayWarning(key string, err error) string {
+	return fmt.Sprintf("Warning: Could not auto-set up the %s overlay binding (%v); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.", key, err)
 }
 
 // resolveAgentTypeFilter determines the agent type filter from flags

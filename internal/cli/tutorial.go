@@ -57,7 +57,12 @@ Navigation:
 			// Create and run the tutorial
 			m := tutorial.New(opts...)
 
-			p := tea.NewProgram(m, tea.WithAltScreen())
+			progOpts := []tea.ProgramOption{tea.WithAltScreen()}
+			// Enable mouse support unless NTM_MOUSE=0
+			if v, ok := os.LookupEnv("NTM_MOUSE"); !ok || (v != "0" && v != "false") {
+				progOpts = append(progOpts, tea.WithMouseCellMotion())
+			}
+			p := tea.NewProgram(m, progOpts...)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("failed to run tutorial: %w", err)
 			}

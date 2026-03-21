@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,10 +20,10 @@ var validKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9\-\^]+$`)
 
 func newBindCmd() *cobra.Command {
 	var (
-		key     string
-		unbind  bool
+		key      string
+		unbind   bool
 		showOnly bool
-		overlay bool
+		overlay  bool
 	)
 
 	cmd := &cobra.Command{
@@ -152,27 +153,31 @@ func setupBinding(key string) error {
 }
 
 func setupOverlayBinding(key string) error {
+	return setupOverlayBindingWithWriter(key, os.Stdout)
+}
+
+func setupOverlayBindingQuiet(key string) error {
+	return setupOverlayBindingWithWriter(key, nil)
+}
+
+func setupOverlayBindingWithWriter(key string, out io.Writer) error {
 	t := theme.Current()
 
 	// The binding: launch ntm dashboard in popup mode for the current session.
 	// #{session_name} is expanded by tmux at trigger time.
-	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 95%% -h 95%% "NTM_POPUP=1 ntm dashboard --popup #{session_name}"`, key)
+	bindCmd := overlayBindingCommand(key)
 
 	// Apply to current tmux server
 	inTmux := os.Getenv("TMUX") != ""
 	if inTmux {
-		cmd := exec.Command(tmux.BinaryPath(),
-			"bind-key", "-n", key,
-			"display-popup", "-E", "-w", "95%", "-h", "95%",
-			"NTM_POPUP=1 ntm dashboard --popup #{session_name}",
-		)
+		cmd := exec.Command(tmux.BinaryPath(), overlayBindingArgs(key)...)
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
+			maybeFprintf(out, "%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
 		} else {
-			fmt.Printf("%s✓%s Bound %s for dashboard overlay in current tmux server\n", colorize(t.Success), colorize(t.Text), key)
+			maybeFprintf(out, "%s✓%s Bound %s for dashboard overlay in current tmux server\n", colorize(t.Success), colorize(t.Text), key)
 		}
 	} else {
-		fmt.Printf("%s→%s Not in tmux, will only update config file\n", colorize(t.Info), colorize(t.Text))
+		maybeFprintf(out, "%s→%s Not in tmux, will only update config file\n", colorize(t.Info), colorize(t.Text))
 	}
 
 	// Update tmux.conf
@@ -200,7 +205,7 @@ func setupOverlayBinding(key string) error {
 		if err := os.WriteFile(tmuxConf, []byte(strings.Join(newLines, "\n")), 0600); err != nil {
 			return fmt.Errorf("failed to update tmux.conf: %w", err)
 		}
-		fmt.Printf("%s✓%s Updated existing %s binding in %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
+		maybeFprintf(out, "%s✓%s Updated existing %s binding in %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
 	} else {
 		f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
@@ -212,24 +217,43 @@ func setupOverlayBinding(key string) error {
 		if _, err := f.WriteString(addition); err != nil {
 			return fmt.Errorf("failed to write tmux.conf: %w", err)
 		}
-		fmt.Printf("%s✓%s Added %s overlay binding to %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
+		maybeFprintf(out, "%s✓%s Added %s overlay binding to %s\n", colorize(t.Success), colorize(t.Text), key, tmuxConf)
 	}
 
-	fmt.Println()
-	fmt.Printf("  Press %s%s%s in tmux to toggle the dashboard overlay.\n",
+	maybeFprintf(out, "\n")
+	maybeFprintf(out, "  Press %s%s%s in tmux to toggle the dashboard overlay.\n",
 		colorize(t.Primary), key, colorize(t.Text))
-	fmt.Printf("  Press %sEscape%s inside the overlay to dismiss it.\n",
+	maybeFprintf(out, "  Press %sEscape%s inside the overlay to dismiss it.\n",
 		colorize(t.Primary), colorize(t.Text))
-	fmt.Printf("  Press %sz/Enter%s on a pane to zoom into it.\n",
+	maybeFprintf(out, "  Press %sz/Enter%s on a pane to zoom into it.\n",
 		colorize(t.Primary), colorize(t.Text))
 
 	if !inTmux {
-		fmt.Printf("\n  %sNote:%s Run %stmux source ~/.tmux.conf%s to reload config.\n",
+		maybeFprintf(out, "\n  %sNote:%s Run %stmux source ~/.tmux.conf%s to reload config.\n",
 			colorize(t.Info), colorize(t.Text),
 			colorize(t.Primary), colorize(t.Text))
 	}
 
 	return nil
+}
+
+func overlayBindingCommand(key string) string {
+	return fmt.Sprintf(`bind-key -n %s display-popup -E -w 95%% -h 95%% "NTM_POPUP=1 ntm dashboard --popup #{session_name}"`, key)
+}
+
+func overlayBindingArgs(key string) []string {
+	return []string{
+		"bind-key", "-n", key,
+		"display-popup", "-E", "-w", "95%", "-h", "95%",
+		"NTM_POPUP=1 ntm dashboard --popup #{session_name}",
+	}
+}
+
+func maybeFprintf(out io.Writer, format string, args ...interface{}) {
+	if out == nil {
+		return
+	}
+	fmt.Fprintf(out, format, args...)
 }
 
 func removeBinding(key string) error {
@@ -336,11 +360,17 @@ func isOverlayKeyBound(key string) bool {
 		return false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if isBindingLine(line, key) && strings.Contains(line, "ntm") {
+		if isOverlayBindingLine(line, key) {
 			return true
 		}
 	}
 	return false
+}
+
+func isOverlayBindingLine(line, key string) bool {
+	return isBindingLine(line, key) &&
+		strings.Contains(line, "display-popup") &&
+		strings.Contains(line, "dashboard --popup")
 }
 
 // isBindingLine checks if a line is a tmux binding for the given key.
