@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -34,15 +33,14 @@ type BeadsPanel struct {
 	summary      bv.BeadsSummary
 	ready        []bv.BeadPreview
 	err          error
-	viewport     viewport.Model
+	scroll       *components.ScrollablePanel
 	lastBodyHash string // Track content changes to avoid resetting scroll position
 }
 
 func NewBeadsPanel() *BeadsPanel {
-	vp := viewport.New(30, 10)
 	return &BeadsPanel{
 		PanelBase: NewPanelBase(beadsConfig()),
-		viewport:  vp,
+		scroll:    components.NewScrollablePanel(30, 10),
 	}
 }
 
@@ -70,9 +68,9 @@ func (m *BeadsPanel) Init() tea.Cmd {
 }
 
 func (m *BeadsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.IsFocused() {
+	if m.IsFocused() && m.scroll != nil {
 		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
+		m.scroll, cmd = m.scroll.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -97,6 +95,11 @@ func (m *BeadsPanel) Keybindings() []Keybinding {
 			Action:      "new",
 		},
 	}
+}
+
+// HandlesOwnHeight returns true because the beads body is viewport-managed.
+func (m *BeadsPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 func (m *BeadsPanel) View() string {
@@ -246,22 +249,23 @@ func (m *BeadsPanel) View() string {
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
-	m.viewport.Width = w
-	m.viewport.Height = vpHeight
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(w, vpHeight)
+	}
+	m.scroll.SetSize(w, vpHeight)
 	bodyStr := body.String()
 	if bodyStr != m.lastBodyHash {
-		m.viewport.SetContent(bodyStr)
+		m.scroll.SetContent(bodyStr)
 		m.lastBodyHash = bodyStr
 	}
 
-	content.WriteString(m.viewport.View())
+	content.WriteString(m.scroll.View())
 
 	// Show scroll indicator if content overflows
-	totalLines := lipgloss.Height(body.String())
-	if totalLines > vpHeight {
-		scrollPct := int(m.viewport.ScrollPercent() * 100)
-		scrollHint := lipgloss.NewStyle().Foreground(t.Overlay).Render(fmt.Sprintf(" ↕ %d%%", scrollPct))
-		content.WriteString("\n" + scrollHint)
+	if m.scroll.NeedsScroll() {
+		if footer := components.ScrollFooter(m.scroll.ScrollState(), w); footer != "" {
+			content.WriteString("\n" + footer)
+		}
 	}
 
 	// Ensure stable height to prevent layout jitter

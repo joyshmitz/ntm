@@ -4134,9 +4134,11 @@ func (m Model) View() string {
 		if available < 1 {
 			available = 1
 		}
-		// Truncate content to fit within available height.
-		// lipgloss Height/MaxHeight don't truncate - they're CSS-like properties.
-		content = truncateToHeight(content, available)
+		if !m.focusedPanelHandlesOwnHeight() {
+			// Truncate content to fit within available height.
+			// lipgloss Height/MaxHeight don't truncate - they're CSS-like properties.
+			content = truncateToHeight(content, available)
+		}
 		// Apply height style to ensure consistent spacing
 		content = lipgloss.NewStyle().Height(available).MaxHeight(available).Render(content)
 	}
@@ -5862,6 +5864,19 @@ func contentHeightFor(total int) int {
 	return contentHeight
 }
 
+func (m Model) focusedPanelHandlesOwnHeight() bool {
+	switch m.focusedPanel {
+	case PanelBeads:
+		return m.beadsPanel != nil && m.beadsPanel.HandlesOwnHeight()
+	case PanelAlerts:
+		return m.alertsPanel != nil && m.alertsPanel.HandlesOwnHeight()
+	case PanelAttention:
+		return m.attentionPanel != nil && m.attentionPanel.HandlesOwnHeight()
+	default:
+		return false
+	}
+}
+
 // truncateToHeight truncates content to fit within maxLines.
 // If the content has more lines than maxLines, it truncates and optionally
 // shows a "more" indicator. This is needed because lipgloss's Height/MaxHeight
@@ -7107,6 +7122,11 @@ func indentDashboardLayout(content string) string {
 
 func (m Model) renderBeadsPanel(width, height int) string {
 	m.beadsPanel.SetSize(width, height)
+	if m.focusedPanel == PanelBeads {
+		m.beadsPanel.Focus()
+	} else {
+		m.beadsPanel.Blur()
+	}
 	return m.beadsPanel.View()
 }
 

@@ -1,9 +1,12 @@
 package panels
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 )
@@ -59,6 +62,13 @@ func TestAlertsPanelFocusBlur(t *testing.T) {
 	panel.Blur()
 	if panel.IsFocused() {
 		t.Error("expected IsFocused to be false after Blur()")
+	}
+}
+
+func TestAlertsPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewAlertsPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Fatal("expected alerts panel to manage its own height")
 	}
 }
 
@@ -192,6 +202,36 @@ func TestAlertsPanelUpdate(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("expected Update to return nil cmd")
+	}
+}
+
+func TestAlertsPanelUpdateScrollsFocusedViewport(t *testing.T) {
+	panel := NewAlertsPanel()
+	panel.SetSize(80, 10)
+
+	alertList := make([]alerts.Alert, 0, 24)
+	for i := 0; i < 24; i++ {
+		alertList = append(alertList, alerts.Alert{
+			ID:       fmt.Sprintf("alert-%02d", i),
+			Severity: alerts.SeverityWarning,
+			Message:  fmt.Sprintf("Warning alert entry %d", i),
+		})
+	}
+	panel.SetData(alertList, nil)
+	panel.View()
+
+	if panel.scroll == nil {
+		t.Fatal("expected scrollable panel to be initialized")
+	}
+	if !panel.scroll.NeedsScroll() {
+		t.Fatal("expected alerts body to overflow and require scrolling")
+	}
+
+	panel.Focus()
+	panel.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+
+	if panel.scroll.ScrollPercent() == 0 {
+		t.Fatal("expected pgdown to move the alerts viewport")
 	}
 }
 

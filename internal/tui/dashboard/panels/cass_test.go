@@ -2,9 +2,12 @@ package panels
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 )
@@ -50,6 +53,13 @@ func TestCASSPanelFocusBlur(t *testing.T) {
 	panel.Blur()
 	if panel.IsFocused() {
 		t.Error("panel should not be focused after Blur()")
+	}
+}
+
+func TestCASSPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewCASSPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Error("expected CASS panel to manage its own height")
 	}
 }
 
@@ -163,6 +173,42 @@ func TestCASSPanelViewWithHits(t *testing.T) {
 	}
 	if !strings.Contains(view, "2h") {
 		t.Error("expected age formatted in view")
+	}
+}
+
+func TestCASSPanelViewportNavigationKeepsSelectionVisible(t *testing.T) {
+	panel := NewCASSPanel()
+	panel.SetSize(52, 10)
+	panel.Focus()
+	now := time.Now()
+
+	var hits []cass.SearchHit
+	for i := 0; i < 12; i++ {
+		hits = append(hits, cass.SearchHit{
+			Title:     fmt.Sprintf("Session: result %02d", i),
+			Score:     float64(100-i) / 100,
+			CreatedAt: ptrFlexTime(now.Add(time.Duration(-i) * time.Hour)),
+		})
+	}
+	panel.SetData(hits, nil)
+	panel.View()
+
+	for i := 0; i < 8; i++ {
+		panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+
+	view := panel.View()
+	if panel.cursor != 8 {
+		t.Fatalf("expected cursor 8, got %d", panel.cursor)
+	}
+	if panel.offset == 0 {
+		t.Fatal("expected viewport-backed navigation to advance offset")
+	}
+	if !panel.scroll.NeedsScroll() {
+		t.Fatal("expected scrollable viewport for overflowing CASS hits")
+	}
+	if !strings.Contains(view, "result 08") {
+		t.Fatalf("expected selected hit to remain visible, view=%q", view)
 	}
 }
 

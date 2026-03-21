@@ -1044,6 +1044,58 @@ func TestStatsBarShowsHelpVerbosity(t *testing.T) {
 	}
 }
 
+func TestFocusedPanelHandlesOwnHeight(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(layout.MegaWideViewThreshold)
+	m.beadsPanel = panels.NewBeadsPanel()
+	m.alertsPanel = panels.NewAlertsPanel()
+	m.attentionPanel = panels.NewAttentionPanel()
+
+	tests := []struct {
+		name  string
+		panel PanelID
+		want  bool
+	}{
+		{name: "pane list", panel: PanelPaneList, want: false},
+		{name: "beads", panel: PanelBeads, want: true},
+		{name: "alerts", panel: PanelAlerts, want: true},
+		{name: "attention", panel: PanelAttention, want: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Copy model to avoid race condition with parallel subtests
+			localM := m
+			localM.focusedPanel = tt.panel
+			if got := localM.focusedPanelHandlesOwnHeight(); got != tt.want {
+				t.Fatalf("focusedPanelHandlesOwnHeight() = %v, want %v for panel %v", got, tt.want, tt.panel)
+			}
+		})
+	}
+}
+
+func TestRenderBeadsPanelTracksFocusState(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(layout.MegaWideViewThreshold)
+	m.beadsPanel = panels.NewBeadsPanel()
+
+	m.focusedPanel = PanelBeads
+	_ = m.renderBeadsPanel(40, 12)
+	if !m.beadsPanel.IsFocused() {
+		t.Fatal("expected beads panel to be focused when PanelBeads is active")
+	}
+
+	m.focusedPanel = PanelPaneList
+	_ = m.renderBeadsPanel(40, 12)
+	if m.beadsPanel.IsFocused() {
+		t.Fatal("expected beads panel to blur when another panel is active")
+	}
+}
+
 // TestHelpBarContextualHints verifies that help hints change based on the focused panel.
 // This tests the getFocusedPanelHints() implementation (bd-144k acceptance criteria #2).
 func TestHelpBarContextualHints(t *testing.T) {

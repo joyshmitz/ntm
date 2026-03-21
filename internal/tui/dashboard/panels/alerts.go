@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -36,7 +35,7 @@ type AlertsPanel struct {
 	PanelBase
 	alerts       []alerts.Alert
 	err          error
-	viewport     viewport.Model
+	scroll       *components.ScrollablePanel
 	lastBodyHash string // Track content changes to preserve scroll position
 
 	firstSeen map[string]time.Time
@@ -44,10 +43,9 @@ type AlertsPanel struct {
 }
 
 func NewAlertsPanel() *AlertsPanel {
-	vp := viewport.New(25, 6)
 	return &AlertsPanel{
 		PanelBase: NewPanelBase(alertsConfig()),
-		viewport:  vp,
+		scroll:    components.NewScrollablePanel(25, 6),
 		firstSeen: make(map[string]time.Time),
 		now:       time.Now,
 	}
@@ -92,9 +90,9 @@ func (m *AlertsPanel) Init() tea.Cmd {
 }
 
 func (m *AlertsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.IsFocused() {
+	if m.IsFocused() && m.scroll != nil {
 		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
+		m.scroll, cmd = m.scroll.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -114,6 +112,11 @@ func (m *AlertsPanel) Keybindings() []Keybinding {
 			Action:      "ack_all",
 		},
 	}
+}
+
+// HandlesOwnHeight returns true because the alerts body is viewport-managed.
+func (m *AlertsPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 func (m *AlertsPanel) alertKey(a alerts.Alert) string {
@@ -262,22 +265,23 @@ func (m *AlertsPanel) View() string {
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
-	m.viewport.Width = w
-	m.viewport.Height = vpHeight
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(w, vpHeight)
+	}
+	m.scroll.SetSize(w, vpHeight)
 	bodyStr := body.String()
 	if bodyStr != m.lastBodyHash {
-		m.viewport.SetContent(bodyStr)
+		m.scroll.SetContent(bodyStr)
 		m.lastBodyHash = bodyStr
 	}
 
-	content.WriteString(m.viewport.View())
+	content.WriteString(m.scroll.View())
 
 	// Show scroll indicator if content overflows
-	totalLines := lipgloss.Height(bodyStr)
-	if totalLines > vpHeight {
-		scrollPct := int(m.viewport.ScrollPercent() * 100)
-		scrollHint := lipgloss.NewStyle().Foreground(t.Overlay).Render(fmt.Sprintf(" ↕ %d%%", scrollPct))
-		content.WriteString("\n" + scrollHint)
+	if m.scroll.NeedsScroll() {
+		if footer := components.ScrollFooter(m.scroll.ScrollState(), w); footer != "" {
+			content.WriteString("\n" + footer)
+		}
 	}
 
 	// Ensure stable height to prevent layout jitter

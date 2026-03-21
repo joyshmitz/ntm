@@ -2,6 +2,7 @@ package panels
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,13 @@ func TestFilesPanelFocusBlur(t *testing.T) {
 	panel.Blur()
 	if panel.IsFocused() {
 		t.Error("panel should not be focused after Blur()")
+	}
+}
+
+func TestFilesPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewFilesPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Error("expected files panel to manage its own height")
 	}
 }
 
@@ -280,6 +288,33 @@ func TestFilesPanelTimeWindowCycle(t *testing.T) {
 	}
 }
 
+func TestFilesPanelTimeWindowCycleRefiltersData(t *testing.T) {
+	panel := NewFilesPanel()
+	panel.Focus()
+	now := time.Now()
+
+	changes := []tracker.RecordedFileChange{
+		{Timestamp: now.Add(-1 * time.Minute), Session: "s", Change: tracker.FileChange{Path: "/a", Type: tracker.FileAdded}},
+		{Timestamp: now.Add(-10 * time.Minute), Session: "s", Change: tracker.FileChange{Path: "/b", Type: tracker.FileAdded}},
+		{Timestamp: now.Add(-30 * time.Minute), Session: "s", Change: tracker.FileChange{Path: "/c", Type: tracker.FileAdded}},
+	}
+
+	panel.SetData(changes, nil)
+	if len(panel.changes) != 2 {
+		t.Fatalf("expected default 15m window to show 2 changes, got %d", len(panel.changes))
+	}
+
+	panel.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if len(panel.changes) != 1 {
+		t.Fatalf("expected 5m window to show 1 change after tab, got %d", len(panel.changes))
+	}
+
+	panel.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if len(panel.changes) != 3 {
+		t.Fatalf("expected all window to show 3 changes after second tab, got %d", len(panel.changes))
+	}
+}
+
 func TestTimeWindowString(t *testing.T) {
 	tests := []struct {
 		window   TimeWindow
@@ -469,5 +504,46 @@ func TestFilesPanelNotFocusedIgnoresKeys(t *testing.T) {
 	// Cursor should not change
 	if panel.cursor != 0 {
 		t.Errorf("expected cursor 0 when not focused, got %d", panel.cursor)
+	}
+}
+
+func TestFilesPanelViewportNavigationKeepsSelectionVisible(t *testing.T) {
+	panel := NewFilesPanel()
+	panel.SetSize(52, 10)
+	panel.Focus()
+	panel.timeWindow = WindowAll
+	now := time.Now()
+
+	var changes []tracker.RecordedFileChange
+	for i := 0; i < 12; i++ {
+		changes = append(changes, tracker.RecordedFileChange{
+			Timestamp: now.Add(time.Duration(-i) * time.Minute),
+			Session:   "s",
+			Agents:    []string{"Agent"},
+			Change: tracker.FileChange{
+				Path: fmt.Sprintf("/tmp/file%02d.go", i),
+				Type: tracker.FileAdded,
+			},
+		})
+	}
+	panel.SetData(changes, nil)
+	panel.View()
+
+	for i := 0; i < 8; i++ {
+		panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+
+	view := panel.View()
+	if panel.cursor != 8 {
+		t.Fatalf("expected cursor 8, got %d", panel.cursor)
+	}
+	if panel.offset == 0 {
+		t.Fatal("expected viewport-backed navigation to advance offset")
+	}
+	if !panel.scroll.NeedsScroll() {
+		t.Fatal("expected scrollable viewport for overflowing files list")
+	}
+	if !strings.Contains(view, "file08.go") {
+		t.Fatalf("expected selected file to remain visible, view=%q", view)
 	}
 }

@@ -68,12 +68,15 @@ func (w TimeWindow) Duration() time.Duration {
 // FilesPanel displays recent file changes with agent attribution
 type FilesPanel struct {
 	PanelBase
-	changes    []tracker.RecordedFileChange
-	cursor     int
-	offset     int
-	timeWindow TimeWindow
-	theme      theme.Theme
-	err        error
+	allChanges   []tracker.RecordedFileChange
+	changes      []tracker.RecordedFileChange
+	cursor       int
+	offset       int
+	timeWindow   TimeWindow
+	theme        theme.Theme
+	err          error
+	scroll       *components.ScrollablePanel
+	lastBodyHash string
 }
 
 // NewFilesPanel creates a new files panel
@@ -82,6 +85,7 @@ func NewFilesPanel() *FilesPanel {
 		PanelBase:  NewPanelBase(filesConfig()),
 		timeWindow: Window15m, // Default to 15 minute window
 		theme:      theme.Current(),
+		scroll:     components.NewScrollablePanel(30, 8),
 	}
 }
 
@@ -96,42 +100,85 @@ func (m *FilesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.syncScrollBody()
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
+		switch {
+		case msg.Type == tea.KeyUp || msg.String() == "k":
+			m.moveCursor(-1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyDown || msg.String() == "j":
+			m.moveCursor(1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyPgUp:
+			m.pageCursor(-1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyPgDown:
+			m.pageCursor(1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyHome:
+			m.cursor = 0
+			if m.scroll != nil {
+				m.scroll.GotoTop()
+			}
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyEnd:
+			if len(m.changes) > 0 {
+				m.cursor = len(m.changes) - 1
+				if m.scroll != nil {
+					m.scroll.GotoBottom()
 				}
 			}
-		case "down", "j":
-			if m.cursor < len(m.changes)-1 {
-				m.cursor++
-				if m.cursor >= m.offset+m.contentHeight() {
-					m.offset = m.cursor - m.contentHeight() + 1
-				}
-			}
-		case "tab":
-			// Cycle time window
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyTab:
 			m.timeWindow = (m.timeWindow + 1) % 4
+			m.changes = m.filterByTimeWindow(m.allChanges)
+			m.clampCursor()
+			m.syncScrollBody()
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			return m, nil
 		}
 	}
+
+	if m.scroll != nil {
+		var cmd tea.Cmd
+		m.scroll, cmd = m.scroll.Update(msg)
+		m.syncOffsetFromScroll()
+		m.clampCursorToVisible()
+		m.syncScrollBody()
+		return m, cmd
+	}
+
 	return m, nil
 }
 
 // SetData updates the file changes
 func (m *FilesPanel) SetData(changes []tracker.RecordedFileChange, err error) {
-	m.changes = m.filterByTimeWindow(changes)
+	m.allChanges = append([]tracker.RecordedFileChange(nil), changes...)
+	m.changes = m.filterByTimeWindow(m.allChanges)
 	m.err = err
-	// Keep cursor within bounds
-	if m.cursor >= len(m.changes) {
-		m.cursor = len(m.changes) - 1
-	}
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
+	m.clampCursor()
+	m.syncScrollBody()
+	m.ensureCursorVisible()
+	m.syncOffsetFromScroll()
 }
 
 // filterByTimeWindow filters changes based on the current time window
@@ -153,6 +200,11 @@ func (m *FilesPanel) filterByTimeWindow(changes []tracker.RecordedFileChange) []
 // HasError returns true if there's an active error
 func (m *FilesPanel) HasError() bool {
 	return m.err != nil
+}
+
+// HandlesOwnHeight returns true because the files body is viewport-managed.
+func (m *FilesPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 // Keybindings returns files panel specific shortcuts
@@ -182,7 +234,197 @@ func (m *FilesPanel) Keybindings() []Keybinding {
 }
 
 func (m *FilesPanel) contentHeight() int {
-	return m.Height() - 5 // borders + header + stats row
+	height := m.Height() - 7 // borders + header + stats + footer
+	if height < 3 {
+		height = 3
+	}
+	return height
+}
+
+func (m *FilesPanel) contentWidth() int {
+	width := m.Width() - 4
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+func (m *FilesPanel) syncScrollBody() {
+	if m.Width() <= 0 || m.Height() <= 0 {
+		return
+	}
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(m.contentWidth(), m.contentHeight())
+	}
+	m.scroll.SetSize(m.contentWidth(), m.contentHeight())
+	bodyStr := m.renderBody()
+	if bodyStr != m.lastBodyHash {
+		m.scroll.SetContent(bodyStr)
+		m.lastBodyHash = bodyStr
+	}
+}
+
+func (m *FilesPanel) renderBody() string {
+	if len(m.changes) == 0 {
+		return ""
+	}
+
+	t := m.theme
+	innerWidth := m.contentWidth()
+	var body strings.Builder
+	for i, change := range m.changes {
+		selected := i == m.cursor
+
+		var lineStyle lipgloss.Style
+		if selected {
+			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
+		} else {
+			lineStyle = lipgloss.NewStyle()
+		}
+
+		var prefix string
+		var prefixColor lipgloss.Color
+		switch change.Change.Type {
+		case tracker.FileAdded:
+			prefix = "+"
+			prefixColor = t.Green
+		case tracker.FileModified:
+			prefix = "~"
+			prefixColor = t.Yellow
+		case tracker.FileDeleted:
+			prefix = "-"
+			prefixColor = t.Red
+		default:
+			prefix = "?"
+			prefixColor = t.Overlay
+		}
+		prefixStyled := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(prefix)
+
+		filename := filepath.Base(change.Change.Path)
+		agentLabel := ""
+		if len(change.Agents) > 0 {
+			agent := change.Agents[0]
+			if len(change.Agents) > 1 {
+				agent = fmt.Sprintf("%s+%d", agent, len(change.Agents)-1)
+			}
+			agentLabel = "@" + agent
+		}
+		timeAgo := m.formatTimeAgo(change.Timestamp)
+
+		maxFilename := innerWidth - len(agentLabel) - len(timeAgo) - 8
+		if maxFilename < 10 {
+			maxFilename = 10
+		}
+		filename = layout.TruncateWidthDefault(filename, maxFilename)
+
+		filenameStyled := lipgloss.NewStyle().Foreground(t.Text).Render(filename)
+		agentStyled := lipgloss.NewStyle().Foreground(t.Blue).Render(agentLabel)
+		timeStyled := lipgloss.NewStyle().Foreground(t.Overlay).Render(timeAgo)
+
+		line := fmt.Sprintf(" %s %s %s %s", prefixStyled, filenameStyled, agentStyled, timeStyled)
+		body.WriteString(lineStyle.Render(line))
+		body.WriteByte('\n')
+	}
+
+	return strings.TrimRight(body.String(), "\n")
+}
+
+func (m *FilesPanel) clampCursor() {
+	if len(m.changes) == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
+	if m.cursor >= len(m.changes) {
+		m.cursor = len(m.changes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	maxOffset := len(m.changes) - 1
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
+}
+
+func (m *FilesPanel) moveCursor(delta int) {
+	if len(m.changes) == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
+	m.cursor += delta
+	m.clampCursor()
+}
+
+func (m *FilesPanel) pageCursor(direction int) {
+	step := m.contentHeight() - 1
+	if step < 1 {
+		step = 1
+	}
+	m.moveCursor(direction * step)
+}
+
+func (m *FilesPanel) syncOffsetFromScroll() {
+	if m.scroll == nil || len(m.changes) == 0 {
+		m.offset = 0
+		return
+	}
+	state := m.scroll.ScrollState()
+	if state.TotalItems == 0 {
+		m.offset = 0
+		return
+	}
+	m.offset = state.FirstVisible
+}
+
+func (m *FilesPanel) clampCursorToVisible() {
+	if m.scroll == nil || len(m.changes) == 0 {
+		return
+	}
+	state := m.scroll.ScrollState()
+	if state.TotalItems == 0 {
+		return
+	}
+	lastVisible := state.LastVisible
+	if lastVisible < state.FirstVisible {
+		lastVisible = state.FirstVisible
+	}
+	if m.cursor < state.FirstVisible {
+		m.cursor = state.FirstVisible
+	}
+	if m.cursor > lastVisible {
+		m.cursor = lastVisible
+	}
+}
+
+func (m *FilesPanel) ensureCursorVisible() {
+	if m.scroll == nil || len(m.changes) == 0 {
+		return
+	}
+	for i := 0; i < len(m.changes)+1; i++ {
+		state := m.scroll.ScrollState()
+		if state.TotalItems == 0 || state.AllVisible() {
+			break
+		}
+		lastVisible := state.LastVisible
+		if lastVisible < state.FirstVisible {
+			lastVisible = state.FirstVisible
+		}
+		switch {
+		case m.cursor < state.FirstVisible:
+			m.scroll.Update(tea.KeyMsg{Type: tea.KeyUp})
+		case m.cursor > lastVisible:
+			m.scroll.Update(tea.KeyMsg{Type: tea.KeyDown})
+		default:
+			m.offset = state.FirstVisible
+			return
+		}
+	}
+	m.syncOffsetFromScroll()
 }
 
 // View renders the panel
@@ -263,78 +505,16 @@ func (m *FilesPanel) View() string {
 		return boxStyle.Render(FitToHeight(content.String(), h-4))
 	}
 
-	// File list
-	visibleHeight := m.contentHeight()
-	end := m.offset + visibleHeight
-	if end > len(m.changes) {
-		end = len(m.changes)
-	}
+	m.syncScrollBody()
+	m.ensureCursorVisible()
+	m.syncOffsetFromScroll()
 
-	for i := m.offset; i < end; i++ {
-		change := m.changes[i]
-		selected := i == m.cursor
+	content.WriteString(m.scroll.View())
 
-		var lineStyle lipgloss.Style
-		if selected {
-			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
-		} else {
-			lineStyle = lipgloss.NewStyle()
+	if m.scroll != nil && m.scroll.NeedsScroll() {
+		if footer := components.ScrollFooter(m.scroll.ScrollState(), m.contentWidth()); footer != "" {
+			content.WriteString("\n" + footer)
 		}
-
-		// Change type prefix with color
-		var prefix string
-		var prefixColor lipgloss.Color
-		switch change.Change.Type {
-		case tracker.FileAdded:
-			prefix = "+"
-			prefixColor = t.Green
-		case tracker.FileModified:
-			prefix = "~"
-			prefixColor = t.Yellow
-		case tracker.FileDeleted:
-			prefix = "-"
-			prefixColor = t.Red
-		default:
-			prefix = "?"
-			prefixColor = t.Overlay
-		}
-		prefixStyled := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(prefix)
-
-		// File path (basename for display, truncated)
-		filename := filepath.Base(change.Change.Path)
-		maxFilename := w - 20
-		if maxFilename < 10 {
-			maxFilename = 10
-		}
-		filename = layout.TruncateWidthDefault(filename, maxFilename)
-		filenameStyled := lipgloss.NewStyle().Foreground(t.Text).Render(filename)
-
-		// Agent attribution
-		agentStr := ""
-		if len(change.Agents) > 0 {
-			agent := change.Agents[0]
-			if len(change.Agents) > 1 {
-				agent = fmt.Sprintf("%s+%d", agent, len(change.Agents)-1)
-			}
-			agentStr = lipgloss.NewStyle().Foreground(t.Blue).Render("@" + agent)
-		}
-
-		// Time ago
-		timeAgo := m.formatTimeAgo(change.Timestamp)
-		timeStyled := lipgloss.NewStyle().Foreground(t.Overlay).Render(timeAgo)
-
-		line := fmt.Sprintf(" %s %s %s %s", prefixStyled, filenameStyled, agentStr, timeStyled)
-		content.WriteString(lineStyle.Render(line) + "\n")
-	}
-
-	// Add scroll indicator if there's more content
-	scrollState := components.ScrollState{
-		FirstVisible: m.offset,
-		LastVisible:  end - 1,
-		TotalItems:   len(m.changes),
-	}
-	if footer := components.ScrollFooter(scrollState, w-4); footer != "" {
-		content.WriteString(footer + "\n")
 	}
 
 	// Ensure stable height to prevent layout jitter

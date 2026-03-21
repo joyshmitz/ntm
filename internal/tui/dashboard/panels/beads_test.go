@@ -1,9 +1,12 @@
 package panels
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 )
@@ -59,6 +62,13 @@ func TestBeadsPanelFocusBlur(t *testing.T) {
 	panel.Blur()
 	if panel.IsFocused() {
 		t.Error("expected IsFocused to be false after Blur()")
+	}
+}
+
+func TestBeadsPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewBeadsPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Fatal("expected beads panel to manage its own height")
 	}
 }
 
@@ -136,6 +146,42 @@ func TestBeadsPanelUpdate(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("expected Update to return nil cmd")
+	}
+}
+
+func TestBeadsPanelUpdateScrollsFocusedViewport(t *testing.T) {
+	panel := NewBeadsPanel()
+	panel.SetSize(90, 12)
+
+	ready := make([]bv.BeadPreview, 0, 30)
+	for i := 0; i < 30; i++ {
+		ready = append(ready, bv.BeadPreview{
+			ID:       fmt.Sprintf("br-%03d", i),
+			Title:    fmt.Sprintf("Ready item %d", i),
+			Priority: "P1",
+		})
+	}
+	panel.SetData(bv.BeadsSummary{
+		Available:  true,
+		Ready:      len(ready),
+		InProgress: 4,
+		Blocked:    2,
+		Closed:     8,
+	}, ready, nil)
+	panel.View()
+
+	if panel.scroll == nil {
+		t.Fatal("expected scrollable panel to be initialized")
+	}
+	if !panel.scroll.NeedsScroll() {
+		t.Fatal("expected beads body to overflow and require scrolling")
+	}
+
+	panel.Focus()
+	panel.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+
+	if panel.scroll.ScrollPercent() == 0 {
+		t.Fatal("expected pgdown to move the beads viewport")
 	}
 }
 

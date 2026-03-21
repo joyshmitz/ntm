@@ -31,17 +31,20 @@ func cassConfig() PanelConfig {
 // CASSPanel displays recent CASS search hits for the current session.
 type CASSPanel struct {
 	PanelBase
-	hits   []cass.SearchHit
-	cursor int
-	offset int
-	theme  theme.Theme
-	err    error
+	hits         []cass.SearchHit
+	cursor       int
+	offset       int
+	theme        theme.Theme
+	err          error
+	scroll       *components.ScrollablePanel
+	lastBodyHash string
 }
 
 func NewCASSPanel() *CASSPanel {
 	return &CASSPanel{
 		PanelBase: NewPanelBase(cassConfig()),
 		theme:     theme.Current(),
+		scroll:    components.NewScrollablePanel(35, 8),
 	}
 }
 
@@ -54,24 +57,63 @@ func (m *CASSPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.syncScrollBody()
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
+		switch {
+		case msg.Type == tea.KeyUp || msg.String() == "k":
+			m.moveCursor(-1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyDown || msg.String() == "j":
+			m.moveCursor(1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyPgUp:
+			m.pageCursor(-1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyPgDown:
+			m.pageCursor(1)
+			m.ensureCursorVisible()
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyHome:
+			m.cursor = 0
+			if m.scroll != nil {
+				m.scroll.GotoTop()
+			}
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
+		case msg.Type == tea.KeyEnd:
+			if len(m.hits) > 0 {
+				m.cursor = len(m.hits) - 1
+				if m.scroll != nil {
+					m.scroll.GotoBottom()
 				}
 			}
-		case "down", "j":
-			if m.cursor < len(m.hits)-1 {
-				m.cursor++
-				if m.cursor >= m.offset+m.contentHeight() {
-					m.offset = m.cursor - m.contentHeight() + 1
-				}
-			}
+			m.syncOffsetFromScroll()
+			m.syncScrollBody()
+			return m, nil
 		}
+	}
+
+	if m.scroll != nil {
+		var cmd tea.Cmd
+		m.scroll, cmd = m.scroll.Update(msg)
+		m.syncOffsetFromScroll()
+		m.clampCursorToVisible()
+		m.syncScrollBody()
+		return m, cmd
 	}
 
 	return m, nil
@@ -94,10 +136,18 @@ func (m *CASSPanel) SetData(hits []cass.SearchHit, err error) {
 	if m.offset > m.cursor {
 		m.offset = m.cursor
 	}
+	m.syncScrollBody()
+	m.ensureCursorVisible()
+	m.syncOffsetFromScroll()
 }
 
 func (m *CASSPanel) HasError() bool {
 	return m.err != nil
+}
+
+// HandlesOwnHeight returns true because the CASS body is viewport-managed.
+func (m *CASSPanel) HandlesOwnHeight() bool {
+	return true
 }
 
 func (m *CASSPanel) Keybindings() []Keybinding {
@@ -121,7 +171,157 @@ func (m *CASSPanel) Keybindings() []Keybinding {
 }
 
 func (m *CASSPanel) contentHeight() int {
-	return m.Height() - 4 // borders + header
+	height := m.Height() - 6 // borders + header + footer
+	if height < 3 {
+		height = 3
+	}
+	return height
+}
+
+func (m *CASSPanel) contentWidth() int {
+	width := m.Width() - 4
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+func (m *CASSPanel) syncScrollBody() {
+	if m.Width() <= 0 || m.Height() <= 0 {
+		return
+	}
+	if m.scroll == nil {
+		m.scroll = components.NewScrollablePanel(m.contentWidth(), m.contentHeight())
+	}
+	m.scroll.SetSize(m.contentWidth(), m.contentHeight())
+	bodyStr := m.renderBody()
+	if bodyStr != m.lastBodyHash {
+		m.scroll.SetContent(bodyStr)
+		m.lastBodyHash = bodyStr
+	}
+}
+
+func (m *CASSPanel) renderBody() string {
+	if len(m.hits) == 0 {
+		return ""
+	}
+
+	t := m.theme
+	innerWidth := m.contentWidth()
+	var body strings.Builder
+	for i, hit := range m.hits {
+		selected := i == m.cursor
+
+		var lineStyle lipgloss.Style
+		if selected {
+			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
+		} else {
+			lineStyle = lipgloss.NewStyle()
+		}
+
+		score := lipgloss.NewStyle().
+			Foreground(t.Blue).
+			Width(5).
+			Align(lipgloss.Right).
+			Render(fmt.Sprintf("%.2f", hit.Score))
+
+		age := lipgloss.NewStyle().
+			Foreground(t.Overlay).
+			Width(5).
+			Render(formatAge(hit.CreatedAtTime()))
+
+		titleWidth := innerWidth - 13
+		if titleWidth < 8 {
+			titleWidth = 8
+		}
+		name := layout.TruncateWidthDefault(hit.Title, titleWidth)
+		line := fmt.Sprintf("%s %s %s", score, age, name)
+		body.WriteString(lineStyle.Render(line))
+		body.WriteByte('\n')
+	}
+	return strings.TrimRight(body.String(), "\n")
+}
+
+func (m *CASSPanel) moveCursor(delta int) {
+	if len(m.hits) == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
+	m.cursor += delta
+	if m.cursor >= len(m.hits) {
+		m.cursor = len(m.hits) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func (m *CASSPanel) pageCursor(direction int) {
+	step := m.contentHeight() - 1
+	if step < 1 {
+		step = 1
+	}
+	m.moveCursor(direction * step)
+}
+
+func (m *CASSPanel) syncOffsetFromScroll() {
+	if m.scroll == nil || len(m.hits) == 0 {
+		m.offset = 0
+		return
+	}
+	state := m.scroll.ScrollState()
+	if state.TotalItems == 0 {
+		m.offset = 0
+		return
+	}
+	m.offset = state.FirstVisible
+}
+
+func (m *CASSPanel) clampCursorToVisible() {
+	if m.scroll == nil || len(m.hits) == 0 {
+		return
+	}
+	state := m.scroll.ScrollState()
+	if state.TotalItems == 0 {
+		return
+	}
+	lastVisible := state.LastVisible
+	if lastVisible < state.FirstVisible {
+		lastVisible = state.FirstVisible
+	}
+	if m.cursor < state.FirstVisible {
+		m.cursor = state.FirstVisible
+	}
+	if m.cursor > lastVisible {
+		m.cursor = lastVisible
+	}
+}
+
+func (m *CASSPanel) ensureCursorVisible() {
+	if m.scroll == nil || len(m.hits) == 0 {
+		return
+	}
+	for i := 0; i < len(m.hits)+1; i++ {
+		state := m.scroll.ScrollState()
+		if state.TotalItems == 0 || state.AllVisible() {
+			break
+		}
+		lastVisible := state.LastVisible
+		if lastVisible < state.FirstVisible {
+			lastVisible = state.FirstVisible
+		}
+		switch {
+		case m.cursor < state.FirstVisible:
+			m.scroll.Update(tea.KeyMsg{Type: tea.KeyUp})
+		case m.cursor > lastVisible:
+			m.scroll.Update(tea.KeyMsg{Type: tea.KeyDown})
+		default:
+			m.offset = state.FirstVisible
+			return
+		}
+	}
+	m.syncOffsetFromScroll()
 }
 
 func (m *CASSPanel) View() string {
@@ -187,52 +387,16 @@ func (m *CASSPanel) View() string {
 		return boxStyle.Render(FitToHeight(content.String(), h-4))
 	}
 
-	visibleHeight := m.contentHeight()
-	end := m.offset + visibleHeight
-	if end > len(m.hits) {
-		end = len(m.hits)
-	}
+	m.syncScrollBody()
+	m.ensureCursorVisible()
+	m.syncOffsetFromScroll()
 
-	for i := m.offset; i < end; i++ {
-		hit := m.hits[i]
-		selected := i == m.cursor
+	content.WriteString(m.scroll.View())
 
-		var lineStyle lipgloss.Style
-		if selected {
-			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
-		} else {
-			lineStyle = lipgloss.NewStyle()
+	if m.scroll != nil && m.scroll.NeedsScroll() {
+		if footer := components.ScrollFooter(m.scroll.ScrollState(), m.contentWidth()); footer != "" {
+			content.WriteString("\n" + footer)
 		}
-
-		score := lipgloss.NewStyle().
-			Foreground(t.Blue).
-			Width(5).
-			Align(lipgloss.Right).
-			Render(fmt.Sprintf("%.2f", hit.Score))
-
-		age := lipgloss.NewStyle().
-			Foreground(t.Overlay).
-			Width(5).
-			Render(formatAge(hit.CreatedAtTime()))
-
-		titleWidth := w - 4 - 5 - 1 - 5 - 1 // box padding + score + spaces + age + spaces
-		if titleWidth < 8 {
-			titleWidth = 8
-		}
-		name := layout.TruncateWidthDefault(hit.Title, titleWidth)
-
-		line := fmt.Sprintf("%s %s %s", score, age, name)
-		content.WriteString(lineStyle.Render(line) + "\n")
-	}
-
-	// Add scroll indicator if there's more content
-	scrollState := components.ScrollState{
-		FirstVisible: m.offset,
-		LastVisible:  end - 1,
-		TotalItems:   len(m.hits),
-	}
-	if footer := components.ScrollFooter(scrollState, w-4); footer != "" {
-		content.WriteString(footer + "\n")
 	}
 
 	// Ensure stable height to prevent layout jitter

@@ -7,238 +7,189 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestNewScrollablePanel(t *testing.T) {
-	sp := NewScrollablePanel(80, 24)
-	if sp == nil {
-		t.Fatal("NewScrollablePanel returned nil")
+func TestScrollablePanelSetContent(t *testing.T) {
+	sp := NewScrollablePanel(40, 10)
+	sp.SetContent("line1\nline2\nline3")
+	view := sp.View()
+	if !strings.Contains(view, "line1") {
+		t.Error("content not visible in view")
 	}
+}
+
+func TestScrollablePanelOverflow(t *testing.T) {
+	sp := NewScrollablePanel(40, 3)
+	sp.SetContent(strings.Repeat("line\n", 20))
+	if sp.AtBottom() {
+		t.Error("should not be at bottom with overflow content")
+	}
+	if !sp.NeedsScrolling() {
+		t.Error("should need scrolling with overflow content")
+	}
+}
+
+func TestScrollablePanelPgDown(t *testing.T) {
+	sp := NewScrollablePanel(40, 5)
+	sp.SetContent(strings.Repeat("line\n", 50))
+
+	// Simulate PgDown key press
+	sp, _ = sp.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if sp.ScrollPercent() == 0 {
+		t.Error("PgDown should scroll content")
+	}
+}
+
+func TestScrollablePanelResize(t *testing.T) {
+	sp := NewScrollablePanel(40, 10)
+	sp.SetContent(strings.Repeat("line\n", 20))
+	sp.SetSize(80, 20)
+
 	if sp.Width() != 80 {
 		t.Errorf("Width() = %d, want 80", sp.Width())
 	}
-	if sp.Height() != 24 {
-		t.Errorf("Height() = %d, want 24", sp.Height())
+	if sp.Height() != 20 {
+		t.Errorf("Height() = %d, want 20", sp.Height())
 	}
-	t.Logf("Created panel: %dx%d", sp.Width(), sp.Height())
-}
-
-func TestScrollablePanelSetContent(t *testing.T) {
-	sp := NewScrollablePanel(40, 10)
-	content := "Line 1\nLine 2\nLine 3\nLine 4\nLine 5"
-	sp.SetContent(content)
 
 	view := sp.View()
 	if view == "" {
-		t.Error("View() returned empty after SetContent")
-	}
-	t.Logf("Content lines: %d, View lines: %d", strings.Count(content, "\n")+1, strings.Count(view, "\n")+1)
-}
-
-func TestScrollablePanelSetSize(t *testing.T) {
-	sp := NewScrollablePanel(80, 24)
-	sp.SetSize(120, 40)
-
-	if sp.Width() != 120 {
-		t.Errorf("Width() = %d after SetSize, want 120", sp.Width())
-	}
-	if sp.Height() != 40 {
-		t.Errorf("Height() = %d after SetSize, want 40", sp.Height())
+		t.Error("should render after resize")
 	}
 }
 
-func TestScrollablePanelScrollPosition(t *testing.T) {
+func TestScrollablePanelBoundaries(t *testing.T) {
 	sp := NewScrollablePanel(40, 5)
+	sp.SetContent(strings.Repeat("line\n", 50))
 
-	// Create content that needs scrolling (20 lines in 5-line viewport)
-	lines := make([]string, 20)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
-	}
-	sp.SetContent(strings.Join(lines, "\n"))
-
-	// Should start at top
 	if !sp.AtTop() {
-		t.Error("AtTop() should be true initially")
-	}
-	if sp.AtBottom() {
-		t.Error("AtBottom() should be false initially")
-	}
-	if sp.ScrollPercent() != 0 {
-		t.Errorf("ScrollPercent() = %f, want 0", sp.ScrollPercent())
+		t.Error("should start at top")
 	}
 
-	// Scroll to bottom
 	sp.GotoBottom()
 	if !sp.AtBottom() {
-		t.Error("AtBottom() should be true after GotoBottom")
-	}
-	if sp.AtTop() {
-		t.Error("AtTop() should be false after GotoBottom")
+		t.Error("should be at bottom after GotoBottom")
 	}
 
-	// Scroll back to top
 	sp.GotoTop()
 	if !sp.AtTop() {
-		t.Error("AtTop() should be true after GotoTop")
+		t.Error("should be at top after GotoTop")
 	}
-
-	t.Logf("Total lines: %d, Visible: %d", sp.TotalLines(), sp.VisibleLines())
 }
 
-func TestScrollablePanelScrollState(t *testing.T) {
-	sp := NewScrollablePanel(40, 5)
+func TestScrollablePanelFitsNoScroll(t *testing.T) {
+	sp := NewScrollablePanel(40, 20)
+	sp.SetContent("short\ncontent")
 
-	// Small content that doesn't need scrolling
-	sp.SetContent("Line 1\nLine 2\nLine 3")
-	state := sp.ScrollState()
-	if !state.AllVisible() {
-		t.Error("AllVisible() should be true for small content")
+	if sp.NeedsScrolling() {
+		t.Error("should not need scrolling for short content")
 	}
-
-	// Large content that needs scrolling
-	lines := make([]string, 20)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
+	if sp.ScrollIndicator() != "" {
+		t.Error("should not show scroll indicator for short content")
 	}
-	sp.SetContent(strings.Join(lines, "\n"))
-	state = sp.ScrollState()
-
-	if state.AllVisible() {
-		t.Error("AllVisible() should be false for large content")
-	}
-	if !state.HasMoreBelow() {
-		t.Error("HasMoreBelow() should be true at top of large content")
-	}
-	if state.HasMoreAbove() {
-		t.Error("HasMoreAbove() should be false at top")
-	}
-
-	t.Logf("ScrollState: first=%d, last=%d, total=%d",
-		state.FirstVisible, state.LastVisible, state.TotalItems)
 }
 
-func TestScrollablePanelScrollIndicator(t *testing.T) {
+func TestScrollIndicatorIntegration(t *testing.T) {
 	sp := NewScrollablePanel(40, 5)
+	sp.SetContent(strings.Repeat("line\n", 50))
 
-	// Content that doesn't need scrolling
-	sp.SetContent("Line 1\nLine 2")
-	indicator := sp.ScrollIndicator()
-	if indicator != "" {
-		t.Errorf("ScrollIndicator() = %q for small content, want empty", indicator)
+	ind := sp.ScrollIndicator()
+	if ind == "" {
+		t.Error("should show scroll indicator for overflow content")
+	}
+}
+
+func TestScrollablePanelPageNavigationKeys(t *testing.T) {
+	sp := NewScrollablePanel(40, 5)
+	sp.SetContent(strings.Repeat("line\n", 60))
+
+	sp, _ = sp.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if sp.ScrollPercent() == 0 {
+		t.Fatal("expected pgdown to scroll forward")
 	}
 
-	// Large content at top
+	sp, _ = sp.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if !sp.AtBottom() {
+		t.Fatal("expected end to jump to the bottom")
+	}
+
+	sp, _ = sp.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if !sp.AtTop() {
+		t.Fatal("expected home to jump back to the top")
+	}
+}
+
+func TestScrollablePanelScrollIndicatorTracksOffset(t *testing.T) {
+	sp := NewScrollablePanel(40, 5)
 	lines := make([]string, 20)
 	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
+		lines[i] = "line"
 	}
 	sp.SetContent(strings.Join(lines, "\n"))
-	indicator = sp.ScrollIndicator()
-	if indicator != "▼" {
-		t.Errorf("ScrollIndicator() = %q at top, want '▼'", indicator)
+
+	if got := sp.ScrollIndicator(); got != "▼" {
+		t.Fatalf("ScrollIndicator() at top = %q, want %q", got, "▼")
 	}
 
-	// Scroll to middle
-	sp.LineDown(5)
-	indicator = sp.ScrollIndicator()
-	if indicator != "▲▼" {
-		t.Errorf("ScrollIndicator() = %q in middle, want '▲▼'", indicator)
+	sp.LineDown(4)
+	if got := sp.ScrollIndicator(); got != "▲▼" {
+		t.Fatalf("ScrollIndicator() in middle = %q, want %q", got, "▲▼")
+	}
+	if got := sp.YOffset(); got != 4 {
+		t.Fatalf("YOffset() after LineDown = %d, want 4", got)
 	}
 
-	// Scroll to bottom
 	sp.GotoBottom()
-	indicator = sp.ScrollIndicator()
-	if indicator != "▲" {
-		t.Errorf("ScrollIndicator() = %q at bottom, want '▲'", indicator)
-	}
-
-	t.Logf("Indicators tested: top=▼, middle=▲▼, bottom=▲")
-}
-
-func TestScrollablePanelNeedsScroll(t *testing.T) {
-	sp := NewScrollablePanel(40, 10)
-
-	// Small content
-	sp.SetContent("Line 1\nLine 2\nLine 3")
-	if sp.NeedsScroll() {
-		t.Error("NeedsScroll() should be false for small content")
-	}
-
-	// Large content
-	lines := make([]string, 20)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
-	}
-	sp.SetContent(strings.Join(lines, "\n"))
-	if !sp.NeedsScroll() {
-		t.Error("NeedsScroll() should be true for large content")
+	if got := sp.ScrollIndicator(); got != "▲" {
+		t.Fatalf("ScrollIndicator() at bottom = %q, want %q", got, "▲")
 	}
 }
 
-func TestScrollablePanelUpdate(t *testing.T) {
-	sp := NewScrollablePanel(40, 10)
-	lines := make([]string, 30)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
-	}
-	sp.SetContent(strings.Join(lines, "\n"))
-
-	// Simulate a key message (though viewport handles its own keys)
-	_, cmd := sp.Update(tea.KeyMsg{Type: tea.KeyDown})
-	// cmd may or may not be nil depending on viewport state
-	_ = cmd
-
-	// Panel should still be valid
-	if sp.Width() != 40 {
-		t.Errorf("Width() changed after Update: %d", sp.Width())
-	}
-}
-
-func TestScrollablePanelLineScrolling(t *testing.T) {
+func TestScrollablePanelResizePreservesScrollOffset(t *testing.T) {
 	sp := NewScrollablePanel(40, 5)
 	lines := make([]string, 20)
 	for i := range lines {
-		lines[i] = strings.Repeat("x", 40)
+		lines[i] = "line"
 	}
 	sp.SetContent(strings.Join(lines, "\n"))
+	sp.LineDown(6)
 
-	initialOffset := sp.YOffset()
-	sp.LineDown(3)
-	if sp.YOffset() != initialOffset+3 {
-		t.Errorf("YOffset after LineDown(3) = %d, want %d", sp.YOffset(), initialOffset+3)
+	if got := sp.YOffset(); got != 6 {
+		t.Fatalf("YOffset() before resize = %d, want 6", got)
 	}
 
-	sp.LineUp(1)
-	if sp.YOffset() != initialOffset+2 {
-		t.Errorf("YOffset after LineUp(1) = %d, want %d", sp.YOffset(), initialOffset+2)
+	sp.SetSize(60, 7)
+
+	if got := sp.YOffset(); got != 6 {
+		t.Fatalf("YOffset() after resize = %d, want 6", got)
 	}
-
-	t.Logf("Line scrolling: down 3, up 1, final offset=%d", sp.YOffset())
-}
-
-func BenchmarkScrollablePanelView(b *testing.B) {
-	sp := NewScrollablePanel(80, 24)
-	lines := make([]string, 100)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 80)
-	}
-	sp.SetContent(strings.Join(lines, "\n"))
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = sp.View()
+	if got := sp.VisibleLines(); got != 7 {
+		t.Fatalf("VisibleLines() after resize = %d, want 7", got)
 	}
 }
 
-func BenchmarkScrollablePanelScrollState(b *testing.B) {
-	sp := NewScrollablePanel(80, 24)
-	lines := make([]string, 100)
-	for i := range lines {
-		lines[i] = strings.Repeat("x", 80)
-	}
-	sp.SetContent(strings.Join(lines, "\n"))
+func TestScrollablePanelContentChange(t *testing.T) {
+	sp := NewScrollablePanel(40, 10)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = sp.ScrollState()
+	// Set initial content
+	sp.SetContent("initial")
+	if sp.TotalLines() != 1 {
+		t.Errorf("TotalLines() = %d, want 1", sp.TotalLines())
+	}
+
+	// Change content
+	sp.SetContent("line1\nline2\nline3")
+	if sp.TotalLines() != 3 {
+		t.Errorf("TotalLines() = %d, want 3", sp.TotalLines())
+	}
+}
+
+func TestScrollablePanelEmptyContent(t *testing.T) {
+	sp := NewScrollablePanel(40, 10)
+	sp.SetContent("")
+
+	if sp.TotalLines() != 0 {
+		t.Errorf("TotalLines() = %d, want 0 for empty content", sp.TotalLines())
+	}
+	if sp.NeedsScrolling() {
+		t.Error("should not need scrolling for empty content")
 	}
 }
