@@ -189,6 +189,14 @@ func normalizeAgentType(t string) string {
 		return "codex"
 	case "gmi", "gemini", "google-gemini":
 		return "gemini"
+	case "cursor":
+		return "cursor"
+	case "windsurf", "ws":
+		return "windsurf"
+	case "aider":
+		return "aider"
+	case "ollama":
+		return "ollama"
 	default:
 		return t
 	}

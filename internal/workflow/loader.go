@@ -225,6 +225,8 @@ func ProfileToAgentType(profile string) string {
 		return string(agent.AgentTypeWindsurf)
 	case "aider":
 		return string(agent.AgentTypeAider)
+	case "ollama":
+		return string(agent.AgentTypeOllama)
 	default:
 		// Default to Claude for unknown profiles (most capable agent)
 		return string(agent.AgentTypeClaudeCode)

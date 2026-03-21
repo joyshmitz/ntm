@@ -64,6 +64,14 @@ func (p *Persona) AgentTypeFlag() string {
 		return "cod"
 	case "gemini", "gmi":
 		return "gmi"
+	case "cursor":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "aider":
+		return "aider"
+	case "ollama":
+		return "ollama"
 	default:
 		return "cc" // Default to Claude
 	}
@@ -83,10 +91,10 @@ func (p *Persona) Validate() error {
 
 	// Validate agent type
 	switch strings.ToLower(p.AgentType) {
-	case "claude", "cc", "codex", "cod", "gemini", "gmi":
+	case "claude", "cc", "codex", "cod", "gemini", "gmi", "cursor", "windsurf", "aider", "ollama":
 		// valid
 	default:
-		return fmt.Errorf("persona %q: invalid agent_type %q (must be claude, codex, or gemini)", p.Name, p.AgentType)
+		return fmt.Errorf("persona %q: invalid agent_type %q", p.Name, p.AgentType)
 	}
 
 	// Validate temperature if set

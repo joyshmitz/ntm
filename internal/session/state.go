@@ -45,12 +45,13 @@ type AgentConfig struct {
 	Cursor   int `json:"cursor"`
 	Windsurf int `json:"windsurf"`
 	Aider    int `json:"aider"`
+	Ollama   int `json:"ollama"`
 	User     int `json:"user"`
 }
 
 // Total returns the total number of agents.
 func (a AgentConfig) Total() int {
-	return a.Claude + a.Codex + a.Gemini + a.Cursor + a.Windsurf + a.Aider + a.User
+	return a.Claude + a.Codex + a.Gemini + a.Cursor + a.Windsurf + a.Aider + a.Ollama + a.User
 }
 
 // PaneState represents the state of a single pane.
@@ -69,16 +70,24 @@ type PaneState struct {
 
 // ConfigSnapshot captures relevant config at save time.
 type ConfigSnapshot struct {
-	ClaudeCmd string `json:"claude_cmd,omitempty"`
-	CodexCmd  string `json:"codex_cmd,omitempty"`
-	GeminiCmd string `json:"gemini_cmd,omitempty"`
+	ClaudeCmd   string `json:"claude_cmd,omitempty"`
+	CodexCmd    string `json:"codex_cmd,omitempty"`
+	GeminiCmd   string `json:"gemini_cmd,omitempty"`
+	CursorCmd   string `json:"cursor_cmd,omitempty"`
+	WindsurfCmd string `json:"windsurf_cmd,omitempty"`
+	AiderCmd    string `json:"aider_cmd,omitempty"`
+	OllamaCmd   string `json:"ollama_cmd,omitempty"`
 }
 
 // AgentCommands defines the launch commands for agents.
 type AgentCommands struct {
-	Claude string
-	Codex  string
-	Gemini string
+	Claude   string
+	Codex    string
+	Gemini   string
+	Cursor   string
+	Windsurf string
+	Aider    string
+	Ollama   string
 }
 
 // SaveOptions configures how a session is saved.

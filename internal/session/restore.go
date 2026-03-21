@@ -288,6 +288,14 @@ func getAgentCommand(agentType string, cmds AgentCommands) string {
 		return cmds.Codex
 	case "gmi", "gemini":
 		return cmds.Gemini
+	case "cursor":
+		return cmds.Cursor
+	case "windsurf":
+		return cmds.Windsurf
+	case "aider":
+		return cmds.Aider
+	case "ollama":
+		return cmds.Ollama
 	default:
 		return ""
 	}

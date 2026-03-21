@@ -285,6 +285,14 @@ func matchesRebalanceFilter(agentType, filter string) bool {
 		return agentType == "codex" || strings.HasPrefix(agentType, "cod")
 	case "gmi", "gemini":
 		return agentType == "gemini" || strings.HasPrefix(agentType, "gmi")
+	case "cursor":
+		return agentType == "cursor"
+	case "windsurf":
+		return agentType == "windsurf"
+	case "aider":
+		return agentType == "aider"
+	case "ollama":
+		return agentType == "ollama"
 	}
 	return true
 }

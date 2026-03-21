@@ -250,8 +250,20 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 	case "gmi", "gemini":
 		agentTypeFull = "gemini"
 		agentCmdTemplate = cfg.Agents.Gemini
+	case "cursor":
+		agentTypeFull = "cursor"
+		agentCmdTemplate = cfg.Agents.Cursor
+	case "windsurf", "ws":
+		agentTypeFull = "windsurf"
+		agentCmdTemplate = cfg.Agents.Windsurf
+	case "aider":
+		agentTypeFull = "aider"
+		agentCmdTemplate = cfg.Agents.Aider
+	case "ollama":
+		agentTypeFull = "ollama"
+		agentCmdTemplate = cfg.Agents.Ollama
 	default:
-		return nil, fmt.Errorf("unknown agent type: %s (use cc, cod, or gmi)", agentType)
+		return nil, fmt.Errorf("unknown agent type: %s", agentType)
 	}
 
 	dir := cfg.GetProjectDir(session)
