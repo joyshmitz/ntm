@@ -5,8 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
@@ -22,11 +24,17 @@ const (
 
 // Toast represents a single ephemeral notification.
 type Toast struct {
-	ID        string     // Unique identifier for dedup
-	Message   string     // Display text
-	Level     ToastLevel // Severity level
-	CreatedAt time.Time  // When the toast was created
+	ID        string        // Unique identifier for dedup
+	Message   string        // Display text
+	Level     ToastLevel    // Severity level
+	CreatedAt time.Time     // When the toast was created
 	Duration  time.Duration // How long to display (0 = default 4s)
+
+	// Spring animation fields (internal)
+	offsetX    float64          // Current horizontal offset (pixels from final position)
+	offsetXVel float64          // Current velocity for spring physics
+	spring     harmonica.Spring // Spring physics engine
+	dismissed  bool             // Whether toast is animating out
 }
 
 // DefaultToastDuration is the default display time for toasts.
@@ -57,6 +65,17 @@ func (tm *ToastManager) Push(toast Toast) {
 		toast.CreatedAt = time.Now()
 	}
 
+	// Initialize spring animation (slide in from right)
+	if styles.ReducedMotionEnabled() {
+		toast.offsetX = 0.0
+		toast.offsetXVel = 0.0
+	} else {
+		// Create spring: 60 FPS, frequency 6.0 Hz, damping 0.4 (slightly underdamped for bounce)
+		toast.spring = harmonica.NewSpring(harmonica.FPS(60), 6.0, 0.4)
+		toast.offsetX = 40.0 // Start 40 chars to the right (offscreen)
+		toast.offsetXVel = 0.0
+	}
+
 	// Dedup check
 	if toast.ID != "" {
 		if lastSeen, ok := tm.seen[toast.ID]; ok {
@@ -75,16 +94,39 @@ func (tm *ToastManager) Push(toast Toast) {
 	}
 }
 
-// Tick prunes expired toasts. Call on each dashboard tick.
+// Tick prunes expired toasts and updates spring animations. Call on each dashboard tick.
 func (tm *ToastManager) Tick() {
 	now := time.Now()
+
+	// Update spring animations for all toasts
+	if !styles.ReducedMotionEnabled() {
+		for i := range tm.toasts {
+			t := &tm.toasts[i]
+			// Calculate target position: 0 for active, 60 for dismissed (slide out right)
+			target := 0.0
+			if t.dismissed {
+				target = 60.0
+			}
+			t.offsetX, t.offsetXVel = t.spring.Update(t.offsetX, t.offsetXVel, target)
+		}
+	}
+
+	// Prune expired toasts (keep if not expired or still animating out)
 	active := tm.toasts[:0]
 	for _, t := range tm.toasts {
 		dur := t.Duration
 		if dur == 0 {
 			dur = DefaultToastDuration
 		}
-		if now.Sub(t.CreatedAt) < dur {
+		expired := now.Sub(t.CreatedAt) >= dur
+
+		if expired && !t.dismissed {
+			// Start dismiss animation
+			t.dismissed = true
+		}
+
+		// Keep toast if: (not dismissed AND not expired) OR (dismissed AND still animating out)
+		if (!t.dismissed && !expired) || (t.dismissed && t.offsetX < 55.0) {
 			active = append(active, t)
 		}
 	}
@@ -101,6 +143,36 @@ func (tm *ToastManager) Tick() {
 // Count returns the number of active toasts.
 func (tm *ToastManager) Count() int {
 	return len(tm.toasts)
+}
+
+// IsAnimating returns true if any toast is currently animating (slide-in or slide-out).
+// Use this to request faster tick rates during animation.
+func (tm *ToastManager) IsAnimating() bool {
+	if styles.ReducedMotionEnabled() {
+		return false
+	}
+	for _, t := range tm.toasts {
+		// Animating in: offset > 0.5 and not dismissed
+		if !t.dismissed && t.offsetX > 0.5 {
+			return true
+		}
+		// Animating out: dismissed and offset < 55
+		if t.dismissed && t.offsetX < 55.0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Dismiss marks a toast for removal, triggering the slide-out animation.
+func (tm *ToastManager) Dismiss(id string) bool {
+	for i := range tm.toasts {
+		if tm.toasts[i].ID == id && !tm.toasts[i].dismissed {
+			tm.toasts[i].dismissed = true
+			return true
+		}
+	}
+	return false
 }
 
 // RenderToasts renders all active toasts as a vertical stack for overlay.
@@ -201,6 +273,15 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 			Padding(0, 1).
 			Width(toastWidth).
 			Render(content)
+
+		// Apply horizontal offset from spring animation
+		if toast.offsetX > 0.5 {
+			// Pad with spaces to create the offset effect
+			offset := int(toast.offsetX)
+			if offset > 0 {
+				toastBox = strings.Repeat(" ", offset) + toastBox
+			}
+		}
 
 		rendered = append(rendered, toastBox)
 	}

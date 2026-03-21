@@ -82,6 +82,38 @@ func TestProgressBarWidthWithPercent(t *testing.T) {
 	}
 }
 
+func TestProgressBarBubblesPathWidth(t *testing.T) {
+	bar := NewProgressBar(20)
+	bar.Percent = 0.5
+	bar.Animated = false
+	bar.ShowPercent = false
+	bar.GradientColors = []string{"#ff0000", "#0000ff"}
+
+	rendered := bar.View()
+	if rendered == "" {
+		t.Fatal("expected non-empty rendered bar")
+	}
+	if width := lipgloss.Width(rendered); width != 20 {
+		t.Errorf("width = %d, want 20", width)
+	}
+}
+
+func TestProgressBarBubblesPathWithPercentWidth(t *testing.T) {
+	bar := NewProgressBar(20)
+	bar.Percent = 0.5
+	bar.Animated = false
+	bar.ShowPercent = true
+	bar.GradientColors = []string{"#ff0000"}
+
+	rendered := bar.View()
+	if rendered == "" {
+		t.Fatal("expected non-empty rendered bar")
+	}
+	if width := lipgloss.Width(rendered); width != 25 {
+		t.Errorf("width = %d, want 25", width)
+	}
+}
+
 // TestShimmerStability verifies shimmer produces stable width across ticks
 func TestShimmerStability(t *testing.T) {
 	text := strings.Repeat("█", 10)
@@ -300,5 +332,123 @@ func TestIndeterminateBarDisablesAnimationInTmuxByDefault(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatal("expected no follow-up tick when indeterminate animation is disabled")
+	}
+}
+
+// Phase 1d: bubbles/progress integration tests
+
+// TestStylesProgressBar2Color verifies 2-color bar uses bubbles/progress
+func TestStylesProgressBar2Color(t *testing.T) {
+	bar := styles.ProgressBar(0.5, 40, "", "", "#ff0000", "#0000ff")
+	if bar == "" {
+		t.Error("2-color bar should not be empty")
+	}
+	w := lipgloss.Width(bar)
+	if w > 42 {
+		t.Errorf("bar width %d exceeds expected maximum of 42", w)
+	}
+	t.Logf("2-color bar width: %d, content length: %d", w, len(bar))
+}
+
+// TestStylesProgressBar3Color verifies 3+ color bar uses custom gradient
+func TestStylesProgressBar3Color(t *testing.T) {
+	bar := styles.ProgressBar(0.5, 40, "", "", "#ff0000", "#00ff00", "#0000ff")
+	if bar == "" {
+		t.Error("3-color bar should not be empty")
+	}
+	t.Logf("3-color bar width: %d", lipgloss.Width(bar))
+}
+
+// TestStylesProgressBarZeroAndFull verifies boundary cases
+func TestStylesProgressBarZeroAndFull(t *testing.T) {
+	bar0 := styles.ProgressBar(0.0, 40, "", "")
+	bar1 := styles.ProgressBar(1.0, 40, "", "")
+
+	if bar0 == "" {
+		t.Error("0% bar should render")
+	}
+	if bar1 == "" {
+		t.Error("100% bar should render")
+	}
+
+	t.Logf("0%% bar width: %d, 100%% bar width: %d", lipgloss.Width(bar0), lipgloss.Width(bar1))
+}
+
+// TestStylesShimmerProgressBar verifies shimmer animation still works
+func TestStylesShimmerProgressBar(t *testing.T) {
+	bar := styles.ShimmerProgressBar(0.5, 40, "", "", 5)
+	if bar == "" {
+		t.Error("shimmer bar should not be empty")
+	}
+	t.Logf("shimmer bar width: %d", lipgloss.Width(bar))
+}
+
+// TestComponentsProgressBarStruct verifies ProgressBar struct renders correctly
+func TestComponentsProgressBarStruct(t *testing.T) {
+	pb := NewProgressBar(40)
+	pb.Percent = 0.75
+	pb.Animated = false
+	pb.ShowPercent = false
+
+	view := pb.View()
+	if view == "" {
+		t.Error("component bar should not be empty")
+	}
+	t.Logf("component bar width: %d", lipgloss.Width(view))
+}
+
+// TestComponentsIndeterminateBarRender verifies indeterminate bar renders
+func TestComponentsIndeterminateBarRender(t *testing.T) {
+	ib := NewIndeterminateBar(40)
+	ib.ShowLabel = false
+
+	view := ib.View()
+	if view == "" {
+		t.Error("indeterminate bar should not be empty")
+	}
+	t.Logf("indeterminate bar width: %d", lipgloss.Width(view))
+}
+
+// TestProgressBarReducedMotion verifies reduced motion disables shimmer
+func TestProgressBarReducedMotion(t *testing.T) {
+	t.Setenv("NTM_ANIMATIONS", "0")
+	t.Setenv("NTM_REDUCE_MOTION", "")
+
+	bar1 := styles.ShimmerProgressBar(0.5, 40, "", "", 0)
+	bar2 := styles.ShimmerProgressBar(0.5, 40, "", "", 100)
+
+	// With reduced motion, different ticks should produce identical output
+	// (shimmer effect is disabled)
+	t.Logf("tick 0 width: %d, tick 100 width: %d", lipgloss.Width(bar1), lipgloss.Width(bar2))
+
+	// Both should render something
+	if bar1 == "" || bar2 == "" {
+		t.Error("reduced motion bars should still render")
+	}
+	if bar1 != bar2 {
+		t.Error("reduced motion should suppress shimmer differences across ticks")
+	}
+}
+
+// TestStylesProgressBarDefaultColors verifies default colors when none specified
+func TestStylesProgressBarDefaultColors(t *testing.T) {
+	bar := styles.ProgressBar(0.5, 40, "", "")
+	if bar == "" {
+		t.Error("bar with default colors should not be empty")
+	}
+	t.Logf("default colors bar width: %d", lipgloss.Width(bar))
+}
+
+// BenchmarkStylesProgressBar benchmarks styles.ProgressBar
+func BenchmarkStylesProgressBar(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = styles.ProgressBar(0.5, 40, "", "", "#ff0000", "#0000ff")
+	}
+}
+
+// BenchmarkStylesProgressBar3Color benchmarks 3-color custom gradient
+func BenchmarkStylesProgressBar3Color(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = styles.ProgressBar(0.5, 40, "█", "░", "#ff0000", "#00ff00", "#0000ff")
 	}
 }

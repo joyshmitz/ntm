@@ -2,9 +2,11 @@ package components
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	bubblesprogress "github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -85,9 +87,12 @@ func (p ProgressBar) Update(msg tea.Msg) (ProgressBar, tea.Cmd) {
 
 // View renders the progress bar
 func (p ProgressBar) View() string {
-	// Calculate filled width
-	filledWidth := int(p.Percent * float64(p.Width))
-	emptyWidth := p.Width - filledWidth
+	percent := p.Percent
+	if percent < 0 {
+		percent = 0
+	} else if percent > 1 {
+		percent = 1
+	}
 
 	// Determine characters to use (ASCII fallback for limited terminals)
 	filledChar, emptyChar := p.FilledChar, p.EmptyChar
@@ -95,35 +100,43 @@ func (p ProgressBar) View() string {
 		filledChar, emptyChar = FilledASCII, EmptyASCII
 	}
 
-	// Create filled portion with gradient (or solid color for limited terminals)
-	var filledStr string
-	if filledWidth > 0 {
-		barText := strings.Repeat(filledChar, filledWidth)
-		if terminal.SupportsTrueColor() {
-			if p.Animated {
-				// Animated shimmer effect
-				filledStr = styles.Shimmer(barText, p.AnimationTick, p.GradientColors...)
+	var bar string
+	if !p.Animated && len(p.GradientColors) <= 2 {
+		bar = p.renderStaticBubblesBar(percent, filledChar, emptyChar)
+	} else {
+		slog.Debug("progress: using custom component backend", "animated", p.Animated, "colors", len(p.GradientColors), "width", p.Width)
+		filledWidth := int(percent * float64(p.Width))
+		emptyWidth := p.Width - filledWidth
+
+		// Create filled portion with gradient (or solid color for limited terminals)
+		var filledStr string
+		if filledWidth > 0 {
+			barText := strings.Repeat(filledChar, filledWidth)
+			if terminal.SupportsTrueColor() {
+				if p.Animated {
+					// Animated shimmer effect
+					filledStr = styles.Shimmer(barText, p.AnimationTick, p.GradientColors...)
+				} else {
+					filledStr = styles.GradientText(barText, p.GradientColors...)
+				}
 			} else {
-				filledStr = styles.GradientText(barText, p.GradientColors...)
+				// Fallback to solid primary color for terminals without true color
+				filledStr = lipgloss.NewStyle().
+					Foreground(theme.Current().Primary).
+					Render(barText)
 			}
-		} else {
-			// Fallback to solid primary color for terminals without true color
-			filledStr = lipgloss.NewStyle().
-				Foreground(theme.Current().Primary).
-				Render(barText)
 		}
+
+		// Create empty portion
+		emptyStr := lipgloss.NewStyle().
+			Foreground(p.EmptyColor).
+			Render(strings.Repeat(emptyChar, emptyWidth))
+
+		bar = filledStr + emptyStr
 	}
 
-	// Create empty portion
-	emptyStr := lipgloss.NewStyle().
-		Foreground(p.EmptyColor).
-		Render(strings.Repeat(emptyChar, emptyWidth))
-
-	// Build result
-	bar := filledStr + emptyStr
-
 	if p.ShowPercent {
-		percentStr := fmt.Sprintf(" %3.0f%%", p.Percent*100)
+		percentStr := fmt.Sprintf(" %3.0f%%", percent*100)
 		bar += lipgloss.NewStyle().
 			Foreground(theme.Current().Text).
 			Render(percentStr)
@@ -136,6 +149,25 @@ func (p ProgressBar) View() string {
 	}
 
 	return bar
+}
+
+func (p ProgressBar) renderStaticBubblesBar(percent float64, filledChar, emptyChar string) string {
+	opts := []bubblesprogress.Option{
+		bubblesprogress.WithWidth(p.Width),
+		bubblesprogress.WithoutPercentage(),
+		bubblesprogress.WithFillCharacters(progressRune(filledChar, '█'), progressRune(emptyChar, '░')),
+	}
+
+	if len(p.GradientColors) >= 2 {
+		opts = append(opts, bubblesprogress.WithGradient(p.GradientColors[0], p.GradientColors[1]))
+	} else {
+		opts = append(opts, bubblesprogress.WithDefaultGradient())
+	}
+
+	bar := bubblesprogress.New(opts...)
+	bar.EmptyColor = string(p.EmptyColor)
+	slog.Debug("progress: using bubbles component backend", "colors", len(p.GradientColors), "width", p.Width)
+	return bar.ViewAs(percent)
 }
 
 // SetPercent updates the progress percentage
@@ -153,6 +185,14 @@ func (p ProgressBar) tick() tea.Cmd {
 	return tea.Tick(progressTickInterval, func(t time.Time) tea.Msg {
 		return ProgressTickMsg(t)
 	})
+}
+
+func progressRune(value string, fallback rune) rune {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) == 0 {
+		return fallback
+	}
+	return runes[0]
 }
 
 // IndeterminateBar is a progress bar for unknown duration

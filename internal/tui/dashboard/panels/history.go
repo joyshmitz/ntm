@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
@@ -179,6 +180,10 @@ type HistoryPanel struct {
 
 	showPreview   bool
 	previewScroll int
+
+	// bubbles/table for rendering
+	table     table.Model
+	tableInit bool // true after first table setup
 }
 
 // NewHistoryPanel creates a new history panel
@@ -275,10 +280,6 @@ func (m *HistoryPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "up", "k":
-			m.moveCursor(-1)
-		case "down", "j":
-			m.moveCursor(1)
 		case "enter":
 			// Replay selected entry.
 			if entry, ok := m.selectedEntry(); ok {
@@ -307,6 +308,49 @@ func (m *HistoryPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Cycle time window filter.
 			m.timeFilter = m.timeFilter.Next()
 			m.applyFilters()
+		case "up", "k":
+			// Move cursor up
+			if m.tableInit {
+				m.table.MoveUp(1)
+				m.cursor = m.table.Cursor()
+				m.syncOffsetFromTable()
+			}
+		case "down", "j":
+			// Move cursor down
+			if m.tableInit {
+				m.table.MoveDown(1)
+				m.cursor = m.table.Cursor()
+				// Sync offset for backwards compatibility (table scrolls internally)
+				m.syncOffsetFromTable()
+			}
+		case "pgup", "ctrl+u":
+			// Page up
+			if m.tableInit {
+				m.table.MoveUp(m.contentHeight())
+				m.cursor = m.table.Cursor()
+				m.syncOffsetFromTable()
+			}
+		case "pgdown", "ctrl+d":
+			// Page down
+			if m.tableInit {
+				m.table.MoveDown(m.contentHeight())
+				m.cursor = m.table.Cursor()
+				m.syncOffsetFromTable()
+			}
+		case "home", "g":
+			// Go to first entry
+			if m.tableInit {
+				m.table.GotoTop()
+				m.cursor = m.table.Cursor()
+				m.syncOffsetFromTable()
+			}
+		case "end", "G":
+			// Go to last entry
+			if m.tableInit {
+				m.table.GotoBottom()
+				m.cursor = m.table.Cursor()
+				m.syncOffsetFromTable()
+			}
 		}
 	}
 	return m, nil
@@ -316,6 +360,7 @@ func (m *HistoryPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *HistoryPanel) SetEntries(entries []history.HistoryEntry, err error) {
 	m.entries = entries
 	m.err = err
+	m.initTable() // Initialize table before applying filters
 	m.applyFilters()
 }
 
@@ -383,6 +428,9 @@ func (m *HistoryPanel) moveCursor(delta int) {
 	if len(m.visibleEntries) == 0 {
 		m.cursor = 0
 		m.offset = 0
+		if m.tableInit {
+			m.table.SetCursor(0)
+		}
 		return
 	}
 
@@ -402,6 +450,9 @@ func (m *HistoryPanel) moveCursor(delta int) {
 	}
 	if m.offset < 0 {
 		m.offset = 0
+	}
+	if m.tableInit {
+		m.table.SetCursor(m.cursor)
 	}
 }
 
@@ -458,6 +509,166 @@ func (m *HistoryPanel) applyFilters() {
 		m.offset = m.cursor
 	}
 	if m.offset < 0 {
+		m.offset = 0
+	}
+
+	if m.tableInit {
+		m.rebuildTableRows()
+	}
+}
+
+func (m *HistoryPanel) historyTableHeight() int {
+	height := m.Height() - 5
+	if height < 3 {
+		height = 3
+	}
+	return height
+}
+
+// historyTableColumns returns adaptive columns based on panel width.
+func (m *HistoryPanel) historyTableColumns() []table.Column {
+	w := m.Width()
+	if w < 4 {
+		w = 40
+	}
+	// Reserve space for borders/padding
+	contentWidth := w - 6
+
+	// Define column widths based on available space
+	if contentWidth < 50 {
+		// Narrow: Status + Prompt only
+		return []table.Column{
+			{Title: "St", Width: 2},
+			{Title: "Prompt", Width: contentWidth - 4},
+		}
+	}
+	if contentWidth < 70 {
+		// Medium: Status + ID + Prompt
+		return []table.Column{
+			{Title: "St", Width: 2},
+			{Title: "ID", Width: 4},
+			{Title: "Prompt", Width: contentWidth - 10},
+		}
+	}
+	// Wide: Status + ID + Target + Prompt
+	targetWidth := 12
+	idWidth := 4
+	statusWidth := 2
+	promptWidth := contentWidth - targetWidth - idWidth - statusWidth - 6
+	if promptWidth < 20 {
+		promptWidth = 20
+	}
+	return []table.Column{
+		{Title: "St", Width: statusWidth},
+		{Title: "ID", Width: idWidth},
+		{Title: "Target", Width: targetWidth},
+		{Title: "Prompt", Width: promptWidth},
+	}
+}
+
+// rebuildTableRows converts visibleEntries to table rows.
+func (m *HistoryPanel) rebuildTableRows() {
+	cols := m.historyTableColumns()
+	rows := make([]table.Row, len(m.visibleEntries))
+
+	for i, e := range m.visibleEntries {
+		// Status indicator
+		status := "✓"
+		if !e.Success {
+			status = "✗"
+		}
+
+		// ID (truncated to 4 chars)
+		id := e.ID
+		if len(id) > 4 {
+			id = id[:4]
+		}
+
+		// Target
+		target := "all"
+		if len(e.Targets) > 0 {
+			target = m.formatTargets(e, 10)
+		}
+
+		// Prompt (single line)
+		prompt := strings.ReplaceAll(e.Prompt, "\n", " ")
+		maxPrompt := cols[len(cols)-1].Width
+		if len(prompt) > maxPrompt {
+			prompt = prompt[:maxPrompt-1] + "…"
+		}
+
+		// Build row based on column count
+		switch len(cols) {
+		case 2:
+			rows[i] = table.Row{status, prompt}
+		case 3:
+			rows[i] = table.Row{status, id, prompt}
+		default:
+			rows[i] = table.Row{status, id, target, prompt}
+		}
+	}
+
+	// Set columns BEFORE rows - rows reference column indices during render
+	m.table.SetColumns(cols)
+	m.table.SetRows(rows)
+
+	// Sync cursor position with table
+	if len(rows) > 0 {
+		if m.cursor < len(rows) {
+			m.table.SetCursor(m.cursor)
+		} else {
+			m.table.SetCursor(len(rows) - 1)
+		}
+	}
+}
+
+// initTable initializes the table model with styling.
+func (m *HistoryPanel) initTable() {
+	if m.tableInit {
+		return
+	}
+	t := m.theme
+
+	// Build table styles using Catppuccin theme
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(t.Surface1).
+		BorderBottom(true).
+		Bold(true).
+		Foreground(t.Lavender)
+	s.Selected = s.Selected.
+		Foreground(t.Text).
+		Background(t.Surface0).
+		Bold(true)
+	s.Cell = s.Cell.
+		Foreground(t.Subtext)
+
+	m.table = table.New(
+		table.WithColumns(m.historyTableColumns()),
+		table.WithRows([]table.Row{}),
+		table.WithFocused(m.IsFocused()),
+		table.WithWidth(max(10, m.Width()-6)),
+		table.WithHeight(m.historyTableHeight()),
+		table.WithStyles(s),
+	)
+
+	m.tableInit = true
+	m.rebuildTableRows()
+}
+
+// syncOffsetFromTable syncs the panel's offset field from the table's internal scroll position.
+// This maintains backwards compatibility with tests that check panel.offset.
+func (m *HistoryPanel) syncOffsetFromTable() {
+	// The table's offset is calculated from cursor position and visible height
+	// If cursor > visibleHeight, there's scrolling happening
+	visibleHeight := m.contentHeight()
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	if m.cursor >= visibleHeight {
+		m.offset = m.cursor - visibleHeight + 1
+	} else {
 		m.offset = 0
 	}
 }
@@ -759,73 +970,21 @@ func (m *HistoryPanel) View() string {
 		return mainContent
 	}
 
-	visibleHeight := m.contentHeight()
-	end := m.offset + visibleHeight
-	if end > len(m.visibleEntries) {
-		end = len(m.visibleEntries)
+	// Initialize table if needed
+	m.initTable()
+	if m.IsFocused() {
+		m.table.Focus()
+	} else {
+		m.table.Blur()
 	}
 
-	for i := m.offset; i < end; i++ {
-		entry := m.visibleEntries[i]
-		selected := i == m.cursor
+	// Update table dimensions for rendering
+	m.table.SetHeight(m.historyTableHeight())
+	m.table.SetWidth(max(10, w-6))
+	m.rebuildTableRows()
 
-		var lineStyle lipgloss.Style
-		if selected {
-			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
-		} else {
-			lineStyle = lipgloss.NewStyle()
-		}
-
-		// ID
-		idText := entry.ID
-		if len(idText) > 4 {
-			idText = idText[:4]
-		}
-		id := lipgloss.NewStyle().Foreground(t.Overlay).Render(idText)
-
-		// Targets
-		targets := "all"
-		if len(entry.Targets) > 0 {
-			targets = m.formatTargets(entry, 0)
-		}
-		if len(targets) > 10 {
-			targets = targets[:9] + "…"
-		}
-		targetStyle := lipgloss.NewStyle().Foreground(t.Blue).Width(10).Render(targets)
-
-		// Prompt
-		prompt := strings.ReplaceAll(entry.Prompt, "\n", " ")
-		maxPrompt := w - 20
-		if maxPrompt < 10 {
-			maxPrompt = 10
-		}
-		if len(prompt) > maxPrompt {
-			prompt = prompt[:maxPrompt-1] + "…"
-		}
-		promptStyle := lipgloss.NewStyle().Foreground(t.Text).Render(prompt)
-
-		// Status
-		status := "✓"
-		statusColor := t.Green
-		if !entry.Success {
-			status = "✗"
-			statusColor = t.Red
-		}
-		statusStyle := lipgloss.NewStyle().Foreground(statusColor).Render(status)
-
-		line := fmt.Sprintf("%s %s %s %s", statusStyle, id, targetStyle, promptStyle)
-		content.WriteString(lineStyle.Render(line) + "\n")
-	}
-
-	// Add scroll indicator if there's more content
-	scrollState := components.ScrollState{
-		FirstVisible: m.offset,
-		LastVisible:  end - 1,
-		TotalItems:   len(m.visibleEntries),
-	}
-	if footer := components.ScrollFooter(scrollState, w-4); footer != "" {
-		content.WriteString(footer + "\n")
-	}
+	// Render the table
+	content.WriteString(m.table.View() + "\n")
 
 	mainContent := boxStyle.Render(FitToHeight(content.String(), h-4))
 

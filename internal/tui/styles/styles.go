@@ -3,10 +3,12 @@ package styles
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"strings"
 
+	bubblesprogress "github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/truncate"
 
@@ -77,6 +79,50 @@ func defaultGradient() []string {
 
 func defaultSurface1() lipgloss.Color {
 	return theme.Current().Surface1
+}
+
+func normalizeProgressChars(filled, empty string) (string, string) {
+	if filled == "" {
+		filled = "█"
+	}
+	if empty == "" {
+		empty = "░"
+	}
+	return filled, empty
+}
+
+func progressFillRunes(filled, empty string) (rune, rune) {
+	filled, empty = normalizeProgressChars(filled, empty)
+	fullRunes := []rune(filled)
+	emptyRunes := []rune(empty)
+	return fullRunes[0], emptyRunes[0]
+}
+
+func renderBubblesProgressBar(percent float64, width int, filled, empty string, colors ...string) string {
+	fullRune, emptyRune := progressFillRunes(filled, empty)
+	opts := []bubblesprogress.Option{
+		bubblesprogress.WithWidth(width),
+		bubblesprogress.WithoutPercentage(),
+		bubblesprogress.WithFillCharacters(fullRune, emptyRune),
+	}
+
+	switch len(colors) {
+	case 0:
+		opts = append(opts, bubblesprogress.WithDefaultGradient())
+	default:
+		if len(colors) >= 2 {
+			opts = append(opts, bubblesprogress.WithGradient(colors[0], colors[1]))
+			break
+		}
+		fallthrough
+	case 1:
+		opts = append(opts, bubblesprogress.WithDefaultGradient())
+	}
+
+	bar := bubblesprogress.New(opts...)
+	bar.EmptyColor = string(defaultSurface1())
+	slog.Debug("progress: using bubbles backend", "colors", len(colors), "width", width)
+	return bar.ViewAs(percent)
 }
 
 // GradientDirection specifies gradient orientation
@@ -336,7 +382,9 @@ func clamp(v int) int {
 	return v
 }
 
-// ProgressBar creates a beautiful gradient progress bar
+// ProgressBar creates a beautiful gradient progress bar.
+// For <=2 colors, uses charmbracelet/bubbles/progress for rendering.
+// For 3+ colors, uses custom gradient implementation.
 func ProgressBar(percent float64, width int, filled, empty string, colors ...string) string {
 	if width <= 0 {
 		return ""
@@ -348,13 +396,21 @@ func ProgressBar(percent float64, width int, filled, empty string, colors ...str
 		percent = 1
 	}
 
-	filledWidth := int(percent * float64(width))
-	emptyWidth := width - filledWidth
-
-	if len(colors) < 2 {
+	// Default colors if not specified.
+	if len(colors) == 0 {
 		t := theme.Current()
 		colors = []string{string(t.Blue), string(t.Green)}
 	}
+
+	// Use bubbles/progress for 2-color gradients or solid fills.
+	if len(colors) <= 2 {
+		return renderBubblesProgressBar(percent, width, filled, empty, colors...)
+	}
+
+	// 3+ colors: use custom gradient implementation
+	filled, empty = normalizeProgressChars(filled, empty)
+	filledWidth := int(percent * float64(width))
+	emptyWidth := width - filledWidth
 
 	filledStr := GradientText(strings.Repeat(filled, filledWidth), colors...)
 	emptyStr := lipgloss.NewStyle().Foreground(defaultSurface1()).Render(strings.Repeat(empty, emptyWidth))
@@ -374,6 +430,7 @@ func ShimmerProgressBar(percent float64, width int, filled, empty string, tick i
 		percent = 1
 	}
 
+	filled, empty = normalizeProgressChars(filled, empty)
 	filledWidth := int(percent * float64(width))
 	emptyWidth := width - filledWidth
 
@@ -386,8 +443,10 @@ func ShimmerProgressBar(percent float64, width int, filled, empty string, tick i
 	filledStr := GradientText(strings.Repeat(filled, filledWidth), colors...)
 
 	// Apply shimmer effect on top if tick > 0
-	if tick > 0 {
+	if tick > 0 && !ReducedMotionEnabled() {
 		filledStr = Shimmer(strings.Repeat(filled, filledWidth), tick, colors...)
+	} else if tick > 0 && ReducedMotionEnabled() {
+		slog.Debug("progress: shimmer suppressed by reduced motion", "width", width)
 	}
 
 	emptyStr := lipgloss.NewStyle().Foreground(defaultSurface1()).Render(strings.Repeat(empty, emptyWidth))
