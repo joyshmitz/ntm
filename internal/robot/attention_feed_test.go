@@ -2055,3 +2055,225 @@ func TestAttentionResponse_CursorExpired(t *testing.T) {
 		t.Errorf("OldestCursor should be 100, got %d", resp.CursorInfo.OldestCursor)
 	}
 }
+
+// =============================================================================
+// Operator Loop Integration Tests (br-9bmtl)
+// =============================================================================
+
+func TestOperatorLoop_CursorChaining(t *testing.T) {
+	t.Parallel()
+
+	feed := newTestAttentionFeed(t)
+	oldFeed := GetAttentionFeed()
+	SetAttentionFeed(feed)
+	defer SetAttentionFeed(oldFeed)
+
+	// Step 1: Bootstrap — empty feed returns cursor 0
+	events, latestCursor, err := feed.Replay(0, 100)
+	if err != nil {
+		t.Fatalf("initial replay error: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events on empty feed, got %d", len(events))
+	}
+	if latestCursor != 0 {
+		t.Errorf("expected cursor 0 on empty feed, got %d", latestCursor)
+	}
+
+	// Step 2: Add events and replay from cursor 0
+	ev1 := feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStalled,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       "agent stalled",
+		Session:       "proj",
+	})
+	ev2 := feed.Append(AttentionEvent{
+		Category:      EventCategoryPane,
+		Type:          EventTypePaneOutput,
+		Actionability: ActionabilityBackground,
+		Severity:      SeverityInfo,
+		Summary:       "pane output",
+		Session:       "proj",
+	})
+
+	events, latestCursor, err = feed.Replay(0, 100)
+	if err != nil {
+		t.Fatalf("replay error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Errorf("expected 2 events, got %d", len(events))
+	}
+	if latestCursor != ev2.Cursor {
+		t.Errorf("latest cursor = %d, want %d", latestCursor, ev2.Cursor)
+	}
+
+	// Step 3: Replay from ev1's cursor — should get only ev2
+	events, latestCursor, err = feed.Replay(ev1.Cursor, 100)
+	if err != nil {
+		t.Fatalf("chained replay error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("expected 1 event from cursor %d, got %d", ev1.Cursor, len(events))
+	}
+	if len(events) > 0 && events[0].Cursor != ev2.Cursor {
+		t.Errorf("expected event cursor %d, got %d", ev2.Cursor, events[0].Cursor)
+	}
+
+	// Step 4: Replay from latest — should get 0 events
+	events, _, err = feed.Replay(latestCursor, 100)
+	if err != nil {
+		t.Fatalf("replay from latest error: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events from latest cursor, got %d", len(events))
+	}
+}
+
+func TestOperatorLoop_ProfileFilteredEvents(t *testing.T) {
+	t.Parallel()
+
+	feed := newTestAttentionFeed(t)
+
+	// Add events at different actionability levels
+	feed.Append(AttentionEvent{
+		Category:      EventCategorySystem,
+		Type:          EventTypeSystemHealthChange,
+		Actionability: ActionabilityBackground,
+		Severity:      SeverityInfo,
+		Summary:       "system healthy",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStateChange,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "agent state changed",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAlert,
+		Type:          EventTypeAlertWarning,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       "context hot",
+	})
+
+	events, _, _ := feed.Replay(0, 100)
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	// Operator profile: min_actionability=interesting → should exclude background
+	operatorProfile := GetProfile("operator")
+	if operatorProfile == nil {
+		t.Fatal("operator profile not found")
+	}
+	filters := ResolveEffectiveFilters("operator", ProfileFilters{})
+	if filters.MinActionability != ActionabilityInteresting {
+		t.Errorf("operator min_actionability = %q, want %q", filters.MinActionability, ActionabilityInteresting)
+	}
+
+	// Apply filters manually to verify
+	var filtered []AttentionEvent
+	for _, ev := range events {
+		if filters.MatchesFilters(&ev) {
+			filtered = append(filtered, ev)
+		}
+	}
+	if len(filtered) != 2 {
+		t.Errorf("operator profile should show 2 events (interesting+action_required), got %d", len(filtered))
+	}
+
+	// Debug profile: min_actionability=background → should include all
+	debugFilters := ResolveEffectiveFilters("debug", ProfileFilters{})
+	var debugFiltered []AttentionEvent
+	for _, ev := range events {
+		if debugFilters.MatchesFilters(&ev) {
+			debugFiltered = append(debugFiltered, ev)
+		}
+	}
+	if len(debugFiltered) != 3 {
+		t.Errorf("debug profile should show all 3 events, got %d", len(debugFiltered))
+	}
+
+	// Minimal profile: min_severity=error AND min_actionability=action_required
+	// The alert (severity=warning, actionability=action_required) does NOT meet min_severity=error.
+	// So minimal profile should exclude all our test events (none have severity >= error).
+	minFilters := ResolveEffectiveFilters("minimal", ProfileFilters{})
+	var minFiltered []AttentionEvent
+	for _, ev := range events {
+		if minFilters.MatchesFilters(&ev) {
+			minFiltered = append(minFiltered, ev)
+		}
+	}
+	// None of our 3 events have severity >= error (warning < error), so 0 pass minimal.
+	if len(minFiltered) != 0 {
+		t.Errorf("minimal profile should show 0 events (none have severity>=error), got %d", len(minFiltered))
+	}
+}
+
+func TestOperatorLoop_SnapshotSummaryConsistency(t *testing.T) {
+	t.Parallel()
+
+	feed := newTestAttentionFeed(t)
+
+	// Add known events
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAlert,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityError,
+		Summary:       "critical alert",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "agent info",
+	})
+	feed.Append(AttentionEvent{
+		Category:      EventCategoryAgent,
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       "agent warning",
+	})
+
+	summary := buildSnapshotAttentionSummary(feed)
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+
+	// Verify counts match what we added
+	if summary.TotalEvents != 3 {
+		t.Errorf("TotalEvents = %d, want 3", summary.TotalEvents)
+	}
+	if summary.ActionRequiredCount != 2 {
+		t.Errorf("ActionRequiredCount = %d, want 2", summary.ActionRequiredCount)
+	}
+	if summary.InterestingCount != 1 {
+		t.Errorf("InterestingCount = %d, want 1", summary.InterestingCount)
+	}
+
+	// Category breakdown
+	if summary.ByCategoryCount["alert"] != 1 {
+		t.Errorf("ByCategoryCount[alert] = %d, want 1", summary.ByCategoryCount["alert"])
+	}
+	if summary.ByCategoryCount["agent"] != 2 {
+		t.Errorf("ByCategoryCount[agent] = %d, want 2", summary.ByCategoryCount["agent"])
+	}
+
+	// TopItems should include both action_required events (capped at 3)
+	if len(summary.TopItems) != 2 {
+		t.Errorf("TopItems = %d, want 2", len(summary.TopItems))
+	}
+
+	// Unsupported signals should always be present
+	if len(summary.UnsupportedSignals) == 0 {
+		t.Error("expected unsupported signals for honest representation")
+	}
+
+	// Next steps should reference action_required events
+	if len(summary.NextSteps) == 0 {
+		t.Error("expected next-step hints")
+	}
+}

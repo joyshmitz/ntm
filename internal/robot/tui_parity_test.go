@@ -10,6 +10,78 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
+func TestFormatTerseLine_FeedUnavailableMarker(t *testing.T) {
+	state := TerseState{
+		Session:           "proj",
+		ActiveAgents:      2,
+		TotalAgents:       2,
+		AttentionAction:   0,
+		AttentionInterest: 0,
+	}
+
+	line := formatTerseLine(state, "feed:unavail")
+	if !strings.Contains(line, "|T:feed:unavail") {
+		t.Fatalf("formatTerseLine() = %q, want feed unavailable marker", line)
+	}
+
+	clearLine := formatTerseLine(state, "clear")
+	if strings.Contains(clearLine, "|T:") {
+		t.Fatalf("formatTerseLine() with clear hint = %q, want no extra marker", clearLine)
+	}
+}
+
+func TestPrintDashboardMarkdown_IncludesAttentionSection(t *testing.T) {
+	output := DashboardOutput{
+		RobotResponse: NewRobotResponse(true),
+		GeneratedAt:   time.Unix(1700000000, 0).UTC(),
+		Fleet:         "ntm",
+		System: SystemInfo{
+			Version:   "test-version",
+			GoVersion: "go1.test",
+			OS:        "linux",
+			Arch:      "amd64",
+		},
+		Summary: StatusSummary{},
+		Agents:  []SnapshotSession{},
+		Attention: &SnapshotAttentionSummary{
+			TotalEvents:         4,
+			ActionRequiredCount: 2,
+			InterestingCount:    1,
+			TopItems: []SnapshotAttentionItem{
+				{Cursor: 12, Severity: string(SeverityWarning), Category: string(EventCategoryAlert), Summary: "agent stalled in proj"},
+			},
+			ByCategoryCount: map[string]int{
+				string(EventCategoryAlert): 2,
+				string(EventCategoryAgent): 2,
+			},
+			UnsupportedSignals: []string{"bead_orphaned"},
+			NextSteps: []NextAction{
+				{Action: "robot-attention", Args: "--robot-attention --since-cursor=12", Reason: "Continue the operator loop"},
+			},
+		},
+	}
+
+	rendered, err := captureStdout(t, func() error { return printDashboardMarkdown(output) })
+	if err != nil {
+		t.Fatalf("printDashboardMarkdown() error = %v", err)
+	}
+	if !strings.Contains(rendered, "## Attention") {
+		t.Fatalf("dashboard markdown missing attention section:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "| Attention | 2 action-required, 1 interesting |") {
+		t.Fatalf("dashboard markdown missing attention headline:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "agent stalled in proj") {
+		t.Fatalf("dashboard markdown missing frontier item:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "robot-attention") {
+		t.Fatalf("dashboard markdown missing next-step command:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "bead_orphaned") {
+		t.Fatalf("dashboard markdown missing unsupported signal:\n%s", rendered)
+	}
+}
+
 // =============================================================================
 // Helper Function Tests
 // =============================================================================

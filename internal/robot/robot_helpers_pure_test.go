@@ -3,6 +3,7 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -759,6 +760,336 @@ func TestBuildSnapshotAttentionSummary_UsesDigestWhenOnlyInterestingEventsExist(
 	}
 	if !hasSnapshotNextAction(summary.NextSteps, "robot-snapshot", "--robot-snapshot") {
 		t.Fatalf("expected resync handoff in %+v", summary.NextSteps)
+	}
+}
+
+func TestDashboardAttentionHeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		summary *SnapshotAttentionSummary
+		want    string
+	}{
+		{
+			name:    "nil summary means feed unavailable",
+			summary: nil,
+			want:    "feed unavailable",
+		},
+		{
+			name:    "empty summary is clear",
+			summary: &SnapshotAttentionSummary{TotalEvents: 0},
+			want:    "clear",
+		},
+		{
+			name: "action required only",
+			summary: &SnapshotAttentionSummary{
+				TotalEvents:         2,
+				ActionRequiredCount: 2,
+			},
+			want: "2 action-required",
+		},
+		{
+			name: "mixed action and interesting",
+			summary: &SnapshotAttentionSummary{
+				TotalEvents:         5,
+				ActionRequiredCount: 2,
+				InterestingCount:    3,
+			},
+			want: "2 action-required, 3 interesting",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dashboardAttentionHeadline(tt.summary); got != tt.want {
+				t.Fatalf("dashboardAttentionHeadline(%+v) = %q, want %q", tt.summary, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteAttentionSection_UnavailableAndClear(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		summary *SnapshotAttentionSummary
+		want    string
+	}{
+		{
+			name:    "nil summary",
+			summary: nil,
+			want:    "_Attention feed not available._\n",
+		},
+		{
+			name:    "empty summary",
+			summary: &SnapshotAttentionSummary{TotalEvents: 0},
+			want:    "_No attention events. Feed is clear._\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var sb strings.Builder
+			writeAttentionSection(&sb, tt.summary)
+			if got := sb.String(); got != tt.want {
+				t.Fatalf("writeAttentionSection() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWriteAttentionSection_SummaryTable verifies the summary table rendering.
+func TestWriteAttentionSection_SummaryTable(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         10,
+		ActionRequiredCount: 3,
+		InterestingCount:    5,
+	})
+
+	got := sb.String()
+
+	checks := []string{
+		"| Key | Value |",
+		"|---|---|",
+		"| Total Events | 10 |",
+		"| Action Required | 3 |",
+		"| Interesting | 5 |",
+	}
+	for _, check := range checks {
+		if !strings.Contains(got, check) {
+			t.Errorf("missing %q in output:\n%s", check, got)
+		}
+	}
+}
+
+// TestWriteAttentionSection_TopItems verifies top action items rendering.
+func TestWriteAttentionSection_TopItems(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         5,
+		ActionRequiredCount: 2,
+		InterestingCount:    1,
+		TopItems: []SnapshotAttentionItem{
+			{Cursor: 100, Category: "agent", Severity: "error", Summary: "Agent crashed"},
+			{Cursor: 101, Category: "session", Severity: "warning", Summary: "Session idle"},
+		},
+	})
+
+	got := sb.String()
+
+	checks := []string{
+		"### Top Action Items",
+		"| Cursor | Category | Severity | Summary |",
+		"| 100 | agent | error | Agent crashed |",
+		"| 101 | session | warning | Session idle |",
+	}
+	for _, check := range checks {
+		if !strings.Contains(got, check) {
+			t.Errorf("missing %q in output:\n%s", check, got)
+		}
+	}
+}
+
+// TestWriteAttentionSection_NextSteps verifies next steps rendering.
+func TestWriteAttentionSection_NextSteps(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         3,
+		ActionRequiredCount: 1,
+		InterestingCount:    1,
+		NextSteps: []NextAction{
+			{Action: "robot-tail", Args: "--session proj", Reason: "Check agent output"},
+			{Action: "robot-send", Args: "--pane 2", Reason: "Confirm prompt"},
+		},
+	})
+
+	got := sb.String()
+
+	if !strings.Contains(got, "### Suggested Next Steps") {
+		t.Errorf("missing next steps header in output:\n%s", got)
+	}
+	if !strings.Contains(got, "ntm --session proj") {
+		t.Errorf("missing first next step in output:\n%s", got)
+	}
+	if !strings.Contains(got, "Check agent output") {
+		t.Errorf("missing reason for first step in output:\n%s", got)
+	}
+}
+
+// TestWriteAttentionSection_UnsupportedSignals verifies unsupported signals rendering.
+func TestWriteAttentionSection_UnsupportedSignals(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         1,
+		ActionRequiredCount: 0,
+		InterestingCount:    1,
+		UnsupportedSignals:  []string{"network_latency", "memory_pressure"},
+	})
+
+	got := sb.String()
+
+	if !strings.Contains(got, "### Unsupported Signals") {
+		t.Errorf("missing unsupported signals header in output:\n%s", got)
+	}
+	if !strings.Contains(got, "network_latency, memory_pressure") {
+		t.Errorf("missing signal list in output:\n%s", got)
+	}
+}
+
+// TestWriteAttentionSection_MarkdownEscaping verifies pipe characters are escaped.
+func TestWriteAttentionSection_MarkdownEscaping(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         1,
+		ActionRequiredCount: 1,
+		TopItems: []SnapshotAttentionItem{
+			{Cursor: 1, Category: "test|cat", Severity: "warn", Summary: "text with | pipe"},
+		},
+	})
+
+	got := sb.String()
+
+	// Pipes in cell content should be escaped
+	if strings.Contains(got, "test|cat") {
+		t.Errorf("unescaped pipe in category:\n%s", got)
+	}
+	if !strings.Contains(got, "test\\|cat") {
+		t.Errorf("expected escaped pipe in category:\n%s", got)
+	}
+}
+
+// TestWriteAttentionSection_EmptySections verifies empty sections are not rendered.
+func TestWriteAttentionSection_EmptySections(t *testing.T) {
+	t.Parallel()
+
+	var sb strings.Builder
+	writeAttentionSection(&sb, &SnapshotAttentionSummary{
+		TotalEvents:         5,
+		ActionRequiredCount: 2,
+		InterestingCount:    3,
+		TopItems:            []SnapshotAttentionItem{},
+		NextSteps:           []NextAction{},
+		UnsupportedSignals:  []string{},
+	})
+
+	got := sb.String()
+
+	// Empty sections should NOT appear
+	if strings.Contains(got, "### Top Action Items") {
+		t.Errorf("unexpected top action items section:\n%s", got)
+	}
+	if strings.Contains(got, "### Suggested Next Steps") {
+		t.Errorf("unexpected next steps section:\n%s", got)
+	}
+	if strings.Contains(got, "### Unsupported Signals") {
+		t.Errorf("unexpected unsupported signals section:\n%s", got)
+	}
+}
+
+func TestBuildAttentionHintFromSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		summary *SnapshotAttentionSummary
+		want    string
+	}{
+		{
+			name:    "nil summary",
+			summary: nil,
+			want:    "clear",
+		},
+		{
+			name:    "empty summary",
+			summary: &SnapshotAttentionSummary{TotalEvents: 0},
+			want:    "clear",
+		},
+		{
+			name: "action only",
+			summary: &SnapshotAttentionSummary{
+				TotalEvents:         2,
+				ActionRequiredCount: 2,
+			},
+			want: "2!action",
+		},
+		{
+			name: "interesting only",
+			summary: &SnapshotAttentionSummary{
+				TotalEvents:      4,
+				InterestingCount: 4,
+			},
+			want: "4?interest",
+		},
+		{
+			name: "mixed summary",
+			summary: &SnapshotAttentionSummary{
+				TotalEvents:         7,
+				ActionRequiredCount: 2,
+				InterestingCount:    5,
+			},
+			want: "2!action 5?interest",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := buildAttentionHintFromSummary(tt.summary); got != tt.want {
+				t.Fatalf("buildAttentionHintFromSummary(%+v) = %q, want %q", tt.summary, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintDashboardMarkdown_RendersAttentionOnce(t *testing.T) {
+	output := DashboardOutput{
+		RobotResponse: NewRobotResponse(true),
+		GeneratedAt:   time.Unix(1700000000, 0).UTC(),
+		Fleet:         "ntm",
+		System: SystemInfo{
+			Version:   "test-version",
+			GoVersion: "go1.test",
+			OS:        "linux",
+			Arch:      "amd64",
+		},
+		Summary: StatusSummary{},
+		Attention: &SnapshotAttentionSummary{
+			TotalEvents:         4,
+			ActionRequiredCount: 2,
+			InterestingCount:    1,
+		},
+	}
+
+	rendered, err := captureStdout(t, func() error { return printDashboardMarkdown(output) })
+	if err != nil {
+		t.Fatalf("printDashboardMarkdown() error = %v", err)
+	}
+	if count := strings.Count(rendered, "## Attention\n"); count != 1 {
+		t.Fatalf("expected one attention section, got %d:\n%s", count, rendered)
+	}
+	if count := strings.Count(rendered, "| Attention | 2 action-required, 1 interesting |\n"); count != 1 {
+		t.Fatalf("expected one summary attention headline, got %d:\n%s", count, rendered)
+	}
+	if attn := strings.Index(rendered, "## Attention\n"); attn == -1 {
+		t.Fatalf("dashboard markdown missing attention section:\n%s", rendered)
+	} else if sessions := strings.Index(rendered, "## Sessions\n"); sessions == -1 || attn > sessions {
+		t.Fatalf("attention section should appear before sessions:\n%s", rendered)
 	}
 }
 

@@ -281,6 +281,32 @@ func TestGetProfile_NormalizesInput(t *testing.T) {
 	}
 }
 
+func TestGetProfile_ReturnsDetachedCopy(t *testing.T) {
+	t.Parallel()
+
+	profile := GetProfile("alerts")
+	if profile == nil {
+		t.Fatal("expected alerts profile")
+	}
+	if len(profile.Filters.Categories) == 0 {
+		t.Fatal("expected alerts profile to expose categories")
+	}
+
+	profile.Name = "mutated"
+	profile.Filters.Categories[0] = EventCategorySystem
+
+	builtin := GetProfile("alerts")
+	if builtin == nil {
+		t.Fatal("expected alerts profile on second lookup")
+	}
+	if builtin.Name != "alerts" {
+		t.Fatalf("GetProfile returned shared state; Name = %q, want %q", builtin.Name, "alerts")
+	}
+	if builtin.Filters.Categories[0] != EventCategoryAlert {
+		t.Fatalf("GetProfile returned shared nested slices; Categories[0] = %q, want %q", builtin.Filters.Categories[0], EventCategoryAlert)
+	}
+}
+
 func TestListProfiles_ReturnsCopy(t *testing.T) {
 	t.Parallel()
 
@@ -293,6 +319,35 @@ func TestListProfiles_ReturnsCopy(t *testing.T) {
 	profiles[0].Name = "mutated"
 	if BuiltinProfiles[0].Name != original {
 		t.Fatalf("ListProfiles returned backing storage; BuiltinProfiles[0].Name = %q, want %q", BuiltinProfiles[0].Name, original)
+	}
+}
+
+func TestListProfiles_DeepCopiesNestedFilters(t *testing.T) {
+	t.Parallel()
+
+	profiles := ListProfiles()
+	var alerts *AttentionProfile
+	for i := range profiles {
+		if profiles[i].Name == "alerts" {
+			alerts = &profiles[i]
+			break
+		}
+	}
+	if alerts == nil {
+		t.Fatal("expected alerts profile in copied list")
+	}
+	if len(alerts.Filters.Categories) == 0 {
+		t.Fatal("expected alerts profile categories")
+	}
+
+	alerts.Filters.Categories[0] = EventCategorySystem
+
+	refetched := GetProfile("alerts")
+	if refetched == nil {
+		t.Fatal("expected alerts profile after mutation")
+	}
+	if refetched.Filters.Categories[0] != EventCategoryAlert {
+		t.Fatalf("ListProfiles leaked nested filter slices; Categories[0] = %q, want %q", refetched.Filters.Categories[0], EventCategoryAlert)
 	}
 }
 
@@ -318,6 +373,20 @@ func TestResolveEffectiveFilters_ProfileAndExplicitOverrides(t *testing.T) {
 	}
 	if filters.ExplicitOverrides[0] != "min_severity" || filters.ExplicitOverrides[1] != "min_actionability" {
 		t.Fatalf("ExplicitOverrides = %v, want min_severity,min_actionability", filters.ExplicitOverrides)
+	}
+}
+
+func TestSeverityMeetsMinimum_CriticalRanksAboveError(t *testing.T) {
+	t.Parallel()
+
+	if !severityMeetsMinimum(SeverityCritical, SeverityError) {
+		t.Fatal("critical severity should satisfy an error minimum")
+	}
+	if !severityMeetsMinimum(SeverityCritical, SeverityCritical) {
+		t.Fatal("critical severity should satisfy a critical minimum")
+	}
+	if severityMeetsMinimum(SeverityWarning, SeverityCritical) {
+		t.Fatal("warning severity should not satisfy a critical minimum")
 	}
 }
 

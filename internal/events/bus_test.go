@@ -354,6 +354,18 @@ func TestWorkflowEvents(t *testing.T) {
 	})
 }
 
+func TestNewWorkflowStartedEvent_DefensiveCopiesAgents(t *testing.T) {
+	t.Parallel()
+
+	agents := []string{"agent1", "agent2"}
+	event := NewWorkflowStartedEvent("session1", "code-review", "run123", agents)
+	agents[0] = "mutated"
+
+	if got, want := event.Agents[0], "agent1"; got != want {
+		t.Fatalf("event.Agents[0] = %q, want %q", got, want)
+	}
+}
+
 func TestAgentEvents(t *testing.T) {
 	t.Parallel()
 
@@ -640,5 +652,44 @@ func TestConflictEvents_JSONMarshal(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte(`"auth.go"`)) {
 		t.Errorf("JSON should contain path, got %s", data)
+	}
+}
+
+func TestNewReservationConflictEvent_DefensiveCopiesHolders(t *testing.T) {
+	t.Parallel()
+
+	holders := []string{"BlueLake", "GreenCastle"}
+	event := NewReservationConflictEvent("proj", "auth.go", "A", "cc_1", holders)
+	holders[0] = "mutated"
+
+	if got, want := event.Holders[0], "BlueLake"; got != want {
+		t.Fatalf("event.Holders[0] = %q, want %q", got, want)
+	}
+}
+
+func TestNewFileConflictEvent_DefensiveCopiesAgents(t *testing.T) {
+	t.Parallel()
+
+	agents := []string{"Agent1", "Agent2"}
+	event := NewFileConflictEvent("proj", "cmd/main.go", agents)
+	agents[0] = "mutated"
+
+	if got, want := event.Agents[0], "Agent1"; got != want {
+		t.Fatalf("event.Agents[0] = %q, want %q", got, want)
+	}
+}
+
+func TestNewWebhookEvent_DefensiveCopiesDetails(t *testing.T) {
+	t.Parallel()
+
+	details := map[string]string{
+		"severity": "warning",
+		"agent":    "cc_1",
+	}
+	event := NewWebhookEvent("agent.rate_limit", "proj", "1", "cc_1", "rate limited", details)
+	details["severity"] = "critical"
+
+	if got, want := event.Details["severity"], "warning"; got != want {
+		t.Fatalf("event.Details[severity] = %q, want %q", got, want)
 	}
 }

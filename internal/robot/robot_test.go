@@ -1965,22 +1965,24 @@ func TestStatusOutputWithGraphMetrics(t *testing.T) {
 
 func TestTerseStateString(t *testing.T) {
 	state := TerseState{
-		Session:        "myproject",
-		ActiveAgents:   2,
-		TotalAgents:    3,
-		WorkingAgents:  1,
-		IdleAgents:     1,
-		ErrorAgents:    0,
-		ContextPct:     45,
-		ReadyBeads:     10,
-		BlockedBeads:   5,
-		InProgressBead: 2,
-		UnreadMail:     3,
-		CriticalAlerts: 1,
-		WarningAlerts:  2,
+		Session:           "myproject",
+		ActiveAgents:      2,
+		TotalAgents:       3,
+		WorkingAgents:     1,
+		IdleAgents:        1,
+		ErrorAgents:       0,
+		ContextPct:        45,
+		ReadyBeads:        10,
+		BlockedBeads:      5,
+		InProgressBead:    2,
+		UnreadMail:        3,
+		AttentionAction:   2,
+		AttentionInterest: 4,
+		CriticalAlerts:    1,
+		WarningAlerts:     2,
 	}
 
-	expected := "S:myproject|A:2/3|W:1|I:1|E:0|C:45%|B:R10/I2/B5|M:3|!:1c,2w"
+	expected := "S:myproject|A:2/3|W:1|I:1|E:0|C:45%|B:R10/I2/B5|M:3|^:2a,4i|!:1c,2w"
 	got := state.String()
 	if got != expected {
 		t.Errorf("TerseState.String() = %q, want %q", got, expected)
@@ -1989,22 +1991,24 @@ func TestTerseStateString(t *testing.T) {
 
 func TestTerseStateStringNoSession(t *testing.T) {
 	state := TerseState{
-		Session:        "-",
-		ActiveAgents:   0,
-		TotalAgents:    0,
-		WorkingAgents:  0,
-		IdleAgents:     0,
-		ErrorAgents:    0,
-		ContextPct:     0,
-		ReadyBeads:     15,
-		BlockedBeads:   8,
-		InProgressBead: 3,
-		UnreadMail:     0,
-		CriticalAlerts: 0,
-		WarningAlerts:  0,
+		Session:           "-",
+		ActiveAgents:      0,
+		TotalAgents:       0,
+		WorkingAgents:     0,
+		IdleAgents:        0,
+		ErrorAgents:       0,
+		ContextPct:        0,
+		ReadyBeads:        15,
+		BlockedBeads:      8,
+		InProgressBead:    3,
+		UnreadMail:        0,
+		AttentionAction:   0,
+		AttentionInterest: 0,
+		CriticalAlerts:    0,
+		WarningAlerts:     0,
 	}
 
-	expected := "S:-|A:0/0|W:0|I:0|E:0|C:0%|B:R15/I3/B8|M:0|!:0"
+	expected := "S:-|A:0/0|W:0|I:0|E:0|C:0%|B:R15/I3/B8|M:0|^:0|!:0"
 	got := state.String()
 	if got != expected {
 		t.Errorf("TerseState.String() = %q, want %q", got, expected)
@@ -2018,60 +2022,87 @@ func TestParseTerse(t *testing.T) {
 		expected TerseState
 	}{
 		{
-			name:  "full state with alerts",
-			input: "S:myproject|A:2/3|W:1|I:1|E:0|C:45%|B:R10/I2/B5|M:3|!:1c,2w",
+			name:  "full state with alerts and attention",
+			input: "S:myproject|A:2/3|W:1|I:1|E:0|C:45%|B:R10/I2/B5|M:3|^:2a,4i|!:1c,2w",
 			expected: TerseState{
-				Session:        "myproject",
-				ActiveAgents:   2,
-				TotalAgents:    3,
-				WorkingAgents:  1,
-				IdleAgents:     1,
-				ErrorAgents:    0,
-				ContextPct:     45,
-				ReadyBeads:     10,
-				BlockedBeads:   5,
-				InProgressBead: 2,
-				UnreadMail:     3,
-				CriticalAlerts: 1,
-				WarningAlerts:  2,
+				Session:           "myproject",
+				ActiveAgents:      2,
+				TotalAgents:       3,
+				WorkingAgents:     1,
+				IdleAgents:        1,
+				ErrorAgents:       0,
+				ContextPct:        45,
+				ReadyBeads:        10,
+				BlockedBeads:      5,
+				InProgressBead:    2,
+				UnreadMail:        3,
+				AttentionAction:   2,
+				AttentionInterest: 4,
+				CriticalAlerts:    1,
+				WarningAlerts:     2,
 			},
 		},
 		{
-			name:  "no session zero alerts",
-			input: "S:-|A:0/0|W:0|I:0|E:0|C:0%|B:R15/I3/B8|M:0|!:0",
+			name:  "no session zero alerts zero attention",
+			input: "S:-|A:0/0|W:0|I:0|E:0|C:0%|B:R15/I3/B8|M:0|^:0|!:0",
 			expected: TerseState{
-				Session:        "-",
-				ActiveAgents:   0,
-				TotalAgents:    0,
-				WorkingAgents:  0,
-				IdleAgents:     0,
-				ErrorAgents:    0,
-				ContextPct:     0,
-				ReadyBeads:     15,
-				BlockedBeads:   8,
-				InProgressBead: 3,
-				UnreadMail:     0,
-				CriticalAlerts: 0,
-				WarningAlerts:  0,
+				Session:           "-",
+				ActiveAgents:      0,
+				TotalAgents:       0,
+				WorkingAgents:     0,
+				IdleAgents:        0,
+				ErrorAgents:       0,
+				ContextPct:        0,
+				ReadyBeads:        15,
+				BlockedBeads:      8,
+				InProgressBead:    3,
+				UnreadMail:        0,
+				AttentionAction:   0,
+				AttentionInterest: 0,
+				CriticalAlerts:    0,
+				WarningAlerts:     0,
 			},
 		},
 		{
-			name:  "only critical alerts",
-			input: "S:proj|A:5/8|W:3|I:2|E:0|C:78%|B:R100/I50/B20|M:10|!:5c",
+			name:  "only critical alerts only action attention",
+			input: "S:proj|A:5/8|W:3|I:2|E:0|C:78%|B:R100/I50/B20|M:10|^:3a|!:5c",
 			expected: TerseState{
-				Session:        "proj",
-				ActiveAgents:   5,
-				TotalAgents:    8,
-				WorkingAgents:  3,
-				IdleAgents:     2,
-				ErrorAgents:    0,
-				ContextPct:     78,
-				ReadyBeads:     100,
-				BlockedBeads:   20,
-				InProgressBead: 50,
-				UnreadMail:     10,
-				CriticalAlerts: 5,
-				WarningAlerts:  0,
+				Session:           "proj",
+				ActiveAgents:      5,
+				TotalAgents:       8,
+				WorkingAgents:     3,
+				IdleAgents:        2,
+				ErrorAgents:       0,
+				ContextPct:        78,
+				ReadyBeads:        100,
+				BlockedBeads:      20,
+				InProgressBead:    50,
+				UnreadMail:        10,
+				AttentionAction:   3,
+				AttentionInterest: 0,
+				CriticalAlerts:    5,
+				WarningAlerts:     0,
+			},
+		},
+		{
+			name:  "only interesting attention",
+			input: "S:test|A:1/1|W:1|I:0|E:0|C:50%|B:R5/I1/B2|M:0|^:7i|!:0",
+			expected: TerseState{
+				Session:           "test",
+				ActiveAgents:      1,
+				TotalAgents:       1,
+				WorkingAgents:     1,
+				IdleAgents:        0,
+				ErrorAgents:       0,
+				ContextPct:        50,
+				ReadyBeads:        5,
+				BlockedBeads:      2,
+				InProgressBead:    1,
+				UnreadMail:        0,
+				AttentionAction:   0,
+				AttentionInterest: 7,
+				CriticalAlerts:    0,
+				WarningAlerts:     0,
 			},
 		},
 	}
@@ -2091,19 +2122,21 @@ func TestParseTerse(t *testing.T) {
 
 func TestTerseStateRoundTrip(t *testing.T) {
 	original := TerseState{
-		Session:        "test",
-		ActiveAgents:   5,
-		TotalAgents:    8,
-		WorkingAgents:  3,
-		IdleAgents:     2,
-		ErrorAgents:    0,
-		ContextPct:     78,
-		ReadyBeads:     20,
-		BlockedBeads:   10,
-		InProgressBead: 5,
-		UnreadMail:     2,
-		CriticalAlerts: 1,
-		WarningAlerts:  2,
+		Session:           "test",
+		ActiveAgents:      5,
+		TotalAgents:       8,
+		WorkingAgents:     3,
+		IdleAgents:        2,
+		ErrorAgents:       0,
+		ContextPct:        78,
+		ReadyBeads:        20,
+		BlockedBeads:      10,
+		InProgressBead:    5,
+		UnreadMail:        2,
+		AttentionAction:   3,
+		AttentionInterest: 5,
+		CriticalAlerts:    1,
+		WarningAlerts:     2,
 	}
 
 	str := original.String()
@@ -2119,14 +2152,16 @@ func TestTerseStateRoundTrip(t *testing.T) {
 
 func TestTerseStateMarshal(t *testing.T) {
 	state := TerseState{
-		Session:        "myproject",
-		ActiveAgents:   2,
-		TotalAgents:    3,
-		ReadyBeads:     10,
-		BlockedBeads:   5,
-		InProgressBead: 2,
-		UnreadMail:     3,
-		CriticalAlerts: 1,
+		Session:           "myproject",
+		ActiveAgents:      2,
+		TotalAgents:       3,
+		ReadyBeads:        10,
+		BlockedBeads:      5,
+		InProgressBead:    2,
+		UnreadMail:        3,
+		AttentionAction:   2,
+		AttentionInterest: 4,
+		CriticalAlerts:    1,
 	}
 
 	data, err := json.Marshal(state)
@@ -2141,6 +2176,108 @@ func TestTerseStateMarshal(t *testing.T) {
 
 	if result != state {
 		t.Errorf("Marshal/Unmarshal round trip failed: got %+v, want %+v", result, state)
+	}
+}
+
+// TestTerseStateAttentionStates tests terse output for various attention states.
+func TestTerseStateAttentionStates(t *testing.T) {
+	tests := []struct {
+		name              string
+		attnAction        int
+		attnInterest      int
+		expectedSubstring string
+	}{
+		{
+			name:              "quiet_no_attention",
+			attnAction:        0,
+			attnInterest:      0,
+			expectedSubstring: "|^:0|",
+		},
+		{
+			name:              "interesting_only",
+			attnAction:        0,
+			attnInterest:      5,
+			expectedSubstring: "|^:5i|",
+		},
+		{
+			name:              "action_required_only",
+			attnAction:        3,
+			attnInterest:      0,
+			expectedSubstring: "|^:3a|",
+		},
+		{
+			name:              "mixed_action_and_interesting",
+			attnAction:        2,
+			attnInterest:      7,
+			expectedSubstring: "|^:2a,7i|",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := TerseState{
+				Session:           "test",
+				ActiveAgents:      1,
+				TotalAgents:       1,
+				AttentionAction:   tc.attnAction,
+				AttentionInterest: tc.attnInterest,
+			}
+			got := state.String()
+			if !strings.Contains(got, tc.expectedSubstring) {
+				t.Errorf("TerseState.String() = %q, want substring %q", got, tc.expectedSubstring)
+			}
+		})
+	}
+}
+
+// TestTerseStateAttentionRoundTrip verifies attention fields survive round-trip.
+func TestTerseStateAttentionRoundTrip(t *testing.T) {
+	tests := []struct {
+		name         string
+		attnAction   int
+		attnInterest int
+	}{
+		{"quiet", 0, 0},
+		{"action_only", 5, 0},
+		{"interesting_only", 0, 10},
+		{"both", 3, 7},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			original := TerseState{
+				Session:           "attn-test",
+				ActiveAgents:      2,
+				TotalAgents:       3,
+				WorkingAgents:     1,
+				IdleAgents:        1,
+				ContextPct:        50,
+				ReadyBeads:        5,
+				InProgressBead:    1,
+				BlockedBeads:      2,
+				UnreadMail:        0,
+				AttentionAction:   tc.attnAction,
+				AttentionInterest: tc.attnInterest,
+				CriticalAlerts:    0,
+				WarningAlerts:     0,
+			}
+
+			str := original.String()
+			parsed, err := ParseTerse(str)
+			if err != nil {
+				t.Fatalf("ParseTerse failed: %v", err)
+			}
+
+			if parsed.AttentionAction != tc.attnAction {
+				t.Errorf("AttentionAction: got %d, want %d", parsed.AttentionAction, tc.attnAction)
+			}
+			if parsed.AttentionInterest != tc.attnInterest {
+				t.Errorf("AttentionInterest: got %d, want %d", parsed.AttentionInterest, tc.attnInterest)
+			}
+			if *parsed != original {
+				t.Errorf("Round trip failed: original=%+v, parsed=%+v", original, *parsed)
+			}
+		})
 	}
 }
 
@@ -3831,7 +3968,7 @@ func TestBuildSnapshotAttentionSummary_NilFeed(t *testing.T) {
 	}
 }
 
-func TestBuildSnapshotAttentionSummary_EmptyFeed(t *testing.T) {
+func TestBuildSnapshotAttentionSummary_EmptyFeedBasic(t *testing.T) {
 	t.Parallel()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       100,
