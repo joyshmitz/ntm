@@ -184,7 +184,7 @@ func (c *BVClient) GetInsights() (*Insights, error) {
 	}
 
 	// Build insights from insights response
-	return c.buildInsightsFromResponse(insightsResp), nil
+	return c.buildInsightsFromResponse(insightsResp, workDir), nil
 }
 
 // GetQuickWins returns low-effort, high-impact recommendations.
@@ -385,7 +385,7 @@ func (c *BVClient) estimateSize(rec TriageRecommendation) string {
 }
 
 // buildInsightsFromResponse builds Insights from an InsightsResponse.
-func (c *BVClient) buildInsightsFromResponse(resp *InsightsResponse) *Insights {
+func (c *BVClient) buildInsightsFromResponse(resp *InsightsResponse, workDir string) *Insights {
 	insights := &Insights{}
 
 	// Extract cycles
@@ -399,6 +399,15 @@ func (c *BVClient) buildInsightsFromResponse(resp *InsightsResponse) *Insights {
 			ID:          b.ID,
 			Betweenness: b.Value,
 		})
+	}
+
+	// Populate counts using GetBeadsSummary
+	if workDir != "" {
+		summary := GetBeadsSummary(workDir, 1)
+		if summary != nil && summary.Available {
+			insights.ReadyCount = summary.Ready
+			insights.TotalCount = summary.Total
+		}
 	}
 
 	return insights

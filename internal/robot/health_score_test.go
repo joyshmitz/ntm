@@ -436,48 +436,8 @@ func TestDeriveHealthRecommendation_LowScore(t *testing.T) {
 // Helper Function Tests
 // =============================================================================
 
-func TestFormatFloat(t *testing.T) {
-	tests := []struct {
-		input    float64
-		expected string
-	}{
-		{0, "0"},
-		{95.4, "95"},
-		{95.6, "96"},
-		{100, "100"},
-		{-5.0, "-4"}, // int(-5.0+0.5) = int(-4.5) = -4 (Go truncates toward zero)
-	}
-
-	for _, tt := range tests {
-		got := formatFloat(tt.input)
-		if got != tt.expected {
-			t.Errorf("formatFloat(%v) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
-func TestFormatInt(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{100, "100"},
-		{999, "999"},
-	}
-
-	for _, tt := range tests {
-		got := formatInt(tt.input)
-		if got != tt.expected {
-			t.Errorf("formatInt(%d) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
 func TestHealthRecommendationConstants_Distinct(t *testing.T) {
-	// Verify all recommendation constants are distinct
+	// Ensure all recommendation constants have distinct values
 	recs := []HealthRecommendation{
 		RecommendHealthy,
 		RecommendMonitor,

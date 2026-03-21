@@ -5,6 +5,7 @@ package robot
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
@@ -322,24 +323,10 @@ func formatRestartReason(format string, value float64) string {
 
 // formatReasonWithPercent inserts a rounded percentage into a format string.
 func formatReasonWithPercent(format string, pct float64) string {
-	result := ""
-	pctStr := formatFloat(pct)
-	for i := 0; i < len(format); i++ {
-		if format[i] == '%' && i+1 < len(format) {
-			if format[i+1] == '%' {
-				result += "%"
-				i++
-			} else if format[i+1] == '.' && i+3 < len(format) && format[i+2] == '0' && format[i+3] == 'f' {
-				result += pctStr
-				i += 3
-			} else {
-				result += string(format[i])
-			}
-		} else {
-			result += string(format[i])
-		}
+	if !strings.Contains(format, "%") {
+		return format
 	}
-	return result
+	return fmt.Sprintf(format, pct)
 }
 
 // buildWaitInfo constructs wait information for rate-limited agents.

@@ -4,6 +4,7 @@ package process
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -58,6 +59,19 @@ func GetChildPID(parentPID int) int {
 	data, err := os.ReadFile(taskPath)
 	if err == nil {
 		parts := strings.Fields(string(data))
+		if len(parts) > 0 {
+			pid, err := strconv.Atoi(parts[0])
+			if err == nil && pid > 0 {
+				return pid
+			}
+		}
+	}
+
+	// Fallback to pgrep (works on macOS and Linux without /proc/.../children)
+	cmd := exec.Command("pgrep", "-P", strconv.Itoa(parentPID))
+	out, err := cmd.Output()
+	if err == nil {
+		parts := strings.Fields(string(out))
 		if len(parts) > 0 {
 			pid, err := strconv.Atoi(parts[0])
 			if err == nil && pid > 0 {

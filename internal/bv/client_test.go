@@ -479,9 +479,9 @@ func TestBuildInsightsFromResponse(t *testing.T) {
 
 	t.Run("empty response", func(t *testing.T) {
 		t.Parallel()
-		client := &BVClient{}
+		client := NewBVClient()
 		resp := &InsightsResponse{}
-		insights := client.buildInsightsFromResponse(resp)
+		insights := client.buildInsightsFromResponse(resp, "")
 
 		if insights == nil {
 			t.Fatal("expected non-nil insights")
@@ -496,19 +496,22 @@ func TestBuildInsightsFromResponse(t *testing.T) {
 
 	t.Run("with cycles and bottlenecks", func(t *testing.T) {
 		t.Parallel()
-		client := &BVClient{}
+		client := NewBVClient()
 		resp := &InsightsResponse{
 			Cycles: []Cycle{
-				{Nodes: []string{"A", "B", "C"}},
-				{Nodes: []string{"D", "E"}},
+				{Nodes: []string{"auth", "db", "auth"}},
+				{Nodes: []string{"ui", "api", "ui"}},
 			},
 			Bottlenecks: []NodeScore{
-				{ID: "X", Value: 0.9},
-				{ID: "Y", Value: 0.5},
+				{ID: "db-migration", Value: 0.85},
+				{ID: "auth-service", Value: 0.65},
 			},
 		}
-		insights := client.buildInsightsFromResponse(resp)
+		insights := client.buildInsightsFromResponse(resp, "")
 
+		if insights == nil {
+			t.Fatal("expected non-nil insights")
+		}
 		if len(insights.Cycles) != 2 {
 			t.Fatalf("expected 2 cycles, got %d", len(insights.Cycles))
 		}
@@ -518,11 +521,11 @@ func TestBuildInsightsFromResponse(t *testing.T) {
 		if len(insights.Bottlenecks) != 2 {
 			t.Fatalf("expected 2 bottlenecks, got %d", len(insights.Bottlenecks))
 		}
-		if insights.Bottlenecks[0].ID != "X" {
-			t.Errorf("expected first bottleneck ID=X, got %s", insights.Bottlenecks[0].ID)
+		if insights.Bottlenecks[0].ID != "db-migration" {
+			t.Errorf("expected first bottleneck ID=db-migration, got %s", insights.Bottlenecks[0].ID)
 		}
-		if insights.Bottlenecks[0].Betweenness != 0.9 {
-			t.Errorf("expected betweenness=0.9, got %f", insights.Bottlenecks[0].Betweenness)
+		if insights.Bottlenecks[0].Betweenness != 0.85 {
+			t.Errorf("expected betweenness=0.85, got %f", insights.Bottlenecks[0].Betweenness)
 		}
 	})
 }

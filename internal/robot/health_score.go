@@ -3,6 +3,8 @@
 package robot
 
 import (
+	"fmt"
+
 	"github.com/Dicklesworthstone/ntm/internal/caut"
 )
 
@@ -135,7 +137,7 @@ func CollectIssues(localState *PaneWorkStatus, providerUsage *caut.ProviderPaylo
 
 	if localState.IsContextLow {
 		if localState.ContextRemaining != nil {
-			issues = append(issues, formatIssue("Context remaining below 20%% threshold (%.0f%%)", *localState.ContextRemaining))
+			issues = append(issues, fmt.Sprintf("Context remaining below 20%% threshold (%.0f%%)", *localState.ContextRemaining))
 		} else {
 			issues = append(issues, "Context remaining below threshold")
 		}
@@ -157,9 +159,9 @@ func CollectIssues(localState *PaneWorkStatus, providerUsage *caut.ProviderPaylo
 	if providerUsage != nil {
 		if pct := providerUsage.UsedPercent(); pct != nil {
 			if *pct >= 95 {
-				issues = append(issues, formatIssue("Provider at %.0f%% usage, near cap", *pct))
+				issues = append(issues, fmt.Sprintf("Provider at %.0f%% usage, near cap", *pct))
 			} else if *pct >= 80 {
-				issues = append(issues, formatIssue("Provider at %.0f%% usage, approaching limit", *pct))
+				issues = append(issues, fmt.Sprintf("Provider at %.0f%% usage, approaching limit", *pct))
 			}
 		}
 
@@ -169,62 +171,6 @@ func CollectIssues(localState *PaneWorkStatus, providerUsage *caut.ProviderPaylo
 	}
 
 	return issues
-}
-
-// formatIssue is a helper for formatting issue strings with values.
-func formatIssue(format string, args ...interface{}) string {
-	return sprintf(format, args...)
-}
-
-// sprintf is a local alias to avoid import in signature.
-var sprintf = func() func(string, ...interface{}) string {
-	return func(format string, args ...interface{}) string {
-		// Manual implementation to avoid fmt import in hot path
-		// For simple percentage formatting
-		if len(args) == 1 {
-			if pct, ok := args[0].(float64); ok {
-				// Simple percentage substitution
-				result := ""
-				for i := 0; i < len(format); i++ {
-					if format[i] == '%' && i+1 < len(format) {
-						if format[i+1] == '%' {
-							result += "%"
-							i++
-						} else if format[i+1] == '.' && i+3 < len(format) && format[i+2] == '0' && format[i+3] == 'f' {
-							result += formatFloat(pct)
-							i += 3
-						}
-					} else {
-						result += string(format[i])
-					}
-				}
-				return result
-			}
-		}
-		return format
-	}
-}()
-
-// formatFloat converts a float to a string without decimal places.
-func formatFloat(f float64) string {
-	n := int(f + 0.5) // Round
-	if n < 0 {
-		return "-" + formatInt(-n)
-	}
-	return formatInt(n)
-}
-
-// formatInt converts an integer to a string.
-func formatInt(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := ""
-	for n > 0 {
-		digits = string(rune('0'+n%10)) + digits
-		n /= 10
-	}
-	return digits
 }
 
 // DeriveHealthRecommendation determines the recommended action based on health analysis.
@@ -248,7 +194,7 @@ func DeriveHealthRecommendation(localState *PaneWorkStatus, providerUsage *caut.
 	// Check for provider near capacity
 	if providerUsage != nil {
 		if pct := providerUsage.UsedPercent(); pct != nil && *pct >= 90 {
-			return RecommendSwitchAccount, formatIssue("Provider at %.0f%% usage, consider account switch", *pct)
+			return RecommendSwitchAccount, fmt.Sprintf("Provider at %.0f%% usage, consider account switch", *pct)
 		}
 	}
 
@@ -256,7 +202,7 @@ func DeriveHealthRecommendation(localState *PaneWorkStatus, providerUsage *caut.
 	if localState.IsContextLow && localState.IsIdle {
 		reason := "Low context"
 		if localState.ContextRemaining != nil {
-			reason = formatIssue("Low context (%.0f%%)", *localState.ContextRemaining)
+			reason = fmt.Sprintf("Low context (%.0f%%)", *localState.ContextRemaining)
 		}
 		return RecommendRestartRecommended, reason + ", restart will restore capacity"
 	}
