@@ -423,14 +423,14 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 	// Create watch loop
 	watchLoop := NewWatchLoop(session, store, opts)
 
-	overlayPrep := prepareAssignWatchOverlay(
+	prepareAndAnnounceAssignWatchOverlay(
+		watchLoop.logf,
 		session,
 		tmux.InTmux(),
 		tmux.GetCurrentSession(),
 		isOverlayKeyBound,
 		setupOverlayBindingQuiet,
 	)
-	announceAssignWatchOverlay(watchLoop.logf, overlayPrep)
 
 	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -513,6 +513,12 @@ type assignWatchOverlayPreparation struct {
 	Warning string
 }
 
+func prepareAndAnnounceAssignWatchOverlay(logf func(string, ...interface{}), session string, inTmux bool, currentSession string, isBound func(string) bool, ensureBinding func(string) error) assignWatchOverlayPreparation {
+	prep := prepareAssignWatchOverlay(session, inTmux, currentSession, isBound, ensureBinding)
+	announceAssignWatchOverlay(logf, prep)
+	return prep
+}
+
 func announceAssignWatchOverlay(logf func(string, ...interface{}), prep assignWatchOverlayPreparation) {
 	if logf == nil {
 		return
@@ -529,11 +535,17 @@ func prepareAssignWatchOverlay(session string, inTmux bool, currentSession strin
 	if !shouldOfferAssignWatchOverlay(session, inTmux, currentSession) {
 		return assignWatchOverlayPreparation{}
 	}
+	if isBound == nil {
+		return assignWatchOverlayPreparation{}
+	}
 
 	if isBound(assignWatchOverlayKey) {
 		return assignWatchOverlayPreparation{
 			Hint: buildAssignWatchOverlayHint(assignWatchOverlayKey, false),
 		}
+	}
+	if ensureBinding == nil {
+		return assignWatchOverlayPreparation{}
 	}
 
 	if err := ensureBinding(assignWatchOverlayKey); err != nil {

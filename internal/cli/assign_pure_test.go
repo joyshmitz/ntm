@@ -451,6 +451,33 @@ func TestPrepareAssignWatchOverlay_ReportsBindingSetupFailure(t *testing.T) {
 	}
 }
 
+func TestPrepareAssignWatchOverlay_SkipsWhenBindingHooksUnavailable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing isBound hook", func(t *testing.T) {
+		t.Parallel()
+
+		prep := prepareAssignWatchOverlay("proj", true, "proj", nil, func(string) error {
+			t.Fatal("ensureBinding should not be called when isBound is unavailable")
+			return nil
+		})
+		t.Logf("missing isBound hook => prep=%+v", prep)
+		if prep != (assignWatchOverlayPreparation{}) {
+			t.Fatalf("unexpected prep: %+v", prep)
+		}
+	})
+
+	t.Run("missing ensureBinding hook", func(t *testing.T) {
+		t.Parallel()
+
+		prep := prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, nil)
+		t.Logf("missing ensureBinding hook => prep=%+v", prep)
+		if prep != (assignWatchOverlayPreparation{}) {
+			t.Fatalf("unexpected prep: %+v", prep)
+		}
+	})
+}
+
 func TestAnnounceAssignWatchOverlay_SkipsEmptyPreparation(t *testing.T) {
 	t.Parallel()
 
@@ -526,38 +553,46 @@ func TestAnnounceAssignWatchOverlay_WithPreparedScenarios(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		prep    assignWatchOverlayPreparation
+		prepFn  func(*testing.T) assignWatchOverlayPreparation
 		wantLog []string
 	}{
 		{
-			name:    "outside useful context",
-			prep:    prepareAssignWatchOverlay("proj", false, "proj", func(string) bool { return false }, func(string) error { return nil }),
+			name: "outside useful context",
+			prepFn: func(*testing.T) assignWatchOverlayPreparation {
+				return prepareAssignWatchOverlay("proj", false, "proj", func(string) bool { return false }, func(string) error { return nil })
+			},
 			wantLog: nil,
 		},
 		{
 			name: "existing binding",
-			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return true }, func(string) error {
-				t.Fatal("ensureBinding should not be called when binding exists")
-				return nil
-			}),
+			prepFn: func(t *testing.T) assignWatchOverlayPreparation {
+				return prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return true }, func(string) error {
+					t.Fatal("ensureBinding should not be called when binding exists")
+					return nil
+				})
+			},
 			wantLog: []string{
 				"Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running.",
 			},
 		},
 		{
 			name: "installs missing binding",
-			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
-				return nil
-			}),
+			prepFn: func(*testing.T) assignWatchOverlayPreparation {
+				return prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
+					return nil
+				})
+			},
 			wantLog: []string{
 				"Hint: installed the F12 overlay binding. Press F12 for the attention-aware dashboard overlay while assign --watch is running.",
 			},
 		},
 		{
 			name: "binding setup failure",
-			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
-				return errors.New("boom")
-			}),
+			prepFn: func(*testing.T) assignWatchOverlayPreparation {
+				return prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
+					return errors.New("boom")
+				})
+			},
 			wantLog: []string{
 				"Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.",
 			},
@@ -568,10 +603,11 @@ func TestAnnounceAssignWatchOverlay_WithPreparedScenarios(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			prep := tt.prepFn(t)
 			var logs []string
 			announceAssignWatchOverlay(func(format string, args ...interface{}) {
 				logs = append(logs, fmt.Sprintf(format, args...))
-			}, tt.prep)
+			}, prep)
 
 			if len(logs) != len(tt.wantLog) {
 				t.Fatalf("log count = %d, want %d (%v)", len(logs), len(tt.wantLog), logs)
@@ -580,6 +616,153 @@ func TestAnnounceAssignWatchOverlay_WithPreparedScenarios(t *testing.T) {
 				if logs[i] != tt.wantLog[i] {
 					t.Fatalf("log[%d] = %q, want %q", i, logs[i], tt.wantLog[i])
 				}
+			}
+		})
+	}
+}
+
+func TestPrepareAndAnnounceAssignWatchOverlay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		session          string
+		inTmux           bool
+		currentSession   string
+		isBound          func(*testing.T, string) bool
+		ensureBinding    func(*testing.T, string) error
+		wantLogs         []string
+		wantIsBoundCalls int
+		wantEnsureCalls  int
+	}{
+		{
+			name:           "outside useful context stays silent",
+			session:        "proj",
+			inTmux:         false,
+			currentSession: "proj",
+			isBound: func(t *testing.T, _ string) bool {
+				t.Fatal("isBound should not be called outside useful context")
+				return false
+			},
+			ensureBinding: func(t *testing.T, _ string) error {
+				t.Fatal("ensureBinding should not be called outside useful context")
+				return nil
+			},
+		},
+		{
+			name:           "existing binding logs discoverability hint",
+			session:        "proj",
+			inTmux:         true,
+			currentSession: "proj",
+			isBound: func(*testing.T, string) bool {
+				return true
+			},
+			ensureBinding: func(t *testing.T, _ string) error {
+				t.Fatal("ensureBinding should not be called when binding already exists")
+				return nil
+			},
+			wantLogs: []string{
+				"Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+			wantIsBoundCalls: 1,
+		},
+		{
+			name:           "missing binding installs and logs upgraded hint",
+			session:        "proj",
+			inTmux:         true,
+			currentSession: "proj",
+			isBound: func(*testing.T, string) bool {
+				return false
+			},
+			ensureBinding: func(*testing.T, string) error {
+				return nil
+			},
+			wantLogs: []string{
+				"Hint: installed the F12 overlay binding. Press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+			wantIsBoundCalls: 1,
+			wantEnsureCalls:  1,
+		},
+		{
+			name:           "binding setup failure logs warning",
+			session:        "proj",
+			inTmux:         true,
+			currentSession: "proj",
+			isBound: func(*testing.T, string) bool {
+				return false
+			},
+			ensureBinding: func(*testing.T, string) error {
+				return errors.New("boom")
+			},
+			wantLogs: []string{
+				"Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.",
+			},
+			wantIsBoundCalls: 1,
+			wantEnsureCalls:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs []string
+			isBoundCalls := 0
+			ensureCalls := 0
+
+			prep := prepareAndAnnounceAssignWatchOverlay(
+				func(format string, args ...interface{}) {
+					logs = append(logs, fmt.Sprintf(format, args...))
+				},
+				tt.session,
+				tt.inTmux,
+				tt.currentSession,
+				func(key string) bool {
+					isBoundCalls++
+					return tt.isBound(t, key)
+				},
+				func(key string) error {
+					ensureCalls++
+					return tt.ensureBinding(t, key)
+				},
+			)
+			t.Logf(
+				"session=%q inTmux=%v currentSession=%q logs=%v isBoundCalls=%d ensureCalls=%d prep=%+v",
+				tt.session,
+				tt.inTmux,
+				tt.currentSession,
+				logs,
+				isBoundCalls,
+				ensureCalls,
+				prep,
+			)
+
+			if len(logs) != len(tt.wantLogs) {
+				t.Fatalf("log count = %d, want %d (%v)", len(logs), len(tt.wantLogs), logs)
+			}
+			for i := range tt.wantLogs {
+				if logs[i] != tt.wantLogs[i] {
+					t.Fatalf("log[%d] = %q, want %q", i, logs[i], tt.wantLogs[i])
+				}
+			}
+			if isBoundCalls != tt.wantIsBoundCalls {
+				t.Fatalf("isBoundCalls = %d, want %d", isBoundCalls, tt.wantIsBoundCalls)
+			}
+			if ensureCalls != tt.wantEnsureCalls {
+				t.Fatalf("ensureCalls = %d, want %d", ensureCalls, tt.wantEnsureCalls)
+			}
+
+			wantPrep := assignWatchOverlayPreparation{}
+			if len(tt.wantLogs) == 1 {
+				switch {
+				case strings.HasPrefix(tt.wantLogs[0], "Hint:"):
+					wantPrep.Hint = tt.wantLogs[0]
+				case strings.HasPrefix(tt.wantLogs[0], "Warning:"):
+					wantPrep.Warning = tt.wantLogs[0]
+				}
+			}
+			if prep != wantPrep {
+				t.Fatalf("prep = %+v, want %+v", prep, wantPrep)
 			}
 		})
 	}
