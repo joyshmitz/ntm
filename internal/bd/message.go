@@ -3,6 +3,7 @@ package bd
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os/exec"
 	"time"
 )
@@ -46,8 +47,24 @@ func (c *MessageClient) Inbox(ctx context.Context, unreadOnly, urgentOnly bool) 
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = c.projectPath
-	output, err := cmd.Output()
+
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Limit output to 10MB to prevent OOM
+	output, err := io.ReadAll(io.LimitReader(stdoutPipe, 10*1024*1024))
+	if err != nil {
+		_ = cmd.Wait()
+		return nil, err
+	}
+
+	if err := cmd.Wait(); err != nil {
 		return nil, err
 	}
 
@@ -61,8 +78,24 @@ func (c *MessageClient) Inbox(ctx context.Context, unreadOnly, urgentOnly bool) 
 func (c *MessageClient) Read(ctx context.Context, id string) (*Message, error) {
 	cmd := exec.CommandContext(ctx, "bd", "message", "read", id, "--json")
 	cmd.Dir = c.projectPath
-	output, err := cmd.Output()
+
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Limit output to 1MB to prevent OOM
+	output, err := io.ReadAll(io.LimitReader(stdoutPipe, 1024*1024))
+	if err != nil {
+		_ = cmd.Wait()
+		return nil, err
+	}
+
+	if err := cmd.Wait(); err != nil {
 		return nil, err
 	}
 
