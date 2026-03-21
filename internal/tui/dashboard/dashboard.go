@@ -4059,12 +4059,47 @@ func (m *Model) updateTickerData() {
 // View implements tea.Model
 func (m Model) View() string {
 	if m.showHelp {
-		helpOpts := m.dashboardHelpOptions()
-		helpOverlay := components.HelpOverlay(components.HelpOverlayOptions{
-			Title:    "Dashboard Shortcuts",
-			Sections: components.DashboardHelpSections(helpOpts),
-			MaxWidth: 60,
-		})
+		// Use bubbles/help with FullHelp for the help overlay.
+		// This replaces the manual DashboardHelpSections call.
+		helpCopy := m.helpModel
+		helpCopy.ShowAll = true
+		helpCopy.Width = 56 // Content width within the 60-char box
+
+		// Section labels for FullHelp columns
+		sectionLabels := []string{"Navigation", "Panels", "Data", "Control"}
+		labelStyle := lipgloss.NewStyle().
+			Foreground(m.theme.Primary).
+			Bold(true)
+
+		var helpLines []string
+		// Add section labels header
+		helpLines = append(helpLines, strings.Join(func() []string {
+			labels := make([]string, len(sectionLabels))
+			for i, label := range sectionLabels {
+				labels[i] = labelStyle.Render(label)
+			}
+			return labels
+		}(), "    "))
+
+		// Render the keybindings
+		helpContent := helpCopy.View(dashKeys)
+		helpLines = append(helpLines, helpContent)
+
+		fullContent := strings.Join(helpLines, "\n")
+
+		// Append panel-specific keys if a panel is focused.
+		if panelHints := m.getFocusedPanelHints(); len(panelHints) > 0 {
+			var hintLines []string
+			for _, hint := range panelHints {
+				hintLines = append(hintLines, hint.Key+" "+hint.Desc)
+			}
+			fullContent += "\n\n" + lipgloss.NewStyle().
+				Foreground(m.theme.Subtext).
+				Render("Panel: "+strings.Join(hintLines, " • "))
+		}
+
+		// Wrap in styled box using Catppuccin theme.
+		helpOverlay := m.renderHelpOverlayBox("Dashboard Shortcuts", fullContent, 60)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, helpOverlay)
 	}
 
@@ -5078,7 +5113,8 @@ func (m Model) renderQuickActions() string {
 func (m Model) renderHelpBar() string {
 	opts := m.dashboardHelpOptions()
 
-	// Base hints (no debug extras); debug extras are appended last so they truncate first.
+	// Use DashboardHelpBarHints for the footer bar.
+	// The KeyMap’s help.KeyMap interface is used for the help overlay instead.
 	baseOpts := opts
 	baseOpts.Debug = false
 	hints := components.DashboardHelpBarHints(baseOpts)
@@ -5094,7 +5130,7 @@ func (m Model) renderHelpBar() string {
 		}
 	}
 
-	// Add contextual attention hint when items need human attention and we're not already
+	// Add contextual attention hint when items need human attention and we’re not already
 	// focused on the attention panel. This helps users discover where to look.
 	if m.focusedPanel != PanelAttention && m.attentionPanel != nil && m.attentionFeedOK {
 		if m.attentionPanel.ActionRequiredCount() > 0 {
@@ -5118,6 +5154,31 @@ func (m Model) renderHelpBar() string {
 		Hints: hints,
 		Width: m.width - 4, // Account for margins
 	})
+}
+
+// renderHelpOverlayBox renders a styled box with a title and content.
+// Uses the Catppuccin theme for consistent styling with the dashboard.
+func (m Model) renderHelpOverlayBox(title, content string, maxWidth int) string {
+	t := m.theme
+
+	// Title style
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Primary).
+		Padding(0, 1)
+
+	// Box style with rounded border
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.Primary).
+		Background(t.Base).
+		Padding(1, 2).
+		Width(maxWidth)
+
+	// Combine title and content
+	fullContent := titleStyle.Render(title) + "\n\n" + content
+
+	return boxStyle.Render(fullContent)
 }
 
 // getFocusedPanelHints returns keybindings for the currently focused panel as KeyHints.
