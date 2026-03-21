@@ -345,6 +345,98 @@ func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
 	}
 }
 
+func TestVisiblePanelsForHelpVerbosity_AttentionByTier(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		width           int
+		expectAttention bool
+	}{
+		{width: 119, expectAttention: false},
+		{width: 120, expectAttention: true},
+		{width: 200, expectAttention: true},
+		{width: 240, expectAttention: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(fmt.Sprintf("width_%d", tc.width), func(t *testing.T) {
+			t.Parallel()
+
+			m := newTestModel(tc.width)
+			visible := m.visiblePanelsForHelpVerbosity()
+
+			hasAttention := false
+			for _, panel := range visible {
+				if panel == PanelAttention {
+					hasAttention = true
+					break
+				}
+			}
+
+			if hasAttention != tc.expectAttention {
+				t.Fatalf("width %d: attention visible=%v, want %v", tc.width, hasAttention, tc.expectAttention)
+			}
+		})
+	}
+}
+
+func TestCycleFocusIncludesAttentionAtSplitAndSkipsAtNarrow(t *testing.T) {
+	t.Parallel()
+
+	split := newTestModel(120)
+	split.focusedPanel = PanelDetail
+	split.syncFocusRing()
+	split.cycleFocus(1)
+	if split.focusedPanel != PanelAttention {
+		t.Fatalf("expected split-tier focus to advance to attention, got %v", split.focusedPanel)
+	}
+
+	narrow := newTestModel(100)
+	narrow.focusedPanel = PanelPaneList
+	narrow.syncFocusRing()
+	narrow.cycleFocus(1)
+	if narrow.focusedPanel != PanelPaneList {
+		t.Fatalf("expected narrow-tier focus to stay on pane list, got %v", narrow.focusedPanel)
+	}
+}
+
+func TestRenderSplitViewUsesAttentionPanelWhenFocused(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(200)
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{Summary: "Critical alert", Actionability: robot.ActionabilityActionRequired, SourcePane: 1},
+	}, true)
+	m.focusedPanel = PanelAttention
+
+	out := status.StripANSI(m.renderSplitView())
+	if !strings.Contains(out, "Attention") {
+		t.Fatalf("expected split view to render attention panel, got %q", out)
+	}
+	if strings.Contains(out, "Context Usage") {
+		t.Fatalf("expected split attention view to replace detail content, got %q", out)
+	}
+}
+
+func TestRenderUltraLayoutKeepsDetailVisibleWhenAttentionFocused(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(240)
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{Summary: "Critical alert", Actionability: robot.ActionabilityActionRequired, SourcePane: 1},
+	}, true)
+	m.focusedPanel = PanelAttention
+
+	out := status.StripANSI(m.renderUltraLayout())
+	if !strings.Contains(out, "Attention") {
+		t.Fatalf("expected ultra layout to include attention panel, got %q", out)
+	}
+	if !strings.Contains(out, "Context Usage") {
+		t.Fatalf("expected ultra layout to keep pane detail visible when attention is focused, got %q", out)
+	}
+}
+
 func TestVisiblePanelsIncludeAttentionAtSplitAndHideAtNarrow(t *testing.T) {
 	t.Parallel()
 
@@ -359,6 +451,18 @@ func TestVisiblePanelsIncludeAttentionAtSplitAndHideAtNarrow(t *testing.T) {
 	}
 	if containsPanelID(narrow.visiblePanelsForHelpVerbosity(), PanelAttention) {
 		t.Fatal("did not expect narrow-tier panel set to include PanelAttention")
+	}
+}
+
+func TestNewSeedsAttentionFetchCadence(t *testing.T) {
+	t.Parallel()
+
+	m := New("test", "")
+	if !m.fetchingAttention {
+		t.Fatal("expected New to mark attention fetch as in flight during initial startup")
+	}
+	if m.lastAttentionFetch.IsZero() {
+		t.Fatal("expected New to seed the attention refresh timestamp")
 	}
 }
 
@@ -600,7 +704,7 @@ func TestSidebarRendersMetricsAndHistoryPanelsWhenSpaceAllows(t *testing.T) {
 	})
 	m = updated.(Model)
 
-	out := status.StripANSI(m.renderSidebar(60, 30))
+	out := status.StripANSI(m.renderSidebar(60, 45))
 	if !strings.Contains(out, "Metrics") {
 		t.Fatalf("expected sidebar to include metrics panel title; got:\n%s", out)
 	}
@@ -841,10 +945,22 @@ func TestKeyboardNavigationPanelCycling(t *testing.T) {
 			t.Fatalf("expected focused panel to move to detail after tab, got %v", m.focusedPanel)
 		}
 
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = updated.(Model)
+		if m.focusedPanel != PanelAttention {
+			t.Fatalf("expected focused panel to move to attention after second tab, got %v", m.focusedPanel)
+		}
+
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = updated.(Model)
+		if m.focusedPanel != PanelDetail {
+			t.Fatalf("expected focused panel to move back to detail after shift+tab, got %v", m.focusedPanel)
+		}
+
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 		m = updated.(Model)
 		if m.focusedPanel != PanelPaneList {
-			t.Fatalf("expected focused panel to move back to pane list after shift+tab, got %v", m.focusedPanel)
+			t.Fatalf("expected focused panel to move back to pane list after second shift+tab, got %v", m.focusedPanel)
 		}
 	})
 
@@ -980,6 +1096,61 @@ func TestHelpBarContextualHints(t *testing.T) {
 	}
 	if alertsHelp == "" {
 		t.Error("alerts help bar should not be empty")
+	}
+}
+
+// TestHelpBarAttentionContextualHint verifies the contextual attention hint behavior.
+// When attention items exist and focus is not on the attention panel, a hint should appear.
+func TestHelpBarAttentionContextualHint(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(200)
+	m.tier = layout.TierWide
+
+	// Initialize attention panel with items
+	m.attentionPanel = panels.NewAttentionPanel()
+	m.attentionFeedOK = true
+
+	// Test 1: No attention items - no hint
+	m.attentionPanel.SetData(nil, true)
+	m.focusedPanel = PanelPaneList
+	helpNoItems := m.renderHelpBar()
+	if strings.Contains(helpNoItems, "attention") {
+		t.Error("help bar should not contain attention hint when no items")
+	}
+
+	// Test 2: Action required items, not focused on attention - should show "attention!"
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{Summary: "test", Actionability: robot.ActionabilityActionRequired},
+	}, true)
+	m.focusedPanel = PanelPaneList
+	helpWithAction := m.renderHelpBar()
+	if !strings.Contains(helpWithAction, "attention!") {
+		t.Error("help bar should contain 'attention!' hint when action_required items exist")
+	}
+
+	// Test 3: Interesting items only, not focused on attention - should show "attention"
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{Summary: "test", Actionability: robot.ActionabilityInteresting},
+	}, true)
+	m.focusedPanel = PanelPaneList
+	helpWithInteresting := m.renderHelpBar()
+	if !strings.Contains(helpWithInteresting, "attention") {
+		t.Error("help bar should contain 'attention' hint when interesting items exist")
+	}
+
+	// Test 4: Focused on attention panel - no extra hint needed
+	m.focusedPanel = PanelAttention
+	helpFocused := m.renderHelpBar()
+	if strings.Contains(helpFocused, "attention!") || strings.Contains(helpFocused, "attention") {
+		t.Fatalf("help bar should not contain an attention discovery hint when already focused on attention, got %q", helpFocused)
+	}
+
+	// Test 5: Feed unavailable - no hint even if stale items remain on the panel model
+	m.attentionFeedOK = false
+	helpUnavailable := m.renderHelpBar()
+	if strings.Contains(helpUnavailable, "attention!") || strings.Contains(helpUnavailable, "attention") {
+		t.Fatalf("help bar should stay calm when the attention feed is unavailable, got %q", helpUnavailable)
 	}
 }
 

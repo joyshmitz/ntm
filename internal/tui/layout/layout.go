@@ -423,3 +423,24 @@ func MegaProportions(total int) (p1, p2, p3, p4, p5 int) {
 	p5 = avail - p1 - p2 - p3 - p4
 	return
 }
+
+// MegaProportions6 returns widths for 6-panel layout: Agents | Detail | Beads | Alerts | Attention | Sidebar.
+// Proportions: 15/26/18/15/12/14 with attention panel inserted between alerts and sidebar.
+func MegaProportions6(total int) (p1, p2, p3, p4, p5, p6 int) {
+	if total < MegaWideViewThreshold {
+		return 0, total, 0, 0, 0, 0
+	}
+	// Budget 12 cols for borders/padding (2 per panel)
+	avail := total - 12
+	if avail < 12 {
+		return 0, total, 0, 0, 0, 0
+	}
+
+	p1 = int(float64(avail) * 0.15)
+	p2 = int(float64(avail) * 0.26)
+	p3 = int(float64(avail) * 0.18)
+	p4 = int(float64(avail) * 0.15)
+	p5 = int(float64(avail) * 0.12)
+	p6 = avail - p1 - p2 - p3 - p4 - p5
+	return
+}
