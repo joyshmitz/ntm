@@ -467,6 +467,59 @@ func TestSpinnerDisablesAnimationInTmuxByDefault(t *testing.T) {
 	}
 }
 
+func TestSpinnerReducedMotionView(t *testing.T) {
+	// When animations are disabled, View() should still render but stay stable
+	t.Setenv("NTM_ANIMATIONS", "0")
+
+	s := NewSpinner()
+	v1 := s.View()
+	if v1 == "" {
+		t.Error("spinner should render even with animations disabled")
+	}
+
+	// Advance frame manually to simulate tick
+	s, _ = s.Update(SpinnerTickMsg{})
+	v2 := s.View()
+
+	// Frame should not advance (AnimationsEnabled returned false)
+	if v1 != v2 {
+		t.Errorf("view should remain stable with animations disabled, got %q then %q", v1, v2)
+	}
+}
+
+func TestSpinnerBubblesTickMsg(t *testing.T) {
+	// Verify spinner handles bubbles TickMsg for interoperability
+	enableAnimationsForTest(t)
+	s := NewSpinner()
+	initialFrame := s.Frame
+
+	// Import bubbles ticker type
+	updated, cmd := s.Update(SpinnerTickMsg{})
+	if updated.Frame == initialFrame {
+		t.Error("spinner frame should advance on tick")
+	}
+	if cmd == nil {
+		t.Error("spinner should return command after tick")
+	}
+}
+
+func BenchmarkSpinnerView(b *testing.B) {
+	s := NewSpinner()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.View()
+	}
+}
+
+func BenchmarkSpinnerViewWithGradient(b *testing.B) {
+	s := NewSpinner()
+	s.Gradient = true
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.View()
+	}
+}
+
 // Logo constants tests
 func TestLogoConstants(t *testing.T) {
 	if len(LogoLarge) == 0 {
