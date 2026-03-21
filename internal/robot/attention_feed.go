@@ -2484,3 +2484,6 @@ func minInt(a, b int) int {
 }
 
 // NOTE: buildSnapshotAttentionSummary is defined in robot.go (br-slg9g)
+
+// NOTE: EventsOptions, filterEventsForRobot, and toStringSetForEvents are
+// defined in events.go (br-kpvhy: --robot-events command implementation)

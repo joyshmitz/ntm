@@ -3470,23 +3470,23 @@ func buildSnapshotAgentMail() *SnapshotAgentMail {
 // SnapshotOutput provides complete system state for AI orchestration
 type SnapshotOutput struct {
 	RobotResponse
-	Timestamp                string                   `json:"ts"`
-	SafetyProfile            string                   `json:"safety_profile,omitempty"`
-	AttentionContractVersion string                   `json:"attention_contract_version"`
-	LatestCursor             int64                    `json:"latest_cursor"`
-	ReplayWindow             SnapshotReplayWindowInfo `json:"replay_window"`
-	Sessions                 []SnapshotSession        `json:"sessions"`
-	Pagination               *PaginationInfo          `json:"pagination,omitempty"`
-	AgentHints               *AgentHints              `json:"_agent_hints,omitempty"`
-	BeadsSummary             *bv.BeadsSummary         `json:"beads_summary,omitempty"`
-	AgentMail                *SnapshotAgentMail       `json:"agent_mail,omitempty"`
-	MailUnread               int                      `json:"mail_unread,omitempty"`
-	Tools                    []ToolInfoOutput         `json:"tools,omitempty"`           // Flywheel tool inventory and health
-	Swarm                    *SwarmSnapshot           `json:"swarm,omitempty"`           // Active swarm orchestration state (optional)
-	Alerts                   []string                   `json:"alerts"`                       // Legacy: simple string alerts
-	AlertsDetailed           []AlertInfo                `json:"alerts_detailed,omitempty"`    // Rich alert objects
-	AlertSummary             *AlertSummaryInfo          `json:"alert_summary,omitempty"`
-	AttentionSummary         *SnapshotAttentionSummary  `json:"attention_summary,omitempty"`  // Compact feed summary for bootstrap orientation
+	Timestamp                string                    `json:"ts"`
+	SafetyProfile            string                    `json:"safety_profile,omitempty"`
+	AttentionContractVersion string                    `json:"attention_contract_version"`
+	LatestCursor             int64                     `json:"latest_cursor"`
+	ReplayWindow             SnapshotReplayWindowInfo  `json:"replay_window"`
+	Sessions                 []SnapshotSession         `json:"sessions"`
+	Pagination               *PaginationInfo           `json:"pagination,omitempty"`
+	AgentHints               *AgentHints               `json:"_agent_hints,omitempty"`
+	BeadsSummary             *bv.BeadsSummary          `json:"beads_summary,omitempty"`
+	AgentMail                *SnapshotAgentMail        `json:"agent_mail,omitempty"`
+	MailUnread               int                       `json:"mail_unread,omitempty"`
+	Tools                    []ToolInfoOutput          `json:"tools,omitempty"`           // Flywheel tool inventory and health
+	Swarm                    *SwarmSnapshot            `json:"swarm,omitempty"`           // Active swarm orchestration state (optional)
+	Alerts                   []string                  `json:"alerts"`                    // Legacy: simple string alerts
+	AlertsDetailed           []AlertInfo               `json:"alerts_detailed,omitempty"` // Rich alert objects
+	AlertSummary             *AlertSummaryInfo         `json:"alert_summary,omitempty"`
+	AttentionSummary         *SnapshotAttentionSummary `json:"attention_summary,omitempty"` // Compact feed summary for bootstrap orientation
 }
 
 // NOTE: SnapshotAttentionSummary and SnapshotAttentionItem types are defined in
@@ -3500,14 +3500,14 @@ type SnapshotOutput struct {
 //   - If a cursor expires, use `resync_command` to get a fresh snapshot
 type SnapshotReplayWindowInfo struct {
 	Supported       bool   `json:"supported"`
-	Reason          string `json:"reason,omitempty"`            // Why replay is/isn't supported
-	OldestCursor    int64  `json:"oldest_cursor"`               // Earliest cursor still in retention
-	LatestCursor    int64  `json:"latest_cursor"`               // Most recent cursor (use for --since)
-	EventCount      int    `json:"event_count"`                 // Events in the replay window
-	OldestTimestamp string `json:"oldest_timestamp,omitempty"`  // RFC3339 timestamp of oldest event
-	LatestTimestamp string `json:"latest_timestamp,omitempty"`  // RFC3339 timestamp of latest event
-	RetentionPeriod string `json:"retention_period,omitempty"`  // How long events are retained
-	ResyncCommand   string `json:"resync_command,omitempty"`    // Command to run when cursor expires
+	Reason          string `json:"reason,omitempty"`           // Why replay is/isn't supported
+	OldestCursor    int64  `json:"oldest_cursor"`              // Earliest cursor still in retention
+	LatestCursor    int64  `json:"latest_cursor"`              // Most recent cursor (use for --since)
+	EventCount      int    `json:"event_count"`                // Events in the replay window
+	OldestTimestamp string `json:"oldest_timestamp,omitempty"` // RFC3339 timestamp of oldest event
+	LatestTimestamp string `json:"latest_timestamp,omitempty"` // RFC3339 timestamp of latest event
+	RetentionPeriod string `json:"retention_period,omitempty"` // How long events are retained
+	ResyncCommand   string `json:"resync_command,omitempty"`   // Command to run when cursor expires
 }
 
 // AlertInfo provides detailed alert information for robot output
@@ -3876,28 +3876,48 @@ func buildSnapshotAttentionSummary(feed *AttentionFeed) *SnapshotAttentionSummar
 	}
 
 	stats := feed.Stats()
+	unsupported := make([]string, 0, len(UnsupportedConditions()))
+	for _, uc := range UnsupportedConditions() {
+		unsupported = append(unsupported, uc.Name)
+	}
+
 	if stats.Count == 0 {
-		unsupported := make([]string, 0, len(UnsupportedConditions()))
-		for _, uc := range UnsupportedConditions() {
-			unsupported = append(unsupported, uc.Name)
-		}
 		return &SnapshotAttentionSummary{
+			TotalEvents:        0,
+			ByCategoryCount:    map[string]int{},
 			UnsupportedSignals: unsupported,
 			NextSteps: []NextAction{
-				{Action: "robot-events", Args: "--since=0", Reason: "No events yet — replay will be empty until agents start"},
+				attentionStatusNextAction("Inspect the current robot state while the attention feed is still empty"),
+				{Action: "robot-snapshot", Args: "--robot-snapshot", Reason: "Refresh the bootstrap view after agents start emitting replayable attention events"},
 			},
 		}
 	}
 
-	// Replay recent events to compute summary (cap at 1000 for performance)
-	events, _, _ := feed.Replay(0, 1000)
+	replaySince := stats.OldestCursor - 1
+	if replaySince < 0 {
+		replaySince = 0
+	}
+	events, _, err := feed.Replay(replaySince, stats.Count)
 
 	summary := &SnapshotAttentionSummary{
-		TotalEvents:     len(events),
-		ByCategoryCount: make(map[string]int),
+		TotalEvents:        stats.Count,
+		ByCategoryCount:    map[string]int{},
+		TopItems:           []SnapshotAttentionItem{},
+		UnsupportedSignals: unsupported,
+		NextSteps:          []NextAction{},
+	}
+	if err != nil {
+		summary.NextSteps = append(summary.NextSteps, NextAction{
+			Action: "robot-snapshot",
+			Args:   "--robot-snapshot",
+			Reason: "Replay metadata changed while building the snapshot; fetch a fresh snapshot before following cursors",
+		})
+		return summary
 	}
 
-	var topItems []SnapshotAttentionItem
+	topItems := make([]SnapshotAttentionItem, 0, 3)
+	actionRequiredEvents := make([]AttentionEvent, 0, len(events))
+	interestingEvents := make([]AttentionEvent, 0, len(events))
 	for _, ev := range events {
 		cat := string(ev.Category)
 		summary.ByCategoryCount[cat]++
@@ -3905,6 +3925,7 @@ func buildSnapshotAttentionSummary(feed *AttentionFeed) *SnapshotAttentionSummar
 		switch ev.Actionability {
 		case ActionabilityActionRequired:
 			summary.ActionRequiredCount++
+			actionRequiredEvents = append(actionRequiredEvents, cloneAttentionEvent(ev))
 			topItems = append(topItems, SnapshotAttentionItem{
 				Cursor:        ev.Cursor,
 				Category:      cat,
@@ -3914,6 +3935,7 @@ func buildSnapshotAttentionSummary(feed *AttentionFeed) *SnapshotAttentionSummar
 			})
 		case ActionabilityInteresting:
 			summary.InterestingCount++
+			interestingEvents = append(interestingEvents, cloneAttentionEvent(ev))
 		}
 	}
 
@@ -3923,20 +3945,55 @@ func buildSnapshotAttentionSummary(feed *AttentionFeed) *SnapshotAttentionSummar
 	}
 	summary.TopItems = topItems
 
-	// Add unsupported signals
-	for _, uc := range UnsupportedConditions() {
-		summary.UnsupportedSignals = append(summary.UnsupportedSignals, uc.Name)
+	for _, ev := range actionRequiredEvents {
+		for _, action := range ev.NextActions {
+			if len(summary.NextSteps) >= 3 {
+				break
+			}
+			duplicate := false
+			for _, existing := range summary.NextSteps {
+				if existing.Action == action.Action && existing.Args == action.Args {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				summary.NextSteps = append(summary.NextSteps, action)
+			}
+		}
 	}
 
-	// Add mechanical next-step hints based on current state
-	if summary.ActionRequiredCount > 0 {
-		summary.NextSteps = []NextAction{
-			{Action: "robot-events", Args: "--actionability=action_required", Reason: fmt.Sprintf("%d action-required events — review urgently", summary.ActionRequiredCount)},
+	if len(summary.NextSteps) == 0 && len(actionRequiredEvents) > 0 {
+		since := actionRequiredEvents[0].Cursor - 1
+		if since < replaySince {
+			since = replaySince
 		}
-	} else {
-		summary.NextSteps = []NextAction{
-			{Action: "robot-events", Args: fmt.Sprintf("--since=%d", stats.NewestCursor), Reason: "Follow new events from current cursor"},
-		}
+		summary.NextSteps = append(summary.NextSteps, NextAction{
+			Action: "robot-events",
+			Args:   fmt.Sprintf("--robot-events --since=%d --limit=20", since),
+			Reason: fmt.Sprintf("Inspect the %d surfaced action-required event(s) in the current replay window", len(summary.TopItems)),
+		})
+	}
+	if len(summary.NextSteps) == 0 && len(interestingEvents) > 0 {
+		summary.NextSteps = append(summary.NextSteps, NextAction{
+			Action: "robot-digest",
+			Args:   "--robot-digest",
+			Reason: fmt.Sprintf("%d interesting event(s) are present; use the digest for the steady-state delta summary", summary.InterestingCount),
+		})
+	}
+	if len(summary.NextSteps) < 3 && stats.NewestCursor > 0 {
+		summary.NextSteps = append(summary.NextSteps, NextAction{
+			Action: "robot-events",
+			Args:   fmt.Sprintf("--robot-events --since=%d --limit=20", stats.NewestCursor),
+			Reason: "Continue following new attention events from the snapshot cursor",
+		})
+	}
+	if len(summary.NextSteps) < 3 {
+		summary.NextSteps = append(summary.NextSteps, NextAction{
+			Action: "robot-snapshot",
+			Args:   "--robot-snapshot",
+			Reason: "Resync if a saved cursor falls outside the current replay window",
+		})
 	}
 
 	return summary
