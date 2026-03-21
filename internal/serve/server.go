@@ -975,6 +975,16 @@ func (s *Server) buildRouter() chi.Router {
 		// Accounts API - CAAM account management
 		s.registerAccountsRoutes(r)
 
+		// Attention Feed API - normalized event streaming for operator agents
+		r.Route("/attention", func(r chi.Router) {
+			// SSE stream with cursor-based replay
+			r.With(s.RequirePermission(PermReadEvents)).Get("/stream", s.handleAttentionStreamV1)
+			// HTTP replay for non-streaming clients
+			r.With(s.RequirePermission(PermReadEvents)).Get("/events", s.handleAttentionEventsV1)
+			// Digest endpoint for aggregated summary
+			r.With(s.RequirePermission(PermReadEvents)).Get("/digest", s.handleAttentionDigestV1)
+		})
+
 		// WebSocket endpoint (requires read permission)
 		r.With(s.RequirePermission(PermReadWebSocket)).Get("/ws", s.handleWebSocket)
 
@@ -1015,6 +1025,16 @@ func (s *Server) Start(ctx context.Context) error {
 		})
 		defer unsubscribe()
 	}
+
+	// Subscribe to attention feed for WebSocket broadcasting
+	attentionUnsubscribe := robot.GetAttentionFeed().Subscribe(func(e robot.AttentionEvent) {
+		// Publish to both global attention topic and session-specific topic
+		s.wsHub.Publish("attention", string(e.Type), e)
+		if e.Session != "" {
+			s.wsHub.Publish("attention:"+e.Session, string(e.Type), e)
+		}
+	})
+	defer attentionUnsubscribe()
 
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", s.host, s.port),
@@ -4776,7 +4796,12 @@ func isValidTopic(topic string) bool {
 		strings.HasPrefix(topic, "reservations:") ||
 		strings.HasPrefix(topic, "pipelines:") ||
 		strings.HasPrefix(topic, "approvals:") ||
-		strings.HasPrefix(topic, "accounts:") {
+		strings.HasPrefix(topic, "accounts:") ||
+		strings.HasPrefix(topic, "attention:") {
+		return true
+	}
+	// attention topic without prefix (for main feed)
+	if topic == "attention" {
 		return true
 	}
 	return false
@@ -4852,4 +4877,387 @@ func (c *WSClient) sendPong(requestID string) {
 // WSHub returns the WebSocket hub for testing.
 func (s *Server) WSHub() *WSHub {
 	return s.wsHub
+}
+
+// =============================================================================
+// Attention Feed Handlers
+// =============================================================================
+
+// handleAttentionStreamV1 handles SSE streaming at /api/v1/attention/stream.
+// Query params:
+//   - since_cursor: replay from this cursor (0 = start from beginning, -1 = from now)
+//   - category: filter by event category (comma-separated)
+//   - session: filter by session name
+//   - actionability: filter by actionability level (comma-separated)
+//   - heartbeat: heartbeat interval in seconds (default 30, 0 to disable)
+func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	sinceCursor := int64(0)
+	if sc := r.URL.Query().Get("since_cursor"); sc != "" {
+		parsed, err := strconv.ParseInt(sc, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid since_cursor: "+err.Error())
+			return
+		}
+		sinceCursor = parsed
+	}
+
+	categoryFilter := parseCSVParam(r.URL.Query().Get("category"))
+	sessionFilter := r.URL.Query().Get("session")
+	actionabilityFilter := parseCSVParam(r.URL.Query().Get("actionability"))
+
+	heartbeatInterval := 30 * time.Second
+	if hb := r.URL.Query().Get("heartbeat"); hb != "" {
+		parsed, err := strconv.Atoi(hb)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid heartbeat: "+err.Error())
+			return
+		}
+		heartbeatInterval = time.Duration(parsed) * time.Second
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	feed := robot.GetAttentionFeed()
+	stats := feed.Stats()
+
+	// Check for cursor expiration
+	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+		// Cursor has expired - send error event and close
+		cursorExpiredEvent := map[string]interface{}{
+			"error_code":    robot.ErrCodeCursorExpired,
+			"message":       "cursor has expired, resync required",
+			"oldest_cursor": stats.OldestCursor,
+			"newest_cursor": stats.NewestCursor,
+			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
+		}
+		data, _ := json.Marshal(cursorExpiredEvent)
+		if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", data); err != nil {
+			return
+		}
+		flusher.Flush()
+		return
+	}
+
+	// Send connection event
+	connEvent := map[string]interface{}{
+		"status":        "connected",
+		"time":          time.Now().UTC().Format(time.RFC3339),
+		"since_cursor":  sinceCursor,
+		"oldest_cursor": stats.OldestCursor,
+		"newest_cursor": stats.NewestCursor,
+	}
+	connData, _ := json.Marshal(connEvent)
+	if _, err := fmt.Fprintf(w, "event: connected\ndata: %s\n\n", connData); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	// Replay events from cursor if requested
+	replayCursor := sinceCursor
+	if sinceCursor == -1 {
+		// Start from now - no replay
+		replayCursor = stats.NewestCursor
+	} else if sinceCursor >= 0 {
+		// Replay all events since cursor
+		events, newest, err := feed.Replay(sinceCursor, stats.Count)
+		if err == nil {
+			for _, event := range events {
+				if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
+					continue
+				}
+				data, err := json.Marshal(event)
+				if err != nil {
+					continue
+				}
+				if _, err := fmt.Fprintf(w, "event: attention\ndata: %s\n\n", data); err != nil {
+					return
+				}
+			}
+			flusher.Flush()
+			replayCursor = newest
+		}
+	}
+
+	// Subscribe for new events
+	eventCh := make(chan robot.AttentionEvent, 100)
+	unsubscribe := feed.Subscribe(func(event robot.AttentionEvent) {
+		select {
+		case eventCh <- event:
+		default:
+			// Buffer full, drop event
+		}
+	})
+	defer unsubscribe()
+
+	// Set up heartbeat ticker
+	var heartbeatTicker *time.Ticker
+	var heartbeatCh <-chan time.Time
+	if heartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(heartbeatInterval)
+		heartbeatCh = heartbeatTicker.C
+		defer heartbeatTicker.Stop()
+	}
+
+	// Stream events
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-eventCh:
+			if event.Cursor <= replayCursor {
+				// Already sent during replay
+				continue
+			}
+			if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
+				continue
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: attention\ndata: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+			replayCursor = event.Cursor
+		case <-heartbeatCh:
+			currentStats := feed.Stats()
+			heartbeat := map[string]interface{}{
+				"type":          "heartbeat",
+				"time":          time.Now().UTC().Format(time.RFC3339),
+				"oldest_cursor": currentStats.OldestCursor,
+				"newest_cursor": currentStats.NewestCursor,
+				"event_count":   currentStats.Count,
+			}
+			data, _ := json.Marshal(heartbeat)
+			if _, err := fmt.Fprintf(w, "event: heartbeat\ndata: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// handleAttentionEventsV1 handles HTTP replay at /api/v1/attention/events.
+// Query params:
+//   - since_cursor: replay from this cursor (required)
+//   - category: filter by event category (comma-separated)
+//   - session: filter by session name
+//   - actionability: filter by actionability level (comma-separated)
+//   - limit: max events to return (default 100)
+func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request) {
+	sinceCursor := int64(0)
+	if sc := r.URL.Query().Get("since_cursor"); sc != "" {
+		parsed, err := strconv.ParseInt(sc, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid since_cursor: "+err.Error())
+			return
+		}
+		sinceCursor = parsed
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		parsed, err := strconv.Atoi(l)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit: "+err.Error())
+			return
+		}
+		if parsed > 0 && parsed < 10000 {
+			limit = parsed
+		}
+	}
+
+	categoryFilter := parseCSVParam(r.URL.Query().Get("category"))
+	sessionFilter := r.URL.Query().Get("session")
+	actionabilityFilter := parseCSVParam(r.URL.Query().Get("actionability"))
+
+	feed := robot.GetAttentionFeed()
+	stats := feed.Stats()
+
+	// Check for cursor expiration
+	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error_code":    robot.ErrCodeCursorExpired,
+			"message":       "cursor has expired, resync required",
+			"oldest_cursor": stats.OldestCursor,
+			"newest_cursor": stats.NewestCursor,
+			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
+		})
+		return
+	}
+
+	events, newestCursor, err := feed.Replay(sinceCursor, limit*2) // Fetch extra to account for filtering
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "replay failed: "+err.Error())
+		return
+	}
+
+	// Apply filters
+	filtered := make([]robot.AttentionEvent, 0, len(events))
+	for _, event := range events {
+		if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
+			continue
+		}
+		filtered = append(filtered, event)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+
+	truncated := len(filtered) >= limit && len(events) > len(filtered)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"events":        filtered,
+		"since_cursor":  sinceCursor,
+		"newest_cursor": newestCursor,
+		"oldest_cursor": stats.OldestCursor,
+		"event_count":   len(filtered),
+		"truncated":     truncated,
+	})
+}
+
+// handleAttentionDigestV1 handles digest at /api/v1/attention/digest.
+// Query params:
+//   - since_cursor: aggregate events from this cursor
+//   - category: filter by event category (comma-separated)
+//   - session: filter by session name
+//   - action_required_limit: max action_required items (default 5)
+//   - interesting_limit: max interesting items (default 10)
+//   - background_limit: max background items (default 5)
+//   - trace: include decision trace (default false)
+func (s *Server) handleAttentionDigestV1(w http.ResponseWriter, r *http.Request) {
+	sinceCursor := int64(0)
+	if sc := r.URL.Query().Get("since_cursor"); sc != "" {
+		parsed, err := strconv.ParseInt(sc, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid since_cursor: "+err.Error())
+			return
+		}
+		sinceCursor = parsed
+	}
+
+	opts := robot.DefaultAttentionDigestOptions()
+
+	if arl := r.URL.Query().Get("action_required_limit"); arl != "" {
+		if parsed, err := strconv.Atoi(arl); err == nil && parsed >= 0 {
+			opts.ActionRequiredLimit = parsed
+		}
+	}
+	if il := r.URL.Query().Get("interesting_limit"); il != "" {
+		if parsed, err := strconv.Atoi(il); err == nil && parsed >= 0 {
+			opts.InterestingLimit = parsed
+		}
+	}
+	if bl := r.URL.Query().Get("background_limit"); bl != "" {
+		if parsed, err := strconv.Atoi(bl); err == nil && parsed >= 0 {
+			opts.BackgroundLimit = parsed
+		}
+	}
+	if trace := r.URL.Query().Get("trace"); trace == "true" || trace == "1" {
+		opts.IncludeTrace = true
+	}
+
+	categoryFilter := parseCSVParam(r.URL.Query().Get("category"))
+	if len(categoryFilter) > 0 {
+		categories := make([]robot.EventCategory, 0, len(categoryFilter))
+		for _, cat := range categoryFilter {
+			categories = append(categories, robot.EventCategory(cat))
+		}
+		opts.Categories = categories
+	}
+
+	sessionFilter := r.URL.Query().Get("session")
+	if sessionFilter != "" {
+		opts.Session = sessionFilter
+	}
+
+	feed := robot.GetAttentionFeed()
+	stats := feed.Stats()
+
+	// Check for cursor expiration
+	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error_code":    robot.ErrCodeCursorExpired,
+			"message":       "cursor has expired, resync required",
+			"oldest_cursor": stats.OldestCursor,
+			"newest_cursor": stats.NewestCursor,
+			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
+		})
+		return
+	}
+
+	digest, err := feed.Digest(sinceCursor, opts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "digest failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, digest)
+}
+
+// matchesAttentionFilters checks if an event matches the specified filters.
+func matchesAttentionFilters(event robot.AttentionEvent, categoryFilter []string, sessionFilter string, actionabilityFilter []string) bool {
+	// Category filter
+	if len(categoryFilter) > 0 {
+		matched := false
+		for _, cat := range categoryFilter {
+			if string(event.Category) == cat {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	// Session filter
+	if sessionFilter != "" && event.Session != sessionFilter {
+		return false
+	}
+
+	// Actionability filter
+	if len(actionabilityFilter) > 0 {
+		matched := false
+		for _, act := range actionabilityFilter {
+			if string(event.Actionability) == act {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	return true
+}
+
+// parseCSVParam parses a comma-separated query parameter into a slice.
+func parseCSVParam(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }
