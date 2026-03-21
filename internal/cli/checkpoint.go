@@ -411,7 +411,9 @@ Examples:
 			}
 
 			if !force && !jsonOutput {
-				if !confirm(fmt.Sprintf("Delete checkpoint %s?", id)) {
+				title := fmt.Sprintf("Delete checkpoint %s?", id)
+				desc := fmt.Sprintf("This checkpoint for session '%s' will be permanently removed.", session)
+				if !confirmHuhDestructive(title, desc) {
 					fmt.Println("Aborted.")
 					return nil
 				}

@@ -3,6 +3,8 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -379,6 +381,38 @@ func TestOverlayPopupArgs(t *testing.T) {
 	}
 }
 
+func restoreOverlayTestDeps() func() {
+	prevExecCommand := overlayExecCommand
+	prevBinaryPath := overlayBinaryPath
+	prevIsInstalled := overlayIsInstalled
+	prevInTmux := overlayInTmux
+	prevSessionExists := overlaySessionExists
+	prevCurrentSession := overlayCurrentSession
+	prevOSExecutable := overlayOSExecutable
+	prevLaunchProbeDelay := overlayLaunchProbeDelay
+
+	return func() {
+		overlayExecCommand = prevExecCommand
+		overlayBinaryPath = prevBinaryPath
+		overlayIsInstalled = prevIsInstalled
+		overlayInTmux = prevInTmux
+		overlaySessionExists = prevSessionExists
+		overlayCurrentSession = prevCurrentSession
+		overlayOSExecutable = prevOSExecutable
+		overlayLaunchProbeDelay = prevLaunchProbeDelay
+	}
+}
+
+func decodeOverlayOutput(t *testing.T, out string) OverlayOutput {
+	t.Helper()
+
+	var resp OverlayOutput
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("unmarshal output: %v\nraw: %s", err, out)
+	}
+	return resp
+}
+
 func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -387,10 +421,10 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 		wantHint string
 	}{
 		{
-			name:     "missing session",
+			name:     "missing session outside tmux",
 			opts:     OverlayOptions{},
-			wantCode: ErrCodeInvalidFlag,
-			wantHint: "Pass --robot-overlay=<session>",
+			wantCode: ErrCodeInternalError,
+			wantHint: "Run --robot-overlay from inside tmux so tmux can draw the popup",
 		},
 		{
 			name:     "negative cursor",
@@ -402,6 +436,11 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			restore := restoreOverlayTestDeps()
+			defer restore()
+			overlayIsInstalled = func() bool { return true }
+			overlayInTmux = func() bool { return false }
+
 			out, err := captureStdout(t, func() error {
 				return PrintOverlay(tt.opts)
 			})
@@ -409,10 +448,7 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("PrintOverlay returned error: %v", err)
 			}
 
-			var resp OverlayOutput
-			if err := json.Unmarshal([]byte(out), &resp); err != nil {
-				t.Fatalf("unmarshal output: %v\nraw: %s", err, out)
-			}
+			resp := decodeOverlayOutput(t, out)
 			if resp.Success {
 				t.Fatalf("expected failure response, got success: %+v", resp)
 			}
@@ -423,6 +459,136 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 				t.Fatalf("hint = %q, want %q", resp.Hint, tt.wantHint)
 			}
 		})
+	}
+}
+
+func TestPrintOverlayDefaultsToCurrentSession(t *testing.T) {
+	restore := restoreOverlayTestDeps()
+	defer restore()
+
+	var gotName string
+	var gotArgs []string
+
+	overlayIsInstalled = func() bool { return true }
+	overlayInTmux = func() bool { return true }
+	overlayCurrentSession = func() string { return "proj-current" }
+	overlaySessionExists = func(session string) bool { return session == "proj-current" }
+	overlayBinaryPath = func() string { return "/usr/bin/tmux" }
+	overlayOSExecutable = func() (string, error) { return "/usr/local/bin/ntm", nil }
+	overlayExecCommand = func(name string, args ...string) *exec.Cmd {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return exec.Command("true")
+	}
+
+	out, err := captureStdout(t, func() error {
+		return PrintOverlay(OverlayOptions{Cursor: 7})
+	})
+	if err != nil {
+		t.Fatalf("PrintOverlay returned error: %v", err)
+	}
+
+	resp := decodeOverlayOutput(t, out)
+	if !resp.Success {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if resp.Session != "proj-current" {
+		t.Fatalf("session = %q, want %q", resp.Session, "proj-current")
+	}
+	if resp.Cursor != 7 {
+		t.Fatalf("cursor = %d, want 7", resp.Cursor)
+	}
+	if !resp.Launched || !resp.Dismissed {
+		t.Fatalf("expected launched+dismissed response, got %+v", resp)
+	}
+	if gotName != "/usr/bin/tmux" {
+		t.Fatalf("command name = %q, want /usr/bin/tmux", gotName)
+	}
+	wantArgs := overlayPopupArgs("/usr/local/bin/ntm", "proj-current", 7)
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("command args = %v, want %v", gotArgs, wantArgs)
+	}
+}
+
+func TestPrintOverlayNoWaitReturnsLaunchStatus(t *testing.T) {
+	restore := restoreOverlayTestDeps()
+	defer restore()
+
+	overlayIsInstalled = func() bool { return true }
+	overlayInTmux = func() bool { return true }
+	overlayCurrentSession = func() string { return "proj" }
+	overlaySessionExists = func(session string) bool { return session == "proj" }
+	overlayBinaryPath = func() string { return "/usr/bin/tmux" }
+	overlayOSExecutable = func() (string, error) { return "/usr/local/bin/ntm", nil }
+	overlayLaunchProbeDelay = 5 * time.Millisecond
+	overlayExecCommand = func(string, ...string) *exec.Cmd {
+		return exec.Command("sleep", "0.1")
+	}
+
+	out, err := captureStdout(t, func() error {
+		return PrintOverlay(OverlayOptions{Session: "proj", Cursor: 11, NoWait: true})
+	})
+	if err != nil {
+		t.Fatalf("PrintOverlay returned error: %v", err)
+	}
+
+	resp := decodeOverlayOutput(t, out)
+	if !resp.Success {
+		t.Fatalf("expected success response, got %+v", resp)
+	}
+	if !resp.Launched || resp.Dismissed {
+		t.Fatalf("expected launched without dismissed, got %+v", resp)
+	}
+	if !resp.NoWait {
+		t.Fatalf("no_wait = false, want true")
+	}
+	if resp.PID <= 0 {
+		t.Fatalf("pid = %d, want > 0", resp.PID)
+	}
+	if resp.Cursor != 11 {
+		t.Fatalf("cursor = %d, want 11", resp.Cursor)
+	}
+}
+
+func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
+	restore := restoreOverlayTestDeps()
+	defer restore()
+
+	prevProbeDelay := overlayLaunchProbeDelay
+	overlayLaunchProbeDelay = 20 * time.Millisecond
+	defer func() {
+		overlayLaunchProbeDelay = prevProbeDelay
+	}()
+
+	overlayIsInstalled = func() bool { return true }
+	overlayInTmux = func() bool { return true }
+	overlayCurrentSession = func() string { return "proj" }
+	overlaySessionExists = func(session string) bool { return session == "proj" }
+	overlayBinaryPath = func() string { return "/usr/bin/tmux" }
+	overlayOSExecutable = func() (string, error) { return "/usr/local/bin/ntm", nil }
+	overlayExecCommand = func(string, ...string) *exec.Cmd {
+		return exec.Command("false")
+	}
+
+	out, err := captureStdout(t, func() error {
+		return PrintOverlay(OverlayOptions{Session: "proj", Cursor: 19, NoWait: true})
+	})
+	if err != nil {
+		t.Fatalf("PrintOverlay returned error: %v", err)
+	}
+
+	resp := decodeOverlayOutput(t, out)
+	if resp.Success {
+		t.Fatalf("expected failure response, got %+v", resp)
+	}
+	if resp.ErrorCode != ErrCodeInternalError {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeInternalError)
+	}
+	if resp.Launched {
+		t.Fatalf("expected launched=false on immediate failure, got %+v", resp)
+	}
+	if resp.Cursor != 19 || !resp.NoWait {
+		t.Fatalf("response lost cursor/no-wait state: %+v", resp)
 	}
 }
 

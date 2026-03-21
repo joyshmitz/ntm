@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
@@ -193,10 +194,19 @@ func runRebalance(session string, dryRun, apply bool, filter string, threshold f
 
 	// If --apply, prompt for confirmation
 	if apply && len(transfers) > 0 && !dryRun {
-		fmt.Print("\nApply these changes? (y/n): ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) == "y" {
+		var confirmed bool
+		err := huh.NewConfirm().
+			Title(fmt.Sprintf("Apply %d transfers?", len(transfers))).
+			Description("This will reassign beads between agents.").
+			Affirmative("Yes, apply").
+			Negative("Cancel").
+			Value(&confirmed).
+			WithTheme(theme.HuhTheme()).
+			Run()
+		if err != nil {
+			return fmt.Errorf("confirmation dialog: %w", err)
+		}
+		if confirmed {
 			if err := applyTransfers(store, transfers); err != nil {
 				return fmt.Errorf("failed to apply transfers: %w", err)
 			}

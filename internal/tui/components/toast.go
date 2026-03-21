@@ -87,7 +87,7 @@ func (tm *ToastManager) Push(toast Toast) {
 		// Create spring: 60 FPS, frequency 6.0 Hz, damping 0.4 (slightly underdamped for bounce)
 		toast.spring = harmonica.NewSpring(harmonica.FPS(60), 6.0, 0.4)
 		toast.springY = harmonica.NewSpring(harmonica.FPS(60), 8.0, 0.5) // Faster Y spring for repositioning
-		toast.offsetX = 40.0 // Start 40 chars to the right (offscreen)
+		toast.offsetX = 40.0                                             // Start 40 chars to the right (offscreen)
 		toast.offsetXVel = 0.0
 		toast.offsetY = 0.0
 		toast.offsetYVel = 0.0

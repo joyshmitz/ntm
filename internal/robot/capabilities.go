@@ -473,6 +473,21 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-interrupt=proj --interrupt-msg='Stop and fix bug'"},
 		},
 		{
+			Name:        "overlay",
+			Flag:        "--robot-overlay",
+			Category:    "control",
+			Description: "Open the dashboard overlay for human handoff from an agent or operator loop. Runs inside tmux, can resolve the current session automatically, and can pre-focus the attention panel on a specific cursor.",
+			Parameters: []RobotParameter{
+				{Name: "overlay-session", Flag: "--overlay-session", Type: "string", Required: false, Description: "Session to open. Defaults to the current tmux session when omitted."},
+				{Name: "overlay-cursor", Flag: "--overlay-cursor", Type: "int", Required: false, Default: "0", Description: "Pre-focus the overlay attention panel on this cursor"},
+				{Name: "overlay-no-wait", Flag: "--overlay-no-wait", Type: "bool", Required: false, Description: "Return after launch instead of blocking until the popup is dismissed"},
+			},
+			Examples: []string{
+				"ntm --robot-overlay --overlay-session=myproject",
+				"ntm --robot-overlay --overlay-cursor=42 --overlay-no-wait",
+			},
+		},
+		{
 			Name:        "restart-pane",
 			Flag:        "--robot-restart-pane",
 			Category:    "control",

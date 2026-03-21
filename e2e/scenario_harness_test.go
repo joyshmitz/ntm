@@ -1,5 +1,5 @@
-//go:build e2e
-// +build e2e
+//go:build e2e && legacy_scenario_harness
+// +build e2e,legacy_scenario_harness
 
 package e2e
 
@@ -104,10 +104,10 @@ func TestArtifactManagerPrunesOldArtifacts(t *testing.T) {
 
 func TestArtifactManagerFinalizeRetention(t *testing.T) {
 	cases := []struct {
-		name     string
-		retain   ArtifactRetention
-		failed   bool
-		exists   bool
+		name   string
+		retain ArtifactRetention
+		failed bool
+		exists bool
 	}{
 		{name: "retain_on_failure_pass", retain: RetainOnFailure, failed: false, exists: false},
 		{name: "retain_on_failure_fail", retain: RetainOnFailure, failed: true, exists: true},

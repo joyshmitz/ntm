@@ -502,6 +502,7 @@ func TestPrintHelp(t *testing.T) {
 		"--robot-status",
 		"--robot-plan",
 		"--robot-send",
+		"--robot-overlay",
 		"latest_cursor",
 		"replay_window",
 		"--robot-version",

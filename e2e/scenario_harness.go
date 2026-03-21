@@ -1,5 +1,5 @@
-//go:build e2e
-// +build e2e
+//go:build e2e && legacy_scenario_harness
+// +build e2e,legacy_scenario_harness
 
 // Package e2e provides end-to-end test infrastructure for NTM.
 //
@@ -168,11 +168,11 @@ func NewArtifactManager(scenarioName string, config ArtifactConfig) (*ArtifactMa
 	}
 
 	if err := am.writeManifest(map[string]interface{}{
-		"scenario":    scenarioName,
-		"suite":       config.SuiteName,
-		"started_at":  am.startTime.Format(time.RFC3339Nano),
-		"status":      "running",
-		"retention":   am.config.Retention.String(),
+		"scenario":     scenarioName,
+		"suite":        config.SuiteName,
+		"started_at":   am.startTime.Format(time.RFC3339Nano),
+		"status":       "running",
+		"retention":    am.config.Retention.String(),
 		"artifact_dir": am.scenarioDir,
 	}); err != nil {
 		return nil, err
@@ -183,7 +183,7 @@ func NewArtifactManager(scenarioName string, config ArtifactConfig) (*ArtifactMa
 		Kind:      "lifecycle",
 		Summary:   "scenario started",
 		Fields: map[string]interface{}{
-			"suite":       config.SuiteName,
+			"suite":        config.SuiteName,
 			"artifact_dir": am.scenarioDir,
 		},
 	}); err != nil {
@@ -867,7 +867,7 @@ func (h *ScenarioHarness) CaptureTransport(label string, data []byte) error {
 		Kind:      "transport",
 		Summary:   label,
 		Fields: map[string]interface{}{
-			"path": filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path),
+			"path":  filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path),
 			"bytes": len(data),
 		},
 	}); err != nil {

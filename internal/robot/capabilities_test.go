@@ -185,6 +185,32 @@ func TestBuildCommandRegistry_IncludesAttentionContractCommands(t *testing.T) {
 	}
 }
 
+func TestBuildCommandRegistry_IncludesRobotOverlay(t *testing.T) {
+	t.Parallel()
+
+	commands := buildCommandRegistry()
+	for _, cmd := range commands {
+		if cmd.Flag != "--robot-overlay" {
+			continue
+		}
+		if cmd.Category != "control" {
+			t.Fatalf("overlay category = %q, want control", cmd.Category)
+		}
+		if len(cmd.Parameters) != 3 {
+			t.Fatalf("overlay parameter count = %d, want 3", len(cmd.Parameters))
+		}
+		if strings.TrimSpace(cmd.Description) == "" {
+			t.Fatal("overlay description should not be empty")
+		}
+		if len(cmd.Examples) == 0 {
+			t.Fatal("overlay examples should not be empty")
+		}
+		return
+	}
+
+	t.Fatal("missing --robot-overlay in command registry")
+}
+
 // =============================================================================
 // GetCapabilities tests
 // =============================================================================

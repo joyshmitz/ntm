@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
@@ -48,6 +49,10 @@ func ConfirmWithOptions(prompt string, opts ConfirmOptions) bool {
 
 // ConfirmWriter prompts using the given writer and reader.
 func ConfirmWriter(w io.Writer, r io.Reader, prompt string, opts ConfirmOptions) bool {
+	if ok, handled := confirmWithHuh(w, r, prompt, opts); handled {
+		return ok
+	}
+
 	useColor := false
 	if f, ok := w.(*os.File); ok {
 		useColor = term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == ""
@@ -108,6 +113,62 @@ func ConfirmWriter(w io.Writer, r io.Reader, prompt string, opts ConfirmOptions)
 	}
 
 	return answer == "y" || answer == "yes"
+}
+
+func confirmWithHuh(w io.Writer, r io.Reader, prompt string, opts ConfirmOptions) (confirmed bool, handled bool) {
+	stdout, ok := w.(*os.File)
+	if !ok || stdout != os.Stdout || !term.IsTerminal(int(stdout.Fd())) {
+		return false, false
+	}
+
+	stdin, ok := r.(*os.File)
+	if !ok || stdin != os.Stdin || !term.IsTerminal(int(stdin.Fd())) {
+		return false, false
+	}
+
+	confirmed = opts.Default
+	confirm := huh.NewConfirm().
+		Title(prompt).
+		Affirmative(confirmAffirmativeLabel(opts)).
+		Negative(confirmNegativeLabel(opts)).
+		Value(&confirmed)
+
+	form := huh.NewForm(huh.NewGroup(confirm)).WithTheme(confirmHuhTheme(opts))
+	if err := form.Run(); err != nil {
+		return false, false
+	}
+	return confirmed, true
+}
+
+func confirmAffirmativeLabel(opts ConfirmOptions) string {
+	switch opts.Style {
+	case StyleDestructive:
+		return "Yes, continue"
+	case StyleInfo:
+		return "Continue"
+	default:
+		return "Yes"
+	}
+}
+
+func confirmNegativeLabel(opts ConfirmOptions) string {
+	switch opts.Style {
+	case StyleDestructive:
+		return "Cancel"
+	case StyleInfo:
+		return "Abort"
+	default:
+		return "No"
+	}
+}
+
+func confirmHuhTheme(opts ConfirmOptions) *huh.Theme {
+	switch opts.Style {
+	case StyleDestructive:
+		return theme.HuhDestructiveTheme()
+	default:
+		return theme.HuhTheme()
+	}
 }
 
 // ConfirmDestructive is a convenience function for destructive operations.

@@ -1,6 +1,10 @@
 package theme
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 func withDetector(t *testing.T, detector func() bool) {
 	original := detectDarkBackground
@@ -98,6 +102,60 @@ func TestCurrentUnknownFallsBackToAuto(t *testing.T) {
 	// Unknown should fall through to autoTheme()
 	if got := Current(); got.Base != CatppuccinMocha.Base {
 		t.Fatalf("expected Mocha for unknown theme with dark background, got base %s", got.Base)
+	}
+}
+
+func TestHuhThemeFromProvidesStyledFields(t *testing.T) {
+	th := HuhThemeFrom(CatppuccinMocha)
+	if th == nil {
+		t.Fatal("HuhThemeFrom returned nil")
+	}
+	if _, ok := th.Focused.Title.GetForeground().(lipgloss.Color); !ok {
+		t.Fatal("focused title should have a concrete foreground color")
+	}
+	if _, ok := th.Focused.FocusedButton.GetBackground().(lipgloss.Color); !ok {
+		t.Fatal("focused button should have a concrete background color")
+	}
+}
+
+func TestHuhThemeFromSupportsAllCatppuccinVariants(t *testing.T) {
+	tests := []struct {
+		name string
+		t    Theme
+	}{
+		{name: "mocha", t: CatppuccinMocha},
+		{name: "macchiato", t: CatppuccinMacchiato},
+		{name: "latte", t: CatppuccinLatte},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			th := HuhThemeFrom(tt.t)
+			if th == nil {
+				t.Fatal("HuhThemeFrom returned nil")
+			}
+			fg, ok := th.Focused.Title.GetForeground().(lipgloss.Color)
+			if !ok {
+				t.Fatal("focused title foreground should be a lipgloss color")
+			}
+			if fg != tt.t.Text {
+				t.Fatalf("focused title foreground = %q, want %q", fg, tt.t.Text)
+			}
+		})
+	}
+}
+
+func TestHuhDestructiveThemeUsesErrorAccent(t *testing.T) {
+	th := HuhDestructiveThemeFrom(CatppuccinMacchiato)
+	if th == nil {
+		t.Fatal("HuhDestructiveThemeFrom returned nil")
+	}
+	bg, ok := th.Focused.FocusedButton.GetBackground().(lipgloss.Color)
+	if !ok {
+		t.Fatal("destructive focused button background should be a lipgloss color")
+	}
+	if bg != CatppuccinMacchiato.Error {
+		t.Fatalf("destructive focused button background = %q, want %q", bg, CatppuccinMacchiato.Error)
 	}
 }
 

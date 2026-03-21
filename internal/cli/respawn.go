@@ -143,8 +143,9 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 
 	// Confirmation
 	if !force {
-		msg := fmt.Sprintf("Restart %d pane(s) in session '%s'?", len(targetPanes), session)
-		if !confirm(msg) {
+		title := fmt.Sprintf("Restart %d pane(s)?", len(targetPanes))
+		desc := fmt.Sprintf("Agents in session '%s' will be restarted with fresh shells.", session)
+		if !confirmHuh(title, desc) {
 			fmt.Println("Aborted.")
 			return nil
 		}

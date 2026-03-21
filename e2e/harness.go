@@ -54,16 +54,16 @@ const (
 )
 
 type HarnessOptions struct {
-	Scenario     string
-	ArtifactRoot string
+	Scenario      string
+	ArtifactRoot  string
 	SessionPrefix string
-	RunToken     string
-	Debug        bool
-	Retain       ArtifactRetention
-	Clock        func() time.Time
-	FailureState func() bool
-	LookPath     func(string) (string, error)
-	Runner       RunnerFunc
+	RunToken      string
+	Debug         bool
+	Retain        ArtifactRetention
+	Clock         func() time.Time
+	FailureState  func() bool
+	LookPath      func(string) (string, error)
+	Runner        RunnerFunc
 }
 
 type TmuxSessionOptions struct {
@@ -138,21 +138,21 @@ type cleanupReport struct {
 }
 
 type HarnessManifest struct {
-	Scenario      string                     `json:"scenario"`
-	Session       string                     `json:"session"`
-	RunToken      string                     `json:"run_token"`
-	ArtifactRoot  string                     `json:"artifact_root"`
-	StartedAt     string                     `json:"started_at"`
-	CompletedAt   string                     `json:"completed_at"`
-	RetainPolicy  ArtifactRetention          `json:"retain_policy"`
-	Debug         bool                       `json:"debug"`
-	Failed        bool                       `json:"failed"`
-	Retained      bool                       `json:"retained"`
-	Directories   map[ArtifactKind]string    `json:"directories"`
-	TimelinePath  string                     `json:"timeline_path"`
-	Cleanup       []cleanupReport            `json:"cleanup"`
-	CommandCount  uint64                     `json:"command_count"`
-	ArtifactCount uint64                     `json:"artifact_count"`
+	Scenario      string                  `json:"scenario"`
+	Session       string                  `json:"session"`
+	RunToken      string                  `json:"run_token"`
+	ArtifactRoot  string                  `json:"artifact_root"`
+	StartedAt     string                  `json:"started_at"`
+	CompletedAt   string                  `json:"completed_at"`
+	RetainPolicy  ArtifactRetention       `json:"retain_policy"`
+	Debug         bool                    `json:"debug"`
+	Failed        bool                    `json:"failed"`
+	Retained      bool                    `json:"retained"`
+	Directories   map[ArtifactKind]string `json:"directories"`
+	TimelinePath  string                  `json:"timeline_path"`
+	Cleanup       []cleanupReport         `json:"cleanup"`
+	CommandCount  uint64                  `json:"command_count"`
+	ArtifactCount uint64                  `json:"artifact_count"`
 }
 
 type ScenarioHarness struct {
@@ -429,13 +429,13 @@ func (h *ScenarioHarness) RunCommand(spec CommandSpec) (CommandResult, error) {
 	result.MetadataPath = metadataPath
 
 	stepDetails := map[string]any{
-		"path":         result.Path,
-		"args":         result.Args,
-		"dir":          result.Dir,
-		"exit_code":    result.ExitCode,
-		"timed_out":    result.TimedOut,
-		"stdout_path":  stdoutPath,
-		"stderr_path":  stderrPath,
+		"path":          result.Path,
+		"args":          result.Args,
+		"dir":           result.Dir,
+		"exit_code":     result.ExitCode,
+		"timed_out":     result.TimedOut,
+		"stdout_path":   stdoutPath,
+		"stderr_path":   stderrPath,
 		"metadata_path": metadataPath,
 	}
 	if runErr != nil {

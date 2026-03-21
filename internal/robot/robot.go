@@ -1804,6 +1804,7 @@ Session Operations:
 --robot-tail=SESSION    Capture pane output (--lines=50, --panes=1,2)
 --robot-ensemble=SESSION Ensemble state (modes, status, synthesis readiness)
 --robot-interrupt=SESSION  Ctrl+C to agents (--interrupt-msg="new task")
+--robot-overlay         Open dashboard overlay for human handoff (--overlay-session=proj, --overlay-cursor=42)
 --robot-is-working=SESSION Check if agents are busy
 --robot-wait=SESSION    Wait for idle state (--timeout=5m, --condition=idle)
                         Conditions: idle, complete, generating, healthy
@@ -1917,6 +1918,7 @@ Common Workflows:
 -----------------
 - Single agent: ntm --robot-spawn=proj --spawn-cc=1 --spawn-wait
 - Send+wait:    ntm --robot-send=proj --msg="do X" --track
+- Handoff:      ntm --robot-overlay --overlay-session=proj --overlay-cursor=42
 - Bootstrap:    ntm --robot-snapshot   # use latest_cursor + replay_window for follow-up
 - Tending:      ntm --robot-attention --since-cursor=42  # wait-then-digest loop
 - Recover:      ntm --robot-snapshot   # resync after cursor expiration
@@ -1926,6 +1928,7 @@ Tips for AI Agents:
 - Start with --robot-snapshot for bootstrap, then --robot-attention for steady-state.
 - Use --robot-events for raw replay when you need full event history.
 - Use --robot-digest for a quick summary without waiting.
+- Use --robot-overlay to hand a specific cursor or session back to a human inside tmux.
 - Snapshot returns latest_cursor plus replay_window metadata for mechanical resync.
 - Prefer --robot-capabilities for schema discovery over parsing help text.
 - Profiles reduce filter boilerplate: --profile=operator is the default.

@@ -32,7 +32,9 @@ sudo apt install imagemagick
 ./scripts/visual-regression.sh
 ```
 
-The script automatically gives each VHS run its own writable temp directory so Chrome state does not collide with other local browser sessions.
+The script automatically builds `./ntm` before running the tapes and gives each
+VHS run its own writable temp directory so Chrome state does not collide with
+other local browser sessions.
 
 ### Run a specific test:
 ```bash
@@ -56,6 +58,24 @@ go test -v -run Visual ./tests/e2e/...
 - **dashboard-navigation.tape** - Keyboard navigation between panels
 - **dashboard-refresh.tape** - Ticker updates and manual refresh
 - **dashboard-minimum.tape** - Rendering at minimum terminal sizes
+- **dashboard-toast-animation.tape** - Toast lifecycle and animation coverage
+- **dashboard-fuzzy-filter.tape** - Pane list filtering coverage
+- **dashboard-table-scroll.tape** - Keyboard table scrolling coverage
+- **dashboard-focus-ring.tape** - Focus-ring traversal across visible panels
+- **palette-fuzzy.tape** - Palette fuzzy filtering and selection coverage
+- **dashboard-wide-layout.tape** - Ultrawide layout rendering coverage
+
+## Input Limits
+
+VHS only supports keyboard-driven automation. Mouse clicks, hover, and scroll wheel
+behavior must be covered by unit tests or manual verification instead of tapes.
+
+## Tape Conventions
+
+1. Use `Output testdata/screenshots/<tape-name>.png` for the primary artifact.
+2. Add `Require "./ntm"` so missing binaries fail fast.
+3. Prefer self-contained tmux setup/cleanup inside the tape rather than relying on
+   the removed `--demo` mode.
 
 ## Directory Structure
 

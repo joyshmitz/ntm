@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/health"
@@ -19,6 +20,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 func newSwarmCmd() *cobra.Command {
@@ -650,6 +652,7 @@ func newSwarmStopCmd() *cobra.Command {
 		timeout         time.Duration
 		sessionPatterns []string
 		jsonOutput      bool
+		skipConfirm     bool
 	)
 
 	cmd := &cobra.Command{
@@ -703,6 +706,26 @@ Examples:
 				output.PrintInfof("  - %s", sess)
 			}
 
+			// Confirm before destructive action (unless --yes or --force)
+			if !skipConfirm && !force {
+				var confirmed bool
+				err := huh.NewConfirm().
+					Title(fmt.Sprintf("Stop %d swarm session(s)?", len(sessions))).
+					Description("This will terminate all agents in the selected sessions.").
+					Affirmative("Yes, stop all").
+					Negative("Cancel").
+					Value(&confirmed).
+					WithTheme(theme.HuhDestructiveTheme()).
+					Run()
+				if err != nil {
+					return fmt.Errorf("confirmation dialog: %w", err)
+				}
+				if !confirmed {
+					output.PrintInfo("Operation cancelled")
+					return nil
+				}
+			}
+
 			// Configure shutdown
 			cfg := swarm.DefaultShutdownConfig()
 			cfg.ForceKill = force
@@ -745,6 +768,7 @@ Examples:
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Second, "Timeout for graceful exit")
 	cmd.Flags().StringSliceVar(&sessionPatterns, "sessions", nil, "Session name patterns to stop")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output results as JSON")
+	cmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompt")
 
 	return cmd
 }
