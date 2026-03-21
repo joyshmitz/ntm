@@ -30,10 +30,18 @@ type Toast struct {
 	CreatedAt time.Time     // When the toast was created
 	Duration  time.Duration // How long to display (0 = default 4s)
 
+	// Enhanced toast options
+	Persistent bool    // If true, don't auto-dismiss (requires explicit Dismiss)
+	Progress   float64 // Progress value 0.0-1.0 (only used if > 0)
+
 	// Spring animation fields (internal)
 	offsetX    float64          // Current horizontal offset (pixels from final position)
 	offsetXVel float64          // Current velocity for spring physics
-	spring     harmonica.Spring // Spring physics engine
+	offsetY    float64          // Current vertical offset for stack repositioning
+	offsetYVel float64          // Velocity for Y spring
+	targetY    float64          // Target Y position in stack
+	spring     harmonica.Spring // Spring physics engine for X
+	springY    harmonica.Spring // Spring physics engine for Y
 	dismissed  bool             // Whether toast is animating out
 }
 
@@ -43,10 +51,14 @@ const DefaultToastDuration = 4 * time.Second
 // MaxToasts is the maximum number of toasts displayed simultaneously.
 const MaxToasts = 4
 
+// MaxToastHistory is the maximum number of dismissed toasts to remember.
+const MaxToastHistory = 20
+
 // ToastManager tracks active toasts with automatic expiry.
 type ToastManager struct {
-	toasts []Toast
-	seen   map[string]time.Time // Dedup: ID -> last seen time
+	toasts  []Toast
+	history []Toast              // Ring buffer of dismissed toasts
+	seen    map[string]time.Time // Dedup: ID -> last seen time
 }
 
 // NewToastManager creates a new toast manager.
@@ -69,11 +81,16 @@ func (tm *ToastManager) Push(toast Toast) {
 	if styles.ReducedMotionEnabled() {
 		toast.offsetX = 0.0
 		toast.offsetXVel = 0.0
+		toast.offsetY = 0.0
+		toast.offsetYVel = 0.0
 	} else {
 		// Create spring: 60 FPS, frequency 6.0 Hz, damping 0.4 (slightly underdamped for bounce)
 		toast.spring = harmonica.NewSpring(harmonica.FPS(60), 6.0, 0.4)
+		toast.springY = harmonica.NewSpring(harmonica.FPS(60), 8.0, 0.5) // Faster Y spring for repositioning
 		toast.offsetX = 40.0 // Start 40 chars to the right (offscreen)
 		toast.offsetXVel = 0.0
+		toast.offsetY = 0.0
+		toast.offsetYVel = 0.0
 	}
 
 	// Dedup check
@@ -103,12 +120,14 @@ func (tm *ToastManager) Tick() {
 	if !reducedMotion {
 		for i := range tm.toasts {
 			t := &tm.toasts[i]
-			// Calculate target position: 0 for active, 60 for dismissed (slide out right)
-			target := 0.0
+			// Calculate target X position: 0 for active, 60 for dismissed (slide out right)
+			targetX := 0.0
 			if t.dismissed {
-				target = 60.0
+				targetX = 60.0
 			}
-			t.offsetX, t.offsetXVel = t.spring.Update(t.offsetX, t.offsetXVel, target)
+			t.offsetX, t.offsetXVel = t.spring.Update(t.offsetX, t.offsetXVel, targetX)
+			// Update Y position for stack repositioning
+			t.offsetY, t.offsetYVel = t.springY.Update(t.offsetY, t.offsetYVel, t.targetY)
 		}
 	}
 
@@ -119,11 +138,13 @@ func (tm *ToastManager) Tick() {
 		if dur == 0 {
 			dur = DefaultToastDuration
 		}
-		expired := now.Sub(t.CreatedAt) >= dur
+		// Persistent toasts never expire
+		expired := !t.Persistent && now.Sub(t.CreatedAt) >= dur
 
 		if expired && !t.dismissed {
-			// Start dismiss animation
+			// Start dismiss animation and add to history
 			t.dismissed = true
+			tm.addToHistory(t)
 		}
 
 		// Reduced motion suppresses slide animations, so dismissed toasts should
@@ -175,10 +196,131 @@ func (tm *ToastManager) Dismiss(id string) bool {
 	for i := range tm.toasts {
 		if tm.toasts[i].ID == id && !tm.toasts[i].dismissed {
 			tm.toasts[i].dismissed = true
+			tm.addToHistory(tm.toasts[i])
+			tm.updateStackTargets()
 			return true
 		}
 	}
 	return false
+}
+
+// addToHistory adds a dismissed toast to the history ring buffer.
+func (tm *ToastManager) addToHistory(t Toast) {
+	tm.history = append(tm.history, t)
+	if len(tm.history) > MaxToastHistory {
+		tm.history = tm.history[len(tm.history)-MaxToastHistory:]
+	}
+}
+
+// updateStackTargets recalculates Y target positions for remaining toasts.
+func (tm *ToastManager) updateStackTargets() {
+	// Each toast is ~3 lines tall; dismissed toasts leave gaps that animate closed
+	for i := range tm.toasts {
+		if !tm.toasts[i].dismissed {
+			tm.toasts[i].targetY = 0 // All active toasts target Y=0 in their slot
+		}
+	}
+}
+
+// History returns the dismissed toast history (most recent last).
+func (tm *ToastManager) History() []Toast {
+	return tm.history
+}
+
+// HistoryCount returns the number of toasts in history.
+func (tm *ToastManager) HistoryCount() int {
+	return len(tm.history)
+}
+
+// ClearHistory removes all toasts from history.
+func (tm *ToastManager) ClearHistory() {
+	tm.history = nil
+}
+
+// PushPersistent adds a toast that won't auto-dismiss.
+func (tm *ToastManager) PushPersistent(id, message string, level ToastLevel) {
+	tm.Push(Toast{
+		ID:         id,
+		Message:    message,
+		Level:      level,
+		Persistent: true,
+	})
+}
+
+// PushProgress adds a progress toast (0.0-1.0 progress bar).
+func (tm *ToastManager) PushProgress(id, message string, progress float64) {
+	tm.Push(Toast{
+		ID:         id,
+		Message:    message,
+		Level:      ToastInfo,
+		Progress:   progress,
+		Persistent: true, // Progress toasts don't auto-dismiss
+	})
+}
+
+// UpdateProgress updates the progress of an existing progress toast.
+// Returns false if the toast doesn't exist.
+func (tm *ToastManager) UpdateProgress(id string, progress float64) bool {
+	for i := range tm.toasts {
+		if tm.toasts[i].ID == id {
+			tm.toasts[i].Progress = progress
+			// Auto-dismiss when progress reaches 1.0
+			if progress >= 1.0 {
+				tm.toasts[i].Persistent = false
+				tm.toasts[i].Duration = 1 * time.Second
+				tm.toasts[i].CreatedAt = time.Now()
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// ToastAtPosition returns the toast ID at the given Y offset within the toast stack.
+// Returns empty string if no toast at that position. This is used for click-to-dismiss.
+// The yOffset is relative to the top of the toast stack (not absolute screen position).
+func (tm *ToastManager) ToastAtPosition(yOffset int) string {
+	if len(tm.toasts) == 0 || yOffset < 0 {
+		return ""
+	}
+
+	// Each toast occupies ~3 lines (1 content + 2 border/padding), or 4 with progress bar
+	currentY := 0
+	for _, t := range tm.toasts {
+		toastHeight := 3
+		if t.Progress > 0 {
+			toastHeight = 4 // Extra line for progress bar
+		}
+		if yOffset >= currentY && yOffset < currentY+toastHeight {
+			return t.ID
+		}
+		currentY += toastHeight
+	}
+	return ""
+}
+
+// DismissAll dismisses all active toasts (used for clearing the stack).
+func (tm *ToastManager) DismissAll() {
+	for i := range tm.toasts {
+		if !tm.toasts[i].dismissed {
+			tm.toasts[i].dismissed = true
+			tm.addToHistory(tm.toasts[i])
+		}
+	}
+	tm.updateStackTargets()
+}
+
+// ToastStackHeight returns the total rendered height of the toast stack.
+func (tm *ToastManager) ToastStackHeight() int {
+	height := 0
+	for _, t := range tm.toasts {
+		if t.Progress > 0 {
+			height += 4 // Content + progress bar + borders
+		} else {
+			height += 3 // Content + borders
+		}
+	}
+	return height
 }
 
 // RenderToasts renders all active toasts as a vertical stack for overlay.
@@ -271,6 +413,22 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 			Render(msg)
 
 		content := iconStyled + " " + msgStyled
+
+		// Add progress bar for progress toasts
+		if toast.Progress > 0 {
+			barWidth := toastWidth - 8 // Account for padding and borders
+			if barWidth < 10 {
+				barWidth = 10
+			}
+			filled := int(float64(barWidth) * toast.Progress)
+			if filled > barWidth {
+				filled = barWidth
+			}
+			empty := barWidth - filled
+			progressBar := lipgloss.NewStyle().Foreground(fgColor).Render(strings.Repeat("█", filled)) +
+				lipgloss.NewStyle().Foreground(t.Surface1).Render(strings.Repeat("░", empty))
+			content = content + "\n" + progressBar
+		}
 
 		toastBox := lipgloss.NewStyle().
 			Background(bgColor).
