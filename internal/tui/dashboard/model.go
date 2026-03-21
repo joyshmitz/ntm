@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -26,7 +25,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
-	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	synthtui "github.com/Dicklesworthstone/ntm/internal/tui/synthesizer"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
