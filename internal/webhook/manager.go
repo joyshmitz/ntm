@@ -411,6 +411,10 @@ func (m *WebhookManager) Stop() error {
 	m.log("stopping webhook manager...")
 	m.cancel()
 
+	// Close the queue channel to unblock workers.
+	// Safe after cancel() since no new sends will occur.
+	close(m.queue)
+
 	// Signal retry processor to wake up and exit
 	m.retryCond.Broadcast()
 
