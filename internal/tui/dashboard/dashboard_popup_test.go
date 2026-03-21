@@ -4,9 +4,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
 )
@@ -259,6 +262,234 @@ func TestPopupHelpHintsPreferEscClose(t *testing.T) {
 	}
 
 	t.Logf("popup help hints: %+v", hints)
+}
+
+func TestOverlayZoomHintIncludesCursorWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	hint := overlayZoomHint(42135)
+	if !strings.Contains(hint, "cursor:42135") {
+		t.Fatalf("expected cursor in zoom hint, got %q", hint)
+	}
+}
+
+func TestOverlayZoomHintOmitsCursorWhenUnavailable(t *testing.T) {
+	t.Parallel()
+
+	hint := overlayZoomHint(0)
+	if strings.Contains(hint, "cursor:") {
+		t.Fatalf("did not expect cursor in zoom hint, got %q", hint)
+	}
+}
+
+func TestActivatePopupModeSetsOverlayOpenedAt(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(120)
+	if m.popupMode {
+		t.Fatal("test model should start outside popup mode")
+	}
+	if !m.overlayOpenedAt.IsZero() {
+		t.Fatalf("expected zero overlayOpenedAt before activation, got %v", m.overlayOpenedAt)
+	}
+
+	fixedNow := time.Date(2026, 3, 21, 3, 30, 0, 0, time.UTC)
+	m.activatePopupMode(fixedNow)
+
+	if !m.popupMode {
+		t.Fatal("activatePopupMode should enable popup mode")
+	}
+	if !m.overlayOpenedAt.Equal(fixedNow) {
+		t.Fatalf("overlayOpenedAt = %v, want %v", m.overlayOpenedAt, fixedNow)
+	}
+}
+
+func TestPopupZoomPublishesHumanZoomAndDisplaysCursorHint(t *testing.T) {
+	oldFeed := robot.GetAttentionFeed()
+	oldZoomPane := dashboardZoomPane
+	oldDisplayMessage := dashboardDisplayMessage
+	oldPublishEvent := dashboardPublishBusEvent
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		dashboardZoomPane = oldZoomPane
+		dashboardDisplayMessage = oldDisplayMessage
+		dashboardPublishBusEvent = oldPublishEvent
+	})
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{JournalSize: 16, RetentionPeriod: time.Hour})
+	feed.Append(robot.AttentionEvent{Summary: "seed"})
+	feed.Append(robot.AttentionEvent{Summary: "seed-2"})
+	robot.SetAttentionFeed(feed)
+
+	var zoomSession string
+	var zoomPane int
+	dashboardZoomPane = func(session string, paneIndex int) error {
+		zoomSession = session
+		zoomPane = paneIndex
+		return nil
+	}
+
+	var displayed string
+	var displayDuration int
+	dashboardDisplayMessage = func(session, msg string, durationMs int) error {
+		if session != "test" {
+			t.Fatalf("display session = %q, want test", session)
+		}
+		displayed = msg
+		displayDuration = durationMs
+		return nil
+	}
+
+	var published ntmevents.BusEvent
+	dashboardPublishBusEvent = func(event ntmevents.BusEvent) {
+		published = event
+	}
+
+	m := newTestModel(120)
+	m.popupMode = true
+	m.overlayOpenedAt = time.Now().Add(-2 * time.Second)
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	updated := updatedModel.(Model)
+
+	if zoomSession != "test" || zoomPane != 1 {
+		t.Fatalf("zoom called with session=%q pane=%d, want test/1", zoomSession, zoomPane)
+	}
+	if !updated.quitting {
+		t.Fatal("popup zoom should quit the overlay")
+	}
+	if updated.postQuitAction != nil {
+		t.Fatalf("popup zoom should not leave a postQuitAction behind: %+v", updated.postQuitAction)
+	}
+	if cmd == nil {
+		t.Fatal("popup zoom should return a quit command")
+	}
+	if displayDuration != 4000 {
+		t.Fatalf("display duration = %d, want 4000", displayDuration)
+	}
+	if !strings.Contains(displayed, "cursor:2") {
+		t.Fatalf("expected zoom hint to include current cursor, got %q", displayed)
+	}
+
+	zoomEvent, ok := published.(ntmevents.WebhookEvent)
+	if !ok {
+		t.Fatalf("expected WebhookEvent, got %T", published)
+	}
+	if zoomEvent.EventType() != ntmevents.EventHumanZoom {
+		t.Fatalf("event type = %q, want %q", zoomEvent.EventType(), ntmevents.EventHumanZoom)
+	}
+	if zoomEvent.Pane != "1" {
+		t.Fatalf("pane = %q, want 1", zoomEvent.Pane)
+	}
+	if zoomEvent.Agent == "" {
+		t.Fatal("expected agent type in human zoom event")
+	}
+	if got := zoomEvent.Details["cursor"]; got != "2" {
+		t.Fatalf("cursor detail = %q, want 2", got)
+	}
+
+	normalized, ok := robot.NewBusAttentionEvent(zoomEvent)
+	if !ok {
+		t.Fatal("human zoom webhook should normalize into the attention feed")
+	}
+	if normalized.Actionability != robot.ActionabilityBackground {
+		t.Fatalf("attention actionability = %q, want %q", normalized.Actionability, robot.ActionabilityBackground)
+	}
+	if !strings.Contains(strings.ToLower(normalized.Summary), "human zoom") {
+		t.Fatalf("attention summary = %q, want human zoom context", normalized.Summary)
+	}
+	details, ok := normalized.Details["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized details payload = %T, want map[string]any", normalized.Details["details"])
+	}
+	if details["cursor"] != "2" {
+		t.Fatalf("attention cursor detail = %v, want %q", details["cursor"], "2")
+	}
+	replayed, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay(0, 10) error: %v", err)
+	}
+	if len(replayed) != 2 {
+		t.Fatalf("expected stubbed publish path to leave attention feed unchanged, got %d events", len(replayed))
+	}
+}
+
+func TestPopupEscapePublishesOverlayDismissDuration(t *testing.T) {
+	oldFeed := robot.GetAttentionFeed()
+	oldNow := dashboardNow
+	oldPublishEvent := dashboardPublishBusEvent
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		dashboardNow = oldNow
+		dashboardPublishBusEvent = oldPublishEvent
+	})
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{JournalSize: 16, RetentionPeriod: time.Hour})
+	feed.Append(robot.AttentionEvent{Summary: "seed"})
+	feed.Append(robot.AttentionEvent{Summary: "seed-2"})
+	feed.Append(robot.AttentionEvent{Summary: "seed-3"})
+	robot.SetAttentionFeed(feed)
+
+	fixedNow := time.Date(2026, 3, 21, 3, 15, 0, 0, time.UTC)
+	dashboardNow = func() time.Time { return fixedNow }
+
+	var published ntmevents.BusEvent
+	dashboardPublishBusEvent = func(event ntmevents.BusEvent) {
+		published = event
+	}
+
+	m := newTestModel(120)
+	m.popupMode = true
+	m.overlayOpenedAt = fixedNow.Add(-3 * time.Second)
+
+	updatedModel, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := updatedModel.(Model)
+
+	if !updated.quitting {
+		t.Fatal("popup escape should quit the overlay")
+	}
+	if cmd == nil {
+		t.Fatal("popup escape should return a quit command")
+	}
+
+	dismissEvent, ok := published.(ntmevents.WebhookEvent)
+	if !ok {
+		t.Fatalf("expected WebhookEvent, got %T", published)
+	}
+	if dismissEvent.EventType() != ntmevents.EventHumanOverlayDismiss {
+		t.Fatalf("event type = %q, want %q", dismissEvent.EventType(), ntmevents.EventHumanOverlayDismiss)
+	}
+	if got := dismissEvent.Details["cursor"]; got != "3" {
+		t.Fatalf("cursor detail = %q, want 3", got)
+	}
+	if dismissEvent.Details["duration_seconds"] != "3.000" {
+		t.Fatalf("duration_seconds detail = %q, want 3.000", dismissEvent.Details["duration_seconds"])
+	}
+
+	normalized, ok := robot.NewBusAttentionEvent(dismissEvent)
+	if !ok {
+		t.Fatal("human overlay dismiss webhook should normalize into the attention feed")
+	}
+	if normalized.Actionability != robot.ActionabilityBackground {
+		t.Fatalf("attention actionability = %q, want %q", normalized.Actionability, robot.ActionabilityBackground)
+	}
+	if !strings.Contains(strings.ToLower(normalized.Summary), "human overlay dismiss") {
+		t.Fatalf("attention summary = %q, want overlay dismiss context", normalized.Summary)
+	}
+	details, ok := normalized.Details["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized details payload = %T, want map[string]any", normalized.Details["details"])
+	}
+	if details["duration_seconds"] != "3.000" {
+		t.Fatalf("attention duration detail = %v, want %q", details["duration_seconds"], "3.000")
+	}
+	replayed, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay(0, 10) error: %v", err)
+	}
+	if len(replayed) != 3 {
+		t.Fatalf("expected stubbed publish path to leave attention feed unchanged, got %d events", len(replayed))
+	}
 }
 
 // TestPopupModeKeyBehavior documents and verifies popup mode key behavior.
@@ -554,5 +785,139 @@ func TestPostQuitActionSemantics(t *testing.T) {
 				t.Errorf("reattach decision = %v, want %v", shouldReattach, tc.shouldReattach)
 			}
 		})
+	}
+}
+
+func TestPublishHumanZoomEventUsesWebhookEventAndBackgroundAttention(t *testing.T) {
+	oldFeed := robot.GetAttentionFeed()
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       8,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		feed.Stop()
+		robot.SetAttentionFeed(oldFeed)
+	})
+
+	m := newTestModel(120)
+	ch := make(chan ntmevents.BusEvent, 1)
+	unsub := ntmevents.Subscribe(ntmevents.EventHumanZoom, func(e ntmevents.BusEvent) {
+		select {
+		case ch <- e:
+		default:
+		}
+	})
+	t.Cleanup(unsub)
+
+	m.publishHumanZoomEvent(m.panes[0], 42)
+
+	var event ntmevents.BusEvent
+	select {
+	case event = <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for human zoom event")
+	}
+
+	webhook, ok := event.(ntmevents.WebhookEvent)
+	if !ok {
+		t.Fatalf("event type = %T, want WebhookEvent", event)
+	}
+	if webhook.EventType() != ntmevents.EventHumanZoom {
+		t.Fatalf("webhook type = %q, want %q", webhook.EventType(), ntmevents.EventHumanZoom)
+	}
+	if webhook.Pane != "1" {
+		t.Fatalf("webhook pane = %q, want %q", webhook.Pane, "1")
+	}
+	if webhook.Agent != string(m.panes[0].Type) {
+		t.Fatalf("webhook agent = %q, want %q", webhook.Agent, string(m.panes[0].Type))
+	}
+	if webhook.Details["cursor"] != "42" {
+		t.Fatalf("webhook cursor detail = %q, want %q", webhook.Details["cursor"], "42")
+	}
+
+	normalized, ok := robot.NewBusAttentionEvent(webhook)
+	if !ok {
+		t.Fatal("human zoom webhook should normalize into the attention feed")
+	}
+	if normalized.Actionability != robot.ActionabilityBackground {
+		t.Fatalf("normalized actionability = %q, want %q", normalized.Actionability, robot.ActionabilityBackground)
+	}
+	details, ok := normalized.Details["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized details payload = %T, want map[string]any", normalized.Details["details"])
+	}
+	if details["cursor"] != "42" {
+		t.Fatalf("normalized cursor detail = %v, want %q", details["cursor"], "42")
+	}
+}
+
+func TestPublishHumanOverlayDismissIncludesDurationAndBackgroundAttention(t *testing.T) {
+	oldFeed := robot.GetAttentionFeed()
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       8,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	feed.Append(robot.AttentionEvent{Summary: "seed"})
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		feed.Stop()
+		robot.SetAttentionFeed(oldFeed)
+	})
+
+	m := newTestModel(120)
+	openedAt := time.Date(2026, time.March, 20, 12, 0, 0, 0, time.UTC)
+	m.activatePopupMode(openedAt)
+
+	ch := make(chan ntmevents.BusEvent, 1)
+	unsub := ntmevents.Subscribe(ntmevents.EventHumanOverlayDismiss, func(e ntmevents.BusEvent) {
+		select {
+		case ch <- e:
+		default:
+		}
+	})
+	t.Cleanup(unsub)
+
+	m.publishHumanOverlayDismiss(openedAt.Add(5 * time.Second))
+
+	var event ntmevents.BusEvent
+	select {
+	case event = <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for human overlay dismiss event")
+	}
+
+	webhook, ok := event.(ntmevents.WebhookEvent)
+	if !ok {
+		t.Fatalf("event type = %T, want WebhookEvent", event)
+	}
+	if webhook.EventType() != ntmevents.EventHumanOverlayDismiss {
+		t.Fatalf("webhook type = %q, want %q", webhook.EventType(), ntmevents.EventHumanOverlayDismiss)
+	}
+	if webhook.Details["duration_seconds"] != "5.000" {
+		t.Fatalf("duration_seconds = %q, want %q", webhook.Details["duration_seconds"], "5.000")
+	}
+	if webhook.Details["cursor"] != "1" {
+		t.Fatalf("cursor detail = %q, want %q", webhook.Details["cursor"], "1")
+	}
+	if webhook.Details["overlay_opened_at"] != openedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("overlay_opened_at = %q, want %q", webhook.Details["overlay_opened_at"], openedAt.Format(time.RFC3339Nano))
+	}
+
+	normalized, ok := robot.NewBusAttentionEvent(webhook)
+	if !ok {
+		t.Fatal("human overlay dismiss webhook should normalize into the attention feed")
+	}
+	if normalized.Actionability != robot.ActionabilityBackground {
+		t.Fatalf("normalized actionability = %q, want %q", normalized.Actionability, robot.ActionabilityBackground)
+	}
+	details, ok := normalized.Details["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized details payload = %T, want map[string]any", normalized.Details["details"])
+	}
+	if details["duration_seconds"] != "5.000" {
+		t.Fatalf("normalized duration detail = %v, want %q", details["duration_seconds"], "5.000")
 	}
 }

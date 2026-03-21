@@ -58,6 +58,13 @@ func NewEventBus(historySize int) *EventBus {
 // DefaultBus is the global default event bus
 var DefaultBus = NewEventBus(100)
 
+const (
+	// EventHumanZoom is emitted when a human zooms into a pane from the overlay.
+	EventHumanZoom = "human.zoom"
+	// EventHumanOverlayDismiss is emitted when a human dismisses the overlay.
+	EventHumanOverlayDismiss = "human.overlay_dismiss"
+)
+
 // Subscribe registers a handler for a specific event type
 // Returns an unsubscribe function
 func (b *EventBus) Subscribe(eventType string, handler EventHandler) UnsubscribeFunc {
@@ -191,13 +198,14 @@ func (b *EventBus) History(limit int) []BusEvent {
 // EnableRobotMode enables JSON streaming of all events to a writer.
 // Note: The handler uses a mutex to serialize Encode calls since
 // json.Encoder is not safe for concurrent use by multiple goroutines.
+// Encode errors are silently ignored (best-effort delivery to closed writers).
 func (b *EventBus) EnableRobotMode(w io.Writer) UnsubscribeFunc {
 	enc := json.NewEncoder(w)
 	var mu sync.Mutex
 	return b.SubscribeAll(func(e BusEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		enc.Encode(e)
+		_ = enc.Encode(e) // Best-effort: ignore errors on closed/broken writers
 	})
 }
 
@@ -227,6 +235,51 @@ func (e BaseEvent) EventTimestamp() time.Time { return e.Timestamp }
 
 // EventSession returns the session name
 func (e BaseEvent) EventSession() string { return e.Session }
+
+// HumanZoomEvent is emitted when a human zooms into a pane from the overlay.
+type HumanZoomEvent struct {
+	BaseEvent
+	PaneIndex int    `json:"pane_index"`
+	AgentType string `json:"agent_type,omitempty"`
+	Cursor    int64  `json:"cursor,omitempty"`
+}
+
+// NewHumanZoomEvent creates a new human zoom event.
+func NewHumanZoomEvent(session string, paneIndex int, agentType string, cursor int64) HumanZoomEvent {
+	return HumanZoomEvent{
+		BaseEvent: BaseEvent{
+			Type:      EventHumanZoom,
+			Timestamp: time.Now().UTC(),
+			Session:   session,
+		},
+		PaneIndex: paneIndex,
+		AgentType: agentType,
+		Cursor:    cursor,
+	}
+}
+
+// HumanOverlayDismissEvent is emitted when a human dismisses the overlay.
+type HumanOverlayDismissEvent struct {
+	BaseEvent
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	Cursor          int64   `json:"cursor,omitempty"`
+}
+
+// NewHumanOverlayDismissEvent creates a new human overlay dismiss event.
+func NewHumanOverlayDismissEvent(session string, durationSeconds float64, cursor int64) HumanOverlayDismissEvent {
+	if durationSeconds < 0 {
+		durationSeconds = 0
+	}
+	return HumanOverlayDismissEvent{
+		BaseEvent: BaseEvent{
+			Type:      EventHumanOverlayDismiss,
+			Timestamp: time.Now().UTC(),
+			Session:   session,
+		},
+		DurationSeconds: durationSeconds,
+		Cursor:          cursor,
+	}
+}
 
 // ----------------------------------------------------------------
 // Profile Events

@@ -384,6 +384,42 @@ func TestAlertEvent(t *testing.T) {
 	}
 }
 
+func TestHumanOverlayEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("HumanZoomEvent", func(t *testing.T) {
+		event := NewHumanZoomEvent("session1", 3, "codex", 42)
+		if event.EventType() != EventHumanZoom {
+			t.Fatalf("expected type %q, got %q", EventHumanZoom, event.EventType())
+		}
+		if event.EventSession() != "session1" {
+			t.Fatalf("expected session session1, got %q", event.EventSession())
+		}
+		if event.PaneIndex != 3 {
+			t.Fatalf("expected pane index 3, got %d", event.PaneIndex)
+		}
+		if event.AgentType != "codex" {
+			t.Fatalf("expected agent type codex, got %q", event.AgentType)
+		}
+		if event.Cursor != 42 {
+			t.Fatalf("expected cursor 42, got %d", event.Cursor)
+		}
+	})
+
+	t.Run("HumanOverlayDismissEvent", func(t *testing.T) {
+		event := NewHumanOverlayDismissEvent("session1", -1, 99)
+		if event.EventType() != EventHumanOverlayDismiss {
+			t.Fatalf("expected type %q, got %q", EventHumanOverlayDismiss, event.EventType())
+		}
+		if event.DurationSeconds != 0 {
+			t.Fatalf("expected negative durations to clamp to 0, got %.3f", event.DurationSeconds)
+		}
+		if event.Cursor != 99 {
+			t.Fatalf("expected cursor 99, got %d", event.Cursor)
+		}
+	})
+}
+
 func TestGlobalFunctions(t *testing.T) {
 	t.Parallel()
 

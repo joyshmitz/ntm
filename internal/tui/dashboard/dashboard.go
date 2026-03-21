@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -30,6 +31,7 @@ import (
 	ctxmon "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/cost"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
+	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
@@ -51,6 +53,13 @@ import (
 	synthtui "github.com/Dicklesworthstone/ntm/internal/tui/synthesizer"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
+)
+
+var (
+	dashboardNow             = func() time.Time { return time.Now().UTC() }
+	dashboardZoomPane        = tmux.ZoomPane
+	dashboardDisplayMessage  = tmux.DisplayMessage
+	dashboardPublishBusEvent = ntmevents.PublishSync
 )
 
 // DashboardTickMsg is sent for animation updates
@@ -339,7 +348,10 @@ type Model struct {
 	height       int
 	animTick     int
 	cursor       int
+	paneList     list.Model
+	paneDelegate paneDelegate
 	focusedPanel PanelID
+	focusRing    FocusRing
 	quitting     bool
 	err          error
 
@@ -606,12 +618,113 @@ type Model struct {
 
 	// Popup/overlay mode: dashboard is running inside a tmux display-popup.
 	// Escape closes the popup; zoom doesn't re-attach (we're already in-session).
-	popupMode bool
+	popupMode       bool
+	overlayOpenedAt time.Time
 }
 
 // PostQuitAction describes what the caller should do after the dashboard TUI exits.
 type PostQuitAction struct {
 	AttachSession string // Non-empty: attach/switch to this tmux session.
+}
+
+func overlayZoomHint(cursor int64) string {
+	hint := "F12 → dashboard overlay · prefix+z → unzoom"
+	if cursor > 0 {
+		return fmt.Sprintf("%s · cursor:%d", hint, cursor)
+	}
+	return hint
+}
+
+func overlayDismissDurationSeconds(openedAt, now time.Time) float64 {
+	if openedAt.IsZero() || now.Before(openedAt) {
+		return 0
+	}
+	return now.Sub(openedAt).Seconds()
+}
+
+func (m *Model) activatePopupMode(now time.Time) {
+	m.popupMode = true
+	if m.overlayOpenedAt.IsZero() {
+		m.overlayOpenedAt = now
+	}
+}
+
+func (m Model) paneByIndex(paneIndex int) (tmux.Pane, bool) {
+	for _, pane := range m.panes {
+		if pane.Index == paneIndex {
+			return pane, true
+		}
+	}
+	return tmux.Pane{}, false
+}
+
+func (m *Model) publishHumanZoomEvent(pane tmux.Pane, cursor int64) {
+	details := map[string]string{
+		"pane_index": strconv.Itoa(pane.Index),
+	}
+	if pane.Type != "" {
+		details["agent_type"] = string(pane.Type)
+	}
+	if cursor > 0 {
+		details["cursor"] = strconv.FormatInt(cursor, 10)
+	}
+	event := ntmevents.NewWebhookEvent(
+		ntmevents.EventHumanZoom,
+		m.session,
+		strconv.Itoa(pane.Index),
+		string(pane.Type),
+		fmt.Sprintf("human zoomed pane %d", pane.Index),
+		details,
+	)
+	dashboardPublishBusEvent(event)
+}
+
+func (m *Model) publishHumanOverlayDismiss(now time.Time) {
+	cursor := robot.GetAttentionFeed().CurrentCursor()
+	duration := overlayDismissDurationSeconds(m.overlayOpenedAt, now)
+	details := map[string]string{
+		"duration_seconds": strconv.FormatFloat(duration, 'f', 3, 64),
+		"overlay_popup":    "true",
+	}
+	if !m.overlayOpenedAt.IsZero() {
+		details["overlay_opened_at"] = m.overlayOpenedAt.Format(time.RFC3339Nano)
+	}
+	if cursor > 0 {
+		details["cursor"] = strconv.FormatInt(cursor, 10)
+	}
+	event := ntmevents.NewWebhookEvent(
+		ntmevents.EventHumanOverlayDismiss,
+		m.session,
+		"",
+		"",
+		"human dismissed dashboard overlay",
+		details,
+	)
+	dashboardPublishBusEvent(event)
+}
+
+func (m *Model) exitPopupOverlay() tea.Cmd {
+	m.postQuitAction = nil
+	m.quitting = true
+	m.publishHumanOverlayDismiss(dashboardNow())
+	return tea.Quit
+}
+
+func (m *Model) handlePaneZoom(pane tmux.Pane) tea.Cmd {
+	if err := dashboardZoomPane(m.session, pane.Index); err != nil {
+		m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
+		return nil
+	}
+	if m.popupMode {
+		cursor := robot.GetAttentionFeed().CurrentCursor()
+		m.publishHumanZoomEvent(pane, cursor)
+		_ = dashboardDisplayMessage(m.session, overlayZoomHint(cursor), 4000)
+		m.postQuitAction = nil
+	} else {
+		m.postQuitAction = &PostQuitAction{AttachSession: m.session}
+	}
+	m.quitting = true
+	return tea.Quit
 }
 
 // PaneStatus tracks the status of a pane including compaction state
@@ -709,10 +822,10 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // Implements help.KeyMap interface.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Left, k.Right, k.Zoom},    // Navigation
-		{k.Tab, k.ShiftTab, k.NextPanel, k.Send},   // Panels & Actions
+		{k.Up, k.Down, k.Left, k.Right, k.Zoom},                    // Navigation
+		{k.Tab, k.ShiftTab, k.NextPanel, k.Send},                   // Panels & Actions
 		{k.Refresh, k.ContextRefresh, k.MailRefresh, k.CassSearch}, // Data
-		{k.Help, k.Quit, k.Pause, k.Diagnostics},   // Control
+		{k.Help, k.Quit, k.Pause, k.Diagnostics},                   // Control
 	}
 }
 
@@ -884,6 +997,17 @@ func New(session, projectDir string) Model {
 		fetchingDCG:         true,
 	}
 
+	m.paneDelegate = newPaneDelegate(t, CalculateLayout(40, 1))
+	m.paneList = list.New(nil, m.paneDelegate, 40, 8)
+	m.paneList.DisableQuitKeybindings()
+	m.paneList.SetShowFilter(true)
+	m.paneList.SetShowTitle(false)
+	m.paneList.SetShowHelp(false)
+	m.paneList.SetShowPagination(false)
+	m.paneList.SetShowStatusBar(true)
+	m.paneList.SetStatusBarItemName("pane", "panes")
+	m.paneList.SetFilteringEnabled(true)
+
 	// Initialize last-fetch timestamps to start cadence after the initial fetches from Init.
 	now := time.Now()
 	m.lastPaneFetch = now
@@ -913,6 +1037,7 @@ func New(session, projectDir string) Model {
 	m.idleTimeout = 5 * time.Second
 
 	applyDashboardEnvOverrides(&m)
+	m.syncFocusRing()
 
 	// Set up conflict action handler for the conflicts panel
 	m.conflictsPanel.SetActionHandler(m.handleConflictAction)
@@ -943,6 +1068,83 @@ func New(session, projectDir string) Model {
 
 	m.initRenderer(40)
 	return m
+}
+
+func (m *Model) selectedPaneID() string {
+	if selected := m.paneList.SelectedItem(); selected != nil {
+		if item, ok := selected.(paneItem); ok {
+			return item.pane.ID
+		}
+	}
+	if m.cursor >= 0 && m.cursor < len(m.panes) {
+		return m.panes[m.cursor].ID
+	}
+	return ""
+}
+
+func (m *Model) syncCursorFromPaneList() {
+	selectedID := m.selectedPaneID()
+	if selectedID != "" {
+		for i := range m.panes {
+			if m.panes[i].ID == selectedID {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	if len(m.panes) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(m.panes) {
+		m.cursor = len(m.panes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func (m *Model) setPaneListSelectionByPaneID(paneID string) {
+	if paneID != "" {
+		if idx := findPaneIndexByID(m.paneList.Items(), paneID); idx >= 0 {
+			m.paneList.Select(idx)
+			m.syncCursorFromPaneList()
+			return
+		}
+	}
+	if len(m.panes) == 0 {
+		m.paneList.ResetSelected()
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(m.panes) {
+		m.cursor = len(m.panes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	m.paneList.Select(m.cursor)
+}
+
+func (m *Model) rebuildPaneList() tea.Cmd {
+	listWidth := maxInt(m.width/4-4, 24)
+	listHeight := contentHeightFor(m.height)
+	if listHeight < 6 {
+		listHeight = 6
+	}
+	if rowCount := len(m.panes) + 4; rowCount < listHeight {
+		listHeight = rowCount
+	}
+
+	m.paneDelegate.SetDims(CalculateLayout(listWidth, 1))
+	m.paneDelegate.SetTick(m.animTick)
+	m.paneList.SetDelegate(m.paneDelegate)
+	m.paneList.SetSize(listWidth, listHeight)
+
+	prevSelectedID := m.selectedPaneID()
+	cmd := m.paneList.SetItems(toPaneItems(m.panes, m.paneStatus, m.beadsReady, m.theme))
+	m.setPaneListSelectionByPaneID(prevSelectedID)
+	return cmd
 }
 
 // NewWithInterval creates a dashboard with custom refresh interval
@@ -2383,17 +2585,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case synthtui.ZoomMsg:
-		if err := tmux.ZoomPane(m.session, msg.PaneIndex); err != nil {
-			m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
-			return m, nil
+		pane, ok := m.paneByIndex(msg.PaneIndex)
+		if !ok {
+			pane = tmux.Pane{Index: msg.PaneIndex}
 		}
-		if m.popupMode {
-			_ = tmux.DisplayMessage(m.session,
-				"F12 → dashboard overlay · prefix+z → unzoom", 4000)
-		} else {
-			m.postQuitAction = &PostQuitAction{AttachSession: m.session}
-		}
-		return m, tea.Quit
+		return m, m.handlePaneZoom(pane)
 
 	case EnsembleModesDataMsg:
 		m.ensembleModes.SetData(msg.SessionName, msg.Session, msg.Catalog, msg.Panes, msg.Err)
@@ -3343,6 +3539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Map Y position to pane index (rough heuristic)
 					paneIndex := (msg.Y - 4) / 2
 					if paneIndex >= 0 && paneIndex < len(m.panes) {
+						m.setFocusedPanel(PanelPaneList)
 						m.cursor = paneIndex
 						return m, nil
 					}
@@ -3373,8 +3570,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Popup mode: Escape closes the overlay (exits cleanly)
 		if m.popupMode && msg.String() == "esc" {
-			m.quitting = true
-			return m, tea.Quit
+			return m, m.exitPopupOverlay()
 		}
 
 		switch {
@@ -3467,19 +3663,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, dashKeys.Zoom):
 			if (m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail) && len(m.panes) > 0 && m.cursor < len(m.panes) {
-				p := m.panes[m.cursor]
-				if err := tmux.ZoomPane(m.session, p.Index); err != nil {
-					m.healthMessage = fmt.Sprintf("Zoom failed: %v", err)
-					return m, nil
-				}
-				if m.popupMode {
-					// Show a brief hint so the user knows how to return.
-					_ = tmux.DisplayMessage(m.session,
-						"F12 → dashboard overlay · prefix+z → unzoom", 4000)
-				} else {
-					m.postQuitAction = &PostQuitAction{AttachSession: m.session}
-				}
-				return m, tea.Quit
+				return m, m.handlePaneZoom(m.panes[m.cursor])
 			}
 			return m, nil
 
@@ -3606,25 +3790,29 @@ func (m *Model) selectByNumber(n int) {
 }
 
 func (m *Model) cycleFocus(dir int) {
-	visiblePanes := m.visiblePanelsForHelpVerbosity()
-
-	// Find current index in visiblePanes
-	currIdx := -1
-	for i, p := range visiblePanes {
-		if p == m.focusedPanel {
-			currIdx = i
-			break
-		}
+	if dir == 0 {
+		m.syncFocusRing()
+		return
 	}
 
-	// If not found (e.g. resized from Mega to Split while focus was on Beads), default to 0
-	if currIdx == -1 {
-		currIdx = 0
+	m.refreshFocusRing()
+
+	previous := m.focusedPanel
+	if dir > 0 {
+		m.focusRing.Next()
+	} else {
+		m.focusRing.Prev()
 	}
 
-	// Cycle
-	nextIdx := (currIdx + dir + len(visiblePanes)) % len(visiblePanes)
-	m.focusedPanel = visiblePanes[nextIdx]
+	current := m.focusRing.Current()
+	if current.ID == "" {
+		return
+	}
+
+	m.focusedPanel = current.Panel
+	if previous != m.focusedPanel {
+		logFocusf("focus: %s -> %s", panelIDString(previous), current.ID)
+	}
 }
 
 func (m *Model) updateStats() {
@@ -3942,32 +4130,9 @@ func (m Model) renderMainContentSection() string {
 func (m Model) renderPanelTabBar(width int) string {
 	visible := m.visiblePanelsForHelpVerbosity()
 
-	panelIDStr := func(id PanelID) string {
-		switch id {
-		case PanelPaneList:
-			return "panes"
-		case PanelDetail:
-			return "detail"
-		case PanelBeads:
-			return "beads"
-		case PanelAlerts:
-			return "alerts"
-		case PanelConflicts:
-			return "conflicts"
-		case PanelMetrics:
-			return "metrics"
-		case PanelHistory:
-			return "history"
-		case PanelSidebar:
-			return "sidebar"
-		default:
-			return "unknown"
-		}
-	}
-
 	var tabs []components.Tab
 	for _, pid := range visible {
-		idStr := panelIDStr(pid)
+		idStr := panelIDString(pid)
 		badge := 0
 		hasErr := false
 
@@ -3986,7 +4151,7 @@ func (m Model) renderPanelTabBar(width int) string {
 		tabs = append(tabs, components.PanelIDToTab(idStr, badge, hasErr))
 	}
 
-	activeID := panelIDStr(m.focusedPanel)
+	activeID := panelIDString(m.focusedPanel)
 
 	return components.RenderTabBar(components.TabBarOptions{
 		Tabs:       tabs,
@@ -6926,6 +7091,22 @@ func activitySummaryLine(rows []PaneTableRow, t theme.Theme) string {
 	return label.Render("Activity:") + " " + strings.Join(compactBadges, " ")
 }
 
+func (m *Model) ensureDashboardConflictAgent(ctx context.Context, client *agentmail.Client, projectKey string) string {
+	agentName := m.session + "_dashboard"
+	_, err := client.RegisterAgent(ctx, agentmail.RegisterAgentOptions{
+		ProjectKey:      projectKey,
+		Program:         "ntm-dashboard",
+		Model:           "local",
+		Name:            agentName,
+		TaskDescription: "Dashboard conflict resolution",
+	})
+	if err != nil {
+		log.Printf("[ConflictAction] Warning: could not register dashboard agent %s: %v", agentName, err)
+		// Continue anyway - the agent may already be registered or the server may accept the operation.
+	}
+	return agentName
+}
+
 // handleConflictAction handles user actions on file reservation conflicts.
 // It integrates with Agent Mail to send messages or force-release reservations.
 func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watcher.ConflictAction) error {
@@ -6956,19 +7137,7 @@ func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watch
 			return fmt.Errorf("no holders to request handoff from")
 		}
 
-		// Register ourselves if not already registered
-		agentName := m.session + "_dashboard"
-		_, err := client.RegisterAgent(ctx, agentmail.RegisterAgentOptions{
-			ProjectKey:      projectKey,
-			Program:         "ntm-dashboard",
-			Model:           "local",
-			Name:            agentName,
-			TaskDescription: "Dashboard conflict resolution",
-		})
-		if err != nil {
-			log.Printf("[ConflictAction] Warning: could not register agent for messaging: %v", err)
-			// Continue anyway - the agent might already be registered
-		}
+		agentName := m.ensureDashboardConflictAgent(ctx, client, projectKey)
 
 		// Send handoff request to each holder
 		for _, holder := range conflict.Holders {
@@ -7003,10 +7172,10 @@ func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watch
 		if len(conflict.HolderReservationIDs) == 0 {
 			return fmt.Errorf("no reservation IDs available for force-release")
 		}
+		agentName := m.ensureDashboardConflictAgent(ctx, client, projectKey)
 
 		// Force-release each reservation
 		for _, reservationID := range conflict.HolderReservationIDs {
-			agentName := m.session + "_dashboard"
 			result, err := client.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
 				ProjectKey:     projectKey,
 				AgentName:      agentName,
@@ -7101,7 +7270,9 @@ func mouseEnabled() bool {
 // RunWithOptions starts the dashboard with configurable options.
 func RunWithOptions(session, projectDir string, popupMode bool) (*PostQuitAction, error) {
 	model := New(session, projectDir)
-	model.popupMode = popupMode
+	if popupMode {
+		model.activatePopupMode(dashboardNow())
+	}
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if mouseEnabled() {
 		opts = append(opts, tea.WithMouseCellMotion())
