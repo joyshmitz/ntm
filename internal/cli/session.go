@@ -692,7 +692,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 	}
 
 	// Calculate counts
-	var ccCount, codCount, gmiCount, otherCount int
+	var ccCount, codCount, gmiCount, cursorCount, windsurfCount, aiderCount, otherCount int
 	for _, p := range panes {
 		switch p.Type {
 		case tmux.AgentClaude:
@@ -701,6 +701,12 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 			codCount++
 		case tmux.AgentGemini:
 			gmiCount++
+		case tmux.AgentCursor:
+			cursorCount++
+		case tmux.AgentWindsurf:
+			windsurfCount++
+		case tmux.AgentAider:
+			aiderCount++
 		default:
 			otherCount++
 		}
@@ -740,11 +746,14 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 		Attached:            attached,
 		WorkingDirectory:    dir,
 		AgentCounts: output.AgentCountsResponse{
-			Claude: ccCount,
-			Codex:  codCount,
-			Gemini: gmiCount,
-			User:   otherCount,
-			Total:  len(panes),
+			Claude:   ccCount,
+			Codex:    codCount,
+			Gemini:   gmiCount,
+			Cursor:   cursorCount,
+			Windsurf: windsurfCount,
+			Aider:    aiderCount,
+			User:     otherCount,
+			Total:    len(panes),
 		},
 	}
 
@@ -1038,7 +1047,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	}
 
 	// Calculate counts
-	var ccCount, codCount, gmiCount, otherCount int
+	var ccCount, codCount, gmiCount, cursorCount, windsurfCount, aiderCount, otherCount int
 	for _, p := range panes {
 		switch p.Type {
 		case tmux.AgentClaude:
@@ -1047,6 +1056,12 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 			codCount++
 		case tmux.AgentGemini:
 			gmiCount++
+		case tmux.AgentCursor:
+			cursorCount++
+		case tmux.AgentWindsurf:
+			windsurfCount++
+		case tmux.AgentAider:
+			aiderCount++
 		default:
 			otherCount++
 		}
@@ -1115,8 +1130,8 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	fmt.Fprintln(w)
 
 	// Directory info
-	fmt.Fprintf(w, "  %s%s Directory:%s %s%s%s\n", subtext, ic.Folder, reset, text, dir, reset)
-	fmt.Fprintf(w, "  %s%s Panes:%s    %s%d%s\n", subtext, ic.Pane, reset, text, len(panes), reset)
+	fmt.Fprintf(w, "  %s%s%s Directory:%s %s%s\n", subtext, ic.Folder, reset, text, dir, reset)
+	fmt.Fprintf(w, "  %s%s%s Panes:%s    %d%s\n", subtext, ic.Pane, reset, text, len(panes), reset)
 	fmt.Fprintln(w)
 
 	maxTextWidth := maxInt(width-12, 20)
@@ -1165,7 +1180,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 			typeIcon = ic.Gemini
 		default:
 			typeColor = success
-			typeIcon = ic.User
+			typeIcon = ic.Robot
 		}
 
 		// Number for quick selection (1-9)
@@ -1331,11 +1346,20 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	if gmiCount > 0 {
 		fmt.Fprintf(w, "    %s%s Gemini%s  %s%d instance(s)%s\n", gemini, ic.Gemini, reset, text, gmiCount, reset)
 	}
+	if cursorCount > 0 {
+		fmt.Fprintf(w, "    %s%s Cursor%s  %s%d instance(s)%s\n", success, ic.Robot, reset, text, cursorCount, reset)
+	}
+	if windsurfCount > 0 {
+		fmt.Fprintf(w, "    %s%s Windsurf%s %s%d instance(s)%s\n", success, ic.Robot, reset, text, windsurfCount, reset)
+	}
+	if aiderCount > 0 {
+		fmt.Fprintf(w, "    %s%s Aider%s   %s%d instance(s)%s\n", success, ic.Robot, reset, text, aiderCount, reset)
+	}
 	if otherCount > 0 {
 		fmt.Fprintf(w, "    %s%s User%s    %s%d pane(s)%s\n", success, ic.User, reset, text, otherCount, reset)
 	}
 
-	totalAgents := ccCount + codCount + gmiCount
+	totalAgents := ccCount + codCount + gmiCount + cursorCount + windsurfCount + aiderCount
 	if totalAgents == 0 {
 		fmt.Fprintf(w, "    %sNo agents running%s\n", overlay, reset)
 	}

@@ -1943,6 +1943,20 @@ Shell Integration:
 			return
 		}
 
+		// Robot-overlay handler for agent-initiated human handoff (br-a6cmp)
+		if robotOverlay != "" {
+			opts := robot.OverlayOptions{
+				Session: robotOverlay,
+				Cursor:  robotOverlayCursor,
+				NoWait:  robotOverlayNoWait,
+			}
+			if err := robot.PrintOverlay(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		// Show help with appropriate verbosity when run without subcommand
 		showMinimal := helpMinimal
 		if !helpMinimal && helpFull {
@@ -2545,6 +2559,11 @@ var (
 	mailVerbose       bool   // --verbose flag for extra details
 	mailOffset        int    // --mail-offset for pagination
 	mailUntil         string // --mail-until date filter (YYYY-MM-DD)
+
+	// Robot-overlay flags for agent-initiated human handoff (br-a6cmp)
+	robotOverlay       string // --robot-overlay flag (session name)
+	robotOverlayCursor int64  // --overlay-cursor for attention item focus
+	robotOverlayNoWait bool   // --overlay-no-wait to return immediately
 )
 
 func init() {
@@ -3028,6 +3047,11 @@ func init() {
 	rootCmd.Flags().BoolVar(&mailVerbose, "mail-verbose", false, "Include extra details in output. Optional with --robot-mail-check")
 	rootCmd.Flags().IntVar(&mailOffset, "mail-offset", 0, "Skip first N messages for pagination. Optional with --robot-mail-check. Example: --mail-offset=20")
 	rootCmd.Flags().StringVar(&mailUntil, "mail-until", "", "Filter to messages before date (YYYY-MM-DD). Optional with --robot-mail-check. Example: --mail-until=2025-12-31")
+
+	// Robot-overlay flags for agent-initiated human handoff (br-a6cmp)
+	rootCmd.Flags().StringVar(&robotOverlay, "robot-overlay", "", "Open dashboard overlay for a session. Returns JSON status. Required: SESSION. Example: ntm --robot-overlay=myproject")
+	rootCmd.Flags().Int64Var(&robotOverlayCursor, "overlay-cursor", 0, "Attention cursor to focus on. Optional with --robot-overlay. Example: --overlay-cursor=12345")
+	rootCmd.Flags().BoolVar(&robotOverlayNoWait, "overlay-no-wait", false, "Return immediately without waiting for dismissal. Optional with --robot-overlay")
 
 	// ==========================================================================
 	// CANONICAL FLAG ALIASES - Robot Mode API Harmonization
