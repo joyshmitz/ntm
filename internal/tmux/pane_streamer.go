@@ -256,7 +256,6 @@ func (ps *PaneStreamer) runFIFOReader() {
 	}
 	defer fifo.Close()
 
-	reader := bufio.NewReader(fifo)
 	var lineBuf []string
 	flushTicker := time.NewTicker(ps.config.FlushInterval)
 	defer flushTicker.Stop()
@@ -275,6 +274,33 @@ func (ps *PaneStreamer) runFIFOReader() {
 		lineBuf = nil
 	}
 
+	lineCh := make(chan string)
+	errCh := make(chan error, 1)
+
+	go func() {
+		reader := bufio.NewReader(fifo)
+		for {
+			line, err := reader.ReadString('\n')
+			if len(line) > 0 {
+				select {
+				case lineCh <- line:
+				case <-stopCh:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				select {
+				case errCh <- err:
+				case <-stopCh:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-stopCh:
@@ -285,31 +311,13 @@ func (ps *PaneStreamer) runFIFOReader() {
 			return
 		case <-flushTicker.C:
 			flushLines()
-		default:
-			// Non-blocking read with short timeout
-			fifo.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF || os.IsTimeout(err) {
-					continue
-				}
-				// Check if stop has been requested
-				select {
-				case <-stopCh:
-					flushLines()
-					return
-				default:
-				}
-
-				// Check if parent context is done
-				if ctx.Err() != nil {
-					flushLines()
-					return
-				}
+		case err := <-errCh:
+			flushLines()
+			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
 				log.Printf("pipe-pane: read error for %s: %v", ps.target, err)
-				continue
 			}
-
+			return
+		case line := <-lineCh:
 			lineBuf = append(lineBuf, strings.TrimSuffix(line, "\n"))
 
 			// Flush if buffer is full
