@@ -18,19 +18,20 @@ import (
 // DashboardOutput provides a concise dashboard view for AI orchestrators.
 type DashboardOutput struct {
 	RobotResponse
-	GeneratedAt  time.Time          `json:"generated_at"`
-	Fleet        string             `json:"fleet"`
-	Agents       []SnapshotSession  `json:"agents"`
-	Metrics      map[string]any     `json:"metrics,omitempty"`
-	System       SystemInfo         `json:"system"`
-	Summary      StatusSummary      `json:"summary"`
-	Beads        *bv.BeadsSummary   `json:"beads,omitempty"`
-	Progress     *ProgressSummary   `json:"progress,omitempty"`
-	Alerts       []AlertInfo        `json:"alerts,omitempty"`
-	AlertSummary *AlertSummaryInfo  `json:"alert_summary,omitempty"`
-	Conflicts    []tracker.Conflict `json:"conflicts,omitempty"`
-	FileChanges  []FileChangeInfo   `json:"file_changes,omitempty"`
-	AgentMail    *SnapshotAgentMail `json:"agent_mail,omitempty"`
+	GeneratedAt  time.Time                 `json:"generated_at"`
+	Fleet        string                    `json:"fleet"`
+	Agents       []SnapshotSession         `json:"agents"`
+	Metrics      map[string]any            `json:"metrics,omitempty"`
+	System       SystemInfo                `json:"system"`
+	Summary      StatusSummary             `json:"summary"`
+	Beads        *bv.BeadsSummary          `json:"beads,omitempty"`
+	Progress     *ProgressSummary          `json:"progress,omitempty"`
+	Alerts       []AlertInfo               `json:"alerts,omitempty"`
+	AlertSummary *AlertSummaryInfo         `json:"alert_summary,omitempty"`
+	Conflicts    []tracker.Conflict        `json:"conflicts,omitempty"`
+	FileChanges  []FileChangeInfo          `json:"file_changes,omitempty"`
+	AgentMail    *SnapshotAgentMail        `json:"agent_mail,omitempty"`
+	Attention    *SnapshotAttentionSummary `json:"attention,omitempty"`
 }
 
 // GetDashboard retrieves a dashboard-oriented view for AI orchestrators.
@@ -147,6 +148,9 @@ func GetDashboard() (*DashboardOutput, error) {
 	// Agent Mail summary (best-effort)
 	output.AgentMail = buildSnapshotAgentMail()
 
+	// Attention feed summary (best-effort)
+	output.Attention = buildSnapshotAttentionSummary(GetAttentionFeed())
+
 	return output, nil
 }
 
@@ -225,6 +229,11 @@ func printDashboardMarkdown(output DashboardOutput) error {
 			fmt.Fprintf(&sb, "| Agent Mail | unavailable (%s) |\n", escapeMarkdownCell(output.AgentMail.Reason, 120))
 		}
 	}
+	fmt.Fprintf(&sb, "| Attention | %s |\n", escapeMarkdownCell(dashboardAttentionHeadline(output.Attention), 120))
+	sb.WriteString("\n")
+
+	sb.WriteString("## Attention\n")
+	writeAttentionSection(&sb, output.Attention)
 	sb.WriteString("\n")
 
 	sb.WriteString("## Sessions\n")
@@ -295,6 +304,76 @@ func escapeMarkdownCell(s string, maxLen int) string {
 		s = truncateStr(s, maxLen)
 	}
 	return s
+}
+
+func dashboardAttentionHeadline(summary *SnapshotAttentionSummary) string {
+	if summary == nil {
+		return "feed unavailable"
+	}
+	if summary.TotalEvents == 0 {
+		return "clear"
+	}
+
+	parts := make([]string, 0, 2)
+	if summary.ActionRequiredCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d action-required", summary.ActionRequiredCount))
+	}
+	if summary.InterestingCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d interesting", summary.InterestingCount))
+	}
+	if len(parts) == 0 {
+		return "clear"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// writeAttentionSection renders the attention summary for dashboard markdown.
+func writeAttentionSection(sb *strings.Builder, attention *SnapshotAttentionSummary) {
+	if attention == nil {
+		sb.WriteString("_Attention feed not available._\n")
+		return
+	}
+	if attention.TotalEvents == 0 {
+		sb.WriteString("_No attention events. Feed is clear._\n")
+		return
+	}
+
+	sb.WriteString("| Key | Value |\n")
+	sb.WriteString("|---|---|\n")
+	fmt.Fprintf(sb, "| Total Events | %d |\n", attention.TotalEvents)
+	fmt.Fprintf(sb, "| Action Required | %d |\n", attention.ActionRequiredCount)
+	fmt.Fprintf(sb, "| Interesting | %d |\n", attention.InterestingCount)
+	sb.WriteString("\n")
+
+	if len(attention.TopItems) > 0 {
+		sb.WriteString("### Top Action Items\n")
+		sb.WriteString("| Cursor | Category | Severity | Summary |\n")
+		sb.WriteString("|---:|---|---|---|\n")
+		for _, item := range attention.TopItems {
+			fmt.Fprintf(sb, "| %d | %s | %s | %s |\n",
+				item.Cursor,
+				escapeMarkdownCell(item.Category, 20),
+				escapeMarkdownCell(item.Severity, 10),
+				escapeMarkdownCell(item.Summary, 80),
+			)
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(attention.NextSteps) > 0 {
+		sb.WriteString("### Suggested Next Steps\n")
+		for _, step := range attention.NextSteps {
+			fmt.Fprintf(sb, "- `ntm %s` — %s\n", step.Args, escapeMarkdownCell(step.Reason, 100))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(attention.UnsupportedSignals) > 0 {
+		sb.WriteString("### Unsupported Signals\n")
+		sb.WriteString("_The following signals are not yet implemented:_ ")
+		sb.WriteString(strings.Join(attention.UnsupportedSignals, ", "))
+		sb.WriteString("\n")
+	}
 }
 
 func dashboardCounts(sessions []SnapshotSession) (totalPanes, userPanes int, typeCounts map[string]int) {

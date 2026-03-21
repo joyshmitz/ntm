@@ -473,7 +473,7 @@ func NewWorkflowStartedEvent(session, workflow, runID string, agents []string) W
 		},
 		Workflow: workflow,
 		RunID:    runID,
-		Agents:   agents,
+		Agents:   cloneStringSlice(agents),
 	}
 }
 
@@ -654,7 +654,7 @@ func NewReservationConflictEvent(session, path, requestorAgent, requestorPane st
 		Path:           path,
 		RequestorAgent: requestorAgent,
 		RequestorPane:  requestorPane,
-		Holders:        holders,
+		Holders:        cloneStringSlice(holders),
 	}
 }
 
@@ -675,8 +675,17 @@ func NewFileConflictEvent(session, path string, agents []string) FileConflictEve
 			Session:   session,
 		},
 		Path:   path,
-		Agents: agents,
+		Agents: cloneStringSlice(agents),
 	}
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
 }
 
 // ----------------------------------------------------------------

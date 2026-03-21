@@ -4071,15 +4071,15 @@ func (m Model) View() string {
 			Foreground(m.theme.Primary).
 			Bold(true)
 
+		// Build styled section labels
+		styledLabels := make([]string, len(sectionLabels))
+		for i, label := range sectionLabels {
+			styledLabels[i] = labelStyle.Render(label)
+		}
+
 		var helpLines []string
 		// Add section labels header
-		helpLines = append(helpLines, strings.Join(func() []string {
-			labels := make([]string, len(sectionLabels))
-			for i, label := range sectionLabels {
-				labels[i] = labelStyle.Render(label)
-			}
-			return labels
-		}(), "    "))
+		helpLines = append(helpLines, strings.Join(styledLabels, "    "))
 
 		// Render the keybindings
 		helpContent := helpCopy.View(dashKeys)

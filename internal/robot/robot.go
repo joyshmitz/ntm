@@ -1877,18 +1877,52 @@ Quick Start:
 4) Monitor progress:  ntm --robot-is-working=proj
 5) Get output:        ntm --robot-tail=proj --lines=100
 
+Attention Feed (Operator Loop):
+-------------------------------
+The recommended tending loop for operator agents:
+
+  1. Bootstrap:  ntm --robot-snapshot
+     → Get system state + latest_cursor + replay_window
+  2. Attend:     ntm --robot-attention --since-cursor=<cursor>
+     → Sleep until attention needed, wake with digest + reason
+  3. Act:        ntm --robot-send=proj --msg="fix X"
+     → Execute the suggested action
+  4. Loop:       Use cursor from step 2 response as --since-cursor
+     → Repeat from step 2
+
+If cursor expires: re-run --robot-snapshot to resync.
+
+Attention Feed Commands:
+  --robot-events         Raw event replay (--since-cursor=N, --limit=50)
+  --robot-digest         Aggregated summary of recent changes
+  --robot-attention      Wait-then-digest (the one obvious tending command)
+
+Profiles (--profile=NAME):
+  operator    Default. Shows actionable events + important state changes.
+  debug       Full verbosity for troubleshooting.
+  minimal     Only critical items requiring immediate action.
+  alerts      Only synthesized alert events.
+
+Unsupported Conditions:
+  bead_orphaned   Not supported — ntm cannot prove abandonment from observable state.
+                  Use --robot-capabilities for full rationale.
+
 Common Workflows:
 -----------------
 - Single agent: ntm --robot-spawn=proj --spawn-cc=1 --spawn-wait
 - Send+wait:    ntm --robot-send=proj --msg="do X" --track
 - Bootstrap:    ntm --robot-snapshot   # use latest_cursor + replay_window for follow-up
-- Recover:      ntm --robot-snapshot --since=2025-01-01T00:00:00Z
+- Tending:      ntm --robot-attention --since-cursor=42  # wait-then-digest loop
+- Recover:      ntm --robot-snapshot   # resync after cursor expiration
 
 Tips for AI Agents:
 -------------------
-- Start with --robot-status, then narrow with --panes and --lines.
+- Start with --robot-snapshot for bootstrap, then --robot-attention for steady-state.
+- Use --robot-events for raw replay when you need full event history.
+- Use --robot-digest for a quick summary without waiting.
 - Snapshot returns latest_cursor plus replay_window metadata for mechanical resync.
 - Prefer --robot-capabilities for schema discovery over parsing help text.
+- Profiles reduce filter boilerplate: --profile=operator is the default.
 
 For complete API documentation: docs/robot-api-design.md
 For machine-readable schema:    ntm --robot-capabilities
@@ -5480,25 +5514,27 @@ func PrintRecipes() error {
 }
 
 // TerseState represents the ultra-compact state for token-constrained scenarios.
-// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|!:
+// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|^:NaNi|!:
 type TerseState struct {
-	Session        string `json:"session"`
-	ActiveAgents   int    `json:"active_agents"`
-	TotalAgents    int    `json:"total_agents"`
-	WorkingAgents  int    `json:"working_agents"` // Agents actively processing
-	IdleAgents     int    `json:"idle_agents"`    // Agents waiting at prompt
-	ErrorAgents    int    `json:"error_agents"`   // Agents in error state
-	ContextPct     int    `json:"context_pct"`    // Average context usage %
-	ReadyBeads     int    `json:"ready_beads"`    // Beads ready to work on
-	BlockedBeads   int    `json:"blocked_beads"`  // Blocked beads
-	InProgressBead int    `json:"in_progress_beads"`
-	UnreadMail     int    `json:"unread_mail"`
-	CriticalAlerts int    `json:"critical_alerts"`
-	WarningAlerts  int    `json:"warning_alerts"`
+	Session           string `json:"session"`
+	ActiveAgents      int    `json:"active_agents"`
+	TotalAgents       int    `json:"total_agents"`
+	WorkingAgents     int    `json:"working_agents"` // Agents actively processing
+	IdleAgents        int    `json:"idle_agents"`    // Agents waiting at prompt
+	ErrorAgents       int    `json:"error_agents"`   // Agents in error state
+	ContextPct        int    `json:"context_pct"`    // Average context usage %
+	ReadyBeads        int    `json:"ready_beads"`    // Beads ready to work on
+	BlockedBeads      int    `json:"blocked_beads"`  // Blocked beads
+	InProgressBead    int    `json:"in_progress_beads"`
+	UnreadMail        int    `json:"unread_mail"`
+	AttentionAction   int    `json:"attention_action"`      // Action-required attention events
+	AttentionInterest int    `json:"attention_interesting"` // Interesting attention events
+	CriticalAlerts    int    `json:"critical_alerts"`
+	WarningAlerts     int    `json:"warning_alerts"`
 }
 
 // String returns the ultra-compact string representation.
-// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|!:
+// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|^:NaNi|!:
 func (t TerseState) String() string {
 	// Build alerts string (only include if non-zero)
 	alertStr := ""
@@ -5515,21 +5551,38 @@ func (t TerseState) String() string {
 		alertStr = "0"
 	}
 
-	return fmt.Sprintf("S:%s|A:%d/%d|W:%d|I:%d|E:%d|C:%d%%|B:R%d/I%d/B%d|M:%d|!:%s",
+	// Build attention string: Na,Ni (action, interesting) or 0 if none
+	attnStr := ""
+	if t.AttentionAction > 0 || t.AttentionInterest > 0 {
+		var parts []string
+		if t.AttentionAction > 0 {
+			parts = append(parts, fmt.Sprintf("%da", t.AttentionAction))
+		}
+		if t.AttentionInterest > 0 {
+			parts = append(parts, fmt.Sprintf("%di", t.AttentionInterest))
+		}
+		attnStr = strings.Join(parts, ",")
+	} else {
+		attnStr = "0"
+	}
+
+	return fmt.Sprintf("S:%s|A:%d/%d|W:%d|I:%d|E:%d|C:%d%%|B:R%d/I%d/B%d|M:%d|^:%s|!:%s",
 		t.Session,
 		t.ActiveAgents, t.TotalAgents,
 		t.WorkingAgents, t.IdleAgents, t.ErrorAgents,
 		t.ContextPct,
 		t.ReadyBeads, t.InProgressBead, t.BlockedBeads,
 		t.UnreadMail,
+		attnStr,
 		alertStr)
 }
 
 // TerseOutput wraps terse state for robot API output.
 type TerseOutput struct {
 	RobotResponse
-	States     []TerseState `json:"states"`
-	TerseLines []string     `json:"terse_lines"` // Pre-formatted terse strings
+	States        []TerseState `json:"states"`
+	TerseLines    []string     `json:"terse_lines"`    // Pre-formatted terse strings
+	AttentionHint string       `json:"attention_hint"` // Compact attention summary (e.g., "2!action 5?interesting")
 }
 
 // GetTerse retrieves ultra-compact single-line state for token-constrained scenarios.
@@ -5575,15 +5628,28 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 	// Get mail count (best-effort)
 	mailCount := getTerseMailCount()
 
+	// Get attention summary (global for all sessions)
+	var attnAction, attnInterest int
+	feed := GetAttentionFeed()
+	if feed == nil {
+		output.AttentionHint = "feed:unavail"
+	} else if attnSummary := buildSnapshotAttentionSummary(feed); attnSummary != nil {
+		attnAction = attnSummary.ActionRequiredCount
+		attnInterest = attnSummary.InterestingCount
+		output.AttentionHint = buildAttentionHintFromSummary(attnSummary)
+	}
+
 	// Get all sessions
 	sessions, err := tmux.ListSessions()
 	if err != nil {
 		// No sessions - output minimal state with just beads info
 		state := TerseState{
-			Session:        "-",
-			CriticalAlerts: criticalAlerts,
-			WarningAlerts:  warningAlerts,
-			UnreadMail:     mailCount,
+			Session:           "-",
+			CriticalAlerts:    criticalAlerts,
+			WarningAlerts:     warningAlerts,
+			UnreadMail:        mailCount,
+			AttentionAction:   attnAction,
+			AttentionInterest: attnInterest,
 		}
 		if beadsSummary != nil {
 			state.ReadyBeads = beadsSummary.Ready
@@ -5592,16 +5658,18 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 		}
 
 		output.States = append(output.States, state)
-		output.TerseLines = append(output.TerseLines, state.String())
+		output.TerseLines = append(output.TerseLines, formatTerseLine(state, output.AttentionHint))
 		return output, nil
 	}
 
 	for _, sess := range sessions {
 		state := TerseState{
-			Session:        sess.Name,
-			CriticalAlerts: criticalAlerts,
-			WarningAlerts:  warningAlerts,
-			UnreadMail:     mailCount,
+			Session:           sess.Name,
+			CriticalAlerts:    criticalAlerts,
+			WarningAlerts:     warningAlerts,
+			UnreadMail:        mailCount,
+			AttentionAction:   attnAction,
+			AttentionInterest: attnInterest,
 		}
 
 		// Get panes for this session
@@ -5652,14 +5720,49 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 		state.ContextPct = 0
 
 		output.States = append(output.States, state)
-		output.TerseLines = append(output.TerseLines, state.String())
+		output.TerseLines = append(output.TerseLines, formatTerseLine(state, output.AttentionHint))
 	}
 
 	return output, nil
 }
 
+// buildAttentionHint creates a compact attention summary for terse output.
+// Format: "2!action 5?interesting" or "clear" if no attention items.
+func buildAttentionHint() string {
+	feed := GetAttentionFeed()
+	if feed == nil {
+		return "feed:unavail"
+	}
+	return buildAttentionHintFromSummary(buildSnapshotAttentionSummary(feed))
+}
+
+func buildAttentionHintFromSummary(summary *SnapshotAttentionSummary) string {
+	if summary == nil || summary.TotalEvents == 0 {
+		return "clear"
+	}
+	parts := []string{}
+	if summary.ActionRequiredCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d!action", summary.ActionRequiredCount))
+	}
+	if summary.InterestingCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d?interest", summary.InterestingCount))
+	}
+	if len(parts) == 0 {
+		return "clear"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatTerseLine(state TerseState, attentionHint string) string {
+	line := state.String()
+	if attentionHint != "feed:unavail" {
+		return line
+	}
+	return line + "|T:" + attentionHint
+}
+
 // ParseTerse parses the ultra-compact terse string into a TerseState.
-// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|!:
+// Format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|^:NaNi|!:
 func ParseTerse(s string) (*TerseState, error) {
 	state := &TerseState{}
 
@@ -5712,6 +5815,21 @@ func ParseTerse(s string) (*TerseState, error) {
 			}
 		case "M":
 			fmt.Sscanf(val, "%d", &state.UnreadMail)
+		case "^":
+			// Parse "2a,3i" or "0" format (attention: action, interesting)
+			if val == "0" {
+				state.AttentionAction = 0
+				state.AttentionInterest = 0
+			} else {
+				attnParts := strings.Split(val, ",")
+				for _, ap := range attnParts {
+					if strings.HasSuffix(ap, "a") {
+						fmt.Sscanf(strings.TrimSuffix(ap, "a"), "%d", &state.AttentionAction)
+					} else if strings.HasSuffix(ap, "i") {
+						fmt.Sscanf(strings.TrimSuffix(ap, "i"), "%d", &state.AttentionInterest)
+					}
+				}
+			}
 		case "!":
 			// Parse "1c,2w" or "0" format
 			if val == "0" {
@@ -5734,7 +5852,8 @@ func ParseTerse(s string) (*TerseState, error) {
 }
 
 // PrintTerse outputs ultra-compact single-line state for token-constrained scenarios.
-// Output format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|!:
+// Output format: S:session|A:active/total|W:working|I:idle|E:errors|C:ctx%|B:Rn/In/Bn|M:mail|^:NaNi|!:
+// If the attention feed is unavailable, an additional |T:feed:unavail suffix is appended.
 // Multiple sessions are separated by semicolons.
 func PrintTerse(cfg *config.Config) error {
 	output, err := GetTerse(cfg)

@@ -100,6 +100,9 @@ const (
 
 	// EventCategoryAlert events are synthesized attention signals.
 	EventCategoryAlert EventCategory = "alert"
+
+	// EventCategoryHealth events relate to system health checks.
+	EventCategoryHealth EventCategory = "health"
 )
 
 // EventType identifies specific event kinds within a category.
@@ -170,6 +173,7 @@ const (
 	EventTypeSystemShutdown     EventType = "system.shutdown"
 	EventTypeSystemHealthChange EventType = "system.health_change"
 	EventTypeSystemCursorReset  EventType = "system.cursor_reset"
+	EventTypeSpawn              EventType = "system.spawn"
 )
 
 // Alert events (synthesized signals)
@@ -177,6 +181,8 @@ const (
 	EventTypeAlertAttentionRequired EventType = "alert.attention_required"
 	EventTypeAlertWarning           EventType = "alert.warning"
 	EventTypeAlertInfo              EventType = "alert.info"
+	EventTypeAlert                  EventType = "alert.generic"
+	EventTypeHealthChange           EventType = "health.change"
 )
 
 // =============================================================================
@@ -632,6 +638,23 @@ var BuiltinProfiles = []AttentionProfile{
 	},
 }
 
+func cloneProfileFilters(filters ProfileFilters) ProfileFilters {
+	cloned := filters
+	if len(filters.Categories) > 0 {
+		cloned.Categories = append([]EventCategory(nil), filters.Categories...)
+	}
+	if len(filters.ExcludeTypes) > 0 {
+		cloned.ExcludeTypes = append([]EventType(nil), filters.ExcludeTypes...)
+	}
+	return cloned
+}
+
+func cloneAttentionProfile(profile AttentionProfile) AttentionProfile {
+	cloned := profile
+	cloned.Filters = cloneProfileFilters(profile.Filters)
+	return cloned
+}
+
 // GetProfile returns the named profile, or nil if not found.
 func GetProfile(name string) *AttentionProfile {
 	name = strings.TrimSpace(name)
@@ -640,7 +663,8 @@ func GetProfile(name string) *AttentionProfile {
 	}
 	for i := range BuiltinProfiles {
 		if strings.EqualFold(BuiltinProfiles[i].Name, name) {
-			return &BuiltinProfiles[i]
+			profile := cloneAttentionProfile(BuiltinProfiles[i])
+			return &profile
 		}
 	}
 	return nil
@@ -649,7 +673,9 @@ func GetProfile(name string) *AttentionProfile {
 // ListProfiles returns all available profiles.
 func ListProfiles() []AttentionProfile {
 	profiles := make([]AttentionProfile, len(BuiltinProfiles))
-	copy(profiles, BuiltinProfiles)
+	for i := range BuiltinProfiles {
+		profiles[i] = cloneAttentionProfile(BuiltinProfiles[i])
+	}
 	return profiles
 }
 
@@ -766,13 +792,27 @@ func (r *ResolvedFilters) MatchesFilters(event *AttentionEvent) bool {
 
 // severityMeetsMinimum checks if a severity meets the minimum threshold.
 func severityMeetsMinimum(sev, min Severity) bool {
-	order := map[Severity]int{
-		SeverityDebug:   0,
-		SeverityInfo:    1,
-		SeverityWarning: 2,
-		SeverityError:   3,
+	if min == "" {
+		return true
 	}
-	return order[sev] >= order[min]
+
+	order := map[Severity]int{
+		SeverityDebug:    0,
+		SeverityInfo:     1,
+		SeverityWarning:  2,
+		SeverityError:    3,
+		SeverityCritical: 4,
+	}
+
+	sevRank, ok := order[sev]
+	if !ok {
+		return false
+	}
+	minRank, ok := order[min]
+	if !ok {
+		return false
+	}
+	return sevRank >= minRank
 }
 
 // actionabilityMeetsMinimum checks if actionability meets the minimum threshold.

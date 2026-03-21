@@ -46,6 +46,17 @@ func NewWebhookEvent(eventType, session, pane, agent, message string, details ma
 		Pane:    pane,
 		Agent:   agent,
 		Message: message,
-		Details: details,
+		Details: cloneStringMap(details),
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
