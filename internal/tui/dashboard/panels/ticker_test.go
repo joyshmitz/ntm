@@ -443,3 +443,34 @@ func TestTickerPanelScrollText(t *testing.T) {
 		t.Error("expected different scroll positions to produce different results")
 	}
 }
+
+func TestTickerPanelViewShowsOverflowBadge(t *testing.T) {
+	panel := NewTickerPanel()
+	panel.SetSize(32, 1)
+	panel.SetAnimTick(14)
+	panel.SetData(TickerData{
+		TotalAgents:      9,
+		ActiveAgents:     7,
+		ClaudeCount:      3,
+		CodexCount:       3,
+		GeminiCount:      3,
+		CriticalAlerts:   2,
+		WarningAlerts:    4,
+		ReadyBeads:       11,
+		InProgressBeads:  7,
+		BlockedBeads:     3,
+		UnreadMessages:   5,
+		ActiveLocks:      2,
+		MailConnected:    true,
+		CheckpointCount:  4,
+		CheckpointStatus: "recent",
+		BugsCritical:     2,
+		BugsWarning:      5,
+		BugsScanned:      true,
+	})
+
+	view := panel.View()
+	if !strings.Contains(view, "<>") || !strings.Contains(view, "%") {
+		t.Fatalf("expected overflowing ticker to include progress badge, got %q", view)
+	}
+}

@@ -193,3 +193,40 @@ func TestScrollablePanelEmptyContent(t *testing.T) {
 		t.Error("should not need scrolling for empty content")
 	}
 }
+
+func TestScrollablePanelRenderWithIndicatorsIncludesPercentBadge(t *testing.T) {
+	sp := NewScrollablePanel(24, 4)
+	sp.SetContent(strings.Repeat("line\n", 20))
+
+	rendered := sp.RenderWithIndicators(24)
+	if !strings.Contains(rendered, "%") {
+		t.Fatalf("expected RenderWithIndicators to include percent badge, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "▼") {
+		t.Fatalf("expected RenderWithIndicators to include scroll direction, got %q", rendered)
+	}
+}
+
+func TestScrollablePanelClampsInvalidDimensions(t *testing.T) {
+	sp := NewScrollablePanel(0, -2)
+	if sp.Width() != 1 {
+		t.Fatalf("Width() = %d, want 1", sp.Width())
+	}
+	if sp.Height() != 1 {
+		t.Fatalf("Height() = %d, want 1", sp.Height())
+	}
+
+	sp.SetContent(strings.Repeat("line\n", 5))
+	sp.SetSize(-4, 0)
+	if sp.Width() != 1 {
+		t.Fatalf("Width() after SetSize = %d, want 1", sp.Width())
+	}
+	if sp.Height() != 1 {
+		t.Fatalf("Height() after SetSize = %d, want 1", sp.Height())
+	}
+
+	rendered := sp.RenderWithIndicators(0)
+	if rendered == "" {
+		t.Fatal("expected RenderWithIndicators to render with clamped width")
+	}
+}

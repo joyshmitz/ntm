@@ -145,6 +145,16 @@ func (m Model) tick() tea.Cmd {
 	})
 }
 
+func (m Model) toastHistoryShortcutAvailable() bool {
+	if m.focusedPanel == PanelBeads {
+		return false
+	}
+	if m.focusedPanel == PanelSidebar && m.timelinePanel != nil && m.timelinePanel.IsFocused() {
+		return false
+	}
+	return true
+}
+
 // getTickInterval returns the appropriate tick interval based on activity state
 func (m Model) getTickInterval() time.Duration {
 	baseTick := m.baseTick
@@ -170,6 +180,72 @@ func (m Model) getTickInterval() time.Duration {
 	default:
 		return baseTick
 	}
+}
+
+const velocityHistoryLimit = 30
+
+func (m *Model) recordVelocitySnapshot() {
+	if m == nil {
+		return
+	}
+
+	total := 0.0
+	byTypeTotals := make(map[string]float64)
+	for _, pane := range m.panes {
+		ps, ok := m.paneStatus[pane.Index]
+		if !ok || ps.TokenVelocity <= 0 {
+			continue
+		}
+		total += ps.TokenVelocity
+		byTypeTotals[string(pane.Type)] += ps.TokenVelocity
+	}
+
+	m.aggregateVelocityHistory = appendVelocitySample(m.aggregateVelocityHistory, total, velocityHistoryLimit)
+	if m.velocityByType == nil {
+		m.velocityByType = make(map[string][]float64)
+	}
+
+	keys := map[string]struct{}{
+		string(tmux.AgentClaude):   {},
+		string(tmux.AgentCodex):    {},
+		string(tmux.AgentGemini):   {},
+		string(tmux.AgentCursor):   {},
+		string(tmux.AgentWindsurf): {},
+		string(tmux.AgentAider):    {},
+		string(tmux.AgentOllama):   {},
+		string(tmux.AgentUser):     {},
+		string(tmux.AgentUnknown):  {},
+	}
+	for key := range m.velocityByType {
+		keys[key] = struct{}{}
+	}
+	for key := range byTypeTotals {
+		keys[key] = struct{}{}
+	}
+
+	for key := range keys {
+		m.velocityByType[key] = appendVelocitySample(m.velocityByType[key], byTypeTotals[key], velocityHistoryLimit)
+	}
+}
+
+func appendVelocitySample(history []float64, sample float64, limit int) []float64 {
+	history = append(history, sample)
+	if limit > 0 && len(history) > limit {
+		history = history[len(history)-limit:]
+	}
+	return history
+}
+
+func (m Model) currentAggregateVelocity() float64 {
+	if len(m.aggregateVelocityHistory) > 0 {
+		return m.aggregateVelocityHistory[len(m.aggregateVelocityHistory)-1]
+	}
+
+	total := 0.0
+	for _, ps := range m.paneStatus {
+		total += ps.TokenVelocity
+	}
+	return total
 }
 
 // fetchHealthStatus performs the health check via bv
@@ -1475,6 +1551,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.healthMessage = "Copied prompt to clipboard"
 		return m, nil
 
+	// [tui-upgrade: bd-uz09d] Handle spawn wizard completion
+	case panels.SpawnWizardDoneMsg:
+		m.showSpawnWizard = false
+		m.spawnWizard = nil
+		if msg.Cancelled {
+			m.healthMessage = "Spawn cancelled"
+			return m, nil
+		}
+		if !msg.Result.Confirmed {
+			m.healthMessage = "Spawn cancelled"
+			return m, nil
+		}
+		total := msg.Result.CCCount + msg.Result.CodCount + msg.Result.GmiCount
+		m.healthMessage = fmt.Sprintf("Adding %d agent(s)...", total)
+		if m.toasts != nil {
+			m.toasts.PushPersistent(spawnWizardProgressToastID, m.healthMessage, components.ToastInfo)
+		}
+		return m, m.runSpawnWizardAdd(msg.Result)
+
+	case SpawnWizardExecResultMsg:
+		if m.toasts != nil {
+			m.toasts.Dismiss(spawnWizardProgressToastID)
+		}
+		if msg.Err != nil {
+			m.healthMessage = msg.Err.Error()
+			if summary := summarizeSpawnWizardOutput(msg.Output); summary != "" {
+				m.healthMessage = summary
+			}
+			if m.toasts != nil {
+				m.toasts.Push(components.Toast{
+					ID:      "spawn-failed",
+					Message: m.healthMessage,
+					Level:   components.ToastError,
+				})
+			}
+			return m, nil
+		}
+
+		m.healthMessage = fmt.Sprintf("Added %d agent(s)", msg.Added)
+		if summary := summarizeSpawnWizardOutput(msg.Output); summary != "" {
+			m.healthMessage = summary
+		}
+		if m.toasts != nil {
+			m.toasts.Push(components.Toast{
+				ID:      "spawn-complete",
+				Message: fmt.Sprintf("Added %d agent(s)", msg.Added),
+				Level:   components.ToastSuccess,
+			})
+		}
+		return m, tea.Batch(m.fullRefresh(true)...)
+
 	case BeadsUpdateMsg:
 		if !m.acceptUpdate(refreshBeads, msg.Gen) {
 			return m, nil
@@ -1987,6 +2114,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ps.ContextLimit = contextInfo.ContextLimit
 					ps.ContextPercent = contextInfo.UsagePercent
 					ps.ContextModel = modelName
+
+					// [tui-upgrade: bd-3btd6] Update context history ring buffer for sparkline
+					const maxHistoryLen = 12
+					ps.ContextHistory = append(ps.ContextHistory, contextInfo.UsagePercent)
+					if len(ps.ContextHistory) > maxHistoryLen {
+						ps.ContextHistory = ps.ContextHistory[len(ps.ContextHistory)-maxHistoryLen:]
+					}
 				}
 
 				// Compaction check
@@ -2001,6 +2135,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				m.paneStatus[data.PaneIndex] = ps
 			}
+			m.recordVelocitySnapshot()
 			if timelineUpdated {
 				m.refreshTimelinePanel()
 			}
@@ -2167,6 +2302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		m.recordVelocitySnapshot()
 		if timelineUpdated {
 			m.refreshTimelinePanel()
 		}
@@ -2565,6 +2701,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.showToastHistory {
+			if msg.String() == "esc" || key.Matches(msg, dashKeys.ToastHistory) {
+				m.showToastHistory = false
+				return m, nil
+			}
+			if key.Matches(msg, dashKeys.ToastDismiss) && m.toasts != nil {
+				m.toasts.DismissNewest()
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// [tui-upgrade: bd-uz09d] Handle spawn wizard overlay input
+		if m.showSpawnWizard && m.spawnWizard != nil {
+			updated, cmd := m.spawnWizard.Update(msg)
+			m.spawnWizard = updated.(*panels.SpawnWizard)
+			cmds = append(cmds, cmd)
+			return m, tea.Batch(cmds...)
+		}
+
 		if m.showCassSearch {
 			if msg.String() == "esc" {
 				m.showCassSearch = false
@@ -2577,7 +2733,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.exitPopupOverlay()
 		}
 
-		if m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering {
+		if key.Matches(msg, dashKeys.ViewToggle) && m.focusedPanel == PanelPaneList && m.tier >= layout.TierSplit {
+			if !m.showTableView {
+				m.paneList.ResetFilter()
+			}
+			m.showTableView = !m.showTableView
+			if m.showTableView && m.paneTable == nil {
+				m.paneTable = components.NewPaneTable(m.theme)
+			}
+			m.paneList.Select(m.cursor)
+			return m, nil
+		}
+
+		if !m.showTableView && m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering {
 			var cmd tea.Cmd
 			m.paneList, cmd = m.paneList.Update(msg)
 			m.syncCursorFromPaneList()
@@ -2588,6 +2756,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 			return m, nil
+		}
+
+		if key.Matches(msg, dashKeys.ToastHistory) && m.toastHistoryShortcutAvailable() {
+			m.showToastHistory = !m.showToastHistory
+			return m, nil
+		}
+
+		// [tui-upgrade: bd-uz09d] Open spawn wizard with 'w' key
+		if key.Matches(msg, dashKeys.SpawnWizard) {
+			m.showSpawnWizard = true
+			m.spawnWizard = panels.NewSpawnWizard(m.session, m.width, m.height)
+			return m, m.spawnWizard.Init()
 		}
 
 		switch {
@@ -2683,6 +2863,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Create a new checkpoint for the session
 			return m, m.createCheckpointCmd()
 
+		case key.Matches(msg, dashKeys.ToastDismiss):
+			if m.toasts != nil {
+				m.toasts.DismissNewest()
+			}
+			return m, nil
+
 		case key.Matches(msg, dashKeys.Zoom):
 			if (m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail) && len(m.panes) > 0 && m.cursor < len(m.panes) {
 				return m, m.handlePaneZoom(m.panes[m.cursor])
@@ -2726,7 +2912,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch m.focusedPanel {
 		case PanelPaneList:
-			if !paneListKeyHandled {
+			if !paneListKeyHandled && !m.showTableView {
 				var cmd tea.Cmd
 				m.paneList, cmd = m.paneList.Update(msg)
 				m.syncCursorFromPaneList()
@@ -2909,6 +3095,9 @@ func (m *Model) seedInitialPanes(panesWithActivity []tmux.PaneActivity) {
 	})
 
 	m.panes = seeded
+	if m.historyPanel != nil {
+		m.historyPanel.SetPanes(m.panes)
+	}
 	m.initialPaneSnapshotDone = true
 	m.updateStats()
 	_ = m.rebuildPaneList()
@@ -4747,17 +4936,45 @@ func (m *Model) renderPaneList(width int) string {
 	t := m.theme
 	var lines []string
 
-	// Calculate layout dimensions
-	dims := CalculateLayout(width, 1)
-
-	// Header row
-	lines = append(lines, RenderTableHeader(dims, t))
-
 	// Activity summary line (computed from items for consistency)
 	rows := BuildPaneTableRows(m.panes, m.agentStatuses, m.paneStatus, &m.beadsSummary, m.fileChanges, m.healthStates, m.animTick, t)
 	if summary := activitySummaryLine(rows, t); summary != "" {
 		lines = append(lines, " "+summary)
 	}
+
+	if m.showTableView && m.tier >= layout.TierSplit && m.paneTable != nil {
+		tableRows := make([]components.PaneTableRow, 0, len(rows))
+		for _, row := range rows {
+			model := row.Model
+			if model == "" {
+				model = row.ModelVariant
+			}
+			tableRows = append(tableRows, components.PaneTableRow{
+				PaneIndex:  row.Index,
+				Type:       row.Type,
+				Status:     row.Status,
+				ContextPct: row.ContextPct,
+				Model:      model,
+				Command:    row.Command,
+			})
+		}
+
+		tableHeight := len(tableRows) + 1
+		if tableHeight < 2 {
+			tableHeight = 2
+		}
+		m.paneTable.SetSize(width, tableHeight)
+		m.paneTable.SetRows(tableRows)
+		m.paneTable.Select(m.cursor)
+		lines = append(lines, m.paneTable.View())
+		return strings.Join(lines, "\n")
+	}
+
+	// Calculate layout dimensions
+	dims := CalculateLayout(width, 1)
+
+	// Header row
+	lines = append(lines, RenderTableHeader(dims, t))
 
 	// Update delegate dimensions and tick for this render
 	m.paneDelegate.SetDims(dims)

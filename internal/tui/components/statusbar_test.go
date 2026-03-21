@@ -113,6 +113,25 @@ func TestRenderStatusBar_FocusedPanel(t *testing.T) {
 	}
 }
 
+func TestRenderStatusBar_VelocitySparkline(t *testing.T) {
+	got := RenderStatusBar(StatusBarOptions{
+		Width:           120,
+		Session:         "s",
+		FocusedPanel:    "Detail",
+		CurrentVelocity: 240,
+		VelocityHistory: []float64{80, 120, 160, 200, 240},
+	})
+	if !strings.Contains(got, "Detail") {
+		t.Fatal("expected focused panel name in output")
+	}
+	if !strings.Contains(got, "tpm") {
+		t.Fatal("expected tpm sparkline label in output")
+	}
+	if !strings.Contains(got, "240") {
+		t.Fatal("expected current velocity in output")
+	}
+}
+
 func TestRenderStatusBar_PausedIndicator(t *testing.T) {
 	got := RenderStatusBar(StatusBarOptions{
 		Width:   80,
@@ -148,11 +167,22 @@ func TestRenderStatusBar_NarrowWidth(t *testing.T) {
 	if borderWidth > 10 {
 		t.Errorf("border width %d exceeds requested width 10", borderWidth)
 	}
+	barWidth := lipgloss.Width(lines[1])
+	if barWidth > 10 {
+		t.Errorf("bar width %d exceeds requested width 10", barWidth)
+	}
 }
 
 func TestRenderStatusBar_NegativeWidth(t *testing.T) {
 	got := RenderStatusBar(StatusBarOptions{Width: -1})
 	if got != "" {
 		t.Errorf("expected empty string for negative width, got %q", got)
+	}
+}
+
+func TestSparklineWithLabel_RespectsRequestedWidth(t *testing.T) {
+	got := SparklineWithLabel("tpm", []float64{10, 20, 30, 40}, 6, "240")
+	if width := lipgloss.Width(got); width > 6 {
+		t.Fatalf("SparklineWithLabel width = %d, want <= 6 (output=%q)", width, got)
 	}
 }

@@ -150,3 +150,38 @@ func TestAttentionPanelSelectNearestCursor(t *testing.T) {
 		t.Fatalf("selected item = %+v, want nearest newer cursor 44", got)
 	}
 }
+
+func TestAttentionPanelScrollsSelectedItemIntoView(t *testing.T) {
+	panel := NewAttentionPanel()
+	panel.SetSize(40, 10)
+	panel.Focus()
+
+	items := make([]AttentionItem, 0, 8)
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		items = append(items, AttentionItem{
+			Summary:       "item",
+			Actionability: robot.ActionabilityInteresting,
+			Timestamp:     now.Add(time.Duration(i) * time.Minute),
+			SourcePane:    i,
+			SourceAgent:   "codex",
+			Cursor:        int64(i + 1),
+		})
+	}
+	panel.SetData(items, true)
+
+	for i := 0; i < len(items)-1; i++ {
+		panel.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	view := panel.View()
+
+	if panel.scroll == nil {
+		t.Fatal("expected scroll panel to be initialized")
+	}
+	if got := panel.scroll.YOffset(); got == 0 {
+		t.Fatalf("expected scroll offset to move for deep selection, got %d", got)
+	}
+	if !strings.Contains(view, "%") {
+		t.Fatalf("expected attention view to include scroll percent badge, got %q", view)
+	}
+}

@@ -472,6 +472,35 @@ func TestHistoryPanelFocusedBorderStyle(t *testing.T) {
 	}
 }
 
+func TestHistoryPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewHistoryPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Fatal("expected history panel to manage its own height")
+	}
+}
+
+func TestHistoryPanelViewShowsScrollFooterWhenOverflowing(t *testing.T) {
+	panel := NewHistoryPanel()
+	panel.SetSize(80, 10)
+
+	entries := make([]history.HistoryEntry, 0, 20)
+	for i := 0; i < 20; i++ {
+		entries = append(entries, history.HistoryEntry{
+			ID:        "entry-id",
+			Prompt:    "prompt",
+			Targets:   []string{"cc_1"},
+			Success:   true,
+			Timestamp: time.Now().UTC(),
+		})
+	}
+	panel.SetEntries(entries, nil)
+
+	view := panel.View()
+	if !strings.Contains(view, "▼") {
+		t.Fatalf("expected overflowing history panel to show scroll footer, got %q", view)
+	}
+}
+
 func TestHistoryEntryStruct(t *testing.T) {
 	entry := history.HistoryEntry{
 		ID:      "test-entry-id",

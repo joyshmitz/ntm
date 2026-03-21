@@ -2,6 +2,7 @@
 package components
 
 import (
+	"math"
 	"strings"
 	"time"
 
@@ -61,6 +62,13 @@ type ToastManager struct {
 	seen    map[string]time.Time // Dedup: ID -> last seen time
 }
 
+type toastPlacement struct {
+	id     string
+	y      int
+	height int
+	toast  Toast
+}
+
 // NewToastManager creates a new toast manager.
 func NewToastManager() *ToastManager {
 	return &ToastManager{
@@ -109,12 +117,15 @@ func (tm *ToastManager) Push(toast Toast) {
 	if len(tm.toasts) > MaxToasts {
 		tm.toasts = tm.toasts[len(tm.toasts)-MaxToasts:]
 	}
+
+	tm.updateStackTargets()
 }
 
 // Tick prunes expired toasts and updates spring animations. Call on each dashboard tick.
 func (tm *ToastManager) Tick() {
 	now := time.Now()
 	reducedMotion := styles.ReducedMotionEnabled()
+	layoutDirty := false
 
 	// Update spring animations for all toasts
 	if !reducedMotion {
@@ -145,6 +156,7 @@ func (tm *ToastManager) Tick() {
 			// Start dismiss animation and add to history
 			t.dismissed = true
 			tm.addToHistory(t)
+			layoutDirty = true
 		}
 
 		// Reduced motion suppresses slide animations, so dismissed toasts should
@@ -158,6 +170,9 @@ func (tm *ToastManager) Tick() {
 		}
 	}
 	tm.toasts = active
+	if layoutDirty {
+		tm.updateStackTargets()
+	}
 
 	// Clean old dedup entries
 	for id, seen := range tm.seen {
@@ -204,6 +219,20 @@ func (tm *ToastManager) Dismiss(id string) bool {
 	return false
 }
 
+// DismissNewest dismisses the most recently added active toast.
+func (tm *ToastManager) DismissNewest() bool {
+	for i := len(tm.toasts) - 1; i >= 0; i-- {
+		if tm.toasts[i].dismissed {
+			continue
+		}
+		tm.toasts[i].dismissed = true
+		tm.addToHistory(tm.toasts[i])
+		tm.updateStackTargets()
+		return true
+	}
+	return false
+}
+
 // addToHistory adds a dismissed toast to the history ring buffer.
 func (tm *ToastManager) addToHistory(t Toast) {
 	tm.history = append(tm.history, t)
@@ -214,17 +243,42 @@ func (tm *ToastManager) addToHistory(t Toast) {
 
 // updateStackTargets recalculates Y target positions for remaining toasts.
 func (tm *ToastManager) updateStackTargets() {
-	// Each toast is ~3 lines tall; dismissed toasts leave gaps that animate closed
+	currentY := 0.0
 	for i := range tm.toasts {
-		if !tm.toasts[i].dismissed {
-			tm.toasts[i].targetY = 0 // All active toasts target Y=0 in their slot
+		if tm.toasts[i].dismissed {
+			continue
 		}
+		tm.toasts[i].targetY = currentY
+		// Newly added toasts should start in the correct vertical slot while
+		// still keeping their horizontal slide-in animation.
+		if styles.ReducedMotionEnabled() {
+			tm.toasts[i].offsetY = currentY
+			tm.toasts[i].offsetYVel = 0
+		} else if tm.toasts[i].offsetY == 0 && tm.toasts[i].offsetYVel == 0 && currentY > 0 {
+			tm.toasts[i].offsetY = currentY
+		}
+		currentY += float64(toastHeight(tm.toasts[i]))
 	}
 }
 
 // History returns the dismissed toast history (most recent last).
 func (tm *ToastManager) History() []Toast {
 	return tm.history
+}
+
+// RecentHistory returns the most recent dismissed toasts first.
+func (tm *ToastManager) RecentHistory(limit int) []Toast {
+	if len(tm.history) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(tm.history) {
+		limit = len(tm.history)
+	}
+	recent := make([]Toast, 0, limit)
+	for i := len(tm.history) - 1; i >= 0 && len(recent) < limit; i-- {
+		recent = append(recent, tm.history[i])
+	}
+	return recent
 }
 
 // HistoryCount returns the number of toasts in history.
@@ -284,17 +338,12 @@ func (tm *ToastManager) ToastAtPosition(yOffset int) string {
 		return ""
 	}
 
-	// Each toast occupies ~3 lines (1 content + 2 border/padding), or 4 with progress bar
-	currentY := 0
-	for _, t := range tm.toasts {
-		toastHeight := 3
-		if t.Progress > 0 {
-			toastHeight = 4 // Extra line for progress bar
+	placements := tm.placements()
+	for i := len(placements) - 1; i >= 0; i-- {
+		p := placements[i]
+		if yOffset >= p.y && yOffset < p.y+p.height {
+			return p.id
 		}
-		if yOffset >= currentY && yOffset < currentY+toastHeight {
-			return t.ID
-		}
-		currentY += toastHeight
 	}
 	return ""
 }
@@ -313,11 +362,9 @@ func (tm *ToastManager) DismissAll() {
 // ToastStackHeight returns the total rendered height of the toast stack.
 func (tm *ToastManager) ToastStackHeight() int {
 	height := 0
-	for _, t := range tm.toasts {
-		if t.Progress > 0 {
-			height += 4 // Content + progress bar + borders
-		} else {
-			height += 3 // Content + borders
+	for _, placement := range tm.placements() {
+		if end := placement.y + placement.height; end > height {
+			height = end
 		}
 	}
 	return height
@@ -330,6 +377,62 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 		return ""
 	}
 
+	placements := tm.placements()
+	if len(placements) == 0 {
+		return ""
+	}
+
+	height := tm.ToastStackHeight()
+	if height <= 0 {
+		return ""
+	}
+	canvas := make([]string, height)
+	for _, placement := range placements {
+		lines := strings.Split(renderToastBox(placement.toast, maxWidth), "\n")
+		for i, line := range lines {
+			row := placement.y + i
+			if row < 0 || row >= len(canvas) {
+				continue
+			}
+			canvas[row] = line
+		}
+	}
+
+	return strings.Join(canvas, "\n")
+}
+
+func (tm *ToastManager) placements() []toastPlacement {
+	if len(tm.toasts) == 0 {
+		return nil
+	}
+	reducedMotion := styles.ReducedMotionEnabled()
+	placements := make([]toastPlacement, 0, len(tm.toasts))
+	for _, toast := range tm.toasts {
+		y := toast.offsetY
+		if reducedMotion {
+			y = toast.targetY
+		}
+		if y < 0 {
+			y = 0
+		}
+		placements = append(placements, toastPlacement{
+			id:     toast.ID,
+			y:      int(math.Round(y)),
+			height: toastHeight(toast),
+			toast:  toast,
+		})
+	}
+	return placements
+}
+
+func toastHeight(toast Toast) int {
+	if toast.Progress > 0 {
+		return 4
+	}
+	return 3
+}
+
+func renderToastBox(toast Toast, maxWidth int) string {
 	t := theme.Current()
 	toastWidth := maxWidth
 	if toastWidth > 60 {
@@ -339,116 +442,102 @@ func (tm *ToastManager) RenderToasts(maxWidth int) string {
 		toastWidth = 20
 	}
 
-	var rendered []string
-	for _, toast := range tm.toasts {
-		var bgColor, fgColor, iconColor lipgloss.Color
-		var icon string
+	var bgColor, fgColor, iconColor lipgloss.Color
+	var icon string
 
-		switch toast.Level {
-		case ToastSuccess:
-			bgColor = t.Surface0
-			fgColor = t.Green
-			iconColor = t.Green
-			icon = "✓"
-		case ToastWarning:
-			bgColor = t.Surface0
-			fgColor = t.Yellow
-			iconColor = t.Yellow
-			icon = "⚠"
-		case ToastError:
-			bgColor = t.Surface0
-			fgColor = t.Red
-			iconColor = t.Red
-			icon = "✗"
-		default: // ToastInfo
-			bgColor = t.Surface0
-			fgColor = t.Blue
-			iconColor = t.Blue
-			icon = "ℹ"
-		}
-
-		// Calculate remaining time for fade effect
-		elapsed := time.Since(toast.CreatedAt)
-		dur := toast.Duration
-		if dur == 0 {
-			dur = DefaultToastDuration
-		}
-		remaining := dur - elapsed
-
-		// Dim the toast as it approaches expiry (last 25%)
-		if remaining < dur/4 {
-			fgColor = t.Overlay
-			iconColor = t.Overlay
-		}
-
-		iconStyled := lipgloss.NewStyle().
-			Foreground(iconColor).
-			Bold(true).
-			Render(icon)
-
-		// Truncate message to fit by visual width (not rune count),
-		// so wide characters (CJK, emojis) are handled correctly.
-		msg := toast.Message
-		msgMaxWidth := toastWidth - 6 // icon + padding + border
-		if msgMaxWidth < 10 {
-			msgMaxWidth = 10
-		}
-		if lipgloss.Width(msg) > msgMaxWidth {
-			runes := []rune(msg)
-			truncated := make([]rune, 0, len(runes))
-			visWidth := 0
-			for _, r := range runes {
-				rw := lipgloss.Width(string(r))
-				if visWidth+rw+1 > msgMaxWidth { // +1 for "…"
-					break
-				}
-				truncated = append(truncated, r)
-				visWidth += rw
-			}
-			msg = string(truncated) + "…"
-		}
-
-		msgStyled := lipgloss.NewStyle().
-			Foreground(fgColor).
-			Render(msg)
-
-		content := iconStyled + " " + msgStyled
-
-		// Add progress bar for progress toasts
-		if toast.Progress > 0 {
-			barWidth := toastWidth - 8 // Account for padding and borders
-			if barWidth < 10 {
-				barWidth = 10
-			}
-			filled := int(float64(barWidth) * toast.Progress)
-			if filled > barWidth {
-				filled = barWidth
-			}
-			empty := barWidth - filled
-			progressBar := lipgloss.NewStyle().Foreground(fgColor).Render(strings.Repeat("█", filled)) +
-				lipgloss.NewStyle().Foreground(t.Surface1).Render(strings.Repeat("░", empty))
-			content = content + "\n" + progressBar
-		}
-
-		toastBox := lipgloss.NewStyle().
-			Background(bgColor).
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(fgColor).
-			Padding(0, 1).
-			Width(toastWidth).
-			Render(content)
-
-		// Apply horizontal offset from spring animation
-		if toast.offsetX > 0.5 {
-			// Pad with spaces to create the offset effect
-			offset := int(toast.offsetX)
-			if offset > 0 {
-				toastBox = strings.Repeat(" ", offset) + toastBox
-			}
-		}
-
-		rendered = append(rendered, toastBox)
+	switch toast.Level {
+	case ToastSuccess:
+		bgColor = t.Surface0
+		fgColor = t.Green
+		iconColor = t.Green
+		icon = "✓"
+	case ToastWarning:
+		bgColor = t.Surface0
+		fgColor = t.Yellow
+		iconColor = t.Yellow
+		icon = "⚠"
+	case ToastError:
+		bgColor = t.Surface0
+		fgColor = t.Red
+		iconColor = t.Red
+		icon = "✗"
+	default:
+		bgColor = t.Surface0
+		fgColor = t.Blue
+		iconColor = t.Blue
+		icon = "ℹ"
 	}
 
-	return strings.Join(rendered, "\n")
+	elapsed := time.Since(toast.CreatedAt)
+	dur := toast.Duration
+	if dur == 0 {
+		dur = DefaultToastDuration
+	}
+	remaining := dur - elapsed
+	if remaining < dur/4 {
+		fgColor = t.Overlay
+		iconColor = t.Overlay
+	}
+
+	iconStyled := lipgloss.NewStyle().
+		Foreground(iconColor).
+		Bold(true).
+		Render(icon)
+
+	msg := toast.Message
+	msgMaxWidth := toastWidth - 6
+	if msgMaxWidth < 10 {
+		msgMaxWidth = 10
+	}
+	if lipgloss.Width(msg) > msgMaxWidth {
+		runes := []rune(msg)
+		truncated := make([]rune, 0, len(runes))
+		visWidth := 0
+		for _, r := range runes {
+			rw := lipgloss.Width(string(r))
+			if visWidth+rw+1 > msgMaxWidth {
+				break
+			}
+			truncated = append(truncated, r)
+			visWidth += rw
+		}
+		msg = string(truncated) + "…"
+	}
+
+	msgStyled := lipgloss.NewStyle().
+		Foreground(fgColor).
+		Render(msg)
+
+	content := iconStyled + " " + msgStyled
+	if toast.Progress > 0 {
+		barWidth := toastWidth - 8
+		if barWidth < 10 {
+			barWidth = 10
+		}
+		filled := int(float64(barWidth) * toast.Progress)
+		if filled > barWidth {
+			filled = barWidth
+		}
+		empty := barWidth - filled
+		progressBar := lipgloss.NewStyle().Foreground(fgColor).Render(strings.Repeat("█", filled)) +
+			lipgloss.NewStyle().Foreground(t.Surface1).Render(strings.Repeat("░", empty))
+		content += "\n" + progressBar
+	}
+
+	toastBox := lipgloss.NewStyle().
+		Background(bgColor).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(fgColor).
+		Padding(0, 1).
+		Width(toastWidth).
+		Render(content)
+
+	if toast.offsetX > 0.5 {
+		offset := int(toast.offsetX)
+		if offset > 0 {
+			toastBox = strings.Repeat(" ", offset) + toastBox
+		}
+	}
+
+	return toastBox
 }

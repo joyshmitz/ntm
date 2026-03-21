@@ -30,6 +30,10 @@ type KeyMap struct {
 	Diagnostics    key.Binding // 'd' to toggle diagnostics
 	ScanToggle     key.Binding // 'u' to toggle UBS scanning
 	Checkpoint     key.Binding // 'ctrl+k' to create checkpoint
+	ToastDismiss   key.Binding // 'ctrl+x' to dismiss newest toast
+	ToastHistory   key.Binding // 'n' to toggle toast history
+	SpawnWizard    key.Binding // 'w' to open spawn wizard [tui-upgrade: bd-uz09d]
+	ViewToggle     key.Binding // 'v' to toggle table/list view [tui-upgrade: bd-ijnu3]
 	Tab            key.Binding
 	ShiftTab       key.Binding
 	Num1           key.Binding
@@ -53,10 +57,10 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // Implements help.KeyMap interface.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Left, k.Right, k.Zoom},                    // Navigation
-		{k.Tab, k.ShiftTab, k.NextPanel, k.Send},                   // Panels & Actions
-		{k.Refresh, k.ContextRefresh, k.MailRefresh, k.CassSearch}, // Data
-		{k.Help, k.Quit, k.Pause, k.Diagnostics},                   // Control
+		{k.Up, k.Down, k.Left, k.Right, k.Zoom},                                  // Navigation
+		{k.Tab, k.ShiftTab, k.NextPanel, k.ViewToggle, k.Send},                   // Panels & Actions
+		{k.Refresh, k.ContextRefresh, k.MailRefresh, k.CassSearch},               // Data
+		{k.Help, k.Quit, k.Pause, k.Diagnostics, k.ToastDismiss, k.ToastHistory, k.SpawnWizard}, // Control
 	}
 }
 
@@ -96,6 +100,10 @@ var dashKeys = KeyMap{
 	Diagnostics:    key.NewBinding(key.WithKeys("d", "ctrl+d"), key.WithHelp("d/ctrl+d", "toggle diagnostics")),
 	ScanToggle:     key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "toggle UBS scan")),
 	Checkpoint:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "create checkpoint")),
+	ToastDismiss:   key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "dismiss toast")),
+	ToastHistory:   key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "toast history")),
+	SpawnWizard:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "spawn wizard")),
+	ViewToggle:     key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "toggle table view")),
 	Tab:            key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next panel")),
 	ShiftTab:       key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev panel")),
 	Num1:           key.NewBinding(key.WithKeys("1")),

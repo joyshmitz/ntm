@@ -1,6 +1,9 @@
 package panels
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewCostPanel(t *testing.T) {
 	panel := NewCostPanel()
@@ -80,5 +83,40 @@ func TestCostPanel_HasData(t *testing.T) {
 	panel.SetData(CostPanelData{DailyBudgetUSD: 50, BudgetUsedUSD: 1}, nil)
 	if !panel.HasData() {
 		t.Fatal("expected HasData=true when budget is set")
+	}
+}
+
+func TestCostPanelHandlesOwnHeight(t *testing.T) {
+	panel := NewCostPanel()
+	if !panel.HandlesOwnHeight() {
+		t.Fatal("expected cost panel to manage its own height")
+	}
+}
+
+func TestCostPanelViewShowsScrollIndicatorWhenOverflowing(t *testing.T) {
+	panel := NewCostPanel()
+	panel.SetSize(52, 10)
+
+	agents := make([]CostAgentRow, 0, 12)
+	for i := 0; i < 12; i++ {
+		agents = append(agents, CostAgentRow{
+			PaneTitle:    "proj__cc_agent",
+			InputTokens:  1000 + i,
+			OutputTokens: 500 + i,
+			CostUSD:      float64(12 - i),
+			Trend:        CostTrendUp,
+		})
+	}
+
+	panel.SetData(CostPanelData{
+		Agents:          agents,
+		SessionTotalUSD: 42,
+		DailyBudgetUSD:  100,
+		BudgetUsedUSD:   42,
+	}, nil)
+
+	view := panel.View()
+	if !strings.Contains(view, "%") {
+		t.Fatalf("expected overflowing cost panel to show percent badge, got %q", view)
 	}
 }

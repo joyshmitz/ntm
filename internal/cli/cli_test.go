@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -124,6 +125,32 @@ func TestResolveRobotFormat_InvalidValueFallsBack(t *testing.T) {
 
 	if robot.OutputFormat != robot.FormatAuto {
 		t.Errorf("OutputFormat invalid = %q, want %q", robot.OutputFormat, robot.FormatAuto)
+	}
+}
+
+func TestIsSessionMissingError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "cant find session", err: os.ErrNotExist, want: false},
+		{name: "tmux cant find session", err: errors.New("can't find session: ntm"), want: true},
+		{name: "session not found", err: errors.New("session not found: ntm"), want: true},
+		{name: "has-session output", err: errors.New("tmux has-session -t ntm: exit status 1"), want: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSessionMissingError(tc.err); got != tc.want {
+				t.Fatalf("isSessionMissingError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

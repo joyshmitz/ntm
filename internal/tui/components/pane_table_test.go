@@ -1,0 +1,51 @@
+package components
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
+)
+
+func TestPaneTableViewIncludesColumnsAndRows(t *testing.T) {
+	table := NewPaneTable(theme.Current())
+	table.SetSize(80, 10) // wider/taller to ensure all columns and rows visible
+	table.SetRows([]PaneTableRow{
+		{PaneIndex: 1, Type: "cc", Status: "working", ContextPct: 72, Model: "sonnet", Command: "go test ./..."},
+		{PaneIndex: 2, Type: "cod", Status: "idle", ContextPct: 15, Model: "gpt-5.4", Command: "rg TODO"},
+	})
+	table.Select(1)
+
+	rendered := table.View()
+	for _, want := range []string{"Type", "Status", "Ctx%", "Command", "go test", "gpt-5.4"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("pane table view missing %q in %q", want, rendered)
+		}
+	}
+}
+
+func TestPaneTableTruncatesLongCommands(t *testing.T) {
+	table := NewPaneTable(theme.Current())
+	table.SetSize(60, 6) // wide enough for columns, narrow enough to truncate long command
+	table.SetRows([]PaneTableRow{
+		{
+			PaneIndex:  1,
+			Type:       "cc",
+			Status:     "rate_limited",
+			ContextPct: 91,
+			Model:      "claude-sonnet-4.5",
+			Command:    "this-is-a-very-long-command-that-should-not-fit-verbatim",
+		},
+	})
+
+	rendered := table.View()
+	if !strings.Contains(rendered, "RATE") {
+		t.Fatalf("expected abbreviated status label in %q", rendered)
+	}
+	if strings.Contains(rendered, "this-is-a-very-long-command-that-should-not-fit-verbatim") {
+		t.Fatalf("expected command truncation in %q", rendered)
+	}
+	if !strings.Contains(rendered, "…") {
+		t.Fatalf("expected ellipsis in %q", rendered)
+	}
+}

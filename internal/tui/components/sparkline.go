@@ -135,26 +135,69 @@ func SparklineStyled(values []float64, width int) string {
 // SparklineWithLabel renders a sparkline prefixed with a label and current value.
 // Example: "tpm ▁▂▃▅▇▆▅▃ 2400"
 func SparklineWithLabel(label string, values []float64, width int, currentValue string) string {
-	t := theme.Current()
-
-	labelStyled := lipgloss.NewStyle().
-		Foreground(t.Overlay).
-		Render(label)
-
-	valueStyled := lipgloss.NewStyle().
-		Foreground(t.Text).
-		Bold(true).
-		Render(currentValue)
-
-	// Calculate sparkline width after label and value
-	labelWidth := lipgloss.Width(labelStyled)
-	valueWidth := lipgloss.Width(valueStyled)
-	sparkWidth := width - labelWidth - valueWidth - 2 // 2 for spaces
-	if sparkWidth < 4 {
-		sparkWidth = 4
+	if width <= 0 {
+		return ""
 	}
 
-	spark := SparklineStyled(values, sparkWidth)
+	t := theme.Current()
 
-	return labelStyled + " " + spark + " " + valueStyled
+	labelStyle := lipgloss.NewStyle().
+		Foreground(t.Overlay)
+	valueStyle := lipgloss.NewStyle().
+		Foreground(t.Text).
+		Bold(true)
+
+	labelWidth := lipgloss.Width(label)
+	valueWidth := lipgloss.Width(currentValue)
+
+	switch {
+	case label == "" && currentValue == "":
+		return SparklineStyled(values, width)
+	case label == "":
+		if width <= valueWidth {
+			return valueStyle.Render(truncateCell(currentValue, width))
+		}
+		sparkWidth := width - valueWidth - 1
+		if sparkWidth < 1 {
+			return valueStyle.Render(truncateCell(currentValue, width))
+		}
+		spark := SparklineStyled(values, sparkWidth)
+		if spark == "" {
+			return valueStyle.Render(truncateCell(currentValue, width))
+		}
+		return spark + " " + valueStyle.Render(currentValue)
+	case currentValue == "":
+		if width <= labelWidth {
+			return labelStyle.Render(truncateCell(label, width))
+		}
+		sparkWidth := width - labelWidth - 1
+		if sparkWidth < 1 {
+			return labelStyle.Render(truncateCell(label, width))
+		}
+		spark := SparklineStyled(values, sparkWidth)
+		if spark == "" {
+			return labelStyle.Render(truncateCell(label, width))
+		}
+		return labelStyle.Render(label) + " " + spark
+	}
+
+	staticWidth := labelWidth + valueWidth + 2 // spaces around the sparkline
+	if width <= staticWidth {
+		if width <= valueWidth {
+			return valueStyle.Render(truncateCell(currentValue, width))
+		}
+		labelBudget := width - valueWidth - 1
+		if labelBudget < 1 {
+			return valueStyle.Render(truncateCell(currentValue, width))
+		}
+		return labelStyle.Render(truncateCell(label, labelBudget)) + " " + valueStyle.Render(currentValue)
+	}
+
+	sparkWidth := width - staticWidth
+	spark := SparklineStyled(values, sparkWidth)
+	if spark == "" {
+		return labelStyle.Render(truncateCell(label, width))
+	}
+
+	return labelStyle.Render(label) + " " + spark + " " + valueStyle.Render(currentValue)
 }

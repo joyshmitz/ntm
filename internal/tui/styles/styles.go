@@ -235,6 +235,9 @@ func GradientText(text string, colors ...string) string {
 
 // GradientBar creates a gradient-colored bar
 func GradientBar(width int, colors ...string) string {
+	if width <= 0 {
+		return ""
+	}
 	if len(colors) < 2 {
 		return strings.Repeat("█", width)
 	}
@@ -243,6 +246,9 @@ func GradientBar(width int, colors ...string) string {
 
 // GradientBorder creates a box with gradient border
 func GradientBorder(content string, width int, colors ...string) string {
+	if width < 4 {
+		return ""
+	}
 	if len(colors) < 2 {
 		colors = defaultGradient()
 	}
@@ -544,6 +550,9 @@ var HeavyBox = BoxChars{
 
 // RenderBox renders content inside a box
 func RenderBox(content string, width int, box BoxChars, borderColor lipgloss.Color) string {
+	if width < 4 {
+		return ""
+	}
 	style := lipgloss.NewStyle().Foreground(borderColor)
 
 	lines := strings.Split(content, "\n")
@@ -573,6 +582,9 @@ func RenderBox(content string, width int, box BoxChars, borderColor lipgloss.Col
 
 // Divider creates a styled divider line
 func Divider(width int, style string, color lipgloss.Color) string {
+	if width <= 0 {
+		return ""
+	}
 	var char string
 	switch style {
 	case "heavy":

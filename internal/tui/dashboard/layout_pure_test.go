@@ -637,6 +637,65 @@ func TestBuildPaneTableRows_FileChangesByPaneID(t *testing.T) {
 	}
 }
 
+func TestBuildPaneTableRows_ContextHistoryCopied(t *testing.T) {
+	t.Parallel()
+	th := theme.Current()
+
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, Type: tmux.AgentClaude, Title: "agent-a"},
+	}
+
+	sourceHistory := []float64{18, 27, 41, 56}
+	paneStatus := map[int]PaneStatus{
+		1: {
+			State:          "working",
+			ContextPercent: 56,
+			ContextHistory: append([]float64(nil), sourceHistory...),
+		},
+	}
+
+	rows := BuildPaneTableRows(panes, nil, paneStatus, nil, nil, nil, 0, th)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if len(rows[0].ContextHistory) != len(sourceHistory) {
+		t.Fatalf("len(rows[0].ContextHistory) = %d, want %d", len(rows[0].ContextHistory), len(sourceHistory))
+	}
+	for i, want := range sourceHistory {
+		if rows[0].ContextHistory[i] != want {
+			t.Fatalf("rows[0].ContextHistory[%d] = %v, want %v", i, rows[0].ContextHistory[i], want)
+		}
+	}
+
+	paneStatus[1].ContextHistory[0] = 99
+	if rows[0].ContextHistory[0] == 99 {
+		t.Fatal("expected row context history to be copied, not aliased")
+	}
+}
+
+func TestRenderPaneRow_ContextHistoryTriggersWideSecondLine(t *testing.T) {
+	t.Parallel()
+	th := theme.Current()
+
+	row := PaneTableRow{
+		Index:          1,
+		Type:           "cc",
+		Title:          "context-agent",
+		Status:         "working",
+		ContextPct:     72,
+		ContextHistory: []float64{18, 31, 46, 59, 72},
+	}
+	dims := CalculateLayout(160, 30)
+
+	rendered := status.StripANSI(RenderPaneRow(row, dims, th))
+	if !strings.Contains(rendered, "\n") {
+		t.Fatalf("expected wide row with context history to render a second line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "ctx") {
+		t.Fatalf("expected wide row to include context trend label, got %q", rendered)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // currentBeadForPane (75% covered — test nil beads edge case)
 // ---------------------------------------------------------------------------

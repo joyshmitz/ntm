@@ -77,6 +77,20 @@ func TestKeyMapFullHelp(t *testing.T) {
 			t.Errorf("FullHelp() navigation group missing %q key", want)
 		}
 	}
+
+	foundPaneView := false
+	for _, group := range groups {
+		for _, binding := range group {
+			for _, keyName := range binding.Keys() {
+				if keyName == "v" {
+					foundPaneView = true
+				}
+			}
+		}
+	}
+	if !foundPaneView {
+		t.Fatal("FullHelp() missing pane table toggle key 'v'")
+	}
 }
 
 // TestKeyMapBindingsHaveHelp verifies all returned bindings have help text.

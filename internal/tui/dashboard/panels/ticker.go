@@ -127,6 +127,9 @@ func (m *TickerPanel) View() string {
 	// Now style the visible portion
 	// We need to re-apply styling to the visible text
 	styledText := m.styleVisibleText(visiblePlain)
+	if badge := m.overflowBadge([]rune(plainText)); badge != "" {
+		styledText = m.attachOverflowBadge(styledText, badge)
+	}
 
 	// Style the ticker bar container
 	tickerStyle := lipgloss.NewStyle().
@@ -141,6 +144,45 @@ func (m *TickerPanel) View() string {
 	}
 
 	return tickerStyle.Render(styledText)
+}
+
+func (m *TickerPanel) overflowBadge(text []rune) string {
+	if len(text) <= m.width || m.width < 10 {
+		return ""
+	}
+
+	cycle := len(text) + 4
+	progress := 0
+	if cycle > 0 {
+		progress = (m.offset % cycle) * 100 / cycle
+	}
+
+	t := m.theme
+	return lipgloss.NewStyle().
+		Foreground(t.Base).
+		Background(t.Surface2).
+		Bold(true).
+		Padding(0, 1).
+		Render(fmt.Sprintf("<>%2d%%", progress))
+}
+
+func (m *TickerPanel) attachOverflowBadge(text, badge string) string {
+	badgeWidth := lipgloss.Width(badge)
+	if badgeWidth <= 0 || badgeWidth >= m.width {
+		return badge
+	}
+
+	available := m.width - badgeWidth - 1
+	if available < 1 {
+		return badge
+	}
+
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		lipgloss.NewStyle().Width(available).Render(text),
+		" ",
+		badge,
+	)
 }
 
 // buildPlainSegments creates plain text segments without ANSI styling

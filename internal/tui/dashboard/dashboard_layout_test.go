@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
+	"github.com/Dicklesworthstone/ntm/internal/tui/components"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
 )
@@ -853,6 +856,204 @@ func TestHelpOverlayToggle(t *testing.T) {
 			t.Error("help should still be open after pressing unrelated key")
 		}
 	})
+}
+
+func TestToastControls(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ctrl_x_dismisses_newest_toast", func(t *testing.T) {
+		t.Parallel()
+
+		m := newTestModel(120)
+		m.toasts.Push(components.Toast{ID: "oldest", Message: "one", Duration: 10 * time.Second})
+		m.toasts.Push(components.Toast{ID: "newest", Message: "two", Duration: 10 * time.Second})
+
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlX})
+		m = updated.(Model)
+
+		history := m.toasts.RecentHistory(1)
+		if len(history) != 1 || history[0].ID != "newest" {
+			t.Fatalf("expected newest toast dismissed, got %+v", history)
+		}
+	})
+
+	t.Run("n_toggles_toast_history_overlay", func(t *testing.T) {
+		t.Parallel()
+
+		m := newTestModel(120)
+		m.toasts.Push(components.Toast{ID: "toast-1", Message: "one", Duration: 10 * time.Second})
+		m.toasts.Dismiss("toast-1")
+
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		m = updated.(Model)
+		if !m.showToastHistory {
+			t.Fatal("expected toast history overlay to open")
+		}
+
+		view := m.View()
+		if !strings.Contains(view, "Toast History") {
+			t.Fatalf("expected toast history overlay in view, got:\n%s", view)
+		}
+
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = updated.(Model)
+		if m.showToastHistory {
+			t.Fatal("expected toast history overlay to close on esc")
+		}
+	})
+
+	t.Run("panel_local_n_keeps_history_overlay_closed", func(t *testing.T) {
+		t.Parallel()
+
+		m := newTestModel(120)
+		m.focusedPanel = PanelBeads
+		m.toasts.Push(components.Toast{ID: "toast-1", Message: "one", Duration: 10 * time.Second})
+		m.toasts.Dismiss("toast-1")
+
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		m = updated.(Model)
+		if m.showToastHistory {
+			t.Fatal("expected toast history overlay to stay closed when beads panel owns 'n'")
+		}
+	})
+}
+
+func TestDashboardSpawnWizardOpensOverlay(t *testing.T) {
+	m := newTestModel(140)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	if !next.showSpawnWizard {
+		t.Fatal("expected spawn wizard overlay to open")
+	}
+	if next.spawnWizard == nil {
+		t.Fatal("expected spawn wizard model to be initialized")
+	}
+	if cmd == nil {
+		t.Fatal("expected spawn wizard init command")
+	}
+	if !strings.Contains(status.StripANSI(next.View()), "Spawn Wizard") {
+		t.Fatalf("expected spawn wizard overlay in view, got:\n%s", next.View())
+	}
+}
+
+func TestDashboardSpawnWizardExecutesAddCommandOnConfirm(t *testing.T) {
+	oldRun := dashboardRunAddAgents
+	defer func() { dashboardRunAddAgents = oldRun }()
+
+	var (
+		gotProjectDir string
+		gotSession    string
+		gotResult     panels.SpawnWizardResult
+	)
+	dashboardRunAddAgents = func(ctx context.Context, projectDir, session string, result panels.SpawnWizardResult) (string, error) {
+		gotProjectDir = projectDir
+		gotSession = session
+		gotResult = result
+		return "added agents successfully", nil
+	}
+
+	m := newTestModel(140)
+	m.projectDir = "/tmp/ntm-project"
+	m.showSpawnWizard = true
+	m.spawnWizard = panels.NewSpawnWizard(m.session, m.width, m.height)
+
+	updated, cmd := m.Update(panels.SpawnWizardDoneMsg{
+		Result: panels.SpawnWizardResult{
+			CCCount:   1,
+			CodCount:  1,
+			Confirmed: true,
+		},
+	})
+	m = updated.(Model)
+
+	if m.showSpawnWizard {
+		t.Fatal("expected spawn wizard overlay to close after confirmation")
+	}
+	if cmd == nil {
+		t.Fatal("expected add command to be scheduled")
+	}
+	if m.toasts == nil || m.toasts.Count() == 0 {
+		t.Fatal("expected progress toast while add command runs")
+	}
+
+	msg := cmd()
+	execMsg, ok := msg.(SpawnWizardExecResultMsg)
+	if !ok {
+		t.Fatalf("command returned %T, want SpawnWizardExecResultMsg", msg)
+	}
+	if execMsg.Err != nil {
+		t.Fatalf("unexpected exec error: %v", execMsg.Err)
+	}
+
+	updated, refreshCmd := m.Update(execMsg)
+	m = updated.(Model)
+
+	if gotSession != "test" {
+		t.Fatalf("runner session = %q, want test", gotSession)
+	}
+	if gotProjectDir != "/tmp/ntm-project" {
+		t.Fatalf("runner projectDir = %q, want /tmp/ntm-project", gotProjectDir)
+	}
+	if gotResult.CCCount != 1 || gotResult.CodCount != 1 || gotResult.GmiCount != 0 {
+		t.Fatalf("runner result = %+v, want cc=1 cod=1 gmi=0", gotResult)
+	}
+	if m.healthMessage != "added agents successfully" {
+		t.Fatalf("healthMessage = %q, want add output summary", m.healthMessage)
+	}
+	if refreshCmd == nil {
+		t.Fatal("expected refresh command after successful add")
+	}
+}
+
+func TestDashboardSpawnWizardReportsAddFailure(t *testing.T) {
+	oldRun := dashboardRunAddAgents
+	defer func() { dashboardRunAddAgents = oldRun }()
+
+	dashboardRunAddAgents = func(ctx context.Context, projectDir, session string, result panels.SpawnWizardResult) (string, error) {
+		return "agent launch failed", errors.New("boom")
+	}
+
+	m := newTestModel(140)
+	m.showSpawnWizard = true
+	m.spawnWizard = panels.NewSpawnWizard(m.session, m.width, m.height)
+
+	updated, cmd := m.Update(panels.SpawnWizardDoneMsg{
+		Result: panels.SpawnWizardResult{
+			CCCount:   2,
+			Confirmed: true,
+		},
+	})
+	m = updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected add command to be scheduled")
+	}
+
+	msg := cmd()
+	execMsg, ok := msg.(SpawnWizardExecResultMsg)
+	if !ok {
+		t.Fatalf("command returned %T, want SpawnWizardExecResultMsg", msg)
+	}
+	if execMsg.Err == nil {
+		t.Fatal("expected execution error")
+	}
+
+	updated, followup := m.Update(execMsg)
+	m = updated.(Model)
+
+	if followup != nil {
+		t.Fatal("did not expect refresh command after failed add")
+	}
+	if !strings.Contains(m.healthMessage, "agent launch failed") {
+		t.Fatalf("healthMessage = %q, want output summary", m.healthMessage)
+	}
+	if m.toasts == nil || m.toasts.Count() == 0 {
+		t.Fatal("expected failure toast after add error")
+	}
 }
 
 func TestKeyboardNavigationCursorMovement(t *testing.T) {
@@ -2503,6 +2704,108 @@ func TestDashboardPaneListArrowKeysAdvanceSingleRow(t *testing.T) {
 	}
 	if got := m.paneList.Index(); got != 1 {
 		t.Fatalf("pane list selection after single Down = %d, want 1", got)
+	}
+}
+
+func TestDashboardPaneTableToggleSplitTier(t *testing.T) {
+	m := newTestModel(140)
+	m.focusedPanel = PanelPaneList
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 0, Title: "proj__cc_1", Type: tmux.AgentClaude, Variant: "sonnet", Command: "go test ./..."},
+		{ID: "pane-2", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex, Variant: "gpt-5.4", Command: "rg TODO"},
+	}
+	m.paneStatus = map[int]PaneStatus{
+		0: {State: "working", ContextPercent: 65},
+		1: {State: "idle", ContextPercent: 18},
+	}
+	_ = m.rebuildPaneList()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	m = next
+
+	if !m.showTableView {
+		t.Fatal("expected pane table toggle to enable on split tier")
+	}
+	if m.paneTable == nil {
+		t.Fatal("expected pane table to be initialized")
+	}
+
+	plain := status.StripANSI(m.renderPaneList(64))
+	for _, want := range []string{"Type", "Status", "Ctx%", "Command"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("pane table render missing %q in %q", want, plain)
+		}
+	}
+}
+
+func TestDashboardPaneTableToggleIgnoredOnNarrowTier(t *testing.T) {
+	m := newTestModel(100)
+	m.focusedPanel = PanelPaneList
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	if next.showTableView {
+		t.Fatal("expected pane table toggle to stay disabled below split tier")
+	}
+}
+
+func TestDashboardPaneTableBlocksHiddenListFiltering(t *testing.T) {
+	m := newTestModel(140)
+	m.focusedPanel = PanelPaneList
+	m.showTableView = true
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 0, Title: "proj__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-2", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex},
+	}
+	m.paneStatus = map[int]PaneStatus{
+		0: {State: "working"},
+		1: {State: "idle"},
+	}
+	_ = m.rebuildPaneList()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	if got := next.paneList.FilterState(); got == list.Filtering {
+		t.Fatalf("hidden pane list should not enter filter mode while table view is active; got %v", got)
+	}
+}
+
+func TestDashboardPaneTableToggleClearsActiveListFilter(t *testing.T) {
+	m := newTestModel(140)
+	m.focusedPanel = PanelPaneList
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 0, Title: "proj__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-2", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex},
+	}
+	m.paneStatus = map[int]PaneStatus{
+		0: {State: "working"},
+		1: {State: "idle"},
+	}
+	_ = m.rebuildPaneList()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(Model)
+	if got := m.paneList.FilterState(); got != list.Filtering {
+		t.Fatalf("expected list filtering before toggling table view, got %v", got)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = updated.(Model)
+	if !m.showTableView {
+		t.Fatal("expected pane table toggle to enable")
+	}
+	if got := m.paneList.FilterState(); got == list.Filtering {
+		t.Fatalf("expected table toggle to clear list filtering, got %v", got)
 	}
 }
 

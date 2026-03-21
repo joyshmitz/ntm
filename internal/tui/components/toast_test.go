@@ -137,6 +137,51 @@ func TestDismissNonexistentToast(t *testing.T) {
 	}
 }
 
+func TestDismissNewestTargetsMostRecentActiveToast(t *testing.T) {
+	t.Parallel()
+
+	tm := NewToastManager()
+	tm.Push(Toast{ID: "oldest", Message: "one", Duration: 10 * time.Second})
+	tm.Push(Toast{ID: "middle", Message: "two", Duration: 10 * time.Second})
+	tm.Push(Toast{ID: "newest", Message: "three", Duration: 10 * time.Second})
+
+	if !tm.DismissNewest() {
+		t.Fatal("expected DismissNewest to dismiss an active toast")
+	}
+
+	history := tm.RecentHistory(1)
+	if len(history) != 1 || history[0].ID != "newest" {
+		t.Fatalf("expected newest toast in history, got %+v", history)
+	}
+	if !tm.toasts[2].dismissed {
+		t.Fatal("expected newest toast to be marked dismissed")
+	}
+}
+
+func TestDismissNewestTargetsMostRecentAnonymousToast(t *testing.T) {
+	t.Parallel()
+
+	tm := NewToastManager()
+	tm.Push(Toast{Message: "one", Duration: 10 * time.Second})
+	tm.Push(Toast{Message: "two", Duration: 10 * time.Second})
+	tm.Push(Toast{Message: "three", Duration: 10 * time.Second})
+
+	if !tm.DismissNewest() {
+		t.Fatal("expected DismissNewest to dismiss an active toast")
+	}
+
+	history := tm.RecentHistory(1)
+	if len(history) != 1 || history[0].Message != "three" {
+		t.Fatalf("expected newest anonymous toast in history, got %+v", history)
+	}
+	if !tm.toasts[2].dismissed {
+		t.Fatal("expected newest anonymous toast to be marked dismissed")
+	}
+	if tm.toasts[0].dismissed || tm.toasts[1].dismissed {
+		t.Fatal("expected older anonymous toasts to remain active")
+	}
+}
+
 // TestIsAnimatingReturnsFalseWhenIdle verifies IsAnimating() is false when no animation.
 func TestIsAnimatingReturnsFalseWhenIdle(t *testing.T) {
 	enableAnimations(t)
@@ -263,6 +308,45 @@ func TestMultipleToastsAnimate(t *testing.T) {
 	// Still should have 3 toasts (not expired yet)
 	if tm.Count() != 3 {
 		t.Errorf("expected 3 toasts after animation, got %d", tm.Count())
+	}
+}
+
+func TestUpdateStackTargetsUsesCumulativeHeights(t *testing.T) {
+	t.Parallel()
+
+	tm := NewToastManager()
+	tm.Push(Toast{ID: "first", Message: "one", Duration: 10 * time.Second})
+	tm.PushProgress("second", "Loading", 0.5)
+	tm.Push(Toast{ID: "third", Message: "three", Duration: 10 * time.Second})
+
+	if got := tm.toasts[0].targetY; got != 0 {
+		t.Fatalf("first targetY = %.1f, want 0", got)
+	}
+	if got := tm.toasts[1].targetY; got != 3 {
+		t.Fatalf("second targetY = %.1f, want 3", got)
+	}
+	if got := tm.toasts[2].targetY; got != 7 {
+		t.Fatalf("third targetY = %.1f, want 7", got)
+	}
+}
+
+func TestDismissReflowsRemainingTargets(t *testing.T) {
+	t.Parallel()
+
+	tm := NewToastManager()
+	tm.Push(Toast{ID: "first", Message: "one", Duration: 10 * time.Second})
+	tm.PushProgress("second", "Loading", 0.5)
+	tm.Push(Toast{ID: "third", Message: "three", Duration: 10 * time.Second})
+
+	if !tm.Dismiss("first") {
+		t.Fatal("expected Dismiss to return true")
+	}
+
+	if got := tm.toasts[1].targetY; got != 0 {
+		t.Fatalf("second targetY after dismiss = %.1f, want 0", got)
+	}
+	if got := tm.toasts[2].targetY; got != 4 {
+		t.Fatalf("third targetY after dismiss = %.1f, want 4", got)
 	}
 }
 
@@ -438,6 +522,24 @@ func TestClearHistory(t *testing.T) {
 
 	if tm.HistoryCount() != 0 {
 		t.Errorf("expected empty history after clear, got %d", tm.HistoryCount())
+	}
+}
+
+func TestRecentHistoryReturnsMostRecentFirst(t *testing.T) {
+	t.Parallel()
+
+	tm := NewToastManager()
+	tm.Push(Toast{ID: "first", Message: "one", Duration: 10 * time.Second})
+	tm.Push(Toast{ID: "second", Message: "two", Duration: 10 * time.Second})
+	tm.Dismiss("first")
+	tm.Dismiss("second")
+
+	recent := tm.RecentHistory(2)
+	if len(recent) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(recent))
+	}
+	if recent[0].ID != "second" || recent[1].ID != "first" {
+		t.Fatalf("unexpected history order: %+v", recent)
 	}
 }
 

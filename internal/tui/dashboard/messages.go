@@ -150,6 +150,13 @@ type SpawnUpdateMsg struct {
 	Gen  uint64
 }
 
+// SpawnWizardExecResultMsg reports the outcome of running the dashboard spawn wizard action.
+type SpawnWizardExecResultMsg struct {
+	Added  int
+	Output string
+	Err    error
+}
+
 // MetricsUpdateMsg is sent when session metrics are updated.
 type MetricsUpdateMsg struct {
 	Data panels.MetricsData

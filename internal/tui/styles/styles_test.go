@@ -130,6 +130,15 @@ func TestGradientBar(t *testing.T) {
 			t.Error("GradientBar with <2 colors should return plain blocks")
 		}
 	})
+
+	t.Run("non-positive width", func(t *testing.T) {
+		if result := GradientBar(0, "#ff0000", "#0000ff"); result != "" {
+			t.Fatalf("GradientBar with width 0 = %q, want empty string", result)
+		}
+		if result := GradientBar(-1, "#ff0000", "#0000ff"); result != "" {
+			t.Fatalf("GradientBar with width -1 = %q, want empty string", result)
+		}
+	})
 }
 
 func TestGradientBorder(t *testing.T) {
@@ -139,6 +148,10 @@ func TestGradientBorder(t *testing.T) {
 	}
 	if !strings.Contains(result, "╭") {
 		t.Error("GradientBorder should contain box corners")
+	}
+
+	if result := GradientBorder("Hello", 3); result != "" {
+		t.Fatalf("GradientBorder with width 3 = %q, want empty string", result)
 	}
 }
 
@@ -384,6 +397,10 @@ func TestRenderBox(t *testing.T) {
 	if !strings.Contains(result, "╭") {
 		t.Error("RenderBox should contain rounded corners")
 	}
+
+	if result := RenderBox("Hello", 3, RoundedBox, lipgloss.Color("#ff0000")); result != "" {
+		t.Fatalf("RenderBox with width 3 = %q, want empty string", result)
+	}
 }
 
 func TestDivider(t *testing.T) {
@@ -406,6 +423,13 @@ func TestDivider(t *testing.T) {
 			}
 		})
 	}
+
+	if result := Divider(0, "heavy", lipgloss.Color("#ff0000")); result != "" {
+		t.Fatalf("Divider with width 0 = %q, want empty string", result)
+	}
+	if result := Divider(-1, "heavy", lipgloss.Color("#ff0000")); result != "" {
+		t.Fatalf("Divider with width -1 = %q, want empty string", result)
+	}
 }
 
 func TestGradientDivider(t *testing.T) {
@@ -420,6 +444,15 @@ func TestGradientDivider(t *testing.T) {
 		result := GradientDivider(10)
 		if result == "" {
 			t.Error("GradientDivider with defaults should return non-empty string")
+		}
+	})
+
+	t.Run("non-positive width", func(t *testing.T) {
+		if result := GradientDivider(0, "#ff0000", "#0000ff"); result != "" {
+			t.Fatalf("GradientDivider with width 0 = %q, want empty string", result)
+		}
+		if result := GradientDivider(-1, "#ff0000", "#0000ff"); result != "" {
+			t.Fatalf("GradientDivider with width -1 = %q, want empty string", result)
 		}
 	})
 }

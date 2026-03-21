@@ -202,36 +202,12 @@ func (b *EventBus) History(limit int) []BusEvent {
 // Encode errors are silently ignored (best-effort delivery to closed writers).
 func (b *EventBus) EnableRobotMode(w io.Writer) UnsubscribeFunc {
 	enc := json.NewEncoder(w)
-
-	// Use a buffered channel to decouple encoding from the bus publish loop
-	// and prevent blocking the publisher if the writer stalls.
-	ch := make(chan BusEvent, 1000)
-	done := make(chan struct{})
-
-	go func() {
-		for {
-			select {
-			case e := <-ch:
-				_ = enc.Encode(e) // Best-effort: ignore errors on closed/broken writers
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	unsub := b.SubscribeAll(func(e BusEvent) {
-		select {
-		case ch <- e:
-		default:
-			// Drop event if the channel is full to prevent backpressure
-			// from blocking the event bus.
-		}
+	var mu sync.Mutex
+	return b.SubscribeAll(func(e BusEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(e) // Best-effort: ignore errors on closed/broken writers
 	})
-
-	return func() {
-		unsub()
-		close(done)
-	}
 }
 
 // SubscriberCount returns the number of subscribers for an event type

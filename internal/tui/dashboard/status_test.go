@@ -23,7 +23,13 @@ func TestStatusUpdateSetsPaneStateAndTimestamp(t *testing.T) {
 	now := time.Now()
 	msg := StatusUpdateMsg{
 		Statuses: []status.AgentStatus{
-			{PaneID: "%1", State: status.StateIdle, UpdatedAt: now},
+			{
+				PaneID:     "%1",
+				State:      status.StateIdle,
+				LastActive: now.Add(-1 * time.Minute),
+				LastOutput: strings.Repeat("token ", 24),
+				UpdatedAt:  now,
+			},
 		},
 		Time: now,
 	}
@@ -36,6 +42,15 @@ func TestStatusUpdateSetsPaneStateAndTimestamp(t *testing.T) {
 	}
 	if m2.lastRefresh.IsZero() {
 		t.Fatalf("expected lastRefresh to be set")
+	}
+	if len(m2.aggregateVelocityHistory) == 0 {
+		t.Fatalf("expected aggregate velocity history to be recorded")
+	}
+	if got := m2.aggregateVelocityHistory[len(m2.aggregateVelocityHistory)-1]; got <= 0 {
+		t.Fatalf("expected aggregate velocity sample > 0, got %v", got)
+	}
+	if got := len(m2.velocityByType[string(tmux.AgentCodex)]); got == 0 {
+		t.Fatalf("expected per-type velocity history to be recorded")
 	}
 }
 
@@ -173,5 +188,29 @@ func TestSessionDataUpdate_SortsPanesAndKeepsSelection(t *testing.T) {
 	}
 	if m2.panes[m2.cursor].ID != "%2" {
 		t.Fatalf("expected selection to remain on %%2, got %s", m2.panes[m2.cursor].ID)
+	}
+}
+
+func TestSeedInitialPanes_SortsAndMarksSnapshotComplete(t *testing.T) {
+	t.Parallel()
+
+	m := New("session", "")
+	m.seedInitialPanes([]tmux.PaneActivity{
+		{Pane: tmux.Pane{ID: "%2", Index: 2, Title: "session__cc_1", Type: tmux.AgentClaude}},
+		{Pane: tmux.Pane{ID: "%0", Index: 0, Title: "session__user_0", Type: tmux.AgentUser}},
+		{Pane: tmux.Pane{ID: "%1", Index: 1, Title: "session__cod_1", Type: tmux.AgentCodex}},
+	})
+
+	if !m.initialPaneSnapshotDone {
+		t.Fatalf("expected initialPaneSnapshotDone to be true")
+	}
+	if len(m.panes) != 3 {
+		t.Fatalf("expected 3 panes, got %d", len(m.panes))
+	}
+	if m.panes[0].ID != "%0" || m.panes[1].ID != "%1" || m.panes[2].ID != "%2" {
+		t.Fatalf("expected seeded panes sorted by index, got %s %s %s", m.panes[0].ID, m.panes[1].ID, m.panes[2].ID)
+	}
+	if m.claudeCount != 1 || m.codexCount != 1 || m.userCount != 1 {
+		t.Fatalf("expected seeded counts Claude=1 Codex=1 User=1, got C=%d O=%d U=%d", m.claudeCount, m.codexCount, m.userCount)
 	}
 }

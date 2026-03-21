@@ -127,6 +127,19 @@ func TestSendError_BufferFull(t *testing.T) {
 	client.sendError("req-x", "ERR", "dropped")
 }
 
+func TestSendError_ClosedChannel(t *testing.T) {
+	t.Parallel()
+	ch := make(chan []byte, 1)
+	close(ch)
+	client := &WSClient{
+		id:     "test-closed",
+		send:   ch,
+		topics: make(map[string]struct{}),
+	}
+
+	client.sendError("req-x", "ERR", "dropped")
+}
+
 // =============================================================================
 // sendAck — 0% → 100%
 // =============================================================================
@@ -162,6 +175,19 @@ func TestSendAck(t *testing.T) {
 	}
 }
 
+func TestSendAck_ClosedChannel(t *testing.T) {
+	t.Parallel()
+	ch := make(chan []byte, 1)
+	close(ch)
+	client := &WSClient{
+		id:     "test-ack-closed",
+		send:   ch,
+		topics: make(map[string]struct{}),
+	}
+
+	client.sendAck("req-2", map[string]interface{}{"status": "ok"})
+}
+
 // =============================================================================
 // sendPong — 0% → 100%
 // =============================================================================
@@ -192,6 +218,19 @@ func TestSendPong(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for pong")
 	}
+}
+
+func TestSendPong_ClosedChannel(t *testing.T) {
+	t.Parallel()
+	ch := make(chan []byte, 1)
+	close(ch)
+	client := &WSClient{
+		id:     "test-pong-closed",
+		send:   ch,
+		topics: make(map[string]struct{}),
+	}
+
+	client.sendPong("req-3")
 }
 
 // =============================================================================

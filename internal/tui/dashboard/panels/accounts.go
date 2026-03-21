@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
+	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
 	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -119,6 +120,9 @@ func (a *AccountsPanel) Keybindings() []Keybinding {
 func (a *AccountsPanel) View() string {
 	t := a.theme
 	w, h := a.Width(), a.Height()
+	if w <= 0 || h <= 0 {
+		return ""
+	}
 
 	// Create border style based on focus
 	borderColor := t.Surface1
@@ -250,31 +254,36 @@ func (a *AccountsPanel) View() string {
 			}
 		}
 
-		// Account info
-		var accountInfo string
-		if activeAcc != nil {
-			email := activeAcc.Email
-			if email == "" {
-				email = activeAcc.Name
-			}
-			if email == "" {
-				email = activeAcc.ID
-			}
-			// Truncate email if too long
-			maxEmailLen := w - 15 - lipgloss.Width(provider)
-			if maxEmailLen > 0 && len(email) > maxEmailLen {
-				email = email[:maxEmailLen-3] + "..."
-			}
-			accountInfo = lipgloss.NewStyle().Foreground(t.Text).Render(email)
-		} else {
-			accountInfo = lipgloss.NewStyle().Foreground(t.Overlay).Render("(none active)")
-		}
-
 		// Status indicator
 		statusStr := ""
 		if cooldownCount > 0 {
 			statusStr = lipgloss.NewStyle().Foreground(t.Yellow).Render(fmt.Sprintf(" [%d cooldown]", cooldownCount))
 		}
+
+		// Account info
+		accountLabel := "(none active)"
+		accountStyle := lipgloss.NewStyle().Foreground(t.Overlay)
+		if activeAcc != nil {
+			accountLabel = activeAcc.Email
+			if accountLabel == "" {
+				accountLabel = activeAcc.Name
+			}
+			if accountLabel == "" {
+				accountLabel = activeAcc.ID
+			}
+			accountStyle = lipgloss.NewStyle().Foreground(t.Text)
+		}
+
+		maxAccountWidth := w - 6 - lipgloss.Width(providerName) - lipgloss.Width(statusStr)
+		switch {
+		case maxAccountWidth <= 0:
+			accountLabel = ""
+		case maxAccountWidth == 1 && lipgloss.Width(accountLabel) > maxAccountWidth:
+			accountLabel = "…"
+		default:
+			accountLabel = layout.TruncateWidthDefault(accountLabel, maxAccountWidth)
+		}
+		accountInfo := accountStyle.Render(accountLabel)
 
 		// Build the line
 		gap := w - 6 - lipgloss.Width(providerName) - lipgloss.Width(accountInfo) - lipgloss.Width(statusStr)

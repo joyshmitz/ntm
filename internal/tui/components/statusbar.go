@@ -7,20 +7,23 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // StatusBarOptions configures status bar rendering.
 type StatusBarOptions struct {
-	Width        int
-	Session      string
-	ClaudeCount  int
-	CodexCount   int
-	GeminiCount  int
-	UserCount    int
-	FocusedPanel string
-	LayoutTier   string // "Narrow", "Split", "Wide", "Ultra", "Mega"
-	Paused       bool
+	Width           int
+	Session         string
+	ClaudeCount     int
+	CodexCount      int
+	GeminiCount     int
+	UserCount       int
+	FocusedPanel    string
+	LayoutTier      string // "Narrow", "Split", "Wide", "Ultra", "Mega"
+	Paused          bool
+	CurrentVelocity float64
+	VelocityHistory []float64
 }
 
 // RenderStatusBar renders a three-section status bar: left | center | right.
@@ -44,9 +47,6 @@ func RenderStatusBar(opts StatusBarOptions) string {
 	// ── Left section: session name + agent count badges ──────────
 	left := renderStatusLeft(t, base, opts)
 
-	// ── Center section: focused panel name ───────────────────────
-	center := renderStatusCenter(t, base, opts)
-
 	// ── Right section: layout tier + tick indicator ──────────────
 	right := renderStatusRight(t, base, opts)
 
@@ -58,6 +58,9 @@ func RenderStatusBar(opts StatusBarOptions) string {
 		centerW = 0
 	}
 
+	// ── Center section: focused panel name + aggregate trend ─────
+	center := renderStatusCenter(t, base, opts, centerW)
+
 	// Pad center to fill remaining space, keeping it visually centered
 	centeredSection := base.Width(centerW).Align(lipgloss.Center).Render(
 		lipgloss.PlaceHorizontal(centerW, lipgloss.Center, center,
@@ -65,6 +68,9 @@ func RenderStatusBar(opts StatusBarOptions) string {
 	)
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, left, centeredSection, right)
+	if lipgloss.Width(bar) > opts.Width {
+		bar = styles.Truncate(bar, opts.Width)
+	}
 
 	return border + "\n" + bar
 }
@@ -123,15 +129,48 @@ func renderStatusLeft(t theme.Theme, base lipgloss.Style, opts StatusBarOptions)
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
-// renderStatusCenter builds the center section: focused panel name.
-func renderStatusCenter(t theme.Theme, base lipgloss.Style, opts StatusBarOptions) string {
-	if opts.FocusedPanel == "" {
+// renderStatusCenter builds the center section: focused panel name + velocity trend.
+func renderStatusCenter(t theme.Theme, base lipgloss.Style, opts StatusBarOptions, width int) string {
+	if width <= 0 {
 		return ""
 	}
-	return base.
-		Foreground(t.Primary).
-		Bold(true).
-		Render(opts.FocusedPanel)
+
+	focusedPanel := ""
+	if opts.FocusedPanel != "" {
+		focusedPanel = base.
+			Foreground(t.Primary).
+			Bold(true).
+			Render(opts.FocusedPanel)
+	}
+
+	if len(opts.VelocityHistory) == 0 {
+		if focusedPanel == "" {
+			return ""
+		}
+		return styles.Truncate(focusedPanel, width)
+	}
+
+	currentVelocity := opts.CurrentVelocity
+	if currentVelocity <= 0 {
+		currentVelocity = opts.VelocityHistory[len(opts.VelocityHistory)-1]
+	}
+
+	if focusedPanel == "" {
+		return SparklineWithLabel("tpm", opts.VelocityHistory, width, fmt.Sprintf("%.0f", currentVelocity))
+	}
+
+	if width < 24 {
+		return styles.Truncate(focusedPanel, width)
+	}
+
+	separator := base.Foreground(t.Overlay).Render(" · ")
+	remainingWidth := width - lipgloss.Width(focusedPanel) - lipgloss.Width(separator)
+	if remainingWidth < 12 {
+		return styles.Truncate(focusedPanel, width)
+	}
+
+	trend := SparklineWithLabel("tpm", opts.VelocityHistory, remainingWidth, fmt.Sprintf("%.0f", currentVelocity))
+	return lipgloss.JoinHorizontal(lipgloss.Top, focusedPanel, separator, trend)
 }
 
 // renderStatusRight builds the right section: layout tier + tick/paused indicator.

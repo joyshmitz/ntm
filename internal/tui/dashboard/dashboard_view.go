@@ -15,6 +15,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
 	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // View implements tea.Model
@@ -85,6 +86,27 @@ func (m Model) View() string {
 			Background(m.theme.Base).
 			Padding(1, 2)
 		modal := modalStyle.Render(modesView)
+		backdrop := m.renderHeaderSection() + m.renderMainContentSection() + m.renderFooterSection()
+		return renderModalOverlay(backdrop, modal, m.width, m.height, m.theme)
+	}
+
+	// [tui-upgrade: bd-uz09d] Render spawn wizard overlay
+	if m.showSpawnWizard && m.spawnWizard != nil {
+		m.spawnWizard.SetSize(m.width, m.height)
+		modal := m.spawnWizard.View()
+		backdrop := m.renderHeaderSection() + m.renderMainContentSection() + m.renderFooterSection()
+		return renderModalOverlay(backdrop, modal, m.width, m.height, m.theme)
+	}
+
+	if m.showToastHistory {
+		modalWidth := m.width - 8
+		if modalWidth > 72 {
+			modalWidth = 72
+		}
+		if modalWidth < 36 {
+			modalWidth = 36
+		}
+		modal := m.renderHelpOverlayBox("Toast History", m.renderToastHistoryContent(), modalWidth)
 		backdrop := m.renderHeaderSection() + m.renderMainContentSection() + m.renderFooterSection()
 		return renderModalOverlay(backdrop, modal, m.width, m.height, m.theme)
 	}
@@ -344,15 +366,17 @@ func (m Model) renderFooterSection() string {
 	// STATUS BAR (session info, focused panel, layout tier)
 	// ═══════════════════════════════════════════════════════════════
 	b.WriteString(components.RenderStatusBar(components.StatusBarOptions{
-		Width:        m.width,
-		Session:      m.session,
-		ClaudeCount:  m.claudeCount,
-		CodexCount:   m.codexCount,
-		GeminiCount:  m.geminiCount,
-		UserCount:    m.userCount,
-		FocusedPanel: panelIDString(m.focusedPanel),
-		LayoutTier:   tierLabel(m.tier),
-		Paused:       m.refreshPaused,
+		Width:           m.width,
+		Session:         m.session,
+		ClaudeCount:     m.claudeCount,
+		CodexCount:      m.codexCount,
+		GeminiCount:     m.geminiCount,
+		UserCount:       m.userCount,
+		FocusedPanel:    panelIDString(m.focusedPanel),
+		LayoutTier:      tierLabel(m.tier),
+		Paused:          m.refreshPaused,
+		CurrentVelocity: m.currentAggregateVelocity(),
+		VelocityHistory: m.aggregateVelocityHistory,
 	}) + "\n")
 
 	// ═══════════════════════════════════════════════════════════════
@@ -976,10 +1000,63 @@ func (m Model) renderHelpBar() string {
 		)
 	}
 
+	if m.toasts != nil && m.toasts.Count() > 0 {
+		hints = append(hints, components.KeyHint{Key: "ctrl+x", Desc: "dismiss toast"})
+	}
+	if m.toasts != nil && m.toasts.HistoryCount() > 0 && m.toastHistoryShortcutAvailable() {
+		hints = append(hints, components.KeyHint{Key: "n", Desc: "toast history"})
+	}
+
 	return components.RenderHelpBar(components.HelpBarOptions{
 		Hints: hints,
 		Width: m.width - 4,
 	})
+}
+
+func (m Model) renderToastHistoryContent() string {
+	subtle := lipgloss.NewStyle().Foreground(m.theme.Subtext)
+	if m.toasts == nil || m.toasts.HistoryCount() == 0 {
+		return subtle.Render("No dismissed toasts yet.\n\nPress ctrl+x to dismiss the newest active toast.")
+	}
+
+	var lines []string
+	lines = append(lines, subtle.Render("Most recent first. Press n or Esc to close."))
+	lines = append(lines, "")
+
+	for _, toast := range m.toasts.RecentHistory(8) {
+		lines = append(lines, toastHistoryLine(m.theme, toast))
+	}
+
+	if active := m.toasts.Count(); active > 0 {
+		lines = append(lines, "")
+		lines = append(lines, subtle.Render(fmt.Sprintf("%d active toast(s). ctrl+x dismisses the newest.", active)))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func toastHistoryLine(t theme.Theme, toast components.Toast) string {
+	var label string
+	var color lipgloss.Color
+	switch toast.Level {
+	case components.ToastSuccess:
+		label, color = "SUCCESS", t.Green
+	case components.ToastWarning:
+		label, color = "WARN", t.Yellow
+	case components.ToastError:
+		label, color = "ERROR", t.Red
+	default:
+		label, color = "INFO", t.Blue
+	}
+
+	badge := lipgloss.NewStyle().
+		Background(color).
+		Foreground(t.Base).
+		Bold(true).
+		Padding(0, 1).
+		Render(label)
+
+	return badge + " " + toast.Message
 }
 
 func (m Model) renderHelpOverlayBox(title, content string, maxWidth int) string {
