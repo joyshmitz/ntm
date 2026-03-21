@@ -630,6 +630,56 @@ func NewAlertEvent(session, alertID, alertType, severity, message string) AlertE
 }
 
 // ----------------------------------------------------------------
+// Conflict Events
+// ----------------------------------------------------------------
+
+// ReservationConflictEvent is emitted when an agent's file reservation
+// conflicts with another agent's existing reservation.
+type ReservationConflictEvent struct {
+	BaseEvent
+	Path           string   `json:"path"`
+	RequestorAgent string   `json:"requestor_agent"`
+	RequestorPane  string   `json:"requestor_pane"`
+	Holders        []string `json:"holders"`
+}
+
+// NewReservationConflictEvent creates a new reservation conflict event.
+func NewReservationConflictEvent(session, path, requestorAgent, requestorPane string, holders []string) ReservationConflictEvent {
+	return ReservationConflictEvent{
+		BaseEvent: BaseEvent{
+			Type:      "conflict.reservation",
+			Timestamp: time.Now().UTC(),
+			Session:   session,
+		},
+		Path:           path,
+		RequestorAgent: requestorAgent,
+		RequestorPane:  requestorPane,
+		Holders:        holders,
+	}
+}
+
+// FileConflictEvent is emitted when multiple agents modify the same file
+// concurrently, detected via the file watcher.
+type FileConflictEvent struct {
+	BaseEvent
+	Path   string   `json:"path"`
+	Agents []string `json:"agents"`
+}
+
+// NewFileConflictEvent creates a new file conflict event.
+func NewFileConflictEvent(session, path string, agents []string) FileConflictEvent {
+	return FileConflictEvent{
+		BaseEvent: BaseEvent{
+			Type:      "conflict.file",
+			Timestamp: time.Now().UTC(),
+			Session:   session,
+		},
+		Path:   path,
+		Agents: agents,
+	}
+}
+
+// ----------------------------------------------------------------
 // Global Functions (using DefaultBus)
 // ----------------------------------------------------------------
 

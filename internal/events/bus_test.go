@@ -551,3 +551,94 @@ func TestEventBus_UnsubscribeMultiple(t *testing.T) {
 			bus.SubscriberCount("test_event"))
 	}
 }
+
+// =============================================================================
+// Conflict Event Tests (br-vdfjr)
+// =============================================================================
+
+func TestNewReservationConflictEvent(t *testing.T) {
+	t.Parallel()
+
+	event := NewReservationConflictEvent("proj", "src/auth.go", "BlueLake", "cc_1", []string{"GreenCastle"})
+	if event.EventType() != "conflict.reservation" {
+		t.Errorf("EventType() = %q, want %q", event.EventType(), "conflict.reservation")
+	}
+	if event.EventSession() != "proj" {
+		t.Errorf("EventSession() = %q, want %q", event.EventSession(), "proj")
+	}
+	if event.Path != "src/auth.go" {
+		t.Errorf("Path = %q, want %q", event.Path, "src/auth.go")
+	}
+	if event.RequestorAgent != "BlueLake" {
+		t.Errorf("RequestorAgent = %q, want %q", event.RequestorAgent, "BlueLake")
+	}
+	if len(event.Holders) != 1 || event.Holders[0] != "GreenCastle" {
+		t.Errorf("Holders = %v, want [GreenCastle]", event.Holders)
+	}
+	if event.EventTimestamp().IsZero() {
+		t.Error("expected non-zero timestamp")
+	}
+}
+
+func TestNewFileConflictEvent(t *testing.T) {
+	t.Parallel()
+
+	event := NewFileConflictEvent("proj", "cmd/main.go", []string{"Agent1", "Agent2"})
+	if event.EventType() != "conflict.file" {
+		t.Errorf("EventType() = %q, want %q", event.EventType(), "conflict.file")
+	}
+	if event.EventSession() != "proj" {
+		t.Errorf("EventSession() = %q, want %q", event.EventSession(), "proj")
+	}
+	if event.Path != "cmd/main.go" {
+		t.Errorf("Path = %q, want %q", event.Path, "cmd/main.go")
+	}
+	if len(event.Agents) != 2 {
+		t.Errorf("Agents count = %d, want 2", len(event.Agents))
+	}
+}
+
+func TestConflictEvents_ImplementBusEvent(t *testing.T) {
+	t.Parallel()
+
+	// Compile-time interface check
+	var _ BusEvent = ReservationConflictEvent{}
+	var _ BusEvent = FileConflictEvent{}
+
+	// Publish and receive through the bus
+	bus := NewEventBus(10)
+	var received atomic.Int32
+
+	bus.SubscribeAll(func(event BusEvent) {
+		received.Add(1)
+	})
+
+	bus.PublishSync(NewReservationConflictEvent("s", "f.go", "A", "p1", []string{"B"}))
+	bus.PublishSync(NewFileConflictEvent("s", "g.go", []string{"A", "B"}))
+
+	if received.Load() != 2 {
+		t.Errorf("expected 2 events received, got %d", received.Load())
+	}
+
+	// Verify in history
+	history := bus.History(10)
+	if len(history) != 2 {
+		t.Errorf("expected 2 events in history, got %d", len(history))
+	}
+}
+
+func TestConflictEvents_JSONMarshal(t *testing.T) {
+	t.Parallel()
+
+	event := NewReservationConflictEvent("proj", "auth.go", "A", "cc_1", []string{"B", "C"})
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"conflict.reservation"`)) {
+		t.Errorf("JSON should contain event type, got %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"auth.go"`)) {
+		t.Errorf("JSON should contain path, got %s", data)
+	}
+}

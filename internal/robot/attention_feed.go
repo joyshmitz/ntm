@@ -5,6 +5,7 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,12 +143,8 @@ func (j *AttentionJournal) Append(event AttentionEvent) {
 	}
 
 	j.entries = append(j.entries, entry)
+	j.oldest = j.entries[0].event.Cursor
 	j.newest = event.Cursor
-	if len(j.entries) == 0 {
-		j.oldest = 0
-	} else {
-		j.oldest = j.entries[0].event.Cursor
-	}
 	j.totalAppended.Add(1)
 }
 
@@ -389,6 +386,569 @@ func (f *AttentionFeed) Stats() JournalStats {
 	return f.journal.Stats()
 }
 
+// =============================================================================
+// Digest Engine
+// =============================================================================
+
+// AttentionDigestOptions controls how the digest engine filters and coalesces
+// events before they are surfaced to operator-facing commands.
+type AttentionDigestOptions struct {
+	Session             string
+	Categories          []EventCategory
+	Types               []EventType
+	MinSeverity         Severity
+	MinActionability    Actionability
+	ActionRequiredLimit int
+	InterestingLimit    int
+	BackgroundLimit     int
+	IncludeTrace        bool
+}
+
+// AttentionDigest is the token-efficient delta view built from the raw feed.
+// It preserves cursor boundaries, counts, and representative event details so
+// higher-level robot commands can summarize "what changed?" without forcing a
+// full snapshot or full event replay each time.
+type AttentionDigest struct {
+	CursorStart     int64                      `json:"cursor_start"`
+	CursorEnd       int64                      `json:"cursor_end"`
+	PeriodStart     string                     `json:"period_start,omitempty"`
+	PeriodEnd       string                     `json:"period_end,omitempty"`
+	EventCount      int                        `json:"event_count"`
+	ByCategory      map[EventCategory]int      `json:"by_category"`
+	ByActionability map[Actionability]int      `json:"by_actionability"`
+	Buckets         AttentionDigestBuckets     `json:"buckets"`
+	Suppressed      AttentionDigestSuppression `json:"suppressed"`
+	Summary         string                     `json:"summary"`
+	Trace           []AttentionDigestDecision  `json:"trace,omitempty"`
+}
+
+// AttentionDigestBuckets groups representative digest items by urgency so
+// operators can see the most important changes first.
+type AttentionDigestBuckets struct {
+	ActionRequired []AttentionDigestItem `json:"action_required,omitempty"`
+	Interesting    []AttentionDigestItem `json:"interesting,omitempty"`
+	Background     []AttentionDigestItem `json:"background,omitempty"`
+}
+
+// AttentionDigestItem represents one surfaced digest entry. It preserves the
+// representative event plus the cursor span and source-event count that produced
+// the item so follow-up inspection can stay targeted.
+type AttentionDigestItem struct {
+	Event             AttentionEvent `json:"event"`
+	CursorStart       int64          `json:"cursor_start"`
+	CursorEnd         int64          `json:"cursor_end"`
+	SourceEventCount  int            `json:"source_event_count"`
+	SuppressedCount   int            `json:"suppressed_count,omitempty"`
+	SuppressionReason string         `json:"suppression_reason,omitempty"`
+}
+
+// AttentionDigestSuppression summarizes how much raw feed noise was suppressed
+// and why.
+type AttentionDigestSuppression struct {
+	Total    int            `json:"total"`
+	ByReason map[string]int `json:"by_reason,omitempty"`
+}
+
+// AttentionDigestDecision captures the deterministic surface/coalesce/suppress
+// decision made for a source event. Tests use this to print high-signal traces
+// when digest expectations fail.
+type AttentionDigestDecision struct {
+	Cursor               int64         `json:"cursor"`
+	Summary              string        `json:"summary"`
+	Bucket               Actionability `json:"bucket,omitempty"`
+	Decision             string        `json:"decision"`
+	Reason               string        `json:"reason,omitempty"`
+	RepresentativeCursor int64         `json:"representative_cursor,omitempty"`
+}
+
+const (
+	attentionDigestSuppressionHeartbeat       = "heartbeat_noise"
+	attentionDigestSuppressionPaneOutputBurst = "pane_output_burst"
+	attentionDigestSuppressionLifecycleNoise  = "lifecycle_noise"
+	attentionDigestSuppressionDuplicateAlert  = "duplicate_alert"
+	attentionDigestSuppressionBucketLimit     = "bucket_limit"
+)
+
+type attentionDigestCandidate struct {
+	item    AttentionDigestItem
+	members []AttentionEvent
+}
+
+// DefaultAttentionDigestOptions returns conservative defaults that keep the
+// surfaced digest compact while preserving the most important signals.
+func DefaultAttentionDigestOptions() AttentionDigestOptions {
+	return AttentionDigestOptions{
+		MinSeverity:         SeverityInfo,
+		MinActionability:    ActionabilityBackground,
+		ActionRequiredLimit: 5,
+		InterestingLimit:    4,
+		BackgroundLimit:     3,
+	}
+}
+
+// Digest builds a token-efficient digest from all replayable events newer than
+// sinceCursor. It reuses replay cursor semantics so callers can chain digest
+// calls without inventing a second cursor model.
+func (f *AttentionFeed) Digest(sinceCursor int64, opts AttentionDigestOptions) (*AttentionDigest, error) {
+	limit := f.Stats().Count
+	if limit < 1 {
+		limit = 1
+	}
+
+	events, newest, err := f.Replay(sinceCursor, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return BuildAttentionDigest(events, sinceCursor, newest, opts), nil
+}
+
+// BuildAttentionDigest reduces a set of replayed events into a compact summary
+// that preserves cursor boundaries and representative event details.
+func BuildAttentionDigest(events []AttentionEvent, sinceCursor, cursorEnd int64, opts AttentionDigestOptions) *AttentionDigest {
+	options := normalizeAttentionDigestOptions(opts)
+
+	filtered := make([]AttentionEvent, 0, len(events))
+	for _, event := range events {
+		if matchesAttentionDigestFilters(event, options) {
+			filtered = append(filtered, cloneAttentionEvent(event))
+		}
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].Cursor != filtered[j].Cursor {
+			return filtered[i].Cursor < filtered[j].Cursor
+		}
+		return filtered[i].Ts < filtered[j].Ts
+	})
+
+	digest := &AttentionDigest{
+		CursorStart:     cursorEnd,
+		CursorEnd:       cursorEnd,
+		EventCount:      len(filtered),
+		ByCategory:      map[EventCategory]int{},
+		ByActionability: map[Actionability]int{},
+		Buckets: AttentionDigestBuckets{
+			ActionRequired: []AttentionDigestItem{},
+			Interesting:    []AttentionDigestItem{},
+			Background:     []AttentionDigestItem{},
+		},
+		Suppressed: AttentionDigestSuppression{
+			ByReason: map[string]int{},
+		},
+	}
+	if digest.CursorStart < 0 {
+		digest.CursorStart = 0
+	}
+	if len(filtered) > 0 {
+		digest.CursorStart = filtered[0].Cursor
+		digest.PeriodStart = filtered[0].Ts
+		digest.PeriodEnd = filtered[len(filtered)-1].Ts
+	} else if sinceCursor >= 0 {
+		digest.CursorStart = sinceCursor
+	}
+
+	candidates := buildAttentionDigestCandidates(filtered, options, digest)
+	actionRequired, interesting, background := partitionAttentionDigestCandidates(candidates)
+
+	digest.Buckets.ActionRequired = surfaceAttentionDigestBucket(actionRequired, ActionabilityActionRequired, options.ActionRequiredLimit, options, digest)
+	digest.Buckets.Interesting = surfaceAttentionDigestBucket(interesting, ActionabilityInteresting, options.InterestingLimit, options, digest)
+	digest.Buckets.Background = surfaceAttentionDigestBucket(background, ActionabilityBackground, options.BackgroundLimit, options, digest)
+	digest.Summary = buildAttentionDigestSummary(digest)
+
+	if len(digest.Suppressed.ByReason) == 0 {
+		digest.Suppressed.ByReason = nil
+	}
+	if !options.IncludeTrace {
+		digest.Trace = nil
+	}
+
+	return digest
+}
+
+func normalizeAttentionDigestOptions(opts AttentionDigestOptions) AttentionDigestOptions {
+	if opts.MinSeverity == "" {
+		opts.MinSeverity = SeverityInfo
+	}
+	if opts.MinActionability == "" {
+		opts.MinActionability = ActionabilityBackground
+	}
+	if opts.ActionRequiredLimit <= 0 {
+		opts.ActionRequiredLimit = 5
+	}
+	if opts.InterestingLimit <= 0 {
+		opts.InterestingLimit = 4
+	}
+	if opts.BackgroundLimit <= 0 {
+		opts.BackgroundLimit = 3
+	}
+	return opts
+}
+
+func matchesAttentionDigestFilters(event AttentionEvent, opts AttentionDigestOptions) bool {
+	if opts.Session != "" && event.Session != opts.Session {
+		return false
+	}
+	if len(opts.Categories) > 0 {
+		matched := false
+		for _, category := range opts.Categories {
+			if event.Category == category {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if len(opts.Types) > 0 {
+		matched := false
+		for _, eventType := range opts.Types {
+			if event.Type == eventType {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if attentionSeverityRank(event.Severity) < attentionSeverityRank(opts.MinSeverity) {
+		return false
+	}
+	if attentionActionabilityRank(event.Actionability) < attentionActionabilityRank(opts.MinActionability) {
+		return false
+	}
+	return true
+}
+
+func buildAttentionDigestCandidates(events []AttentionEvent, opts AttentionDigestOptions, digest *AttentionDigest) []*attentionDigestCandidate {
+	candidates := make([]*attentionDigestCandidate, 0, len(events))
+	grouped := make(map[string]int)
+
+	for _, event := range events {
+		digest.ByCategory[event.Category]++
+		digest.ByActionability[event.Actionability]++
+
+		if reason, drop := attentionDigestDropReason(event); drop {
+			recordAttentionDigestSuppression(digest, reason)
+			recordAttentionDigestDecision(digest, opts, event, event.Actionability, "suppressed", reason, 0)
+			continue
+		}
+
+		if key, reason := attentionDigestGroupKey(event); key != "" {
+			if idx, ok := grouped[key]; ok {
+				coalesceAttentionDigestCandidate(candidates[idx], event, reason, digest)
+				continue
+			}
+			grouped[key] = len(candidates)
+			candidates = append(candidates, newAttentionDigestCandidate(event, opts))
+			continue
+		}
+
+		candidates = append(candidates, newAttentionDigestCandidate(event, opts))
+	}
+
+	return candidates
+}
+
+func partitionAttentionDigestCandidates(candidates []*attentionDigestCandidate) (actionRequired, interesting, background []*attentionDigestCandidate) {
+	for _, candidate := range candidates {
+		switch candidate.item.Event.Actionability {
+		case ActionabilityActionRequired:
+			actionRequired = append(actionRequired, candidate)
+		case ActionabilityInteresting:
+			interesting = append(interesting, candidate)
+		default:
+			background = append(background, candidate)
+		}
+	}
+	return actionRequired, interesting, background
+}
+
+func surfaceAttentionDigestBucket(candidates []*attentionDigestCandidate, bucket Actionability, limit int, opts AttentionDigestOptions, digest *AttentionDigest) []AttentionDigestItem {
+	if len(candidates) == 0 {
+		return []AttentionDigestItem{}
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i].item.Event
+		right := candidates[j].item.Event
+		if attentionSeverityRank(left.Severity) != attentionSeverityRank(right.Severity) {
+			return attentionSeverityRank(left.Severity) > attentionSeverityRank(right.Severity)
+		}
+		if candidates[i].item.CursorEnd != candidates[j].item.CursorEnd {
+			return candidates[i].item.CursorEnd > candidates[j].item.CursorEnd
+		}
+		if left.Category != right.Category {
+			return left.Category < right.Category
+		}
+		if left.Type != right.Type {
+			return left.Type < right.Type
+		}
+		return left.Summary < right.Summary
+	})
+
+	surfaced := make([]AttentionDigestItem, 0, minInt(limit, len(candidates)))
+	for idx, candidate := range candidates {
+		if idx < limit {
+			surfaced = append(surfaced, candidate.item)
+			recordAttentionDigestCandidateTrace(digest, opts, candidate, bucket, false)
+			continue
+		}
+
+		recordAttentionDigestSuppression(digest, attentionDigestSuppressionBucketLimit)
+		recordAttentionDigestCandidateTrace(digest, opts, candidate, bucket, true)
+	}
+
+	return surfaced
+}
+
+func newAttentionDigestCandidate(event AttentionEvent, opts AttentionDigestOptions) *attentionDigestCandidate {
+	item := AttentionDigestItem{
+		Event:            cloneAttentionEvent(event),
+		CursorStart:      event.Cursor,
+		CursorEnd:        event.Cursor,
+		SourceEventCount: 1,
+	}
+	candidate := &attentionDigestCandidate{item: item}
+	if opts.IncludeTrace {
+		candidate.members = []AttentionEvent{cloneAttentionEvent(event)}
+	}
+	return candidate
+}
+
+func coalesceAttentionDigestCandidate(candidate *attentionDigestCandidate, event AttentionEvent, reason string, digest *AttentionDigest) {
+	candidate.item.SourceEventCount++
+	candidate.item.SuppressedCount++
+	candidate.item.SuppressionReason = reason
+	if candidate.item.CursorStart == 0 || event.Cursor < candidate.item.CursorStart {
+		candidate.item.CursorStart = event.Cursor
+	}
+	if event.Cursor > candidate.item.CursorEnd {
+		candidate.item.CursorEnd = event.Cursor
+	}
+	if shouldReplaceAttentionDigestRepresentative(candidate.item.Event, event) {
+		candidate.item.Event = cloneAttentionEvent(event)
+	}
+	if candidate.members != nil {
+		candidate.members = append(candidate.members, cloneAttentionEvent(event))
+	}
+
+	annotateAttentionDigestRepresentative(&candidate.item)
+	recordAttentionDigestSuppression(digest, reason)
+}
+
+func shouldReplaceAttentionDigestRepresentative(current, next AttentionEvent) bool {
+	if attentionSeverityRank(next.Severity) != attentionSeverityRank(current.Severity) {
+		return attentionSeverityRank(next.Severity) > attentionSeverityRank(current.Severity)
+	}
+	if attentionActionabilityRank(next.Actionability) != attentionActionabilityRank(current.Actionability) {
+		return attentionActionabilityRank(next.Actionability) > attentionActionabilityRank(current.Actionability)
+	}
+	return next.Cursor >= current.Cursor
+}
+
+func annotateAttentionDigestRepresentative(item *AttentionDigestItem) {
+	if item == nil {
+		return
+	}
+	if item.Event.Details == nil {
+		item.Event.Details = map[string]any{}
+	}
+	item.Event.Details["digest_cursor_start"] = item.CursorStart
+	item.Event.Details["digest_cursor_end"] = item.CursorEnd
+	item.Event.Details["digest_source_event_count"] = item.SourceEventCount
+	if item.SuppressedCount > 0 {
+		item.Event.Details["digest_suppressed_count"] = item.SuppressedCount
+		item.Event.Details["digest_suppression_reason"] = item.SuppressionReason
+	}
+	switch item.SuppressionReason {
+	case attentionDigestSuppressionPaneOutputBurst:
+		item.Event.Summary = attentionDigestOutputSummary(item.Event, item.SourceEventCount)
+	case attentionDigestSuppressionLifecycleNoise, attentionDigestSuppressionDuplicateAlert:
+		item.Event.Summary = attentionDigestRepeatedSummary(item.Event.Summary, item.SourceEventCount)
+	}
+}
+
+func attentionDigestOutputSummary(event AttentionEvent, count int) string {
+	if count <= 1 {
+		return event.Summary
+	}
+	paneRef := attentionEventPaneRef(event)
+	switch {
+	case event.Session != "" && paneRef != "":
+		return fmt.Sprintf("%d output updates in %s pane %s", count, event.Session, paneRef)
+	case event.Session != "":
+		return fmt.Sprintf("%d output updates in %s", count, event.Session)
+	default:
+		return fmt.Sprintf("%d output updates", count)
+	}
+}
+
+func attentionDigestRepeatedSummary(summary string, count int) string {
+	if summary == "" || count <= 1 {
+		return summary
+	}
+	return fmt.Sprintf("%s (%dx)", summary, count)
+}
+
+func attentionDigestDropReason(event AttentionEvent) (string, bool) {
+	switch event.Type {
+	case EventType(DefaultTransportLiveness.HeartbeatType):
+		return attentionDigestSuppressionHeartbeat, true
+	case EventTypePaneResized, EventTypeSessionAttached, EventTypeSessionDetached:
+		return attentionDigestSuppressionLifecycleNoise, true
+	default:
+		return "", false
+	}
+}
+
+func attentionDigestGroupKey(event AttentionEvent) (string, string) {
+	if event.Type == EventTypePaneOutput {
+		return fmt.Sprintf("output:%s:%s", event.Session, attentionEventPaneRef(event)), attentionDigestSuppressionPaneOutputBurst
+	}
+	if isAttentionDigestDuplicateAlertCandidate(event) {
+		return fmt.Sprintf("alert:%s:%s:%d:%s", event.Type, event.Session, event.Pane, strings.ToLower(strings.TrimSpace(event.Summary))), attentionDigestSuppressionDuplicateAlert
+	}
+	if isAttentionDigestLifecycleCandidate(event) {
+		return fmt.Sprintf("lifecycle:%s:%s:%d:%s", event.Type, event.Session, event.Pane, attentionStringDetail(event.Details, "signal")), attentionDigestSuppressionLifecycleNoise
+	}
+	return "", ""
+}
+
+func isAttentionDigestDuplicateAlertCandidate(event AttentionEvent) bool {
+	if event.Category != EventCategoryAlert {
+		return false
+	}
+	return strings.TrimSpace(event.Summary) != ""
+}
+
+func isAttentionDigestLifecycleCandidate(event AttentionEvent) bool {
+	if event.Actionability == ActionabilityActionRequired {
+		return false
+	}
+	switch event.Type {
+	case EventTypeSessionCreated,
+		EventTypeSessionDestroyed,
+		EventTypePaneCreated,
+		EventTypePaneDestroyed,
+		EventTypeAgentStarted,
+		EventTypeAgentStopped,
+		EventTypeAgentStateChange,
+		EventTypeAgentRecovered,
+		EventTypeAgentCompacted:
+		return true
+	default:
+		return false
+	}
+}
+
+func recordAttentionDigestSuppression(digest *AttentionDigest, reason string) {
+	if digest == nil || reason == "" {
+		return
+	}
+	digest.Suppressed.Total++
+	if digest.Suppressed.ByReason == nil {
+		digest.Suppressed.ByReason = map[string]int{}
+	}
+	digest.Suppressed.ByReason[reason]++
+}
+
+func recordAttentionDigestDecision(digest *AttentionDigest, opts AttentionDigestOptions, event AttentionEvent, bucket Actionability, decision, reason string, representativeCursor int64) {
+	if digest == nil || !opts.IncludeTrace {
+		return
+	}
+	digest.Trace = append(digest.Trace, AttentionDigestDecision{
+		Cursor:               event.Cursor,
+		Summary:              event.Summary,
+		Bucket:               bucket,
+		Decision:             decision,
+		Reason:               reason,
+		RepresentativeCursor: representativeCursor,
+	})
+}
+
+func recordAttentionDigestCandidateTrace(digest *AttentionDigest, opts AttentionDigestOptions, candidate *attentionDigestCandidate, bucket Actionability, bucketSuppressed bool) {
+	if digest == nil || candidate == nil || !opts.IncludeTrace {
+		return
+	}
+
+	representative := candidate.item.Event
+	representativeCursor := representative.Cursor
+	if len(candidate.members) == 0 {
+		decision := "surfaced"
+		reason := ""
+		if bucketSuppressed {
+			decision = "suppressed"
+			reason = attentionDigestSuppressionBucketLimit
+		} else if candidate.item.SuppressedCount > 0 {
+			decision = "coalesced"
+			reason = candidate.item.SuppressionReason
+		}
+		recordAttentionDigestDecision(digest, opts, representative, bucket, decision, reason, 0)
+		return
+	}
+
+	for _, member := range candidate.members {
+		switch {
+		case member.Cursor == representativeCursor && bucketSuppressed:
+			recordAttentionDigestDecision(digest, opts, member, bucket, "suppressed", attentionDigestSuppressionBucketLimit, 0)
+		case member.Cursor == representativeCursor && candidate.item.SuppressedCount > 0:
+			recordAttentionDigestDecision(digest, opts, member, bucket, "coalesced", candidate.item.SuppressionReason, representativeCursor)
+		case member.Cursor == representativeCursor:
+			recordAttentionDigestDecision(digest, opts, member, bucket, "surfaced", "", 0)
+		default:
+			recordAttentionDigestDecision(digest, opts, member, bucket, "suppressed", candidate.item.SuppressionReason, representativeCursor)
+		}
+	}
+}
+
+func buildAttentionDigestSummary(digest *AttentionDigest) string {
+	if digest == nil {
+		return "no matching changes"
+	}
+
+	actionRequired := len(digest.Buckets.ActionRequired)
+	interesting := len(digest.Buckets.Interesting)
+	background := len(digest.Buckets.Background)
+	countSummary := fmt.Sprintf("%d action_required, %d interesting, %d background", actionRequired, interesting, background)
+
+	switch {
+	case digest.EventCount == 0:
+		return "no matching changes"
+	case actionRequired == 0 && interesting == 0 && background == 0:
+		return fmt.Sprintf("no surfaced items; %d suppressed from %d events", digest.Suppressed.Total, digest.EventCount)
+	}
+
+	lead := attentionDigestLeadSummary(digest)
+	if digest.Suppressed.Total > 0 {
+		countSummary = fmt.Sprintf("%s; %d suppressed from %d events", countSummary, digest.Suppressed.Total, digest.EventCount)
+	} else {
+		countSummary = fmt.Sprintf("%s from %d events", countSummary, digest.EventCount)
+	}
+	if lead == "" {
+		return countSummary
+	}
+	return fmt.Sprintf("%s; %s", lead, countSummary)
+}
+
+func attentionDigestLeadSummary(digest *AttentionDigest) string {
+	if digest == nil {
+		return ""
+	}
+	for _, items := range [][]AttentionDigestItem{
+		digest.Buckets.ActionRequired,
+		digest.Buckets.Interesting,
+		digest.Buckets.Background,
+	} {
+		if len(items) == 0 {
+			continue
+		}
+		return items[0].Event.Summary
+	}
+	return ""
+}
+
 // PublishTrackerChange normalizes a state tracker change and appends it to the feed.
 func (f *AttentionFeed) PublishTrackerChange(change tracker.StateChange) AttentionEvent {
 	return f.Append(NewTrackerEvent(change))
@@ -482,6 +1042,68 @@ func (f *AttentionFeed) SubscribeEventBus(bus *ntmevents.EventBus) func() {
 	return bus.SubscribeAll(func(event ntmevents.BusEvent) {
 		f.PublishBusEvent(event)
 	})
+}
+
+// PublishMailPending creates and appends a mail_pending signal for unread mail.
+func (f *AttentionFeed) PublishMailPending(from, to, subject string, messageID int, threadID string) AttentionEvent {
+	event := AttentionEvent{
+		Ts:            time.Now().UTC().Format(time.RFC3339Nano),
+		Category:      EventCategoryMail,
+		Type:          EventTypeMailReceived,
+		Source:        "agent_mail",
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       fmt.Sprintf("New mail from %s: %s", from, subject),
+		Details: map[string]any{
+			"from":       from,
+			"to":         to,
+			"subject":    subject,
+			"message_id": messageID,
+			"thread_id":  threadID,
+		},
+		NextActions: []NextAction{
+			{
+				Action: "robot-mail-read",
+				Args:   fmt.Sprintf("--message-id=%d", messageID),
+				Reason: "Read message",
+			},
+		},
+	}
+	return f.Append(annotateAttentionSignal(event))
+}
+
+// PublishMailAckRequired creates and appends a mail_ack_required signal for messages needing acknowledgment.
+func (f *AttentionFeed) PublishMailAckRequired(from, to, subject string, messageID int, threadID string) AttentionEvent {
+	event := AttentionEvent{
+		Ts:            time.Now().UTC().Format(time.RFC3339Nano),
+		Category:      EventCategoryMail,
+		Type:          EventTypeMailAckRequired,
+		Source:        "agent_mail",
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       fmt.Sprintf("Ack required from %s: %s", from, subject),
+		Details: map[string]any{
+			"from":         from,
+			"to":           to,
+			"subject":      subject,
+			"message_id":   messageID,
+			"thread_id":    threadID,
+			"ack_required": true,
+		},
+		NextActions: []NextAction{
+			{
+				Action: "robot-mail-ack",
+				Args:   fmt.Sprintf("--message-id=%d", messageID),
+				Reason: "Acknowledge message",
+			},
+			{
+				Action: "robot-mail-read",
+				Args:   fmt.Sprintf("--message-id=%d", messageID),
+				Reason: "Read message first",
+			},
+		},
+	}
+	return f.Append(annotateAttentionSignal(event))
 }
 
 // Subscribe registers a handler to receive events.
@@ -890,6 +1512,34 @@ func NewBusAttentionEvent(event ntmevents.BusEvent) (AttentionEvent, bool) {
 			severity = SeverityWarning
 		}
 		return attentionFromBusStruct(e.BaseEvent, "event_bus.alert", attentionDetailsFromStruct(e), EventCategoryAlert, eventType, actionability, severity, e.Message, []NextAction{attentionStatusNextAction("Inspect the active alerts")}), true
+	case ntmevents.ReservationConflictEvent:
+		holders := strings.Join(e.Holders, ", ")
+		summary := fmt.Sprintf("reservation conflict on %s: %s blocked by [%s]", e.Path, e.RequestorAgent, holders)
+		details := map[string]any{
+			"path":            e.Path,
+			"requestor_agent": e.RequestorAgent,
+			"requestor_pane":  e.RequestorPane,
+			"holders":         e.Holders,
+			"conflict_kind":   "reservation",
+		}
+		nextActions := []NextAction{
+			attentionStatusNextAction("Inspect file reservations with --robot-locks"),
+			{Action: "robot-locks", Args: fmt.Sprintf("%s --all-agents --json", e.Session), Reason: "View all active file reservations"},
+		}
+		return attentionFromBusStruct(e.BaseEvent, "event_bus.conflict", details, EventCategoryFile, EventTypeFileConflict, ActionabilityActionRequired, SeverityWarning, summary, nextActions), true
+	case ntmevents.FileConflictEvent:
+		agents := strings.Join(e.Agents, ", ")
+		summary := fmt.Sprintf("file conflict on %s: agents [%s] editing concurrently", e.Path, agents)
+		details := map[string]any{
+			"path":          e.Path,
+			"agents":        e.Agents,
+			"conflict_kind": "file",
+		}
+		nextActions := []NextAction{
+			attentionStatusNextAction("Inspect which agents are editing this file"),
+			{Action: "robot-diff", Args: e.Session, Reason: "Compare agent outputs for conflict resolution"},
+		}
+		return attentionFromBusStruct(e.BaseEvent, "event_bus.conflict", details, EventCategoryFile, EventTypeFileConflict, ActionabilityActionRequired, SeverityWarning, summary, nextActions), true
 	case ntmevents.WebhookEvent:
 		return attentionFromWebhookEvent(e), true
 	case ntmevents.BaseEvent:
@@ -1116,6 +1766,12 @@ func GetAttentionFeed() *AttentionFeed {
 	return globalFeed
 }
 
+// PeekAttentionFeed returns the global attention feed if it has already been
+// initialized. Unlike GetAttentionFeed, it never creates a new feed instance.
+func PeekAttentionFeed() *AttentionFeed {
+	return globalFeed
+}
+
 // SetAttentionFeed sets a custom global feed (for testing).
 // Must be called before any calls to GetAttentionFeed.
 func SetAttentionFeed(feed *AttentionFeed) {
@@ -1133,7 +1789,8 @@ func cloneAttentionEvent(event AttentionEvent) AttentionEvent {
 
 func sanitizeNextActions(actions []NextAction) []NextAction {
 	if len(actions) == 0 {
-		return actions
+		// Normalize nil to empty slice so JSON always emits [] not null.
+		return []NextAction{}
 	}
 
 	filtered := make([]NextAction, 0, len(actions))
@@ -1147,7 +1804,7 @@ func sanitizeNextActions(actions []NextAction) []NextAction {
 		filtered = append(filtered, action)
 	}
 	if len(filtered) == 0 {
-		return nil
+		return []NextAction{}
 	}
 	return filtered
 }

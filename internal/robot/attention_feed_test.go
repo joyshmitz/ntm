@@ -44,6 +44,23 @@ func mustBusAttentionEvent(t *testing.T, event ntmevents.BusEvent) AttentionEven
 	return normalized
 }
 
+func digestTestEvent(cursor int64, category EventCategory, eventType EventType, actionability Actionability, severity Severity, summary string) AttentionEvent {
+	return AttentionEvent{
+		Cursor:        cursor,
+		Ts:            time.Date(2026, 3, 21, 4, 0, 0, 0, time.UTC).Add(time.Duration(cursor) * time.Second).Format(time.RFC3339Nano),
+		Session:       "proj",
+		Pane:          2,
+		Category:      category,
+		Type:          eventType,
+		Actionability: actionability,
+		Severity:      severity,
+		Summary:       summary,
+		Details: map[string]any{
+			"pane_ref": "2",
+		},
+	}
+}
+
 // =============================================================================
 // Cursor Allocator Tests
 // =============================================================================
@@ -941,6 +958,203 @@ func TestNewFileConflictEvent(t *testing.T) {
 	}
 }
 
+func TestBuildAttentionDigest_CoalescesPaneOutputBursts(t *testing.T) {
+	events := []AttentionEvent{
+		digestTestEvent(1, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 1"),
+		digestTestEvent(2, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 2"),
+		digestTestEvent(3, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 3"),
+		digestTestEvent(4, EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, "agent became idle"),
+	}
+
+	opts := DefaultAttentionDigestOptions()
+	opts.IncludeTrace = true
+	opts.ActionRequiredLimit = 5
+	opts.InterestingLimit = 5
+	opts.BackgroundLimit = 5
+
+	digest := BuildAttentionDigest(events, 0, 4, opts)
+	t.Logf("digest summary=%q suppressed=%+v trace=%+v", digest.Summary, digest.Suppressed, digest.Trace)
+
+	if len(digest.Buckets.Interesting) != 2 {
+		t.Fatalf("interesting bucket len = %d, want 2", len(digest.Buckets.Interesting))
+	}
+
+	var burst *AttentionDigestItem
+	for i := range digest.Buckets.Interesting {
+		if digest.Buckets.Interesting[i].Event.Type == EventTypePaneOutput {
+			burst = &digest.Buckets.Interesting[i]
+			break
+		}
+	}
+	if burst == nil {
+		t.Fatal("expected pane output burst item in interesting bucket")
+	}
+	if burst.SourceEventCount != 3 {
+		t.Fatalf("burst.SourceEventCount = %d, want 3", burst.SourceEventCount)
+	}
+	if burst.SuppressedCount != 2 {
+		t.Fatalf("burst.SuppressedCount = %d, want 2", burst.SuppressedCount)
+	}
+	if burst.SuppressionReason != attentionDigestSuppressionPaneOutputBurst {
+		t.Fatalf("burst.SuppressionReason = %q, want %q", burst.SuppressionReason, attentionDigestSuppressionPaneOutputBurst)
+	}
+	if burst.Event.Summary != "3 output updates in proj pane 2" {
+		t.Fatalf("burst summary = %q, want %q", burst.Event.Summary, "3 output updates in proj pane 2")
+	}
+	if digest.Suppressed.Total != 2 {
+		t.Fatalf("suppressed total = %d, want 2", digest.Suppressed.Total)
+	}
+	if digest.Suppressed.ByReason[attentionDigestSuppressionPaneOutputBurst] != 2 {
+		t.Fatalf("pane output suppression count = %d, want 2", digest.Suppressed.ByReason[attentionDigestSuppressionPaneOutputBurst])
+	}
+
+	hasCoalesced := false
+	hasSuppressed := false
+	for _, decision := range digest.Trace {
+		if decision.Decision == "coalesced" {
+			hasCoalesced = true
+		}
+		if decision.Decision == "suppressed" && decision.Reason == attentionDigestSuppressionPaneOutputBurst {
+			hasSuppressed = true
+		}
+	}
+	if !hasCoalesced || !hasSuppressed {
+		t.Fatalf("trace missing coalesced/suppressed pane output decisions: %+v", digest.Trace)
+	}
+}
+
+func TestBuildAttentionDigest_SuppressesLifecycleNoiseAndDuplicateAlerts(t *testing.T) {
+	attached := digestTestEvent(1, EventCategorySession, EventTypeSessionAttached, ActionabilityInteresting, SeverityInfo, "session attached")
+	attached.Pane = 0
+	delete(attached.Details, "pane_ref")
+
+	resized := digestTestEvent(2, EventCategoryPane, EventTypePaneResized, ActionabilityBackground, SeverityInfo, "pane resized")
+	dupAlert1 := digestTestEvent(3, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 85%")
+	dupAlert2 := digestTestEvent(4, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 85%")
+	background := digestTestEvent(5, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityInfo, "checkpoint created")
+	background.Pane = 0
+	delete(background.Details, "pane_ref")
+
+	opts := DefaultAttentionDigestOptions()
+	opts.IncludeTrace = true
+	opts.ActionRequiredLimit = 5
+	opts.InterestingLimit = 5
+	opts.BackgroundLimit = 5
+
+	digest := BuildAttentionDigest([]AttentionEvent{attached, resized, dupAlert1, dupAlert2, background}, 0, 5, opts)
+	t.Logf("digest summary=%q suppressed=%+v trace=%+v", digest.Summary, digest.Suppressed, digest.Trace)
+
+	if len(digest.Buckets.ActionRequired) != 1 {
+		t.Fatalf("action_required bucket len = %d, want 1", len(digest.Buckets.ActionRequired))
+	}
+	alert := digest.Buckets.ActionRequired[0]
+	if alert.SourceEventCount != 2 || alert.SuppressedCount != 1 {
+		t.Fatalf("duplicate alert item = %+v, want source=2 suppressed=1", alert)
+	}
+	if alert.SuppressionReason != attentionDigestSuppressionDuplicateAlert {
+		t.Fatalf("duplicate alert reason = %q, want %q", alert.SuppressionReason, attentionDigestSuppressionDuplicateAlert)
+	}
+	if len(digest.Buckets.Background) != 1 {
+		t.Fatalf("background bucket len = %d, want 1", len(digest.Buckets.Background))
+	}
+	if digest.Suppressed.Total != 3 {
+		t.Fatalf("suppressed total = %d, want 3", digest.Suppressed.Total)
+	}
+	if digest.Suppressed.ByReason[attentionDigestSuppressionLifecycleNoise] != 2 {
+		t.Fatalf("lifecycle suppression count = %d, want 2", digest.Suppressed.ByReason[attentionDigestSuppressionLifecycleNoise])
+	}
+	if digest.Suppressed.ByReason[attentionDigestSuppressionDuplicateAlert] != 1 {
+		t.Fatalf("duplicate alert suppression count = %d, want 1", digest.Suppressed.ByReason[attentionDigestSuppressionDuplicateAlert])
+	}
+}
+
+func TestAttentionFeed_DigestPreservesCursorBoundariesAndImportantSignals(t *testing.T) {
+	feed := newTestAttentionFeed(t)
+
+	feed.Append(digestTestEvent(0, EventCategorySystem, EventType(DefaultTransportLiveness.HeartbeatType), ActionabilityBackground, SeverityDebug, "Heartbeat"))
+	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 1"))
+	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 2"))
+	feed.Append(digestTestEvent(0, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 92%"))
+	feed.Append(digestTestEvent(0, EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, "agent became idle"))
+
+	opts := DefaultAttentionDigestOptions()
+	opts.IncludeTrace = true
+	opts.MinSeverity = SeverityDebug
+	opts.ActionRequiredLimit = 1
+	opts.InterestingLimit = 1
+	opts.BackgroundLimit = 1
+
+	digest, err := feed.Digest(0, opts)
+	if err != nil {
+		t.Fatalf("Digest error: %v", err)
+	}
+	t.Logf("digest summary=%q cursor_start=%d cursor_end=%d suppressed=%+v trace=%+v", digest.Summary, digest.CursorStart, digest.CursorEnd, digest.Suppressed, digest.Trace)
+
+	if digest.CursorStart != 1 {
+		t.Fatalf("CursorStart = %d, want 1", digest.CursorStart)
+	}
+	if digest.CursorEnd != 5 {
+		t.Fatalf("CursorEnd = %d, want 5", digest.CursorEnd)
+	}
+	if len(digest.Buckets.ActionRequired) != 1 {
+		t.Fatalf("action_required bucket len = %d, want 1", len(digest.Buckets.ActionRequired))
+	}
+	if digest.Buckets.ActionRequired[0].Event.Summary != "quota at 92%" {
+		t.Fatalf("action_required summary = %q, want %q", digest.Buckets.ActionRequired[0].Event.Summary, "quota at 92%")
+	}
+	if !strings.HasPrefix(digest.Summary, "quota at 92%") {
+		t.Fatalf("summary = %q, want prefix %q", digest.Summary, "quota at 92%")
+	}
+	if digest.Suppressed.Total < 2 {
+		t.Fatalf("suppressed total = %d, want at least 2", digest.Suppressed.Total)
+	}
+}
+
+func TestBuildAttentionDigest_SummaryStableAndBucketAssignment(t *testing.T) {
+	heartbeat := digestTestEvent(1, EventCategorySystem, EventType(DefaultTransportLiveness.HeartbeatType), ActionabilityBackground, SeverityDebug, "Heartbeat")
+	heartbeat.Pane = 0
+	delete(heartbeat.Details, "pane_ref")
+
+	alert := digestTestEvent(2, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 92%")
+	bead := digestTestEvent(3, EventCategoryBead, EventTypeBeadUpdated, ActionabilityInteresting, SeverityInfo, "bead ready")
+	output1 := digestTestEvent(4, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 1")
+	output2 := digestTestEvent(5, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 2")
+	background := digestTestEvent(6, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityInfo, "checkpoint created")
+	background.Pane = 0
+	delete(background.Details, "pane_ref")
+
+	opts := DefaultAttentionDigestOptions()
+	opts.MinSeverity = SeverityDebug
+	opts.ActionRequiredLimit = 5
+	opts.InterestingLimit = 5
+	opts.BackgroundLimit = 5
+
+	digest := BuildAttentionDigest([]AttentionEvent{heartbeat, alert, bead, output1, output2, background}, 0, 6, opts)
+	t.Logf("digest summary=%q buckets=%+v suppressed=%+v", digest.Summary, digest.Buckets, digest.Suppressed)
+
+	if digest.CursorStart != 1 {
+		t.Fatalf("CursorStart = %d, want 1", digest.CursorStart)
+	}
+	if digest.CursorEnd != 6 {
+		t.Fatalf("CursorEnd = %d, want 6", digest.CursorEnd)
+	}
+	if digest.PeriodStart != heartbeat.Ts {
+		t.Fatalf("PeriodStart = %q, want %q", digest.PeriodStart, heartbeat.Ts)
+	}
+	if digest.PeriodEnd != background.Ts {
+		t.Fatalf("PeriodEnd = %q, want %q", digest.PeriodEnd, background.Ts)
+	}
+	if len(digest.Buckets.ActionRequired) != 1 || len(digest.Buckets.Interesting) != 2 || len(digest.Buckets.Background) != 1 {
+		t.Fatalf("bucket sizes = action_required:%d interesting:%d background:%d, want 1/2/1",
+			len(digest.Buckets.ActionRequired), len(digest.Buckets.Interesting), len(digest.Buckets.Background))
+	}
+
+	wantSummary := "quota at 92%; 1 action_required, 2 interesting, 1 background; 2 suppressed from 6 events"
+	if digest.Summary != wantSummary {
+		t.Fatalf("summary = %q, want %q", digest.Summary, wantSummary)
+	}
+}
+
 // =============================================================================
 // JSON Serialization Tests
 // =============================================================================
@@ -1074,5 +1288,175 @@ func BenchmarkAttentionFeed_Append(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		feed.Append(event)
+	}
+}
+
+// =============================================================================
+// Conflict Event Tests (br-vdfjr)
+// =============================================================================
+
+func TestNewBusAttentionEvent_ReservationConflict(t *testing.T) {
+	t.Parallel()
+
+	event := ntmevents.NewReservationConflictEvent(
+		"myproject", "internal/auth/handler.go", "BlueLake", "cc_1",
+		[]string{"GreenCastle", "RedMountain"},
+	)
+
+	att, ok := NewBusAttentionEvent(event)
+	if !ok {
+		t.Fatal("expected ReservationConflictEvent to normalize")
+	}
+
+	if att.Category != EventCategoryFile {
+		t.Errorf("Category = %q, want %q", att.Category, EventCategoryFile)
+	}
+	if att.Type != EventTypeFileConflict {
+		t.Errorf("Type = %q, want %q", att.Type, EventTypeFileConflict)
+	}
+	if att.Actionability != ActionabilityActionRequired {
+		t.Errorf("Actionability = %q, want %q", att.Actionability, ActionabilityActionRequired)
+	}
+	if att.Severity != SeverityWarning {
+		t.Errorf("Severity = %q, want %q", att.Severity, SeverityWarning)
+	}
+	if !strings.Contains(att.Summary, "reservation conflict") {
+		t.Errorf("Summary should contain 'reservation conflict', got %q", att.Summary)
+	}
+	if !strings.Contains(att.Summary, "internal/auth/handler.go") {
+		t.Errorf("Summary should contain file path, got %q", att.Summary)
+	}
+	if att.Details == nil {
+		t.Fatal("Details must not be nil")
+	}
+	if att.Details["conflict_kind"] != "reservation" {
+		t.Errorf("conflict_kind = %v, want 'reservation'", att.Details["conflict_kind"])
+	}
+	if att.Details["path"] != "internal/auth/handler.go" {
+		t.Errorf("path = %v, want 'internal/auth/handler.go'", att.Details["path"])
+	}
+	if len(att.NextActions) == 0 {
+		t.Error("NextActions must suggest follow-up commands")
+	}
+}
+
+func TestNewBusAttentionEvent_FileConflict(t *testing.T) {
+	t.Parallel()
+
+	event := ntmevents.NewFileConflictEvent(
+		"myproject", "cmd/main.go",
+		[]string{"BlueLake", "GreenCastle"},
+	)
+
+	att, ok := NewBusAttentionEvent(event)
+	if !ok {
+		t.Fatal("expected FileConflictEvent to normalize")
+	}
+
+	if att.Category != EventCategoryFile {
+		t.Errorf("Category = %q, want %q", att.Category, EventCategoryFile)
+	}
+	if att.Type != EventTypeFileConflict {
+		t.Errorf("Type = %q, want %q", att.Type, EventTypeFileConflict)
+	}
+	if att.Actionability != ActionabilityActionRequired {
+		t.Errorf("Actionability = %q, want %q", att.Actionability, ActionabilityActionRequired)
+	}
+	if !strings.Contains(att.Summary, "file conflict") {
+		t.Errorf("Summary should contain 'file conflict', got %q", att.Summary)
+	}
+	if !strings.Contains(att.Summary, "cmd/main.go") {
+		t.Errorf("Summary should contain file path, got %q", att.Summary)
+	}
+	if att.Details == nil {
+		t.Fatal("Details must not be nil")
+	}
+	if att.Details["conflict_kind"] != "file" {
+		t.Errorf("conflict_kind = %v, want 'file'", att.Details["conflict_kind"])
+	}
+	if len(att.NextActions) == 0 {
+		t.Error("NextActions must suggest follow-up commands")
+	}
+}
+
+func TestConflictEvents_FeedToJournal(t *testing.T) {
+	t.Parallel()
+
+	feed := newTestAttentionFeed(t)
+
+	// Publish a reservation conflict
+	reservationEvt := ntmevents.NewReservationConflictEvent(
+		"proj", "src/auth.go", "Agent1", "cc_1", []string{"Agent2"},
+	)
+	published, ok := feed.PublishBusEvent(reservationEvt)
+	if !ok {
+		t.Fatal("reservation conflict should be publishable")
+	}
+	if published.Cursor == 0 {
+		t.Error("published event should have a cursor")
+	}
+
+	// Publish a file conflict
+	fileEvt := ntmevents.NewFileConflictEvent("proj", "src/main.go", []string{"A", "B"})
+	published2, ok := feed.PublishBusEvent(fileEvt)
+	if !ok {
+		t.Fatal("file conflict should be publishable")
+	}
+	if published2.Cursor <= published.Cursor {
+		t.Errorf("cursor should be monotonically increasing: %d <= %d", published2.Cursor, published.Cursor)
+	}
+
+	// Verify replay returns both
+	events, _, err := feed.Replay(0, 100)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Errorf("expected 2 events in journal, got %d", len(events))
+	}
+}
+
+func TestConflictEvents_PartialObservability(t *testing.T) {
+	t.Parallel()
+
+	// Reservation conflict with empty holders — should still work
+	event := ntmevents.NewReservationConflictEvent(
+		"proj", "file.go", "Agent1", "cc_1", nil,
+	)
+	att, ok := NewBusAttentionEvent(event)
+	if !ok {
+		t.Fatal("reservation conflict with nil holders should normalize")
+	}
+	if att.Actionability != ActionabilityActionRequired {
+		t.Errorf("even with no holders, actionability should be action_required")
+	}
+
+	// File conflict with single agent (edge case)
+	event2 := ntmevents.NewFileConflictEvent("proj", "f.go", []string{"OnlyAgent"})
+	att2, ok := NewBusAttentionEvent(event2)
+	if !ok {
+		t.Fatal("file conflict with one agent should normalize")
+	}
+	if att2.Details["conflict_kind"] != "file" {
+		t.Errorf("conflict_kind should be 'file'")
+	}
+}
+
+func BenchmarkBuildAttentionDigest_Burst(b *testing.B) {
+	events := make([]AttentionEvent, 0, 4096)
+	for i := 0; i < 4000; i++ {
+		event := digestTestEvent(int64(i+1), EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update")
+		events = append(events, event)
+	}
+	events = append(events, digestTestEvent(4001, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 92%"))
+
+	opts := DefaultAttentionDigestOptions()
+	opts.ActionRequiredLimit = 5
+	opts.InterestingLimit = 5
+	opts.BackgroundLimit = 5
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildAttentionDigest(events, 0, 4001, opts)
 	}
 }
