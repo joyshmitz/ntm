@@ -1029,8 +1029,15 @@ func TestPrintSnapshot(t *testing.T) {
 	if result.LatestCursor != 0 {
 		t.Errorf("LatestCursor = %d, want 0 for empty journal", result.LatestCursor)
 	}
-	if !result.ReplayWindow.Supported {
-		t.Error("ReplayWindow.Supported = false, want true")
+	// Empty journal has no events to replay
+	if result.ReplayWindow.Supported {
+		t.Error("ReplayWindow.Supported = true, want false for empty journal")
+	}
+	if result.ReplayWindow.Reason != "no events in feed yet" {
+		t.Errorf("ReplayWindow.Reason = %q, want %q", result.ReplayWindow.Reason, "no events in feed yet")
+	}
+	if result.ReplayWindow.EventCount != 0 {
+		t.Errorf("ReplayWindow.EventCount = %d, want 0 for empty journal", result.ReplayWindow.EventCount)
 	}
 	if result.ReplayWindow.OldestCursor != 0 {
 		t.Errorf("ReplayWindow.OldestCursor = %d, want 0 for empty journal", result.ReplayWindow.OldestCursor)
@@ -1115,6 +1122,20 @@ func TestGetSnapshotIncludesReplayWindowMetadata(t *testing.T) {
 	}
 	if result.ReplayWindow.ResyncCommand != "ntm --robot-snapshot" {
 		t.Errorf("ReplayWindow.ResyncCommand = %q, want %q", result.ReplayWindow.ResyncCommand, "ntm --robot-snapshot")
+	}
+	// New fields for bootstrap contract
+	if result.ReplayWindow.Reason != "ready" {
+		t.Errorf("ReplayWindow.Reason = %q, want %q", result.ReplayWindow.Reason, "ready")
+	}
+	if result.ReplayWindow.EventCount != 2 {
+		t.Errorf("ReplayWindow.EventCount = %d, want 2 (journal size)", result.ReplayWindow.EventCount)
+	}
+	// Timestamps should be populated from events
+	if result.ReplayWindow.OldestTimestamp == "" {
+		t.Error("ReplayWindow.OldestTimestamp should be populated")
+	}
+	if result.ReplayWindow.LatestTimestamp == "" {
+		t.Error("ReplayWindow.LatestTimestamp should be populated")
 	}
 }
 
@@ -1292,6 +1313,8 @@ func TestPrintSnapshotWithSession(t *testing.T) {
 // ====================
 
 func TestAgentTypeString(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input    tmux.AgentType
 		expected string
@@ -1299,8 +1322,11 @@ func TestAgentTypeString(t *testing.T) {
 		{tmux.AgentClaude, "claude"},
 		{tmux.AgentCodex, "codex"},
 		{tmux.AgentGemini, "gemini"},
+		{tmux.AgentCursor, "cursor"},
+		{tmux.AgentWindsurf, "windsurf"},
+		{tmux.AgentAider, "aider"},
 		{tmux.AgentUser, "user"},
-		{tmux.AgentType("other"), "unknown"},
+		{tmux.AgentType("invalid"), "unknown"},
 	}
 
 	for _, tc := range tests {
@@ -2068,6 +2094,10 @@ func TestTerseStateRoundTrip(t *testing.T) {
 		Session:        "test",
 		ActiveAgents:   5,
 		TotalAgents:    8,
+		WorkingAgents:  3,
+		IdleAgents:     2,
+		ErrorAgents:    0,
+		ContextPct:     78,
 		ReadyBeads:     20,
 		BlockedBeads:   10,
 		InProgressBead: 5,
@@ -2917,10 +2947,9 @@ func TestGenerateTokenHints(t *testing.T) {
 			output: TokensOutput{
 				TotalTokens:  54000,
 				TotalPrompts: 30,
-				Breakdown:    []TokenBreakdown{},
-				AgentStats: map[string]AgentTokenStats{
-					"claude": {Tokens: 50000},
-					"codex":  {Tokens: 4000}, // 50000/4000 = 12.5x ratio (> 10)
+				Breakdown: []TokenBreakdown{
+					{Key: "claude", Tokens: 50000},
+					{Key: "codex", Tokens: 4000}, // 50000/4000 = 12.5x ratio (> 10)
 				},
 			},
 			checkFunc: func(t *testing.T, hints *TokensAgentHints) {

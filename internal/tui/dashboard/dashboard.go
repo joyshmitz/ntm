@@ -371,10 +371,13 @@ type Model struct {
 	statusFetchErr      error
 
 	// Stats
-	claudeCount int
-	codexCount  int
-	geminiCount int
-	userCount   int
+	claudeCount   int
+	codexCount    int
+	geminiCount   int
+	cursorCount   int
+	windsurfCount int
+	aiderCount    int
+	userCount     int
 
 	// Theme
 	theme theme.Theme
@@ -3958,6 +3961,9 @@ func (m *Model) updateStats() {
 	m.claudeCount = 0
 	m.codexCount = 0
 	m.geminiCount = 0
+	m.cursorCount = 0
+	m.windsurfCount = 0
+	m.aiderCount = 0
 	m.userCount = 0
 
 	for _, p := range m.panes {
@@ -3968,6 +3974,12 @@ func (m *Model) updateStats() {
 			m.codexCount++
 		case tmux.AgentGemini:
 			m.geminiCount++
+		case tmux.AgentCursor:
+			m.cursorCount++
+		case tmux.AgentWindsurf:
+			m.windsurfCount++
+		case tmux.AgentAider:
+			m.aiderCount++
 		default:
 			m.userCount++
 		}
@@ -3994,7 +4006,7 @@ func (m *Model) updateTickerData() {
 	if activeAgents == 0 && len(m.panes) > 0 {
 		// Status detection hasn't populated yet; show total agents as placeholder
 		// This prevents showing "0/17" when we simply haven't fetched status yet
-		activeAgents = m.claudeCount + m.codexCount + m.geminiCount
+		activeAgents = m.claudeCount + m.codexCount + m.geminiCount + m.cursorCount + m.windsurfCount + m.aiderCount
 	}
 
 	// Count alerts by severity
@@ -4012,12 +4024,12 @@ func (m *Model) updateTickerData() {
 
 	// Build ticker data from dashboard state
 	data := panels.TickerData{
-		TotalAgents:      len(m.panes),
-		ActiveAgents:     activeAgents,
-		ClaudeCount:      m.claudeCount,
-		CodexCount:       m.codexCount,
-		GeminiCount:      m.geminiCount,
-		UserCount:        m.userCount,
+		TotalAgents:  len(m.panes),
+		ActiveAgents: activeAgents,
+		ClaudeCount:  m.claudeCount,
+		CodexCount:   m.codexCount,
+		GeminiCount:  m.geminiCount,
+		UserCount:    m.userCount,
 		CriticalAlerts:   critAlerts,
 		WarningAlerts:    warnAlerts,
 		InfoAlerts:       infoAlerts,

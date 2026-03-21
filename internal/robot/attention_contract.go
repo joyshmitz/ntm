@@ -442,29 +442,9 @@ var AttentionCommands = []AttentionCommand{
 // Output Types
 // =============================================================================
 
-// EventsOutput is the response for --robot-events.
-type EventsOutput struct {
-	RobotResponse
-
-	// Events is the list of events matching the query.
-	// Always present, empty array if no events.
-	Events []AttentionEvent `json:"events"`
-
-	// NextCursor is the cursor to use for the next request.
-	// Zero if no more events are available.
-	NextCursor int64 `json:"next_cursor"`
-
-	// HasMore indicates if more events exist beyond limit.
-	HasMore bool `json:"has_more"`
-
-	// Profile is the name of the profile used (if any).
-	// Omitted if using defaults.
-	Profile string `json:"profile,omitempty"`
-
-	// ProfileApplied indicates which filters came from the profile.
-	// Helps operators understand what was auto-applied.
-	ProfileApplied map[string]any `json:"profile_applied,omitempty"`
-}
+// EventsOutput is defined in attention_feed.go (the runtime implementation).
+// It includes: Events, LatestCursor, FeedCursor, SinceCursor, EventCount,
+// Truncated, CursorExpired, and ResyncHint fields.
 
 // DigestOutput is the response for --robot-digest.
 type DigestOutput struct {

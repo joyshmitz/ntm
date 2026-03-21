@@ -3490,12 +3490,20 @@ type SnapshotOutput struct {
 
 // SnapshotReplayWindowInfo describes the currently replayable cursor window.
 // This gives operators a mechanical handoff boundary for replay-oriented commands.
+// The snapshot bootstrap contract is:
+//   - Use `latest_cursor` as the starting point for --robot-events --since=<cursor>
+//   - If `supported` is false, see `reason` for why replay is unavailable
+//   - If a cursor expires, use `resync_command` to get a fresh snapshot
 type SnapshotReplayWindowInfo struct {
 	Supported       bool   `json:"supported"`
-	OldestCursor    int64  `json:"oldest_cursor"`
-	LatestCursor    int64  `json:"latest_cursor"`
-	RetentionPeriod string `json:"retention_period,omitempty"`
-	ResyncCommand   string `json:"resync_command,omitempty"`
+	Reason          string `json:"reason,omitempty"`            // Why replay is/isn't supported
+	OldestCursor    int64  `json:"oldest_cursor"`               // Earliest cursor still in retention
+	LatestCursor    int64  `json:"latest_cursor"`               // Most recent cursor (use for --since)
+	EventCount      int    `json:"event_count"`                 // Events in the replay window
+	OldestTimestamp string `json:"oldest_timestamp,omitempty"`  // RFC3339 timestamp of oldest event
+	LatestTimestamp string `json:"latest_timestamp,omitempty"`  // RFC3339 timestamp of latest event
+	RetentionPeriod string `json:"retention_period,omitempty"`  // How long events are retained
+	ResyncCommand   string `json:"resync_command,omitempty"`    // Command to run when cursor expires
 }
 
 // AlertInfo provides detailed alert information for robot output
@@ -3626,15 +3634,35 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 		Alerts:                   []string{},
 	}
 
-	feedStats := GetAttentionFeed().Stats()
+	feed := GetAttentionFeed()
+	feedStats := feed.Stats()
 	output.LatestCursor = feedStats.NewestCursor
-	output.ReplayWindow = SnapshotReplayWindowInfo{
-		Supported:       true,
+
+	// Build replay window info with full bootstrap metadata
+	replayWindow := SnapshotReplayWindowInfo{
 		OldestCursor:    feedStats.OldestCursor,
 		LatestCursor:    feedStats.NewestCursor,
+		EventCount:      feedStats.Count,
 		RetentionPeriod: feedStats.RetentionPeriod.String(),
 		ResyncCommand:   "ntm --robot-snapshot",
 	}
+
+	// Determine replay support and populate timestamps
+	if feedStats.Count == 0 {
+		replayWindow.Supported = false
+		replayWindow.Reason = "no events in feed yet"
+	} else {
+		replayWindow.Supported = true
+		replayWindow.Reason = "ready"
+		// Get timestamps from oldest and newest events
+		if oldestEvents, _, err := feed.Replay(feedStats.OldestCursor-1, 1); err == nil && len(oldestEvents) > 0 {
+			replayWindow.OldestTimestamp = oldestEvents[0].Ts
+		}
+		if newestEvents, _, err := feed.Replay(feedStats.NewestCursor-1, 1); err == nil && len(newestEvents) > 0 {
+			replayWindow.LatestTimestamp = newestEvents[0].Ts
+		}
+	}
+	output.ReplayWindow = replayWindow
 
 	// Check tmux availability
 	if !tmux.IsInstalled() {
@@ -4001,6 +4029,12 @@ func agentTypeString(t tmux.AgentType) string {
 		return "codex"
 	case tmux.AgentGemini:
 		return "gemini"
+	case tmux.AgentCursor:
+		return "cursor"
+	case tmux.AgentWindsurf:
+		return "windsurf"
+	case tmux.AgentAider:
+		return "aider"
 	case tmux.AgentUser:
 		return "user"
 	default:
@@ -4035,6 +4069,12 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 		return "gpt-4"
 	case tmux.AgentGemini:
 		return "gemini-2.0-flash"
+	case tmux.AgentCursor:
+		return "cursor"
+	case tmux.AgentWindsurf:
+		return "windsurf"
+	case tmux.AgentAider:
+		return "aider"
 	default:
 		return ""
 	}

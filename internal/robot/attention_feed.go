@@ -1778,6 +1778,10 @@ func SetAttentionFeed(feed *AttentionFeed) {
 	globalFeed = feed
 }
 
+// NOTE: --robot-events command implementation lives in events.go (br-kpvhy).
+// The EventsOptions, EventsResponse, GetEvents, filterEvents, and PrintEvents
+// are all defined there. This comment preserves the bead reference.
+
 func cloneAttentionEvent(event AttentionEvent) AttentionEvent {
 	cloned := event
 	cloned.Details = cloneAnyMap(event.Details)
@@ -2478,3 +2482,5 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// NOTE: --robot-events command implementation lives in events.go (br-kpvhy).
