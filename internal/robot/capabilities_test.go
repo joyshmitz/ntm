@@ -235,6 +235,92 @@ func TestDefaultAttentionCapabilities_BeadOrphanedUnsupported(t *testing.T) {
 	}
 }
 
+func TestDefaultAttentionCapabilities_ProfilesDiscoverable(t *testing.T) {
+	t.Parallel()
+
+	caps := DefaultAttentionCapabilities()
+	if caps == nil {
+		t.Fatal("DefaultAttentionCapabilities() returned nil")
+	}
+	if caps.DefaultProfile != DefaultProfile {
+		t.Fatalf("DefaultProfile = %q, want %q", caps.DefaultProfile, DefaultProfile)
+	}
+	if len(caps.Profiles) == 0 {
+		t.Fatal("expected discoverable profiles in capabilities output")
+	}
+	if _, ok := caps.Features["profile_presets"]; !ok {
+		t.Fatal("expected profile_presets feature entry")
+	}
+	if caps.Features["profile_presets"].Status != CapabilityAvailable {
+		t.Fatalf("profile_presets status = %q, want %q", caps.Features["profile_presets"].Status, CapabilityAvailable)
+	}
+
+	seen := map[string]bool{}
+	for _, profile := range caps.Profiles {
+		seen[profile.Name] = true
+		if profile.Description == "" {
+			t.Fatalf("profile %q should have a description", profile.Name)
+		}
+	}
+	for _, required := range []string{"operator", "debug"} {
+		if !seen[required] {
+			t.Fatalf("expected %q profile in capabilities output, got %+v", required, caps.Profiles)
+		}
+	}
+}
+
+func TestGetProfile_NormalizesInput(t *testing.T) {
+	t.Parallel()
+
+	profile := GetProfile("  DEBUG ")
+	if profile == nil {
+		t.Fatal("expected case-insensitive trimmed profile lookup to succeed")
+	}
+	if profile.Name != "debug" {
+		t.Fatalf("profile.Name = %q, want %q", profile.Name, "debug")
+	}
+}
+
+func TestListProfiles_ReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	profiles := ListProfiles()
+	if len(profiles) == 0 {
+		t.Fatal("expected non-empty profile list")
+	}
+
+	original := BuiltinProfiles[0].Name
+	profiles[0].Name = "mutated"
+	if BuiltinProfiles[0].Name != original {
+		t.Fatalf("ListProfiles returned backing storage; BuiltinProfiles[0].Name = %q, want %q", BuiltinProfiles[0].Name, original)
+	}
+}
+
+func TestResolveEffectiveFilters_ProfileAndExplicitOverrides(t *testing.T) {
+	t.Parallel()
+
+	filters := ResolveEffectiveFilters("operator", ProfileFilters{
+		MinSeverity:      SeverityError,
+		MinActionability: ActionabilityActionRequired,
+	})
+
+	if filters.SourceProfile != "operator" {
+		t.Fatalf("SourceProfile = %q, want %q", filters.SourceProfile, "operator")
+	}
+	if filters.MinSeverity != SeverityError {
+		t.Fatalf("MinSeverity = %q, want %q", filters.MinSeverity, SeverityError)
+	}
+	if filters.MinActionability != ActionabilityActionRequired {
+		t.Fatalf("MinActionability = %q, want %q", filters.MinActionability, ActionabilityActionRequired)
+	}
+	if len(filters.ExplicitOverrides) != 2 {
+		t.Fatalf("ExplicitOverrides = %v, want 2 explicit fields", filters.ExplicitOverrides)
+	}
+	if filters.ExplicitOverrides[0] != "min_severity" || filters.ExplicitOverrides[1] != "min_actionability" {
+		t.Fatalf("ExplicitOverrides = %v, want min_severity,min_actionability", filters.ExplicitOverrides)
+	}
+}
+
 func TestDefaultAttentionCapabilities_UnsupportedConditionsIncluded(t *testing.T) {
 	t.Parallel()
 

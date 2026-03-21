@@ -60,6 +60,7 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -631,6 +632,159 @@ var BuiltinProfiles = []AttentionProfile{
 	},
 }
 
+// GetProfile returns the named profile, or nil if not found.
+func GetProfile(name string) *AttentionProfile {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	for i := range BuiltinProfiles {
+		if strings.EqualFold(BuiltinProfiles[i].Name, name) {
+			return &BuiltinProfiles[i]
+		}
+	}
+	return nil
+}
+
+// ListProfiles returns all available profiles.
+func ListProfiles() []AttentionProfile {
+	profiles := make([]AttentionProfile, len(BuiltinProfiles))
+	copy(profiles, BuiltinProfiles)
+	return profiles
+}
+
+// ResolvedFilters represents the effective filters after profile and explicit filter resolution.
+type ResolvedFilters struct {
+	// Categories to include (empty = all).
+	Categories []EventCategory `json:"categories,omitempty"`
+
+	// MinSeverity is the minimum severity to include.
+	MinSeverity Severity `json:"min_severity"`
+
+	// MinActionability is the minimum actionability to include.
+	MinActionability Actionability `json:"min_actionability"`
+
+	// ExcludeTypes lists event types to exclude.
+	ExcludeTypes []EventType `json:"exclude_types,omitempty"`
+
+	// SourceProfile is the profile name used (empty if none).
+	SourceProfile string `json:"source_profile,omitempty"`
+
+	// ExplicitOverrides lists which fields were explicitly overridden.
+	ExplicitOverrides []string `json:"explicit_overrides,omitempty"`
+}
+
+// ResolveEffectiveFilters merges a profile with explicit filter overrides.
+// Explicit filters always take precedence over profile defaults.
+// If profileName is empty, no profile is applied.
+func ResolveEffectiveFilters(profileName string, explicit ProfileFilters) ResolvedFilters {
+	result := ResolvedFilters{
+		MinSeverity:      SeverityInfo,
+		MinActionability: ActionabilityBackground,
+	}
+
+	// Apply profile if specified
+	if profileName != "" {
+		profile := GetProfile(profileName)
+		if profile != nil {
+			result.SourceProfile = profileName
+			if len(profile.Filters.Categories) > 0 {
+				result.Categories = profile.Filters.Categories
+			}
+			if profile.Filters.MinSeverity != "" {
+				result.MinSeverity = profile.Filters.MinSeverity
+			}
+			if profile.Filters.MinActionability != "" {
+				result.MinActionability = profile.Filters.MinActionability
+			}
+			if len(profile.Filters.ExcludeTypes) > 0 {
+				result.ExcludeTypes = profile.Filters.ExcludeTypes
+			}
+		}
+	}
+
+	// Apply explicit overrides
+	overrides := []string{}
+	if len(explicit.Categories) > 0 {
+		result.Categories = explicit.Categories
+		overrides = append(overrides, "categories")
+	}
+	if explicit.MinSeverity != "" {
+		result.MinSeverity = explicit.MinSeverity
+		overrides = append(overrides, "min_severity")
+	}
+	if explicit.MinActionability != "" {
+		result.MinActionability = explicit.MinActionability
+		overrides = append(overrides, "min_actionability")
+	}
+	if len(explicit.ExcludeTypes) > 0 {
+		result.ExcludeTypes = explicit.ExcludeTypes
+		overrides = append(overrides, "exclude_types")
+	}
+	if len(overrides) > 0 {
+		result.ExplicitOverrides = overrides
+	}
+
+	return result
+}
+
+// MatchesFilters checks if an event passes the resolved filters.
+func (r *ResolvedFilters) MatchesFilters(event *AttentionEvent) bool {
+	// Category check
+	if len(r.Categories) > 0 {
+		found := false
+		for _, cat := range r.Categories {
+			if event.Category == cat {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	// Severity check
+	if !severityMeetsMinimum(event.Severity, r.MinSeverity) {
+		return false
+	}
+
+	// Actionability check
+	if !actionabilityMeetsMinimum(event.Actionability, r.MinActionability) {
+		return false
+	}
+
+	// Exclude types check
+	for _, et := range r.ExcludeTypes {
+		if event.Type == et {
+			return false
+		}
+	}
+
+	return true
+}
+
+// severityMeetsMinimum checks if a severity meets the minimum threshold.
+func severityMeetsMinimum(sev, min Severity) bool {
+	order := map[Severity]int{
+		SeverityDebug:   0,
+		SeverityInfo:    1,
+		SeverityWarning: 2,
+		SeverityError:   3,
+	}
+	return order[sev] >= order[min]
+}
+
+// actionabilityMeetsMinimum checks if actionability meets the minimum threshold.
+func actionabilityMeetsMinimum(act, min Actionability) bool {
+	order := map[Actionability]int{
+		ActionabilityBackground:     0,
+		ActionabilityInteresting:    1,
+		ActionabilityActionRequired: 2,
+	}
+	return order[act] >= order[min]
+}
+
 // =============================================================================
 // Degraded State and Capability Markers
 // =============================================================================
@@ -653,6 +807,12 @@ const (
 type AttentionCapabilities struct {
 	// ContractVersion is the attention feed contract version.
 	ContractVersion string `json:"contract_version"`
+
+	// DefaultProfile is the explicit default noise model for tending surfaces.
+	DefaultProfile string `json:"default_profile,omitempty"`
+
+	// Profiles enumerates the discoverable built-in profile presets.
+	Profiles []AttentionProfile `json:"profiles,omitempty"`
 
 	// Features reports availability of specific features.
 	Features map[string]CapabilityFeature `json:"features"`
@@ -772,10 +932,16 @@ func UnsupportedConditions() []UnsupportedCondition {
 func DefaultAttentionCapabilities() *AttentionCapabilities {
 	return &AttentionCapabilities{
 		ContractVersion: AttentionContractVersion,
+		DefaultProfile:  DefaultProfile,
+		Profiles:        ListProfiles(),
 		Features: map[string]CapabilityFeature{
 			"cursor_replay": {
 				Status: CapabilityAvailable,
 				Note:   "Replay uses monotonic cursors with explicit resync instructions on expiration.",
+			},
+			"profile_presets": {
+				Status: CapabilityAvailable,
+				Note:   "Named attention profiles resolve first, then explicit filters narrow or override the effective filter set.",
 			},
 		},
 		SignalAvailability: map[string]CapabilityFeature{
