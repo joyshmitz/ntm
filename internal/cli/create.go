@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -508,11 +507,9 @@ func buildCreateResponse(session string, panes int) (resp output.CreateResponse,
 
 // confirm prompts the user for y/n confirmation
 func confirm(prompt string) bool {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("%s [y/N]: ", prompt)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
+	return output.ConfirmWithOptions(prompt, output.ConfirmOptions{
+		Default: false,
+	})
 }
 
 // agentTypeToString converts a tmux.AgentType to a string for JSON output

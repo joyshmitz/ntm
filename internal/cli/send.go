@@ -2032,7 +2032,9 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 		}
 
 		if !force {
-			if !confirm(fmt.Sprintf("Kill %d pane(s) matching tags %v?", len(toKill), tags)) {
+			title := fmt.Sprintf("Kill %d pane(s)?", len(toKill))
+			desc := fmt.Sprintf("This will terminate panes matching tags %v in session '%s'.", tags, session)
+			if !confirmHuhDestructive(title, desc) {
 				auditAborted = true
 				fmt.Println("Aborted.")
 				return nil
@@ -2057,7 +2059,9 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 			return err
 		}
 
-		if !confirm(fmt.Sprintf("Kill session '%s' with %d pane(s)?", session, len(panes))) {
+		title := fmt.Sprintf("Kill session '%s'?", session)
+		desc := fmt.Sprintf("This will terminate %d running agent(s).", len(panes))
+		if !confirmHuhDestructive(title, desc) {
 			auditAborted = true
 			fmt.Println("Aborted.")
 			return nil
@@ -2136,8 +2140,9 @@ func runKillProject(w io.Writer, project string, force bool, tags []string, noHo
 	}
 
 	if !force {
-		fmt.Fprintf(w, "Kill %d session(s)? %s\n", len(targets), strings.Join(names, ", "))
-		if !confirm("Proceed?") {
+		title := fmt.Sprintf("Kill %d session(s)?", len(targets))
+		desc := fmt.Sprintf("Sessions: %s", strings.Join(names, ", "))
+		if !confirmHuhDestructive(title, desc) {
 			fmt.Fprintln(w, "Aborted.")
 			return nil
 		}

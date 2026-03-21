@@ -3,6 +3,8 @@
 
 Output testdata/screenshots/dashboard-minimum.png
 
+Require "./ntm"
+
 Set FontSize 14
 Set Shell "bash"
 Set Theme "Catppuccin Mocha"
@@ -11,7 +13,26 @@ Set Theme "Catppuccin Mocha"
 Set Width 80
 Set Height 24
 
-Type "ntm dashboard --demo"
+Hide
+Type "cd /data/projects/ntm"
+Enter
+Type "tmux kill-session -t ntm-vhs-min 2>/dev/null || true"
+Enter
+Type "tmux new-session -d -s ntm-vhs-min 'sleep 120'"
+Enter
+Type "tmux split-window -h -t ntm-vhs-min 'sleep 120'"
+Enter
+Type "tmux split-window -v -t ntm-vhs-min:0.0 'sleep 120'"
+Enter
+Type "tmux select-pane -t ntm-vhs-min:0.0 -T 'ntm-vhs-min__cc_1'"
+Enter
+Type "tmux select-pane -t ntm-vhs-min:0.1 -T 'ntm-vhs-min__cod_1'"
+Enter
+Type "tmux select-pane -t ntm-vhs-min:0.2 -T 'ntm-vhs-min__gmi_1'"
+Enter
+Show
+
+Type "NTM_ANIMATIONS=1 NTM_ICONS=nerd ./ntm dashboard ntm-vhs-min --debug"
 Enter
 Sleep 2s
 
@@ -28,3 +49,10 @@ Set Width 80
 Set Height 24
 Sleep 1s
 Screenshot testdata/screenshots/dashboard-minimum.png
+
+Type "q"
+Sleep 500ms
+
+Hide
+Type "tmux kill-session -t ntm-vhs-min 2>/dev/null || true"
+Enter

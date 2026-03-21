@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -184,6 +186,7 @@ type ensembleStopOptions struct {
 	NoCollect bool
 	Quiet     bool
 	Format    string
+	Yes       bool
 }
 
 type ensembleStopOutput struct {
@@ -245,6 +248,7 @@ Flags:
 	cmd.Flags().BoolVar(&opts.NoCollect, "no-collect", false, "Don't attempt to collect partial outputs")
 	cmd.Flags().BoolVarP(&opts.Quiet, "quiet", "q", false, "Minimal output")
 	cmd.Flags().StringVarP(&opts.Format, "format", "f", "text", "Output format: text, json, yaml")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Skip confirmation prompt")
 	cmd.ValidArgsFunction = completeSessionArgs
 	return cmd
 }
@@ -291,6 +295,26 @@ func runEnsembleStop(w io.Writer, session string, opts ensembleStopOptions) erro
 		"force", opts.Force,
 		"no_collect", opts.NoCollect,
 	)
+
+	// Confirm before destructive action (unless --yes or --force)
+	if !opts.Yes && !opts.Force && !opts.Quiet {
+		agentCount := len(state.Assignments)
+		var confirmed bool
+		err := huh.NewConfirm().
+			Title(fmt.Sprintf("Stop ensemble session '%s'?", session)).
+			Description(fmt.Sprintf("This will terminate %d agents and collect partial outputs.", agentCount)).
+			Affirmative("Yes, stop").
+			Negative("Cancel").
+			Value(&confirmed).
+			WithTheme(theme.HuhDestructiveTheme()).
+			Run()
+		if err != nil {
+			return fmt.Errorf("confirmation dialog: %w", err)
+		}
+		if !confirmed {
+			return nil // User cancelled, no error
+		}
+	}
 
 	var captured int
 	var collectErrors []error

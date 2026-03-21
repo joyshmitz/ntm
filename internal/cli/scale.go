@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // ScaleAction represents a single scale-up or scale-down action
@@ -258,11 +260,26 @@ func runScale(session string, targets []scaleTarget, dryRun, force bool) error {
 	if len(scaleDownActions) > 0 && !force && !IsJSONOutput() {
 		printScalePlan(session, before, after, allActions)
 		fmt.Println()
-		fmt.Println("WARNING: Scaling down will terminate agents and lose their context.")
-		fmt.Print("\nProceed? (y/n) ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if confirm != "y" && confirm != "Y" && confirm != "yes" {
+
+		// Count agents to be terminated
+		terminateCount := 0
+		for _, action := range scaleDownActions {
+			terminateCount += action.Count
+		}
+
+		var confirmed bool
+		err := huh.NewConfirm().
+			Title(fmt.Sprintf("Scale down %d agents?", terminateCount)).
+			Description("Scaling down will terminate agents and lose their context.").
+			Affirmative("Yes, proceed").
+			Negative("Cancel").
+			Value(&confirmed).
+			WithTheme(theme.HuhDestructiveTheme()).
+			Run()
+		if err != nil {
+			return fmt.Errorf("confirmation dialog: %w", err)
+		}
+		if !confirmed {
 			fmt.Println("Aborted.")
 			return nil
 		}

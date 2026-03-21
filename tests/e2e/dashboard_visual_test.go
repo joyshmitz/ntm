@@ -76,6 +76,30 @@ func TestDashboardVisualMinimum(t *testing.T) {
 	runSingleVisualTest(t, "dashboard-minimum")
 }
 
+func TestDashboardVisualToastAnimation(t *testing.T) {
+	runSingleVisualTest(t, "dashboard-toast-animation")
+}
+
+func TestDashboardVisualFuzzyFilter(t *testing.T) {
+	runSingleVisualTest(t, "dashboard-fuzzy-filter")
+}
+
+func TestDashboardVisualTableScroll(t *testing.T) {
+	runSingleVisualTest(t, "dashboard-table-scroll")
+}
+
+func TestDashboardVisualFocusRing(t *testing.T) {
+	runSingleVisualTest(t, "dashboard-focus-ring")
+}
+
+func TestDashboardVisualPaletteFuzzy(t *testing.T) {
+	runSingleVisualTest(t, "palette-fuzzy")
+}
+
+func TestDashboardVisualWideLayout(t *testing.T) {
+	runSingleVisualTest(t, "dashboard-wide-layout")
+}
+
 // runSingleVisualTest runs a single VHS tape test.
 func runSingleVisualTest(t *testing.T, tapeName string) {
 	t.Helper()

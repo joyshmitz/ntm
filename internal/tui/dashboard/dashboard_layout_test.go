@@ -2429,6 +2429,83 @@ func TestPaneListFilterKey(t *testing.T) {
 	t.Log("Filter enabled: '/' key will activate fuzzy search")
 }
 
+func TestDashboardPaneListForwardsFilterKeys(t *testing.T) {
+	m := newTestModel(120)
+	m.focusedPanel = PanelPaneList
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 0, Title: "proj__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-2", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex},
+		{ID: "pane-3", Index: 2, Title: "proj__cc_2", Type: tmux.AgentClaude},
+	}
+	m.cursor = 0
+	m.paneStatus = map[int]PaneStatus{
+		0: {State: "working"},
+		1: {State: "idle"},
+		2: {State: "waiting"},
+	}
+	_ = m.rebuildPaneList()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	m = next
+
+	if got := m.paneList.FilterState(); got != list.Filtering {
+		t.Fatalf("pane list filter state = %v, want %v", got, list.Filtering)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	next, ok = updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T after first rune, want dashboard.Model", updated)
+	}
+	m = next
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	next, ok = updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T after second rune, want dashboard.Model", updated)
+	}
+	m = next
+
+	if got := m.paneList.FilterInput.Value(); got != "cc" {
+		t.Fatalf("pane list filter input = %q, want %q", got, "cc")
+	}
+}
+
+func TestDashboardPaneListArrowKeysAdvanceSingleRow(t *testing.T) {
+	m := newTestModel(120)
+	m.focusedPanel = PanelPaneList
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 0, Title: "proj__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-2", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex},
+		{ID: "pane-3", Index: 2, Title: "proj__gmi_1", Type: tmux.AgentGemini},
+	}
+	m.cursor = 0
+	m.paneStatus = map[int]PaneStatus{
+		0: {State: "working"},
+		1: {State: "idle"},
+		2: {State: "waiting"},
+	}
+	_ = m.rebuildPaneList()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("Update() returned %T, want dashboard.Model", updated)
+	}
+	m = next
+
+	if m.cursor != 1 {
+		t.Fatalf("cursor after single Down = %d, want 1", m.cursor)
+	}
+	if got := m.paneList.Index(); got != 1 {
+		t.Fatalf("pane list selection after single Down = %d, want 1", got)
+	}
+}
+
 // TestToPaneItems verifies conversion from panes to list items.
 func TestToPaneItems(t *testing.T) {
 	m := newTestModel(120)

@@ -114,6 +114,7 @@ func BenchmarkPaneGrid_Compact_1000(b *testing.B) {
 // BenchmarkDashboardView benchmarks View() to verify 60fps capability.
 // Target: < 16ms for 60 FPS.
 func BenchmarkDashboardView(b *testing.B) {
+	configureDashboardPerfEnv(b)
 	m := newBenchModel(200, 50, 20)
 
 	// Simulate window resize
@@ -130,6 +131,7 @@ func BenchmarkDashboardView(b *testing.B) {
 // BenchmarkDashboardViewAllocs reports allocation pressure during rendering.
 // Target: < 200 allocs/op for smooth performance.
 func BenchmarkDashboardViewAllocs(b *testing.B) {
+	configureDashboardPerfEnv(b)
 	m := newBenchModel(200, 50, 20)
 	m.width = 200
 	m.height = 50
@@ -143,6 +145,7 @@ func BenchmarkDashboardViewAllocs(b *testing.B) {
 
 // BenchmarkDashboardViewWide benchmarks View() at wide terminal widths.
 func BenchmarkDashboardViewWide(b *testing.B) {
+	configureDashboardPerfEnv(b)
 	m := newBenchModel(400, 60, 50)
 
 	b.ReportAllocs()
@@ -154,6 +157,7 @@ func BenchmarkDashboardViewWide(b *testing.B) {
 
 // BenchmarkDashboardUpdate benchmarks the Update() loop with tick messages.
 func BenchmarkDashboardUpdate(b *testing.B) {
+	configureDashboardPerfEnv(b)
 	m := newBenchModel(200, 50, 20)
 	tickMsg := DashboardTickMsg(time.Now())
 
@@ -171,6 +175,10 @@ func BenchmarkDashboardUpdate(b *testing.B) {
 
 // TestViewRenderTime verifies View() stays under 16ms for 60fps.
 func TestViewRenderTime(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping wall-clock render profile in -short mode")
+	}
+	configureDashboardPerfEnv(t)
 	m := newBenchModel(200, 50, 20)
 	m.width = 200
 	m.height = 50
@@ -193,6 +201,10 @@ func TestViewRenderTime(t *testing.T) {
 
 // TestUpdateLoopPerformance verifies Update() with ticks stays fast.
 func TestUpdateLoopPerformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping wall-clock update profile in -short mode")
+	}
+	configureDashboardPerfEnv(t)
 	m := newBenchModel(200, 50, 20)
 	tickMsg := DashboardTickMsg(time.Now())
 
@@ -219,13 +231,15 @@ func TestUpdateLoopPerformance(t *testing.T) {
 
 // BenchmarkDashboardWithSprings benchmarks View() with spring animations active.
 func BenchmarkDashboardWithSprings(b *testing.B) {
+	configureDashboardPerfEnv(b)
 	m := newBenchModel(200, 50, 20)
 
-	// Activate springs by simulating panel changes
+	// Activate the real focus-ring springs so View() exercises the animated border path.
 	if m.dashboardSprings != nil {
-		for i := 0; i < 20; i++ {
-			m.dashboardSprings.Set(fmt.Sprintf("panel_%d", i), float64(i*10))
-		}
+		m.focusedPanel = PanelPaneList
+		m.syncFocusAnimations()
+		m.focusedPanel = PanelAttention
+		m.syncFocusAnimations()
 	}
 
 	b.ReportAllocs()
@@ -240,6 +254,10 @@ func BenchmarkDashboardWithSprings(b *testing.B) {
 
 // TestSpringAnimationOverhead measures the overhead of spring physics.
 func TestSpringAnimationOverhead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping spring overhead profile in -short mode")
+	}
+	configureDashboardPerfEnv(t)
 	m := newBenchModel(200, 50, 20)
 
 	// Baseline without springs
@@ -252,9 +270,10 @@ func TestSpringAnimationOverhead(t *testing.T) {
 
 	// With active springs
 	if m.dashboardSprings != nil {
-		for i := 0; i < 20; i++ {
-			m.dashboardSprings.Set(fmt.Sprintf("panel_%d", i), float64(i*10))
-		}
+		m.focusedPanel = PanelPaneList
+		m.syncFocusAnimations()
+		m.focusedPanel = PanelAttention
+		m.syncFocusAnimations()
 	}
 
 	start = time.Now()
@@ -333,6 +352,22 @@ func durationPerIteration(total time.Duration, iterations int, unit time.Duratio
 		return 0
 	}
 	return float64(total) / float64(iterations) / float64(unit)
+}
+
+type perfEnvTB interface {
+	Helper()
+	Setenv(string, string)
+}
+
+func configureDashboardPerfEnv(tb perfEnvTB) {
+	tb.Helper()
+	tb.Setenv("NTM_ANIMATIONS", "1")
+	tb.Setenv("NTM_REDUCE_MOTION", "")
+	tb.Setenv("CI", "")
+	tb.Setenv("TMUX", "")
+	tb.Setenv("STY", "")
+	tb.Setenv("TERM", "xterm-256color")
+	tb.Setenv("COLORTERM", "truecolor")
 }
 
 func logPerfResult(t testing.TB, metric string, value float64, unit, target string) {

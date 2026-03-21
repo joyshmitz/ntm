@@ -507,6 +507,18 @@ Shell Integration:
 			}
 			return
 		}
+		if robotOverlay {
+			opts := robot.OverlayOptions{
+				Session: robotOverlaySession,
+				Cursor:  robotOverlayCursor,
+				NoWait:  robotOverlayNoWait,
+			}
+			if err := robot.PrintOverlay(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotTools {
 			if err := robot.PrintTools(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -2010,20 +2022,6 @@ Shell Integration:
 			return
 		}
 
-		// Robot-overlay handler for agent-initiated human handoff (br-a6cmp)
-		if robotOverlay != "" {
-			opts := robot.OverlayOptions{
-				Session: robotOverlay,
-				Cursor:  robotOverlayCursor,
-				NoWait:  robotOverlayNoWait,
-			}
-			if err := robot.PrintOverlay(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-
 		// Show help with appropriate verbosity when run without subcommand
 		showMinimal := helpMinimal
 		if !helpMinimal && helpFull {
@@ -2233,6 +2231,12 @@ var (
 	robotEnsembleStop          string // session name to stop
 	robotEnsembleStopForce     bool   // force kill without graceful shutdown
 	robotEnsembleStopNoCollect bool   // skip partial output collection
+
+	// Robot-overlay flags for agent-initiated human handoff (br-a6cmp)
+	robotOverlay               bool   // open overlay for human handoff
+	robotOverlaySession        string // session for overlay
+	robotOverlayCursor         int64  // attention cursor for pre-focus
+	robotOverlayNoWait         bool   // return immediately without blocking
 
 	// Robot-send flags
 	robotSend        string // session name for send
@@ -2640,11 +2644,6 @@ var (
 	mailVerbose       bool   // --verbose flag for extra details
 	mailOffset        int    // --mail-offset for pagination
 	mailUntil         string // --mail-until date filter (YYYY-MM-DD)
-
-	// Robot-overlay flags for agent-initiated human handoff (br-a6cmp)
-	robotOverlay       string // --robot-overlay flag (session name)
-	robotOverlayCursor int64  // --overlay-cursor for attention item focus
-	robotOverlayNoWait bool   // --overlay-no-wait to return immediately
 )
 
 func init() {
@@ -2747,6 +2746,13 @@ func init() {
 	rootCmd.Flags().StringVar(&robotEnsembleStop, "robot-ensemble-stop", "", "Stop an ensemble and save partial state. Required: SESSION. Example: ntm --robot-ensemble-stop=myproject")
 	rootCmd.Flags().BoolVar(&robotEnsembleStopForce, "stop-force", false, "Force kill without graceful shutdown. Optional with --robot-ensemble-stop")
 	rootCmd.Flags().BoolVar(&robotEnsembleStopNoCollect, "stop-no-collect", false, "Skip partial output collection. Optional with --robot-ensemble-stop")
+
+	// Overlay flags for agent-initiated human handoff (br-a6cmp)
+	rootCmd.Flags().BoolVar(&robotOverlay, "robot-overlay", false, "Open dashboard overlay for human handoff (JSON). Requires tmux. Example: ntm --robot-overlay")
+	rootCmd.Flags().StringVar(&robotOverlaySession, "overlay-session", "", "Session for overlay. Optional with --robot-overlay, defaults to current session. Example: --overlay-session=myproject")
+	rootCmd.Flags().Int64Var(&robotOverlayCursor, "overlay-cursor", 0, "Pre-focus attention panel on this cursor. Optional with --robot-overlay. Example: --overlay-cursor=42")
+	rootCmd.Flags().BoolVar(&robotOverlayNoWait, "overlay-no-wait", false, "Return immediately without blocking. Optional with --robot-overlay")
+
 	rootCmd.Flags().IntVar(&robotBeadLimit, "bead-limit", 5, "Max beads per category in snapshot. Optional with --robot-snapshot, --robot-status. Example: --bead-limit=10")
 	rootCmd.Flags().IntVar(&robotLimit, "robot-limit", 0, "Max items to return for robot list outputs (status, snapshot, history). Example: --robot-limit=10")
 	rootCmd.Flags().IntVar(&robotOffset, "robot-offset", 0, "Pagination offset for robot list outputs (status, snapshot, history). Example: --robot-offset=20")
@@ -3142,11 +3148,6 @@ func init() {
 	rootCmd.Flags().BoolVar(&mailVerbose, "mail-verbose", false, "Include extra details in output. Optional with --robot-mail-check")
 	rootCmd.Flags().IntVar(&mailOffset, "mail-offset", 0, "Skip first N messages for pagination. Optional with --robot-mail-check. Example: --mail-offset=20")
 	rootCmd.Flags().StringVar(&mailUntil, "mail-until", "", "Filter to messages before date (YYYY-MM-DD). Optional with --robot-mail-check. Example: --mail-until=2025-12-31")
-
-	// Robot-overlay flags for agent-initiated human handoff (br-a6cmp)
-	rootCmd.Flags().StringVar(&robotOverlay, "robot-overlay", "", "Open dashboard overlay for a session. Returns JSON status. Required: SESSION. Example: ntm --robot-overlay=myproject")
-	rootCmd.Flags().Int64Var(&robotOverlayCursor, "overlay-cursor", 0, "Attention cursor to focus on. Optional with --robot-overlay. Example: --overlay-cursor=12345")
-	rootCmd.Flags().BoolVar(&robotOverlayNoWait, "overlay-no-wait", false, "Return immediately without waiting for dismissal. Optional with --robot-overlay")
 
 	// ==========================================================================
 	// CANONICAL FLAG ALIASES - Robot Mode API Harmonization

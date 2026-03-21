@@ -41,6 +41,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
@@ -2450,6 +2451,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Track activity for adaptive tick rate (fixes #32)
 		m.lastActivity = time.Now()
 		m.activityState = StateActive
+		paneListKeyHandled := false
 
 		// Handle help overlay: Esc or ? closes it
 		if m.showHelp {
@@ -2469,6 +2471,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Popup mode: Escape closes the overlay (exits cleanly)
 		if m.popupMode && msg.String() == "esc" {
 			return m, m.exitPopupOverlay()
+		}
+
+		if m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering {
+			var cmd tea.Cmd
+			m.paneList, cmd = m.paneList.Update(msg)
+			m.syncCursorFromPaneList()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if len(cmds) > 0 {
+				return m, tea.Batch(cmds...)
+			}
+			return m, nil
 		}
 
 		switch {
@@ -2526,6 +2541,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, dashKeys.Up):
 			if m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail {
+				paneListKeyHandled = m.focusedPanel == PanelPaneList
 				if m.cursor > 0 {
 					m.cursor--
 					m.paneList.Select(m.cursor)
@@ -2534,6 +2550,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, dashKeys.Down):
 			if m.focusedPanel == PanelPaneList || m.focusedPanel == PanelDetail {
+				paneListKeyHandled = m.focusedPanel == PanelPaneList
 				if m.cursor < len(m.panes)-1 {
 					m.cursor++
 					m.paneList.Select(m.cursor)
@@ -2576,34 +2593,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Number quick-select
 		case key.Matches(msg, dashKeys.Num1):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(1)
 		case key.Matches(msg, dashKeys.Num2):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(2)
 		case key.Matches(msg, dashKeys.Num3):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(3)
 		case key.Matches(msg, dashKeys.Num4):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(4)
 		case key.Matches(msg, dashKeys.Num5):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(5)
 		case key.Matches(msg, dashKeys.Num6):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(6)
 		case key.Matches(msg, dashKeys.Num7):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(7)
 		case key.Matches(msg, dashKeys.Num8):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(8)
 		case key.Matches(msg, dashKeys.Num9):
+			paneListKeyHandled = m.focusedPanel == PanelPaneList && m.paneList.FilterState() == list.Filtering
 			m.selectByNumber(9)
 		}
-	}
-
-	// Forward keyboard events to focused panels for panel-specific actions
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		// Only forward if not handled by global shortcuts above
 		switch m.focusedPanel {
+		case PanelPaneList:
+			if !paneListKeyHandled {
+				var cmd tea.Cmd
+				m.paneList, cmd = m.paneList.Update(msg)
+				m.syncCursorFromPaneList()
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+
 		case PanelHistory:
 			if m.historyPanel != nil {
 				var cmd tea.Cmd
-				_, cmd = m.historyPanel.Update(keyMsg)
+				_, cmd = m.historyPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2612,37 +2643,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// For sidebar, forward to the focused sub-panel
 			if m.timelinePanel != nil && m.timelinePanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.timelinePanel.Update(keyMsg)
+				_, cmd = m.timelinePanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			} else if m.historyPanel != nil && m.historyPanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.historyPanel.Update(keyMsg)
+				_, cmd = m.historyPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			} else if m.filesPanel != nil && m.filesPanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.filesPanel.Update(keyMsg)
+				_, cmd = m.filesPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			} else if m.cassPanel != nil && m.cassPanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.cassPanel.Update(keyMsg)
+				_, cmd = m.cassPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			} else if m.costPanel != nil && m.costPanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.costPanel.Update(keyMsg)
+				_, cmd = m.costPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			} else if m.metricsPanel != nil && m.metricsPanel.IsFocused() {
 				var cmd tea.Cmd
-				_, cmd = m.metricsPanel.Update(keyMsg)
+				_, cmd = m.metricsPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2650,7 +2681,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case PanelBeads:
 			if m.beadsPanel != nil {
 				var cmd tea.Cmd
-				_, cmd = m.beadsPanel.Update(keyMsg)
+				_, cmd = m.beadsPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2658,7 +2689,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case PanelAlerts:
 			if m.alertsPanel != nil {
 				var cmd tea.Cmd
-				_, cmd = m.alertsPanel.Update(keyMsg)
+				_, cmd = m.alertsPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2666,7 +2697,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case PanelAttention:
 			if m.attentionPanel != nil {
 				var cmd tea.Cmd
-				_, cmd = m.attentionPanel.Update(keyMsg)
+				_, cmd = m.attentionPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2674,7 +2705,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case PanelConflicts:
 			if m.conflictsPanel != nil {
 				var cmd tea.Cmd
-				_, cmd = m.conflictsPanel.Update(keyMsg)
+				_, cmd = m.conflictsPanel.Update(msg)
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2684,7 +2715,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Also forward to rotation confirm panel when it has pending rotations
 		if m.rotationConfirmPanel != nil && m.rotationConfirmPanel.HasPending() && m.rotationConfirmPanel.IsFocused() {
 			var cmd tea.Cmd
-			_, cmd = m.rotationConfirmPanel.Update(keyMsg)
+			_, cmd = m.rotationConfirmPanel.Update(msg)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}

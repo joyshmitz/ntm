@@ -85,7 +85,9 @@ Examples:
 					fmt.Printf("  Description: %s\n", cp.Description)
 				}
 				fmt.Println()
-				if !confirm("Proceed with rollback?") {
+				title := "Proceed with rollback?"
+				desc := "This will restore files to the checkpoint state."
+				if !confirmHuhDestructive(title, desc) {
 					fmt.Println("Aborted.")
 					return nil
 				}

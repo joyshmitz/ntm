@@ -266,7 +266,16 @@ func buildAttentionNextCommand(opts AttentionOptions, cursor int64) string {
 // --robot-overlay (br-a6cmp)
 // =============================================================================
 
-var overlayExecCommand = exec.Command
+var (
+	overlayExecCommand      = exec.Command
+	overlayBinaryPath       = tmux.BinaryPath
+	overlayIsInstalled      = tmux.IsInstalled
+	overlayInTmux           = tmux.InTmux
+	overlaySessionExists    = tmux.SessionExists
+	overlayCurrentSession   = tmux.GetCurrentSession
+	overlayOSExecutable     = os.Executable
+	overlayLaunchProbeDelay = 150 * time.Millisecond
+)
 
 // OverlayOptions configures the --robot-overlay command.
 type OverlayOptions struct {
@@ -310,6 +319,14 @@ func overlayPopupArgs(ntmBin, session string, attentionCursor int64) []string {
 	}
 }
 
+func resolveOverlaySession(session string) string {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		return session
+	}
+	return strings.TrimSpace(overlayCurrentSession())
+}
+
 func newOverlayErrorOutput(opts OverlayOptions, err error, code, hint string) OverlayOutput {
 	return OverlayOutput{
 		RobotResponse: NewErrorResponse(err, code, hint),
@@ -321,15 +338,6 @@ func newOverlayErrorOutput(opts OverlayOptions, err error, code, hint string) Ov
 
 // PrintOverlay launches the dashboard overlay and returns JSON status.
 func PrintOverlay(opts OverlayOptions) error {
-	session := strings.TrimSpace(opts.Session)
-	if session == "" {
-		return outputJSON(newOverlayErrorOutput(
-			opts,
-			fmt.Errorf("session is required"),
-			ErrCodeInvalidFlag,
-			"Pass --robot-overlay=<session>",
-		))
-	}
 	if opts.Cursor < 0 {
 		return outputJSON(newOverlayErrorOutput(
 			opts,
@@ -338,7 +346,7 @@ func PrintOverlay(opts OverlayOptions) error {
 			"Use --overlay-cursor with a non-negative event cursor",
 		))
 	}
-	if !tmux.IsInstalled() {
+	if !overlayIsInstalled() {
 		return outputJSON(newOverlayErrorOutput(
 			opts,
 			fmt.Errorf("tmux not installed"),
@@ -346,7 +354,7 @@ func PrintOverlay(opts OverlayOptions) error {
 			"Install tmux to use overlay popups",
 		))
 	}
-	if !tmux.InTmux() {
+	if !overlayInTmux() {
 		return outputJSON(newOverlayErrorOutput(
 			opts,
 			fmt.Errorf("overlay requires an attached tmux client"),
@@ -354,7 +362,16 @@ func PrintOverlay(opts OverlayOptions) error {
 			"Run --robot-overlay from inside tmux so tmux can draw the popup",
 		))
 	}
-	if !tmux.SessionExists(session) {
+	session := resolveOverlaySession(opts.Session)
+	if session == "" {
+		return outputJSON(newOverlayErrorOutput(
+			opts,
+			fmt.Errorf("could not determine current tmux session"),
+			ErrCodeInternalError,
+			"Pass --overlay-session=<session> or run inside the target tmux session",
+		))
+	}
+	if !overlaySessionExists(session) {
 		return outputJSON(newOverlayErrorOutput(
 			OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 			fmt.Errorf("session %q not found", session),
@@ -363,12 +380,12 @@ func PrintOverlay(opts OverlayOptions) error {
 		))
 	}
 
-	ntmBin, err := os.Executable()
+	ntmBin, err := overlayOSExecutable()
 	if err != nil || strings.TrimSpace(ntmBin) == "" {
 		ntmBin = "ntm"
 	}
 
-	cmd := overlayExecCommand(tmux.BinaryPath(), overlayPopupArgs(ntmBin, session, opts.Cursor)...)
+	cmd := overlayExecCommand(overlayBinaryPath(), overlayPopupArgs(ntmBin, session, opts.Cursor)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -389,10 +406,28 @@ func PrintOverlay(opts OverlayOptions) error {
 				"Check that tmux popup support is available in this client",
 			))
 		}
+
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- cmd.Wait()
+		}()
+
+		select {
+		case err := <-waitCh:
+			if err != nil {
+				return outputJSON(newOverlayErrorOutput(
+					OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
+					err,
+					ErrCodeInternalError,
+					"Check that tmux popup support is available in this client",
+				))
+			}
+		case <-time.After(overlayLaunchProbeDelay):
+		}
+
 		output.Launched = true
 		if cmd.Process != nil {
 			output.PID = cmd.Process.Pid
-			_ = cmd.Process.Release()
 		}
 		return outputJSON(output)
 	}
