@@ -190,6 +190,7 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 	opts.CursorCount = 0
 	opts.WindsurfCount = 0
 	opts.AiderCount = 0
+	opts.OllamaCount = 0
 
 	for _, agent := range opts.Agents {
 		switch agent.Type {
@@ -205,6 +206,8 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 			opts.WindsurfCount++
 		case AgentTypeAider:
 			opts.AiderCount++
+		case AgentTypeOllama:
+			opts.OllamaCount++
 		}
 	}
 }
@@ -356,6 +359,7 @@ type SpawnOptions struct {
 	CursorCount   int
 	WindsurfCount int
 	AiderCount    int
+	OllamaCount    int
 	UserPane      bool
 	AutoRestart   bool
 	RecipeName    string
@@ -1465,6 +1469,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		if agentNum >= len(panes) {
 			break
 		}
+
 		pane := panes[agentNum]
 
 		if testPacing.agentDelay > 0 && staggerAgentIdx > 0 {
@@ -2333,23 +2338,18 @@ func appendOllamaAgentSpecs(agentSpecs *AgentSpecs, localCount, ollamaCount int,
 		return "", fmt.Errorf("cannot use both --local and --ollama; pick one")
 	}
 
-	total := localCount
-	if total == 0 {
-		total = ollamaCount
-	}
-
 	model := strings.TrimSpace(localModel)
 	if model == "" {
 		model = "codellama:latest"
 	}
 
-	if total > 0 {
+	if localCount > 0 {
 		if !modelPattern.MatchString(model) {
 			return "", fmt.Errorf("invalid characters in --local-model %q; allowed: letters, numbers, . _ / @ : + -", model)
 		}
 		*agentSpecs = append(*agentSpecs, AgentSpec{
 			Type:  AgentTypeOllama,
-			Count: total,
+			Count: localCount,
 			Model: model,
 		})
 	}

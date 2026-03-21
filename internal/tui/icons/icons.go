@@ -53,6 +53,10 @@ type IconSet struct {
 	Claude  string
 	Codex   string
 	Gemini  string
+	Cursor  string
+	Windsurf string
+	Aider   string
+	Ollama  string
 	All     string
 	User    string
 
@@ -121,6 +125,10 @@ var NerdFonts = IconSet{
 	Claude:  "󰗣", // Alpha C circle - Anthropic-ish
 	Codex:   "",  // Hubot - OpenAI-ish
 	Gemini:  "󰊤", // Google icon
+	Cursor:  "󰢹",
+	Windsurf: "󰖟",
+	Aider:   "󰚩",
+	Ollama:  "󰚩",
 	All:     "󰕟", // Broadcast
 	User:    "",  // User icon
 
@@ -189,6 +197,10 @@ var Unicode = IconSet{
 	Claude:  "C",
 	Codex:   "O",
 	Gemini:  "G",
+	Cursor:  "c",
+	Windsurf: "W",
+	Aider:   "A",
+	Ollama:  "L",
 	All:     "*",
 	User:    "U",
 
@@ -257,6 +269,10 @@ var ASCII = IconSet{
 	Claude:  "C",
 	Codex:   "O",
 	Gemini:  "G",
+	Cursor:  "c",
+	Windsurf: "W",
+	Aider:   "A",
+	Ollama:  "L",
 	All:     "*",
 	User:    "U",
 
@@ -427,6 +443,14 @@ func (i IconSet) AgentIcon(agentType string) string {
 		return i.Codex
 	case "gmi", "gemini":
 		return i.Gemini
+	case "cursor":
+		return i.Cursor
+	case "windsurf", "ws":
+		return i.Windsurf
+	case "aider":
+		return i.Aider
+	case "ollama":
+		return i.Ollama
 	case "user":
 		return i.Terminal
 	default:

@@ -38,6 +38,7 @@ const (
 	AgentCursor   = agent.AgentTypeCursor
 	AgentWindsurf = agent.AgentTypeWindsurf
 	AgentAider    = agent.AgentTypeAider
+	AgentOllama   = agent.AgentTypeOllama
 	AgentUser     = agent.AgentTypeUser
 	AgentUnknown  = agent.AgentTypeUnknown
 )
@@ -1395,6 +1396,14 @@ func (c *Client) GetPanesWithActivityContext(ctx context.Context, session string
 
 		// Parse pane title using regex to extract type, index, variant, and tags
 		pane.Type, pane.NTMIndex, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
+
+		// Fallback: if title didn't match NTM format, try detecting from process command
+		// This handles cases where shell prompts or tmux hooks change the pane title
+		if pane.Type == AgentUser && pane.Command != "" {
+			if detected := detectAgentFromCommand(pane.Command); detected != AgentUser {
+				pane.Type = detected
+			}
+		}
 
 		panes = append(panes, PaneActivity{
 			Pane:         pane,

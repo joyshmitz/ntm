@@ -243,13 +243,13 @@ func TestRobotStatusWithSyntheticAgents(t *testing.T) {
 			} `json:"agents"`
 		} `json:"sessions"`
 		Summary struct {
-			TotalAgents int `json:"total_agents"`
-			ClaudeCount int `json:"claude_count"`
-			CodexCount  int `json:"codex_count"`
-			GeminiCount int `json:"gemini_count"`
-			CursorCount int `json:"cursor_count"`
+			TotalAgents   int `json:"total_agents"`
+			ClaudeCount   int `json:"claude_count"`
+			CodexCount    int `json:"codex_count"`
+			GeminiCount   int `json:"gemini_count"`
+			CursorCount   int `json:"cursor_count"`
 			WindsurfCount int `json:"windsurf_count"`
-			AiderCount int `json:"aider_count"`
+			AiderCount    int `json:"aider_count"`
 		} `json:"summary"`
 	}
 

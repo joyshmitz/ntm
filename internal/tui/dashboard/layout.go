@@ -1129,15 +1129,25 @@ func WorkingSpinnerFrame(tick int) string {
 func AgentBorderColor(agentType string, t theme.Theme) lipgloss.Color {
 	switch agentType {
 	case "cc", "claude":
-		return t.Claude // Mauve/purple
+		return t.Claude
 	case "cod", "codex":
-		return t.Codex // Blue
+		return t.Codex
 	case "gmi", "gemini":
-		return t.Gemini // Yellow
+		return t.Gemini
+	case "cursor":
+		return t.Claude
+	case "windsurf":
+		return t.Codex
+	case "aider":
+		return t.Gemini
+	case "ollama":
+		// Fallback to a distinct color if missing from theme,
+		// but typically we'd use t.Text if we don't have a specific color
+		return t.Text
 	case "user":
-		return t.User // Green
+		return t.User
 	default:
-		return t.Surface2 // Default neutral color
+		return t.Text
 	}
 }
 

@@ -429,12 +429,18 @@ func findPTState(ptStates map[string]*pt.AgentState, session, paneStr, agentType
 	// Try session__agenttype_pane pattern (e.g., "myproject__cc_1")
 	agentPrefix := ""
 	switch agentType {
-	case "claude-code":
+	case "cc", "claude-code", "claude":
 		agentPrefix = "cc"
-	case "codex":
-		agentPrefix = "codex"
-	case "gemini":
-		agentPrefix = "gemini"
+	case "cod", "codex":
+		agentPrefix = "cod"
+	case "gmi", "gemini":
+		agentPrefix = "gmi"
+	case "cursor":
+		agentPrefix = "cursor"
+	case "windsurf":
+		agentPrefix = "windsurf"
+	case "aider":
+		agentPrefix = "aider"
 	}
 
 	if agentPrefix != "" {
