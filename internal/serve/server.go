@@ -4927,14 +4927,15 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 
 	feed := robot.GetAttentionFeed()
 	stats := feed.Stats()
+	earliestCursor := attentionReplayEarliestCursor(stats)
 
-	// Check for cursor expiration
-	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+	// Check for cursor expiration using the same boundary as the underlying journal.
+	if expired, earliest := attentionCursorExpired(sinceCursor, stats); expired {
 		// Cursor has expired - send error event and close
 		cursorExpiredEvent := map[string]interface{}{
 			"error_code":    robot.ErrCodeCursorExpired,
 			"message":       "cursor has expired, resync required",
-			"oldest_cursor": stats.OldestCursor,
+			"oldest_cursor": earliest,
 			"newest_cursor": stats.NewestCursor,
 			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
 		}
@@ -4951,7 +4952,7 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 		"status":        "connected",
 		"time":          time.Now().UTC().Format(time.RFC3339),
 		"since_cursor":  sinceCursor,
-		"oldest_cursor": stats.OldestCursor,
+		"oldest_cursor": earliestCursor,
 		"newest_cursor": stats.NewestCursor,
 	}
 	connData, _ := json.Marshal(connEvent)
@@ -5034,7 +5035,7 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 			heartbeat := map[string]interface{}{
 				"type":          "heartbeat",
 				"time":          time.Now().UTC().Format(time.RFC3339),
-				"oldest_cursor": currentStats.OldestCursor,
+				"oldest_cursor": attentionReplayEarliestCursor(currentStats),
 				"newest_cursor": currentStats.NewestCursor,
 				"event_count":   currentStats.Count,
 			}
@@ -5083,13 +5084,14 @@ func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request)
 
 	feed := robot.GetAttentionFeed()
 	stats := feed.Stats()
+	earliestCursor := attentionReplayEarliestCursor(stats)
 
-	// Check for cursor expiration
-	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+	// Check for cursor expiration using the same boundary as the underlying journal.
+	if expired, earliest := attentionCursorExpired(sinceCursor, stats); expired {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error_code":    robot.ErrCodeCursorExpired,
 			"message":       "cursor has expired, resync required",
-			"oldest_cursor": stats.OldestCursor,
+			"oldest_cursor": earliest,
 			"newest_cursor": stats.NewestCursor,
 			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
 		})
@@ -5120,7 +5122,7 @@ func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request)
 		"events":        filtered,
 		"since_cursor":  sinceCursor,
 		"newest_cursor": newestCursor,
-		"oldest_cursor": stats.OldestCursor,
+		"oldest_cursor": earliestCursor,
 		"event_count":   len(filtered),
 		"truncated":     truncated,
 	})
@@ -5184,12 +5186,12 @@ func (s *Server) handleAttentionDigestV1(w http.ResponseWriter, r *http.Request)
 	feed := robot.GetAttentionFeed()
 	stats := feed.Stats()
 
-	// Check for cursor expiration
-	if sinceCursor > 0 && sinceCursor < stats.OldestCursor {
+	// Check for cursor expiration using the same boundary as the underlying journal.
+	if expired, earliest := attentionCursorExpired(sinceCursor, stats); expired {
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error_code":    robot.ErrCodeCursorExpired,
 			"message":       "cursor has expired, resync required",
-			"oldest_cursor": stats.OldestCursor,
+			"oldest_cursor": earliest,
 			"newest_cursor": stats.NewestCursor,
 			"resync_hint":   "fetch --robot-snapshot then resume from newest_cursor",
 		})
@@ -5203,6 +5205,24 @@ func (s *Server) handleAttentionDigestV1(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, digest)
+}
+
+func attentionReplayEarliestCursor(stats robot.JournalStats) int64 {
+	if stats.Count == 0 {
+		return stats.NewestCursor
+	}
+	return stats.OldestCursor
+}
+
+func attentionCursorExpired(sinceCursor int64, stats robot.JournalStats) (bool, int64) {
+	earliest := attentionReplayEarliestCursor(stats)
+	if sinceCursor <= 0 || stats.NewestCursor == 0 {
+		return false, earliest
+	}
+	if stats.Count == 0 {
+		return sinceCursor < stats.NewestCursor, earliest
+	}
+	return sinceCursor < earliest-1, earliest
 }
 
 // matchesAttentionFilters checks if an event matches the specified filters.

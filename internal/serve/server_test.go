@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
@@ -658,6 +660,172 @@ func TestEventStreamSSE(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	if len(body) == 0 {
 		t.Error("Expected some output from SSE stream")
+	}
+}
+
+func installServeTestAttentionFeed(t *testing.T) (*robot.AttentionFeed, robot.JournalStats) {
+	t.Helper()
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       2,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	oldFeed := robot.GetAttentionFeed()
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	for i := 0; i < 4; i++ {
+		feed.Append(robot.AttentionEvent{
+			Session:       "proj",
+			Pane:          2,
+			Category:      robot.EventCategoryAlert,
+			Type:          robot.EventTypeAlertAttentionRequired,
+			Actionability: robot.ActionabilityActionRequired,
+			Severity:      robot.SeverityWarning,
+			Summary:       "operator attention item",
+		})
+	}
+
+	stats := feed.Stats()
+	if stats.Count != 2 {
+		t.Fatalf("journal count = %d, want 2 retained events", stats.Count)
+	}
+	if stats.OldestCursor < 2 {
+		t.Fatalf("oldest cursor = %d, want wrapped journal", stats.OldestCursor)
+	}
+
+	return feed, stats
+}
+
+func TestAttentionEventsAcceptsBoundaryCursor(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	_, stats := installServeTestAttentionFeed(t)
+
+	sinceCursor := stats.OldestCursor - 1
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/events", nil)
+	query := req.URL.Query()
+	query.Set("since_cursor", strconv.FormatInt(sinceCursor, 10))
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	srv.handleAttentionEventsV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Events       []robot.AttentionEvent `json:"events"`
+		SinceCursor  int64                  `json:"since_cursor"`
+		NewestCursor int64                  `json:"newest_cursor"`
+		OldestCursor int64                  `json:"oldest_cursor"`
+		EventCount   int                    `json:"event_count"`
+		Truncated    bool                   `json:"truncated"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp.SinceCursor != sinceCursor {
+		t.Fatalf("since_cursor = %d, want %d", resp.SinceCursor, sinceCursor)
+	}
+	if resp.OldestCursor != stats.OldestCursor {
+		t.Fatalf("oldest_cursor = %d, want %d", resp.OldestCursor, stats.OldestCursor)
+	}
+	if resp.NewestCursor != stats.NewestCursor {
+		t.Fatalf("newest_cursor = %d, want %d", resp.NewestCursor, stats.NewestCursor)
+	}
+	if resp.EventCount != stats.Count {
+		t.Fatalf("event_count = %d, want %d", resp.EventCount, stats.Count)
+	}
+	if len(resp.Events) != stats.Count {
+		t.Fatalf("events = %d, want %d", len(resp.Events), stats.Count)
+	}
+	if resp.Events[0].Cursor != stats.OldestCursor {
+		t.Fatalf("first replay cursor = %d, want %d", resp.Events[0].Cursor, stats.OldestCursor)
+	}
+	if resp.Truncated {
+		t.Fatal("boundary replay should not be truncated")
+	}
+}
+
+func TestAttentionDigestAcceptsBoundaryCursor(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	_, stats := installServeTestAttentionFeed(t)
+
+	sinceCursor := stats.OldestCursor - 1
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/digest", nil)
+	query := req.URL.Query()
+	query.Set("since_cursor", strconv.FormatInt(sinceCursor, 10))
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	srv.handleAttentionDigestV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		CursorStart int64 `json:"cursor_start"`
+		CursorEnd   int64 `json:"cursor_end"`
+		EventCount  int   `json:"event_count"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp.CursorStart != stats.OldestCursor {
+		t.Fatalf("cursor_start = %d, want %d", resp.CursorStart, stats.OldestCursor)
+	}
+	if resp.CursorEnd != stats.NewestCursor {
+		t.Fatalf("cursor_end = %d, want %d", resp.CursorEnd, stats.NewestCursor)
+	}
+	if resp.EventCount != stats.Count {
+		t.Fatalf("event_count = %d, want %d", resp.EventCount, stats.Count)
+	}
+}
+
+func TestAttentionStreamAcceptsBoundaryCursor(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	_, stats := installServeTestAttentionFeed(t)
+
+	sinceCursor := stats.OldestCursor - 1
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/stream", nil).WithContext(ctx)
+	query := req.URL.Query()
+	query.Set("since_cursor", strconv.FormatInt(sinceCursor, 10))
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.handleAttentionStreamV1(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("attention stream handler did not exit after cancel")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: connected") {
+		t.Fatalf("stream body missing connected event: %s", body)
+	}
+	if !strings.Contains(body, "event: attention") {
+		t.Fatalf("stream body missing replayed attention event: %s", body)
+	}
+	if strings.Contains(body, robot.ErrCodeCursorExpired) {
+		t.Fatalf("stream incorrectly treated boundary cursor as expired: %s", body)
 	}
 }
 
