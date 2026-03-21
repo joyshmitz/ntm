@@ -396,6 +396,7 @@ type AttentionDigestOptions struct {
 	Session             string
 	Categories          []EventCategory
 	Types               []EventType
+	ExcludeTypes        []EventType
 	MinSeverity         Severity
 	MinActionability    Actionability
 	ActionRequiredLimit int
@@ -610,6 +611,13 @@ func matchesAttentionDigestFilters(event AttentionEvent, opts AttentionDigestOpt
 		}
 		if !matched {
 			return false
+		}
+	}
+	if len(opts.ExcludeTypes) > 0 {
+		for _, eventType := range opts.ExcludeTypes {
+			if event.Type == eventType {
+				return false
+			}
 		}
 	}
 	if attentionSeverityRank(event.Severity) < attentionSeverityRank(opts.MinSeverity) {

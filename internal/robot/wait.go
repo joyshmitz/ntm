@@ -285,7 +285,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 
 		attentionMet := !hasAttention
 		if hasAttention {
-			lastAttentionResult = checkAttentionConditions(attentionConditions, opts.SinceCursor, opts.Session)
+			lastAttentionResult = checkAttentionConditions(attentionConditions, opts.SinceCursor, opts.Session, opts.Profile)
 			if lastAttentionResult != nil && lastAttentionResult.CursorExpired != nil {
 				cursorErr := lastAttentionResult.CursorExpired
 				details := cursorErr.ToDetails()
@@ -639,7 +639,7 @@ func newAttentionConditionResult(condition string, observedCursor, nextCursor, o
 
 // checkAttentionConditions checks if all requested attention-based conditions
 // are met. Multiple attention conditions are ANDed together.
-func checkAttentionConditions(conditions []string, sinceCursor int64, session string) *AttentionConditionResult {
+func checkAttentionConditions(conditions []string, sinceCursor int64, session, profile string) *AttentionConditionResult {
 	feed := GetAttentionFeed()
 	if feed == nil {
 		return nil
@@ -660,6 +660,8 @@ func checkAttentionConditions(conditions []string, sinceCursor int64, session st
 		return result
 	}
 
+	result.Details["raw_event_count"] = len(events)
+
 	// Filter by session if specified
 	if session != "" {
 		filtered := make([]AttentionEvent, 0)
@@ -670,10 +672,14 @@ func checkAttentionConditions(conditions []string, sinceCursor int64, session st
 		}
 		events = filtered
 	}
+	events = filterAttentionEventsByProfile(events, profile)
 
 	result.Details["scanned_event_count"] = len(events)
 	if session != "" {
 		result.Details["session"] = session
+	}
+	if profile != "" {
+		result.Details["profile"] = profile
 	}
 
 	matchedConditions := make([]string, 0, len(conditions))

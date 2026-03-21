@@ -210,6 +210,58 @@ func toStringSetForEvents(strs []string) map[string]bool {
 	return set
 }
 
+func applyProfileToDigestOptions(profile string, opts AttentionDigestOptions) AttentionDigestOptions {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return opts
+	}
+
+	resolved := ResolveEffectiveFilters(profile, ProfileFilters{})
+	if len(resolved.Categories) > 0 {
+		opts.Categories = append([]EventCategory(nil), resolved.Categories...)
+	}
+	if len(resolved.ExcludeTypes) > 0 {
+		opts.ExcludeTypes = append([]EventType(nil), resolved.ExcludeTypes...)
+	}
+	if resolved.MinSeverity != "" {
+		opts.MinSeverity = resolved.MinSeverity
+	}
+	if resolved.MinActionability != "" {
+		opts.MinActionability = resolved.MinActionability
+	}
+	return opts
+}
+
+func filterAttentionEventsByProfile(events []AttentionEvent, profile string) []AttentionEvent {
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return events
+	}
+
+	resolved := ResolveEffectiveFilters(profile, ProfileFilters{})
+	filtered := make([]AttentionEvent, 0, len(events))
+	for _, event := range events {
+		if resolved.MatchesFilters(&event) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func buildAttentionNextCommand(opts AttentionOptions, cursor int64) string {
+	parts := []string{fmt.Sprintf("ntm --robot-attention --since-cursor=%d", cursor)}
+	if opts.Session != "" {
+		parts = append(parts, fmt.Sprintf("--session=%s", opts.Session))
+	}
+	if opts.Profile != "" {
+		parts = append(parts, fmt.Sprintf("--profile=%s", opts.Profile))
+	}
+	if opts.Condition != "" && opts.Condition != WaitConditionAttention {
+		parts = append(parts, fmt.Sprintf("--attention-condition=%s", opts.Condition))
+	}
+	return strings.Join(parts, " ")
+}
+
 // =============================================================================
 // --robot-overlay (br-a6cmp)
 // =============================================================================
@@ -461,6 +513,7 @@ func PrintDigest(opts DigestOptions) error {
 		BackgroundLimit:     opts.BackgroundLimit,
 		IncludeTrace:        opts.IncludeTrace,
 	}
+	digestOpts = applyProfileToDigestOptions(opts.Profile, digestOpts)
 
 	// Apply defaults if not specified
 	if digestOpts.ActionRequiredLimit <= 0 {
@@ -691,7 +744,27 @@ func PrintAttention(opts AttentionOptions) int {
 			[]string{opts.Condition},
 			opts.SinceCursor,
 			opts.Session,
+			opts.Profile,
 		)
+		if result != nil && result.CursorExpired != nil {
+			cursorErr := result.CursorExpired
+			details := cursorErr.ToDetails()
+			outputJSON(AttentionResponse{
+				RobotResponse: NewErrorResponse(
+					cursorErr,
+					ErrCodeCursorExpired,
+					details.ResyncCommand,
+				),
+				WakeReason: "cursor_expired",
+				Digest:     &AttentionDigest{},
+				CursorInfo: AttentionCursorInfo{
+					StartCursor:  opts.SinceCursor,
+					OldestCursor: details.EarliestCursor,
+					NextCommand:  details.ResyncCommand,
+				},
+			})
+			return 2
+		}
 
 		if result != nil && result.Met {
 			wakeReason = "attention"
@@ -716,6 +789,7 @@ func PrintAttention(opts AttentionOptions) int {
 		BackgroundLimit:     opts.BackgroundLimit,
 		IncludeTrace:        opts.IncludeTrace,
 	}
+	digestOpts = applyProfileToDigestOptions(opts.Profile, digestOpts)
 
 	digest, err := feed.Digest(opts.SinceCursor, digestOpts)
 	if err != nil {
@@ -775,10 +849,7 @@ func PrintAttention(opts AttentionOptions) int {
 		StartCursor:  opts.SinceCursor,
 		EndCursor:    endCursor,
 		OldestCursor: stats.OldestCursor,
-		NextCommand:  fmt.Sprintf("ntm --robot-attention --since-cursor=%d", endCursor),
-	}
-	if opts.Session != "" {
-		cursorInfo.NextCommand += fmt.Sprintf(" --session=%s", opts.Session)
+		NextCommand:  buildAttentionNextCommand(opts, endCursor),
 	}
 
 	exitCode := 0

@@ -295,8 +295,12 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: invalid attention poll '%s': %v\n", robotAttentionPoll, err)
 				os.Exit(1)
 			}
+			sinceCursor := robotAttentionSinceCursor
+			if sinceCursor == 0 {
+				sinceCursor = robotEventsSinceCursor
+			}
 			opts := robot.AttentionOptions{
-				SinceCursor:  robotAttentionSinceCursor,
+				SinceCursor:  sinceCursor,
 				Session:      robotAttentionSession,
 				Timeout:      timeout,
 				PollInterval: poll,
@@ -818,6 +822,10 @@ Shell Integration:
 					paneFilter = append(paneFilter, idx)
 				}
 			}
+			sinceCursor := robotAttentionSinceCursor
+			if sinceCursor == 0 {
+				sinceCursor = robotEventsSinceCursor
+			}
 			opts := robot.WaitOptions{
 				Session:           robotWait,
 				Condition:         robotWaitUntil,
@@ -828,6 +836,8 @@ Shell Integration:
 				WaitForAny:        robotWaitAny,
 				ExitOnError:       robotWaitOnError,
 				RequireTransition: robotWaitTransition,
+				SinceCursor:       sinceCursor,
+				Profile:           robotProfile,
 			}
 			exitCode := robot.PrintWait(opts)
 			os.Exit(exitCode)
@@ -2159,12 +2169,12 @@ var (
 	robotPlan                  bool
 	robotSnapshot              bool   // unified state query
 	robotSince                 string // ISO8601 timestamp for delta snapshot
-	robotEvents              bool   // raw replay/feed surface
-	robotEventsSinceCursor   int64  // cursor for --robot-events
-	robotEventsLimit         int    // max events for --robot-events
-	robotEventsCategory      string // category filter for --robot-events
-	robotEventsSession       string // session filter for --robot-events
-	robotEventsActionability string // actionability filter for --robot-events
+	robotEvents                bool   // raw replay/feed surface
+	robotEventsSinceCursor     int64  // cursor for --robot-events
+	robotEventsLimit           int    // max events for --robot-events
+	robotEventsCategory        string // category filter for --robot-events
+	robotEventsSession         string // session filter for --robot-events
+	robotEventsActionability   string // actionability filter for --robot-events
 	robotProfile               string // filter profile for attention-feed commands (br-91gti)
 	robotAttention             bool   // one obvious tending primitive (br-t540i)
 	robotAttentionSinceCursor  int64  // cursor for --robot-attention
