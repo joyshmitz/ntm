@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -54,6 +55,9 @@ type TimelinePanel struct {
 	markerIndex    int                   // Currently selected marker index (-1 = none)
 	selectedMarker *state.TimelineMarker // Currently selected marker for overlay
 	showOverlay    bool                  // Whether to show marker details overlay
+
+	table     table.Model
+	tableInit bool
 }
 
 // NewTimelinePanel creates a new timeline panel
@@ -185,6 +189,9 @@ func (m *TimelinePanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedMarker = nil
 		}
 	}
+	if m.tableInit {
+		m.table.SetCursor(m.cursor)
+	}
 	return m, nil
 }
 
@@ -202,6 +209,9 @@ func (m *TimelinePanel) SetData(data TimelineData, err error) {
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
+	}
+	if m.tableInit {
+		m.table.SetCursor(m.cursor)
 	}
 }
 
@@ -306,9 +316,9 @@ func (m *TimelinePanel) View() string {
 
 	content.WriteString(headerStyle.Render(title) + "\n")
 
-	// Stats line (best-effort)
+	statsLine := ""
 	if w > 20 {
-		statsLine := m.renderStatsLine(w - 4)
+		statsLine = m.renderStatsLine(w - 4)
 		if statsLine != "" {
 			content.WriteString(statsLine + "\n")
 		}
@@ -334,55 +344,24 @@ func (m *TimelinePanel) View() string {
 
 	// Calculate layout
 	labelWidth := m.maxAgentLabelWidth(agents) + 2
-	barWidth := w - labelWidth - 8
+	barWidth := w - labelWidth - 12
 	if barWidth < 10 {
 		barWidth = 10
-	}
-
-	// Render agent tracks
-	contentHeight := h - 6 // Leave room for header, time axis, borders
-	visibleAgents := contentHeight - 2
-	if visibleAgents < 1 {
-		visibleAgents = 1
 	}
 
 	now := time.Now()
 	windowEnd := now.Add(m.timeOffset)
 	windowStart := windowEnd.Add(-m.timeWindow)
-
-	for i, agentID := range agents {
-		if i >= visibleAgents {
-			break
-		}
-
-		selected := i == m.cursor
-		var lineStyle lipgloss.Style
-		if selected && m.IsFocused() {
-			lineStyle = lipgloss.NewStyle().Background(t.Surface0).Bold(true)
-		} else {
-			lineStyle = lipgloss.NewStyle()
-		}
-
-		// Agent label
-		label := m.formatAgentLabel(agentID, labelWidth)
-		labelStyle := lipgloss.NewStyle().
-			Foreground(m.agentColor(agentID)).
-			Width(labelWidth)
-
-		// Render marker row above the timeline bar (only if there are markers)
-		markersForAgent := m.getMarkersForAgentInWindow(agentID, windowStart, windowEnd)
-		if len(markersForAgent) > 0 {
-			markerRow := m.renderMarkerRow(agentID, windowStart, windowEnd, barWidth-2)
-			markerLine := strings.Repeat(" ", labelWidth+2) + markerRow
-			content.WriteString(markerLine + "\n")
-		}
-
-		// Render timeline bar
-		bar := m.renderTimelineBar(agentID, windowStart, windowEnd, barWidth)
-
-		line := labelStyle.Render(label) + " " + bar
-		content.WriteString(lineStyle.Render(line) + "\n")
+	m.initTable()
+	if m.IsFocused() {
+		m.table.Focus()
+	} else {
+		m.table.Blur()
 	}
+	m.table.SetWidth(max(10, w-6))
+	m.table.SetHeight(m.timelineTableHeight(len(agents), statsLine != ""))
+	m.rebuildTimelineTableRows(agents, windowStart, windowEnd, labelWidth, barWidth)
+	content.WriteString(m.table.View() + "\n")
 
 	// Render time axis
 	timeAxis := m.renderTimeAxis(windowStart, windowEnd, labelWidth, barWidth)
@@ -570,6 +549,73 @@ func formatTimelineSpan(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
+func (m *TimelinePanel) timelineTableHeight(rowCount int, hasStats bool) int {
+	height := m.Height() - 8
+	if hasStats {
+		height--
+	}
+	if rowCount > 0 && height > rowCount+1 {
+		height = rowCount + 1 // header + visible rows; avoid blank filler clipping the axis
+	}
+	if height < 3 {
+		height = 3
+	}
+	return height
+}
+
+func (m *TimelinePanel) timelineTableColumns(labelWidth, barWidth int) []table.Column {
+	return []table.Column{
+		{Title: "Agent", Width: labelWidth},
+		{Title: "Timeline", Width: barWidth},
+	}
+}
+
+func (m *TimelinePanel) rebuildTimelineTableRows(agents []string, start, end time.Time, labelWidth, barWidth int) {
+	rows := make([]table.Row, len(agents))
+	for i, agentID := range agents {
+		rows[i] = table.Row{
+			m.formatAgentLabel(agentID, labelWidth),
+			m.renderTimelineBarText(agentID, start, end, barWidth),
+		}
+	}
+
+	m.table.SetColumns(m.timelineTableColumns(labelWidth, barWidth))
+	m.table.SetRows(rows)
+	if len(rows) > 0 {
+		m.table.SetCursor(m.cursor)
+	}
+}
+
+func (m *TimelinePanel) initTable() {
+	if m.tableInit {
+		return
+	}
+
+	t := m.theme
+	styles := table.DefaultStyles()
+	styles.Header = styles.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(t.Surface1).
+		BorderBottom(true).
+		Bold(true).
+		Foreground(t.Lavender)
+	styles.Selected = styles.Selected.
+		Foreground(t.Text).
+		Background(t.Surface0).
+		Bold(true)
+	styles.Cell = styles.Cell.Foreground(t.Subtext)
+
+	m.table = table.New(
+		table.WithColumns([]table.Column{}),
+		table.WithRows([]table.Row{}),
+		table.WithFocused(m.IsFocused()),
+		table.WithWidth(max(10, m.Width()-6)),
+		table.WithHeight(m.timelineTableHeight(0, false)),
+		table.WithStyles(styles),
+	)
+	m.tableInit = true
+}
+
 func (m *TimelinePanel) getAgentList() []string {
 	agentSet := make(map[string]struct{})
 	for _, e := range m.data.Events {
@@ -651,6 +697,29 @@ func (m *TimelinePanel) stateChar(s state.TimelineState) string {
 	default:
 		return " "
 	}
+}
+
+func (m *TimelinePanel) renderTimelineBarText(agentID string, start, end time.Time, width int) string {
+	var bar strings.Builder
+	bar.WriteString("[")
+
+	events := m.getEventsForAgent(agentID)
+	if len(events) == 0 {
+		bar.WriteString(strings.Repeat("·", max(0, width-2)))
+		bar.WriteString("]")
+		return bar.String()
+	}
+
+	duration := end.Sub(start)
+	charDuration := duration / time.Duration(max(1, width-2))
+	for i := 0; i < width-2; i++ {
+		slotStart := start.Add(time.Duration(i) * charDuration)
+		slotEnd := slotStart.Add(charDuration)
+		bar.WriteString(m.stateChar(m.getStateInRange(events, slotStart, slotEnd)))
+	}
+
+	bar.WriteString("]")
+	return bar.String()
 }
 
 func (m *TimelinePanel) renderTimelineBar(agentID string, start, end time.Time, width int) string {

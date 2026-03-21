@@ -316,6 +316,7 @@ func TestTimelinePanel_RenderWithData(t *testing.T) {
 
 	// Should contain timeline indicators
 	if !strings.Contains(view, "[") || !strings.Contains(view, "]") {
+		t.Logf("TIMELINE_TEST: View contents on missing brackets:\n%s", view)
 		t.Error("expected timeline brackets in view")
 	}
 
