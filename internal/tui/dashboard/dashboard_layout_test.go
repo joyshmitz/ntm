@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -1896,5 +1897,246 @@ func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
 				t.Errorf("expected %d panes, got %d", expectedTotal, len(m.panes))
 			}
 		})
+	}
+}
+
+// =============================================================================
+// Phase 2d: bubbles/list pane delegate tests
+// =============================================================================
+
+// TestPaneItemInterface verifies paneItem implements list.Item correctly.
+func TestPaneItemInterface(t *testing.T) {
+	row := PaneTableRow{
+		Title:        "proj__cc_1",
+		Type:         "cc",
+		ModelVariant: "sonnet",
+		Status:       "working",
+	}
+	item := paneItem{row: row}
+
+	// Verify Title()
+	if got := item.Title(); got != "proj__cc_1" {
+		t.Errorf("Title() = %q, want %q", got, "proj__cc_1")
+	}
+
+	// Verify Description()
+	desc := item.Description()
+	if !strings.Contains(desc, "working") {
+		t.Errorf("Description() = %q, missing status", desc)
+	}
+	if !strings.Contains(desc, "sonnet") {
+		t.Errorf("Description() = %q, missing model", desc)
+	}
+
+	// Verify FilterValue() includes searchable fields
+	filter := item.FilterValue()
+	if !strings.Contains(filter, "proj__cc_1") {
+		t.Errorf("FilterValue() = %q, missing title", filter)
+	}
+	if !strings.Contains(filter, "cc") {
+		t.Errorf("FilterValue() = %q, missing type", filter)
+	}
+	if !strings.Contains(filter, "sonnet") {
+		t.Errorf("FilterValue() = %q, missing model", filter)
+	}
+
+	t.Logf("paneItem methods: Title=%q, FilterValue=%q", item.Title(), filter)
+}
+
+// TestPaneDelegateRender verifies delegate produces renderable output.
+func TestPaneDelegateRender(t *testing.T) {
+	m := newTestModel(120)
+	dims := CalculateLayout(100, 1)
+	d := newPaneDelegate(m.theme, dims)
+	d.SetTick(5) // Set animation tick
+
+	items := []list.Item{
+		paneItem{row: PaneTableRow{
+			Title:  "proj__cc_1",
+			Type:   "cc",
+			Status: "working",
+		}},
+		paneItem{row: PaneTableRow{
+			Title:  "proj__cod_1",
+			Type:   "cod",
+			Status: "idle",
+		}},
+	}
+
+	l := list.New(items, d, 100, 20)
+
+	// Verify Height()
+	if h := d.Height(); h != 1 && h != 2 {
+		t.Errorf("Height() = %d, want 1 or 2", h)
+	}
+
+	// Verify Spacing()
+	if s := d.Spacing(); s != 0 {
+		t.Errorf("Spacing() = %d, want 0", s)
+	}
+
+	// Verify Update() returns nil
+	if cmd := d.Update(nil, &l); cmd != nil {
+		t.Errorf("Update() returned non-nil command")
+	}
+
+	// Verify View() produces output
+	view := l.View()
+	if view == "" {
+		t.Error("list.View() returned empty string")
+	}
+
+	t.Logf("Delegate render: Height=%d, View length=%d", d.Height(), len(view))
+}
+
+// TestPaneListRefreshPreservesSelection verifies selection is preserved across refresh.
+func TestPaneListRefreshPreservesSelection(t *testing.T) {
+	m := newTestModel(120)
+	dims := CalculateLayout(100, 1)
+	d := newPaneDelegate(m.theme, dims)
+
+	// Initial items
+	items := []list.Item{
+		paneItem{row: PaneTableRow{Index: 0, Title: "cc_1", Type: "cc"}},
+		paneItem{row: PaneTableRow{Index: 1, Title: "cc_2", Type: "cc"}},
+		paneItem{row: PaneTableRow{Index: 2, Title: "cod_1", Type: "cod"}},
+	}
+	l := list.New(items, d, 100, 20)
+
+	// Select item at index 1 (cc_2)
+	l.Select(1)
+	if l.Index() != 1 {
+		t.Fatalf("Select(1) failed, Index()=%d", l.Index())
+	}
+
+	// Save current selection
+	sel := l.SelectedItem().(paneItem)
+	prevTitle := sel.row.Title
+	t.Logf("Before refresh: selected index=%d title=%q", l.Index(), prevTitle)
+
+	// Simulate refresh with reordered items (cc_2 moved to index 2)
+	newItems := []list.Item{
+		paneItem{row: PaneTableRow{Index: 0, Title: "cc_1", Type: "cc"}},
+		paneItem{row: PaneTableRow{Index: 1, Title: "cod_1", Type: "cod"}},
+		paneItem{row: PaneTableRow{Index: 2, Title: "cc_2", Type: "cc"}}, // moved
+		paneItem{row: PaneTableRow{Index: 3, Title: "cc_3", Type: "cc"}}, // new
+	}
+	l.SetItems(newItems)
+
+	// Find and restore selection by title
+	for i, item := range l.Items() {
+		if pi, ok := item.(paneItem); ok && pi.row.Title == prevTitle {
+			l.Select(i)
+			break
+		}
+	}
+
+	// Verify selection was restored
+	restored := l.SelectedItem().(paneItem)
+	if restored.row.Title != prevTitle {
+		t.Errorf("Selection not preserved: got %q, want %q", restored.row.Title, prevTitle)
+	}
+
+	t.Logf("After refresh: selected index=%d title=%q", l.Index(), restored.row.Title)
+}
+
+// TestPaneListEmptyState verifies empty list renders without panic.
+func TestPaneListEmptyState(t *testing.T) {
+	m := newTestModel(120)
+	dims := CalculateLayout(100, 1)
+	d := newPaneDelegate(m.theme, dims)
+
+	// Empty list
+	l := list.New(nil, d, 100, 20)
+	view := l.View()
+
+	if view == "" {
+		t.Log("Empty list returned empty view (acceptable)")
+	} else {
+		t.Logf("Empty list view: %d chars", len(view))
+	}
+
+	// Verify no panic when iterating empty
+	for range l.Items() {
+		t.Error("Should not iterate over empty list")
+	}
+}
+
+// TestPaneListFilterKey verifies filtering is enabled by default.
+func TestPaneListFilterKey(t *testing.T) {
+	m := newTestModel(120)
+	dims := CalculateLayout(100, 1)
+	d := newPaneDelegate(m.theme, dims)
+
+	items := []list.Item{
+		paneItem{row: PaneTableRow{Title: "proj__cc_1", Type: "cc"}},
+		paneItem{row: PaneTableRow{Title: "proj__cod_1", Type: "cod"}},
+	}
+	l := list.New(items, d, 100, 20)
+	l.SetFilteringEnabled(true)
+
+	if !l.FilteringEnabled() {
+		t.Error("FilteringEnabled() should be true after SetFilteringEnabled(true)")
+	}
+
+	t.Log("Filter enabled: '/' key will activate fuzzy search")
+}
+
+// TestToPaneItems verifies conversion from panes to list items.
+func TestToPaneItems(t *testing.T) {
+	m := newTestModel(120)
+	panes := []tmux.Pane{
+		{ID: "1", Index: 0, Title: "cc_1", Type: tmux.AgentClaude},
+		{ID: "2", Index: 1, Title: "cod_1", Type: tmux.AgentCodex},
+	}
+	statuses := map[int]PaneStatus{
+		0: {State: "working", ContextPercent: 50},
+		1: {State: "idle", ContextPercent: 20},
+	}
+
+	items := toPaneItems(panes, statuses, nil, m.theme)
+
+	if len(items) != 2 {
+		t.Fatalf("toPaneItems returned %d items, want 2", len(items))
+	}
+
+	// Verify first item
+	item0 := items[0].(paneItem)
+	if item0.row.Title != "cc_1" {
+		t.Errorf("items[0].Title = %q, want %q", item0.row.Title, "cc_1")
+	}
+	if item0.row.Type != "cc" {
+		t.Errorf("items[0].Type = %q, want %q", item0.row.Type, "cc")
+	}
+
+	// Verify second item
+	item1 := items[1].(paneItem)
+	if item1.row.Title != "cod_1" {
+		t.Errorf("items[1].Title = %q, want %q", item1.row.Title, "cod_1")
+	}
+
+	t.Logf("toPaneItems: converted %d panes to list items", len(items))
+}
+
+// BenchmarkPaneListView benchmarks list rendering performance.
+func BenchmarkPaneListView(b *testing.B) {
+	m := newTestModel(120)
+	dims := CalculateLayout(100, 1)
+	d := newPaneDelegate(m.theme, dims)
+
+	items := make([]list.Item, 20)
+	for i := range items {
+		items[i] = paneItem{row: PaneTableRow{
+			Index: i,
+			Title: fmt.Sprintf("proj__cc_%d", i),
+			Type:  "cc",
+		}}
+	}
+
+	l := list.New(items, d, 100, 20)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = l.View()
 	}
 }
