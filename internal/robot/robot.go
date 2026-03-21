@@ -1806,6 +1806,8 @@ Session Operations:
 --robot-interrupt=SESSION  Ctrl+C to agents (--interrupt-msg="new task")
 --robot-is-working=SESSION Check if agents are busy
 --robot-wait=SESSION    Wait for idle state (--timeout=5m, --condition=idle)
+                        Conditions: idle, complete, generating, healthy
+                        Note: bead_orphaned is deliberately unsupported — see --robot-capabilities
 
 Note: Pane-targeting commands exclude the user pane by default.
 Use --all to include the user pane (index depends on tmux pane-base-index).

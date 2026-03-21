@@ -232,6 +232,100 @@ func TestDefaultAttentionCapabilities_BeadOrphanedUnsupported(t *testing.T) {
 	}
 }
 
+func TestDefaultAttentionCapabilities_UnsupportedConditionsIncluded(t *testing.T) {
+	t.Parallel()
+
+	caps := DefaultAttentionCapabilities()
+	if caps == nil {
+		t.Fatal("DefaultAttentionCapabilities() returned nil")
+	}
+	if len(caps.UnsupportedConditions) == 0 {
+		t.Fatal("expected UnsupportedConditions to be non-empty")
+	}
+
+	// Verify bead_orphaned is listed with full rationale
+	found := false
+	for _, uc := range caps.UnsupportedConditions {
+		if uc.Name == AttentionSignalBeadOrphaned {
+			found = true
+			if uc.Status != CapabilityUnavailable {
+				t.Errorf("bead_orphaned Status = %q, want %q", uc.Status, CapabilityUnavailable)
+			}
+			if uc.Reason == "" {
+				t.Error("bead_orphaned Reason must not be empty")
+			}
+			if len(uc.ObservablesAvailable) == 0 {
+				t.Error("bead_orphaned ObservablesAvailable must list what ntm CAN see")
+			}
+			if uc.WhatWouldChange == "" {
+				t.Error("bead_orphaned WhatWouldChange must explain prerequisites for support")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in UnsupportedConditions", AttentionSignalBeadOrphaned)
+	}
+}
+
+func TestUnsupportedConditions_ConsistentWithSignalAvailability(t *testing.T) {
+	t.Parallel()
+
+	caps := DefaultAttentionCapabilities()
+
+	// Every unsupported condition must also appear in SignalAvailability
+	// with CapabilityUnavailable status — the two surfaces must agree.
+	for _, uc := range caps.UnsupportedConditions {
+		signal, ok := caps.SignalAvailability[uc.Name]
+		if !ok {
+			t.Errorf("UnsupportedCondition %q not found in SignalAvailability", uc.Name)
+			continue
+		}
+		if signal.Status != CapabilityUnavailable {
+			t.Errorf("SignalAvailability[%q].Status = %q, but UnsupportedConditions marks it unavailable",
+				uc.Name, signal.Status)
+		}
+	}
+}
+
+func TestUnsupportedConditions_NotInAllWaitConditions(t *testing.T) {
+	t.Parallel()
+
+	// Unsupported conditions must NEVER appear in AllWaitConditions
+	waitSet := make(map[string]bool)
+	for _, wc := range AllWaitConditions {
+		waitSet[wc] = true
+	}
+
+	for _, uc := range UnsupportedConditions() {
+		if waitSet[uc.Name] {
+			t.Errorf("unsupported condition %q must not be in AllWaitConditions", uc.Name)
+		}
+	}
+}
+
+func TestIsUnsupportedWaitCondition(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		condition string
+		want      bool
+	}{
+		{AttentionSignalBeadOrphaned, true},
+		{"bead_orphaned", true},           // explicit string match
+		{"idle", false},                   // valid condition
+		{"complete", false},               // valid condition
+		{"nonexistent_garbage", false},     // unknown condition
+		{"bead_orphaned,idle", true},      // unsupported in composed condition
+	}
+
+	for _, tt := range tests {
+		got := isUnsupportedWaitCondition(tt.condition)
+		if got != tt.want {
+			t.Errorf("isUnsupportedWaitCondition(%q) = %v, want %v", tt.condition, got, tt.want)
+		}
+	}
+}
+
 // =============================================================================
 // categoryOrder tests
 // =============================================================================

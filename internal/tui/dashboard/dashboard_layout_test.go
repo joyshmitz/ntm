@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/history"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
@@ -342,6 +343,109 @@ func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVisiblePanelsIncludeAttentionAtSplitAndHideAtNarrow(t *testing.T) {
+	t.Parallel()
+
+	split := newTestModel(layout.SplitViewThreshold)
+	split.tier = layout.TierSplit
+
+	narrow := newTestModel(100)
+	narrow.tier = layout.TierNarrow
+
+	if !containsPanelID(split.visiblePanelsForHelpVerbosity(), PanelAttention) {
+		t.Fatal("expected split-tier panel set to include PanelAttention")
+	}
+	if containsPanelID(narrow.visiblePanelsForHelpVerbosity(), PanelAttention) {
+		t.Fatal("did not expect narrow-tier panel set to include PanelAttention")
+	}
+}
+
+func TestSortAttentionItemsOrdersByActionabilityThenRecency(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 21, 7, 0, 0, 0, time.UTC)
+	items := []panels.AttentionItem{
+		{Summary: "older interesting", Actionability: robot.ActionabilityInteresting, Timestamp: now.Add(-2 * time.Minute)},
+		{Summary: "newer action required", Actionability: robot.ActionabilityActionRequired, Timestamp: now.Add(-1 * time.Minute)},
+		{Summary: "older action required", Actionability: robot.ActionabilityActionRequired, Timestamp: now.Add(-3 * time.Minute)},
+		{Summary: "newer interesting", Actionability: robot.ActionabilityInteresting, Timestamp: now},
+	}
+
+	sortAttentionItems(items)
+
+	got := []string{items[0].Summary, items[1].Summary, items[2].Summary, items[3].Summary}
+	want := []string{"newer action required", "older action required", "newer interesting", "older interesting"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted item[%d] = %q, want %q (full order: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestSplitViewRendersAttentionPanelWhenFocused(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(160)
+	m.height = 30
+	m.tier = layout.TierSplit
+	m.focusedPanel = PanelAttention
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{
+			Summary:       "operator attention item",
+			Actionability: robot.ActionabilityActionRequired,
+			Timestamp:     time.Now(),
+			SourcePane:    1,
+			SourceAgent:   "codex",
+		},
+	}, true)
+
+	out := status.StripANSI(m.renderSplitView())
+	if !strings.Contains(out, "Attention") {
+		t.Fatalf("expected split view to render attention panel title, got %q", out)
+	}
+	if !strings.Contains(out, "operator attention item") {
+		t.Fatalf("expected split view to render attention summary, got %q", out)
+	}
+	if strings.Contains(out, "Context Usage") {
+		t.Fatalf("expected attention panel to replace the detail view while focused, got %q", out)
+	}
+}
+
+func TestMegaLayoutRendersAttentionPanelWhenFocused(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(layout.MegaWideViewThreshold)
+	m.height = 30
+	m.tier = layout.TierMega
+	m.focusedPanel = PanelAttention
+	m.attentionPanel.SetData([]panels.AttentionItem{
+		{
+			Summary:       "overlay attention item",
+			Actionability: robot.ActionabilityInteresting,
+			Timestamp:     time.Now(),
+			SourcePane:    1,
+			SourceAgent:   "codex",
+		},
+	}, true)
+
+	out := status.StripANSI(m.renderMegaLayout())
+	if !strings.Contains(out, "Attention") {
+		t.Fatalf("expected mega layout to render attention panel title, got %q", out)
+	}
+	if !strings.Contains(out, "overlay attention item") {
+		t.Fatalf("expected mega layout to render attention summary, got %q", out)
+	}
+}
+
+func containsPanelID(ids []PanelID, want PanelID) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUltraLayout_DoesNotOverflowWidth(t *testing.T) {
@@ -750,16 +854,25 @@ func TestKeyboardNavigationPanelCycling(t *testing.T) {
 		m := newTestModel(layout.MegaWideViewThreshold)
 		m.focusedPanel = PanelAlerts
 
+		// Alerts -> Attention (PanelAttention is now between Alerts and Sidebar at TierMega)
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 		m = updated.(Model)
-		if m.focusedPanel != PanelSidebar {
-			t.Fatalf("expected focused panel to move from alerts to sidebar, got %v", m.focusedPanel)
+		if m.focusedPanel != PanelAttention {
+			t.Fatalf("expected focused panel to move from alerts to attention, got %v", m.focusedPanel)
 		}
 
+		// Attention -> Sidebar
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = updated.(Model)
+		if m.focusedPanel != PanelSidebar {
+			t.Fatalf("expected focused panel to move from attention to sidebar, got %v", m.focusedPanel)
+		}
+
+		// Sidebar -> Attention (shift+tab)
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 		m = updated.(Model)
-		if m.focusedPanel != PanelAlerts {
-			t.Fatalf("expected focused panel to move back to alerts after shift+tab, got %v", m.focusedPanel)
+		if m.focusedPanel != PanelAttention {
+			t.Fatalf("expected focused panel to move back to attention after shift+tab, got %v", m.focusedPanel)
 		}
 	})
 

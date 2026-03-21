@@ -11,6 +11,7 @@ import (
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
 )
 
@@ -411,6 +412,76 @@ func TestPopupZoomPublishesHumanZoomAndDisplaysCursorHint(t *testing.T) {
 	}
 	if len(replayed) != 2 {
 		t.Fatalf("expected stubbed publish path to leave attention feed unchanged, got %d events", len(replayed))
+	}
+}
+
+func TestHandleAttentionZoomUsesPaneIndexLookup(t *testing.T) {
+	oldZoomPane := dashboardZoomPane
+	t.Cleanup(func() {
+		dashboardZoomPane = oldZoomPane
+	})
+
+	var zoomSession string
+	var zoomPane int
+	dashboardZoomPane = func(session string, paneIndex int) error {
+		zoomSession = session
+		zoomPane = paneIndex
+		return nil
+	}
+
+	m := New("test", "")
+	m.width = 140
+	m.height = 30
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 1, Title: "test__cc_1", Type: tmux.AgentClaude},
+		{ID: "pane-3", Index: 3, Title: "test__cod_1", Type: tmux.AgentCodex},
+	}
+	m.rebuildPaneList()
+
+	cmd := m.handleAttentionZoom(3)
+	if cmd == nil {
+		t.Fatal("expected handleAttentionZoom to return a zoom command for an existing pane index")
+	}
+	if zoomSession != "test" || zoomPane != 3 {
+		t.Fatalf("zoom called with session=%q pane=%d, want test/3", zoomSession, zoomPane)
+	}
+	if m.healthMessage != "" {
+		t.Fatalf("did not expect a missing-pane health message, got %q", m.healthMessage)
+	}
+}
+
+func TestHandleAttentionZoomMissingPaneShowsHealthMessage(t *testing.T) {
+	oldZoomPane := dashboardZoomPane
+	t.Cleanup(func() {
+		dashboardZoomPane = oldZoomPane
+	})
+
+	zoomCalled := false
+	dashboardZoomPane = func(session string, paneIndex int) error {
+		zoomCalled = true
+		return nil
+	}
+
+	m := New("test", "")
+	m.width = 140
+	m.height = 30
+	m.panes = []tmux.Pane{
+		{ID: "pane-1", Index: 1, Title: "test__cc_1", Type: tmux.AgentClaude},
+	}
+	m.rebuildPaneList()
+
+	cmd := m.handleAttentionZoom(99)
+	if cmd != nil {
+		t.Fatalf("expected no zoom command for a missing pane, got %v", cmd)
+	}
+	if zoomCalled {
+		t.Fatal("did not expect dashboardZoomPane to be called for a missing pane")
+	}
+	if m.healthMessage != "Source pane no longer available" {
+		t.Fatalf("healthMessage = %q, want %q", m.healthMessage, "Source pane no longer available")
+	}
+	if m.toasts == nil || m.toasts.Count() != 1 {
+		t.Fatalf("expected a warning toast for missing pane, got %+v", m.toasts)
 	}
 }
 
