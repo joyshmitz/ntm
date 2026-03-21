@@ -1,6 +1,7 @@
 package status
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -231,10 +232,22 @@ func TestCompactionRecoveryIntegration_CheckAndRecover_NoCompaction(t *testing.T
 }
 
 func TestMakePaneID(t *testing.T) {
-	id := makePaneID("mysession", 5)
-	expected := "mysession:5"
-	if id != expected {
-		t.Errorf("makePaneID = %q, want %q", id, expected)
+	tests := []struct {
+		session string
+		index   int
+		want    string
+	}{
+		{"mysession", 5, "mysession:.5"},
+		{"test", 0, "test:.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s_%d", tt.session, tt.index), func(t *testing.T) {
+			got := makePaneID(tt.session, tt.index)
+			if got != tt.want {
+				t.Errorf("makePaneID = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
