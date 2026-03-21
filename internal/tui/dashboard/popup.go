@@ -42,7 +42,7 @@ func (m *Model) activatePopupMode(now time.Time) {
 	}
 }
 
-func (m Model) paneByIndex(paneIndex int) (tmux.Pane, bool) {
+func (m *Model) paneByIndex(paneIndex int) (tmux.Pane, bool) {
 	for _, pane := range m.panes {
 		if pane.Index == paneIndex {
 			return pane, true

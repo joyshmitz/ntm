@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -374,21 +375,23 @@ func (d *DesktopChannel) Send(ctx context.Context, alert *Alert) error {
 
 // escapeAppleScript escapes a string for use in AppleScript
 func escapeAppleScript(s string) string {
-	// Escape backslashes and quotes
-	result := ""
+	var sb strings.Builder
+	// Pre-allocate slightly more than the string length to avoid reallocations
+	sb.Grow(len(s) + 16)
+	
 	for _, c := range s {
 		switch c {
 		case '\\':
-			result += "\\\\"
+			sb.WriteString("\\\\")
 		case '"':
-			result += "\\\""
+			sb.WriteString("\\\"")
 		case '\n':
-			result += "\\n"
+			sb.WriteString("\\n")
 		default:
-			result += string(c)
+			sb.WriteRune(c)
 		}
 	}
-	return result
+	return sb.String()
 }
 
 // =============================================================================
