@@ -430,12 +430,7 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 		isOverlayKeyBound,
 		setupOverlayBindingQuiet,
 	)
-	if overlayPrep.Warning != "" {
-		watchLoop.logf("%s", overlayPrep.Warning)
-	}
-	if overlayPrep.Hint != "" {
-		watchLoop.logf("%s", overlayPrep.Hint)
-	}
+	announceAssignWatchOverlay(watchLoop.logf, overlayPrep)
 
 	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -516,6 +511,18 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 type assignWatchOverlayPreparation struct {
 	Hint    string
 	Warning string
+}
+
+func announceAssignWatchOverlay(logf func(string, ...interface{}), prep assignWatchOverlayPreparation) {
+	if logf == nil {
+		return
+	}
+	if prep.Warning != "" {
+		logf("%s", prep.Warning)
+	}
+	if prep.Hint != "" {
+		logf("%s", prep.Hint)
+	}
 }
 
 func prepareAssignWatchOverlay(session string, inTmux bool, currentSession string, isBound func(string) bool, ensureBinding func(string) error) assignWatchOverlayPreparation {

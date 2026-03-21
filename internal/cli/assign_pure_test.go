@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -447,5 +448,139 @@ func TestPrepareAssignWatchOverlay_ReportsBindingSetupFailure(t *testing.T) {
 	}
 	if ensureCalls != 1 {
 		t.Fatalf("ensureBinding called %d times, want 1", ensureCalls)
+	}
+}
+
+func TestAnnounceAssignWatchOverlay_SkipsEmptyPreparation(t *testing.T) {
+	t.Parallel()
+
+	var logs []string
+	announceAssignWatchOverlay(func(format string, args ...interface{}) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}, assignWatchOverlayPreparation{})
+
+	if len(logs) != 0 {
+		t.Fatalf("expected no logs, got %v", logs)
+	}
+}
+
+func TestAnnounceAssignWatchOverlay_LogsPreparedHintAndWarning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		prep assignWatchOverlayPreparation
+		want []string
+	}{
+		{
+			name: "hint only",
+			prep: assignWatchOverlayPreparation{
+				Hint: "Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+			want: []string{
+				"Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+		},
+		{
+			name: "warning only",
+			prep: assignWatchOverlayPreparation{
+				Warning: "Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.",
+			},
+			want: []string{
+				"Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.",
+			},
+		},
+		{
+			name: "warning then hint",
+			prep: assignWatchOverlayPreparation{
+				Warning: "warning",
+				Hint:    "hint",
+			},
+			want: []string{"warning", "hint"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs []string
+			announceAssignWatchOverlay(func(format string, args ...interface{}) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}, tt.prep)
+
+			if len(logs) != len(tt.want) {
+				t.Fatalf("log count = %d, want %d (%v)", len(logs), len(tt.want), logs)
+			}
+			for i := range tt.want {
+				if logs[i] != tt.want[i] {
+					t.Fatalf("log[%d] = %q, want %q", i, logs[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAnnounceAssignWatchOverlay_WithPreparedScenarios(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prep    assignWatchOverlayPreparation
+		wantLog []string
+	}{
+		{
+			name:    "outside useful context",
+			prep:    prepareAssignWatchOverlay("proj", false, "proj", func(string) bool { return false }, func(string) error { return nil }),
+			wantLog: nil,
+		},
+		{
+			name: "existing binding",
+			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return true }, func(string) error {
+				t.Fatal("ensureBinding should not be called when binding exists")
+				return nil
+			}),
+			wantLog: []string{
+				"Hint: press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+		},
+		{
+			name: "installs missing binding",
+			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
+				return nil
+			}),
+			wantLog: []string{
+				"Hint: installed the F12 overlay binding. Press F12 for the attention-aware dashboard overlay while assign --watch is running.",
+			},
+		},
+		{
+			name: "binding setup failure",
+			prep: prepareAssignWatchOverlay("proj", true, "proj", func(string) bool { return false }, func(string) error {
+				return errors.New("boom")
+			}),
+			wantLog: []string{
+				"Warning: Could not auto-set up the F12 overlay binding (boom); run 'ntm bind --overlay' if you want the attention-aware dashboard overlay shortcut.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs []string
+			announceAssignWatchOverlay(func(format string, args ...interface{}) {
+				logs = append(logs, fmt.Sprintf(format, args...))
+			}, tt.prep)
+
+			if len(logs) != len(tt.wantLog) {
+				t.Fatalf("log count = %d, want %d (%v)", len(logs), len(tt.wantLog), logs)
+			}
+			for i := range tt.wantLog {
+				if logs[i] != tt.wantLog[i] {
+					t.Fatalf("log[%d] = %q, want %q", i, logs[i], tt.wantLog[i])
+				}
+			}
+		})
 	}
 }
