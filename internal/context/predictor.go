@@ -104,6 +104,10 @@ func (p *ContextPredictor) AddSampleAt(tokens int64, timestamp time.Time) {
 // PredictExhaustion calculates the predicted time to context exhaustion.
 // Returns nil if insufficient data is available for prediction.
 func (p *ContextPredictor) PredictExhaustion(modelLimit int64) *Prediction {
+	if modelLimit <= 0 {
+		return nil
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 

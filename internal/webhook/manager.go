@@ -409,10 +409,13 @@ func (m *WebhookManager) Stop() error {
 	}
 
 	m.log("stopping webhook manager...")
+
+	// Set started=false BEFORE closing the channel to prevent Dispatch()
+	// from sending on a closed channel (panic).
+	m.started.Store(false)
 	m.cancel()
 
 	// Close the queue channel to unblock workers.
-	// Safe after cancel() since no new sends will occur.
 	close(m.queue)
 
 	// Signal retry processor to wake up and exit
@@ -432,7 +435,6 @@ func (m *WebhookManager) Stop() error {
 		m.log("webhook manager stop timed out")
 	}
 
-	m.started.Store(false)
 	return nil
 }
 

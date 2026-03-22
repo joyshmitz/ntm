@@ -548,17 +548,20 @@ func calculateStatus(agent AgentHealth) Status {
 	return StatusUnknown
 }
 
-// statusSeverity returns numeric severity for status comparison
+// statusSeverity returns numeric severity for status comparison.
+// Higher values indicate worse status.
 func statusSeverity(s Status) int {
 	switch s {
 	case StatusOK:
 		return 0
-	case StatusWarning:
+	case StatusUnknown:
 		return 1
-	case StatusError:
+	case StatusWarning:
 		return 2
+	case StatusError:
+		return 3
 	default:
-		return 0
+		return 1 // unknown defaults to between OK and Warning
 	}
 }
 

@@ -442,8 +442,13 @@ func (ir *IncrementalResolver) Resolve(sessionName, incrementalID string) (*Chec
 		return nil, fmt.Errorf("loading base checkpoint: %w", err)
 	}
 
-	// Create a copy of base and apply changes
+	// Create a deep copy of base and apply changes.
+	// Shallow copy shares the Panes slice — deep copy to avoid corrupting the original.
 	resolved := *base
+	if base.Session.Panes != nil {
+		resolved.Session.Panes = make([]PaneState, len(base.Session.Panes))
+		copy(resolved.Session.Panes, base.Session.Panes)
+	}
 	resolved.ID = fmt.Sprintf("resolved-%s", incrementalID)
 	resolved.CreatedAt = inc.CreatedAt
 	resolved.Description = fmt.Sprintf("Resolved from incremental %s (base: %s)", incrementalID, inc.BaseCheckpointID)
@@ -573,11 +578,16 @@ func (ir *IncrementalResolver) ListIncrementals(sessionName string) ([]*Incremen
 // this function walks the chain back to find the base full checkpoint and applies
 // all incrementals in order.
 func (ir *IncrementalResolver) ChainResolve(sessionName, incrementalID string) (*Checkpoint, error) {
-	// Build the chain of incrementals
+	// Build the chain of incrementals (with cycle detection)
 	chain := []*IncrementalCheckpoint{}
+	visited := make(map[string]bool)
 
 	currentID := incrementalID
 	for {
+		if visited[currentID] {
+			return nil, fmt.Errorf("cycle detected in incremental chain at %s", currentID)
+		}
+		visited[currentID] = true
 		inc, err := ir.loadIncremental(sessionName, currentID)
 		if err != nil {
 			// Not an incremental - might be the base checkpoint

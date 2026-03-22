@@ -439,14 +439,16 @@ func (r *RawMetrics) ToEffectivenessScore(w Weights) *EffectivenessScore {
 		score.Quality = qualitySum / float64(qualityComponents)
 	}
 
-	// Error rate
+	// Error rate (no data → assume no errors rather than all errors)
 	totalOps := r.ErrorCount + r.SuccessCount
 	if totalOps > 0 {
 		score.ErrorRate = 1 - (float64(r.ErrorCount) / float64(totalOps))
+	} else {
+		score.ErrorRate = 1.0 // no data = no errors observed
 	}
 
-	// Context usage
-	if r.AvgContextUsage >= 0 {
+	// Context usage (only score when data actually exists)
+	if r.AvgContextUsage > 0 {
 		score.ContextUsage = 1 - r.AvgContextUsage
 	}
 
@@ -454,9 +456,4 @@ func (r *RawMetrics) ToEffectivenessScore(w Weights) *EffectivenessScore {
 	return score
 }
 
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}
+// min() removed — use Go 1.25 builtin min()

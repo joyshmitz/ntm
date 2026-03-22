@@ -375,9 +375,16 @@ func (d *LimitDetector) handleLimitEvent(event *LimitEvent) {
 		}
 	}
 
-	// Send event to channel (non-blocking)
+	// Send event to channel (non-blocking).
+	// Take a local copy under lock to avoid racing with Stop() closing the channel.
+	d.mu.RLock()
+	ch := d.eventChan
+	d.mu.RUnlock()
+	if ch == nil {
+		return
+	}
 	select {
-	case d.eventChan <- *event:
+	case ch <- *event:
 		// Event sent successfully
 	default:
 		d.logger().Warn("[LimitDetector] event_channel_full",

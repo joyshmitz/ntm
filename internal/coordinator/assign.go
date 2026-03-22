@@ -979,6 +979,9 @@ func applyStrategySelection(
 	case StrategyDependency:
 		return selectDependency(pairs, numAgents, numBeads)
 
+	case StrategyRoundRobin:
+		return selectBalanced(pairs, numAgents, numBeads)
+
 	default:
 		return selectGreedy(pairs, numAgents, numBeads)
 	}

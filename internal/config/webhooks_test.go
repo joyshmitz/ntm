@@ -173,6 +173,54 @@ webhooks:
 	}
 }
 
+func TestParseWebhookConfig_RetryDefaultsApplyWhenMaxAttemptsOmitted(t *testing.T) {
+	content := `
+webhooks:
+  - name: partial-retry
+    url: https://example.com/hook
+    retry:
+      backoff: exponential
+`
+
+	cfgs, err := ParseWebhookConfig([]byte(content))
+	if err != nil {
+		t.Fatalf("ParseWebhookConfig failed: %v", err)
+	}
+	if len(cfgs) != 1 {
+		t.Fatalf("expected 1 webhook, got %d", len(cfgs))
+	}
+	if cfgs[0].Retry.MaxAttempts != 5 {
+		t.Fatalf("expected default retry.max_attempts of 5, got %d", cfgs[0].Retry.MaxAttempts)
+	}
+	if cfgs[0].Retry.Backoff != "exponential" {
+		t.Fatalf("expected retry.backoff to remain exponential, got %q", cfgs[0].Retry.Backoff)
+	}
+}
+
+func TestParseWebhookConfig_RetryZeroPreservedWhenExplicit(t *testing.T) {
+	content := `
+webhooks:
+  - name: disabled-retry
+    url: https://example.com/hook
+    retry:
+      max_attempts: 0
+`
+
+	cfgs, err := ParseWebhookConfig([]byte(content))
+	if err != nil {
+		t.Fatalf("ParseWebhookConfig failed: %v", err)
+	}
+	if len(cfgs) != 1 {
+		t.Fatalf("expected 1 webhook, got %d", len(cfgs))
+	}
+	if cfgs[0].Retry.MaxAttempts != 0 {
+		t.Fatalf("expected explicit retry.max_attempts=0 to be preserved, got %d", cfgs[0].Retry.MaxAttempts)
+	}
+	if cfgs[0].Retry.Backoff != "exponential" {
+		t.Fatalf("expected default retry.backoff, got %q", cfgs[0].Retry.Backoff)
+	}
+}
+
 // TestIsValidWebhookAgentType tests all branches of the agent type validator.
 func TestIsValidWebhookAgentType(t *testing.T) {
 	t.Parallel()

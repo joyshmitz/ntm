@@ -3,7 +3,9 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -32,6 +34,7 @@ type Holder struct {
 
 // ConflictDetector detects and tracks file reservation conflicts.
 type ConflictDetector struct {
+	mu         sync.Mutex
 	mailClient *agentmail.Client
 	projectKey string
 	conflicts  map[string]*Conflict
@@ -52,42 +55,18 @@ func (d *ConflictDetector) DetectConflicts(ctx context.Context) ([]Conflict, err
 		return nil, nil
 	}
 
-	// Get all reservations
 	reservations, err := d.mailClient.ListReservations(ctx, d.projectKey, "", true)
 	if err != nil {
 		return nil, fmt.Errorf("listing reservations: %w", err)
 	}
 
-	// Group by pattern to detect overlaps
-	patternHolders := make(map[string][]Holder)
-	for _, r := range reservations {
-		if r.ReleasedTS != nil || time.Now().After(r.ExpiresTS.Time) {
-			continue // Skip released/expired
-		}
-
-		holder := Holder{
-			AgentName:  r.AgentName,
-			ReservedAt: r.CreatedTS.Time,
-			ExpiresAt:  r.ExpiresTS.Time,
-			Reason:     r.Reason,
-		}
-		patternHolders[r.PathPattern] = append(patternHolders[r.PathPattern], holder)
+	conflicts := detectReservationConflictsAt(reservations, time.Now())
+	d.mu.Lock()
+	for i := range conflicts {
+		conflict := conflicts[i]
+		d.conflicts[conflict.ID] = &conflict
 	}
-
-	// Find patterns with multiple exclusive holders
-	var conflicts []Conflict
-	for pattern, holders := range patternHolders {
-		if len(holders) > 1 {
-			conflict := Conflict{
-				ID:         generateConflictID(pattern),
-				Pattern:    pattern,
-				Holders:    holders,
-				DetectedAt: time.Now(),
-			}
-			conflicts = append(conflicts, conflict)
-			d.conflicts[conflict.ID] = &conflict
-		}
-	}
+	d.mu.Unlock()
 
 	return conflicts, nil
 }
@@ -104,8 +83,9 @@ func (d *ConflictDetector) CheckPathConflict(ctx context.Context, path, excludeA
 	}
 
 	var holders []Holder
+	now := time.Now()
 	for _, r := range reservations {
-		if r.ReleasedTS != nil || time.Now().After(r.ExpiresTS.Time) {
+		if !reservationActiveAt(r, now) || !r.Exclusive {
 			continue
 		}
 		if r.AgentName == excludeAgent {
@@ -131,6 +111,124 @@ func (d *ConflictDetector) CheckPathConflict(ctx context.Context, path, excludeA
 		Holders:    holders,
 		DetectedAt: time.Now(),
 	}, nil
+}
+
+func detectReservationConflictsAt(reservations []agentmail.FileReservation, now time.Time) []Conflict {
+	type aggregate struct {
+		conflict Conflict
+		seen     map[string]bool
+	}
+
+	active := make([]agentmail.FileReservation, 0, len(reservations))
+	for _, r := range reservations {
+		if !reservationActiveAt(r, now) {
+			continue
+		}
+		active = append(active, r)
+	}
+
+	groups := make(map[string]*aggregate)
+	for i := 0; i < len(active); i++ {
+		for j := i + 1; j < len(active); j++ {
+			a := active[i]
+			b := active[j]
+			if !reservationsConflict(a, b) {
+				continue
+			}
+
+			pattern := conflictPatternLabel(a.PathPattern, b.PathPattern)
+			group := groups[pattern]
+			if group == nil {
+				group = &aggregate{
+					conflict: Conflict{
+						ID:         generateConflictID(pattern),
+						Pattern:    pattern,
+						DetectedAt: now,
+					},
+					seen: make(map[string]bool),
+				}
+				groups[pattern] = group
+			}
+
+			for _, reservation := range []agentmail.FileReservation{a, b} {
+				if group.seen[reservation.AgentName] {
+					continue
+				}
+				group.seen[reservation.AgentName] = true
+				group.conflict.Holders = append(group.conflict.Holders, Holder{
+					AgentName:  reservation.AgentName,
+					ReservedAt: reservation.CreatedTS.Time,
+					ExpiresAt:  reservation.ExpiresTS.Time,
+					Reason:     reservation.Reason,
+				})
+			}
+		}
+	}
+
+	conflicts := make([]Conflict, 0, len(groups))
+	for _, group := range groups {
+		sortHolders(group.conflict.Holders)
+		conflicts = append(conflicts, group.conflict)
+	}
+
+	sort.Slice(conflicts, func(i, j int) bool {
+		return conflicts[i].Pattern < conflicts[j].Pattern
+	})
+
+	return conflicts
+}
+
+func reservationActiveAt(r agentmail.FileReservation, now time.Time) bool {
+	if r.ReleasedTS != nil {
+		return false
+	}
+	return !now.After(r.ExpiresTS.Time)
+}
+
+func reservationsConflict(a, b agentmail.FileReservation) bool {
+	if a.AgentName == b.AgentName {
+		return false
+	}
+	if !a.Exclusive && !b.Exclusive {
+		return false
+	}
+	return reservationPatternsOverlap(a.PathPattern, b.PathPattern)
+}
+
+func reservationPatternsOverlap(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return matchesPattern(a, b) || matchesPattern(b, a)
+}
+
+func conflictPatternLabel(a, b string) string {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return a
+	}
+	if a > b {
+		a, b = b, a
+	}
+	return a + " <-> " + b
+}
+
+func sortHolders(holders []Holder) {
+	sort.SliceStable(holders, func(i, j int) bool {
+		if holders[i].AgentName != holders[j].AgentName {
+			return holders[i].AgentName < holders[j].AgentName
+		}
+		if !holders[i].ReservedAt.Equal(holders[j].ReservedAt) {
+			return holders[i].ReservedAt.Before(holders[j].ReservedAt)
+		}
+		return holders[i].ExpiresAt.Before(holders[j].ExpiresAt)
+	})
 }
 
 // NegotiateConflict attempts to resolve a conflict by requesting release from lower-priority holders.

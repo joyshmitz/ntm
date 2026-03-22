@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
 
 func TestMatchesPattern(t *testing.T) {
@@ -117,6 +119,72 @@ func TestNewConflictDetector(t *testing.T) {
 	}
 	if cd.conflicts == nil {
 		t.Error("expected conflicts map to be initialized")
+	}
+}
+
+func TestDetectReservationConflictsAt_SharedReservationsDoNotConflict(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	conflicts := detectReservationConflictsAt([]agentmail.FileReservation{
+		testReservation("BlueLake", "internal/**", false, now, now.Add(time.Hour), nil),
+		testReservation("RedStone", "internal/**", false, now, now.Add(time.Hour), nil),
+	}, now)
+
+	if len(conflicts) != 0 {
+		t.Fatalf("expected no conflicts for shared reservations, got %#v", conflicts)
+	}
+}
+
+func TestDetectReservationConflictsAt_ExclusiveOverlapIncludesAllHolders(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	conflicts := detectReservationConflictsAt([]agentmail.FileReservation{
+		testReservation("BlueLake", "internal/**", true, now, now.Add(2*time.Hour), nil),
+		testReservation("RedStone", "internal/cli/*.go", false, now.Add(5*time.Minute), now.Add(2*time.Hour), nil),
+	}, now)
+
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %d", len(conflicts))
+	}
+
+	conflict := conflicts[0]
+	if conflict.Pattern != "internal/** <-> internal/cli/*.go" {
+		t.Fatalf("unexpected conflict pattern %q", conflict.Pattern)
+	}
+	if len(conflict.Holders) != 2 {
+		t.Fatalf("expected 2 holders, got %d", len(conflict.Holders))
+	}
+	if conflict.Holders[0].AgentName != "BlueLake" || conflict.Holders[1].AgentName != "RedStone" {
+		t.Fatalf("holders not sorted as expected: %#v", conflict.Holders)
+	}
+}
+
+func TestDetectReservationConflictsAt_IgnoresExpiredAndReleasedReservations(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	releasedAt := agentmail.FlexTime{Time: now.Add(-10 * time.Minute)}
+	conflicts := detectReservationConflictsAt([]agentmail.FileReservation{
+		testReservation("BlueLake", "internal/**", true, now.Add(-2*time.Hour), now.Add(-time.Minute), nil),
+		testReservation("RedStone", "internal/**", true, now.Add(-time.Hour), now.Add(time.Hour), &releasedAt),
+		testReservation("GreenCastle", "internal/**", true, now, now.Add(time.Hour), nil),
+	}, now)
+
+	if len(conflicts) != 0 {
+		t.Fatalf("expected no conflicts after filtering inactive reservations, got %#v", conflicts)
+	}
+}
+
+func testReservation(agent, pattern string, exclusive bool, createdAt, expiresAt time.Time, releasedAt *agentmail.FlexTime) agentmail.FileReservation {
+	return agentmail.FileReservation{
+		AgentName:   agent,
+		PathPattern: pattern,
+		Exclusive:   exclusive,
+		CreatedTS:   agentmail.FlexTime{Time: createdAt},
+		ExpiresTS:   agentmail.FlexTime{Time: expiresAt},
+		ReleasedTS:  releasedAt,
 	}
 }
 
@@ -308,5 +376,140 @@ func TestConflictStruct(t *testing.T) {
 	}
 	if conflict.Resolution != "" {
 		t.Error("expected empty resolution for unresolved conflict")
+	}
+}
+
+func TestReservationPatternsOverlap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{name: "exact", a: "internal/cli/*.go", b: "internal/cli/*.go", want: true},
+		{name: "overlap broad narrow", a: "internal/**", b: "internal/cli/*.go", want: true},
+		{name: "disjoint", a: "internal/**", b: "docs/**/*.md", want: false},
+		{name: "empty", a: "", b: "docs/**/*.md", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reservationPatternsOverlap(tt.a, tt.b); got != tt.want {
+				t.Fatalf("reservationPatternsOverlap(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectReservationConflictsAt_ExclusiveOverlapsOnly(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	releasedAt := agentmail.FlexTime{Time: now.Add(-time.Minute)}
+	future := agentmail.FlexTime{Time: now.Add(time.Hour)}
+	past := agentmail.FlexTime{Time: now.Add(-time.Minute)}
+
+	reservations := []agentmail.FileReservation{
+		{
+			PathPattern: "internal/**",
+			AgentName:   "Alpha",
+			Exclusive:   true,
+			Reason:      "broad refactor",
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-10 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "internal/cli/*.go",
+			AgentName:   "Beta",
+			Exclusive:   false,
+			Reason:      "cli edits",
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-8 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "internal/cli/*.go",
+			AgentName:   "Gamma",
+			Exclusive:   false,
+			Reason:      "review",
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-6 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "docs/**",
+			AgentName:   "DocsA",
+			Exclusive:   false,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-4 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "docs/manual/*.md",
+			AgentName:   "DocsB",
+			Exclusive:   false,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-3 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "tmp/**",
+			AgentName:   "Expired",
+			Exclusive:   true,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-2 * time.Minute)},
+			ExpiresTS:   past,
+		},
+		{
+			PathPattern: "tmp/file.go",
+			AgentName:   "Released",
+			Exclusive:   true,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-2 * time.Minute)},
+			ExpiresTS:   future,
+			ReleasedTS:  &releasedAt,
+		},
+	}
+
+	conflicts := detectReservationConflictsAt(reservations, now)
+	if len(conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %d: %+v", len(conflicts), conflicts)
+	}
+
+	conflict := conflicts[0]
+	if conflict.Pattern != "internal/** <-> internal/cli/*.go" {
+		t.Fatalf("unexpected conflict pattern: %q", conflict.Pattern)
+	}
+	if len(conflict.Holders) != 3 {
+		t.Fatalf("expected 3 holders, got %d", len(conflict.Holders))
+	}
+	if conflict.Holders[0].AgentName != "Alpha" || conflict.Holders[1].AgentName != "Beta" || conflict.Holders[2].AgentName != "Gamma" {
+		t.Fatalf("holders not sorted/deduped as expected: %+v", conflict.Holders)
+	}
+}
+
+func TestDetectReservationConflictsAt_IgnoresSameAgentDuplicates(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	future := agentmail.FlexTime{Time: now.Add(time.Hour)}
+
+	reservations := []agentmail.FileReservation{
+		{
+			PathPattern: "internal/*.go",
+			AgentName:   "Solo",
+			Exclusive:   true,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-2 * time.Minute)},
+			ExpiresTS:   future,
+		},
+		{
+			PathPattern: "internal/*.go",
+			AgentName:   "Solo",
+			Exclusive:   true,
+			CreatedTS:   agentmail.FlexTime{Time: now.Add(-time.Minute)},
+			ExpiresTS:   future,
+		},
+	}
+
+	conflicts := detectReservationConflictsAt(reservations, now)
+	if len(conflicts) != 0 {
+		t.Fatalf("expected no conflicts for same-agent duplicates, got %+v", conflicts)
 	}
 }

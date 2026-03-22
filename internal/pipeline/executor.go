@@ -1600,9 +1600,10 @@ func (e *Executor) persistState() {
 	}
 }
 
-// GetState returns the current execution state (for monitoring)
+// GetState returns a snapshot of the current execution state (for monitoring).
+// Returns a copy to avoid racing with concurrent writers.
 func (e *Executor) GetState() *ExecutionState {
-	return e.state
+	return e.snapshotState()
 }
 
 // captureErrorContext captures recent pane output for error debugging

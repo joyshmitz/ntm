@@ -33,6 +33,9 @@ func ComputeDiff(pane1, content1, pane2, content2 string) *DiffResult {
 	similarity := 0.0
 	if maxLen > 0 {
 		similarity = 1.0 - (float64(dist) / float64(maxLen))
+		if similarity < 0 {
+			similarity = 0
+		}
 	}
 
 	// Create unified diff (patches)

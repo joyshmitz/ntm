@@ -12,6 +12,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  DEFAULT_NTM_BASE_URL,
   saveConnectionConfig,
   getConnectionConfig,
   checkConnection,
@@ -25,7 +26,7 @@ export default function ConnectPage() {
   const existingConfig = getConnectionConfig();
 
   const [baseUrl, setBaseUrl] = useState(
-    existingConfig?.baseUrl || "http://localhost:8080"
+    existingConfig?.baseUrl || DEFAULT_NTM_BASE_URL
   );
   const [authToken, setAuthToken] = useState(existingConfig?.authToken || "");
   const [isConnecting, setIsConnecting] = useState(false);
@@ -87,7 +88,7 @@ export default function ConnectPage() {
                          bg-white dark:bg-gray-800 text-gray-900 dark:text-white
                          placeholder-gray-400 dark:placeholder-gray-500
                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="http://localhost:8080"
+                placeholder={DEFAULT_NTM_BASE_URL}
               />
             </div>
 

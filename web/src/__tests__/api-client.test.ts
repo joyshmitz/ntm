@@ -30,6 +30,7 @@ Object.defineProperty(global, "localStorage", {
 // Import after mocking
 import {
   getConnectionConfig,
+  getBaseUrl,
   saveConnectionConfig,
   clearConnectionConfig,
 } from "../lib/api/client";
@@ -57,6 +58,19 @@ describe("API Client", () => {
       expect(result).toEqual(config);
     });
 
+    it("normalizes trailing slashes in stored config", () => {
+      localStorageMock.setItem(
+        "ntm-connection",
+        JSON.stringify({ baseUrl: "http://localhost:9000///", authToken: "test-token" })
+      );
+
+      const result = getConnectionConfig();
+      expect(result).toEqual({
+        baseUrl: "http://localhost:9000",
+        authToken: "test-token",
+      });
+    });
+
     it("returns null for invalid JSON", () => {
       localStorageMock.setItem("ntm-connection", "invalid-json");
 
@@ -80,6 +94,33 @@ describe("API Client", () => {
 
       const stored = JSON.parse(localStorageMock.getItem("ntm-connection") || "{}");
       expect(stored.authToken).toBe("my-token");
+    });
+
+    it("normalizes trailing slashes before saving", () => {
+      saveConnectionConfig({ baseUrl: "http://test:8080///", authToken: "my-token" });
+
+      const stored = JSON.parse(localStorageMock.getItem("ntm-connection") || "{}");
+      expect(stored.baseUrl).toBe("http://test:8080");
+    });
+  });
+
+  describe("getBaseUrl", () => {
+    it("returns a normalized stored base URL", () => {
+      localStorageMock.setItem(
+        "ntm-connection",
+        JSON.stringify({ baseUrl: "http://localhost:7337///" })
+      );
+
+      expect(getBaseUrl()).toBe("http://localhost:7337");
+    });
+
+    it("falls back to the default URL for slash-only input", () => {
+      localStorageMock.setItem(
+        "ntm-connection",
+        JSON.stringify({ baseUrl: "///" })
+      );
+
+      expect(getBaseUrl()).toBe("http://localhost:7337");
     });
   });
 

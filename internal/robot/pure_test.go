@@ -253,6 +253,14 @@ func TestDetectReservationConflicts(t *testing.T) {
 			},
 			wantCount: 1,
 		},
+		{
+			name: "overlapping patterns conflict when one reservation is exclusive",
+			reservations: []agentmail.FileReservation{
+				{PathPattern: "internal/**", AgentName: "Alpha", Exclusive: true},
+				{PathPattern: "internal/cli/*.go", AgentName: "Beta", Exclusive: false},
+			},
+			wantCount: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
