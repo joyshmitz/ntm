@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
@@ -3326,6 +3327,104 @@ func TestOperatorLoop_ProfileFilteredEvents(t *testing.T) {
 	// None of our 3 events have severity >= error (warning < error), so 0 pass minimal.
 	if len(minFiltered) != 0 {
 		t.Errorf("minimal profile should show 0 events (none have severity>=error), got %d", len(minFiltered))
+	}
+}
+
+func TestNewPTStateChangeAttentionEvent_SuppressesBenignInitialClassification(t *testing.T) {
+	t.Parallel()
+
+	event, ok := NewPTStateChangeAttentionEvent(pt.ClassificationStateChange{
+		Session:  "proj",
+		Pane:     "proj__cc_1",
+		PID:      12345,
+		Previous: pt.ClassUnknown,
+		Current:  pt.ClassUseful,
+		Event: pt.ClassificationEvent{
+			Classification: pt.ClassUseful,
+			Confidence:     0.99,
+			Timestamp:      time.Date(2026, 3, 22, 20, 0, 0, 0, time.UTC),
+			Reason:         "working normally",
+		},
+		Initial:          true,
+		ConsecutiveCount: 1,
+	})
+	if ok {
+		t.Fatalf("expected benign initial PT classification to be suppressed, got %#v", event)
+	}
+}
+
+func TestNewPTStateChangeAttentionEvent_RecoverySemantics(t *testing.T) {
+	t.Parallel()
+
+	event, ok := NewPTStateChangeAttentionEvent(pt.ClassificationStateChange{
+		Session:  "proj",
+		Pane:     "proj__cc_1",
+		PID:      12345,
+		Previous: pt.ClassStuck,
+		Current:  pt.ClassWaiting,
+		Event: pt.ClassificationEvent{
+			Classification: pt.ClassWaiting,
+			Confidence:     0.88,
+			Timestamp:      time.Date(2026, 3, 22, 20, 1, 0, 0, time.UTC),
+			Reason:         "network activity detected",
+			NetworkActive:  true,
+		},
+		ConsecutiveCount: 1,
+	})
+	if !ok {
+		t.Fatal("expected recovery PT classification to normalize")
+	}
+	if event.Type != EventTypeAgentRecovered {
+		t.Fatalf("event.Type = %q, want %q", event.Type, EventTypeAgentRecovered)
+	}
+	if event.ReasonCode != "pt:state:recovered" {
+		t.Fatalf("event.ReasonCode = %q, want pt:state:recovered", event.ReasonCode)
+	}
+	if event.Actionability != ActionabilityInteresting {
+		t.Fatalf("event.Actionability = %q, want %q", event.Actionability, ActionabilityInteresting)
+	}
+	if got := fmt.Sprint(event.Details["current_classification"]); got != string(pt.ClassWaiting) {
+		t.Fatalf("current_classification = %q, want %q", got, pt.ClassWaiting)
+	}
+}
+
+func TestPublishPTAlert_DeduplicatesRepeatedThresholdAlerts(t *testing.T) {
+	t.Parallel()
+
+	feed := newTestAttentionFeed(t)
+	base := time.Date(2026, 3, 22, 20, 2, 0, 0, time.UTC)
+	alert := pt.Alert{
+		Session:   "proj",
+		Type:      pt.AlertStuck,
+		Pane:      "proj__cc_1",
+		PID:       12345,
+		State:     pt.ClassStuck,
+		Duration:  10 * time.Minute,
+		Timestamp: base,
+		Message:   "Agent proj__cc_1 has been stuck for 10m0s",
+	}
+
+	first, ok := feed.PublishPTAlert(alert)
+	if !ok {
+		t.Fatal("expected first PT alert to publish")
+	}
+	second, ok := feed.PublishPTAlert(alert)
+	if ok {
+		t.Fatalf("expected duplicate PT alert to be suppressed, got %#v", second)
+	}
+
+	events, newest, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay failed: %v", err)
+	}
+	if newest != first.Cursor {
+		t.Fatalf("newest cursor = %d, want %d", newest, first.Cursor)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 PT alert event after dedup, got %d", len(events))
+	}
+	if events[0].ReasonCode != "pt:alert:stuck" {
+		t.Fatalf("stored PT alert reason_code = %q, want pt:alert:stuck", events[0].ReasonCode)
 	}
 }
 

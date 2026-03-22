@@ -6915,7 +6915,7 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 
 	// Get attention summary (global for all sessions)
 	var attnAction, attnInterest int
-	feed := GetAttentionFeed()
+	feed := PeekAttentionFeed()
 	if feed == nil {
 		output.AttentionHint = "feed:unavail"
 	} else if attnSummary := buildSnapshotAttentionSummary(feed); attnSummary != nil {
@@ -7014,7 +7014,7 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 // buildAttentionHint creates a compact attention summary for terse output.
 // Format: "2!action 5?interesting" or "clear" if no attention items.
 func buildAttentionHint() string {
-	feed := GetAttentionFeed()
+	feed := PeekAttentionFeed()
 	if feed == nil {
 		return "feed:unavail"
 	}

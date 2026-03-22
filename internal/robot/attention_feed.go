@@ -13,6 +13,7 @@ import (
 	"time"
 
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -1209,6 +1210,226 @@ func (f *AttentionFeed) SubscribeEventBus(bus *ntmevents.EventBus) func() {
 // publish durable events without duplicating feed-local dedup behavior.
 func (f *AttentionFeed) AppendDeduplicated(event AttentionEvent, window time.Duration) (AttentionEvent, bool) {
 	return f.appendDeduplicated(event, window)
+}
+
+const ptAttentionSource = "pt.monitor"
+
+// PublishPTStateChange normalizes a PT classification transition and appends it
+// to the durable attention feed with light suppression for duplicate bridge emissions.
+func (f *AttentionFeed) PublishPTStateChange(change pt.ClassificationStateChange) (AttentionEvent, bool) {
+	event, ok := NewPTStateChangeAttentionEvent(change)
+	if !ok {
+		return AttentionEvent{}, false
+	}
+	return f.AppendDeduplicated(event, 30*time.Second)
+}
+
+// PublishPTAlert normalizes a PT alert and appends it to the durable attention
+// feed with a wider suppression window to avoid repeated threshold floods.
+func (f *AttentionFeed) PublishPTAlert(alert pt.Alert) (AttentionEvent, bool) {
+	event, ok := NewPTAlertAttentionEvent(alert)
+	if !ok {
+		return AttentionEvent{}, false
+	}
+	return f.AppendDeduplicated(event, ptAlertDedupWindow(alert.Type))
+}
+
+// NewPTStateChangeAttentionEvent converts a PT classification transition into a
+// normalized attention event. Benign steady-state classifications are suppressed.
+func NewPTStateChangeAttentionEvent(change pt.ClassificationStateChange) (AttentionEvent, bool) {
+	session := ptAttentionSession(change.Session, change.Pane)
+	paneRef := strings.TrimSpace(change.Pane)
+	ts := attentionTimestamp(change.Event.Timestamp)
+
+	details := map[string]any{
+		"monitor":                 "pt",
+		"pid":                     change.PID,
+		"pane_ref":                paneRef,
+		"previous_classification": strings.TrimSpace(string(change.Previous)),
+		"current_classification":  strings.TrimSpace(string(change.Current)),
+		"confidence":              change.Event.Confidence,
+		"initial":                 change.Initial,
+		"consecutive_count":       change.ConsecutiveCount,
+	}
+	if !change.Since.IsZero() {
+		details["since"] = change.Since.UTC().Format(time.RFC3339Nano)
+	}
+	if reason := strings.TrimSpace(change.Event.Reason); reason != "" {
+		details["reason"] = reason
+	}
+	if change.Event.NetworkActive {
+		details["network_active"] = true
+	}
+
+	build := func(category EventCategory, eventType EventType, actionability Actionability, severity Severity, reasonCode, summary string, nextActions []NextAction) (AttentionEvent, bool) {
+		return annotateAttentionSignal(AttentionEvent{
+			Ts:            ts.Format(time.RFC3339Nano),
+			Session:       session,
+			Pane:          attentionPaneIndex(paneRef),
+			Category:      category,
+			Type:          eventType,
+			Source:        ptAttentionSource,
+			Actionability: actionability,
+			Severity:      severity,
+			ReasonCode:    reasonCode,
+			Summary:       attentionSummary(session, paneRef, summary),
+			Details:       details,
+			NextActions:   nextActions,
+			DedupKey:      ptStateChangeDedupKey(session, paneRef, change.Previous, change.Current),
+		}), true
+	}
+
+	switch change.Current {
+	case pt.ClassStuck:
+		return build(
+			EventCategoryAgent,
+			EventTypeAgentStalled,
+			ActionabilityInteresting,
+			SeverityWarning,
+			"pt:state:stuck",
+			"agent classified as stuck",
+			attentionTailOrStatusActions(session, paneRef, "Inspect the stalled agent output"),
+		)
+	case pt.ClassZombie:
+		return build(
+			EventCategoryAgent,
+			EventTypeAgentError,
+			ActionabilityActionRequired,
+			SeverityError,
+			"pt:state:zombie",
+			"agent classified as zombie",
+			attentionTailOrStatusActions(session, paneRef, "Inspect the zombie agent output"),
+		)
+	default:
+		if ptStateIsDegraded(change.Previous) && !ptStateIsDegraded(change.Current) {
+			return build(
+				EventCategoryAgent,
+				EventTypeAgentRecovered,
+				ActionabilityInteresting,
+				SeverityInfo,
+				"pt:state:recovered",
+				fmt.Sprintf("agent recovered from %s to %s", change.Previous, change.Current),
+				[]NextAction{attentionStatusNextAction("Inspect current PT health state")},
+			)
+		}
+		return AttentionEvent{}, false
+	}
+}
+
+// NewPTAlertAttentionEvent converts a PT alert into a normalized attention
+// event. Alert thresholds remain actionable even when the PT alert channel is full.
+func NewPTAlertAttentionEvent(alert pt.Alert) (AttentionEvent, bool) {
+	session := ptAttentionSession(alert.Session, alert.Pane)
+	paneRef := strings.TrimSpace(alert.Pane)
+	ts := attentionTimestamp(alert.Timestamp)
+	details := map[string]any{
+		"monitor":          "pt",
+		"alert_type":       strings.TrimSpace(string(alert.Type)),
+		"state":            strings.TrimSpace(string(alert.State)),
+		"pid":              alert.PID,
+		"pane_ref":         paneRef,
+		"duration":         alert.Duration.String(),
+		"duration_seconds": int(alert.Duration.Round(time.Second) / time.Second),
+	}
+	if message := strings.TrimSpace(alert.Message); message != "" {
+		details["message"] = message
+	}
+
+	build := func(category EventCategory, eventType EventType, actionability Actionability, severity Severity, reasonCode, summary string, nextActions []NextAction) (AttentionEvent, bool) {
+		return annotateAttentionSignal(AttentionEvent{
+			Ts:            ts.Format(time.RFC3339Nano),
+			Session:       session,
+			Pane:          attentionPaneIndex(paneRef),
+			Category:      category,
+			Type:          eventType,
+			Source:        ptAttentionSource,
+			Actionability: actionability,
+			Severity:      severity,
+			ReasonCode:    reasonCode,
+			Summary:       attentionSummary(session, paneRef, summary),
+			Details:       details,
+			NextActions:   nextActions,
+			DedupKey:      ptAlertDedupKey(session, paneRef, alert.Type),
+		}), true
+	}
+
+	switch alert.Type {
+	case pt.AlertStuck:
+		return build(
+			EventCategoryAlert,
+			EventTypeAlertWarning,
+			ActionabilityActionRequired,
+			SeverityWarning,
+			"pt:alert:stuck",
+			fmt.Sprintf("agent stuck for %s", alert.Duration.Round(time.Second)),
+			attentionTailOrStatusActions(session, paneRef, "Inspect the stalled agent output"),
+		)
+	case pt.AlertZombie:
+		return build(
+			EventCategoryAlert,
+			EventTypeAlertAttentionRequired,
+			ActionabilityActionRequired,
+			SeverityError,
+			"pt:alert:zombie",
+			"agent is a zombie process",
+			attentionTailOrStatusActions(session, paneRef, "Inspect the zombie agent output"),
+		)
+	case pt.AlertIdle:
+		return build(
+			EventCategoryAgent,
+			EventTypeAgentIdle,
+			ActionabilityInteresting,
+			SeverityWarning,
+			"pt:alert:idle",
+			fmt.Sprintf("agent idle for %s", alert.Duration.Round(time.Second)),
+			[]NextAction{attentionStatusNextAction("Inspect current PT health state")},
+		)
+	default:
+		return AttentionEvent{}, false
+	}
+}
+
+func ptStateIsDegraded(classification pt.Classification) bool {
+	switch classification {
+	case pt.ClassStuck, pt.ClassZombie:
+		return true
+	default:
+		return false
+	}
+}
+
+func ptAlertDedupWindow(alertType pt.AlertType) time.Duration {
+	switch alertType {
+	case pt.AlertIdle:
+		return 5 * time.Minute
+	default:
+		return 15 * time.Minute
+	}
+}
+
+func ptStateChangeDedupKey(session, pane string, previous, current pt.Classification) string {
+	return fmt.Sprintf("pt|state|%s|%s|%s|%s", strings.TrimSpace(session), strings.TrimSpace(pane), strings.TrimSpace(string(previous)), strings.TrimSpace(string(current)))
+}
+
+func ptAlertDedupKey(session, pane string, alertType pt.AlertType) string {
+	return fmt.Sprintf("pt|alert|%s|%s|%s", strings.TrimSpace(session), strings.TrimSpace(pane), strings.TrimSpace(string(alertType)))
+}
+
+func ptAttentionSession(session, pane string) string {
+	if trimmed := strings.TrimSpace(session); trimmed != "" {
+		return trimmed
+	}
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return ""
+	}
+	if strings.Contains(pane, "__") {
+		parts := strings.SplitN(pane, "__", 2)
+		if candidate := strings.TrimSpace(parts[0]); candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // PublishMailPending creates and appends a mail_pending signal for unread mail.

@@ -12,7 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/serve"
 	"github.com/Dicklesworthstone/ntm/internal/state"
@@ -106,12 +108,41 @@ func runServe(opts serveOptions) error {
 		robot.DefaultAttentionFeedConfig(),
 		robot.WithAttentionStore(stateStore),
 	))
+	feed := robot.GetAttentionFeed()
+
+	ptCfg := config.DefaultProcessTriageConfig()
+	if cfg != nil {
+		ptCfg = cfg.Integrations.ProcessTriage
+	}
+	var ptMonitor *pt.HealthMonitor
+	if ptCfg.Enabled {
+		ptMonitor = pt.InitGlobalMonitor(&ptCfg,
+			pt.WithStateChangeCallback(func(change pt.ClassificationStateChange) {
+				if feed == nil {
+					return
+				}
+				feed.PublishPTStateChange(change)
+			}),
+			pt.WithAlertCallback(func(alert pt.Alert) {
+				if feed == nil {
+					return
+				}
+				feed.PublishPTAlert(alert)
+			}),
+		)
+		if err := ptMonitor.Start(); err != nil {
+			slog.Warn("process triage monitor start failed", "err", err)
+			ptMonitor = nil
+		} else {
+			defer ptMonitor.Stop()
+		}
+	}
 
 	mode, err := serve.ParseAuthMode(opts.AuthMode)
 	if err != nil {
 		return err
 	}
-	cfg := serve.Config{
+	serverCfg := serve.Config{
 		Host:           opts.Host,
 		Port:           opts.Port,
 		PublicBaseURL:  opts.PublicBaseURL,
@@ -133,11 +164,11 @@ func runServe(opts serveOptions) error {
 			},
 		},
 	}
-	if err := serve.ValidateConfig(cfg); err != nil {
+	if err := serve.ValidateConfig(serverCfg); err != nil {
 		return err
 	}
 	// Create server with default event bus
-	srv := serve.New(cfg)
+	srv := serve.New(serverCfg)
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
