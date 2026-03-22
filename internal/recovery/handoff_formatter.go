@@ -247,5 +247,14 @@ func truncateToTokens(s string, maxTokens int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	return s[:maxBytes-3] + "..."
+	// Walk rune boundaries to avoid splitting multi-byte UTF-8 characters
+	target := maxBytes - 3 // leave room for "..."
+	end := 0
+	for i := range s {
+		if i > target {
+			break
+		}
+		end = i
+	}
+	return s[:end] + "..."
 }

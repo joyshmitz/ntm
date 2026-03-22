@@ -64,8 +64,9 @@ type CompactionTrigger struct {
 	onCompactionComplete  func(CompactionTriggerEvent)
 
 	// Control
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewCompactionTrigger creates a new proactive compaction trigger.
@@ -106,9 +107,11 @@ func (t *CompactionTrigger) Start() {
 	go t.monitorLoop()
 }
 
-// Stop halts the background monitoring loop.
+// Stop halts the background monitoring loop. Safe to call multiple times.
 func (t *CompactionTrigger) Stop() {
-	close(t.stopCh)
+	t.stopOnce.Do(func() {
+		close(t.stopCh)
+	})
 	t.wg.Wait()
 }
 

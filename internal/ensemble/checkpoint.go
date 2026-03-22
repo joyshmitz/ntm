@@ -359,10 +359,16 @@ func (s *CheckpointStore) ListRuns() ([]CheckpointMetadata, error) {
 		meta, err := s.LoadMetadata(runID)
 		if err != nil {
 			// Create minimal metadata from directory
-			info, _ := entry.Info()
-			meta = &CheckpointMetadata{
-				RunID:     runID,
-				CreatedAt: info.ModTime(),
+			info, infoErr := entry.Info()
+			if infoErr != nil || info == nil {
+				meta = &CheckpointMetadata{
+					RunID: runID,
+				}
+			} else {
+				meta = &CheckpointMetadata{
+					RunID:     runID,
+					CreatedAt: info.ModTime(),
+				}
 			}
 		}
 		runs = append(runs, *meta)

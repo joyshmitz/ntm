@@ -463,12 +463,20 @@ func uniqueStrings(s []string) []string {
 	return result
 }
 
-// truncateGen truncates a string to max length (named to avoid conflict with validate.go truncate).
-func truncateGen(s string, max int) string {
-	if len(s) <= max {
+// truncateGen truncates a string to max bytes at a valid UTF-8 boundary.
+func truncateGen(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
 		return s
 	}
-	return s[:max]
+	// Walk runes to find the last valid boundary within maxBytes
+	end := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		end = i
+	}
+	return s[:end]
 }
 
 func summarizeToolCalls(calls []string) string {

@@ -563,7 +563,13 @@ func (s *Scheduler) EstimateETA(jobID string) (time.Duration, error) {
 
 	// Estimate based on rate limit and concurrency
 	tokensNeeded := float64(jobsAhead) / float64(s.workers)
-	etaSeconds := tokensNeeded / s.globalLimiter.Stats().CurrentTokens
+	currentTokens := s.globalLimiter.Stats().CurrentTokens
+	var etaSeconds float64
+	if currentTokens > 0 {
+		etaSeconds = tokensNeeded / currentTokens
+	} else {
+		etaSeconds = tokensNeeded * 2 // conservative estimate when bucket is empty
+	}
 	if etaSeconds < 0 {
 		etaSeconds = 0
 	}

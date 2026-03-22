@@ -866,6 +866,9 @@ func (s *Server) buildRouter() chi.Router {
 	// WebSocket stub (no versioning)
 	r.Get("/ws", s.handleWS)
 
+	// Kernel registry introspection (legacy path used by the web dashboard palette)
+	r.With(s.RequirePermission(PermReadHealth)).Get("/api/kernel/commands", s.handleKernelCommands)
+
 	// Legacy /api/* routes (maintained for backward compatibility during migration)
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/sessions", s.handleSessions)
@@ -2237,6 +2240,19 @@ func (s *Server) handleDepsV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccessResponse(w, http.StatusOK, data, reqID)
+}
+
+// handleKernelCommands handles GET /api/kernel/commands.
+// Returns the registered kernel command metadata used by the web command palette.
+func (s *Server) handleKernelCommands(w http.ResponseWriter, r *http.Request) {
+	reqID := requestIDFromContext(r.Context())
+	slog.Info("kernel commands list", "request_id", reqID)
+
+	commands := kernel.List()
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+		"commands": commands,
+		"count":    len(commands),
+	}, reqID)
 }
 
 // handleDoctorV1 handles GET /api/v1/doctor.

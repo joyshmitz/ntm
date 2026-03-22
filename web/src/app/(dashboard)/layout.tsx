@@ -13,7 +13,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { getConnectionConfig } from "@/lib/api/client";
+import {
+  getAuthHeaders,
+  getBaseUrl as getApiBaseUrl,
+  getConnectionConfig,
+} from "@/lib/api/client";
 import { NtmQueryProvider, useConnection } from "@/lib/hooks/use-query";
 import { NavBar } from "@/components/layout/nav-bar";
 
@@ -98,22 +102,11 @@ interface KernelListResponse extends ApiEnvelope {
   count?: number;
 }
 
-function getBaseUrl(): string {
-  const config = getConnectionConfig();
-  return config?.baseUrl || process.env.NEXT_PUBLIC_NTM_URL || "http://localhost:8080";
-}
-
-function getAuthHeader(): Record<string, string> {
-  const config = getConnectionConfig();
-  if (!config?.authToken) return {};
-  return { Authorization: `Bearer ${config.authToken}` };
-}
-
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const baseUrl = getBaseUrl();
+  const baseUrl = getApiBaseUrl();
   const headers: HeadersInit = {
     "Content-Type": "application/json",
-    ...getAuthHeader(),
+    ...getAuthHeaders(),
     ...(options.headers || {}),
   };
 

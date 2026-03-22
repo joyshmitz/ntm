@@ -72,8 +72,9 @@ type HandoffTrigger struct {
 	onTriggered func(HandoffTriggerEvent)
 
 	// Control
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 
 	logger *slog.Logger
 }
@@ -137,10 +138,12 @@ func (t *HandoffTrigger) Start() {
 	go t.monitorLoop()
 }
 
-// Stop halts the background monitoring loop.
+// Stop halts the background monitoring loop. Safe to call multiple times.
 func (t *HandoffTrigger) Stop() {
-	t.logger.Info("stopping handoff trigger")
-	close(t.stopCh)
+	t.stopOnce.Do(func() {
+		t.logger.Info("stopping handoff trigger")
+		close(t.stopCh)
+	})
 	t.wg.Wait()
 }
 
@@ -235,9 +238,12 @@ func (t *HandoffTrigger) checkAgent(agentID string) (string, error) {
 
 	// Check cooldown
 	if !t.canTrigger(agentID) {
+		t.mu.RLock()
+		lastHandoff := t.lastHandoff[agentID]
+		t.mu.RUnlock()
 		t.logger.Debug("skipping handoff due to cooldown",
 			"agent_id", agentID,
-			"last_handoff", t.lastHandoff[agentID],
+			"last_handoff", lastHandoff,
 		)
 		return "", nil
 	}

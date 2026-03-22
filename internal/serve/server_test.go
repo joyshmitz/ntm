@@ -26,6 +26,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
@@ -524,6 +525,50 @@ func TestRobotStatusEndpoint(t *testing.T) {
 
 	if resp["success"] != true {
 		t.Error("Expected success=true")
+	}
+}
+
+func TestKernelCommandsEndpoint(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/kernel/commands", nil)
+	rec := httptest.NewRecorder()
+
+	srv.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Success  bool `json:"success"`
+		Count    int  `json:"count"`
+		Commands []struct {
+			Name string `json:"name"`
+		} `json:"commands"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if !resp.Success {
+		t.Fatal("Expected success=true")
+	}
+	if resp.Count != len(resp.Commands) {
+		t.Fatalf("Count = %d, want len(commands)=%d", resp.Count, len(resp.Commands))
+	}
+
+	expected := kernel.List()
+	if resp.Count != len(expected) {
+		t.Fatalf("Count = %d, want %d", resp.Count, len(expected))
+	}
+	for i, cmd := range expected {
+		if i >= len(resp.Commands) {
+			t.Fatalf("missing command at index %d", i)
+		}
+		if resp.Commands[i].Name != cmd.Name {
+			t.Fatalf("Command[%d] = %q, want %q", i, resp.Commands[i].Name, cmd.Name)
+		}
 	}
 }
 

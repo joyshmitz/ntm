@@ -92,6 +92,27 @@ export function NtmQueryProvider({ children }: NtmQueryProviderProps) {
       handleWsEvent(queryClient, event);
     });
 
+    const topics = [
+      "sessions:*",
+      "panes:*",
+      "beads:*",
+      "mail:*",
+      "reservations:*",
+      "pipelines:*",
+      "approvals:*",
+      "accounts:*",
+      "attention",
+      "scanner",
+      "memory",
+    ];
+    for (const topic of topics) {
+      void ws.subscribe(topic).catch((error) => {
+        if (process.env.NODE_ENV === "development") {
+          console.error("[WS Bridge] subscribe failed", topic, error);
+        }
+      });
+    }
+
     // Connect WebSocket
     ws.connect();
 
@@ -179,6 +200,27 @@ function handleWsEvent(queryClient: QueryClient, event: WSEvent): void {
   // Reservation events
   if (topic.startsWith("reservations:") || event_type.startsWith("reservation.")) {
     queryClient.invalidateQueries({ queryKey: ["reservations"] });
+  }
+
+  // Scanner / bug tracker events
+  if (topic === "scanner" || event_type.startsWith("scanner.")) {
+    queryClient.invalidateQueries({ queryKey: ["scanner"] });
+    queryClient.invalidateQueries({ queryKey: ["bugs"] });
+  }
+
+  // Pipeline events
+  if (topic.startsWith("pipelines:") || event_type.startsWith("pipeline.")) {
+    queryClient.invalidateQueries({ queryKey: ["pipelines"] });
+  }
+
+  // Safety / approvals events
+  if (topic.startsWith("approvals:") || event_type.startsWith("approval.")) {
+    queryClient.invalidateQueries({ queryKey: ["safety"] });
+  }
+
+  // Account rotation / quota events
+  if (topic.startsWith("accounts:") || event_type.startsWith("account.")) {
+    queryClient.invalidateQueries({ queryKey: ["accounts"] });
   }
 
   // For optimistic updates with setQueryData, handle specific events here

@@ -77,6 +77,19 @@ describe("NtmWebSocket", () => {
       expect(ws.getState()).toBe("connecting");
     });
 
+    it("normalizes trailing slashes in the websocket URL", async () => {
+      localStorageMock.setItem(
+        "ntm-connection",
+        JSON.stringify({ baseUrl: "http://localhost:8080///" })
+      );
+
+      ws.connect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const mockWs = (ws as unknown as { ws: MockWebSocket }).ws;
+      expect(mockWs.url).toBe("ws://localhost:8080/api/v1/ws");
+    });
+
     it("notifies state handlers", async () => {
       const states: ConnectionState[] = [];
       ws.onStateChange((state) => states.push(state));
@@ -110,6 +123,16 @@ describe("NtmWebSocket", () => {
 
       // Internal state should be cleared
       expect(ws.getState()).toBe("disconnected");
+    });
+
+    it("rejects pending subscription acknowledgements on disconnect", async () => {
+      ws.connect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const pending = ws.subscribe("sessions:*");
+      ws.disconnect();
+
+      await expect(pending).rejects.toThrow("WebSocket disconnected");
     });
   });
 
@@ -153,6 +176,39 @@ describe("NtmWebSocket", () => {
       });
 
       expect(ws.getLastSeq()).toBe(42);
+    });
+
+    it("parses newline-batched websocket frames", async () => {
+      const events: unknown[] = [];
+      ws.onEvent((event) => events.push(event));
+
+      ws.connect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const mockWs = (ws as unknown as { ws: MockWebSocket }).ws;
+      mockWs.onmessage?.({
+        data: [
+          JSON.stringify({
+            type: "event",
+            topic: "sessions:test",
+            event_type: "session.created",
+            data: { name: "test" },
+            seq: 7,
+          }),
+          JSON.stringify({
+            type: "event",
+            topic: "panes:test:0",
+            event_type: "pane.output",
+            data: { lines: ["hi"] },
+            seq: 8,
+          }),
+        ].join("\n"),
+      });
+
+      expect(events).toHaveLength(2);
+      expect((events[0] as { topic: string }).topic).toBe("sessions:test");
+      expect((events[1] as { topic: string }).topic).toBe("panes:test:0");
+      expect(ws.getLastSeq()).toBe(8);
     });
   });
 

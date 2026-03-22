@@ -216,11 +216,19 @@ func (c *ProficiencyConfig) saveUnlocked() error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// GetUsageStats returns a copy of current usage statistics.
+// GetUsageStats returns a deep copy of current usage statistics.
 func (c *ProficiencyConfig) GetUsageStats() UsageStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.UsageStats
+	stats := c.UsageStats
+	if stats.UniqueCommands != nil {
+		cp := make(map[string]int, len(stats.UniqueCommands))
+		for k, v := range stats.UniqueCommands {
+			cp[k] = v
+		}
+		stats.UniqueCommands = cp
+	}
+	return stats
 }
 
 // GetPromotionHistory returns a copy of promotion history.

@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getConnectionConfig } from "@/lib/api/client";
+import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
 interface ApiEnvelope {
   success: boolean;
@@ -111,24 +111,11 @@ type ImportanceFilter = "all" | "normal" | "high" | "urgent";
 
 const AGENT_STORAGE_KEY = "ntm-mail-agent";
 
-function getBaseUrl(): string {
-  const config = getConnectionConfig();
-  return (
-    config?.baseUrl || process.env.NEXT_PUBLIC_NTM_URL || "http://localhost:8080"
-  );
-}
-
-function getAuthHeader(): Record<string, string> {
-  const config = getConnectionConfig();
-  if (!config?.authToken) return {};
-  return { Authorization: `Bearer ${config.authToken}` };
-}
-
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const baseUrl = getBaseUrl();
   const headers: HeadersInit = {
     "Content-Type": "application/json",
-    ...getAuthHeader(),
+    ...getAuthHeaders(),
     ...(options.headers || {}),
   };
 

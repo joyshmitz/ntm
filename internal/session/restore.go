@@ -279,6 +279,9 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 		}, nil)
 	}
 
+	if launched == 0 && attempted > 0 {
+		return fmt.Errorf("all %d agent launch attempts failed", attempted)
+	}
 	return nil
 }
 

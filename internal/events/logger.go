@@ -201,7 +201,7 @@ func (l *Logger) rotateOldEntries() error {
 
 	// Buffer for writing to temp file
 	writer := bufio.NewWriter(tmpFile)
-	defer tmpFile.Close()
+	// Note: tmpFile is closed explicitly in all code paths below; no defer Close here.
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -271,6 +271,7 @@ func (l *Logger) rotateOldEntries() error {
 		}
 		return fmt.Errorf("renaming temp file: %w", err)
 	}
+	tmpPath = "" // Prevent deferred os.Remove from removing the successfully renamed file
 
 	// Reopen file for appending
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)

@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { getAuthHeaders, getBaseUrl } from '@/lib/api/client';
 
 // Types based on scanner.go REST API
 interface ScanOptions {
@@ -80,13 +81,12 @@ interface BugSummary {
   linked_beads: number;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetch(`${getBaseUrl()}${url}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
       ...options?.headers,
     },
   });
@@ -339,33 +339,6 @@ export default function ScannerPage() {
       }
     },
   });
-
-  // WebSocket for real-time updates
-  useEffect(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080/ws';
-    let ws: WebSocket | null = null;
-
-    try {
-      ws = new WebSocket(wsUrl);
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.topic === 'scanner') {
-            queryClient.invalidateQueries({ queryKey: ['scanner'] });
-            queryClient.invalidateQueries({ queryKey: ['bugs'] });
-          }
-        } catch {
-          // Ignore parse errors
-        }
-      };
-    } catch {
-      // WebSocket not available
-    }
-
-    return () => {
-      if (ws) ws.close();
-    };
-  }, [queryClient]);
 
   const isScanning = status?.current_scan?.state === 'running' || status?.current_scan?.state === 'pending';
   const findings = findingsData?.findings || [];

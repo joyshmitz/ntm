@@ -299,10 +299,10 @@ func TestStatusSeverity(t *testing.T) {
 		want   int
 	}{
 		{StatusOK, 0},
-		{StatusWarning, 1},
-		{StatusError, 2},
-		{StatusUnknown, 0}, // default case
-		{Status("invalid"), 0},
+		{StatusUnknown, 1}, // between OK and Warning
+		{StatusWarning, 2},
+		{StatusError, 3},
+		{Status("invalid"), 1}, // unknown defaults to Unknown severity
 	}
 
 	for _, tt := range tests {

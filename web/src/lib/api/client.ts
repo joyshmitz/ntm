@@ -15,6 +15,16 @@ export interface ConnectionConfig {
 }
 
 const CONNECTION_KEY = "ntm-connection";
+export const DEFAULT_NTM_BASE_URL = "http://localhost:7337";
+
+function normalizeBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) {
+    return DEFAULT_NTM_BASE_URL;
+  }
+  const normalized = trimmed.replace(/\/+$/, "");
+  return normalized || DEFAULT_NTM_BASE_URL;
+}
 
 /**
  * Get the current connection config from localStorage.
@@ -24,10 +34,36 @@ export function getConnectionConfig(): ConnectionConfig | null {
   const stored = localStorage.getItem(CONNECTION_KEY);
   if (!stored) return null;
   try {
-    return JSON.parse(stored) as ConnectionConfig;
+    const parsed = JSON.parse(stored) as ConnectionConfig;
+    if (!parsed?.baseUrl) {
+      return null;
+    }
+    return {
+      ...parsed,
+      baseUrl: normalizeBaseUrl(parsed.baseUrl),
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve the active API base URL from saved config or environment.
+ */
+export function getBaseUrl(): string {
+  const config = getConnectionConfig();
+  return normalizeBaseUrl(
+    config?.baseUrl || process.env.NEXT_PUBLIC_NTM_URL || DEFAULT_NTM_BASE_URL
+  );
+}
+
+/**
+ * Build auth headers for the saved connection config.
+ */
+export function getAuthHeaders(): Record<string, string> {
+  const config = getConnectionConfig();
+  if (!config?.authToken) return {};
+  return { Authorization: `Bearer ${config.authToken}` };
 }
 
 /**
@@ -35,7 +71,13 @@ export function getConnectionConfig(): ConnectionConfig | null {
  */
 export function saveConnectionConfig(config: ConnectionConfig): void {
   if (typeof window === "undefined") return;
-  localStorage.setItem(CONNECTION_KEY, JSON.stringify(config));
+  localStorage.setItem(
+    CONNECTION_KEY,
+    JSON.stringify({
+      ...config,
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+    })
+  );
 }
 
 /**
@@ -50,14 +92,11 @@ export function clearConnectionConfig(): void {
  * Create the NTM API client with current connection config.
  */
 export function createNtmClient() {
-  const config = getConnectionConfig();
-  const baseUrl = config?.baseUrl || process.env.NEXT_PUBLIC_NTM_URL || "http://localhost:8080";
+  const authHeaders = getAuthHeaders();
 
   const client = createClient<paths>({
-    baseUrl,
-    headers: config?.authToken
-      ? { Authorization: `Bearer ${config.authToken}` }
-      : undefined,
+    baseUrl: getBaseUrl(),
+    headers: Object.keys(authHeaders).length > 0 ? authHeaders : undefined,
   });
 
   return client;

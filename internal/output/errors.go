@@ -139,6 +139,9 @@ func PrintCLIErrorOrJSON(e *CLIError, jsonMode bool) error {
 
 // Error outputs an error in the appropriate format
 func (f *Formatter) Error(err error) error {
+	if err == nil {
+		return nil
+	}
 	if f.IsJSON() {
 		return f.JSON(NewError(err.Error()))
 	}

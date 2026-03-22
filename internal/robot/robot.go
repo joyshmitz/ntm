@@ -2619,30 +2619,42 @@ func summarizeReservations(reservations []agentmail.FileReservation) []AgentMail
 }
 
 func detectReservationConflicts(reservations []agentmail.FileReservation) []AgentMailConflict {
-	type patternState struct {
-		agents    map[string]bool
-		exclusive bool
+	type conflictState struct {
+		holders map[string]bool
 	}
-	byPattern := make(map[string]*patternState)
-	for _, r := range reservations {
-		state := byPattern[r.PathPattern]
-		if state == nil {
-			state = &patternState{agents: make(map[string]bool)}
-			byPattern[r.PathPattern] = state
-		}
-		state.agents[r.AgentName] = true
-		if r.Exclusive {
-			state.exclusive = true
+	byPattern := make(map[string]*conflictState)
+	for i := 0; i < len(reservations); i++ {
+		for j := i + 1; j < len(reservations); j++ {
+			a := reservations[i]
+			b := reservations[j]
+			if a.AgentName == b.AgentName {
+				continue
+			}
+			if !a.Exclusive && !b.Exclusive {
+				continue
+			}
+			if !reservationPatternsConflict(a.PathPattern, b.PathPattern) {
+				continue
+			}
+
+			pattern := normalizeConflictPattern(a.PathPattern, b.PathPattern)
+			state := byPattern[pattern]
+			if state == nil {
+				state = &conflictState{holders: make(map[string]bool)}
+				byPattern[pattern] = state
+			}
+			state.holders[a.AgentName] = true
+			state.holders[b.AgentName] = true
 		}
 	}
 
 	var conflicts []AgentMailConflict
 	for pattern, state := range byPattern {
-		if !state.exclusive || len(state.agents) <= 1 {
+		if len(state.holders) <= 1 {
 			continue
 		}
 		var holders []string
-		for name := range state.agents {
+		for name := range state.holders {
 			holders = append(holders, name)
 		}
 		sort.Strings(holders)
@@ -2650,6 +2662,30 @@ func detectReservationConflicts(reservations []agentmail.FileReservation) []Agen
 	}
 	sort.SliceStable(conflicts, func(i, j int) bool { return conflicts[i].Pattern < conflicts[j].Pattern })
 	return conflicts
+}
+
+func reservationPatternsConflict(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return matchesPattern(a, b) || matchesPattern(b, a)
+}
+
+func normalizeConflictPattern(a, b string) string {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return a
+	}
+	if a > b {
+		a, b = b, a
+	}
+	return a + " <-> " + b
 }
 
 // getGraphMetrics returns bv graph analysis metrics

@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { getAuthHeaders, getBaseUrl } from '@/lib/api/client';
 
 // Types based on REST API
 interface MetricsData {
@@ -65,13 +66,12 @@ interface Snapshot {
   created_at?: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetch(`${getBaseUrl()}${url}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
       ...options?.headers,
     },
   });

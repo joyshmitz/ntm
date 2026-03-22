@@ -715,9 +715,9 @@ func (r *AutoRespawner) isShellPrompt(output string) bool {
 		if line == "" {
 			continue
 		}
-		// Check if line ends with a prompt character
+		// Check if line ends with a prompt character (handles multi-byte UTF-8)
 		for _, prompt := range prompts {
-			if len(line) > 0 && line[len(line)-1] == prompt[0] {
+			if strings.HasSuffix(line, prompt) {
 				return true
 			}
 		}
@@ -1016,9 +1016,16 @@ func (r *AutoRespawner) emitEvent(result *RespawnResult) {
 		NewAccount:      result.NewAccount,
 	}
 
-	// Non-blocking send
+	// Non-blocking send.
+	// Take a local copy under lock to avoid racing with Stop() closing the channel.
+	r.mu.RLock()
+	ch := r.eventChan
+	r.mu.RUnlock()
+	if ch == nil {
+		return
+	}
 	select {
-	case r.eventChan <- event:
+	case ch <- event:
 		// Event sent successfully
 	default:
 		r.logger().Warn("[AutoRespawner] event_channel_full",

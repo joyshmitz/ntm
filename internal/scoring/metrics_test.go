@@ -555,7 +555,7 @@ func TestErrorRateAccuracy(t *testing.T) {
 		{"10% error rate", 10, 90, 0.90, 0.01},
 		{"50% error rate", 50, 50, 0.50, 0.01},
 		{"all errors", 100, 0, 0.0, 0.01},
-		{"zero operations", 0, 0, 0.0, 0.01},
+		{"zero operations", 0, 0, 1.0, 0.01}, // no data = no errors observed
 	}
 
 	for _, tt := range tests {

@@ -8,7 +8,7 @@
  * - Integration with TanStack Query for cache updates
  */
 
-import { getConnectionConfig } from "../api/client";
+import { getBaseUrl, getConnectionConfig } from "../api/client";
 
 // WebSocket message types from server
 export type WSMessageType =
@@ -26,7 +26,8 @@ export interface WSMessage {
   ts: string;
   seq?: number;
   topic?: string;
-  ref?: string;
+  request_id?: string;
+  data?: Record<string, unknown>;
 }
 
 // Event message with typed data
@@ -92,7 +93,7 @@ export class NtmWebSocket {
 
     this.setState("connecting");
     const config = getConnectionConfig();
-    const baseUrl = config?.baseUrl || process.env.NEXT_PUBLIC_NTM_URL || "http://localhost:8080";
+    const baseUrl = getBaseUrl();
 
     // Convert HTTP URL to WebSocket URL
     const wsUrl = baseUrl.replace(/^http/, "ws") + "/api/v1/ws";
@@ -116,13 +117,13 @@ export class NtmWebSocket {
    */
   disconnect(): void {
     this.clearTimers();
+    this.rejectPendingAcks("WebSocket disconnected");
     if (this.ws) {
       this.ws.close(1000, "Client disconnect");
       this.ws = null;
     }
     this.setState("disconnected");
     this.subscriptions.clear();
-    this.pendingAcks.clear();
   }
 
   /**
@@ -137,16 +138,11 @@ export class NtmWebSocket {
     }
 
     const ref = this.nextRef();
-    const message = {
-      op: "subscribe",
-      ref,
-      topics: [topic],
-      ...options,
-    };
+    const payload: Record<string, unknown> = { topics: [topic], ...options };
 
     return new Promise((resolve, reject) => {
       this.pendingAcks.set(ref, { resolve, reject });
-      this.ws!.send(JSON.stringify(message));
+      this.sendMessage("subscribe", ref, payload);
 
       // Timeout for ack
       setTimeout(() => {
@@ -169,15 +165,10 @@ export class NtmWebSocket {
     }
 
     const ref = this.nextRef();
-    const message = {
-      op: "unsubscribe",
-      ref,
-      topics: [topic],
-    };
 
     return new Promise((resolve, reject) => {
       this.pendingAcks.set(ref, { resolve, reject });
-      this.ws!.send(JSON.stringify(message));
+      this.sendMessage("unsubscribe", ref, { topics: [topic] });
 
       setTimeout(() => {
         if (this.pendingAcks.has(ref)) {
@@ -246,6 +237,7 @@ export class NtmWebSocket {
       }
       this.clearTimers();
       this.ws = null;
+      this.rejectPendingAcks("WebSocket disconnected");
 
       if (event.code !== 1000) {
         // Abnormal close, attempt reconnect
@@ -265,63 +257,70 @@ export class NtmWebSocket {
   }
 
   private handleMessage(data: string): void {
-    try {
-      const message = JSON.parse(data) as WSMessage;
+    const frames = data
+      .split("\n")
+      .map((frame) => frame.trim())
+      .filter((frame) => frame.length > 0);
+
+    for (const frame of frames) {
+      try {
+        const message = JSON.parse(frame) as WSMessage;
 
       // Track sequence for resumption
-      if (message.seq !== undefined) {
-        this.lastSeq = message.seq;
+        if (message.seq !== undefined) {
+          this.lastSeq = message.seq;
+        }
+
+        switch (message.type) {
+          case "ack": {
+            const ref = message.request_id;
+            if (ref && this.pendingAcks.has(ref)) {
+              this.pendingAcks.get(ref)!.resolve();
+              this.pendingAcks.delete(ref);
+            }
+            break;
+          }
+
+          case "error": {
+            const error = message as WSError;
+            const ref = error.request_id;
+            if (ref && this.pendingAcks.has(ref)) {
+              this.pendingAcks.get(ref)!.reject(new Error(error.message));
+              this.pendingAcks.delete(ref);
+            }
+            this.errorHandlers.forEach((h) => h(error));
+            break;
+          }
+
+          case "event":
+          case "pane.output": {
+            const event = message as WSEvent;
+            this.eventHandlers.forEach((h) => h(event));
+            break;
+          }
+
+          case "stream.reset": {
+            // Server says our cursor is stale, reset subscriptions
+            if (process.env.NODE_ENV === "development") {
+              console.log("[WS] Stream reset, resubscribing");
+            }
+            this.lastSeq = null;
+            this.resubscribeAll();
+            break;
+          }
+
+          case "pong":
+            // Expected response to ping
+            break;
+
+          default:
+            if (process.env.NODE_ENV === "development") {
+              console.log("[WS] Unknown message type:", message.type);
+            }
+        }
+      } catch (err) {
+        console.error("[WS] Failed to parse message:", err);
       }
-
-      switch (message.type) {
-        case "ack": {
-          const ref = message.ref;
-          if (ref && this.pendingAcks.has(ref)) {
-            this.pendingAcks.get(ref)!.resolve();
-            this.pendingAcks.delete(ref);
-          }
-          break;
-        }
-
-        case "error": {
-          const error = message as WSError;
-          const ref = error.ref;
-          if (ref && this.pendingAcks.has(ref)) {
-            this.pendingAcks.get(ref)!.reject(new Error(error.message));
-            this.pendingAcks.delete(ref);
-          }
-          this.errorHandlers.forEach((h) => h(error));
-          break;
-        }
-
-        case "event":
-        case "pane.output": {
-          const event = message as WSEvent;
-          this.eventHandlers.forEach((h) => h(event));
-          break;
-        }
-
-        case "stream.reset": {
-          // Server says our cursor is stale, reset subscriptions
-          if (process.env.NODE_ENV === "development") {
-            console.log("[WS] Stream reset, resubscribing");
-          }
-          this.lastSeq = null;
-          this.resubscribeAll();
-          break;
-        }
-
-        case "pong":
-          // Expected response to ping
-          break;
-
-        default:
-          if (process.env.NODE_ENV === "development") {
-            console.log("[WS] Unknown message type:", message.type);
-          }
-      }
-    } catch (err) {
-      console.error("[WS] Failed to parse message:", err);
     }
   }
 
@@ -339,7 +338,7 @@ export class NtmWebSocket {
   private startPing(): void {
     this.pingInterval = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ op: "ping" }));
+        this.sendMessage("ping", this.nextRef());
       }
     }, 30000);
   }
@@ -352,6 +351,17 @@ export class NtmWebSocket {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
+    }
+  }
+
+  private rejectPendingAcks(message: string): void {
+    if (this.pendingAcks.size === 0) {
+      return;
+    }
+    const pending = Array.from(this.pendingAcks.values());
+    this.pendingAcks.clear();
+    for (const entry of pending) {
+      entry.reject(new Error(message));
     }
   }
 
@@ -387,15 +397,30 @@ export class NtmWebSocket {
       }
 
       const ref = this.nextRef();
-      const message = {
-        op: "subscribe",
-        ref,
+      this.sendMessage("subscribe", ref, {
         topics: [topic],
         ...subscribeOptions,
-      };
-
-      this.ws?.send(JSON.stringify(message));
+      });
     }
+  }
+
+  private sendMessage(
+    type: "subscribe" | "unsubscribe" | "ping",
+    requestId: string,
+    data?: Record<string, unknown>
+  ): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.ws.send(
+      JSON.stringify({
+        type,
+        ts: new Date().toISOString(),
+        request_id: requestId,
+        ...(data ? { data } : {}),
+      })
+    );
   }
 }
 

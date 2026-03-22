@@ -1106,7 +1106,7 @@ func SanitizePaneCommand(cmd string) (string, error) {
 		switch {
 		case r == '\n', r == '\r', r == 0:
 			return "", fmt.Errorf("command contains disallowed control characters")
-		case r < 0x20 && r != ' ' && r != '\t':
+		case r < 0x20 && r != '\t':
 			return "", fmt.Errorf("command contains disallowed control character 0x%02x", r)
 		}
 	}

@@ -126,14 +126,14 @@ func (c *WebhookConfig) ValidateConfig() error {
 	return nil
 }
 
-func (c *WebhookConfig) applyDefaults() {
+func (c *WebhookConfig) applyDefaults(maxAttemptsExplicit bool) {
 	if strings.TrimSpace(c.Formatter) == "" {
 		c.Formatter = "json"
 	}
 	if strings.TrimSpace(c.Timeout) == "" {
 		c.Timeout = "10s"
 	}
-	if c.Retry.MaxAttempts == 0 {
+	if !maxAttemptsExplicit && c.Retry.MaxAttempts == 0 {
 		c.Retry.MaxAttempts = 5
 	}
 	if strings.TrimSpace(c.Retry.Backoff) == "" {
@@ -180,7 +180,10 @@ func ParseWebhookConfig(yamlBytes []byte) ([]WebhookConfig, error) {
 			return nil, fmt.Errorf("webhooks[%d]: %w", idx, err)
 		}
 
-		cfg.applyDefaults()
+		retryNode := findYAMLMappingKey(item, "retry")
+		retryMaxAttemptsExplicit := findYAMLMappingKey(retryNode, "max_attempts") != nil
+
+		cfg.applyDefaults(retryMaxAttemptsExplicit)
 		if err := cfg.ValidateConfig(); err != nil {
 			name := strings.TrimSpace(cfg.Name)
 			if name == "" {
@@ -295,6 +298,10 @@ func webhookNames(cfgs []WebhookConfig) string {
 }
 
 func findTopLevelYAMLKey(root *yaml.Node, key string) *yaml.Node {
+	return findYAMLMappingKey(root, key)
+}
+
+func findYAMLMappingKey(root *yaml.Node, key string) *yaml.Node {
 	n := root
 	if n == nil {
 		return nil

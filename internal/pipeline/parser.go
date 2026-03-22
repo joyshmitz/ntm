@@ -305,11 +305,11 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 
 	// Validate loop configuration
 	if step.Loop != nil {
-		if step.Loop.Items == "" {
+		if step.Loop.Items == "" && step.Loop.While == "" && step.Loop.Times <= 0 {
 			result.addError(ParseError{
-				Field:   stepField + ".loop.items",
-				Message: "loop items is required",
-				Hint:    "Specify the variable to iterate over",
+				Field:   stepField + ".loop",
+				Message: "loop must specify items, while, or times",
+				Hint:    "Set items for for-each, while for condition loop, or times for count loop",
 			})
 		}
 		if step.Loop.MaxIterations < 0 {
