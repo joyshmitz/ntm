@@ -891,6 +891,12 @@ func TestCORSMiddleware(t *testing.T) {
 	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
 		t.Error("Expected CORS allowlist header")
 	}
+	if methods := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, http.MethodPatch) {
+		t.Fatalf("expected PATCH in Access-Control-Allow-Methods, got %q", methods)
+	}
+	if headers := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(headers, "Idempotency-Key") {
+		t.Fatalf("expected Idempotency-Key in Access-Control-Allow-Headers, got %q", headers)
+	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("OPTIONS Status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -3028,6 +3034,12 @@ func TestCorsMiddlewareFunc_OptionsRequest(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if methods := w.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, http.MethodPatch) {
+		t.Fatalf("expected PATCH in Access-Control-Allow-Methods, got %q", methods)
+	}
+	if headers := w.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(headers, "Idempotency-Key") {
+		t.Fatalf("expected Idempotency-Key in Access-Control-Allow-Headers, got %q", headers)
 	}
 }
 

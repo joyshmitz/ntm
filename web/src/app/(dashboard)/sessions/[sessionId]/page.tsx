@@ -24,6 +24,8 @@ interface ApiEnvelope {
 interface Session {
   name: string;
   created_at?: string;
+  project_path?: string;
+  status?: string;
   panes?: { index: number; agent_type?: string }[];
   tags?: string[];
 }
@@ -167,13 +169,13 @@ export default function SessionDetailPage() {
   }, [outputLines, outputQuery.data]);
 
   const agentCounts = useMemo(() => {
-    const panes = sessionQuery.data?.session?.panes || [];
+    const panes = panesQuery.data?.panes || [];
     return panes.reduce<Record<string, number>>((acc, pane) => {
-      const type = pane.agent_type || "unknown";
+      const type = pane.type || "unknown";
       acc[type] = (acc[type] || 0) + 1;
       return acc;
     }, {});
-  }, [sessionQuery.data]);
+  }, [panesQuery.data]);
 
   const sendPrompt = useCallback(async () => {
     if (!prompt.trim()) return;
@@ -285,9 +287,9 @@ export default function SessionDetailPage() {
           helper="Agent count"
         />
         <StatCard
-          title="Tags"
-          value={sessionQuery.data?.session?.tags?.length ?? 0}
-          helper="Session tags"
+          title="Status"
+          value={sessionQuery.data?.session?.status || "—"}
+          helper="Current session state"
         />
         <StatCard
           title="Output Lines"
@@ -470,7 +472,7 @@ export default function SessionDetailPage() {
   );
 }
 
-function StatCard({ title, value, helper }: { title: string; value: number; helper: string }) {
+function StatCard({ title, value, helper }: { title: string; value: string | number; helper: string }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
       <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">

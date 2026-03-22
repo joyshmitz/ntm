@@ -11,6 +11,18 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getClient } from "@/lib/api/client";
 
+interface SessionRecord {
+  id: string;
+  name: string;
+  project_path?: string;
+  created_at?: string;
+  status?: string;
+}
+
+interface SessionsResponse {
+  sessions: SessionRecord[];
+}
+
 export default function SessionsPage() {
   const [filter, setFilter] = useState("");
   const {
@@ -25,7 +37,7 @@ export default function SessionsPage() {
       if (response.error) {
         throw new Error(`Failed to fetch sessions: ${response.error}`);
       }
-      return response.data;
+      return response.data as SessionsResponse | undefined;
     },
     refetchInterval: 10000, // Poll every 10 seconds as backup
   });
@@ -52,12 +64,14 @@ export default function SessionsPage() {
   const filteredSessions = useMemo(() => {
     if (!filter) return sessionList;
     const query = filter.toLowerCase();
-    return sessionList.filter((session: Record<string, unknown>) => {
-      const name = (session.name as string) || "";
-      const tags = (session.tags as string[]) || [];
+    return sessionList.filter((session) => {
+      const name = session.name || "";
+      const projectPath = session.project_path || "";
+      const status = session.status || "";
       return (
         name.toLowerCase().includes(query) ||
-        tags.some((tag) => tag.toLowerCase().includes(query))
+        projectPath.toLowerCase().includes(query) ||
+        status.toLowerCase().includes(query)
       );
     });
   }, [filter, sessionList]);
@@ -76,7 +90,7 @@ export default function SessionsPage() {
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-sm text-gray-500 dark:text-gray-400">
-          Filter by session name or tags.
+          Filter by session name, project path, or status.
         </div>
         <input
           value={filter}
@@ -97,8 +111,8 @@ export default function SessionsPage() {
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {filteredSessions.map((session: Record<string, unknown>) => (
-            <SessionCard key={session.name as string} session={session} />
+          {filteredSessions.map((session) => (
+            <SessionCard key={session.name} session={session} />
           ))}
         </div>
       )}
@@ -106,21 +120,15 @@ export default function SessionsPage() {
   );
 }
 
-function SessionCard({ session }: { session: Record<string, unknown> }) {
-  const name = session.name as string;
-  const panes = (session.panes as unknown[]) || [];
-  const tags = (session.tags as string[]) || [];
-  const created = session.created_at as string;
-  const sessionName = session.name as string;
-
-  // Count agents by type
-  const agentCounts = panes.reduce<Record<string, number>>((acc, pane) => {
-    const agent = (pane as Record<string, unknown>).agent_type as string;
-    if (agent) {
-      acc[agent] = (acc[agent] || 0) + 1;
-    }
-    return acc;
-  }, {});
+function SessionCard({ session }: { session: SessionRecord }) {
+  const created = session.created_at;
+  const sessionName = session.name;
+  const status = session.status || "unknown";
+  const statusClasses: Record<string, string> = {
+    active: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300",
+    paused: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300",
+    terminated: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  };
 
   return (
     <Link
@@ -129,36 +137,18 @@ function SessionCard({ session }: { session: Record<string, unknown> }) {
     >
       <div className="flex items-start justify-between">
         <h3 className="font-medium text-gray-900 dark:text-white truncate">
-          {name}
+          {sessionName}
         </h3>
-        <span className="text-xs text-gray-500 dark:text-gray-400">
-          {panes.length} pane{panes.length !== 1 ? "s" : ""}
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs ${statusClasses[status] || "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"}`}
+        >
+          {status}
         </span>
       </div>
 
-      {tags.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {tags.map((tag) => (
-            <span
-              key={tag}
-              className="px-2 py-0.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded"
-            >
-              {tag}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {Object.keys(agentCounts).length > 0 && (
-        <div className="mt-3 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-          {Object.entries(agentCounts).map(([type, count]) => (
-            <span key={type} className="flex items-center gap-1">
-              <AgentIcon type={type} />
-              <span>
-                {count} {type}
-              </span>
-            </span>
-          ))}
+      {session.project_path && (
+        <div className="mt-2 rounded-md bg-gray-50 px-2 py-1 text-xs font-mono text-gray-600 dark:bg-gray-900 dark:text-gray-400">
+          {session.project_path}
         </div>
       )}
 
@@ -169,21 +159,5 @@ function SessionCard({ session }: { session: Record<string, unknown> }) {
         </span>
       </div>
     </Link>
-  );
-}
-
-function AgentIcon({ type }: { type: string }) {
-  // Simple colored dot for agent types
-  const colors: Record<string, string> = {
-    claude: "bg-orange-500",
-    codex: "bg-green-500",
-    gemini: "bg-blue-500",
-    user: "bg-gray-500",
-  };
-
-  return (
-    <span
-      className={`w-2 h-2 rounded-full ${colors[type] || "bg-gray-400"}`}
-    />
   );
 }

@@ -3,12 +3,76 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+type watcherToolHandler func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError)
+
+func newWatcherMCPServer(t *testing.T, handlers map[string]watcherToolHandler) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+			return
+		}
+
+		var req agentmail.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if req.Method != "tools/call" {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &agentmail.JSONRPCError{Code: -32601, Message: "unknown method: " + req.Method},
+			})
+			return
+		}
+
+		params, _ := req.Params.(map[string]interface{})
+		toolName, _ := params["name"].(string)
+		args, _ := params["arguments"].(map[string]interface{})
+
+		handler, ok := handlers[toolName]
+		if !ok {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &agentmail.JSONRPCError{Code: -32601, Message: "unknown tool: " + toolName},
+			})
+			return
+		}
+
+		result, rpcErr := handler(args)
+		if rpcErr != nil {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   rpcErr,
+			})
+			return
+		}
+
+		resultJSON, _ := json.Marshal(result)
+		_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  json.RawMessage(resultJSON),
+		})
+	}))
+}
 
 // TestNewFileReservationWatcher tests the constructor and options.
 func TestNewFileReservationWatcher(t *testing.T) {
@@ -498,6 +562,215 @@ func TestOnFileEditNoProjectDir(t *testing.T) {
 	reservations := w.GetActiveReservations()
 	if len(reservations) != 0 {
 		t.Errorf("expected 0 reservations with empty projectDir, got %d", len(reservations))
+	}
+}
+
+func TestOnFileEditConflictInvokesCallbackAndTracksGrantedReservations(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{
+					{ID: 7, PathPattern: "/granted.go", AgentName: "TestAgent", Exclusive: true},
+				},
+				Conflicts: []agentmail.ReservationConflict{
+					{Path: "/blocked.go", Holders: []string{"BlueLake"}},
+				},
+			}, nil
+		},
+		"list_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return []agentmail.FileReservation{
+				{ID: 99, PathPattern: "/blocked.go", AgentName: "BlueLake"},
+			}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	callbackDone := make(chan struct{})
+	var w *FileReservationWatcher
+
+	w = NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithAgentName("TestAgent"),
+		WithConflictCallback(func(conflict FileConflict) {
+			if conflict.Path != "/blocked.go" {
+				t.Errorf("unexpected conflict path: %s", conflict.Path)
+			}
+			if conflict.RequestorAgent != "TestAgent" {
+				t.Errorf("unexpected requestor agent: %s", conflict.RequestorAgent)
+			}
+			if len(conflict.Holders) != 1 || conflict.Holders[0] != "BlueLake" {
+				t.Errorf("unexpected holders: %v", conflict.Holders)
+			}
+
+			// The callback must run without the watcher mutex held.
+			reservations := w.GetActiveReservations()
+			got := reservations["%1"]
+			if got == nil {
+				t.Fatal("expected pane reservation to exist during callback")
+			}
+			if len(got.Files) != 1 || got.Files[0] != "/granted.go" {
+				t.Fatalf("expected granted file to be tracked, got %v", got.Files)
+			}
+			close(callbackDone)
+		}),
+	)
+
+	pane := tmux.Pane{ID: "%1", Type: tmux.AgentClaude}
+	done := make(chan struct{})
+	go func() {
+		w.OnFileEdit(context.Background(), "test-session", pane, []string{"/granted.go", "/blocked.go"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnFileEdit hung while processing conflict callback")
+	}
+
+	select {
+	case <-callbackDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected conflict callback to be invoked")
+	}
+
+	reservations := w.GetActiveReservations()
+	got := reservations["%1"]
+	if got == nil {
+		t.Fatal("expected reservation for pane %1")
+	}
+	if len(got.ReservationID) != 1 || got.ReservationID[0] != 7 {
+		t.Fatalf("expected granted reservation ID to be tracked, got %v", got.ReservationID)
+	}
+}
+
+func TestReleaseIdleReservationsDoesNotHoldWatcherLock(t *testing.T) {
+	t.Parallel()
+
+	releaseStarted := make(chan struct{})
+	releaseAllowed := make(chan struct{})
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			close(releaseStarted)
+			<-releaseAllowed
+			return map[string]interface{}{"released": 1}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithIdleTimeout(time.Minute),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "TestAgent",
+		Files:         []string{"/file.go"},
+		ReservationID: []int{1},
+		LastActivity:  time.Now().Add(-2 * time.Minute),
+	}
+	w.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		w.releaseIdleReservations(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-releaseStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("release_file_reservations was not called")
+	}
+
+	getDone := make(chan struct{})
+	go func() {
+		_ = w.GetActiveReservations()
+		close(getDone)
+	}()
+
+	select {
+	case <-getDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("GetActiveReservations blocked behind releaseIdleReservations")
+	}
+
+	close(releaseAllowed)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("releaseIdleReservations did not finish")
+	}
+}
+
+func TestRenewReservationsUsesReservationIDs(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		args []map[string]interface{}
+	)
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"renew_file_reservations": func(callArgs map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			mu.Lock()
+			copied := make(map[string]interface{}, len(callArgs))
+			for k, v := range callArgs {
+				copied[k] = v
+			}
+			args = append(args, copied)
+			mu.Unlock()
+
+			return agentmail.RenewReservationsResult{Renewed: 1}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithReservationTTL(15*time.Minute),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "SessionAgent",
+		ReservationID: []int{1, 2},
+	}
+	w.activeReservations["%2"] = &PaneReservation{
+		PaneID:        "%2",
+		AgentName:     "SessionAgent",
+		ReservationID: []int{3},
+	}
+	w.mu.Unlock()
+
+	if err := w.RenewReservations(context.Background()); err != nil {
+		t.Fatalf("RenewReservations returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(args) != 2 {
+		t.Fatalf("expected 2 renew calls, got %d", len(args))
+	}
+	for _, callArgs := range args {
+		rawIDs, ok := callArgs["file_reservation_ids"].([]interface{})
+		if !ok || len(rawIDs) == 0 {
+			t.Fatalf("expected file_reservation_ids in renew call, got %v", callArgs)
+		}
 	}
 }
 

@@ -101,6 +101,9 @@ func TestStartStopStreamEndpoint(t *testing.T) {
 	if startResp["target"] != "testsession:0" {
 		t.Errorf("expected target testsession:0, got %v", startResp["target"])
 	}
+	if startResp["topic"] != "panes:testsession:0" {
+		t.Errorf("expected topic panes:testsession:0, got %v", startResp["topic"])
+	}
 	if startResp["message"] != "streaming started" {
 		t.Errorf("expected message 'streaming started', got %v", startResp["message"])
 	}
@@ -186,5 +189,26 @@ func TestStreamManagerIntegration(t *testing.T) {
 	// Verify stopped
 	if len(sm.ListActive()) != 0 {
 		t.Error("expected no active streams after stop")
+	}
+}
+
+func TestStreamTopicForTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "raw target", target: "demo:2", want: "panes:demo:2"},
+		{name: "already canonical", target: "panes:demo:2", want: "panes:demo:2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := streamTopicForTarget(tt.target); got != tt.want {
+				t.Fatalf("streamTopicForTarget(%q) = %q, want %q", tt.target, got, tt.want)
+			}
+		})
 	}
 }

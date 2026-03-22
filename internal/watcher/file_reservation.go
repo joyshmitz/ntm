@@ -273,52 +273,20 @@ func mapAgentTypeToPatternAgent(agentType tmux.AgentType) string {
 
 // OnFileEdit handles detected file edits by reserving files.
 func (w *FileReservationWatcher) OnFileEdit(ctx context.Context, sessionName string, pane tmux.Pane, files []string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.client == nil || w.projectDir == "" {
 		return
 	}
 
-	// Get or create reservation record for this pane
-	reservation, exists := w.activeReservations[pane.ID]
-	if !exists {
-		// Determine agent name for reservations
-		agentName := w.agentName
-		if agentName == "" {
-			agentName = sessionName + "_" + pane.ID
-		}
-		reservation = &PaneReservation{
-			PaneID:       pane.ID,
-			AgentName:    agentName,
-			Files:        nil,
-			LastActivity: time.Now(),
-		}
-		w.activeReservations[pane.ID] = reservation
-	}
-
-	// Find new files not already reserved by this pane
-	newFiles := make([]string, 0)
-	existingFiles := make(map[string]bool)
-	for _, f := range reservation.Files {
-		existingFiles[f] = true
-	}
-	for _, f := range files {
-		if !existingFiles[f] {
-			newFiles = append(newFiles, f)
-		}
-	}
-
+	now := time.Now()
+	agentName, newFiles := w.prepareReservationAttempt(pane.ID, sessionName, files, now)
 	if len(newFiles) == 0 {
-		// No new files, just update activity time
-		reservation.LastActivity = time.Now()
 		return
 	}
 
 	// Reserve new files
 	opts := agentmail.FileReservationOptions{
 		ProjectKey: w.projectDir,
-		AgentName:  reservation.AgentName,
+		AgentName:  agentName,
 		Paths:      newFiles,
 		TTLSeconds: int(w.reservationTTL.Seconds()),
 		Exclusive:  true,
@@ -326,67 +294,29 @@ func (w *FileReservationWatcher) OnFileEdit(ctx context.Context, sessionName str
 	}
 
 	result, err := w.client.ReservePaths(ctx, opts)
-	if err != nil {
-		// Reservation conflict is expected when another agent has the file
+	if err != nil && !agentmail.IsReservationConflict(err) {
 		if w.debug {
 			log.Printf("[FileReservationWatcher] Reservation error for pane %s: %v", pane.ID, err)
 		}
-		// Still update activity time even on conflict
-		reservation.LastActivity = time.Now()
 		return
 	}
 
-	// Track granted reservations
-	for _, granted := range result.Granted {
-		reservation.Files = append(reservation.Files, granted.PathPattern)
-		reservation.ReservationID = append(reservation.ReservationID, granted.ID)
-	}
-	reservation.LastActivity = time.Now()
+	w.recordReservationResult(pane.ID, result, now)
 
-	if w.debug && len(result.Granted) > 0 {
+	if w.debug && result != nil && len(result.Granted) > 0 {
 		log.Printf("[FileReservationWatcher] Reserved %d files for pane %s: %v",
 			len(result.Granted), pane.ID, newFiles)
 	}
 
 	// Emit conflicts to callback
-	if len(result.Conflicts) > 0 {
+	if result != nil && len(result.Conflicts) > 0 {
 		if w.debug {
 			log.Printf("[FileReservationWatcher] Conflicts for pane %s: %v", pane.ID, result.Conflicts)
 		}
 
 		if w.conflictCallback != nil {
-			for _, conflict := range result.Conflicts {
-				fc := FileConflict{
-					Path:           conflict.Path,
-					RequestorAgent: reservation.AgentName,
-					RequestorPane:  pane.ID,
-					SessionName:    sessionName,
-					Holders:        conflict.Holders,
-					DetectedAt:     time.Now(),
-				}
-
-				// Try to get additional info about the conflicting reservation
-				if w.client != nil && len(conflict.Holders) > 0 {
-					reservations, err := w.client.ListReservations(ctx, w.projectDir, "", true)
-					if err == nil {
-						for _, r := range reservations {
-							// Match by path pattern and holder
-							if r.PathPattern == conflict.Path {
-								for _, holder := range conflict.Holders {
-									if r.AgentName == holder {
-										reservedSince := r.CreatedTS.Time
-										fc.ReservedSince = &reservedSince
-										expiresAt := r.ExpiresTS.Time
-										fc.ExpiresAt = &expiresAt
-										fc.HolderReservationIDs = append(fc.HolderReservationIDs, r.ID)
-									}
-								}
-							}
-						}
-					}
-				}
-
-				w.conflictCallback(fc)
+			for _, conflict := range w.buildConflictNotifications(ctx, sessionName, pane.ID, agentName, result.Conflicts) {
+				w.conflictCallback(conflict)
 			}
 		}
 	}
@@ -394,43 +324,38 @@ func (w *FileReservationWatcher) OnFileEdit(ctx context.Context, sessionName str
 
 // releaseIdleReservations releases reservations for panes that have been idle.
 func (w *FileReservationWatcher) releaseIdleReservations(ctx context.Context) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.client == nil {
 		return
 	}
 
 	now := time.Now()
-	var toDelete []string
+	var idleReservations []PaneReservation
 
+	w.mu.Lock()
 	for paneID, reservation := range w.activeReservations {
 		if now.Sub(reservation.LastActivity) > w.idleTimeout {
-			// Release reservations for this idle pane
-			if len(reservation.ReservationID) > 0 {
-				err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
-				if err != nil && w.debug {
-					log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", paneID, err)
-				} else if w.debug {
-					log.Printf("[FileReservationWatcher] Released %d reservations for idle pane %s",
-						len(reservation.ReservationID), paneID)
-				}
-			}
-			toDelete = append(toDelete, paneID)
+			idleReservations = append(idleReservations, clonePaneReservation(*reservation))
+			delete(w.activeReservations, paneID)
 		}
 	}
+	w.mu.Unlock()
 
-	// Clean up
-	for _, paneID := range toDelete {
-		delete(w.activeReservations, paneID)
+	for _, reservation := range idleReservations {
+		if len(reservation.ReservationID) == 0 {
+			continue
+		}
+		err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
+		if err != nil && w.debug {
+			log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", reservation.PaneID, err)
+		} else if w.debug {
+			log.Printf("[FileReservationWatcher] Released %d reservations for idle pane %s",
+				len(reservation.ReservationID), reservation.PaneID)
+		}
 	}
 }
 
 // releaseAllReservations releases all tracked reservations.
 func (w *FileReservationWatcher) releaseAllReservations() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.client == nil {
 		return
 	}
@@ -438,16 +363,22 @@ func (w *FileReservationWatcher) releaseAllReservations() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	for paneID, reservation := range w.activeReservations {
+	w.mu.Lock()
+	reservations := make([]PaneReservation, 0, len(w.activeReservations))
+	for _, reservation := range w.activeReservations {
+		reservations = append(reservations, clonePaneReservation(*reservation))
+	}
+	w.activeReservations = make(map[string]*PaneReservation)
+	w.mu.Unlock()
+
+	for _, reservation := range reservations {
 		if len(reservation.ReservationID) > 0 {
 			err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
 			if err != nil && w.debug {
-				log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", paneID, err)
+				log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", reservation.PaneID, err)
 			}
 		}
 	}
-
-	w.activeReservations = make(map[string]*PaneReservation)
 }
 
 // GetActiveReservations returns a copy of all active reservations.
@@ -470,20 +401,28 @@ func (w *FileReservationWatcher) GetActiveReservations() map[string]*PaneReserva
 
 // RenewReservations extends the TTL of all active reservations.
 func (w *FileReservationWatcher) RenewReservations(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	if w.client == nil {
 		return nil
 	}
 
 	extendSeconds := int(w.reservationTTL.Seconds())
+
+	w.mu.Lock()
+	reservations := make([]PaneReservation, 0, len(w.activeReservations))
 	for _, reservation := range w.activeReservations {
 		if len(reservation.ReservationID) > 0 {
+			reservations = append(reservations, clonePaneReservation(*reservation))
+		}
+	}
+	w.mu.Unlock()
+
+	for _, reservation := range reservations {
+		if len(reservation.ReservationID) > 0 {
 			_, err := w.client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
-				ProjectKey:    w.projectDir,
-				AgentName:     reservation.AgentName,
-				ExtendSeconds: extendSeconds,
+				ProjectKey:     w.projectDir,
+				AgentName:      reservation.AgentName,
+				ExtendSeconds:  extendSeconds,
+				ReservationIDs: reservation.ReservationID,
 			})
 			if err != nil && w.debug {
 				log.Printf("[FileReservationWatcher] Error renewing reservations for pane %s: %v",
@@ -492,6 +431,144 @@ func (w *FileReservationWatcher) RenewReservations(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (w *FileReservationWatcher) prepareReservationAttempt(
+	paneID string,
+	sessionName string,
+	files []string,
+	now time.Time,
+) (string, []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	reservation, exists := w.activeReservations[paneID]
+	if !exists {
+		agentName := w.agentName
+		if agentName == "" {
+			agentName = sessionName + "_" + paneID
+		}
+		reservation = &PaneReservation{
+			PaneID:       paneID,
+			AgentName:    agentName,
+			LastActivity: now,
+		}
+		w.activeReservations[paneID] = reservation
+	}
+
+	existingFiles := make(map[string]bool, len(reservation.Files))
+	for _, f := range reservation.Files {
+		existingFiles[f] = true
+	}
+
+	newFiles := make([]string, 0, len(files))
+	for _, f := range files {
+		if !existingFiles[f] {
+			newFiles = append(newFiles, f)
+		}
+	}
+
+	reservation.LastActivity = now
+	return reservation.AgentName, newFiles
+}
+
+func (w *FileReservationWatcher) recordReservationResult(paneID string, result *agentmail.ReservationResult, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	reservation, exists := w.activeReservations[paneID]
+	if !exists {
+		return
+	}
+	reservation.LastActivity = now
+
+	if result == nil {
+		return
+	}
+
+	existingFiles := make(map[string]bool, len(reservation.Files))
+	for _, file := range reservation.Files {
+		existingFiles[file] = true
+	}
+	existingIDs := make(map[int]bool, len(reservation.ReservationID))
+	for _, id := range reservation.ReservationID {
+		existingIDs[id] = true
+	}
+
+	for _, granted := range result.Granted {
+		if !existingFiles[granted.PathPattern] {
+			reservation.Files = append(reservation.Files, granted.PathPattern)
+			existingFiles[granted.PathPattern] = true
+		}
+		if !existingIDs[granted.ID] {
+			reservation.ReservationID = append(reservation.ReservationID, granted.ID)
+			existingIDs[granted.ID] = true
+		}
+	}
+}
+
+func (w *FileReservationWatcher) buildConflictNotifications(
+	ctx context.Context,
+	sessionName string,
+	paneID string,
+	agentName string,
+	conflicts []agentmail.ReservationConflict,
+) []FileConflict {
+	notifications := make([]FileConflict, 0, len(conflicts))
+	reservationsByPath := make(map[string][]agentmail.FileReservation)
+
+	if hasConflictHolders(conflicts) {
+		reservations, err := w.client.ListReservations(ctx, w.projectDir, "", true)
+		if err == nil {
+			for _, reservation := range reservations {
+				reservationsByPath[reservation.PathPattern] = append(reservationsByPath[reservation.PathPattern], reservation)
+			}
+		}
+	}
+
+	for _, conflict := range conflicts {
+		fc := FileConflict{
+			Path:           conflict.Path,
+			RequestorAgent: agentName,
+			RequestorPane:  paneID,
+			SessionName:    sessionName,
+			Holders:        append([]string(nil), conflict.Holders...),
+			DetectedAt:     time.Now(),
+		}
+
+		for _, reservation := range reservationsByPath[conflict.Path] {
+			for _, holder := range conflict.Holders {
+				if reservation.AgentName != holder {
+					continue
+				}
+				reservedSince := reservation.CreatedTS.Time
+				fc.ReservedSince = &reservedSince
+				expiresAt := reservation.ExpiresTS.Time
+				fc.ExpiresAt = &expiresAt
+				fc.HolderReservationIDs = append(fc.HolderReservationIDs, reservation.ID)
+				break
+			}
+		}
+
+		notifications = append(notifications, fc)
+	}
+
+	return notifications
+}
+
+func hasConflictHolders(conflicts []agentmail.ReservationConflict) bool {
+	for _, conflict := range conflicts {
+		if len(conflict.Holders) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func clonePaneReservation(reservation PaneReservation) PaneReservation {
+	reservation.Files = append([]string(nil), reservation.Files...)
+	reservation.ReservationID = append([]int(nil), reservation.ReservationID...)
+	return reservation
 }
 
 // =============================================================================

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/cli/tiers"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // ProficiencyConfig stores user proficiency tier and usage statistics.
@@ -126,7 +127,7 @@ func (c *ProficiencyConfig) Save() error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return util.AtomicWriteFile(path, data, 0644)
 }
 
 // GetTier returns the effective proficiency tier.
@@ -213,7 +214,7 @@ func (c *ProficiencyConfig) saveUnlocked() error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return util.AtomicWriteFile(path, data, 0644)
 }
 
 // GetUsageStats returns a deep copy of current usage statistics.

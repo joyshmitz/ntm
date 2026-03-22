@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // SpawnManifest represents the configuration of a spawned session for monitoring
@@ -63,7 +65,7 @@ func SaveManifest(manifest *SpawnManifest) error {
 		return fmt.Errorf("marshaling manifest: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return util.AtomicWriteFile(path, data, 0644)
 }
 
 // LoadManifest loads the spawn manifest for a session

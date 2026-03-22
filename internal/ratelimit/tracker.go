@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/util"
+
 	"github.com/Dicklesworthstone/ntm/internal/status"
 )
 
@@ -402,7 +404,7 @@ func (t *RateLimitTracker) SaveToDir(dir string) error {
 	}
 
 	path := filepath.Join(ntmDir, "rate_limits.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := util.AtomicWriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write rate limits file: %w", err)
 	}
 

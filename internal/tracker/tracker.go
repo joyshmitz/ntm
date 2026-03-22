@@ -88,9 +88,11 @@ func (t *StateTracker) Record(change StateChange) {
 	// Prune old entries first
 	t.pruneOld()
 
-	// If at capacity, remove oldest
+	// If at capacity, remove oldest (copy to new slice to avoid pinning old backing array)
 	if len(t.changes) >= t.maxSize {
-		t.changes = t.changes[1:]
+		surviving := make([]StateChange, len(t.changes)-1, t.maxSize)
+		copy(surviving, t.changes[1:])
+		t.changes = surviving
 	}
 
 	t.changes = append(t.changes, change)
@@ -169,7 +171,9 @@ func (t *StateTracker) pruneOld() {
 	}
 
 	if keepFrom > 0 && keepFrom <= len(t.changes) {
-		t.changes = t.changes[keepFrom:]
+		surviving := make([]StateChange, len(t.changes)-keepFrom)
+		copy(surviving, t.changes[keepFrom:])
+		t.changes = surviving
 	}
 }
 

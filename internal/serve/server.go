@@ -831,7 +831,7 @@ func New(cfg Config) *Server {
 	s.streamManager = tmux.NewStreamManager(tmux.DefaultClient, func(event tmux.StreamEvent) {
 		// Publish pane output to WebSocket subscribers
 		// Topic format: panes:session:pane_idx
-		s.wsHub.Publish(event.Target, "pane.output", map[string]interface{}{
+		s.wsHub.Publish(streamTopicForTarget(event.Target), "pane.output", map[string]interface{}{
 			"lines":   event.Lines,
 			"seq":     event.Seq,
 			"ts":      event.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -1255,7 +1255,7 @@ func (s *Server) corsMiddlewareFunc(next http.Handler) http.Handler {
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, Idempotency-Key, "+requestIDHeader)
 		}
 
@@ -1291,7 +1291,7 @@ func (s *Server) authMiddlewareFunc(next http.Handler) http.Handler {
 func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only apply to mutating methods
-		if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1395,8 +1395,8 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, "+requestIDHeader)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, Idempotency-Key, "+requestIDHeader)
 		}
 
 		if r.Method == "OPTIONS" {
@@ -3026,8 +3026,9 @@ func (s *Server) handleStartPaneStreamV1(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Target format for streaming is "session:pane_idx" which matches WebSocket topic "panes:session:idx"
+	// Stream manager targets use raw tmux-style "session:pane_idx".
 	target := fmt.Sprintf("%s:%d", sessionID, paneIdx)
+	topic := streamTopicForTarget(target)
 
 	if err := s.streamManager.StartStream(target); err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
@@ -3036,7 +3037,7 @@ func (s *Server) handleStartPaneStreamV1(w http.ResponseWriter, r *http.Request)
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"target":  target,
-		"topic":   target, // WebSocket topic to subscribe to
+		"topic":   topic,
 		"message": "streaming started",
 	}, reqID)
 }
@@ -3065,6 +3066,13 @@ func (s *Server) handleStopPaneStreamV1(w http.ResponseWriter, r *http.Request) 
 		"target":  target,
 		"message": "streaming stopped",
 	}, reqID)
+}
+
+func streamTopicForTarget(target string) string {
+	if strings.HasPrefix(target, "panes:") {
+		return target
+	}
+	return "panes:" + target
 }
 
 // handleStreamingStatsV1 handles GET /api/v1/streaming/stats.
