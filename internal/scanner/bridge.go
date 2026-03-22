@@ -68,13 +68,22 @@ func SeverityToPriority(sev Severity) BeadPriority {
 }
 
 // SeverityMeetsTreshold returns true if sev meets or exceeds the threshold.
+// Unknown severities are treated as Info (lowest priority) to avoid false positives.
 func SeverityMeetsThreshold(sev, threshold Severity) bool {
 	severityOrder := map[Severity]int{
 		SeverityCritical: 0,
 		SeverityWarning:  1,
 		SeverityInfo:     2,
 	}
-	return severityOrder[sev] <= severityOrder[threshold]
+	sevVal, ok := severityOrder[sev]
+	if !ok {
+		sevVal = 2 // unknown → Info (least severe)
+	}
+	threshVal, ok := severityOrder[threshold]
+	if !ok {
+		threshVal = 2
+	}
+	return sevVal <= threshVal
 }
 
 // FindingSignature generates a unique signature for a finding.

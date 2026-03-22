@@ -115,11 +115,14 @@ func (idx *DedupIndex) Add(f Finding, beadID string) {
 }
 
 // FindingsForFile returns signatures of all indexed findings in a file.
+// Returns a copy to avoid aliasing internal state.
 func (idx *DedupIndex) FindingsForFile(file string) []string {
 	idx.mu.RLock()
-	sigs := idx.ByFile[file]
+	orig := idx.ByFile[file]
+	out := make([]string, len(orig))
+	copy(out, orig)
 	idx.mu.RUnlock()
-	return sigs
+	return out
 }
 
 // parseBeadForDedup extracts signature and file from bead title/description.
