@@ -1093,7 +1093,8 @@ func newTestAttentionStore(t *testing.T) *state.Store {
 
 func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 	store := newTestAttentionStore(t)
-	firstCollectedAt := time.Date(2026, 3, 22, 19, 30, 0, 0, time.UTC)
+	firstCollectedAt := time.Now().UTC()
+	staleWindow := 10 * time.Minute
 	firstTmuxSnapshot := &NormalizedSnapshot{
 		Sessions: []state.RuntimeSession{
 			{
@@ -1198,7 +1199,7 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 		},
 	}
 
-	if err := persistNormalizedProjection(store, first, firstTmuxSnapshot, time.Minute); err != nil {
+	if err := persistNormalizedProjection(store, first, firstTmuxSnapshot, staleWindow); err != nil {
 		t.Fatalf("persistNormalizedProjection(first) error: %v", err)
 	}
 
@@ -1322,7 +1323,7 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 		},
 	}
 
-	if err := persistNormalizedProjection(store, second, secondTmuxSnapshot, time.Minute); err != nil {
+	if err := persistNormalizedProjection(store, second, secondTmuxSnapshot, staleWindow); err != nil {
 		t.Fatalf("persistNormalizedProjection(second) error: %v", err)
 	}
 
