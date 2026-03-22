@@ -26,8 +26,6 @@ interface Session {
   created_at?: string;
   project_path?: string;
   status?: string;
-  panes?: { index: number; agent_type?: string }[];
-  tags?: string[];
 }
 
 interface SessionResponse extends ApiEnvelope {
