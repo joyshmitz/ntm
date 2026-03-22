@@ -108,3 +108,4 @@ storage.sqlite3-shm.corrupt-*
 storage.sqlite3-wal.corrupt-*
 .env
 .claude/settings.local.json
+.gomodcache/
