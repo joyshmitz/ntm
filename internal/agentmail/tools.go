@@ -74,7 +74,7 @@ func (c *Client) CreateAgentIdentity(ctx context.Context, opts RegisterAgentOpti
 		args["task_description"] = opts.TaskDescription
 	}
 
-	result, err := c.callTool(ctx, "create_agent_identity", args)
+	result, err := c.callToolWithBusyRetry(ctx, "create_agent_identity", args, 3*time.Second, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -236,27 +236,45 @@ func (c *Client) FetchInbox(ctx context.Context, opts FetchInboxOptions) ([]Inbo
 }
 
 // MarkMessageRead marks a message as read for an agent.
-func (c *Client) MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) error {
+func (c *Client) MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) (*MessageReadResult, error) {
 	args := map[string]interface{}{
 		"project_key": projectKey,
 		"agent_name":  agentName,
 		"message_id":  messageID,
 	}
 
-	_, err := c.callTool(ctx, "mark_message_read", args)
-	return err
+	result, err := c.callTool(ctx, "mark_message_read", args)
+	if err != nil {
+		return nil, err
+	}
+
+	var readResult MessageReadResult
+	if err := json.Unmarshal(result, &readResult); err != nil {
+		return nil, NewAPIError("mark_message_read", 0, err)
+	}
+
+	return &readResult, nil
 }
 
 // AcknowledgeMessage acknowledges a message for an agent.
-func (c *Client) AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) error {
+func (c *Client) AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) (*MessageAckResult, error) {
 	args := map[string]interface{}{
 		"project_key": projectKey,
 		"agent_name":  agentName,
 		"message_id":  messageID,
 	}
 
-	_, err := c.callTool(ctx, "acknowledge_message", args)
-	return err
+	result, err := c.callTool(ctx, "acknowledge_message", args)
+	if err != nil {
+		return nil, err
+	}
+
+	var ackResult MessageAckResult
+	if err := json.Unmarshal(result, &ackResult); err != nil {
+		return nil, NewAPIError("acknowledge_message", 0, err)
+	}
+
+	return &ackResult, nil
 }
 
 // ContactRequestResult contains the result of a contact request.

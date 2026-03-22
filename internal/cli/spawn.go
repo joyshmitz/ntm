@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -2156,6 +2157,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			}
 		}
 
+		// Register session coordinator with Agent Mail (creates agent.json for ntm lock)
+		registerSessionAgent(opts.Session, dir)
+
 		// Register spawned agents with Agent Mail
 		var agentMailStatus *output.AgentMailSpawnStatus
 		if len(launchedAgents) > 0 {
@@ -2238,6 +2242,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 
 	// Print "What's next?" suggestions
 	output.SuccessFooter(output.SpawnSuggestions(opts.Session)...)
+
+	// Register session coordinator with Agent Mail (creates agent.json for ntm lock)
+	registerSessionAgent(opts.Session, dir)
 
 	// Register spawned agents with Agent Mail (non-JSON mode)
 	if len(launchedAgents) > 0 {
@@ -2620,7 +2627,7 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 			model = agent.model
 		}
 
-		regCtx, regCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		regCtx, regCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		registered, err := client.CreateAgentIdentity(regCtx, agentmail.RegisterAgentOptions{
 			ProjectKey: workingDir,
 			Program:    program,
@@ -2629,11 +2636,39 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 		regCancel()
 
 		if err != nil {
-			status.AgentsFailed++
-			if !IsJSONOutput() {
-				output.PrintWarningf("Agent Mail registration failed for pane %d: %v", agent.paneIndex, err)
+			// On transient busy errors, the agent may have been created server-side
+			// despite the error. Reconcile by listing agents and checking.
+			if errors.Is(err, agentmail.ErrTransientBusy) {
+				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				agents, listErr := client.ListAgents(reconcileCtx, workingDir)
+				reconcileCancel()
+				if listErr == nil {
+					// Look for a recently-created agent matching our program/model
+					var found *agentmail.Agent
+					for i := range agents {
+						if agents[i].Program == program && agents[i].Model == model {
+							if found == nil || agents[i].ID > found.ID {
+								found = &agents[i]
+							}
+						}
+					}
+					if found != nil {
+						// Agent was actually created — treat as success
+						registered = found
+						err = nil
+						if !IsJSONOutput() {
+							output.PrintInfof("Reconciled busy response for pane %d: agent %s exists", agent.paneIndex, found.Name)
+						}
+					}
+				}
 			}
-			continue
+			if err != nil {
+				status.AgentsFailed++
+				if !IsJSONOutput() {
+					output.PrintWarningf("Agent Mail registration failed for pane %d: %v", agent.paneIndex, err)
+				}
+				continue
+			}
 		}
 
 		// Write per-pane identity file so notify hooks can resolve AGENT_MAIL_AGENT.

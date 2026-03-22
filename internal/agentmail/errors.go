@@ -35,6 +35,11 @@ var (
 
 	// ErrReservationConflict is returned when a file reservation conflicts with existing ones.
 	ErrReservationConflict = errors.New("file reservation conflict")
+
+	// ErrTransientBusy is returned when the server reports a temporary busy
+	// condition (e.g. non-atomic create_agent_identity partially completed).
+	// Callers should retry with backoff rather than treating this as a hard failure.
+	ErrTransientBusy = errors.New("resource temporarily busy")
 )
 
 // JSONRPCError represents a JSON-RPC 2.0 error response.
@@ -111,6 +116,12 @@ func IsReservationConflict(err error) bool {
 	return errors.Is(err, ErrReservationConflict)
 }
 
+// IsTransientBusy returns true if the error indicates a temporary busy condition
+// that should be retried.
+func IsTransientBusy(err error) bool {
+	return errors.Is(err, ErrTransientBusy)
+}
+
 // mapJSONRPCError converts JSON-RPC error codes to Go errors.
 func mapJSONRPCError(rpcErr *JSONRPCError) error {
 	if rpcErr == nil {
@@ -128,6 +139,8 @@ func mapJSONRPCError(rpcErr *JSONRPCError) error {
 		return fmt.Errorf("%w: %s", ErrReservationConflict, rpcErr.Message)
 	case strings.Contains(msg, "not found") && !strings.Contains(msg, "method not found"):
 		return fmt.Errorf("%w: %s", ErrNotFound, rpcErr.Message)
+	case strings.Contains(msg, "busy") || strings.Contains(msg, "temporarily unavailable"):
+		return fmt.Errorf("%w: %s", ErrTransientBusy, rpcErr.Message)
 	}
 
 	// Map common JSON-RPC error codes

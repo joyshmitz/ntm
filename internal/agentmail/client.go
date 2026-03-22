@@ -393,6 +393,35 @@ func (c *Client) callToolWithTimeout(ctx context.Context, toolName string, args 
 	return c.callTool(ctx, toolName, args)
 }
 
+// callToolWithBusyRetry wraps callTool with retry logic for ErrTransientBusy errors.
+// It retries up to maxRetries times with exponential backoff (500ms, 1s, 2s).
+func (c *Client) callToolWithBusyRetry(ctx context.Context, toolName string, args map[string]interface{}, perCallTimeout time.Duration, maxRetries int) (json.RawMessage, error) {
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		callCtx, cancel := context.WithTimeout(ctx, perCallTimeout)
+		result, err := c.callTool(callCtx, toolName, args)
+		cancel()
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !IsTransientBusy(err) {
+			return nil, err
+		}
+		// Transient busy — wait before retrying (unless this was the last attempt)
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+	}
+	return nil, lastErr
+}
+
 // ReadResource reads a resource from the Agent Mail server.
 func (c *Client) ReadResource(ctx context.Context, uri string) (json.RawMessage, error) {
 	reqID := c.requestID.Add(1)
