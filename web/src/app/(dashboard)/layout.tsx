@@ -103,7 +103,7 @@ interface KernelListResponse extends ApiEnvelope {
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const baseUrl = getApiBaseUrl();
+  const baseUrl = getBaseUrl();
   const headers: HeadersInit = {
     "Content-Type": "application/json",
     ...getAuthHeaders(),
@@ -272,7 +272,12 @@ function CommandPalette({
                 Loading commands...
               </div>
             )}
-            {!commandsQuery.isLoading && filtered.length === 0 && (
+            {commandsQuery.error && (
+              <div className="py-6 text-center text-sm text-red-500 dark:text-red-400">
+                Failed to load commands: {getErrorMessage(commandsQuery.error)}
+              </div>
+            )}
+            {!commandsQuery.isLoading && !commandsQuery.error && filtered.length === 0 && (
               <div className="py-6 text-center text-sm text-gray-400">
                 No commands match your search.
               </div>

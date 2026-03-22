@@ -71,7 +71,7 @@ func TestInferRuleCode(t *testing.T) {
 		// Git patterns
 		{"git reset hard", "git reset --hard", "HARD_RESET"},
 		{"git push force main", "git push --force origin main", "FORCE_PUSH_PROTECTED"},
-		{"git push force master", "git push -f origin master", "FORCE_PUSH_PROTECTED"},
+		{"git push force main short flag", "git push -f origin main", "FORCE_PUSH_PROTECTED"},
 		{"git push force other branch", "git push --force origin feature", "BLOCKED_COMMAND"}, // not protected
 
 		// Database patterns

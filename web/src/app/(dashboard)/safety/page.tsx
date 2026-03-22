@@ -6,7 +6,7 @@
  * Approvals, policy management, and hook/guard status.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
@@ -25,6 +25,8 @@ interface SafetyStatus {
   approval_rules: number;
   allowed_rules: number;
   wrapper_path?: string;
+  git_wrapper_installed: boolean;
+  rm_wrapper_installed: boolean;
   hook_installed: boolean;
 }
 
@@ -58,6 +60,7 @@ interface AutomationConfig {
 interface PolicyGetResponse extends ApiEnvelope {
   version: number;
   policy_path?: string;
+  content?: string;
   is_default: boolean;
   stats: PolicyStats;
   automation: AutomationConfig;
@@ -196,6 +199,7 @@ export default function SafetyPage() {
   const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
   const [policyYaml, setPolicyYaml] = useState("");
   const [showPolicyEditor, setShowPolicyEditor] = useState(false);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [actionBusy, setActionBusy] = useState({
     approve: false,
     deny: false,
@@ -206,9 +210,23 @@ export default function SafetyPage() {
     uninstall: false,
   });
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   // Safety status query
@@ -221,7 +239,7 @@ export default function SafetyPage() {
   // Policy query
   const policyQuery = useQuery({
     queryKey: ["safety", "policy"],
-    queryFn: () => apiFetch<PolicyGetResponse>("/api/v1/policy?rules=true"),
+    queryFn: () => apiFetch<PolicyGetResponse>("/api/v1/policy?rules=true&content=true"),
     refetchInterval: 30000,
   });
 
@@ -232,6 +250,12 @@ export default function SafetyPage() {
       const params = statusFilter !== "all" ? `?status=${statusFilter}` : "";
       return apiFetch<ApprovalsListResponse>(`/api/v1/approvals${params}`);
     },
+    refetchInterval: 5000,
+  });
+
+  const pendingApprovalsQuery = useQuery({
+    queryKey: ["safety", "approvals", "pending-card"],
+    queryFn: () => apiFetch<ApprovalsListResponse>("/api/v1/approvals?status=pending"),
     refetchInterval: 5000,
   });
 
@@ -253,9 +277,20 @@ export default function SafetyPage() {
     return approvalsList.find((a) => a.id === selectedApprovalId) ?? null;
   }, [approvalsList, selectedApprovalId]);
 
-  // Auto-select first pending approval
+  // Auto-select the first approval visible in the current filter.
   useEffect(() => {
-    if (selectedApprovalId === null && approvalsList.length > 0) {
+    if (approvalsList.length === 0) {
+      if (selectedApprovalId !== null) {
+        setSelectedApprovalId(null);
+      }
+      return;
+    }
+
+    const hasSelectedApproval = selectedApprovalId
+      ? approvalsList.some((approval) => approval.id === selectedApprovalId)
+      : false;
+
+    if (!hasSelectedApproval) {
       setSelectedApprovalId(approvalsList[0].id);
     }
   }, [approvalsList, selectedApprovalId]);
@@ -384,10 +419,30 @@ export default function SafetyPage() {
     }
   }, [queryClient, setStatusNotice]);
 
-  const connectionError = statusQuery.error ?? policyQuery.error ?? approvalsQuery.error;
+  const connectionError =
+    statusQuery.error ??
+    policyQuery.error ??
+    pendingApprovalsQuery.error ??
+    approvalsQuery.error ??
+    blockedQuery.error;
 
   const safetyStatus = statusQuery.data;
   const policyData = policyQuery.data;
+  const wrappersInstalled =
+    safetyStatus?.git_wrapper_installed && safetyStatus?.rm_wrapper_installed;
+  const wrapperStatusText = wrappersInstalled
+    ? "Installed"
+    : safetyStatus?.git_wrapper_installed || safetyStatus?.rm_wrapper_installed
+      ? "Partial"
+      : "Not installed";
+
+  useEffect(() => {
+    if (showPolicyEditor) {
+      return;
+    }
+    setPolicyYaml(policyData?.content || "");
+    setValidationResult(null);
+  }, [policyData?.content, showPolicyEditor]);
 
   return (
     <div className="space-y-8">
@@ -462,7 +517,8 @@ export default function SafetyPage() {
             </span>
           </div>
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            Hook: {safetyStatus?.hook_installed ? "Installed" : "Not installed"}
+            Wrappers: {wrapperStatusText} · Hook:{" "}
+            {safetyStatus?.hook_installed ? "Installed" : "Not installed"}
           </div>
         </div>
 
@@ -486,7 +542,7 @@ export default function SafetyPage() {
             Pending Approvals
           </div>
           <div className="mt-2 text-lg font-semibold text-gray-900 dark:text-white">
-            {approvalsQuery.data?.count ?? 0}
+            {pendingApprovalsQuery.data?.count ?? 0}
           </div>
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
             {(policyData?.stats?.slb_rules ?? 0) > 0

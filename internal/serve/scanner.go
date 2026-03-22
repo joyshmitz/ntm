@@ -91,6 +91,27 @@ func (s *ScannerStore) AddScan(scan *ScanRecord) {
 	s.scanList = append(s.scanList, scan.ID)
 }
 
+// TryStartScan atomically registers a new pending/running scan only when no other
+// active scan exists. It returns the conflicting active scan when registration fails.
+func (s *ScannerStore) TryStartScan(scan *ScanRecord) (*ScanRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := len(s.scanList) - 1; i >= 0; i-- {
+		existing, ok := s.scans[s.scanList[i]]
+		if !ok || existing == nil {
+			continue
+		}
+		if existing.State == ScanStatePending || existing.State == ScanStateRunning {
+			return existing, false
+		}
+	}
+
+	s.scans[scan.ID] = scan
+	s.scanList = append(s.scanList, scan.ID)
+	return nil, true
+}
+
 // GetScan retrieves a scan by ID
 func (s *ScannerStore) GetScan(id string) (*ScanRecord, bool) {
 	s.mu.RLock()
@@ -141,6 +162,24 @@ func (s *ScannerStore) GetRunningScan() *ScanRecord {
 			return scan
 		}
 	}
+	return nil
+}
+
+// GetActiveScan returns the newest pending or running scan, if any.
+func (s *ScannerStore) GetActiveScan() *ScanRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for i := len(s.scanList) - 1; i >= 0; i-- {
+		scan, ok := s.scans[s.scanList[i]]
+		if !ok || scan == nil {
+			continue
+		}
+		if scan.State == ScanStatePending || scan.State == ScanStateRunning {
+			return scan
+		}
+	}
+
 	return nil
 }
 
@@ -319,9 +358,9 @@ func (s *Server) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get current/last scan
-	status.CurrentScan = scannerStore.GetRunningScan()
+	status.CurrentScan = scannerStore.GetActiveScan()
 	scans := scannerStore.GetScans(1, 0)
-	if len(scans) > 0 && scans[0].State != ScanStateRunning {
+	if len(scans) > 0 && scans[0].State != ScanStateRunning && scans[0].State != ScanStatePending {
 		status.LastScan = scans[0]
 	}
 
@@ -331,14 +370,20 @@ func (s *Server) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
 	status.TotalFindings = len(scannerStore.findings)
 	scannerStore.mu.RUnlock()
 
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"available":      status.Available,
 		"version":        status.Version,
-		"current_scan":   status.CurrentScan,
-		"last_scan":      status.LastScan,
 		"total_scans":    status.TotalScans,
 		"total_findings": status.TotalFindings,
-	}, reqID)
+	}
+	if status.CurrentScan != nil {
+		resp["current_scan"] = status.CurrentScan
+	}
+	if status.LastScan != nil {
+		resp["last_scan"] = status.LastScan
+	}
+
+	writeSuccessResponse(w, http.StatusOK, resp, reqID)
 }
 
 // handleRunScan starts a new scan
@@ -353,22 +398,12 @@ func (s *Server) handleRunScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if a scan is already running
-	if running := scannerStore.GetRunningScan(); running != nil {
-		slog.Warn("scan already in progress", "request_id", reqID, "scan_id", running.ID)
-		writeErrorResponse(w, http.StatusConflict, ErrCodeScanInProgress,
-			"A scan is already in progress", map[string]interface{}{"scan_id": running.ID}, reqID)
-		return
-	}
-
 	// Parse request
 	var opts ScanOptionsRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
-			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
-				"Invalid request body", nil, reqID)
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &opts); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"Invalid request body", nil, reqID)
+		return
 	}
 
 	// Default path to project directory
@@ -388,7 +423,12 @@ func (s *Server) handleRunScan(w http.ResponseWriter, r *http.Request) {
 		Options:   &opts,
 		StartedAt: time.Now(),
 	}
-	scannerStore.AddScan(scan)
+	if activeScan, ok := scannerStore.TryStartScan(scan); !ok {
+		slog.Warn("scan already in progress", "request_id", reqID, "scan_id", activeScan.ID)
+		writeErrorResponse(w, http.StatusConflict, ErrCodeScanInProgress,
+			"A scan is already in progress", map[string]interface{}{"scan_id": activeScan.ID}, reqID)
+		return
+	}
 
 	slog.Info("starting scan", "request_id", reqID, "scan_id", scanID, "path", path)
 
@@ -604,8 +644,10 @@ func (s *Server) handleDismissFinding(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request
 	var req DismissFindingRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"Invalid request body", nil, reqID)
+		return
 	}
 
 	// Get user from RBAC context
@@ -654,8 +696,10 @@ func (s *Server) handleCreateBeadFromFinding(w http.ResponseWriter, r *http.Requ
 
 	// Parse request
 	var req CreateBeadFromFindingRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"Invalid request body", nil, reqID)
+		return
 	}
 
 	// Generate bead title
@@ -717,7 +761,9 @@ func (s *Server) handleCreateBeadFromFinding(w http.ResponseWriter, r *http.Requ
 	// Parse bead ID from output (assuming format "Created <id>: ...")
 	beadID := extractBeadID(output)
 	if beadID == "" {
-		beadID = "unknown"
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeBeadsUnavailable,
+			"Failed to determine bead ID from br output", map[string]interface{}{"output": strings.TrimSpace(output)}, reqID)
+		return
 	}
 
 	// Update bead description

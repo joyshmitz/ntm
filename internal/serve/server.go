@@ -171,6 +171,8 @@ const (
 	ErrCodeConflict         = "CONFLICT"
 	ErrCodeInternalError    = "INTERNAL_ERROR"
 	ErrCodeServiceUnavail   = "SERVICE_UNAVAILABLE"
+	ErrCodeNotImplemented   = "NOT_IMPLEMENTED"
+	ErrCodeTimeout          = "TIMEOUT"
 	ErrCodeIdempotentReplay = "IDEMPOTENT_REPLAY"
 	ErrCodeJobPending       = "JOB_PENDING"
 )
@@ -1542,6 +1544,24 @@ func writeSuccessResponse(w http.ResponseWriter, status int, data map[string]int
 		data["request_id"] = requestID
 	}
 	writeJSON(w, status, data)
+}
+
+// decodeOptionalJSONBody decodes an optional JSON request body into dst.
+// An empty body is treated as "not provided", while malformed JSON is rejected.
+func decodeOptionalJSONBody(r *http.Request, dst interface{}) error {
+	if r == nil || r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+
+	return nil
 }
 
 // handleHealth handles health check requests.

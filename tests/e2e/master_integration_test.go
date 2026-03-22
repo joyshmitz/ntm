@@ -36,7 +36,7 @@ type TestReport struct {
 	} `json:"summary"`
 }
 
-// IntegrationRunner manages the master integration test execution.
+// IntegrationRunner manages the main integration test execution.
 type IntegrationRunner struct {
 	t           *testing.T
 	logger      *testutil.TestLogger
@@ -137,13 +137,13 @@ func (r *IntegrationRunner) Finalize() *TestReport {
 	return r.report
 }
 
-// TestMasterIntegration_FullSystemFlow exercises all 15 NTM features in sequence.
-func TestMasterIntegration_FullSystemFlow(t *testing.T) {
+// TestMainIntegration_FullSystemFlow exercises all 15 NTM features in sequence.
+func TestMainIntegration_FullSystemFlow(t *testing.T) {
 	testutil.RequireE2E(t)
 
 	tmpDir := t.TempDir()
 	logger := testutil.NewTestLogger(t, tmpDir)
-	logger.LogSection("E2E-MASTER: Full NTM System Flow Integration Test")
+	logger.LogSection("E2E-MAIN: Full NTM System Flow Integration Test")
 
 	runner := NewIntegrationRunner(t, logger, tmpDir)
 
@@ -269,7 +269,7 @@ func (r *IntegrationRunner) phaseProjectInit() error {
 		if err := os.MkdirAll(path, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
-		r.logger.Log("[E2E-MASTER] Created: %s", dir)
+		r.logger.Log("[E2E-MAIN] Created: %s", dir)
 	}
 
 	// Create minimal config
@@ -284,7 +284,7 @@ default_model = "opus"
 	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
-	r.logger.Log("[E2E-MASTER] Config written: %s", configPath)
+	r.logger.Log("[E2E-MAIN] Config written: %s", configPath)
 
 	// Verify structure
 	for _, dir := range dirs {
@@ -294,7 +294,7 @@ default_model = "opus"
 		}
 	}
 
-	r.logger.Log("[E2E-MASTER] Project initialized: %s", r.projectName)
+	r.logger.Log("[E2E-MAIN] Project initialized: %s", r.projectName)
 	return nil
 }
 
@@ -312,8 +312,8 @@ func (r *IntegrationRunner) phaseTemplateSpawn() error {
 		return fmt.Errorf("config not found for spawn: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Template spawn validated (config exists)")
-	r.logger.Log("[E2E-MASTER] Note: Actual tmux spawn skipped to avoid session side effects")
+	r.logger.Log("[E2E-MAIN] Template spawn validated (config exists)")
+	r.logger.Log("[E2E-MAIN] Note: Actual tmux spawn skipped to avoid session side effects")
 	return nil
 }
 
@@ -338,7 +338,7 @@ func (r *IntegrationRunner) phaseCMContext() error {
 		return fmt.Errorf("failed to write memory file: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] CM memory created: %s", memPath)
+	r.logger.Log("[E2E-MAIN] CM memory created: %s", memPath)
 
 	// Verify file is readable
 	data, err := os.ReadFile(memPath)
@@ -349,7 +349,7 @@ func (r *IntegrationRunner) phaseCMContext() error {
 		return fmt.Errorf("memory file missing expected content")
 	}
 
-	r.logger.Log("[E2E-MASTER] CM context loading verified")
+	r.logger.Log("[E2E-MAIN] CM context loading verified")
 	return nil
 }
 
@@ -371,7 +371,7 @@ func (r *IntegrationRunner) phaseTaskAssignment() error {
 		return fmt.Errorf("failed to write issues: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Created %d test beads", len(issues))
+	r.logger.Log("[E2E-MAIN] Created %d test beads", len(issues))
 
 	// Verify beads file
 	data, err := os.ReadFile(issuesPath)
@@ -382,7 +382,7 @@ func (r *IntegrationRunner) phaseTaskAssignment() error {
 		return fmt.Errorf("issues file missing expected bead")
 	}
 
-	r.logger.Log("[E2E-MASTER] Task assignment verified")
+	r.logger.Log("[E2E-MAIN] Task assignment verified")
 	return nil
 }
 
@@ -410,7 +410,7 @@ func (r *IntegrationRunner) phaseFileReservation() error {
 		return fmt.Errorf("failed to write reservation: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] File reservation created: %s", resPath)
+	r.logger.Log("[E2E-MAIN] File reservation created: %s", resPath)
 
 	// Verify reservation
 	data, err := os.ReadFile(resPath)
@@ -427,7 +427,7 @@ func (r *IntegrationRunner) phaseFileReservation() error {
 		return fmt.Errorf("reservation agent mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] File reservation verified")
+	r.logger.Log("[E2E-MAIN] File reservation verified")
 	return nil
 }
 
@@ -458,7 +458,7 @@ func (r *IntegrationRunner) phaseAgentCommunication() error {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Agent message created: %s", msgPath)
+	r.logger.Log("[E2E-MAIN] Agent message created: %s", msgPath)
 
 	// Verify message
 	data, err := os.ReadFile(msgPath)
@@ -475,7 +475,7 @@ func (r *IntegrationRunner) phaseAgentCommunication() error {
 		return fmt.Errorf("message sender mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] Agent communication verified")
+	r.logger.Log("[E2E-MAIN] Agent communication verified")
 	return nil
 }
 
@@ -514,7 +514,7 @@ func (r *IntegrationRunner) phaseContextMonitoring() error {
 		return fmt.Errorf("failed to write context state: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Context state written: %s", statePath)
+	r.logger.Log("[E2E-MAIN] Context state written: %s", statePath)
 
 	// Verify state shows warning for cc_1
 	data, err := os.ReadFile(statePath)
@@ -525,7 +525,7 @@ func (r *IntegrationRunner) phaseContextMonitoring() error {
 		return fmt.Errorf("context state missing warning alert")
 	}
 
-	r.logger.Log("[E2E-MASTER] Context monitoring verified (warning detected)")
+	r.logger.Log("[E2E-MAIN] Context monitoring verified (warning detected)")
 	return nil
 }
 
@@ -566,7 +566,7 @@ func (r *IntegrationRunner) phaseCostTracking() error {
 		return fmt.Errorf("failed to write cost data: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Cost data written: $%.2f total", costData["total_cost_usd"])
+	r.logger.Log("[E2E-MAIN] Cost data written: $%.2f total", costData["total_cost_usd"])
 
 	// Verify cost breakdown
 	readData, err := os.ReadFile(costPath)
@@ -583,7 +583,7 @@ func (r *IntegrationRunner) phaseCostTracking() error {
 		return fmt.Errorf("cost total mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] Cost tracking verified")
+	r.logger.Log("[E2E-MAIN] Cost tracking verified")
 	return nil
 }
 
@@ -592,12 +592,12 @@ func (r *IntegrationRunner) phaseStaggeredOps() error {
 	staggerInterval := 100 * time.Millisecond
 	numOps := 3
 
-	r.logger.Log("[E2E-MASTER] Testing staggered operations: %d ops at %s intervals", numOps, staggerInterval)
+	r.logger.Log("[E2E-MAIN] Testing staggered operations: %d ops at %s intervals", numOps, staggerInterval)
 
 	times := make([]time.Time, numOps)
 	for i := 0; i < numOps; i++ {
 		times[i] = time.Now()
-		r.logger.Log("[E2E-MASTER] Staggered op %d at %s", i+1, times[i].Format("15:04:05.000"))
+		r.logger.Log("[E2E-MAIN] Staggered op %d at %s", i+1, times[i].Format("15:04:05.000"))
 		if i < numOps-1 {
 			time.Sleep(staggerInterval)
 		}
@@ -611,7 +611,7 @@ func (r *IntegrationRunner) phaseStaggeredOps() error {
 		}
 	}
 
-	r.logger.Log("[E2E-MASTER] Staggered operations verified")
+	r.logger.Log("[E2E-MAIN] Staggered operations verified")
 	return nil
 }
 
@@ -642,7 +642,7 @@ func (r *IntegrationRunner) phaseAgentHandoff() error {
 		return fmt.Errorf("failed to write handoff state: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Handoff: %s -> %s (reason: %s)",
+	r.logger.Log("[E2E-MAIN] Handoff: %s -> %s (reason: %s)",
 		handoffState["from_agent"], handoffState["to_agent"], handoffState["reason"])
 
 	// Verify handoff state
@@ -654,7 +654,7 @@ func (r *IntegrationRunner) phaseAgentHandoff() error {
 		return fmt.Errorf("handoff state missing target agent")
 	}
 
-	r.logger.Log("[E2E-MASTER] Agent handoff verified")
+	r.logger.Log("[E2E-MAIN] Agent handoff verified")
 	return nil
 }
 
@@ -700,7 +700,7 @@ func (r *IntegrationRunner) phasePromptHistory() error {
 		}
 	}
 
-	r.logger.Log("[E2E-MASTER] Prompt history: %d prompts recorded", len(prompts))
+	r.logger.Log("[E2E-MAIN] Prompt history: %d prompts recorded", len(prompts))
 
 	// Verify history
 	data, err := os.ReadFile(histPath)
@@ -713,7 +713,7 @@ func (r *IntegrationRunner) phasePromptHistory() error {
 		return fmt.Errorf("history count mismatch: expected %d, got %d", len(prompts), len(lines))
 	}
 
-	r.logger.Log("[E2E-MASTER] Prompt history verified")
+	r.logger.Log("[E2E-MAIN] Prompt history verified")
 	return nil
 }
 
@@ -749,7 +749,7 @@ func (r *IntegrationRunner) phaseSessionSummary() error {
 		return fmt.Errorf("failed to write summary: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Session summary generated: %s", summaryPath)
+	r.logger.Log("[E2E-MAIN] Session summary generated: %s", summaryPath)
 
 	// Verify summary
 	readData, err := os.ReadFile(summaryPath)
@@ -760,7 +760,7 @@ func (r *IntegrationRunner) phaseSessionSummary() error {
 		return fmt.Errorf("summary missing required fields")
 	}
 
-	r.logger.Log("[E2E-MASTER] Session summarization verified")
+	r.logger.Log("[E2E-MAIN] Session summarization verified")
 	return nil
 }
 
@@ -805,7 +805,7 @@ func (r *IntegrationRunner) phaseOutputArchive() error {
 		}
 	}
 
-	r.logger.Log("[E2E-MASTER] Archive created: %d records", len(records))
+	r.logger.Log("[E2E-MAIN] Archive created: %d records", len(records))
 
 	// Verify archive is readable
 	data, err := os.ReadFile(archivePath)
@@ -818,7 +818,7 @@ func (r *IntegrationRunner) phaseOutputArchive() error {
 		return fmt.Errorf("archive record count mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] Output archive verified")
+	r.logger.Log("[E2E-MAIN] Output archive verified")
 	return nil
 }
 
@@ -867,7 +867,7 @@ func (r *IntegrationRunner) phaseEffectivenessScoring() error {
 			return fmt.Errorf("failed to write score: %w", err)
 		}
 		metrics := score["metrics"].(map[string]interface{})
-		r.logger.Log("[E2E-MASTER] Score: %s = %.0f%%", score["agent_type"], metrics["overall"].(float64)*100)
+		r.logger.Log("[E2E-MAIN] Score: %s = %.0f%%", score["agent_type"], metrics["overall"].(float64)*100)
 	}
 
 	// Verify scores
@@ -881,7 +881,7 @@ func (r *IntegrationRunner) phaseEffectivenessScoring() error {
 		return fmt.Errorf("scores count mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] Effectiveness scoring verified")
+	r.logger.Log("[E2E-MAIN] Effectiveness scoring verified")
 	return nil
 }
 
@@ -915,7 +915,7 @@ func (r *IntegrationRunner) phaseSessionRecovery() error {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 
-	r.logger.Log("[E2E-MASTER] Checkpoint created: %s", checkpointPath)
+	r.logger.Log("[E2E-MAIN] Checkpoint created: %s", checkpointPath)
 
 	// Simulate recovery by reading checkpoint
 	readData, err := os.ReadFile(checkpointPath)
@@ -932,16 +932,16 @@ func (r *IntegrationRunner) phaseSessionRecovery() error {
 		return fmt.Errorf("checkpoint session mismatch")
 	}
 
-	r.logger.Log("[E2E-MASTER] Session recovery verified (checkpoint readable)")
+	r.logger.Log("[E2E-MAIN] Session recovery verified (checkpoint readable)")
 	return nil
 }
 
-// TestMasterIntegration_ReportFormat validates the JSON report format.
-func TestMasterIntegration_ReportFormat(t *testing.T) {
+// TestMainIntegration_ReportFormat validates the JSON report format.
+func TestMainIntegration_ReportFormat(t *testing.T) {
 	testutil.RequireE2E(t)
 
 	logger := testutil.NewTestLogger(t, t.TempDir())
-	logger.LogSection("E2E-MASTER: Report Format Validation")
+	logger.LogSection("E2E-MAIN: Report Format Validation")
 
 	// Create a sample report
 	report := TestReport{

@@ -2,6 +2,7 @@ package robot
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
 
@@ -469,6 +472,125 @@ func TestAttentionFeed_SubscriberPanicRecovery(t *testing.T) {
 	}
 }
 
+func TestAttentionFeed_SubscriberCanAppendFollowOnEvent(t *testing.T) {
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	feed.Subscribe(func(e AttentionEvent) {
+		if e.Summary == "seed" {
+			feed.Append(AttentionEvent{Summary: "follow-up"})
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		feed.Append(AttentionEvent{Summary: "seed"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Append deadlocked when subscriber emitted a follow-up event")
+	}
+
+	events, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Summary != "seed" || events[1].Summary != "follow-up" {
+		t.Fatalf("unexpected replay order: %#v", events)
+	}
+}
+
+func TestAttentionFeed_SubscriberFollowOnEventPreservesDeliveryOrder(t *testing.T) {
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	feed.Subscribe(func(e AttentionEvent) {
+		if e.Summary == "seed" {
+			feed.Append(AttentionEvent{Summary: "follow-up"})
+		}
+	})
+
+	received := make([]string, 0, 2)
+	feed.Subscribe(func(e AttentionEvent) {
+		received = append(received, e.Summary)
+	})
+
+	feed.Append(AttentionEvent{Summary: "seed"})
+
+	if len(received) != 2 {
+		t.Fatalf("received %d events, want 2", len(received))
+	}
+	if received[0] != "seed" || received[1] != "follow-up" {
+		t.Fatalf("delivery order = %#v, want []string{\"seed\", \"follow-up\"}", received)
+	}
+}
+
+func TestAttentionFeed_QueuedFollowOnEventUsesStableSnapshot(t *testing.T) {
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	defer feed.Stop()
+
+	details := map[string]any{"status": "original"}
+	received := make(chan AttentionEvent, 1)
+
+	feed.Subscribe(func(e AttentionEvent) {
+		if e.Summary == "seed" {
+			followUp := AttentionEvent{
+				Summary:       "follow-up",
+				Details:       details,
+				Actionability: ActionabilityInteresting,
+			}
+			feed.Append(followUp)
+			details["status"] = "mutated"
+			return
+		}
+		if e.Summary == "follow-up" {
+			received <- e
+		}
+	})
+
+	feed.Append(AttentionEvent{Summary: "seed"})
+
+	var delivered AttentionEvent
+	select {
+	case delivered = <-received:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for follow-up delivery")
+	}
+
+	if got := delivered.Details["status"]; got != "original" {
+		t.Fatalf("delivered status = %v, want %q", got, "original")
+	}
+
+	events, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if got := events[1].Details["status"]; got != "original" {
+		t.Fatalf("replayed status = %v, want %q", got, "original")
+	}
+}
+
 func TestAttentionFeed_PublishTrackerChange(t *testing.T) {
 	feed := newTestAttentionFeed(t)
 
@@ -606,6 +728,859 @@ func TestAttentionFeed_SubscribeEventBus(t *testing.T) {
 	if len(replayed) != 1 {
 		t.Fatalf("replayed %d events after unsubscribe, want 1", len(replayed))
 	}
+}
+
+// =============================================================================
+// Store-backed Persistence Tests (bd-j9jo3.4.1)
+// =============================================================================
+
+func TestAttentionFeed_StoreBackedPersistence(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	// Append event - should persist to store
+	event := AttentionEvent{
+		Session:       "test-proj",
+		Pane:          1,
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStateChange,
+		Source:        "test",
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		ReasonCode:    "agent:state:busy",
+		Summary:       "agent state changed",
+		Details:       map[string]any{"old": "idle", "new": "busy"},
+		NextActions: []NextAction{{
+			Action: "robot-status",
+			Args:   "--robot-status",
+			Reason: "Inspect the updated agent state",
+		}},
+		DedupKey: "agent|test-proj|1|busy",
+	}
+	appended := feed.Append(event)
+
+	if appended.Cursor <= 0 {
+		t.Fatalf("appended event should have positive cursor, got %d", appended.Cursor)
+	}
+
+	// Verify replay from store works
+	replayed, latestCursor, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(replayed) != 1 {
+		t.Fatalf("expected 1 replayed event, got %d", len(replayed))
+	}
+	if replayed[0].Cursor != appended.Cursor {
+		t.Fatalf("replayed cursor = %d, want %d", replayed[0].Cursor, appended.Cursor)
+	}
+	if replayed[0].Summary != "agent state changed" {
+		t.Fatalf("replayed summary = %q, want %q", replayed[0].Summary, "agent state changed")
+	}
+	if replayed[0].ReasonCode != event.ReasonCode {
+		t.Fatalf("replayed reason code = %q, want %q", replayed[0].ReasonCode, event.ReasonCode)
+	}
+	if replayed[0].DedupKey != event.DedupKey {
+		t.Fatalf("replayed dedup key = %q, want %q", replayed[0].DedupKey, event.DedupKey)
+	}
+	if len(replayed[0].NextActions) != 1 || replayed[0].NextActions[0].Action != "robot-status" {
+		t.Fatalf("replayed next actions = %+v, want robot-status action", replayed[0].NextActions)
+	}
+	if latestCursor < appended.Cursor {
+		t.Fatalf("latest cursor = %d, should be >= appended cursor %d", latestCursor, appended.Cursor)
+	}
+
+	// Verify stats reflect store state
+	stats := feed.Stats()
+	if stats.Count != 1 {
+		t.Fatalf("stats.Count = %d, want 1", stats.Count)
+	}
+	if stats.NewestCursor != appended.Cursor {
+		t.Fatalf("stats.NewestCursor = %d, want %d", stats.NewestCursor, appended.Cursor)
+	}
+}
+
+func TestAttentionFeed_StoreSyncCursorOnStartup(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+
+	// Pre-seed store with events
+	for i := 0; i < 5; i++ {
+		stored := state.StoredAttentionEvent{
+			Ts:            time.Now().UTC(),
+			SessionName:   "proj",
+			Category:      "agent",
+			EventType:     "agent.state_change",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityInfo,
+			Summary:       "seeded event",
+			DedupCount:    1,
+		}
+		if _, err := store.AppendAttentionEvent(&stored); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+
+	// Create feed with store - should sync cursor
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	// Cursor should be synced from store (at least 5)
+	currentCursor := feed.CurrentCursor()
+	if currentCursor < 5 {
+		t.Fatalf("cursor should be synced from store (>= 5), got %d", currentCursor)
+	}
+
+	// New events should get cursors after the synced value
+	appended := feed.Append(AttentionEvent{
+		Session:       "proj",
+		Category:      EventCategorySystem,
+		Type:          EventTypeSystemHealthChange,
+		Source:        "test",
+		Actionability: ActionabilityBackground,
+		Severity:      SeverityInfo,
+		Summary:       "new event after sync",
+	})
+
+	if appended.Cursor <= currentCursor {
+		t.Fatalf("new event cursor %d should be > synced cursor %d", appended.Cursor, currentCursor)
+	}
+}
+
+func TestAttentionFeed_StoreCursorExpiration(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Minute, // Short retention for test
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	// Add events
+	for i := 0; i < 3; i++ {
+		feed.Append(AttentionEvent{
+			Session:       "proj",
+			Category:      EventCategoryAgent,
+			Type:          EventTypeAgentStateChange,
+			Source:        "test",
+			Actionability: ActionabilityInteresting,
+			Severity:      SeverityInfo,
+			Summary:       "test event",
+		})
+	}
+
+	// Replay from valid cursor should work
+	events, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay(0) error: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	// Replay from cursor=-1 should return empty with current cursor
+	events, latestCursor, err := feed.Replay(-1, 10)
+	if err != nil {
+		t.Fatalf("Replay(-1) error: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("Replay(-1) should return 0 events, got %d", len(events))
+	}
+	if latestCursor < 3 {
+		t.Fatalf("latest cursor should be >= 3, got %d", latestCursor)
+	}
+}
+
+func TestAttentionFeed_StoreWriteFailureFallsBackConsistently(t *testing.T) {
+	t.Parallel()
+
+	store := newStubAttentionStore()
+	store.seed("persisted")
+	store.failAppend.Store(true)
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	first := feed.Append(AttentionEvent{
+		Session:       "proj",
+		Category:      EventCategoryAlert,
+		Type:          EventTypeAlertWarning,
+		Source:        "test",
+		Actionability: ActionabilityActionRequired,
+		Severity:      SeverityWarning,
+		Summary:       "journal-only alert",
+	})
+	second := feed.Append(AttentionEvent{
+		Session:       "proj",
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStateChange,
+		Source:        "test",
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "journal-only state change",
+	})
+
+	if first.Cursor != 2 {
+		t.Fatalf("first fallback cursor = %d, want 2", first.Cursor)
+	}
+	if second.Cursor != 3 {
+		t.Fatalf("second fallback cursor = %d, want 3", second.Cursor)
+	}
+	if attempts := store.appendAttempts.Load(); attempts != 1 {
+		t.Fatalf("append attempts = %d, want 1 after disabling store writes", attempts)
+	}
+
+	stats := feed.Stats()
+	if stats.Count != 3 {
+		t.Fatalf("stats.Count = %d, want 3", stats.Count)
+	}
+	if stats.OldestCursor != 1 {
+		t.Fatalf("stats.OldestCursor = %d, want 1", stats.OldestCursor)
+	}
+	if stats.NewestCursor != 3 {
+		t.Fatalf("stats.NewestCursor = %d, want 3", stats.NewestCursor)
+	}
+
+	events, latestCursor, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if latestCursor != 3 {
+		t.Fatalf("latest cursor = %d, want 3", latestCursor)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 replayed events, got %d", len(events))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if events[i].Cursor != want {
+			t.Fatalf("events[%d].Cursor = %d, want %d", i, events[i].Cursor, want)
+		}
+	}
+}
+
+func TestAttentionFeed_ConcurrentAppendPreservesCursorOrder(t *testing.T) {
+	t.Parallel()
+
+	store := newStubAttentionStore()
+	store.blockFirstAppend()
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		feed.Append(AttentionEvent{
+			Session:       "proj",
+			Category:      EventCategoryAlert,
+			Type:          EventTypeAlertWarning,
+			Source:        "first",
+			Actionability: ActionabilityActionRequired,
+			Severity:      SeverityWarning,
+			Summary:       "first append",
+		})
+	}()
+
+	<-store.firstAppendStarted
+
+	go func() {
+		defer wg.Done()
+		feed.Append(AttentionEvent{
+			Session:       "proj",
+			Category:      EventCategoryAgent,
+			Type:          EventTypeAgentStateChange,
+			Source:        "second",
+			Actionability: ActionabilityInteresting,
+			Severity:      SeverityInfo,
+			Summary:       "second append",
+		})
+	}()
+
+	close(store.releaseFirstAppend)
+	wg.Wait()
+
+	events, _, err := feed.Replay(0, 10)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 replayed events, got %d", len(events))
+	}
+	if events[0].Cursor != 1 || events[1].Cursor != 2 {
+		t.Fatalf("replay cursors = [%d %d], want [1 2]", events[0].Cursor, events[1].Cursor)
+	}
+}
+
+func TestGetAttentionFeed_ReinitializesAfterSetNil(t *testing.T) {
+	oldFeed := PeekAttentionFeed()
+	SetAttentionFeed(nil)
+	t.Cleanup(func() {
+		SetAttentionFeed(oldFeed)
+	})
+
+	feed := GetAttentionFeed()
+	if feed == nil {
+		t.Fatal("GetAttentionFeed returned nil after SetAttentionFeed(nil)")
+	}
+}
+
+func TestSetAttentionFeed_ReplacesInitializedDefault(t *testing.T) {
+	oldFeed := PeekAttentionFeed()
+	defaultFeed := GetAttentionFeed()
+	customFeed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       8,
+		RetentionPeriod:   time.Minute,
+		HeartbeatInterval: 0,
+	})
+	t.Cleanup(func() {
+		SetAttentionFeed(oldFeed)
+		if customFeed != oldFeed && customFeed != defaultFeed {
+			customFeed.Stop()
+		}
+	})
+
+	SetAttentionFeed(customFeed)
+
+	if got := GetAttentionFeed(); got != customFeed {
+		t.Fatalf("GetAttentionFeed() = %p, want %p", got, customFeed)
+	}
+}
+
+// newTestAttentionStore creates a real in-memory SQLite store for testing.
+func newTestAttentionStore(t *testing.T) *state.Store {
+	t.Helper()
+
+	store, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Apply migrations to create the attention_events table
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate test store: %v", err)
+	}
+
+	return store
+}
+
+func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
+	store := newTestAttentionStore(t)
+	firstCollectedAt := time.Date(2026, 3, 22, 19, 30, 0, 0, time.UTC)
+	firstTmuxSnapshot := &NormalizedSnapshot{
+		Sessions: []state.RuntimeSession{
+			{
+				Name:         "ntm--proj",
+				Label:        "proj",
+				ProjectPath:  "/tmp/proj",
+				Attached:     true,
+				WindowCount:  1,
+				PaneCount:    2,
+				AgentCount:   2,
+				ActiveAgents: 1,
+				IdleAgents:   1,
+				ErrorAgents:  0,
+				HealthStatus: state.HealthStatusHealthy,
+			},
+		},
+		Agents: []state.RuntimeAgent{
+			{
+				ID:             "ntm--proj:%1",
+				SessionName:    "ntm--proj",
+				Pane:           "%1",
+				AgentType:      "claude",
+				TypeConfidence: 0.95,
+				TypeMethod:     "process",
+				State:          state.AgentStateBusy,
+				PendingMail:    2,
+				AgentMailName:  "BlueLake",
+				HealthStatus:   state.HealthStatusHealthy,
+			},
+			{
+				ID:             "ntm--proj:%2",
+				SessionName:    "ntm--proj",
+				Pane:           "%2",
+				AgentType:      "codex",
+				TypeConfidence: 0.95,
+				TypeMethod:     "process",
+				State:          state.AgentStateIdle,
+				HealthStatus:   state.HealthStatusHealthy,
+			},
+		},
+	}
+
+	first := &adapters.AggregatedSignals{
+		CollectedAt: firstCollectedAt,
+		Work: &adapters.WorkSection{
+			Ready: []adapters.WorkItem{
+				{ID: "bd-1", Title: "Top ready bead", Priority: 1, Type: "task", Labels: []string{"robot-redesign"}, Unblocks: 2, Score: float64Pointer(8.5)},
+			},
+			Blocked: []adapters.WorkItem{
+				{ID: "bd-2", Title: "Blocked bead", Priority: 2, Type: "task", BlockedBy: []string{"bd-9"}},
+			},
+			InProgress: []adapters.WorkItem{
+				{ID: "bd-3", Title: "In progress bead", Priority: 1, Type: "task", Assignee: "BlueLake", UpdatedAt: firstCollectedAt.Format(time.RFC3339)},
+			},
+			Triage: &adapters.WorkTriage{
+				TopRecommendation: &adapters.WorkRecommendation{
+					ID:       "bd-1",
+					Title:    "Top ready bead",
+					Priority: 1,
+					Score:    8.5,
+					Reasons:  []string{"high impact", "unblocks downstream"},
+					Unblocks: 2,
+				},
+			},
+		},
+		Coordination: &adapters.CoordinationSection{
+			Mail: &adapters.MailSummary{
+				LatestMessage: firstCollectedAt.Format(time.RFC3339),
+				ByAgent: map[string]adapters.AgentMailStats{
+					"BlueLake": {Unread: 2, Pending: 1, Urgent: 1},
+				},
+			},
+		},
+		Quota: &adapters.QuotaSection{
+			Accounts: []adapters.AccountQuota{
+				{
+					ID:          "acct-1",
+					Provider:    "anthropic",
+					TokensUsed:  80,
+					TokensLimit: 100,
+					Status:      "warning",
+					ReasonCode:  adapters.ReasonQuotaWarningTokens,
+					IsActive:    true,
+				},
+			},
+		},
+		Health: &adapters.SourceHealthSection{
+			Sources: map[string]adapters.SourceInfo{
+				"work_coordination": {
+					Name:           "work_coordination",
+					Available:      false,
+					Fresh:          false,
+					ReasonCode:     adapters.ReasonHealthSourceUnavailable,
+					Degraded:       true,
+					DegradedSince:  firstCollectedAt.Format(time.RFC3339),
+					DegradedReason: "agent mail unavailable",
+					LastError:      "agent mail unavailable",
+				},
+			},
+			Degraded: []string{"work_coordination"},
+			AllFresh: false,
+		},
+	}
+
+	if err := persistNormalizedProjection(store, first, firstTmuxSnapshot, time.Minute); err != nil {
+		t.Fatalf("persistNormalizedProjection(first) error: %v", err)
+	}
+
+	workRows, err := store.ListFreshRuntimeWork("", 0)
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeWork() error: %v", err)
+	}
+	if len(workRows) != 3 {
+		t.Fatalf("runtime work row count = %d, want 3", len(workRows))
+	}
+	workByID := make(map[string]state.RuntimeWork, len(workRows))
+	for _, row := range workRows {
+		workByID[row.BeadID] = row
+	}
+	if workByID["bd-1"].ScoreReason != "high impact; unblocks downstream" {
+		t.Fatalf("bd-1 score reason = %q", workByID["bd-1"].ScoreReason)
+	}
+	if workByID["bd-3"].Status != normalizedProjectionInProgStatus {
+		t.Fatalf("bd-3 status = %q, want %q", workByID["bd-3"].Status, normalizedProjectionInProgStatus)
+	}
+
+	coordinationRows, err := store.ListFreshRuntimeCoordination("")
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeCoordination() error: %v", err)
+	}
+	if len(coordinationRows) != 1 || coordinationRows[0].AgentName != "BlueLake" {
+		t.Fatalf("unexpected coordination rows: %+v", coordinationRows)
+	}
+
+	sessionRows, err := store.GetFreshRuntimeSessions()
+	if err != nil {
+		t.Fatalf("GetFreshRuntimeSessions() error: %v", err)
+	}
+	if len(sessionRows) != 1 || sessionRows[0].Name != "ntm--proj" || sessionRows[0].AgentCount != 2 {
+		t.Fatalf("unexpected session rows: %+v", sessionRows)
+	}
+
+	agentRows, err := store.GetRuntimeAgentsBySession("ntm--proj")
+	if err != nil {
+		t.Fatalf("GetRuntimeAgentsBySession(first) error: %v", err)
+	}
+	if len(agentRows) != 2 {
+		t.Fatalf("runtime agent row count = %d, want 2", len(agentRows))
+	}
+	agentByID := make(map[string]state.RuntimeAgent, len(agentRows))
+	for _, row := range agentRows {
+		agentByID[row.ID] = row
+	}
+	if agentByID["ntm--proj:%1"].PendingMail != 2 || agentByID["ntm--proj:%1"].AgentMailName != "BlueLake" {
+		t.Fatalf("unexpected first agent row: %+v", agentByID["ntm--proj:%1"])
+	}
+
+	quotaRows, err := store.ListFreshRuntimeQuota("")
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeQuota() error: %v", err)
+	}
+	if len(quotaRows) != 1 || quotaRows[0].Provider != "anthropic" {
+		t.Fatalf("unexpected quota rows: %+v", quotaRows)
+	}
+
+	healthRows, err := store.GetAllSourceHealth()
+	if err != nil {
+		t.Fatalf("GetAllSourceHealth() error: %v", err)
+	}
+	if len(healthRows) != 1 || healthRows[0].SourceName != "work_coordination" {
+		t.Fatalf("unexpected health rows: %+v", healthRows)
+	}
+
+	secondCollectedAt := firstCollectedAt.Add(2 * time.Minute)
+	secondTmuxSnapshot := &NormalizedSnapshot{
+		Sessions: []state.RuntimeSession{
+			{
+				Name:         "ntm--next",
+				Label:        "next",
+				ProjectPath:  "/tmp/next",
+				Attached:     false,
+				WindowCount:  1,
+				PaneCount:    1,
+				AgentCount:   1,
+				ActiveAgents: 0,
+				IdleAgents:   1,
+				ErrorAgents:  0,
+				HealthStatus: state.HealthStatusWarning,
+				HealthReason: "one agent compacting",
+			},
+		},
+		Agents: []state.RuntimeAgent{
+			{
+				ID:             "ntm--next:%4",
+				SessionName:    "ntm--next",
+				Pane:           "%4",
+				AgentType:      "claude",
+				TypeConfidence: 0.90,
+				TypeMethod:     "title",
+				State:          state.AgentStateCompacting,
+				PendingMail:    1,
+				AgentMailName:  "GreenStone",
+				HealthStatus:   state.HealthStatusWarning,
+				HealthReason:   "context compacting",
+			},
+		},
+	}
+	second := &adapters.AggregatedSignals{
+		CollectedAt: secondCollectedAt,
+		Work: &adapters.WorkSection{
+			Ready: []adapters.WorkItem{
+				{ID: "bd-4", Title: "Fresh replacement bead", Priority: 1, Type: "task"},
+			},
+		},
+		Coordination: &adapters.CoordinationSection{},
+		Health: &adapters.SourceHealthSection{
+			Sources: map[string]adapters.SourceInfo{
+				"mail": {
+					Name:       "mail",
+					Available:  true,
+					Fresh:      true,
+					ReasonCode: adapters.ReasonHealthOK,
+				},
+			},
+			AllFresh: true,
+		},
+	}
+
+	if err := persistNormalizedProjection(store, second, secondTmuxSnapshot, time.Minute); err != nil {
+		t.Fatalf("persistNormalizedProjection(second) error: %v", err)
+	}
+
+	workRows, err = store.ListFreshRuntimeWork("", 0)
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeWork(second) error: %v", err)
+	}
+	if len(workRows) != 1 || workRows[0].BeadID != "bd-4" {
+		t.Fatalf("unexpected runtime work rows after replacement: %+v", workRows)
+	}
+
+	coordinationRows, err = store.ListFreshRuntimeCoordination("")
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeCoordination(second) error: %v", err)
+	}
+	if len(coordinationRows) != 0 {
+		t.Fatalf("expected coordination rows to be removed, got %+v", coordinationRows)
+	}
+
+	sessionRows, err = store.GetFreshRuntimeSessions()
+	if err != nil {
+		t.Fatalf("GetFreshRuntimeSessions(second) error: %v", err)
+	}
+	if len(sessionRows) != 1 || sessionRows[0].Name != "ntm--next" || sessionRows[0].HealthReason != "one agent compacting" {
+		t.Fatalf("unexpected session rows after replacement: %+v", sessionRows)
+	}
+
+	agentRows, err = store.GetRuntimeAgentsBySession("ntm--proj")
+	if err != nil {
+		t.Fatalf("GetRuntimeAgentsBySession(old session) error: %v", err)
+	}
+	if len(agentRows) != 0 {
+		t.Fatalf("expected old session agents to cascade away, got %+v", agentRows)
+	}
+
+	agentRows, err = store.GetRuntimeAgentsBySession("ntm--next")
+	if err != nil {
+		t.Fatalf("GetRuntimeAgentsBySession(second) error: %v", err)
+	}
+	if len(agentRows) != 1 || agentRows[0].ID != "ntm--next:%4" || agentRows[0].PendingMail != 1 {
+		t.Fatalf("unexpected runtime agent rows after replacement: %+v", agentRows)
+	}
+
+	quotaRows, err = store.ListFreshRuntimeQuota("")
+	if err != nil {
+		t.Fatalf("ListFreshRuntimeQuota(second) error: %v", err)
+	}
+	if len(quotaRows) != 0 {
+		t.Fatalf("expected quota rows to be removed, got %+v", quotaRows)
+	}
+
+	healthRows, err = store.GetAllSourceHealth()
+	if err != nil {
+		t.Fatalf("GetAllSourceHealth(second) error: %v", err)
+	}
+	if len(healthRows) != 1 || healthRows[0].SourceName != "mail" || !healthRows[0].Healthy {
+		t.Fatalf("unexpected health rows after replacement: %+v", healthRows)
+	}
+}
+
+func TestPublishNormalizedAttentionSignals_DeduplicatesRefreshOutput(t *testing.T) {
+	feed := newTestAttentionFeed(t)
+	collectedAt := time.Date(2026, 3, 22, 19, 45, 0, 0, time.UTC)
+
+	signals := &adapters.AggregatedSignals{
+		CollectedAt: collectedAt,
+		Work: &adapters.WorkSection{
+			Triage: &adapters.WorkTriage{
+				TopRecommendation: &adapters.WorkRecommendation{
+					ID:       "bd-42",
+					Title:    "Ship projection refresh",
+					Priority: 1,
+					Score:    9.1,
+					Reasons:  []string{"high leverage"},
+				},
+			},
+		},
+		Coordination: &adapters.CoordinationSection{
+			Problems: []adapters.CoordinationProblem{
+				{
+					Kind:     "reservation_conflict",
+					Severity: "warning",
+					Summary:  "internal/robot/*.go <-> internal/robot/attention_feed.go",
+					Agents:   []string{"BlueLake", "GreenStone"},
+					Paths:    []string{"internal/robot/attention_feed.go"},
+				},
+			},
+		},
+		Health: &adapters.SourceHealthSection{
+			Sources: map[string]adapters.SourceInfo{
+				"work_coordination": {
+					Name:           "work_coordination",
+					Available:      false,
+					Fresh:          false,
+					ReasonCode:     adapters.ReasonHealthSourceUnavailable,
+					Degraded:       true,
+					DegradedSince:  collectedAt.Format(time.RFC3339),
+					DegradedReason: "agent mail unavailable",
+					LastError:      "agent mail unavailable",
+				},
+			},
+			Degraded: []string{"work_coordination"},
+			AllFresh: false,
+		},
+	}
+
+	publishNormalizedAttentionSignals(feed, "ntm--proj", signals)
+	publishNormalizedAttentionSignals(feed, "ntm--proj", signals)
+
+	events, _, err := feed.Replay(0, 100)
+	if err != nil {
+		t.Fatalf("Replay() error: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("event count = %d, want 3 after dedup", len(events))
+	}
+
+	var (
+		sawTopRecommendation bool
+		sawHealthUnavailable bool
+		sawReservation       bool
+	)
+	for _, event := range events {
+		switch event.ReasonCode {
+		case string(adapters.ReasonWorkReadyTopRecommendation):
+			sawTopRecommendation = true
+			if len(event.NextActions) == 0 || event.NextActions[0].Action != "robot-bead-show" {
+				t.Fatalf("top recommendation next actions = %+v", event.NextActions)
+			}
+		case string(adapters.ReasonHealthSourceUnavailable):
+			sawHealthUnavailable = true
+			if event.Actionability != ActionabilityActionRequired {
+				t.Fatalf("health actionability = %q, want %q", event.Actionability, ActionabilityActionRequired)
+			}
+		case string(adapters.ReasonCoordinationReservationConflict):
+			sawReservation = true
+			if event.Actionability != ActionabilityActionRequired {
+				t.Fatalf("reservation conflict actionability = %q, want %q", event.Actionability, ActionabilityActionRequired)
+			}
+		}
+	}
+
+	if !sawTopRecommendation || !sawHealthUnavailable || !sawReservation {
+		t.Fatalf("missing normalized attention events: top=%v health=%v reservation=%v events=%+v", sawTopRecommendation, sawHealthUnavailable, sawReservation, events)
+	}
+}
+
+func float64Pointer(v float64) *float64 {
+	return &v
+}
+
+type stubAttentionStore struct {
+	mu                 sync.Mutex
+	events             []state.StoredAttentionEvent
+	appendAttempts     atomic.Int32
+	failAppend         atomic.Bool
+	blockFirst         atomic.Bool
+	firstAppendStarted chan struct{}
+	releaseFirstAppend chan struct{}
+}
+
+func newStubAttentionStore() *stubAttentionStore {
+	return &stubAttentionStore{
+		firstAppendStarted: make(chan struct{}),
+		releaseFirstAppend: make(chan struct{}),
+	}
+}
+
+func (s *stubAttentionStore) seed(summary string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cursor := int64(len(s.events) + 1)
+	s.events = append(s.events, state.StoredAttentionEvent{
+		Cursor:        cursor,
+		Ts:            time.Now().UTC(),
+		SessionName:   "proj",
+		Category:      string(EventCategorySystem),
+		EventType:     string(EventTypeSystemHealthChange),
+		Source:        "seed",
+		Actionability: state.ActionabilityBackground,
+		Severity:      state.SeverityInfo,
+		Summary:       summary,
+		DedupCount:    1,
+	})
+}
+
+func (s *stubAttentionStore) blockFirstAppend() {
+	s.blockFirst.Store(true)
+}
+
+func (s *stubAttentionStore) AppendAttentionEvent(event *state.StoredAttentionEvent) (int64, error) {
+	attempt := s.appendAttempts.Add(1)
+	if s.failAppend.Load() {
+		return 0, fmt.Errorf("append failed")
+	}
+	if s.blockFirst.Load() && attempt == 1 {
+		close(s.firstAppendStarted)
+		<-s.releaseFirstAppend
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cursor := int64(len(s.events) + 1)
+	stored := *event
+	stored.Cursor = cursor
+	s.events = append(s.events, stored)
+	return cursor, nil
+}
+
+func (s *stubAttentionStore) GetAttentionEventsSince(sinceCursor int64, limit int) ([]state.StoredAttentionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	events := make([]state.StoredAttentionEvent, 0, len(s.events))
+	for _, event := range s.events {
+		if event.Cursor <= sinceCursor {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return events, nil
+}
+
+func (s *stubAttentionStore) GetAttentionReplayWindow() (state.AttentionReplayWindow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	window := state.AttentionReplayWindow{
+		EventCount: len(s.events),
+	}
+	if len(s.events) > 0 {
+		window.OldestCursor = s.events[0].Cursor
+		window.NewestCursor = s.events[len(s.events)-1].Cursor
+	}
+	return window, nil
+}
+
+func (s *stubAttentionStore) GetLatestEventCursor() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.events) == 0 {
+		return 0, nil
+	}
+	return s.events[len(s.events)-1].Cursor, nil
+}
+
+func (s *stubAttentionStore) GCExpiredEvents() (int64, error) {
+	return 0, nil
 }
 
 // =============================================================================

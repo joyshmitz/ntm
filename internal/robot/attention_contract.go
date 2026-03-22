@@ -295,6 +295,11 @@ type AttentionEvent struct {
 	// Required. One of: debug, info, warning, error, critical.
 	Severity Severity `json:"severity"`
 
+	// ReasonCode is the machine-readable reason for this event.
+	// Optional, but strongly recommended for durable events so downstream
+	// consumers can classify them without reparsing the summary text.
+	ReasonCode string `json:"reason_code,omitempty"`
+
 	// Summary is a one-line human-readable description.
 	// Required. Should be suitable for display without additional context.
 	Summary string `json:"summary"`
@@ -307,6 +312,10 @@ type AttentionEvent struct {
 	// These must be real robot commands, not hypothetical future features.
 	// Optional. Empty array if no actions are relevant.
 	NextActions []NextAction `json:"next_actions,omitempty"`
+
+	// DedupKey is an internal suppression key for repeated durable events.
+	// It is intentionally excluded from the wire contract.
+	DedupKey string `json:"-"`
 }
 
 // NextAction describes a mechanical follow-up command.

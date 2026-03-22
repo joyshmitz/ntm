@@ -108,6 +108,7 @@ export default function SessionDetailPage() {
   const queryClient = useQueryClient();
   const { isConnected } = useConnection();
   const outputRef = useRef<HTMLDivElement | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [selectedPane, setSelectedPane] = useState<number | null>(null);
   const [outputLines, setOutputLines] = useState(DEFAULT_OUTPUT_LINES);
@@ -115,9 +116,23 @@ export default function SessionDetailPage() {
   const [prompt, setPrompt] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   const sessionQuery = useQuery({
@@ -145,10 +160,22 @@ export default function SessionDetailPage() {
   });
 
   useEffect(() => {
-    if (paneIndex === null && panesQuery.data?.panes?.length) {
-      setSelectedPane(panesQuery.data.panes[0].index);
+    const panes = panesQuery.data?.panes ?? [];
+    if (panes.length === 0) {
+      if (selectedPane !== null) {
+        setSelectedPane(null);
+      }
+      return;
     }
-  }, [paneIndex, panesQuery.data]);
+
+    const hasSelectedPane = selectedPane !== null
+      ? panes.some((pane) => pane.index === selectedPane)
+      : false;
+
+    if (!hasSelectedPane) {
+      setSelectedPane(panes[0].index);
+    }
+  }, [panesQuery.data, selectedPane]);
 
   useEffect(() => {
     if (!autoScroll || !outputRef.current) return;

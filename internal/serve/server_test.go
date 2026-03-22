@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -117,6 +118,57 @@ func TestValidateConfigPublicBaseURL(t *testing.T) {
 	cfg.PublicBaseURL = "not-a-url"
 	if err := ValidateConfig(cfg); err == nil {
 		t.Fatalf("expected invalid public base URL error")
+	}
+}
+
+func TestHandleGetMessage_NotImplemented(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req agentmail.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &agentmail.JSONRPCError{
+				Code:    -32601,
+				Message: "unknown tool: get_message",
+			},
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/messages/42", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleGetMessage(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotImplemented, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotImplemented)
+	}
+	if !strings.Contains(resp.Hint, "include_bodies") {
+		t.Fatalf("hint = %q, want include_bodies guidance", resp.Hint)
 	}
 }
 

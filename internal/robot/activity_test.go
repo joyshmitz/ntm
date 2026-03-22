@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
 func TestNewVelocityTracker(t *testing.T) {
@@ -1828,6 +1830,58 @@ func TestVelocityTrackerResetClearsAll(t *testing.T) {
 	}
 }
 
+func TestVelocityTrackerResetClearsPersistedBaseline(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "reset-store-pane"
+	tracker := NewVelocityTracker(paneID, WithWatermarkStore(store))
+
+	if _, err := tracker.UpdateWithOutput("persisted baseline"); err != nil {
+		t.Fatalf("initial update failed: %v", err)
+	}
+	if tracker.baselineHash == "" {
+		t.Fatal("expected baseline hash after initial update")
+	}
+	if tracker.baselineRuneCount == 0 {
+		t.Fatal("expected baseline rune count after initial update")
+	}
+
+	tracker.Reset()
+
+	if tracker.baselineHash != "" {
+		t.Fatalf("baseline hash should be cleared after reset, got %q", tracker.baselineHash)
+	}
+	if tracker.baselineRuneCount != 0 {
+		t.Fatalf("baseline rune count should be 0 after reset, got %d", tracker.baselineRuneCount)
+	}
+
+	wm, err := store.GetWatermark(WatermarkTypeVelocity, paneID)
+	if err != nil {
+		t.Fatalf("get watermark after reset: %v", err)
+	}
+	if wm == nil {
+		t.Fatal("expected watermark to exist after reset")
+	}
+	if wm.BaselineHash != "" {
+		t.Fatalf("persisted baseline hash should be cleared after reset, got %q", wm.BaselineHash)
+	}
+	if wm.BaselineCursor == nil || *wm.BaselineCursor != 0 {
+		t.Fatalf("persisted baseline cursor should be 0 after reset, got %v", wm.BaselineCursor)
+	}
+	if wm.LastTs != nil {
+		t.Fatalf("persisted last timestamp should be cleared after reset, got %v", *wm.LastTs)
+	}
+
+	restarted := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	if restarted.baselineHash != "" {
+		t.Fatalf("restarted tracker should not restore a baseline hash after reset, got %q", restarted.baselineHash)
+	}
+	if restarted.baselineRuneCount != 0 {
+		t.Fatalf("restarted tracker should not restore a baseline rune count after reset, got %d", restarted.baselineRuneCount)
+	}
+}
+
 func TestClassifyStateVelocityBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -1884,5 +1938,354 @@ func TestClassifyStateIdleAtBoundary(t *testing.T) {
 	state, _, _ = sc.classifyState(VelocityIdleThreshold-0.1, matches)
 	if state != StateWaiting {
 		t.Errorf("expected WAITING with idle prompt below threshold, got %s", state)
+	}
+}
+
+// =============================================================================
+// Restart-Safe Baseline Tests (bd-j9jo3.4.3)
+// =============================================================================
+
+// mockWatermarkStore implements WatermarkStore for testing.
+type mockWatermarkStore struct {
+	watermarks map[string]*state.OutputWatermark
+}
+
+func newMockWatermarkStore() *mockWatermarkStore {
+	return &mockWatermarkStore{
+		watermarks: make(map[string]*state.OutputWatermark),
+	}
+}
+
+func (m *mockWatermarkStore) GetWatermark(wmType, scope string) (*state.OutputWatermark, error) {
+	key := wmType + ":" + scope
+	return m.watermarks[key], nil
+}
+
+func (m *mockWatermarkStore) SetWatermark(wm *state.OutputWatermark) error {
+	key := wm.WatermarkType + ":" + wm.Scope
+	m.watermarks[key] = wm
+	return nil
+}
+
+func TestVelocityTracker_RestartSafeBaseline_UnchangedContent(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "test-pane-unchanged"
+
+	// Simulate pre-restart: create tracker, add some output, persist
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	content1 := "Hello world content"
+	sample1, err := tracker1.UpdateWithOutput(content1)
+	if err != nil {
+		t.Fatalf("initial update failed: %v", err)
+	}
+	// First sample establishes baseline, no delta reported
+	if sample1.CharsAdded != 0 {
+		t.Errorf("first sample should establish baseline with charsAdded=0, got %d", sample1.CharsAdded)
+	}
+
+	// Second update with more content
+	content2 := "Hello world content - more stuff"
+	sample2, err := tracker1.UpdateWithOutput(content2)
+	if err != nil {
+		t.Fatalf("second update failed: %v", err)
+	}
+	// Should detect new chars
+	expectedGrowth := len(content2) - len(content1)
+	if sample2.CharsAdded != expectedGrowth {
+		t.Errorf("second sample should have charsAdded=%d, got %d", expectedGrowth, sample2.CharsAdded)
+	}
+
+	// Now simulate restart: create new tracker with same store and paneID
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+
+	// First post-restart update with UNCHANGED content
+	sample3, err := tracker2.UpdateWithOutput(content2)
+	if err != nil {
+		t.Fatalf("post-restart update failed: %v", err)
+	}
+
+	// Critical: should NOT show spurious activity (charsAdded should be 0)
+	if sample3.CharsAdded != 0 {
+		t.Errorf("post-restart with unchanged content should have 0 charsAdded, got %d", sample3.CharsAdded)
+	}
+}
+
+func TestVelocityTracker_RestartSafeBaseline_ChangedContent(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "test-pane-changed"
+
+	// Pre-restart: establish baseline
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput("Initial content before restart")
+
+	// Simulate restart with different content (buffer was scrolled/reset)
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	sample, err := tracker2.UpdateWithOutput("Completely different content after restart")
+	if err != nil {
+		t.Fatalf("post-restart update failed: %v", err)
+	}
+
+	// Buffer reset: should NOT show activity (fresh baseline)
+	if sample.CharsAdded != 0 {
+		t.Errorf("post-restart with buffer reset should have 0 charsAdded, got %d", sample.CharsAdded)
+	}
+}
+
+func TestVelocityTracker_RestartSafeBaseline_NoStore(t *testing.T) {
+	t.Parallel()
+
+	// Tracker without store should work normally (no persistence)
+	tracker := NewVelocityTracker("no-store-pane")
+	content1 := "First content"
+	sample1, err := tracker.UpdateWithOutput(content1)
+	if err != nil {
+		t.Fatalf("first update failed: %v", err)
+	}
+	// First sample establishes baseline, no delta reported
+	if sample1.CharsAdded != 0 {
+		t.Errorf("first sample should establish baseline with charsAdded=0, got %d", sample1.CharsAdded)
+	}
+
+	content2 := "First content plus more"
+	sample2, err := tracker.UpdateWithOutput(content2)
+	if err != nil {
+		t.Fatalf("second update failed: %v", err)
+	}
+	expectedGrowth := len(content2) - len(content1)
+	if sample2.CharsAdded != expectedGrowth {
+		t.Errorf("second sample should have charsAdded=%d, got %d", expectedGrowth, sample2.CharsAdded)
+	}
+}
+
+func TestVelocityTracker_RestartSafeBaseline_VelocityAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "test-pane-velocity"
+
+	// Pre-restart
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput("Content before restart")
+
+	// Simulate restart (new tracker)
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+
+	// Post-restart update with unchanged content
+	sample, _ := tracker2.UpdateWithOutput("Content before restart")
+
+	// Velocity should be 0 on first post-restart sample
+	// (we don't compute velocity across restart boundary as the time gap is meaningless)
+	if sample.Velocity != 0 {
+		t.Errorf("velocity across restart boundary should be 0, got %f", sample.Velocity)
+	}
+}
+
+func TestVelocityTracker_RestartSafeBaseline_WithGrowth(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "test-pane-growth"
+
+	// Pre-restart: establish baseline with 20 chars
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput("12345678901234567890") // 20 chars
+
+	// Simulate restart
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+
+	// Post-restart: content grew by 5 chars (same prefix, new suffix)
+	sample, err := tracker2.UpdateWithOutput("1234567890123456789012345") // 25 chars
+	if err != nil {
+		t.Fatalf("post-restart update failed: %v", err)
+	}
+
+	// Hash differs (content changed), so buffer reset semantics apply
+	// This is treated as a fresh baseline, not growth
+	if sample.CharsAdded != 0 {
+		// Because hash changed, we treat it as buffer reset
+		t.Errorf("hash mismatch should trigger buffer reset semantics (0 charsAdded), got %d", sample.CharsAdded)
+	}
+}
+
+func TestVelocityManager_WithStore(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	manager := NewVelocityManager(WithManagerStore(store))
+
+	// Create tracker via manager
+	tracker := manager.GetOrCreate("managed-pane")
+
+	// Should have store wired up
+	_, _ = tracker.UpdateWithOutput("Content for managed tracker")
+
+	// Verify watermark was persisted
+	wm, _ := store.GetWatermark(WatermarkTypeVelocity, "managed-pane")
+	if wm == nil {
+		t.Error("watermark should have been persisted via manager-created tracker")
+	}
+}
+
+func TestStateClassifier_WithWatermarkStore(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	cfg := &ClassifierConfig{
+		WatermarkStore: store,
+	}
+
+	sc := NewStateClassifier("classifier-pane", cfg)
+
+	// Use ClassifyWithOutput to trigger velocity tracker update
+	_, err := sc.ClassifyWithOutput("Some classifier output")
+	if err != nil {
+		t.Fatalf("classify failed: %v", err)
+	}
+
+	// Verify watermark was persisted via classifier
+	wm, _ := store.GetWatermark(WatermarkTypeVelocity, "classifier-pane")
+	if wm == nil {
+		t.Error("watermark should have been persisted via classifier's velocity tracker")
+	}
+}
+
+// =============================================================================
+// Focused Restart Tests for bd-j9jo3.4.3
+// These tests isolate specific restart scenarios without entangling first-sample
+// baseline establishment behavior.
+// =============================================================================
+
+// TestVelocityTracker_PostRestartUnchangedContent_CharsAddedZero verifies that
+// when content is unchanged after restart, CharsAdded is 0 (no false positive delta).
+// This is the critical test for bd-j9jo3.4.3 restart-safe baselines.
+func TestVelocityTracker_PostRestartUnchangedContent_CharsAddedZero(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "restart-delta-unchanged"
+	content := "Stable output that persists across restart"
+
+	// Pre-restart: establish baseline (ignore first sample's CharsAdded - that's a separate issue)
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput(content)
+
+	// Verify baseline was persisted
+	wm, err := store.GetWatermark(WatermarkTypeVelocity, paneID)
+	if err != nil || wm == nil {
+		t.Fatalf("baseline should have been persisted: err=%v, wm=%v", err, wm)
+	}
+	if wm.BaselineHash == "" {
+		t.Fatal("BaselineHash should be set after first update")
+	}
+
+	// Simulate restart: create new tracker with same store
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+
+	// Post-restart: same content as before
+	sample, err := tracker2.UpdateWithOutput(content)
+	if err != nil {
+		t.Fatalf("post-restart update failed: %v", err)
+	}
+
+	// CRITICAL: CharsAdded should be 0 (content unchanged, no false positive)
+	if sample.CharsAdded != 0 {
+		t.Errorf("post-restart unchanged content: expected CharsAdded=0, got %d (false positive delta)", sample.CharsAdded)
+	}
+
+	// Velocity should also be 0 (don't compute velocity across restart boundary)
+	if sample.Velocity != 0 {
+		t.Errorf("post-restart unchanged content: expected Velocity=0, got %f", sample.Velocity)
+	}
+}
+
+// TestVelocityTracker_PostRestartClearedBuffer_CharsAddedZero verifies that
+// when buffer is cleared/reset between restarts, CharsAdded is 0 (no spurious transition).
+// A cleared buffer means hash mismatch, so it should treat current content as fresh baseline.
+func TestVelocityTracker_PostRestartClearedBuffer_CharsAddedZero(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "restart-delta-cleared"
+
+	// Pre-restart: establish baseline with substantial content
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput("Long output that was visible before restart with lots of text")
+
+	// Simulate restart: buffer was cleared (e.g., tmux pane was reset, new shell started)
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	sample, err := tracker2.UpdateWithOutput("$") // Just a prompt, buffer cleared
+
+	if err != nil {
+		t.Fatalf("post-restart update failed: %v", err)
+	}
+
+	// CharsAdded should be 0 (fresh baseline after buffer reset, not spurious activity)
+	if sample.CharsAdded != 0 {
+		t.Errorf("post-restart cleared buffer: expected CharsAdded=0, got %d (spurious transition)", sample.CharsAdded)
+	}
+}
+
+// TestVelocityTracker_PostRestartGrowingContent_CorrectDelta verifies that
+// after restart, if content grows compared to persisted baseline, delta is correct.
+func TestVelocityTracker_PostRestartGrowingContent_CorrectDelta(t *testing.T) {
+	t.Parallel()
+
+	store := newMockWatermarkStore()
+	paneID := "restart-delta-growth"
+	baseContent := "Initial output"
+	grownContent := "Initial output plus more text"
+
+	// Pre-restart: establish baseline
+	tracker1 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	_, _ = tracker1.UpdateWithOutput(baseContent)
+
+	// Simulate restart with same content initially
+	tracker2 := NewVelocityTracker(paneID, WithWatermarkStore(store))
+	sample1, _ := tracker2.UpdateWithOutput(baseContent) // unchanged
+
+	// First post-restart should be 0 (unchanged)
+	if sample1.CharsAdded != 0 {
+		t.Errorf("first post-restart (unchanged): expected CharsAdded=0, got %d", sample1.CharsAdded)
+	}
+
+	// Now content grows
+	sample2, err := tracker2.UpdateWithOutput(grownContent)
+	if err != nil {
+		t.Fatalf("growth update failed: %v", err)
+	}
+
+	// Growth should be detected normally
+	expectedGrowth := len(grownContent) - len(baseContent) // " plus more text" = 16 chars
+	if sample2.CharsAdded != expectedGrowth {
+		t.Errorf("post-restart growth: expected CharsAdded=%d, got %d", expectedGrowth, sample2.CharsAdded)
+	}
+}
+
+// TestVelocityTracker_FirstSampleBaseline_ZeroCharsAdded verifies that
+// the very first sample in a fresh tracker (no prior baseline) has CharsAdded=0.
+// This is distinct from restart scenarios - it's about establishing a clean baseline.
+func TestVelocityTracker_FirstSampleBaseline_ZeroCharsAdded(t *testing.T) {
+	t.Parallel()
+
+	// No store - truly fresh tracker
+	tracker := NewVelocityTracker("first-sample-test")
+	sample, err := tracker.UpdateWithOutput("First ever content")
+	if err != nil {
+		t.Fatalf("first update failed: %v", err)
+	}
+
+	// First sample should establish baseline, not report delta
+	// (comparing against nothing should not count as "all chars added")
+	if sample.CharsAdded != 0 {
+		t.Errorf("first sample (no prior baseline): expected CharsAdded=0, got %d (should establish baseline, not report delta)", sample.CharsAdded)
+	}
+
+	// Velocity should also be 0
+	if sample.Velocity != 0 {
+		t.Errorf("first sample (no prior baseline): expected Velocity=0, got %f", sample.Velocity)
 	}
 }

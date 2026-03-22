@@ -45,7 +45,7 @@ type AutoEvent struct {
 
 // AutoCheckpointConfig configures the background auto-checkpoint worker
 type AutoCheckpointConfig struct {
-	Enabled         bool // Master toggle
+	Enabled         bool // Top-level toggle
 	IntervalMinutes int  // Periodic checkpoint interval (0 = disabled)
 	MaxCheckpoints  int  // Max auto-checkpoints per session
 	OnRotation      bool // Checkpoint before rotation

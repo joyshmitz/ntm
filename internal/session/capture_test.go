@@ -14,6 +14,7 @@ func setupSessionGitRepo(t *testing.T) string {
 
 	cmds := [][]string{
 		{"git", "init"},
+		{"git", "branch", "-m", "main"},
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test"},
 		{"git", "commit", "--allow-empty", "-m", "init"},
@@ -43,9 +44,8 @@ func TestGetGitInfo_ValidRepo(t *testing.T) {
 	if branch == "" {
 		t.Error("expected non-empty branch")
 	}
-	// Most git repos default to "main" or "master"
-	if branch != "main" && branch != "master" {
-		t.Logf("branch = %q (may vary by git config)", branch)
+	if branch != "main" {
+		t.Errorf("branch = %q, want main", branch)
 	}
 
 	// Should detect remote

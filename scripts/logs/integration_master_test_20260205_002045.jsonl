@@ -1,71 +1,71 @@
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"test_start","test":"integration_master_test",{"test":"integration_master_test"}}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_master_test","section":"Phase: init"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_start","test":"integration_master_test","command":"ntm init /tmp/ntm-master-e2e-Jgv3/e2e-master-2292855-project --non-interactive --no-hooks --force"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_end","test":"integration_master_test","command":"ntm init /tmp/ntm-master-e2e-Jgv3/e2e-master-2292855-project --non-interactive --no-hooks --force","exit_code":1,"duration_ms":54,"output":"Error: unknown flag: --non-interactive"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_master_test","message":"Phase failed: init (103ms)"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_master_test","type":"eq","description":"phase init","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_master_test","section":"Phase: spawn_template"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_start","test":"integration_master_test","command":"ntm spawn e2e-master-2292855-project --template review-pipeline --no-user"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_end","test":"integration_master_test","command":"ntm spawn e2e-master-2292855-project --template review-pipeline --no-user","exit_code":1,"duration_ms":56,"output":"Error: unknown flag: --template"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_master_test","message":"Phase failed: spawn_template (106ms)"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_master_test","type":"eq","description":"phase spawn_template","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_master_test","section":"Phase: context_build"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_master_test","message":"Phase failed: context_build (109ms)"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_master_test","type":"eq","description":"phase context_build","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_master_test","section":"Phase: task_assignment"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_master_test","message":"Phase failed: task_assignment (81ms)"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_master_test","type":"eq","description":"phase task_assignment","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_master_test","section":"Phase: file_reservation"}
-{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"error","test":"integration_master_test","message":"Phase failed: file_reservation (206ms)"}
-{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase file_reservation","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"section","test":"integration_master_test","section":"Phase: agent_communication"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"skip","test":"integration_master_test","reason":"Phase skipped: agent_communication"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase agent_communication","result":"fail","actual":"skip","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_master_test","section":"Phase: context_monitoring"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_master_test","command":"ntm status e2e-master-2292855-project --json"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_master_test","command":"ntm status e2e-master-2292855-project --json","exit_code":0,"duration_ms":61,"output":"{\n  \"generated_at\": \"2026-02-05T06:20:48.368668783Z\",\n  \"session\": \"e2e-master-2292855-project\",\n  \"exists\": false,\n  \"attached\": false,\n  \"working_directory\": \"\",\n  \"panes\": null,\n  \"agent_counts\": {\n    \"claude\": 0,\n    \"codex\": 0,\n    \"gemini\": 0,\n    \"total\": 0\n  }\n}"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"valid_json","description":"status JSON","result":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_master_test","message":"Phase failed: context_monitoring (134ms)"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase context_monitoring","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_master_test","section":"Phase: cost_tracking"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_master_test","command":"ntm --json quota e2e-master-2292855-project"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_master_test","command":"ntm --json quota e2e-master-2292855-project","exit_code":1,"duration_ms":72,"output":""}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_master_test","message":"Phase failed: cost_tracking (117ms)"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase cost_tracking","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_master_test","section":"Phase: staggered_operations"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_master_test","command":"ntm --json spawn e2e-master-2292855-stagger --cc=2 --no-user --stagger-mode=fixed --stagger-delay=1s --prompt stagger-test"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_master_test","command":"ntm --json spawn e2e-master-2292855-stagger --cc=2 --no-user --stagger-mode=fixed --stagger-delay=1s --prompt stagger-test","exit_code":1,"duration_ms":58,"output":""}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_master_test","message":"Phase failed: staggered_operations (106ms)"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase staggered_operations","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_master_test","section":"Phase: handoff"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_master_test","message":"Phase failed: handoff (110ms)"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase handoff","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_master_test","section":"Phase: prompt_history"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"error","test":"integration_master_test","message":"Phase failed: prompt_history (493ms)"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase prompt_history","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_master_test","section":"Phase: session_summarization"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"error","test":"integration_master_test","message":"Phase failed: session_summarization (116ms)"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase session_summarization","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_master_test","section":"Phase: output_archive"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_start","test":"integration_master_test","command":"ntm --json cass status"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_end","test":"integration_master_test","command":"ntm --json cass status","exit_code":0,"duration_ms":74,"output":"{\n  \"healthy\": false,\n  \"recommended_action\": \"Run 'cass index' to refresh the index\",\n  \"index\": {\n    \"doc_count\": 0,\n    \"size_bytes\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\",\n    \"healthy\": false\n  },\n  \"database\": {\n    \"path\": \"/home/ubuntu/.local/share/coding-agent-search/agent_search.db\",\n    \"size_bytes\": 0,\n    \"healthy\": false,\n    \"session_count\": 0\n  },\n  \"pending\": {\n    \"sessions\": 0,\n    \"files\": 0\n  },\n  \"last_indexed_at\": \"0001-01-01T00:00:00Z\"\n}"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"valid_json","description":"cass status JSON","result":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"info","test":"integration_master_test","message":"Phase passed: output_archive (149ms)"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase output_archive","result":"pass","actual":"pass","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_master_test","section":"Phase: effectiveness_scoring"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_start","test":"integration_master_test","command":"ntm --json agents stats"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_end","test":"integration_master_test","command":"ntm --json agents stats","exit_code":0,"duration_ms":54,"output":"{\n  \"claude\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.9,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  },\n  \"codex\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.85,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  },\n  \"gemini\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.85,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  }\n}"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"valid_json","description":"agents stats JSON","result":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"info","test":"integration_master_test","message":"Phase passed: effectiveness_scoring (126ms)"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase effectiveness_scoring","result":"pass","actual":"pass","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_master_test","section":"Phase: session_recovery"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"error","test":"integration_master_test","message":"Phase failed: session_recovery (99ms)"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"assert","test":"integration_master_test","type":"eq","description":"phase session_recovery","result":"fail","actual":"fail","expected":"pass"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_master_test","message":"Wrote report: /tmp/ntm-e2e-logs/integration_master_report_20260205_062045.json"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"assert","test":"integration_master_test","type":"valid_json","description":"report JSON is valid","result":"pass"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"test_end","test":"integration_master_test","result":"fail","total":20,"passed":6,"failed":13,"skipped":1,"duration_ms":5000}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"section","test":"integration_master_test","section":"Cleanup"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"exec_start","test":"integration_master_test","command":"ntm kill e2e-master-2292855-project --force"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"exec_end","test":"integration_master_test","command":"ntm kill e2e-master-2292855-project --force","exit_code":1,"duration_ms":69,"output":"Error: session 'e2e-master-2292855-project' not found"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_master_test","message":"Leaving projects base for inspection: /tmp/ntm-master-e2e-Jgv3"}
-{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_master_test","message":"Manual cleanup required (deletion disabled by safety policy)"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"test_start","test":"integration_main_test",{"test":"integration_main_test"}}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_main_test","section":"Phase: init"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_start","test":"integration_main_test","command":"ntm init /tmp/ntm-main-e2e-Jgv3/e2e-main-2292855-project --non-interactive --no-hooks --force"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_end","test":"integration_main_test","command":"ntm init /tmp/ntm-main-e2e-Jgv3/e2e-main-2292855-project --non-interactive --no-hooks --force","exit_code":1,"duration_ms":54,"output":"Error: unknown flag: --non-interactive"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_main_test","message":"Phase failed: init (103ms)"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_main_test","type":"eq","description":"phase init","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_main_test","section":"Phase: spawn_template"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_start","test":"integration_main_test","command":"ntm spawn e2e-main-2292855-project --template review-pipeline --no-user"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"exec_end","test":"integration_main_test","command":"ntm spawn e2e-main-2292855-project --template review-pipeline --no-user","exit_code":1,"duration_ms":56,"output":"Error: unknown flag: --template"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_main_test","message":"Phase failed: spawn_template (106ms)"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_main_test","type":"eq","description":"phase spawn_template","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_main_test","section":"Phase: context_build"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_main_test","message":"Phase failed: context_build (109ms)"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_main_test","type":"eq","description":"phase context_build","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_main_test","section":"Phase: task_assignment"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"error","test":"integration_main_test","message":"Phase failed: task_assignment (81ms)"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"assert","test":"integration_main_test","type":"eq","description":"phase task_assignment","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:45Z","elapsed_ms":0,"level":"section","test":"integration_main_test","section":"Phase: file_reservation"}
+{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"error","test":"integration_main_test","message":"Phase failed: file_reservation (206ms)"}
+{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase file_reservation","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:46Z","elapsed_ms":1000,"level":"section","test":"integration_main_test","section":"Phase: agent_communication"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"skip","test":"integration_main_test","reason":"Phase skipped: agent_communication"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase agent_communication","result":"fail","actual":"skip","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_main_test","section":"Phase: context_monitoring"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_main_test","command":"ntm status e2e-main-2292855-project --json"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_main_test","command":"ntm status e2e-main-2292855-project --json","exit_code":0,"duration_ms":61,"output":"{\n  \"generated_at\": \"2026-02-05T06:20:48.368668783Z\",\n  \"session\": \"e2e-main-2292855-project\",\n  \"exists\": false,\n  \"attached\": false,\n  \"working_directory\": \"\",\n  \"panes\": null,\n  \"agent_counts\": {\n    \"claude\": 0,\n    \"codex\": 0,\n    \"gemini\": 0,\n    \"total\": 0\n  }\n}"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"valid_json","description":"status JSON","result":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_main_test","message":"Phase failed: context_monitoring (134ms)"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase context_monitoring","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_main_test","section":"Phase: cost_tracking"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_main_test","command":"ntm --json quota e2e-main-2292855-project"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_main_test","command":"ntm --json quota e2e-main-2292855-project","exit_code":1,"duration_ms":72,"output":""}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_main_test","message":"Phase failed: cost_tracking (117ms)"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase cost_tracking","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_main_test","section":"Phase: staggered_operations"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_start","test":"integration_main_test","command":"ntm --json spawn e2e-main-2292855-stagger --cc=2 --no-user --stagger-mode=fixed --stagger-delay=1s --prompt stagger-test"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"exec_end","test":"integration_main_test","command":"ntm --json spawn e2e-main-2292855-stagger --cc=2 --no-user --stagger-mode=fixed --stagger-delay=1s --prompt stagger-test","exit_code":1,"duration_ms":58,"output":""}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_main_test","message":"Phase failed: staggered_operations (106ms)"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase staggered_operations","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_main_test","section":"Phase: handoff"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"error","test":"integration_main_test","message":"Phase failed: handoff (110ms)"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase handoff","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:48Z","elapsed_ms":3000,"level":"section","test":"integration_main_test","section":"Phase: prompt_history"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"error","test":"integration_main_test","message":"Phase failed: prompt_history (493ms)"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase prompt_history","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_main_test","section":"Phase: session_summarization"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"error","test":"integration_main_test","message":"Phase failed: session_summarization (116ms)"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase session_summarization","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_main_test","section":"Phase: output_archive"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_start","test":"integration_main_test","command":"ntm --json cass status"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_end","test":"integration_main_test","command":"ntm --json cass status","exit_code":0,"duration_ms":74,"output":"{\n  \"healthy\": false,\n  \"recommended_action\": \"Run 'cass index' to refresh the index\",\n  \"index\": {\n    \"doc_count\": 0,\n    \"size_bytes\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\",\n    \"healthy\": false\n  },\n  \"database\": {\n    \"path\": \"/home/ubuntu/.local/share/coding-agent-search/agent_search.db\",\n    \"size_bytes\": 0,\n    \"healthy\": false,\n    \"session_count\": 0\n  },\n  \"pending\": {\n    \"sessions\": 0,\n    \"files\": 0\n  },\n  \"last_indexed_at\": \"0001-01-01T00:00:00Z\"\n}"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"valid_json","description":"cass status JSON","result":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"info","test":"integration_main_test","message":"Phase passed: output_archive (149ms)"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase output_archive","result":"pass","actual":"pass","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_main_test","section":"Phase: effectiveness_scoring"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_start","test":"integration_main_test","command":"ntm --json agents stats"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"exec_end","test":"integration_main_test","command":"ntm --json agents stats","exit_code":0,"duration_ms":54,"output":"{\n  \"claude\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.9,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  },\n  \"codex\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.85,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  },\n  \"gemini\": {\n    \"avg_completion_time\": 0,\n    \"success_rate\": 0.85,\n    \"tasks_completed\": 0,\n    \"last_updated\": \"0001-01-01T00:00:00Z\"\n  }\n}"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"valid_json","description":"agents stats JSON","result":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"info","test":"integration_main_test","message":"Phase passed: effectiveness_scoring (126ms)"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase effectiveness_scoring","result":"pass","actual":"pass","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:49Z","elapsed_ms":4000,"level":"section","test":"integration_main_test","section":"Phase: session_recovery"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"error","test":"integration_main_test","message":"Phase failed: session_recovery (99ms)"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"assert","test":"integration_main_test","type":"eq","description":"phase session_recovery","result":"fail","actual":"fail","expected":"pass"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_main_test","message":"Wrote report: /tmp/ntm-e2e-logs/integration_main_report_20260205_062045.json"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"assert","test":"integration_main_test","type":"valid_json","description":"report JSON is valid","result":"pass"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"test_end","test":"integration_main_test","result":"fail","total":20,"passed":6,"failed":13,"skipped":1,"duration_ms":5000}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"section","test":"integration_main_test","section":"Cleanup"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"exec_start","test":"integration_main_test","command":"ntm kill e2e-main-2292855-project --force"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"exec_end","test":"integration_main_test","command":"ntm kill e2e-main-2292855-project --force","exit_code":1,"duration_ms":69,"output":"Error: session 'e2e-main-2292855-project' not found"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_main_test","message":"Leaving projects base for inspection: /tmp/ntm-main-e2e-Jgv3"}
+{"timestamp":"2026-02-05T06:20:50Z","elapsed_ms":5000,"level":"info","test":"integration_main_test","message":"Manual cleanup required (deletion disabled by safety policy)"}

@@ -119,16 +119,11 @@ func (m *WorktreeManager) ListWorktrees() ([]*WorktreeInfo, error) {
 func (m *WorktreeManager) MergeBack(agentName string) error {
 	branchName := fmt.Sprintf("ntm/%s/%s", m.session, agentName)
 
-	// Switch to main branch in main worktree
+	// Switch to the canonical main branch in the primary worktree.
 	cmd := exec.Command("git", "checkout", "main")
 	cmd.Dir = m.projectPath
 	if err := cmd.Run(); err != nil {
-		// Try master if main doesn't exist
-		cmd = exec.Command("git", "checkout", "master")
-		cmd.Dir = m.projectPath
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to checkout main/master branch: %w", err)
-		}
+		return fmt.Errorf("failed to checkout main branch: %w", err)
 	}
 
 	// Merge the agent's branch

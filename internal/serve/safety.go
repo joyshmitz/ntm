@@ -54,13 +54,15 @@ func (s *Server) registerSafetyRoutes(r chi.Router) {
 
 // SafetyStatusResponse is the REST response for safety status.
 type SafetyStatusResponse struct {
-	Installed     bool   `json:"installed"`
-	PolicyPath    string `json:"policy_path,omitempty"`
-	BlockedCount  int    `json:"blocked_rules"`
-	ApprovalCount int    `json:"approval_rules"`
-	AllowedCount  int    `json:"allowed_rules"`
-	WrapperPath   string `json:"wrapper_path,omitempty"`
-	HookInstalled bool   `json:"hook_installed"`
+	Installed           bool   `json:"installed"`
+	PolicyPath          string `json:"policy_path,omitempty"`
+	BlockedCount        int    `json:"blocked_rules"`
+	ApprovalCount       int    `json:"approval_rules"`
+	AllowedCount        int    `json:"allowed_rules"`
+	WrapperPath         string `json:"wrapper_path,omitempty"`
+	GitWrapperInstalled bool   `json:"git_wrapper_installed"`
+	RmWrapperInstalled  bool   `json:"rm_wrapper_installed"`
+	HookInstalled       bool   `json:"hook_installed"`
 }
 
 func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +80,9 @@ func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
 
 	// Check if wrappers are installed
 	gitWrapper := filepath.Join(wrapperDir, "git")
-	wrapperInstalled := safetyFileExists(gitWrapper)
+	rmWrapper := filepath.Join(wrapperDir, "rm")
+	gitWrapperInstalled := safetyFileExists(gitWrapper)
+	rmWrapperInstalled := safetyFileExists(rmWrapper)
 
 	// Check if Claude Code hook is installed
 	hookPath := filepath.Join(home, ".claude", "hooks", "PreToolUse", "ntm-safety.sh")
@@ -97,13 +101,15 @@ func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := SafetyStatusResponse{
-		Installed:     wrapperInstalled || hookInstalled,
-		PolicyPath:    policyPath,
-		BlockedCount:  blocked,
-		ApprovalCount: approval,
-		AllowedCount:  allowed,
-		WrapperPath:   wrapperDir,
-		HookInstalled: hookInstalled,
+		Installed:           gitWrapperInstalled && rmWrapperInstalled && hookInstalled,
+		PolicyPath:          policyPath,
+		BlockedCount:        blocked,
+		ApprovalCount:       approval,
+		AllowedCount:        allowed,
+		WrapperPath:         wrapperDir,
+		GitWrapperInstalled: gitWrapperInstalled,
+		RmWrapperInstalled:  rmWrapperInstalled,
+		HookInstalled:       hookInstalled,
 	}
 
 	data, err := toJSONMap(resp)
@@ -245,12 +251,10 @@ func (s *Server) handleSafetyInstallV1(w http.ResponseWriter, r *http.Request) {
 	reqID := requestIDFromContext(r.Context())
 
 	var req SafetyInstallRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
-				"invalid request body", nil, reqID)
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"invalid request body", nil, reqID)
+		return
 	}
 
 	home, err := os.UserHomeDir()
@@ -388,6 +392,7 @@ func (s *Server) handleSafetyUninstallV1(w http.ResponseWriter, r *http.Request)
 type PolicyGetResponse struct {
 	Version    int                     `json:"version"`
 	PolicyPath string                  `json:"policy_path,omitempty"`
+	Content    string                  `json:"content,omitempty"`
 	IsDefault  bool                    `json:"is_default"`
 	Stats      PolicyStatsResponse     `json:"stats"`
 	Automation policy.AutomationConfig `json:"automation"`
@@ -421,6 +426,7 @@ func (s *Server) handlePolicyGetV1(w http.ResponseWriter, r *http.Request) {
 
 	// Check if full rules are requested
 	includeRules := r.URL.Query().Get("rules") == "true"
+	includeContent := r.URL.Query().Get("content") == "true"
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -469,6 +475,20 @@ func (s *Server) handlePolicyGetV1(w http.ResponseWriter, r *http.Request) {
 			Blocked:          toPolicyRuleSummaries(p.Blocked),
 			ApprovalRequired: toPolicyRuleSummaries(p.ApprovalRequired),
 			Allowed:          toPolicyRuleSummaries(p.Allowed),
+		}
+	}
+
+	if includeContent {
+		if isDefault {
+			resp.Content = generatePolicyYAMLFromPolicy(p)
+		} else {
+			content, err := os.ReadFile(policyPath)
+			if err != nil {
+				writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"failed to read policy file", nil, reqID)
+				return
+			}
+			resp.Content = string(content)
 		}
 	}
 
@@ -595,12 +615,10 @@ func (s *Server) handlePolicyValidateV1(w http.ResponseWriter, r *http.Request) 
 	reqID := requestIDFromContext(r.Context())
 
 	var req PolicyValidateRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
-				"invalid request body", nil, reqID)
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"invalid request body", nil, reqID)
+		return
 	}
 
 	var errors []string
@@ -952,6 +970,14 @@ func (s *Server) handleApprovalsListV1(w http.ResponseWriter, r *http.Request) {
 		result = append(result, *a)
 	}
 
+	// Return newest approvals first so the dashboard selection is stable.
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+
 	resp := ApprovalsListResponse{
 		Approvals: result,
 		Count:     len(result),
@@ -1158,6 +1184,14 @@ func (s *Server) handleApprovalDenyV1(w http.ResponseWriter, r *http.Request) {
 		approvalsLock.Unlock()
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound,
 			fmt.Sprintf("approval '%s' not found", id), nil, reqID)
+		return
+	}
+
+	if time.Now().After(approval.ExpiresAt) {
+		approval.Status = "expired"
+		approvalsLock.Unlock()
+		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict,
+			"approval has expired", nil, reqID)
 		return
 	}
 

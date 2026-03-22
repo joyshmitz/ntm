@@ -6,7 +6,7 @@
  * Issue tracking dashboard.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
@@ -144,6 +144,7 @@ export default function BeadsPage() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [dragOver, setDragOver] = useState<BeadStatus | null>(null);
   const [movingBeadId, setMovingBeadId] = useState<string | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -226,9 +227,23 @@ export default function BeadsPage() {
     } as Record<BeadStatus, Bead[]>;
   }, [openQuery.data, inProgressQuery.data, closedQuery.data]);
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   const moveBead = useCallback(
@@ -406,7 +421,25 @@ export default function BeadsPage() {
                     setDragOver(null);
                     const payload = event.dataTransfer.getData("application/ntm-bead");
                     if (!payload) return;
-                    const parsed = JSON.parse(payload) as { id: string };
+                    let parsed: { id?: string };
+                    try {
+                      parsed = JSON.parse(payload) as { id?: string };
+                    } catch {
+                      setStatusNotice({
+                        type: "error",
+                        message: "Invalid bead drag payload.",
+                      });
+                      return;
+                    }
+
+                    if (!parsed.id) {
+                      setStatusNotice({
+                        type: "error",
+                        message: "Missing bead id in drag payload.",
+                      });
+                      return;
+                    }
+
                     const source =
                       beads.find((item) => item.id === parsed.id) ||
                       openQuery.data?.beads?.find((item) => item.id === parsed.id) ||

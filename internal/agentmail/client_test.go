@@ -259,9 +259,11 @@ func TestErrorHelpers(t *testing.T) {
 		{ErrUnauthorized, IsUnauthorized, true},
 		{ErrNotFound, IsNotFound, true},
 		{ErrTimeout, IsTimeout, true},
+		{ErrNotImplemented, IsNotImplemented, true},
 		{ErrReservationConflict, IsReservationConflict, true},
 		{ErrServerUnavailable, IsUnauthorized, false},
 		{NewAPIError("test", 0, ErrNotFound), IsNotFound, true},
+		{NewAPIError("test", 0, ErrNotImplemented), IsNotImplemented, true},
 	}
 
 	for _, tt := range tests {

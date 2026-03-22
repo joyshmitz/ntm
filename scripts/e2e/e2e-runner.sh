@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E2E Test Runner
-# Master script for running E2E tests with parallel execution and JSON logging.
+# Primary script for running E2E tests with parallel execution and JSON logging.
 #
 # Usage:
 #   ./e2e-runner.sh                    # Run all tests

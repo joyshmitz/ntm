@@ -81,6 +81,12 @@ interface BugSummary {
   linked_beads: number;
 }
 
+interface ApiEnvelope {
+  success?: boolean;
+  error?: string;
+  message?: string;
+}
+
 async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${getBaseUrl()}${url}`, {
     ...options,
@@ -90,12 +96,33 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
       ...options?.headers,
     },
   });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(error.message || res.statusText);
+
+  const raw = await res.text();
+  let data: unknown = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error('Invalid response from server.');
+    }
   }
-  const data = await res.json();
-  return data.data || data;
+
+  const envelope = data as ApiEnvelope | null;
+  if (!res.ok || envelope?.success === false) {
+    throw new Error(
+      envelope?.error ||
+        envelope?.message ||
+        res.statusText ||
+        `Request failed (${res.status})`
+    );
+  }
+
+  return ((data as { data?: T } | null)?.data ?? data) as T;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return 'Unexpected error';
 }
 
 // Severity color helpers
@@ -271,28 +298,32 @@ export default function ScannerPage() {
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
 
   // Scanner status
-  const { data: status, isLoading: statusLoading } = useQuery({
+  const { data: status, isLoading: statusLoading, error: statusError } = useQuery({
     queryKey: ['scanner', 'status'],
     queryFn: () => fetchJSON<ScannerStatus>('/api/v1/scanner/status'),
     refetchInterval: 5000, // Poll while scan might be running
   });
 
   // Bug summary
-  const { data: summary } = useQuery({
+  const { data: summary, error: summaryError } = useQuery({
     queryKey: ['bugs', 'summary'],
     queryFn: () => fetchJSON<BugSummary>('/api/v1/bugs/summary'),
     refetchInterval: 10000,
   });
 
   // Findings list
-  const { data: findingsData, isLoading: findingsLoading } = useQuery({
+  const {
+    data: findingsData,
+    isLoading: findingsLoading,
+    error: findingsError,
+  } = useQuery({
     queryKey: ['scanner', 'findings', severityFilter, showDismissed],
     queryFn: () => fetchJSON<{ findings: FindingRecord[]; count: number }>(`/api/v1/scanner/findings?severity=${severityFilter}&include_dismissed=${showDismissed}&limit=100`),
     refetchInterval: 10000,
   });
 
   // Scan history
-  const { data: historyData } = useQuery({
+  const { data: historyData, error: historyError } = useQuery({
     queryKey: ['scanner', 'history'],
     queryFn: () => fetchJSON<{ scans: ScanRecord[] }>('/api/v1/scanner/history?limit=10'),
     refetchInterval: 10000,
@@ -343,6 +374,14 @@ export default function ScannerPage() {
   const isScanning = status?.current_scan?.state === 'running' || status?.current_scan?.state === 'pending';
   const findings = findingsData?.findings || [];
   const history = historyData?.scans || [];
+  const connectionError =
+    statusError ??
+    summaryError ??
+    findingsError ??
+    historyError ??
+    runScanMutation.error ??
+    dismissMutation.error ??
+    createBeadMutation.error;
 
   return (
     <div className="p-6 space-y-6">
@@ -371,6 +410,14 @@ export default function ScannerPage() {
           </button>
         </div>
       </div>
+
+      {connectionError && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
+          <p className="text-sm text-red-300">
+            Scanner error: {getErrorMessage(connectionError)}
+          </p>
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

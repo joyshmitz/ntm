@@ -12473,7 +12473,7 @@ func TestHandleSafetyStatusV1_FullPath(t *testing.T) {
 		t.Errorf("expected installed=false, got %v", resp["installed"])
 	}
 
-	// Test 2: install wrappers then check again
+	// Test 2: install only a partial guard set
 	binDir := filepath.Join(tmpDir, ".ntm", "bin")
 	os.MkdirAll(binDir, 0755)
 	os.WriteFile(filepath.Join(binDir, "git"), []byte("#!/bin/sh\n"), 0755)
@@ -12490,11 +12490,36 @@ func TestHandleSafetyStatusV1_FullPath(t *testing.T) {
 	}
 	var resp2 map[string]interface{}
 	json.Unmarshal(rec2.Body.Bytes(), &resp2)
-	if resp2["installed"] != true {
-		t.Errorf("expected installed=true, got %v", resp2["installed"])
+	if resp2["installed"] != false {
+		t.Errorf("expected installed=false for partial install, got %v", resp2["installed"])
+	}
+	if resp2["git_wrapper_installed"] != true {
+		t.Errorf("expected git_wrapper_installed=true, got %v", resp2["git_wrapper_installed"])
+	}
+	if resp2["rm_wrapper_installed"] != false {
+		t.Errorf("expected rm_wrapper_installed=false, got %v", resp2["rm_wrapper_installed"])
 	}
 	if resp2["hook_installed"] != true {
 		t.Errorf("expected hook_installed=true, got %v", resp2["hook_installed"])
+	}
+
+	// Test 3: install the full guard set
+	os.WriteFile(filepath.Join(binDir, "rm"), []byte("#!/bin/sh\n"), 0755)
+
+	req3 := httptest.NewRequest("GET", "/api/v1/safety/status", nil)
+	rec3 := httptest.NewRecorder()
+	s.handleSafetyStatusV1(rec3, req3)
+
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec3.Code, rec3.Body.String())
+	}
+	var resp3 map[string]interface{}
+	json.Unmarshal(rec3.Body.Bytes(), &resp3)
+	if resp3["installed"] != true {
+		t.Errorf("expected installed=true, got %v", resp3["installed"])
+	}
+	if resp3["rm_wrapper_installed"] != true {
+		t.Errorf("expected rm_wrapper_installed=true, got %v", resp3["rm_wrapper_installed"])
 	}
 }
 
@@ -12690,6 +12715,75 @@ func TestApprovalsListV1_ExpiredTransition(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expired approval %s not found in list with status=expired filter", id)
+	}
+}
+
+// TestApprovalsListV1_SortsNewestFirst ensures the approvals list is returned
+// in descending created_at order so the dashboard selection is deterministic.
+func TestApprovalsListV1_SortsNewestFirst(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	type approvalSeed struct {
+		id        string
+		createdAt time.Time
+	}
+
+	now := time.Now()
+	seeds := []approvalSeed{
+		{id: fmt.Sprintf("apr-sort-oldest-%d", approvalIDSeq+1), createdAt: now.Add(-4 * time.Minute)},
+		{id: fmt.Sprintf("apr-sort-middle-%d", approvalIDSeq+2), createdAt: now.Add(-2 * time.Minute)},
+		{id: fmt.Sprintf("apr-sort-newest-%d", approvalIDSeq+3), createdAt: now.Add(-1 * time.Minute)},
+	}
+
+	approvalsLock.Lock()
+	approvalIDSeq += int64(len(seeds))
+	for _, seed := range seeds {
+		approvals[seed.id] = &Approval{
+			ID:        seed.id,
+			Action:    seed.id,
+			Status:    "pending",
+			CreatedAt: seed.createdAt,
+			ExpiresAt: now.Add(1 * time.Hour),
+		}
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		for _, seed := range seeds {
+			delete(approvals, seed.id)
+		}
+		approvalsLock.Unlock()
+	}()
+
+	req := httptest.NewRequest("GET", "/api/v1/approvals?status=pending", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalsListV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Approvals []Approval `json:"approvals"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	gotPositions := map[string]int{}
+	for index, approval := range resp.Approvals {
+		gotPositions[approval.ID] = index
+	}
+
+	if gotPositions[seeds[2].id] >= gotPositions[seeds[1].id] {
+		t.Fatalf("newest approval %s should sort before %s; got positions %d and %d",
+			seeds[2].id, seeds[1].id, gotPositions[seeds[2].id], gotPositions[seeds[1].id])
+	}
+	if gotPositions[seeds[1].id] >= gotPositions[seeds[0].id] {
+		t.Fatalf("middle approval %s should sort before %s; got positions %d and %d",
+			seeds[1].id, seeds[0].id, gotPositions[seeds[1].id], gotPositions[seeds[0].id])
 	}
 }
 
@@ -13156,6 +13250,58 @@ func TestApprovalDenyV1_WithRBACContext(t *testing.T) {
 	approvalsLock.RUnlock()
 	if a.ApprovedBy != "admin-denier" {
 		t.Errorf("expected approved_by=admin-denier, got %s", a.ApprovedBy)
+	}
+}
+
+// TestApprovalDenyV1_ExpiredApproval ensures deny mirrors approve semantics and
+// rejects approvals that have already expired.
+func TestApprovalDenyV1_ExpiredApproval(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	approvalsLock.Lock()
+	approvalIDSeq++
+	id := fmt.Sprintf("apr-deny-expired-%d", approvalIDSeq)
+	approvals[id] = &Approval{
+		ID:        id,
+		Action:    "dangerous-action",
+		Requestor: "agent-req",
+		Status:    "pending",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+		ExpiresAt: time.Now().Add(-5 * time.Minute),
+	}
+	approvalsLock.Unlock()
+
+	defer func() {
+		approvalsLock.Lock()
+		delete(approvals, id)
+		approvalsLock.Unlock()
+	}()
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", id)
+	req := httptest.NewRequest("POST", "/api/v1/safety/approvals/"+id+"/deny", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleApprovalDenyV1(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !strings.Contains(fmt.Sprint(resp["error"]), "expired") {
+		t.Fatalf("expected expired error, got %v", resp["error"])
+	}
+
+	approvalsLock.RLock()
+	status := approvals[id].Status
+	approvalsLock.RUnlock()
+	if status != "expired" {
+		t.Fatalf("expected approval status=expired, got %s", status)
 	}
 }
 

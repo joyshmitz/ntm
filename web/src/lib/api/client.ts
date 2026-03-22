@@ -17,6 +17,31 @@ export interface ConnectionConfig {
 const CONNECTION_KEY = "ntm-connection";
 export const DEFAULT_NTM_BASE_URL = "http://localhost:7337";
 
+export function formatApiErrorMessage(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const messageFields = ["error", "message", "detail", "title"];
+    for (const field of messageFields) {
+      const value = record[field];
+      if (typeof value === "string" && value.trim()) {
+        return value;
+      }
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "Unexpected error";
+    }
+  }
+  return "Unexpected error";
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim();
   if (!trimmed) {
@@ -150,12 +175,15 @@ export async function checkConnection(): Promise<{ ok: boolean; error?: string }
     const response = await client.GET("/api/v1/health");
 
     if (response.error) {
-      return { ok: false, error: `Server error: ${response.error}` };
+      return {
+        ok: false,
+        error: `Server error: ${formatApiErrorMessage(response.error)}`,
+      };
     }
 
     return { ok: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Connection failed";
+    const message = formatApiErrorMessage(err);
     return { ok: false, error: message };
   }
 }

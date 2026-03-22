@@ -935,8 +935,21 @@ func TestPrintPipelineList_WithPipelines(t *testing.T) {
 		WorkflowID: "workflow-1",
 		Session:    "session-1",
 		Status:     "completed",
-		StartedAt:  now,
+		StartedAt:  now.Add(-time.Minute),
 		Progress:   PipelineProgress{Total: 5, Completed: 5, Percent: 100},
+	}
+	liveExecutor := NewExecutor(DefaultExecutorConfig("session-2"))
+	liveExecutor.state = &ExecutionState{
+		RunID:       "list-test-2",
+		WorkflowID:  "workflow-2",
+		Session:     "session-2",
+		Status:      StatusRunning,
+		StartedAt:   now,
+		CurrentStep: "step-2",
+		Steps: map[string]StepResult{
+			"step-1": {StepID: "step-1", Status: StatusCompleted},
+			"step-2": {StepID: "step-2", Status: StatusRunning},
+		},
 	}
 	exec2 := &PipelineExecution{
 		RunID:      "list-test-2",
@@ -945,6 +958,7 @@ func TestPrintPipelineList_WithPipelines(t *testing.T) {
 		Status:     "running",
 		StartedAt:  now,
 		Progress:   PipelineProgress{Total: 10, Running: 1, Pending: 9, Percent: 0},
+		executor:   liveExecutor,
 	}
 	RegisterPipeline(exec1)
 	RegisterPipeline(exec2)
@@ -972,11 +986,180 @@ func TestPrintPipelineList_WithPipelines(t *testing.T) {
 	}
 
 	// Verify pipelines are sorted by start time (most recent first)
+	if result.Pipelines[0].RunID != "list-test-2" {
+		t.Errorf("Pipelines[0].RunID = %q, want %q", result.Pipelines[0].RunID, "list-test-2")
+	}
+	if result.Pipelines[0].Progress.Total != 10 {
+		t.Errorf("Pipelines[0].Progress.Total = %d, want 10", result.Pipelines[0].Progress.Total)
+	}
+	if result.Pipelines[0].Progress.Completed != 1 {
+		t.Errorf("Pipelines[0].Progress.Completed = %d, want 1", result.Pipelines[0].Progress.Completed)
+	}
+	if result.Pipelines[0].Progress.Running != 1 {
+		t.Errorf("Pipelines[0].Progress.Running = %d, want 1", result.Pipelines[0].Progress.Running)
+	}
+	if result.Pipelines[0].Progress.Percent != 10 {
+		t.Errorf("Pipelines[0].Progress.Percent = %f, want 10", result.Pipelines[0].Progress.Percent)
+	}
 	if result.AgentHints == nil {
 		t.Error("AgentHints should not be nil")
 	}
 
 	ClearPipelineRegistry()
+}
+
+func TestGetPipelineSnapshot_UsesLiveExecutorState(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	executor := NewExecutor(DefaultExecutorConfig("snapshot-session"))
+	executor.state = &ExecutionState{
+		RunID:       "snapshot-live-test",
+		WorkflowID:  "snapshot-workflow",
+		Session:     "snapshot-session",
+		Status:      StatusRunning,
+		CurrentStep: "step-2",
+		Steps: map[string]StepResult{
+			"step-1": {StepID: "step-1", Status: StatusCompleted},
+			"step-2": {StepID: "step-2", Status: StatusRunning},
+		},
+	}
+
+	RegisterPipeline(&PipelineExecution{
+		RunID:      "snapshot-live-test",
+		WorkflowID: "snapshot-workflow",
+		Session:    "snapshot-session",
+		Status:     "running",
+		StartedAt:  time.Now(),
+		Progress: PipelineProgress{
+			Total:   5,
+			Pending: 5,
+		},
+		Steps: map[string]PipelineStep{
+			"stale": {ID: "stale", Status: "pending"},
+		},
+		executor: executor,
+	})
+
+	snapshot := GetPipelineSnapshot("snapshot-live-test")
+	if snapshot == nil {
+		t.Fatal("GetPipelineSnapshot() returned nil")
+	}
+	if snapshot.CurrentStep != "step-2" {
+		t.Errorf("CurrentStep = %q, want %q", snapshot.CurrentStep, "step-2")
+	}
+	if snapshot.Progress.Total != 5 {
+		t.Errorf("Progress.Total = %d, want 5", snapshot.Progress.Total)
+	}
+	if snapshot.Progress.Completed != 1 {
+		t.Errorf("Progress.Completed = %d, want 1", snapshot.Progress.Completed)
+	}
+	if snapshot.Progress.Running != 1 {
+		t.Errorf("Progress.Running = %d, want 1", snapshot.Progress.Running)
+	}
+	if snapshot.Progress.Percent != 20 {
+		t.Errorf("Progress.Percent = %f, want 20", snapshot.Progress.Percent)
+	}
+	if _, ok := snapshot.Steps["step-2"]; !ok {
+		t.Errorf("snapshot steps missing live executor step data: %v", snapshot.Steps)
+	}
+	if _, ok := snapshot.Steps["stale"]; ok {
+		t.Errorf("snapshot should not use stale registry steps when executor state is available: %v", snapshot.Steps)
+	}
+}
+
+func TestGetPipelineSnapshot_PreservesTerminalRegistryStatus(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	executor := NewExecutor(DefaultExecutorConfig("cancelled-session"))
+	executor.state = &ExecutionState{
+		RunID:       "snapshot-cancelled-test",
+		WorkflowID:  "cancelled-workflow",
+		Session:     "cancelled-session",
+		Status:      StatusRunning,
+		CurrentStep: "step-2",
+		Steps: map[string]StepResult{
+			"step-1": {StepID: "step-1", Status: StatusCompleted},
+			"step-2": {StepID: "step-2", Status: StatusRunning},
+		},
+	}
+
+	finishedAt := time.Now()
+	RegisterPipeline(&PipelineExecution{
+		RunID:      "snapshot-cancelled-test",
+		WorkflowID: "cancelled-workflow",
+		Session:    "cancelled-session",
+		Status:     "cancelled",
+		StartedAt:  finishedAt.Add(-time.Minute),
+		FinishedAt: &finishedAt,
+		Progress: PipelineProgress{
+			Total:   4,
+			Pending: 4,
+		},
+		executor: executor,
+	})
+
+	snapshot := GetPipelineSnapshot("snapshot-cancelled-test")
+	if snapshot == nil {
+		t.Fatal("GetPipelineSnapshot() returned nil")
+	}
+	if snapshot.Status != "cancelled" {
+		t.Errorf("Status = %q, want %q", snapshot.Status, "cancelled")
+	}
+	if snapshot.FinishedAt == nil || !snapshot.FinishedAt.Equal(finishedAt) {
+		t.Errorf("FinishedAt = %v, want %v", snapshot.FinishedAt, finishedAt)
+	}
+	if snapshot.Progress.Total != 4 {
+		t.Errorf("Progress.Total = %d, want 4", snapshot.Progress.Total)
+	}
+	if snapshot.Progress.Completed != 1 {
+		t.Errorf("Progress.Completed = %d, want 1", snapshot.Progress.Completed)
+	}
+	if snapshot.Progress.Running != 1 {
+		t.Errorf("Progress.Running = %d, want 1", snapshot.Progress.Running)
+	}
+}
+
+func TestStartBackgroundPipeline_RegistersExecutorAndCancel(t *testing.T) {
+	ClearPipelineRegistry()
+	defer ClearPipelineRegistry()
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "background-start-test",
+		Steps:         nil,
+	}
+	execCfg := DefaultExecutorConfig("background-session")
+	execCfg.DryRun = true
+	execCfg.GlobalTimeout = time.Second
+
+	exec := StartBackgroundPipeline(workflow, nil, execCfg)
+	if exec == nil {
+		t.Fatal("StartBackgroundPipeline() returned nil")
+	}
+
+	registered := GetPipelineExecution(exec.RunID)
+	if registered == nil {
+		t.Fatal("background pipeline was not registered")
+	}
+	if registered.executor == nil {
+		t.Fatal("registered pipeline is missing executor")
+	}
+	if registered.cancelFn == nil {
+		t.Fatal("registered pipeline is missing cancelFn")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := GetPipelineSnapshot(exec.RunID)
+		if snapshot != nil && (snapshot.Status == "running" || snapshot.Status == "completed") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("background pipeline %q never became visible through snapshots", exec.RunID)
 }
 
 func TestPrintPipelineCancel_ValidationErrors(t *testing.T) {

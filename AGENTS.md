@@ -28,20 +28,17 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
-## Git Branch: ONLY Use `main`, NEVER `master`
+## Git Branch: `main` Only
 
-**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+**This repository uses exactly one branch: `main`.**
 
-- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
-- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
-- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
-  ```bash
-  git push origin main:master
-  ```
+- **All work happens on `main`** — commits, PRs, and automation all target `main`
+- **Do not create, use, or sync `master`** — if you see branch logic that references `master`, remove it
+- **Do not create or keep side branches like `beads-sync`** unless I explicitly direct it for a temporary workflow
 
-**If you see `master` referenced anywhere:**
+**If you see non-`main` branch handling in code or docs:**
 1. Update it to `main`
-2. Ensure `master` is synchronized: `git push origin main:master`
+2. Remove any implication that `master` or another long-lived branch should exist
 
 ---
 

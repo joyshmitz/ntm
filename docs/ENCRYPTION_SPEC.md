@@ -29,7 +29,7 @@ Add an `[encryption]` section to `config.toml` and `.ntm/config.toml`.
 
 ```toml
 [encryption]
-# Master toggle for encryption-at-rest (default false).
+# Top-level toggle for encryption-at-rest (default false).
 enabled = false
 
 # Key source: env | file | command

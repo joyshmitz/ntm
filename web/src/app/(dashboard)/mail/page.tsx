@@ -6,7 +6,7 @@
  * Agent mail coordination.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
@@ -48,24 +48,6 @@ interface InboxMessage {
 interface MailInboxResponse extends ApiEnvelope {
   messages: InboxMessage[];
   count: number;
-}
-
-interface Message {
-  id: number;
-  subject: string;
-  from: string;
-  to: string[];
-  cc?: string[];
-  bcc?: string[];
-  created_ts: string;
-  thread_id?: string | null;
-  importance: string;
-  ack_required: boolean;
-  body_md: string;
-}
-
-interface MailMessageResponse extends ApiEnvelope {
-  message: Message;
 }
 
 interface ThreadSummary {
@@ -162,11 +144,6 @@ function formatShortDate(value?: string | null): string {
   return date.toLocaleDateString();
 }
 
-function formatCommaList(values?: string[]): string {
-  if (!values || values.length === 0) return "—";
-  return values.join(", ");
-}
-
 function importanceBadge(importance: string): string {
   switch (importance) {
     case "urgent":
@@ -187,15 +164,30 @@ export default function MailPage() {
   const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
   const [replyBody, setReplyBody] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [actionBusy, setActionBusy] = useState({
     ack: false,
     read: false,
     reply: false,
   });
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   useEffect(() => {
@@ -309,15 +301,6 @@ export default function MailPage() {
     return messageList.find((message) => message.id === selectedMessageId) ?? null;
   }, [messageList, selectedMessageId]);
 
-  const messageQuery = useQuery({
-    queryKey: ["mail", "message", selectedMessageId],
-    queryFn: () =>
-      apiFetch<MailMessageResponse>(
-        `/api/v1/mail/messages/${selectedMessageId}`
-      ),
-    enabled: selectedMessageId !== null,
-  });
-
   const threadSummaryQuery = useQuery({
     queryKey: ["mail", "thread", selectedMessage?.thread_id],
     queryFn: () =>
@@ -326,8 +309,6 @@ export default function MailPage() {
       ),
     enabled: Boolean(selectedMessage?.thread_id),
   });
-
-  const fullMessage = messageQuery.data?.message;
 
   const inboxUnreadCount = useMemo(() => {
     return messageList.filter((message) => !message.read_at).length;
@@ -429,7 +410,7 @@ export default function MailPage() {
       if (process.env.NODE_ENV === "development") {
         console.log("[Mail] Reply", { selectedMessageId, agentName });
       }
-      await apiFetch<MailMessageResponse>(
+      await apiFetch<ApiEnvelope>(
         `/api/v1/mail/messages/${selectedMessageId}/reply`,
         {
           method: "POST",
@@ -441,7 +422,6 @@ export default function MailPage() {
       );
       setReplyBody("");
       queryClient.invalidateQueries({ queryKey: ["mail", "inbox"] });
-      queryClient.invalidateQueries({ queryKey: ["mail", "message"] });
       setStatusNotice({ type: "success", message: "Reply sent." });
     } catch (error) {
       setStatusNotice({ type: "error", message: getErrorMessage(error) });
@@ -456,7 +436,12 @@ export default function MailPage() {
     setStatusNotice,
   ]);
 
-  const connectionError = agentsQuery.error ?? inboxQuery.error;
+  const connectionError =
+    agentsQuery.error ??
+    inboxQuery.error ??
+    reservationsQuery.error ??
+    conflictsQuery.error ??
+    threadSummaryQuery.error;
 
   return (
     <div className="space-y-8">
@@ -638,34 +623,25 @@ export default function MailPage() {
             </div>
           )}
 
-          {selectedMessage && messageQuery.isLoading && (
-            <div className="flex items-center justify-center h-40">
-              <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" />
-            </div>
-          )}
-
           {selectedMessage && (
             <div className="space-y-4">
               <div className="rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 space-y-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                      {fullMessage?.subject || selectedMessage.subject}
+                      {selectedMessage.subject}
                     </h3>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
-                      From {fullMessage?.from || selectedMessage.from} · {" "}
-                      {formatTimestamp(
-                        fullMessage?.created_ts || selectedMessage.created_ts
-                      )}
+                      From {selectedMessage.from} · {formatTimestamp(selectedMessage.created_ts)}
                     </p>
                   </div>
                   <div className="flex flex-col items-end gap-2">
                     <span
                       className={`px-2 py-0.5 rounded-full text-xs ${importanceBadge(
-                        fullMessage?.importance || selectedMessage.importance
+                        selectedMessage.importance
                       )}`}
                     >
-                      {fullMessage?.importance || selectedMessage.importance}
+                      {selectedMessage.importance}
                     </span>
                     {selectedMessage.ack_required && (
                       <span className="text-[10px] uppercase text-red-500">
@@ -676,8 +652,7 @@ export default function MailPage() {
                 </div>
 
                 <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1">
-                  <div>To: {formatCommaList(fullMessage?.to)}</div>
-                  <div>CC: {formatCommaList(fullMessage?.cc)}</div>
+                  <div>Recipients: Available in message threads and replies.</div>
                   <div>Thread: {selectedMessage.thread_id || "—"}</div>
                   <div>
                     Read: {selectedMessage.read_at ? formatTimestamp(selectedMessage.read_at) : "Unread"}
@@ -708,7 +683,7 @@ export default function MailPage() {
                     Body
                   </div>
                   <div className="mt-2 whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-100">
-                    {fullMessage?.body_md || selectedMessage.body_md ||
+                    {selectedMessage.body_md ||
                       "No body content available."}
                   </div>
                 </div>

@@ -376,6 +376,61 @@ func TestHandleCreateBeadFromFindingSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleCreateBeadFromFindingBadJSON(t *testing.T) {
+	resetScannerStoreForTest()
+	addTestFinding("scan-1", "finding-1", scanner.SeverityWarning, "main.go", "security", false, "")
+
+	srv, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/findings/finding-1/create-bead", strings.NewReader("{bad"))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "finding-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleCreateBeadFromFinding(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleCreateBeadFromFindingRejectsUnknownBeadID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub br uses sh")
+	}
+
+	resetScannerStoreForTest()
+	addTestFinding("scan-1", "finding-1", scanner.SeverityWarning, "main.go", "security", false, "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "br")
+	script := "#!/bin/sh\nset -e\necho 'Created bead without parseable id'\n"
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write stub br: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/findings/finding-1/create-bead", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "finding-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleCreateBeadFromFinding(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+
+	finding, ok := scannerStore.GetFinding("finding-1")
+	if !ok {
+		t.Fatal("finding missing after failed create")
+	}
+	if finding.BeadID != "" {
+		t.Fatalf("finding.BeadID=%q, want empty", finding.BeadID)
+	}
+}
+
 func TestHandleListBugsAndSummary(t *testing.T) {
 	resetScannerStoreForTest()
 	addTestFinding("scan-1", "finding-1", scanner.SeverityWarning, "main.go", "security", false, "")
@@ -480,6 +535,73 @@ func TestHandleRunScanAlreadyRunning(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestScannerStoreTryStartScanRejectsActiveScan(t *testing.T) {
+	t.Parallel()
+
+	store := NewScannerStore()
+	first := &ScanRecord{ID: "scan-pending", State: ScanStatePending, StartedAt: time.Now()}
+	if active, ok := store.TryStartScan(first); !ok || active != nil {
+		t.Fatalf("first TryStartScan = (%v, %v), want (<nil>, true)", active, ok)
+	}
+
+	second := &ScanRecord{ID: "scan-second", State: ScanStatePending, StartedAt: time.Now()}
+	active, ok := store.TryStartScan(second)
+	if ok {
+		t.Fatal("expected second TryStartScan to be rejected")
+	}
+	if active == nil || active.ID != "scan-pending" {
+		t.Fatalf("active scan = %#v, want scan-pending", active)
+	}
+}
+
+func TestHandleScannerStatusPendingReportedAsCurrent(t *testing.T) {
+	resetScannerStoreForTest()
+	addTestScan("scan-done", ScanStateCompleted)
+	addTestScan("scan-pending", ScanStatePending)
+
+	srv, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scanner/status", nil)
+	rec := httptest.NewRecorder()
+
+	srv.handleScannerStatus(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	current, ok := resp["current_scan"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected current_scan object")
+	}
+	if current["id"] != "scan-pending" {
+		t.Fatalf("current_scan.id=%v, want scan-pending", current["id"])
+	}
+	if _, exists := resp["last_scan"]; exists {
+		t.Fatalf("unexpected last_scan=%v for pending active scan", resp["last_scan"])
+	}
+}
+
+func TestHandleDismissFindingBadJSON(t *testing.T) {
+	resetScannerStoreForTest()
+	addTestFinding("scan-1", "finding-1", scanner.SeverityWarning, "main.go", "security", false, "")
+
+	srv, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/findings/finding-1/dismiss", strings.NewReader("{bad"))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "finding-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleDismissFinding(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 

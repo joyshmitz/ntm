@@ -23,6 +23,10 @@ var (
 	// ErrTimeout is returned when a request times out.
 	ErrTimeout = errors.New("request timed out")
 
+	// ErrNotImplemented is returned when the connected Agent Mail server does not
+	// expose the requested MCP capability.
+	ErrNotImplemented = errors.New("operation not supported by agent mail")
+
 	// ErrAgentNotRegistered is returned when trying to use an unregistered agent.
 	ErrAgentNotRegistered = errors.New("agent not registered")
 
@@ -97,6 +101,11 @@ func IsTimeout(err error) bool {
 	return errors.Is(err, ErrTimeout)
 }
 
+// IsNotImplemented returns true if the error indicates an unsupported operation.
+func IsNotImplemented(err error) bool {
+	return errors.Is(err, ErrNotImplemented)
+}
+
 // IsReservationConflict returns true if the error indicates a file reservation conflict.
 func IsReservationConflict(err error) bool {
 	return errors.Is(err, ErrReservationConflict)
@@ -117,6 +126,8 @@ func mapJSONRPCError(rpcErr *JSONRPCError) error {
 		return fmt.Errorf("%w: %s", ErrMessageNotFound, rpcErr.Message)
 	case strings.Contains(msg, "conflict") || strings.Contains(msg, "reservation"):
 		return fmt.Errorf("%w: %s", ErrReservationConflict, rpcErr.Message)
+	case strings.Contains(msg, "not found"):
+		return fmt.Errorf("%w: %s", ErrNotFound, rpcErr.Message)
 	}
 
 	// Map common JSON-RPC error codes
@@ -124,7 +135,7 @@ func mapJSONRPCError(rpcErr *JSONRPCError) error {
 	case -32600:
 		return fmt.Errorf("%w: %s", ErrInvalidRequest, rpcErr.Message)
 	case -32601:
-		return fmt.Errorf("%w: method not found", ErrInvalidRequest)
+		return fmt.Errorf("%w: %s", ErrNotImplemented, rpcErr.Message)
 	case -32602:
 		return fmt.Errorf("%w: %s", ErrInvalidRequest, rpcErr.Message)
 	default:

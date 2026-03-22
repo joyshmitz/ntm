@@ -410,9 +410,12 @@ func TestSearchMessages(t *testing.T) {
 
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"search_messages": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return []SearchResult{
-				{ID: 1, Subject: "Build plan", From: "BlueLake"},
-				{ID: 2, Subject: "Build update", From: "RedStone"},
+			return map[string]interface{}{
+				"result": []SearchResult{
+					{ID: 1, Subject: "Build plan", From: "BlueLake"},
+					{ID: 2, Subject: "Build update", From: "RedStone"},
+				},
+				"assistance": "use recency ranking for recent activity",
 			}, nil
 		},
 	}))
@@ -437,11 +440,16 @@ func TestSummarizeThread(t *testing.T) {
 
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"summarize_thread": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return ThreadSummary{
-				ThreadID:     args["thread_id"].(string),
-				Participants: []string{"BlueLake", "RedStone"},
-				KeyPoints:    []string{"Discussed build plan"},
-				ActionItems:  []string{"Write tests"},
+			return ThreadSummaryResponse{
+				ThreadID: args["thread_id"].(string),
+				Summary: ThreadSummary{
+					Participants: []string{"BlueLake", "RedStone"},
+					KeyPoints:    []string{"Discussed build plan"},
+					ActionItems:  []string{"Write tests"},
+				},
+				Examples: []InboxMessage{
+					{ID: 1, Subject: "Build plan"},
+				},
 			}, nil
 		},
 	}))
@@ -878,31 +886,19 @@ func TestUninstallPrecommitGuard(t *testing.T) {
 	}
 }
 
-func TestGetMessage(t *testing.T) {
+func TestGetMessage_NotImplemented(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
-		"get_message": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return Message{
-				ID:      42,
-				Subject: "Test message",
-				BodyMD:  "Hello world",
-				From:    "BlueLake",
-			}, nil
-		},
-	}))
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){}))
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	msg, err := c.GetMessage(context.Background(), "/test", 42)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := c.GetMessage(context.Background(), "/test", 42)
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
-	if msg.ID != 42 {
-		t.Errorf("msg.ID = %d, want 42", msg.ID)
-	}
-	if msg.Subject != "Test message" {
-		t.Errorf("subject = %q, want Test message", msg.Subject)
+	if !IsNotImplemented(err) {
+		t.Fatalf("expected not-implemented error, got %v", err)
 	}
 }
 
@@ -926,12 +922,41 @@ func TestSetContactPolicy(t *testing.T) {
 func TestCheckConflicts(t *testing.T) {
 	t.Parallel()
 
+	mustFlexTime := func(value string) FlexTime {
+		t.Helper()
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatalf("parse time %q: %v", value, err)
+		}
+		return FlexTime{Time: parsed}
+	}
+
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
-		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return ReservationResult{
-				Granted: nil,
-				Conflicts: []ReservationConflict{
-					{Path: "a.go", Holders: []string{"BlueLake"}},
+		"list_file_reservations": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			return []FileReservation{
+				{
+					ID:          1,
+					PathPattern: "internal/**",
+					AgentName:   "BlueLake",
+					Exclusive:   true,
+					CreatedTS:   mustFlexTime("2026-01-01T00:00:00Z"),
+					ExpiresTS:   mustFlexTime("2099-01-01T00:00:00Z"),
+				},
+				{
+					ID:          2,
+					PathPattern: "internal/cli/*.go",
+					AgentName:   "RedStone",
+					Exclusive:   false,
+					CreatedTS:   mustFlexTime("2026-01-01T00:00:00Z"),
+					ExpiresTS:   mustFlexTime("2099-01-01T00:00:00Z"),
+				},
+				{
+					ID:          3,
+					PathPattern: "docs/**",
+					AgentName:   "GreenLake",
+					Exclusive:   false,
+					CreatedTS:   mustFlexTime("2026-01-01T00:00:00Z"),
+					ExpiresTS:   mustFlexTime("2099-01-01T00:00:00Z"),
 				},
 			}, nil
 		},
@@ -939,15 +964,18 @@ func TestCheckConflicts(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	conflicts, err := c.CheckConflicts(context.Background(), "/test", []string{"a.go"})
+	conflicts, err := c.CheckConflicts(context.Background(), "/test", []string{"internal/cli/*.go", "docs/**"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(conflicts) != 1 {
 		t.Fatalf("len(conflicts) = %d, want 1", len(conflicts))
 	}
-	if conflicts[0].Path != "a.go" {
-		t.Errorf("path = %q, want a.go", conflicts[0].Path)
+	if conflicts[0].Path != "internal/cli/*.go" {
+		t.Errorf("path = %q, want internal/cli/*.go", conflicts[0].Path)
+	}
+	if got := strings.Join(conflicts[0].Holders, ","); got != "BlueLake,RedStone" {
+		t.Errorf("holders = %q, want BlueLake,RedStone", got)
 	}
 }
 

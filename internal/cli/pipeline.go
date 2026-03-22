@@ -217,38 +217,12 @@ Examples:
 			ctx := context.Background()
 
 			if background {
-				// Background mode - register pipeline and start execution
-				runID := pipeline.GenerateRunID()
-
-				// Reconfigure executor with the pre-generated RunID
-				execCfg.RunID = runID
-				executor = pipeline.NewExecutor(execCfg)
-
-				// Register pipeline in the registry
-				exec := &pipeline.PipelineExecution{
-					RunID:      runID,
-					WorkflowID: workflow.Name,
-					Session:    session,
-					Status:     "running",
-					StartedAt:  time.Now(),
-					Steps:      make(map[string]pipeline.PipelineStep),
-					Progress: pipeline.PipelineProgress{
-						Total:   len(workflow.Steps),
-						Pending: len(workflow.Steps),
-					},
-				}
-				pipeline.RegisterPipeline(exec)
-
-				go func() {
-					defer close(progress)
-					state, _ := executor.Run(ctx, workflow, vars, progress)
-					pipeline.UpdatePipelineFromState(runID, state)
-				}()
+				exec := pipeline.StartBackgroundPipeline(workflow, vars, execCfg)
 
 				fmt.Printf("✓ Pipeline started in background\n")
-				fmt.Printf("   Run ID: %s\n", runID)
-				fmt.Printf("\n   Check status: ntm pipeline status %s\n", runID)
-				fmt.Printf("   Cancel: ntm pipeline cancel %s\n", runID)
+				fmt.Printf("   Run ID: %s\n", exec.RunID)
+				fmt.Printf("\n   Check status: ntm pipeline status %s\n", exec.RunID)
+				fmt.Printf("   Cancel: ntm pipeline cancel %s\n", exec.RunID)
 				return nil
 			}
 
@@ -849,7 +823,7 @@ func printProgressEvent(event pipeline.ProgressEvent) {
 
 func showPipelineStatus(runID string) error {
 	// Get pipeline from registry
-	exec := pipeline.GetPipelineExecution(runID)
+	exec := pipeline.GetPipelineSnapshot(runID)
 	if exec == nil {
 		return fmt.Errorf("pipeline %q not found (use 'ntm pipeline list' to see available pipelines)", runID)
 	}
@@ -896,7 +870,7 @@ func showPipelineStatus(runID string) error {
 }
 
 func showPipelineList() error {
-	pipelines := pipeline.GetAllPipelines()
+	pipelines := pipeline.GetAllPipelineSnapshots()
 
 	if len(pipelines) == 0 {
 		fmt.Println("No pipelines tracked.")

@@ -6,7 +6,7 @@
  * CAAM account management with quota visualization and rotation.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
@@ -196,14 +196,29 @@ export default function AccountsPage() {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<Notice | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [actionBusy, setActionBusy] = useState({
     rotate: false,
     config: false,
   });
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   // Accounts list query
@@ -262,9 +277,15 @@ export default function AccountsPage() {
     return Array.from(accountsByProvider.keys()).sort();
   }, [accountsByProvider]);
 
-  // Auto-select first provider
-  useMemo(() => {
-    if (selectedProvider === null && providers.length > 0) {
+  useEffect(() => {
+    if (providers.length === 0) {
+      if (selectedProvider !== null) {
+        setSelectedProvider(null);
+      }
+      return;
+    }
+
+    if (selectedProvider === null || !providers.includes(selectedProvider)) {
       setSelectedProvider(providers[0]);
     }
   }, [providers, selectedProvider]);
@@ -320,7 +341,12 @@ export default function AccountsPage() {
     }
   }, [autoRotateConfig, queryClient, setStatusNotice]);
 
-  const connectionError = accountsQuery.error ?? quotaQuery.error;
+  const connectionError =
+    accountsQuery.error ??
+    quotaQuery.error ??
+    activeQuery.error ??
+    configQuery.error ??
+    historyQuery.error;
 
   return (
     <div className="space-y-8">

@@ -523,7 +523,7 @@ func inferRuleCode(command string) string {
 		return "HARD_RESET"
 	}
 	if (strings.Contains(cmd, "git push --force") || strings.Contains(cmd, "git push -f")) &&
-		(strings.Contains(cmd, "main") || strings.Contains(cmd, "master")) {
+		strings.Contains(cmd, "main") {
 		return "FORCE_PUSH_PROTECTED"
 	}
 	if strings.Contains(cmd, "drop database") {

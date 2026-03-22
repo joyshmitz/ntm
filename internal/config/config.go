@@ -147,7 +147,7 @@ func DefaultRobotConfig() RobotConfig {
 
 // CheckpointsConfig holds configuration for automatic checkpoints
 type CheckpointsConfig struct {
-	Enabled               bool `toml:"enabled"`                  // Master toggle for auto-checkpoints
+	Enabled               bool `toml:"enabled"`                  // Top-level toggle for auto-checkpoints
 	BeforeBroadcast       bool `toml:"before_broadcast"`         // Auto-checkpoint before sending to all agents
 	BeforeAddAgents       int  `toml:"before_add_agents"`        // Auto-checkpoint when adding >= N agents (0 = disabled)
 	MaxAutoCheckpoints    int  `toml:"max_auto_checkpoints"`     // Max auto-checkpoints per session (rotation)
@@ -177,7 +177,7 @@ func DefaultCheckpointsConfig() CheckpointsConfig {
 
 // AlertsConfig holds configuration for the alert system
 type AlertsConfig struct {
-	Enabled              bool    `toml:"enabled"`                // Master toggle for alerts
+	Enabled              bool    `toml:"enabled"`                // Top-level toggle for alerts
 	AgentStuckMinutes    int     `toml:"agent_stuck_minutes"`    // Minutes without output before alerting
 	DiskLowThresholdGB   float64 `toml:"disk_low_threshold_gb"`  // Minimum free disk space (GB)
 	MailBacklogThreshold int     `toml:"mail_backlog_threshold"` // Unread messages before alerting
@@ -238,7 +238,7 @@ func DefaultResilienceConfig() ResilienceConfig {
 // This is separate from ResilienceConfig which handles crash recovery;
 // HealthConfig focuses on proactive monitoring and stall detection.
 type HealthConfig struct {
-	Enabled            bool `toml:"enabled"`              // Master toggle for health monitoring
+	Enabled            bool `toml:"enabled"`              // Top-level toggle for health monitoring
 	CheckInterval      int  `toml:"check_interval"`       // Seconds between health checks
 	StallThreshold     int  `toml:"stall_threshold"`      // Seconds without output before agent is stalled
 	AutoRestart        bool `toml:"auto_restart"`         // Auto-restart on unhealthy state
@@ -336,7 +336,7 @@ type RotationDashboard struct {
 
 // RotationConfig holds account rotation configuration
 type RotationConfig struct {
-	Enabled            bool               `toml:"enabled"`             // Master toggle
+	Enabled            bool               `toml:"enabled"`             // Top-level toggle
 	PreferRestart      bool               `toml:"prefer_restart"`      // Prefer restart over switch
 	AutoOpenBrowser    bool               `toml:"auto_open_browser"`   // Auto-open browser for auth
 	AutoTrigger        bool               `toml:"auto_trigger"`        // Show notification when rate limit detected
@@ -391,7 +391,7 @@ func DefaultRotationConfig() RotationConfig {
 
 // CASSConfig holds configuration for CASS (Coding Agent Session Search) integration
 type CASSConfig struct {
-	Enabled          bool   `toml:"enabled"`            // Master switch - disable all CASS features
+	Enabled          bool   `toml:"enabled"`            // Top-level switch - disable all CASS features
 	ShowInstallHints bool   `toml:"show_install_hints"` // Show installation hints when CASS not found
 	BinaryPath       string `toml:"binary_path"`        // Path to cass binary (auto-detect from PATH if empty)
 	Timeout          int    `toml:"timeout"`            // Timeout for CASS operations (seconds)
@@ -496,7 +496,7 @@ func DefaultContextConfig() ContextConfig {
 
 // ContextRotationConfig holds configuration for automatic context window rotation
 type ContextRotationConfig struct {
-	Enabled              bool    `toml:"enabled"`                // Master toggle for context rotation
+	Enabled              bool    `toml:"enabled"`                // Top-level toggle for context rotation
 	WarningThreshold     float64 `toml:"warning_threshold"`      // 0.0-1.0, warn when context usage exceeds this
 	RotateThreshold      float64 `toml:"rotate_threshold"`       // 0.0-1.0, rotate agent when usage exceeds this
 	SummaryMaxTokens     int     `toml:"summary_max_tokens"`     // Max tokens for handoff summary
@@ -646,7 +646,7 @@ func DefaultGeminiSetupConfig() GeminiSetupConfig {
 // SessionRecoveryConfig holds configuration for smart session recovery context injection.
 // This is used to provide agents with context when they start a new session.
 type SessionRecoveryConfig struct {
-	Enabled             bool `toml:"enabled"`               // Master toggle for recovery context injection
+	Enabled             bool `toml:"enabled"`               // Top-level toggle for recovery context injection
 	IncludeAgentMail    bool `toml:"include_agent_mail"`    // Include recent Agent Mail messages
 	IncludeCMMemories   bool `toml:"include_cm_memories"`   // Include CM procedural memories
 	IncludeBeadsContext bool `toml:"include_beads_context"` // Include BV task status
@@ -694,7 +694,7 @@ func DefaultCleanupConfig() CleanupConfig {
 // When enabled, NTM monitors pane output for file edits and automatically reserves
 // those files in Agent Mail, preventing other agents from conflicting edits.
 type FileReservationConfig struct {
-	Enabled               bool `toml:"enabled"`                   // Master toggle for auto file reservation
+	Enabled               bool `toml:"enabled"`                   // Top-level toggle for auto file reservation
 	AutoReserve           bool `toml:"auto_reserve"`              // Automatically reserve on edit detection
 	AutoReleaseIdleMin    int  `toml:"auto_release_idle_minutes"` // Release reservations after this idle time
 	NotifyOnConflict      bool `toml:"notify_on_conflict"`        // Show notification when conflict detected
@@ -741,7 +741,7 @@ func ValidateFileReservationConfig(cfg *FileReservationConfig) error {
 // When enabled, NTM can query the memory system for relevant context
 // before starting tasks and include learned rules in session recovery.
 type MemoryConfig struct {
-	Enabled             bool `toml:"enabled"`               // Master toggle for memory integration
+	Enabled             bool `toml:"enabled"`               // Top-level toggle for memory integration
 	IncludeInRecovery   bool `toml:"include_in_recovery"`   // Include memory context in session recovery
 	MaxRules            int  `toml:"max_rules"`             // Maximum number of rules to inject
 	IncludeAntiPatterns bool `toml:"include_anti_patterns"` // Include anti-patterns in context
@@ -843,7 +843,7 @@ type TmuxConfig struct {
 
 // ActivityIndicatorConfig controls tmux pane border color thresholds.
 type ActivityIndicatorConfig struct {
-	Enabled        bool `toml:"enabled"`         // Master toggle for activity indicators
+	Enabled        bool `toml:"enabled"`         // Top-level toggle for activity indicators
 	ActiveSeconds  int  `toml:"active_seconds"`  // Seconds since activity to be considered active
 	StalledSeconds int  `toml:"stalled_seconds"` // Seconds since activity to be considered stalled
 }
@@ -870,7 +870,7 @@ func ValidateActivityIndicatorConfig(cfg *ActivityIndicatorConfig) error {
 
 // AgentMailConfig holds Agent Mail server settings
 type AgentMailConfig struct {
-	Enabled      bool   `toml:"enabled"`       // Master toggle
+	Enabled      bool   `toml:"enabled"`       // Top-level toggle
 	URL          string `toml:"url"`           // Server endpoint
 	Token        string `toml:"token"`         // Bearer token
 	AutoRegister bool   `toml:"auto_register"` // Auto-register sessions as agents
@@ -1788,7 +1788,7 @@ func ValidatePrivacyConfig(cfg *PrivacyConfig) error {
 // EncryptionConfig controls encryption at rest for NTM artifacts
 // (prompt history, event logs, checkpoint exports).
 type EncryptionConfig struct {
-	// Enabled is the master toggle for encryption at rest (default false).
+	// Enabled is the top-level toggle for encryption at rest (default false).
 	Enabled bool `toml:"enabled"`
 	// KeySource selects how the encryption key is provided: env, file, or command.
 	KeySource string `toml:"key_source"`
@@ -2657,7 +2657,7 @@ func Print(cfg *Config, w io.Writer) error {
 	// Write checkpoints configuration
 	fmt.Fprintln(w, "[checkpoints]")
 	fmt.Fprintln(w, "# Automatic checkpoint configuration for risky operations")
-	fmt.Fprintf(w, "enabled = %t                    # Master toggle for auto-checkpoints\n", cfg.Checkpoints.Enabled)
+	fmt.Fprintf(w, "enabled = %t                    # Top-level toggle for auto-checkpoints\n", cfg.Checkpoints.Enabled)
 	fmt.Fprintf(w, "before_broadcast = %t           # Auto-checkpoint before sending to all agents\n", cfg.Checkpoints.BeforeBroadcast)
 	fmt.Fprintf(w, "before_add_agents = %d            # Auto-checkpoint when adding >= N agents (0 = disabled)\n", cfg.Checkpoints.BeforeAddAgents)
 	fmt.Fprintf(w, "max_auto_checkpoints = %d        # Max auto-checkpoints per session (rotation)\n", cfg.Checkpoints.MaxAutoCheckpoints)
@@ -2771,7 +2771,7 @@ func Print(cfg *Config, w io.Writer) error {
 	// Write rotation configuration
 	fmt.Fprintln(w, "[rotation]")
 	fmt.Fprintln(w, "# Account rotation and restart configuration")
-	fmt.Fprintf(w, "enabled = %t               # Master toggle\n", cfg.Rotation.Enabled)
+	fmt.Fprintf(w, "enabled = %t               # Top-level toggle\n", cfg.Rotation.Enabled)
 	fmt.Fprintf(w, "prefer_restart = %t        # Prefer restart over account switch\n", cfg.Rotation.PreferRestart)
 	fmt.Fprintf(w, "auto_open_browser = %t     # Auto-open browser for auth\n", cfg.Rotation.AutoOpenBrowser)
 	fmt.Fprintf(w, "continuation_prompt = %q\n", cfg.Rotation.ContinuationPrompt)
@@ -2794,7 +2794,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "[health]")
 	fmt.Fprintln(w, "# Agent health monitoring configuration")
 	fmt.Fprintln(w, "# Proactive monitoring to detect stalled, unresponsive, or unhealthy agents")
-	fmt.Fprintf(w, "enabled = %t                # Master toggle for health monitoring\n", cfg.Health.Enabled)
+	fmt.Fprintf(w, "enabled = %t                # Top-level toggle for health monitoring\n", cfg.Health.Enabled)
 	fmt.Fprintf(w, "check_interval = %d          # Seconds between health checks\n", cfg.Health.CheckInterval)
 	fmt.Fprintf(w, "stall_threshold = %d        # Seconds without output before agent is stalled\n", cfg.Health.StallThreshold)
 	fmt.Fprintf(w, "auto_restart = %t           # Auto-restart on unhealthy state\n", cfg.Health.AutoRestart)
@@ -2883,7 +2883,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "[context_rotation]")
 	fmt.Fprintln(w, "# Context window rotation configuration")
 	fmt.Fprintln(w, "# Monitors agent context usage and rotates before exhaustion")
-	fmt.Fprintf(w, "enabled = %t                    # Master toggle for context rotation\n", cfg.ContextRotation.Enabled)
+	fmt.Fprintf(w, "enabled = %t                    # Top-level toggle for context rotation\n", cfg.ContextRotation.Enabled)
 	fmt.Fprintf(w, "warning_threshold = %.2f        # Warn when context usage exceeds this (0.0-1.0)\n", cfg.ContextRotation.WarningThreshold)
 	fmt.Fprintf(w, "rotate_threshold = %.2f         # Rotate agent when usage exceeds this (0.0-1.0)\n", cfg.ContextRotation.RotateThreshold)
 	fmt.Fprintf(w, "summary_max_tokens = %d        # Max tokens for handoff summary\n", cfg.ContextRotation.SummaryMaxTokens)

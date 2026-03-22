@@ -6,7 +6,7 @@
  * Pipeline workflow management with run list and visual builder.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
 
@@ -182,6 +182,7 @@ export default function PipelinesPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [showRunModal, setShowRunModal] = useState(false);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [runForm, setRunForm] = useState({
     workflowFile: "",
     session: "",
@@ -194,9 +195,23 @@ export default function PipelinesPage() {
     validate: false,
   });
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current !== null) {
+        clearTimeout(noticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const setStatusNotice = useCallback((next: Notice) => {
+    if (noticeTimeoutRef.current !== null) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
     setNotice(next);
-    setTimeout(() => setNotice(null), 5000);
+    noticeTimeoutRef.current = setTimeout(() => {
+      setNotice(null);
+      noticeTimeoutRef.current = null;
+    }, 5000);
   }, []);
 
   // Pipelines list query
@@ -238,7 +253,18 @@ export default function PipelinesPage() {
 
   // Auto-select first pipeline if none selected
   useEffect(() => {
-    if (selectedRunId === null && filteredPipelines.length > 0) {
+    if (filteredPipelines.length === 0) {
+      if (selectedRunId !== null) {
+        setSelectedRunId(null);
+      }
+      return;
+    }
+
+    const hasSelectedPipeline = selectedRunId
+      ? filteredPipelines.some((pipeline) => pipeline.run_id === selectedRunId)
+      : false;
+
+    if (!hasSelectedPipeline) {
       setSelectedRunId(filteredPipelines[0].run_id);
     }
   }, [filteredPipelines, selectedRunId]);
@@ -321,7 +347,8 @@ export default function PipelinesPage() {
     }
   }, [selectedRunId, selectedPipeline, queryClient, setStatusNotice]);
 
-  const connectionError = pipelinesQuery.error;
+  const connectionError =
+    pipelinesQuery.error ?? templatesQuery.error ?? detailQuery.error;
 
   const runningCount = pipelinesList.filter(
     (p) => p.status === "running" || p.status === "pending"

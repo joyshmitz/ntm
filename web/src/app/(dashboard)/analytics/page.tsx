@@ -1,8 +1,14 @@
-'use client';
+"use client";
 
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { getAuthHeaders, getBaseUrl } from '@/lib/api/client';
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getAuthHeaders, getBaseUrl } from "@/lib/api/client";
+
+interface ApiEnvelope {
+  success?: boolean;
+  error?: string;
+  message?: string;
+}
 
 // Types based on REST API
 interface SessionMetrics {
@@ -39,17 +45,38 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${getBaseUrl()}${url}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...getAuthHeaders(),
       ...options?.headers,
     },
   });
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(error.message || res.statusText);
+
+  const raw = await res.text();
+  let data: unknown = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error("Invalid response from server.");
+    }
   }
-  const data = await res.json();
-  return data.data || data;
+
+  const envelope = data as ApiEnvelope | null;
+  if (!res.ok || envelope?.success === false) {
+    throw new Error(
+      envelope?.error ||
+        envelope?.message ||
+        res.statusText ||
+        `Request failed (${res.status})`
+    );
+  }
+
+  return ((data as { data?: T } | null)?.data ?? data) as T;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return "Unexpected error";
 }
 
 // Conflict Heatmap Component
@@ -205,18 +232,26 @@ function SessionRow({ session }: { session: SessionMetrics }) {
 
 // Main Analytics Page
 export default function AnalyticsPage() {
-  const [selectedSession, setSelectedSession] = useState<string>('');
+  const [selectedSession, setSelectedSession] = useState<string>("");
 
-  const { data: sessionsData, isLoading: sessionsLoading } = useQuery({
-    queryKey: ['sessions'],
-    queryFn: () => fetchJSON<SessionsResponse>('/api/v1/sessions'),
+  const {
+    data: sessionsData,
+    isLoading: sessionsLoading,
+    error: sessionsError,
+  } = useQuery({
+    queryKey: ["sessions"],
+    queryFn: () => fetchJSON<SessionsResponse>("/api/v1/sessions"),
     refetchInterval: 30000,
   });
 
   // Reservations query for heatmap
-  const { data: reservationsData, isLoading: reservationsLoading } = useQuery({
-    queryKey: ['reservations'],
-    queryFn: () => fetchJSON<{ reservations: Reservation[] }>('/api/v1/reservations'),
+  const {
+    data: reservationsData,
+    isLoading: reservationsLoading,
+    error: reservationsError,
+  } = useQuery({
+    queryKey: ["reservations"],
+    queryFn: () => fetchJSON<{ reservations: Reservation[] }>("/api/v1/reservations"),
     refetchInterval: 15000,
   });
 
@@ -231,10 +266,22 @@ export default function AnalyticsPage() {
       })),
     [sessionsData]
   );
+
+  useEffect(() => {
+    if (!selectedSession) {
+      return;
+    }
+
+    if (!sessions.some((session) => session.session === selectedSession)) {
+      setSelectedSession("");
+    }
+  }, [selectedSession, sessions]);
+
+  const connectionError = sessionsError ?? reservationsError;
   const visibleSessions = sessions.filter(
     (session) => !selectedSession || session.session === selectedSession
   );
-  const activeSessions = sessions.filter((session) => session.status === 'active').length;
+  const activeSessions = sessions.filter((session) => session.status === "active").length;
   const uniqueProjects = new Set(
     sessions
       .map((session) => session.project_path)
@@ -256,6 +303,14 @@ export default function AnalyticsPage() {
           <p className="text-sm text-gray-400">Live session inventory and reservation pressure</p>
         </div>
       </div>
+
+      {connectionError && (
+        <div className="rounded-lg border border-red-800 bg-red-900/20 p-4">
+          <p className="text-sm text-red-300">
+            Analytics error: {getErrorMessage(connectionError)}
+          </p>
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

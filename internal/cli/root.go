@@ -29,6 +29,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/startup"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 	"github.com/Dicklesworthstone/ntm/internal/util"
@@ -60,6 +61,8 @@ var (
 	Date    = "unknown"
 	BuiltBy = "unknown"
 )
+
+var robotStateStore *state.Store
 
 // VersionInput is the kernel input for core.version.
 type VersionInput struct {
@@ -186,6 +189,12 @@ Shell Integration:
 				cfg.Cleanup.MaxAgeHours,
 				cfg.Cleanup.Verbose,
 			)
+		}
+
+		if shouldInitializeRobotPersistence(cmd) {
+			if err := initializeRobotPersistence(); err != nil {
+				return err
+			}
 		}
 		startCommandAudit(cmd, args)
 		return nil
@@ -2052,6 +2061,7 @@ Shell Integration:
 }
 
 func Execute() error {
+	defer closeRobotPersistence()
 	err := rootCmd.Execute()
 	logCommandAuditEnd(err)
 	_ = audit.CloseAll()
@@ -2064,6 +2074,54 @@ func Execute() error {
 		return err
 	}
 	return nil
+}
+
+func shouldInitializeRobotPersistence(cmd *cobra.Command) bool {
+	if cmd != nil && cmd.Name() == "serve" {
+		return false
+	}
+
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--robot-") || arg == "--schema" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func initializeRobotPersistence() error {
+	if robotStateStore != nil {
+		return nil
+	}
+
+	store, err := state.Open("")
+	if err != nil {
+		return fmt.Errorf("open robot state store: %w", err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return fmt.Errorf("migrate robot state store: %w", err)
+	}
+
+	robot.SetAttentionFeed(robot.NewAttentionFeed(
+		robot.DefaultAttentionFeedConfig(),
+		robot.WithAttentionStore(store),
+	))
+	robotStateStore = store
+
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = robot.RefreshNormalizedProjection(refreshCtx, store, "", "")
+	return nil
+}
+
+func closeRobotPersistence() {
+	if robotStateStore == nil {
+		return
+	}
+	_ = robotStateStore.Close()
+	robotStateStore = nil
 }
 
 func resolveRobotPagination(cmd *cobra.Command) (robot.PaginationOptions, error) {

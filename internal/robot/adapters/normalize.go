@@ -43,6 +43,7 @@ type AggregatedSignals struct {
 	Quota            *QuotaSection
 	Alerts           *AlertsSection
 	Health           *SourceHealthSection
+	DegradedFeatures []DegradedFeature
 	CollectionErrors []error
 }
 
@@ -146,6 +147,149 @@ type HealthSource struct {
 	DegradedAt time.Time
 	Reason     string
 	LastError  string
+}
+
+// SourceHealthConfig controls staleness and degradation thresholds
+type SourceHealthConfig struct {
+	// StaleAfter is how long before collected data is considered stale
+	StaleAfter time.Duration
+	// DegradedAfter is how long an error state persists before marking degraded
+	DegradedAfter time.Duration
+}
+
+// DefaultSourceHealthConfig returns conservative defaults for source health
+func DefaultSourceHealthConfig() SourceHealthConfig {
+	return SourceHealthConfig{
+		StaleAfter:    30 * time.Second,
+		DegradedAfter: 60 * time.Second,
+	}
+}
+
+// AdapterResult captures the outcome of an adapter collection for health computation
+type AdapterResult struct {
+	Name        string
+	Available   bool
+	CollectedAt time.Time
+	Error       error
+	Batch       *SignalBatch
+}
+
+// ComputeSourceHealth computes deterministic source health from adapter results.
+// This is the canonical source of freshness and degradation semantics.
+func ComputeSourceHealth(results []AdapterResult, config SourceHealthConfig, now time.Time) *SourceHealthSection {
+	sources := make(map[string]HealthSource, len(results))
+
+	for _, r := range results {
+		source := HealthSource{
+			Available: r.Available && r.Error == nil,
+			Fresh:     true,
+		}
+
+		// Compute freshness from collection timestamp
+		if !r.CollectedAt.IsZero() {
+			source.LastUpdate = &r.CollectedAt
+			age := now.Sub(r.CollectedAt)
+			if age > config.StaleAfter {
+				source.Fresh = false
+				source.Reason = "stale: " + age.Round(time.Second).String() + " since last collection"
+			}
+		} else if r.Available {
+			// Available but no collection timestamp means first collection pending
+			source.Fresh = false
+			source.Reason = "awaiting first collection"
+		}
+
+		// Handle collection errors
+		if r.Error != nil {
+			source.Available = false
+			source.Fresh = false
+			source.LastError = r.Error.Error()
+			source.Reason = "collection failed"
+			source.DegradedAt = now
+		}
+
+		// Handle unavailable sources
+		if !r.Available {
+			source.Fresh = false
+			if source.Reason == "" {
+				source.Reason = "source unavailable"
+			}
+			if source.DegradedAt.IsZero() {
+				source.DegradedAt = now
+			}
+		}
+
+		sources[r.Name] = source
+	}
+
+	return NormalizeHealth(sources)
+}
+
+// DegradedFeature describes a feature that is degraded due to source issues
+type DegradedFeature struct {
+	Feature       string   `json:"feature"`
+	Reason        string   `json:"reason"`
+	AffectedBy    []string `json:"affected_by"`
+	Severity      string   `json:"severity"` // warning, error
+	Actionability string   `json:"actionability"`
+}
+
+// ComputeDegradedFeatures determines which features are degraded based on source health.
+// This provides actionable guidance about what won't work correctly.
+func ComputeDegradedFeatures(health *SourceHealthSection) []DegradedFeature {
+	if health == nil || health.AllFresh {
+		return nil
+	}
+
+	var features []DegradedFeature
+
+	// Map sources to dependent features
+	featureDeps := map[string][]string{
+		"work_coordination": {"work_section", "coordination_section", "bead_triage"},
+		"tmux":              {"session_list", "agent_detection", "pane_output"},
+		"caut":              {"quota_status", "account_rotation"},
+		"beads":             {"work_section", "bead_triage", "dependency_graph"},
+		"mail":              {"coordination_section", "agent_mail_status"},
+		"alerts":            {"alerts_section", "incident_detection"},
+	}
+
+	affectedFeatures := make(map[string][]string) // feature -> affected sources
+
+	for _, sourceName := range health.Degraded {
+		if features, ok := featureDeps[sourceName]; ok {
+			for _, feature := range features {
+				affectedFeatures[feature] = append(affectedFeatures[feature], sourceName)
+			}
+		}
+	}
+
+	for feature, sources := range affectedFeatures {
+		severity := "warning"
+		actionability := "background"
+
+		// Escalate if multiple sources affect the same feature
+		if len(sources) > 1 {
+			severity = "error"
+			actionability = "action_required"
+		}
+
+		// Escalate for critical features
+		switch feature {
+		case "session_list", "agent_detection":
+			severity = "error"
+			actionability = "action_required"
+		}
+
+		features = append(features, DegradedFeature{
+			Feature:       feature,
+			Reason:        "dependent source(s) degraded",
+			AffectedBy:    sources,
+			Severity:      severity,
+			Actionability: actionability,
+		})
+	}
+
+	return features
 }
 
 // FormatTimestamp formats time as RFC3339
@@ -499,19 +643,28 @@ func computeHealthReasonCode(source HealthSource) ReasonCode {
 
 // SignalAggregator combines signals from multiple adapters
 type SignalAggregator struct {
-	adapters []SignalAdapter
-	mu       sync.RWMutex
-	cache    map[string]*SignalBatch
-	cacheTTL time.Duration
+	adapters     []SignalAdapter
+	mu           sync.RWMutex
+	cache        map[string]*SignalBatch
+	cacheTTL     time.Duration
+	healthConfig SourceHealthConfig
 }
 
 // NewSignalAggregator creates a new aggregator
 func NewSignalAggregator(ttl time.Duration) *SignalAggregator {
 	return &SignalAggregator{
-		adapters: make([]SignalAdapter, 0),
-		cache:    make(map[string]*SignalBatch),
-		cacheTTL: ttl,
+		adapters:     make([]SignalAdapter, 0),
+		cache:        make(map[string]*SignalBatch),
+		cacheTTL:     ttl,
+		healthConfig: DefaultSourceHealthConfig(),
 	}
+}
+
+// SetHealthConfig configures staleness and degradation thresholds
+func (a *SignalAggregator) SetHealthConfig(config SourceHealthConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.healthConfig = config
 }
 
 // RegisterAdapter adds an adapter to the aggregator
@@ -521,10 +674,11 @@ func (a *SignalAggregator) RegisterAdapter(adapter SignalAdapter) {
 	a.adapters = append(a.adapters, adapter)
 }
 
-// Collect aggregates signals from all adapters
+// Collect aggregates signals from all adapters and computes deterministic source health
 func (a *SignalAggregator) Collect(ctx context.Context) (*AggregatedSignals, error) {
+	now := time.Now()
 	result := &AggregatedSignals{
-		CollectedAt:  time.Now(),
+		CollectedAt:  now,
 		Work:         NewWorkSection(),
 		Coordination: NewCoordinationSection(),
 		Quota:        &QuotaSection{Accounts: []AccountQuota{}},
@@ -534,32 +688,60 @@ func (a *SignalAggregator) Collect(ctx context.Context) (*AggregatedSignals, err
 
 	a.mu.RLock()
 	adapters := a.adapters
+	healthConfig := a.healthConfig
 	a.mu.RUnlock()
 
+	// Collect from all adapters in parallel, capturing results for health computation
+	type adapterOutcome struct {
+		adapter SignalAdapter
+		batch   *SignalBatch
+		err     error
+	}
+
+	outcomes := make([]adapterOutcome, len(adapters))
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errs []error
 
-	for _, adapter := range adapters {
+	for i, adapter := range adapters {
 		wg.Add(1)
-		go func(ad SignalAdapter) {
+		go func(idx int, ad SignalAdapter) {
 			defer wg.Done()
-
 			batch, err := ad.Collect(ctx)
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-				return
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-			mergeSignalBatch(result, batch)
-		}(adapter)
+			outcomes[idx] = adapterOutcome{adapter: ad, batch: batch, err: err}
+		}(i, adapter)
 	}
 
 	wg.Wait()
+
+	// Build adapter results for health computation and merge batches
+	adapterResults := make([]AdapterResult, 0, len(outcomes))
+	var errs []error
+
+	for _, outcome := range outcomes {
+		// Build health result
+		ar := AdapterResult{
+			Name:      outcome.adapter.Name(),
+			Available: outcome.adapter.Available(ctx),
+			Error:     outcome.err,
+			Batch:     outcome.batch,
+		}
+		if outcome.batch != nil {
+			ar.CollectedAt = outcome.batch.CollectedAt
+		}
+		adapterResults = append(adapterResults, ar)
+
+		// Track errors
+		if outcome.err != nil {
+			errs = append(errs, outcome.err)
+			continue
+		}
+
+		// Merge batch data
+		mergeSignalBatch(result, outcome.batch)
+	}
+
+	// Compute deterministic source health from adapter results
+	result.Health = ComputeSourceHealth(adapterResults, healthConfig, now)
+	result.DegradedFeatures = ComputeDegradedFeatures(result.Health)
 
 	if len(errs) > 0 {
 		result.CollectionErrors = errs

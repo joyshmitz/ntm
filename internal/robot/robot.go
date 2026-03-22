@@ -25,6 +25,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	swarmlib "github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -4929,6 +4931,908 @@ func RecordStateChange(changeType tracker.ChangeType, session, pane string, deta
 
 	stateTracker.Record(change)
 	GetAttentionFeed().Append(NewTrackerEvent(change))
+}
+
+const (
+	normalizedProjectionStaleAfter   = 45 * time.Second
+	normalizedAttentionDedupWindow   = 2 * time.Minute
+	normalizedProjectionEventSource  = "adapter.work_coordination"
+	normalizedProjectionWorkStatus   = "open"
+	normalizedProjectionInProgStatus = "in_progress"
+)
+
+// RefreshNormalizedProjection collects normalized work/coordination state,
+// persists the current runtime projection slice atomically, and publishes
+// durable attention events derived from the normalized result.
+func RefreshNormalizedProjection(ctx context.Context, store *state.Store, projectDir, sessionName string) error {
+	if store == nil {
+		return fmt.Errorf("refresh normalized projection: nil state store")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	resolvedProjectDir, err := resolveNormalizedProjectDir(projectDir)
+	if err != nil {
+		return err
+	}
+
+	aggregator := adapters.NewSignalAggregator(0)
+	aggregator.RegisterAdapter(adapters.NewWorkCoordinationAdapter(
+		adapters.DefaultWorkCoordinationAdapterConfig(resolvedProjectDir),
+	))
+
+	signals, err := aggregator.Collect(ctx)
+	if err != nil {
+		return fmt.Errorf("collect normalized projection: %w", err)
+	}
+	if signals == nil {
+		return nil
+	}
+
+	tmuxSnapshot, err := collectNormalizedTmuxProjection(resolvedProjectDir, normalizedProjectionStaleAfter)
+	if err != nil {
+		return fmt.Errorf("collect tmux projection: %w", err)
+	}
+
+	if err := persistNormalizedProjection(store, signals, tmuxSnapshot, normalizedProjectionStaleAfter); err != nil {
+		return err
+	}
+
+	publishNormalizedAttentionSignals(GetAttentionFeed(), sessionName, signals)
+	return nil
+}
+
+func resolveNormalizedProjectDir(projectDir string) (string, error) {
+	if path := strings.TrimSpace(projectDir); path != "" {
+		return path, nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve normalized projection directory: %w", err)
+	}
+	if root, err := git.FindProjectRoot(cwd); err == nil && strings.TrimSpace(root) != "" {
+		return root, nil
+	}
+	return cwd, nil
+}
+
+func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration) (*NormalizedSnapshot, error) {
+	cfg, err := config.LoadMerged(projectDir, config.DefaultPath())
+	if err != nil {
+		cfg = config.Default()
+	}
+
+	_, mailAgents, mailStats := fetchAgentMailData(projectDir)
+
+	sessions, err := tmux.ListSessions()
+	if err != nil {
+		return &NormalizedSnapshot{
+			Sessions:    []state.RuntimeSession{},
+			Agents:      []state.RuntimeAgent{},
+			CollectedAt: time.Now().UTC(),
+		}, nil
+	}
+
+	adapterConfig := DefaultTmuxAdapterConfig()
+	if staleAfter > 0 {
+		adapterConfig.SessionStaleness = staleAfter
+		adapterConfig.AgentStaleness = staleAfter
+	}
+	adapter := NewTmuxAdapter(adapterConfig)
+
+	agentsBySession := make(map[string][]Agent, len(sessions))
+	outputTailsBySession := make(map[string]map[string]string, len(sessions))
+
+	for i := range sessions {
+		panes, err := tmux.GetPanes(sessions[i].Name)
+		if err != nil {
+			panes = append([]tmux.Pane(nil), sessions[i].Panes...)
+		}
+		sessions[i].Panes = append([]tmux.Pane(nil), panes...)
+
+		agentMapping := resolveAgentsForSession(panes, mailAgents)
+		agents := make([]Agent, 0, len(panes))
+		outputTails := make(map[string]string, len(panes))
+
+		for _, pane := range panes {
+			agent := Agent{
+				Pane:     pane.ID,
+				Window:   pane.WindowIndex,
+				PaneIdx:  pane.Index,
+				IsActive: pane.Active,
+				Variant:  pane.Variant,
+				PID:      pane.PID,
+			}
+
+			ntmType := agentTypeString(pane.Type)
+			if ntmType != "user" && ntmType != "unknown" {
+				agent.Type = ntmType
+			} else {
+				agent.Type = detectAgentType(pane.Title)
+			}
+
+			if mappedName, ok := agentMapping[pane.Title]; ok {
+				agent.Name = mappedName
+			}
+
+			enrichAgentStatus(&agent, sessions[i].Name, modelNameForPane(pane, cfg))
+			if captured, captureErr := tmux.CaptureForStatusDetection(pane.ID); captureErr == nil {
+				outputTails[pane.ID] = captured
+			}
+
+			agents = append(agents, agent)
+		}
+
+		agentsBySession[sessions[i].Name] = agents
+		outputTailsBySession[sessions[i].Name] = outputTails
+	}
+
+	snapshot := adapter.NormalizeSnapshot(sessions, agentsBySession, outputTailsBySession)
+	if snapshot == nil {
+		snapshot = &NormalizedSnapshot{
+			Sessions:    []state.RuntimeSession{},
+			Agents:      []state.RuntimeAgent{},
+			CollectedAt: time.Now().UTC(),
+		}
+	}
+
+	collectedAt := snapshot.CollectedAt.UTC()
+	if collectedAt.IsZero() {
+		collectedAt = time.Now().UTC()
+	}
+	if staleAfter <= 0 {
+		staleAfter = normalizedProjectionStaleAfter
+	}
+	expiresAt := collectedAt.Add(staleAfter)
+
+	for i := range snapshot.Sessions {
+		snapshot.Sessions[i].CollectedAt = collectedAt
+		snapshot.Sessions[i].StaleAfter = expiresAt
+	}
+	for i := range snapshot.Agents {
+		snapshot.Agents[i].CollectedAt = collectedAt
+		snapshot.Agents[i].StaleAfter = expiresAt
+		if stats, ok := mailStats[snapshot.Agents[i].AgentMailName]; ok {
+			snapshot.Agents[i].PendingMail = stats.Unread
+		}
+	}
+
+	return snapshot, nil
+}
+
+func persistNormalizedProjection(store *state.Store, signals *adapters.AggregatedSignals, tmuxSnapshot *NormalizedSnapshot, staleAfter time.Duration) error {
+	if store == nil || signals == nil {
+		return nil
+	}
+
+	collectedAt := signals.CollectedAt.UTC()
+	if collectedAt.IsZero() {
+		collectedAt = time.Now().UTC()
+	}
+	if staleAfter <= 0 {
+		staleAfter = normalizedProjectionStaleAfter
+	}
+	expiresAt := collectedAt.Add(staleAfter)
+
+	workRows := buildRuntimeWorkRows(signals.Work, collectedAt, expiresAt)
+	coordinationRows := buildRuntimeCoordinationRows(signals.Coordination, collectedAt, expiresAt)
+	quotaRows := buildRuntimeQuotaRows(signals.Quota, collectedAt, expiresAt)
+	healthRows := buildSourceHealthRows(signals.Health, collectedAt)
+	sessionRows := buildRuntimeSessionRows(tmuxSnapshot, collectedAt, expiresAt)
+	agentRows := buildRuntimeAgentRows(tmuxSnapshot, collectedAt, expiresAt)
+
+	existingWork, err := store.ListFreshRuntimeWork("", 0)
+	if err != nil {
+		return fmt.Errorf("list runtime work: %w", err)
+	}
+	existingSessions, err := store.GetFreshRuntimeSessions()
+	if err != nil {
+		return fmt.Errorf("list runtime sessions: %w", err)
+	}
+	existingCoordination, err := store.ListFreshRuntimeCoordination("")
+	if err != nil {
+		return fmt.Errorf("list runtime coordination: %w", err)
+	}
+	existingQuota, err := store.ListFreshRuntimeQuota("")
+	if err != nil {
+		return fmt.Errorf("list runtime quota: %w", err)
+	}
+	existingHealth, err := store.GetAllSourceHealth()
+	if err != nil {
+		return fmt.Errorf("list source health: %w", err)
+	}
+	existingAgentsBySession := make(map[string][]state.RuntimeAgent, len(existingSessions))
+	for _, item := range existingSessions {
+		agents, err := store.GetRuntimeAgentsBySession(item.Name)
+		if err != nil {
+			return fmt.Errorf("list runtime agents for %s: %w", item.Name, err)
+		}
+		existingAgentsBySession[item.Name] = agents
+	}
+
+	return store.Transaction(func(tx *state.Tx) error {
+		for _, item := range existingWork {
+			if _, ok := workRows[item.BeadID]; ok {
+				continue
+			}
+			if err := tx.DeleteRuntimeWork(item.BeadID); err != nil {
+				return err
+			}
+		}
+		for _, item := range existingCoordination {
+			if _, ok := coordinationRows[item.AgentName]; ok {
+				continue
+			}
+			if err := tx.DeleteRuntimeCoordination(item.AgentName); err != nil {
+				return err
+			}
+		}
+		for _, item := range existingQuota {
+			key := runtimeQuotaKey(item.Provider, item.Account)
+			if _, ok := quotaRows[key]; ok {
+				continue
+			}
+			if err := tx.DeleteRuntimeQuota(item.Provider, item.Account); err != nil {
+				return err
+			}
+		}
+		for _, item := range existingHealth {
+			if _, ok := healthRows[item.SourceName]; ok {
+				continue
+			}
+			if err := tx.DeleteSourceHealth(item.SourceName); err != nil {
+				return err
+			}
+		}
+		for _, item := range existingSessions {
+			if _, ok := sessionRows[item.Name]; ok {
+				continue
+			}
+			if err := tx.DeleteRuntimeSession(item.Name); err != nil {
+				return err
+			}
+		}
+		for _, sessionKey := range sortedMapKeys(existingAgentsBySession) {
+			if _, ok := sessionRows[sessionKey]; !ok {
+				continue
+			}
+			for _, agent := range existingAgentsBySession[sessionKey] {
+				if _, ok := agentRows[agent.ID]; ok {
+					continue
+				}
+				if err := tx.DeleteRuntimeAgent(agent.ID); err != nil {
+					return err
+				}
+			}
+		}
+
+		for _, key := range sortedMapKeys(workRows) {
+			if err := tx.UpsertRuntimeWork(workRows[key]); err != nil {
+				return err
+			}
+		}
+		for _, key := range sortedMapKeys(sessionRows) {
+			if err := tx.UpsertRuntimeSession(sessionRows[key]); err != nil {
+				return err
+			}
+		}
+		for _, key := range sortedMapKeys(agentRows) {
+			if err := tx.UpsertRuntimeAgent(agentRows[key]); err != nil {
+				return err
+			}
+		}
+		for _, key := range sortedMapKeys(coordinationRows) {
+			if err := tx.UpsertRuntimeCoordination(coordinationRows[key]); err != nil {
+				return err
+			}
+		}
+		for _, key := range sortedMapKeys(quotaRows) {
+			if err := tx.UpsertRuntimeQuota(quotaRows[key]); err != nil {
+				return err
+			}
+		}
+		for _, key := range sortedMapKeys(healthRows) {
+			if err := tx.UpsertSourceHealth(healthRows[key]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func buildRuntimeSessionRows(snapshot *NormalizedSnapshot, collectedAt, staleAfter time.Time) map[string]*state.RuntimeSession {
+	rows := make(map[string]*state.RuntimeSession)
+	if snapshot == nil {
+		return rows
+	}
+
+	for _, item := range snapshot.Sessions {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+
+		row := item
+		row.Name = name
+		row.Label = strings.TrimSpace(row.Label)
+		row.ProjectPath = strings.TrimSpace(row.ProjectPath)
+		row.HealthReason = strings.TrimSpace(row.HealthReason)
+		row.CollectedAt = collectedAt
+		row.StaleAfter = staleAfter
+		rows[name] = &row
+	}
+
+	return rows
+}
+
+func buildRuntimeAgentRows(snapshot *NormalizedSnapshot, collectedAt, staleAfter time.Time) map[string]*state.RuntimeAgent {
+	rows := make(map[string]*state.RuntimeAgent)
+	if snapshot == nil {
+		return rows
+	}
+
+	for _, item := range snapshot.Agents {
+		sessionName := strings.TrimSpace(item.SessionName)
+		pane := strings.TrimSpace(item.Pane)
+		agentID := strings.TrimSpace(item.ID)
+		if agentID == "" && sessionName != "" && pane != "" {
+			agentID = fmt.Sprintf("%s:%s", sessionName, pane)
+		}
+		if agentID == "" || sessionName == "" || pane == "" {
+			continue
+		}
+
+		row := item
+		row.ID = agentID
+		row.SessionName = sessionName
+		row.Pane = pane
+		row.AgentType = strings.TrimSpace(row.AgentType)
+		row.Variant = strings.TrimSpace(row.Variant)
+		row.TypeMethod = strings.TrimSpace(row.TypeMethod)
+		row.StateReason = strings.TrimSpace(row.StateReason)
+		row.PreviousState = strings.TrimSpace(row.PreviousState)
+		row.CurrentBead = strings.TrimSpace(row.CurrentBead)
+		row.AgentMailName = strings.TrimSpace(row.AgentMailName)
+		row.HealthReason = strings.TrimSpace(row.HealthReason)
+		row.CollectedAt = collectedAt
+		row.StaleAfter = staleAfter
+		rows[agentID] = &row
+	}
+
+	return rows
+}
+
+func buildRuntimeWorkRows(section *adapters.WorkSection, collectedAt, staleAfter time.Time) map[string]*state.RuntimeWork {
+	rows := make(map[string]*state.RuntimeWork)
+	if section == nil {
+		return rows
+	}
+
+	topRecommendationID := ""
+	topRecommendationReason := ""
+	if section.Triage != nil && section.Triage.TopRecommendation != nil {
+		topRecommendationID = strings.TrimSpace(section.Triage.TopRecommendation.ID)
+		topRecommendationReason = strings.Join(section.Triage.TopRecommendation.Reasons, "; ")
+	}
+
+	assign := func(item adapters.WorkItem, status string) {
+		beadID := strings.TrimSpace(item.ID)
+		if beadID == "" {
+			return
+		}
+
+		row := &state.RuntimeWork{
+			BeadID:         beadID,
+			Title:          robotFirstNonEmpty(item.Title, beadID),
+			Status:         status,
+			Priority:       item.Priority,
+			BeadType:       strings.TrimSpace(item.Type),
+			Assignee:       strings.TrimSpace(item.Assignee),
+			BlockedByCount: len(item.BlockedBy),
+			UnblocksCount:  item.Unblocks,
+			Labels:         jsonStringOrEmpty(item.Labels),
+			CollectedAt:    collectedAt,
+			StaleAfter:     staleAfter,
+		}
+		if item.Score != nil {
+			score := *item.Score
+			row.Score = &score
+		}
+		if item.Assignee != "" && item.UpdatedAt != "" {
+			row.ClaimedAt = parseRobotTimestamp(item.UpdatedAt)
+		}
+		if beadID == topRecommendationID {
+			row.ScoreReason = strings.TrimSpace(topRecommendationReason)
+		}
+
+		existing := rows[beadID]
+		if existing != nil && runtimeWorkStatusPrecedence(existing.Status) > runtimeWorkStatusPrecedence(status) {
+			return
+		}
+		rows[beadID] = row
+	}
+
+	for _, item := range section.Ready {
+		assign(item, normalizedProjectionWorkStatus)
+	}
+	for _, item := range section.Blocked {
+		assign(item, normalizedProjectionWorkStatus)
+	}
+	for _, item := range section.InProgress {
+		assign(item, normalizedProjectionInProgStatus)
+	}
+
+	return rows
+}
+
+func buildRuntimeCoordinationRows(section *adapters.CoordinationSection, collectedAt, staleAfter time.Time) map[string]*state.RuntimeCoordination {
+	rows := make(map[string]*state.RuntimeCoordination)
+	if section == nil || section.Mail == nil {
+		return rows
+	}
+
+	latestMessageAt := parseRobotTimestamp(section.Mail.LatestMessage)
+	for agentName, stats := range section.Mail.ByAgent {
+		trimmedName := strings.TrimSpace(agentName)
+		if trimmedName == "" {
+			continue
+		}
+		rows[trimmedName] = &state.RuntimeCoordination{
+			AgentName:       trimmedName,
+			SessionName:     "",
+			Pane:            strings.TrimSpace(stats.Pane),
+			UnreadCount:     stats.Unread,
+			PendingAckCount: stats.Pending,
+			UrgentCount:     stats.Urgent,
+			LastMessageAt:   latestMessageAt,
+			LastReceivedAt:  latestMessageAt,
+			CollectedAt:     collectedAt,
+			StaleAfter:      staleAfter,
+		}
+	}
+
+	return rows
+}
+
+func buildRuntimeQuotaRows(section *adapters.QuotaSection, collectedAt, staleAfter time.Time) map[string]*state.RuntimeQuota {
+	rows := make(map[string]*state.RuntimeQuota)
+	if section == nil {
+		return rows
+	}
+
+	for _, account := range section.Accounts {
+		provider := strings.TrimSpace(account.Provider)
+		id := robotFirstNonEmpty(strings.TrimSpace(account.ID), provider)
+		if provider == "" || id == "" {
+			continue
+		}
+
+		usedPct := quotaUsedPercent(account)
+		healthy := !strings.EqualFold(account.Status, "critical") && !strings.EqualFold(account.Status, "exceeded")
+		row := &state.RuntimeQuota{
+			Provider:     provider,
+			Account:      id,
+			LimitHit:     strings.EqualFold(account.Status, "exceeded"),
+			UsedPct:      usedPct,
+			ResetsAt:     parseRobotTimestamp(account.ResetAt),
+			IsActive:     account.IsActive,
+			Healthy:      healthy,
+			HealthReason: strings.TrimSpace(string(account.ReasonCode)),
+			CollectedAt:  collectedAt,
+			StaleAfter:   staleAfter,
+		}
+		rows[runtimeQuotaKey(provider, id)] = row
+	}
+
+	return rows
+}
+
+func buildSourceHealthRows(section *adapters.SourceHealthSection, collectedAt time.Time) map[string]*state.SourceHealth {
+	rows := make(map[string]*state.SourceHealth)
+	if section == nil {
+		return rows
+	}
+
+	for sourceName, info := range section.Sources {
+		trimmedSource := strings.TrimSpace(sourceName)
+		if trimmedSource == "" {
+			continue
+		}
+
+		healthy := info.Available && info.Fresh && !info.Degraded
+		row := &state.SourceHealth{
+			SourceName:          trimmedSource,
+			Available:           info.Available,
+			Healthy:             healthy,
+			Reason:              strings.TrimSpace(robotFirstNonEmpty(info.DegradedReason, string(info.ReasonCode))),
+			LastSuccessAt:       parseRobotTimestamp(info.UpdatedAt),
+			LastFailureAt:       parseRobotTimestamp(info.DegradedSince),
+			LastCheckAt:         collectedAt,
+			ConsecutiveFailures: 0,
+			LastError:           strings.TrimSpace(info.LastError),
+			LastErrorCode:       strings.TrimSpace(string(info.ReasonCode)),
+		}
+		if !healthy {
+			row.ConsecutiveFailures = 1
+		}
+		if healthy && row.Reason == string(adapters.ReasonHealthOK) {
+			row.Reason = ""
+		}
+		rows[trimmedSource] = row
+	}
+
+	return rows
+}
+
+func publishNormalizedAttentionSignals(feed *AttentionFeed, sessionName string, signals *adapters.AggregatedSignals) {
+	if feed == nil || signals == nil {
+		return
+	}
+	for _, event := range normalizedAttentionEvents(sessionName, signals) {
+		feed.AppendDeduplicated(event, normalizedAttentionDedupWindow)
+	}
+}
+
+func normalizedAttentionEvents(sessionName string, signals *adapters.AggregatedSignals) []AttentionEvent {
+	if signals == nil {
+		return nil
+	}
+
+	session := normalizedProjectionSession(sessionName, signals)
+	ts := signals.CollectedAt.UTC()
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+
+	events := make([]AttentionEvent, 0, 8)
+	if event := normalizedTopRecommendationEvent(ts, session, signals.Work); event != nil {
+		events = append(events, *event)
+	}
+	events = append(events, normalizedSourceHealthEvents(ts, session, signals.Health)...)
+	events = append(events, normalizedCoordinationProblemEvents(ts, session, signals.Coordination)...)
+	return events
+}
+
+func normalizedTopRecommendationEvent(ts time.Time, session string, section *adapters.WorkSection) *AttentionEvent {
+	if section == nil || section.Triage == nil || section.Triage.TopRecommendation == nil {
+		return nil
+	}
+	rec := section.Triage.TopRecommendation
+	beadID := strings.TrimSpace(rec.ID)
+	if beadID == "" {
+		return nil
+	}
+
+	details := map[string]any{
+		"bead_id":  beadID,
+		"title":    strings.TrimSpace(rec.Title),
+		"priority": rec.Priority,
+		"score":    rec.Score,
+		"unblocks": rec.Unblocks,
+		"source":   "top_recommendation",
+	}
+	if len(rec.Reasons) > 0 {
+		details["reasons"] = append([]string(nil), rec.Reasons...)
+	}
+
+	event := AttentionEvent{
+		Ts:            ts.Format(time.RFC3339Nano),
+		Session:       session,
+		Category:      EventCategoryBead,
+		Type:          EventTypeBeadUpdated,
+		Source:        normalizedProjectionEventSource,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		ReasonCode:    string(adapters.ReasonWorkReadyTopRecommendation),
+		Summary:       attentionSummary(session, "", fmt.Sprintf("top ready bead %s: %s", beadID, robotFirstNonEmpty(rec.Title, beadID))),
+		Details:       details,
+		NextActions:   attentionBeadActions(beadID, "Inspect the top ready bead"),
+		DedupKey:      normalizedDedupKey("work", "top_recommendation", beadID),
+	}
+
+	annotated := annotateAttentionSignal(event)
+	return &annotated
+}
+
+func normalizedSourceHealthEvents(ts time.Time, session string, section *adapters.SourceHealthSection) []AttentionEvent {
+	if section == nil || len(section.Sources) == 0 {
+		return nil
+	}
+
+	events := make([]AttentionEvent, 0, len(section.Sources))
+	for _, sourceName := range sortedMapKeys(section.Sources) {
+		info := section.Sources[sourceName]
+		reasonCode := info.ReasonCode
+		severity := Severity(adapters.ReasonToSeverity(reasonCode))
+		actionability := Actionability(adapters.SeverityToActionability(adapters.ReasonToSeverity(reasonCode), false))
+		summary := fmt.Sprintf("source %s healthy", sourceName)
+		if info.Degraded || !info.Available || !info.Fresh {
+			summary = fmt.Sprintf("source %s degraded", sourceName)
+			if reason := strings.TrimSpace(info.DegradedReason); reason != "" {
+				summary = fmt.Sprintf("source %s degraded: %s", sourceName, reason)
+			}
+		}
+
+		details := map[string]any{
+			"source_name": sourceName,
+			"available":   info.Available,
+			"fresh":       info.Fresh,
+		}
+		if info.UpdatedAt != "" {
+			details["updated_at"] = info.UpdatedAt
+		}
+		if info.AgeMs > 0 {
+			details["age_ms"] = info.AgeMs
+		}
+		if info.DegradedReason != "" {
+			details["degraded_reason"] = info.DegradedReason
+		}
+		if info.DegradedSince != "" {
+			details["degraded_since"] = info.DegradedSince
+		}
+		if info.LastError != "" {
+			details["last_error"] = info.LastError
+		}
+
+		event := annotateAttentionSignal(AttentionEvent{
+			Ts:            ts.Format(time.RFC3339Nano),
+			Session:       session,
+			Category:      EventCategoryHealth,
+			Type:          EventTypeHealthChange,
+			Source:        normalizedProjectionEventSource,
+			Actionability: actionability,
+			Severity:      severity,
+			ReasonCode:    string(reasonCode),
+			Summary:       attentionSummary(session, "", summary),
+			Details:       details,
+			NextActions:   []NextAction{attentionStatusNextAction("Inspect normalized source health")},
+			DedupKey:      normalizedDedupKey("health", sourceName, string(reasonCode)),
+		})
+		events = append(events, event)
+	}
+
+	return events
+}
+
+func normalizedCoordinationProblemEvents(ts time.Time, session string, section *adapters.CoordinationSection) []AttentionEvent {
+	if section == nil || len(section.Problems) == 0 {
+		return nil
+	}
+
+	events := make([]AttentionEvent, 0, len(section.Problems))
+	for _, problem := range section.Problems {
+		event, ok := normalizedCoordinationProblemEvent(ts, session, problem)
+		if !ok {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func normalizedCoordinationProblemEvent(ts time.Time, session string, problem adapters.CoordinationProblem) (AttentionEvent, bool) {
+	var (
+		reasonCode adapters.ReasonCode
+		category   EventCategory
+		eventType  EventType
+		actions    []NextAction
+		details    = map[string]any{
+			"problem_kind": strings.TrimSpace(problem.Kind),
+		}
+	)
+
+	agents := sortedCompactStrings(problem.Agents)
+	paths := sortedCompactStrings(problem.Paths)
+	threadIDs := sortedCompactStrings(problem.ThreadIDs)
+	if len(agents) > 0 {
+		details["agents"] = agents
+	}
+	if len(paths) > 0 {
+		details["paths"] = paths
+		details["path"] = paths[0]
+	}
+	if len(threadIDs) > 0 {
+		details["thread_ids"] = threadIDs
+	}
+
+	switch strings.TrimSpace(problem.Kind) {
+	case "urgent_mail":
+		reasonCode = adapters.ReasonCoordinationUrgentMail
+		category = EventCategoryMail
+		eventType = EventTypeMailUnread
+		actions = []NextAction{attentionStatusNextAction("Inspect urgent unread mail")}
+	case "pending_ack":
+		reasonCode = adapters.ReasonCoordinationPendingAck
+		category = EventCategoryMail
+		eventType = EventTypeMailAckRequired
+		actions = []NextAction{attentionStatusNextAction("Inspect pending mail acknowledgements")}
+	case "mail_backlog":
+		reasonCode = adapters.ReasonCoordinationMailBacklog
+		category = EventCategoryMail
+		eventType = EventTypeMailUnread
+		actions = []NextAction{attentionStatusNextAction("Inspect swarm mail backlog")}
+	case "reservation_conflict":
+		reasonCode = adapters.ReasonCoordinationReservationConflict
+		category = EventCategoryFile
+		eventType = EventTypeFileConflict
+		if len(agents) > 0 {
+			details["holders"] = agents
+		}
+		actions = attentionConflictActions(session, robotFirstNonEmpty(attentionStringDetail(details, "path"), attentionStringDetail(details, "pattern")), "Inspect the conflicting reservation state")
+	case "file_conflict":
+		reasonCode = adapters.ReasonCoordinationFileConflict
+		category = EventCategoryFile
+		eventType = EventTypeFileConflict
+		if len(agents) > 0 {
+			details["agents"] = agents
+			details["change_count"] = len(agents)
+		}
+		if strings.TrimSpace(problem.Severity) != "" {
+			details["tracker_severity"] = strings.TrimSpace(problem.Severity)
+		}
+		actions = attentionConflictActions(session, attentionStringDetail(details, "path"), "Compare conflicting file edits")
+	case "handoff_blocked":
+		reasonCode = adapters.ReasonCoordinationHandoffBlocked
+		category = EventCategoryAlert
+		eventType = EventTypeAlertWarning
+		actions = []NextAction{attentionStatusNextAction("Inspect blocked handoff state")}
+	default:
+		return AttentionEvent{}, false
+	}
+
+	severity := normalizedCoordinationProblemSeverity(problem.Severity, reasonCode)
+	actionability := normalizedCoordinationProblemActionability(strings.TrimSpace(problem.Kind), severity)
+
+	event := annotateAttentionSignal(AttentionEvent{
+		Ts:            ts.Format(time.RFC3339Nano),
+		Session:       session,
+		Category:      category,
+		Type:          eventType,
+		Source:        normalizedProjectionEventSource,
+		Actionability: actionability,
+		Severity:      severity,
+		ReasonCode:    string(reasonCode),
+		Summary:       attentionSummary(session, "", robotFirstNonEmpty(strings.TrimSpace(problem.Summary), strings.TrimSpace(problem.Kind))),
+		Details:       details,
+		NextActions:   actions,
+		DedupKey:      normalizedDedupKey(append([]string{"coordination", problem.Kind}, append(agents, append(paths, threadIDs...)...)...)...),
+	})
+	return event, true
+}
+
+func normalizedCoordinationProblemSeverity(raw string, reasonCode adapters.ReasonCode) Severity {
+	switch strings.TrimSpace(raw) {
+	case string(adapters.SeverityCritical):
+		return SeverityCritical
+	case string(adapters.SeverityError):
+		return SeverityError
+	case string(adapters.SeverityWarning):
+		return SeverityWarning
+	case string(adapters.SeverityDebug):
+		return SeverityDebug
+	case string(adapters.SeverityInfo):
+		return SeverityInfo
+	default:
+		return Severity(adapters.ReasonToSeverity(reasonCode))
+	}
+}
+
+func normalizedCoordinationProblemActionability(kind string, severity Severity) Actionability {
+	switch kind {
+	case "pending_ack", "reservation_conflict", "file_conflict", "handoff_blocked":
+		return ActionabilityActionRequired
+	}
+	return Actionability(adapters.SeverityToActionability(adapters.Severity(severity), false))
+}
+
+func normalizedProjectionSession(sessionName string, signals *adapters.AggregatedSignals) string {
+	if session := strings.TrimSpace(sessionName); session != "" {
+		return session
+	}
+	if signals != nil && signals.Coordination != nil && signals.Coordination.Handoff != nil {
+		if session := strings.TrimSpace(signals.Coordination.Handoff.Session); session != "" {
+			return session
+		}
+	}
+	return ""
+}
+
+func runtimeWorkStatusPrecedence(status string) int {
+	switch status {
+	case normalizedProjectionInProgStatus:
+		return 2
+	case normalizedProjectionWorkStatus:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func runtimeQuotaKey(provider, account string) string {
+	return strings.TrimSpace(provider) + "\x00" + strings.TrimSpace(account)
+}
+
+func quotaUsedPercent(account adapters.AccountQuota) float64 {
+	if account.TokensLimit > 0 {
+		return float64(account.TokensUsed) / float64(account.TokensLimit) * 100
+	}
+	if account.RequestsLimit > 0 {
+		return float64(account.RequestsUsed) / float64(account.RequestsLimit) * 100
+	}
+	return 0
+}
+
+func sortedMapKeys[T any](items map[string]T) []string {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedCompactStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizedDedupKey(parts ...string) string {
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	return strings.Join(filtered, "|")
+}
+
+func jsonStringOrEmpty(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil || string(data) == "null" {
+		return ""
+	}
+	return string(data)
+}
+
+func parseRobotTimestamp(value string) *time.Time {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		ts, err := time.Parse(layout, trimmed)
+		if err == nil {
+			utc := ts.UTC()
+			return &utc
+		}
+	}
+	return nil
+}
+
+func robotFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // GetStateTracker returns the global state tracker for direct access.

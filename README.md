@@ -1405,7 +1405,7 @@ Context rotation is enabled by default. Configure in `~/.config/ntm/config.toml`
 
 ```toml
 [context_rotation]
-enabled = true              # Master toggle
+enabled = true              # Top-level toggle
 warning_threshold = 0.80    # Warn at 80% usage
 rotate_threshold = 0.95     # Rotate at 95% usage
 summary_max_tokens = 2000   # Max tokens for handoff summary

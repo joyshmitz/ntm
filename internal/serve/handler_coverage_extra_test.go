@@ -1468,6 +1468,32 @@ func TestHandlePolicyGetV1(t *testing.T) {
 	}
 }
 
+func TestHandlePolicyGetV1_WithContent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	srv, _ := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/policy?rules=true&content=true", nil)
+	rec := httptest.NewRecorder()
+	srv.handlePolicyGetV1(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	content, _ := resp["content"].(string)
+	if content == "" {
+		t.Fatalf("content missing from response body: %s", rec.Body.String())
+	}
+	if !strings.Contains(content, "version:") {
+		t.Fatalf("content = %q, want generated YAML", content)
+	}
+}
+
 func TestHandlePolicyUpdateV1_BadJSON(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/policy",

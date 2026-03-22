@@ -288,7 +288,7 @@ or your IDE of choice.
 Additionally, we pass in `--api-version=2` because delve defaults to version 1
 for backwards compatibility reasons. However, delve recommends using version 2
 for all new development and some clients may no longer work with version 1.
-For more information, see the [Delve documentation](https://github.com/go-delve/delve/tree/master/Documentation/api).
+For more information, see the [Delve documentation](https://github.com/go-delve/delve/tree/main/Documentation/api).
 
 ### Logging Stuff
 

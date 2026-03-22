@@ -351,6 +351,7 @@ type StoredAttentionEvent struct {
 	// Priority
 	Actionability Actionability `json:"actionability"`
 	Severity      Severity      `json:"severity"`
+	ReasonCode    string        `json:"reason_code,omitempty"`
 
 	// Content
 	Summary     string `json:"summary"`

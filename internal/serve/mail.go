@@ -5,6 +5,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -106,6 +107,36 @@ type ForceReleaseRequest struct {
 	AgentName      string `json:"agent_name"`
 	Note           string `json:"note,omitempty"`
 	NotifyPrevious bool   `json:"notify_previous,omitempty"`
+}
+
+func writeAgentMailHandlerError(
+	w http.ResponseWriter,
+	reqID string,
+	err error,
+	notFoundCode string,
+	notFoundMatch func(error) bool,
+	notImplementedMessage string,
+	hint string,
+) {
+	switch {
+	case agentmail.IsNotImplemented(err):
+		var details map[string]interface{}
+		if hint != "" {
+			details = map[string]interface{}{}
+			details["hint"] = hint
+		}
+		writeErrorResponse(w, http.StatusNotImplemented, ErrCodeNotImplemented, notImplementedMessage, details, reqID)
+	case notFoundMatch != nil && notFoundMatch(err):
+		writeErrorResponse(w, http.StatusNotFound, notFoundCode, err.Error(), nil, reqID)
+	case agentmail.IsUnauthorized(err):
+		writeErrorResponse(w, http.StatusUnauthorized, ErrCodeUnauthorized, err.Error(), nil, reqID)
+	case agentmail.IsServerUnavailable(err):
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeMailUnavailable, err.Error(), nil, reqID)
+	case agentmail.IsTimeout(err):
+		writeErrorResponse(w, http.StatusGatewayTimeout, ErrCodeTimeout, err.Error(), nil, reqID)
+	default:
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+	}
 }
 
 // registerMailRoutes registers mail and reservation REST endpoints
@@ -384,7 +415,9 @@ func (s *Server) handleGetMailAgent(w http.ResponseWriter, r *http.Request) {
 
 	agent, err := client.Whois(ctx, s.projectDir, agentName, true)
 	if err != nil {
-		writeErrorResponse(w, http.StatusNotFound, ErrCodeAgentNotFound, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeAgentNotFound, func(err error) bool {
+			return errors.Is(err, agentmail.ErrAgentNotRegistered) || agentmail.IsNotFound(err)
+		}, "agent lookup is not supported by the configured Agent Mail server", "")
 		return
 	}
 
@@ -543,7 +576,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 
 	message, err := client.GetMessage(ctx, s.projectDir, messageID)
 	if err != nil {
-		writeErrorResponse(w, http.StatusNotFound, ErrCodeMessageNotFound, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeMessageNotFound, func(err error) bool {
+			return errors.Is(err, agentmail.ErrMessageNotFound) || agentmail.IsNotFound(err)
+		}, "single-message retrieval is not supported by the configured Agent Mail server", "Use inbox responses with include_bodies=true or thread summaries instead.")
 		return
 	}
 
@@ -789,7 +824,7 @@ func (s *Server) handleThreadSummary(w http.ResponseWriter, r *http.Request) {
 		LLMMode:         llmMode,
 	})
 	if err != nil {
-		writeErrorResponse(w, http.StatusNotFound, ErrCodeThreadNotFound, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeThreadNotFound, agentmail.IsNotFound, "thread summaries are not supported by the configured Agent Mail server", "")
 		return
 	}
 

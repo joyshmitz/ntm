@@ -378,6 +378,110 @@ This document provides normative payload examples and operator-loop transcripts 
 }
 ```
 
+## Watch and Progress Filter Scenarios
+
+### Filtered Watch Subscription
+
+```json
+{
+  "action": "watch",
+  "request_id": "req_20260322040008_wat",
+  "cursor": "cur_20260322035500",
+  "subscription": {
+    "surfaces": ["attention", "incidents"],
+    "filters": {
+      "session_refs": ["session:main"],
+      "sources": ["tmux", "agentmail", "beads"],
+      "event_types": ["attention:*", "incident:*", "control:heartbeat"],
+      "severity_at_least": "warning"
+    },
+    "include_progress": true,
+    "progress_interval_ms": 10000,
+    "heartbeat_interval_ms": 5000
+  }
+}
+```
+
+```json
+{
+  "stream": {
+    "stream_id": "watch_20260322040008_wat",
+    "cursor_requested": "cur_20260322035500",
+    "cursor_valid": true,
+    "mode": "replay_then_live"
+  },
+  "subscription": {
+    "surfaces": ["attention", "incidents"],
+    "filters_applied": {
+      "session_refs": ["session:main"],
+      "sources": ["tmux", "agentmail", "beads"],
+      "event_types": ["attention:*", "incident:*", "control:heartbeat"],
+      "severity_at_least": "warning"
+    },
+    "include_progress": true,
+    "progress_interval_ms": 10000,
+    "heartbeat_interval_ms": 5000
+  },
+  "boundedness": {
+    "replay_pending": 12,
+    "suppressed_during_replay": 34,
+    "suppression_reason": "filter_mismatch"
+  }
+}
+```
+
+### Progress Event with Source Progress
+
+```json
+{
+  "event_class": "control",
+  "event_type": "control:progress",
+  "payload": {
+    "stream_id": "watch_20260322040008_wat",
+    "phase": "replay",
+    "cursor_position": "cur_20260322035950",
+    "replayed_events": 8,
+    "replay_remaining": 4,
+    "matched_events_since_last_progress": 2,
+    "suppressed_events_since_last_progress": 7,
+    "progress_interval_ms": 10000,
+    "source_progress": [
+      {
+        "source": "tmux",
+        "status": "healthy",
+        "latest_event_at": "2026-03-22T03:59:49Z",
+        "scan_lag_ms": 800
+      },
+      {
+        "source": "agentmail",
+        "status": "degraded",
+        "latest_event_at": "2026-03-22T03:59:41Z",
+        "scan_lag_ms": 9000,
+        "reason_code": "health:source:busy"
+      }
+    ]
+  }
+}
+```
+
+### Quiet but Healthy Filtered Heartbeat
+
+```json
+{
+  "event_class": "control",
+  "event_type": "control:heartbeat",
+  "payload": {
+    "stream_id": "watch_20260322040008_wat",
+    "cursor_position": "cur_20260322040008",
+    "matched_events_since_last_heartbeat": 0,
+    "suppressed_events_since_last_heartbeat": 3,
+    "quiet_reason": "no_matching_events",
+    "subscription_still_live": true,
+    "next_progress_due_at": "2026-03-22T04:00:20Z"
+  }
+}
+```
+
 ## Bounded Result Scenarios
 
 ### Truncated Output
@@ -438,6 +542,138 @@ This document provides normative payload examples and operator-loop transcripts 
         "command": "ntm inspect alerts"
       }
     }
+  }
+}
+```
+
+## Sensitivity and Disclosure Scenarios
+
+### Disclosure State Matrix
+
+| State | Meaning | Typical Use |
+|-------|---------|-------------|
+| `visible` | Full payload and evidence shown inline | Low-sensitivity inspect/replay |
+| `preview_only` | Summary visible, detailed evidence requires drill-down | Digest, attention, watch |
+| `redacted` | Structure preserved but sensitive fields masked | Snapshot, inspect, export |
+| `withheld` | Presence disclosed but payload omitted | Watch, replay, restricted inspect |
+| `hashed_evidence` | Stable hashes shown instead of raw evidence | Replay, export, validation |
+
+### Visible Evidence
+
+```json
+{
+  "schema_id": "ntm:inspect:agent:v1.0",
+  "request_id": "req_20260322040020_vis",
+  "agent": {
+    "name": "PeachPond",
+    "status": "idle"
+  },
+  "disclosure": {
+    "state": "visible",
+    "policy_version": "v2.1"
+  },
+  "evidence": {
+    "last_output_preview": "Reading internal/robot/attention_feed.go",
+    "current_bead": "bd-j9jo3.1.5"
+  }
+}
+```
+
+### Preview-Only Attention Item
+
+```json
+{
+  "schema_id": "ntm:digest:v1.0",
+  "request_id": "req_20260322040021_prv",
+  "attention": {
+    "requires_action": [
+      {
+        "ref": "mail:msg-20260322-secret",
+        "type": "mail",
+        "summary": "Sensitive operator mail awaiting review",
+        "attention_state": "new",
+        "disclosure": {
+          "state": "preview_only",
+          "reason_code": "sensitivity:explicit_drilldown_required",
+          "drill_down_ref": "inspect:mail:msg-20260322-secret"
+        }
+      }
+    ]
+  }
+}
+```
+
+### Redacted Snapshot Section
+
+```json
+{
+  "schema_id": "ntm:snapshot:v1.0",
+  "request_id": "req_20260322040022_red",
+  "coordination": {
+    "available": true,
+    "mail": {
+      "total_unread": 1,
+      "items": [
+        {
+          "ref": "mail:msg-20260322-secret",
+          "subject": "[redacted]",
+          "sender": "operator@[redacted]",
+          "snippet": "[redacted]"
+        }
+      ]
+    }
+  },
+  "disclosure": {
+    "state": "redacted",
+    "redacted_fields": ["coordination.mail.items[].subject", "coordination.mail.items[].sender", "coordination.mail.items[].snippet"],
+    "policy_version": "v2.1"
+  }
+}
+```
+
+### Withheld Watch Event
+
+```json
+{
+  "event_class": "attention",
+  "event_type": "attention:mail:new",
+  "payload": {
+    "ref": "mail:msg-20260322-secret",
+    "summary": "Sensitive mail event withheld from this stream",
+    "disclosure": {
+      "state": "withheld",
+      "reason_code": "sensitivity:stream_scope_restricted",
+      "operator_override_available": true
+    },
+    "payload_available": false
+  }
+}
+```
+
+### Historical Replay with Hashed Evidence
+
+```json
+{
+  "schema_id": "ntm:incident_replay:v1.0",
+  "request_id": "req_20260322040023_hsh",
+  "incident_replay": {
+    "incident_ref": "incident:inc-20260322-abc",
+    "state_at_open": {
+      "timestamp": "2026-03-22T04:00:00Z",
+      "confidence": "high"
+    },
+    "evidence": [
+      {
+        "ref": "event:attn:9421",
+        "hash": "sha256:7d0c0f3a8fbe91be874c7fd6f1e8f3cf71f9cb8d2e1d9bc8aa0104e4db8c2d4a",
+        "preview": "panic: [redacted]"
+      }
+    ]
+  },
+  "disclosure": {
+    "state": "hashed_evidence",
+    "hash_algorithm": "sha256",
+    "policy_version": "v2.1"
   }
 }
 ```

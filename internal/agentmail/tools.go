@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	pathpkg "path"
+	"sort"
 	"strings"
+	"time"
 )
 
 // EnsureProject ensures a project exists for the given path.
@@ -344,6 +347,17 @@ func (c *Client) SearchMessages(ctx context.Context, opts SearchOptions) ([]Sear
 		return nil, err
 	}
 
+	var wrapper struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(result, &wrapper); err == nil && len(bytes.TrimSpace(wrapper.Result)) > 0 {
+		var results []SearchResult
+		if err := json.Unmarshal(wrapper.Result, &results); err != nil {
+			return nil, NewAPIError("search_messages", 0, fmt.Errorf("parsing result field: %w", err))
+		}
+		return results, nil
+	}
+
 	var results []SearchResult
 	if err := json.Unmarshal(result, &results); err != nil {
 		return nil, NewAPIError("search_messages", 0, err)
@@ -369,6 +383,15 @@ func (c *Client) SummarizeThread(ctx context.Context, opts SummarizeThreadOption
 	result, err := c.callToolWithTimeout(ctx, "summarize_thread", args, LongTimeout)
 	if err != nil {
 		return nil, err
+	}
+
+	var wrapped ThreadSummaryResponse
+	if err := json.Unmarshal(result, &wrapped); err == nil && (wrapped.ThreadID != "" || len(wrapped.Summary.Participants) > 0 || len(wrapped.Summary.KeyPoints) > 0 || len(wrapped.Summary.ActionItems) > 0) {
+		summary := wrapped.Summary
+		if summary.ThreadID == "" {
+			summary.ThreadID = wrapped.ThreadID
+		}
+		return &summary, nil
 	}
 
 	var summary ThreadSummary
@@ -883,22 +906,165 @@ func (c *Client) SetContactPolicy(ctx context.Context, projectKey, agentName, po
 
 // CheckConflicts checks for file reservation conflicts on the given paths.
 func (c *Client) CheckConflicts(ctx context.Context, projectKey string, paths []string) ([]ReservationConflict, error) {
-	args := map[string]interface{}{
-		"project_key": projectKey,
-		"paths":       paths,
-	}
-
-	result, err := c.callTool(ctx, "file_reservation_paths", args)
+	reservations, err := c.ListReservations(ctx, projectKey, "", true)
 	if err != nil {
 		return nil, err
 	}
 
-	var reservationResult ReservationResult
-	if err := json.Unmarshal(result, &reservationResult); err != nil {
-		return nil, NewAPIError("file_reservation_paths", 0, err)
+	now := time.Now()
+	conflicts := make([]ReservationConflict, 0, len(paths))
+	for _, target := range paths {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+
+		matched := make([]FileReservation, 0, len(reservations))
+		for _, reservation := range reservations {
+			if !reservationActiveAt(reservation, now) {
+				continue
+			}
+			if reservationPatternsOverlap(target, reservation.PathPattern) {
+				matched = append(matched, reservation)
+			}
+		}
+
+		holderSet := make(map[string]struct{})
+		for i := 0; i < len(matched); i++ {
+			for j := i + 1; j < len(matched); j++ {
+				if !reservationsConflict(matched[i], matched[j]) {
+					continue
+				}
+				if matched[i].AgentName != "" {
+					holderSet[matched[i].AgentName] = struct{}{}
+				}
+				if matched[j].AgentName != "" {
+					holderSet[matched[j].AgentName] = struct{}{}
+				}
+			}
+		}
+
+		if len(holderSet) == 0 {
+			continue
+		}
+
+		holders := make([]string, 0, len(holderSet))
+		for holder := range holderSet {
+			holders = append(holders, holder)
+		}
+		sort.Strings(holders)
+
+		conflicts = append(conflicts, ReservationConflict{
+			Path:    target,
+			Holders: holders,
+		})
 	}
 
-	return reservationResult.Conflicts, nil
+	sort.Slice(conflicts, func(i, j int) bool {
+		return conflicts[i].Path < conflicts[j].Path
+	})
+
+	return conflicts, nil
+}
+
+func reservationActiveAt(reservation FileReservation, now time.Time) bool {
+	if reservation.ReleasedTS != nil {
+		return false
+	}
+	return !now.After(reservation.ExpiresTS.Time)
+}
+
+func reservationsConflict(a, b FileReservation) bool {
+	if a.AgentName == b.AgentName {
+		return false
+	}
+	if !a.Exclusive && !b.Exclusive {
+		return false
+	}
+	return reservationPatternsOverlap(a.PathPattern, b.PathPattern)
+}
+
+func reservationPatternsOverlap(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return matchesReservationPattern(a, b) || matchesReservationPattern(b, a)
+}
+
+func matchesReservationPattern(path, pattern string) bool {
+	if path == pattern {
+		return true
+	}
+
+	if strings.Contains(pattern, "**") {
+		parts := strings.SplitN(pattern, "**", 2)
+		prefix := parts[0]
+		suffix := ""
+		if len(parts) > 1 {
+			suffix = strings.TrimPrefix(parts[1], "/")
+		}
+
+		if !strings.HasPrefix(path, prefix) {
+			return false
+		}
+		if suffix == "" {
+			return true
+		}
+
+		remaining := strings.TrimPrefix(path, prefix)
+		if strings.Contains(suffix, "*") {
+			return matchesReservationSuffixPattern(remaining, suffix)
+		}
+		return strings.HasSuffix(remaining, suffix)
+	}
+
+	if strings.Contains(pattern, "*") {
+		matched, err := pathpkg.Match(pattern, path)
+		if err == nil && matched {
+			return true
+		}
+		return matchesReservationWildcardPattern(path, pattern)
+	}
+
+	return strings.HasPrefix(path, pattern+"/")
+}
+
+func matchesReservationWildcardPattern(path, pattern string) bool {
+	parts := strings.Split(pattern, "*")
+	if !strings.HasPrefix(path, parts[0]) {
+		return false
+	}
+	if !strings.HasSuffix(path, parts[len(parts)-1]) {
+		return false
+	}
+
+	remaining := path
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(remaining, part)
+		if idx == -1 {
+			return false
+		}
+		remaining = remaining[idx+len(part):]
+	}
+	return true
+}
+
+func matchesReservationSuffixPattern(path, suffixPattern string) bool {
+	suffixSegments := strings.Count(suffixPattern, "/") + 1
+	pathParts := strings.Split(path, "/")
+	if len(pathParts) < suffixSegments {
+		return false
+	}
+	trailingPath := strings.Join(pathParts[len(pathParts)-suffixSegments:], "/")
+	return matchesReservationWildcardPattern(trailingPath, suffixPattern)
 }
 
 // GetReservation retrieves a specific file reservation by ID.

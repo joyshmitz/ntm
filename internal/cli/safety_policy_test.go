@@ -37,17 +37,17 @@ approval_required:
 	}{
 		{
 			name:    "Allowed takes precedence over blocked",
-			command: "git push origin master --force-with-lease",
+			command: "git push origin main --force-with-lease",
 			want:    policy.ActionAllow,
 		},
 		{
 			name:    "Blocked pattern matches",
-			command: "git push origin master --force",
+			command: "git push origin main --force",
 			want:    policy.ActionBlock,
 		},
 		{
 			name:    "Approval required",
-			command: "git rebase master",
+			command: "git rebase main",
 			want:    policy.ActionApprove,
 		},
 		{

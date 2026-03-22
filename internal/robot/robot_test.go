@@ -1236,8 +1236,7 @@ func TestPrintTailWithPaneFilter(t *testing.T) {
 // ====================
 
 func TestPrintSnapshot(t *testing.T) {
-	globalFeedOnce.Do(func() {})
-	oldFeed := globalFeed
+	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
 		RetentionPeriod:   30 * time.Minute,
@@ -1318,8 +1317,7 @@ func TestPrintSnapshot(t *testing.T) {
 }
 
 func TestGetSnapshotIncludesReplayWindowMetadata(t *testing.T) {
-	globalFeedOnce.Do(func() {})
-	oldFeed := globalFeed
+	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       2,
 		RetentionPeriod:   time.Hour,
@@ -1384,8 +1382,7 @@ func TestGetSnapshotIncludesReplayWindowMetadata(t *testing.T) {
 }
 
 func TestRecordStateChangePublishesToAttentionFeed(t *testing.T) {
-	globalFeedOnce.Do(func() {})
-	oldFeed := globalFeed
+	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
 		RetentionPeriod:   time.Hour,
@@ -1423,8 +1420,7 @@ func TestPrintSnapshotIncludesSwarmWhenActive(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
 	// Set up attention feed for tests - earlier tests may leave globalFeed nil
-	globalFeedOnce.Do(func() {})
-	oldFeed := globalFeed
+	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
 		RetentionPeriod:   30 * time.Minute,
@@ -1502,8 +1498,7 @@ func TestPrintSnapshotWithSession(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
 	// Set up attention feed for tests - earlier tests may leave globalFeed nil
-	globalFeedOnce.Do(func() {})
-	oldFeed := globalFeed
+	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
 		RetentionPeriod:   30 * time.Minute,

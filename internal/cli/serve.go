@@ -8,10 +8,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/serve"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
@@ -100,6 +102,11 @@ func runServe(opts serveOptions) error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 
+	robot.SetAttentionFeed(robot.NewAttentionFeed(
+		robot.DefaultAttentionFeedConfig(),
+		robot.WithAttentionStore(stateStore),
+	))
+
 	mode, err := serve.ParseAuthMode(opts.AuthMode)
 	if err != nil {
 		return err
@@ -135,6 +142,30 @@ func runServe(opts serveOptions) error {
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := robot.RefreshNormalizedProjection(refreshCtx, stateStore, "", ""); err != nil {
+		slog.Warn("normalized projection refresh failed", "err", err)
+	}
+	refreshCancel()
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refreshCtx, refreshCancel := context.WithTimeout(ctx, 10*time.Second)
+				if err := robot.RefreshNormalizedProjection(refreshCtx, stateStore, "", ""); err != nil {
+					slog.Warn("normalized projection refresh failed", "err", err)
+				}
+				refreshCancel()
+			}
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

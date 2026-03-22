@@ -13,9 +13,25 @@ import (
 	"time"
 
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 )
+
+// AttentionStore defines the interface for durable attention event storage.
+// This interface allows the AttentionFeed to persist events to SQLite.
+type AttentionStore interface {
+	// AppendAttentionEvent inserts an attention event and returns its cursor.
+	AppendAttentionEvent(event *state.StoredAttentionEvent) (int64, error)
+	// GetAttentionEventsSince returns events with cursor > sinceCursor.
+	GetAttentionEventsSince(sinceCursor int64, limit int) ([]state.StoredAttentionEvent, error)
+	// GetAttentionReplayWindow returns the currently replayable cursor range.
+	GetAttentionReplayWindow() (state.AttentionReplayWindow, error)
+	// GetLatestEventCursor returns the most recent event cursor.
+	GetLatestEventCursor() (int64, error)
+	// GCExpiredEvents deletes events past their expiration time.
+	GCExpiredEvents() (int64, error)
+}
 
 // =============================================================================
 // Configuration
@@ -213,6 +229,27 @@ func (j *AttentionJournal) Stats() JournalStats {
 	}
 }
 
+// RangeStats returns retained journal stats for entries with cursor >= minCursor.
+func (j *AttentionJournal) RangeStats(minCursor int64) (count int, oldest, newest int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	j.pruneLocked(time.Now())
+
+	for _, entry := range j.entries {
+		if entry.event.Cursor < minCursor {
+			continue
+		}
+		if count == 0 {
+			oldest = entry.event.Cursor
+		}
+		count++
+		newest = entry.event.Cursor
+	}
+
+	return count, oldest, newest
+}
+
 func (j *AttentionJournal) pruneLocked(now time.Time) {
 	if len(j.entries) == 0 {
 		j.oldest = 0
@@ -312,10 +349,19 @@ type subscription struct {
 
 // AttentionFeed is the main service for the attention feed system.
 // It manages cursor allocation, event journaling, and subscriptions.
+// When a store is configured, events are persisted to SQLite for restart-safe replay.
 type AttentionFeed struct {
 	config  AttentionFeedConfig
 	cursor  *CursorAllocator
 	journal *AttentionJournal
+	store   AttentionStore // Optional SQLite store for durable persistence
+
+	appendMu            sync.Mutex
+	ephemeralFromCursor atomic.Int64 // First cursor that exists only in-memory after store write failure
+	pendingEvents       []AttentionEvent
+	drainingEvents      bool
+	dedupMu             sync.Mutex
+	recentDedup         map[string]time.Time
 
 	subMu     sync.RWMutex
 	subNextID atomic.Uint64
@@ -325,19 +371,39 @@ type AttentionFeed struct {
 	stopCh   chan struct{}
 }
 
+// AttentionFeedOption is a functional option for configuring AttentionFeed.
+type AttentionFeedOption func(*AttentionFeed)
+
+// WithAttentionStore configures a durable SQLite store for attention events.
+// When set, events are persisted to survive restarts and support cursor-based replay.
+func WithAttentionStore(store AttentionStore) AttentionFeedOption {
+	return func(f *AttentionFeed) {
+		f.store = store
+	}
+}
+
 // NewAttentionFeed creates a new attention feed service.
-func NewAttentionFeed(config AttentionFeedConfig) *AttentionFeed {
+func NewAttentionFeed(config AttentionFeedConfig, opts ...AttentionFeedOption) *AttentionFeed {
 	if config.JournalSize == 0 {
 		config = DefaultAttentionFeedConfig()
 	}
 
 	feed := &AttentionFeed{
-		config:  config,
-		cursor:  NewCursorAllocator(),
-		journal: NewAttentionJournal(config.JournalSize, config.RetentionPeriod),
-		subs:    make(map[uint64]subscription),
-		stopCh:  make(chan struct{}),
+		config:      config,
+		cursor:      NewCursorAllocator(),
+		journal:     NewAttentionJournal(config.JournalSize, config.RetentionPeriod),
+		recentDedup: make(map[string]time.Time),
+		subs:        make(map[uint64]subscription),
+		stopCh:      make(chan struct{}),
 	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(feed)
+	}
+
+	// Sync cursor from store if available
+	feed.syncCursorFromStore()
 
 	// Start heartbeat if configured
 	if config.HeartbeatInterval > 0 {
@@ -349,30 +415,109 @@ func NewAttentionFeed(config AttentionFeedConfig) *AttentionFeed {
 
 // Append allocates a cursor, stores the event, and notifies subscribers.
 // The caller provides an event without a cursor; this method assigns one.
+// When a store is configured, events are persisted to SQLite for durability.
 func (f *AttentionFeed) Append(event AttentionEvent) AttentionEvent {
 	event.NextActions = sanitizeNextActions(event.NextActions)
-
-	// Allocate cursor
-	event.Cursor = f.cursor.Next()
 
 	// Ensure timestamp if not set
 	if event.Ts == "" {
 		event.Ts = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
-	// Store in journal
-	f.journal.Append(event)
+	f.appendMu.Lock()
 
-	// Notify subscribers
-	f.notifySubscribers(event)
+	// Persist to store if available (store assigns cursor via AUTOINCREMENT).
+	// If a store write fails once, switch new events to journal-only mode so
+	// cursor allocation remains monotonic and replay stays internally consistent.
+	if f.store != nil && f.ephemeralFromCursor.Load() == 0 {
+		stored := attentionEventToStored(event, f.config.RetentionPeriod)
+		cursor, err := f.store.AppendAttentionEvent(&stored)
+		if err == nil {
+			event.Cursor = cursor
+			f.cursor.counter.Store(cursor)
+		} else {
+			event.Cursor = f.cursor.Next()
+			f.ephemeralFromCursor.CompareAndSwap(0, event.Cursor)
+		}
+	} else {
+		event.Cursor = f.cursor.Next()
+		if f.store != nil {
+			f.ephemeralFromCursor.CompareAndSwap(0, event.Cursor)
+		}
+	}
+
+	// Store in journal (also serves as in-memory cache)
+	f.journal.Append(event)
+	f.pendingEvents = append(f.pendingEvents, cloneAttentionEvent(event))
+
+	startDrain := !f.drainingEvents
+	if startDrain {
+		f.drainingEvents = true
+	}
+	f.appendMu.Unlock()
+
+	if startDrain {
+		f.drainPendingEvents()
+	}
 
 	return event
+}
+
+func (f *AttentionFeed) appendDeduplicated(event AttentionEvent, window time.Duration) (AttentionEvent, bool) {
+	key := strings.TrimSpace(event.DedupKey)
+	if key == "" || window <= 0 {
+		return f.Append(event), true
+	}
+
+	ts := parseAttentionEventTime(event.Ts)
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	cutoff := ts.Add(-window)
+
+	f.dedupMu.Lock()
+	for existingKey, seenAt := range f.recentDedup {
+		if seenAt.Before(cutoff) {
+			delete(f.recentDedup, existingKey)
+		}
+	}
+	if seenAt, ok := f.recentDedup[key]; ok && !seenAt.Before(cutoff) {
+		f.dedupMu.Unlock()
+		return AttentionEvent{}, false
+	}
+	f.recentDedup[key] = ts
+	f.dedupMu.Unlock()
+
+	return f.Append(event), true
+}
+
+func (f *AttentionFeed) drainPendingEvents() {
+	for {
+		f.appendMu.Lock()
+		if len(f.pendingEvents) == 0 {
+			f.drainingEvents = false
+			f.appendMu.Unlock()
+			return
+		}
+		event := f.pendingEvents[0]
+		f.pendingEvents = f.pendingEvents[1:]
+		f.appendMu.Unlock()
+
+		// Notify subscribers outside appendMu so handlers can emit follow-on
+		// attention events. Those appends requeue behind the current event and
+		// are drained in cursor order after the current delivery completes.
+		f.notifySubscribers(event)
+	}
 }
 
 // Replay returns events since the given cursor.
 // Use cursor=0 to get all available events.
 // Use cursor=-1 to get no events and just the current cursor.
+// When a store is configured, replays from SQLite for durable cursor semantics.
 func (f *AttentionFeed) Replay(sinceCursor int64, limit int) ([]AttentionEvent, int64, error) {
+	if f.store != nil {
+		return f.replayFromStore(sinceCursor, limit)
+	}
 	return f.journal.Replay(sinceCursor, limit)
 }
 
@@ -382,7 +527,14 @@ func (f *AttentionFeed) CurrentCursor() int64 {
 }
 
 // Stats returns journal statistics for observability.
+// When a store is configured, returns stats based on durable storage.
 func (f *AttentionFeed) Stats() JournalStats {
+	if f.store != nil {
+		stats, err := f.storeBackedStats()
+		if err == nil {
+			return stats
+		}
+	}
 	return f.journal.Stats()
 }
 
@@ -1050,6 +1202,13 @@ func (f *AttentionFeed) SubscribeEventBus(bus *ntmevents.EventBus) func() {
 	return bus.SubscribeAll(func(event ntmevents.BusEvent) {
 		f.PublishBusEvent(event)
 	})
+}
+
+// AppendDeduplicated appends a pre-normalized attention event with a suppression window.
+// Higher orchestration layers own source-specific translation and can use this to
+// publish durable events without duplicating feed-local dedup behavior.
+func (f *AttentionFeed) AppendDeduplicated(event AttentionEvent, window time.Duration) (AttentionEvent, bool) {
+	return f.appendDeduplicated(event, window)
 }
 
 // PublishMailPending creates and appends a mail_pending signal for unread mail.
@@ -1767,26 +1926,34 @@ func NewTrackedFileConflictEvent(session string, conflict tracker.Conflict) (Att
 
 // globalFeed is the default attention feed instance.
 var globalFeed *AttentionFeed
-var globalFeedOnce sync.Once
+var globalFeedMu sync.Mutex
 
 // GetAttentionFeed returns the global attention feed instance.
-// The feed is lazily initialized with default configuration.
+// The feed is lazily initialized with default configuration and can later be
+// replaced with a store-backed instance during application startup.
 func GetAttentionFeed() *AttentionFeed {
-	globalFeedOnce.Do(func() {
+	globalFeedMu.Lock()
+	defer globalFeedMu.Unlock()
+	if globalFeed == nil {
 		globalFeed = NewAttentionFeed(DefaultAttentionFeedConfig())
-	})
+	}
 	return globalFeed
 }
 
 // PeekAttentionFeed returns the global attention feed if it has already been
 // initialized. Unlike GetAttentionFeed, it never creates a new feed instance.
 func PeekAttentionFeed() *AttentionFeed {
+	globalFeedMu.Lock()
+	defer globalFeedMu.Unlock()
 	return globalFeed
 }
 
 // SetAttentionFeed sets a custom global feed (for testing).
-// Must be called before any calls to GetAttentionFeed.
+// Production startup uses this to replace the default in-memory feed with a
+// durable store-backed instance. Tests also use it to install controlled feeds.
 func SetAttentionFeed(feed *AttentionFeed) {
+	globalFeedMu.Lock()
+	defer globalFeedMu.Unlock()
 	globalFeed = feed
 }
 
@@ -2499,3 +2666,206 @@ func minInt(a, b int) int {
 
 // NOTE: EventsOptions, filterEventsForRobot, and toStringSetForEvents are
 // defined in events.go (br-kpvhy: --robot-events command implementation)
+
+// =============================================================================
+// Store-backed Operations (bd-j9jo3.4.1)
+// =============================================================================
+
+// syncCursorFromStore initializes the cursor allocator from durable storage.
+func (f *AttentionFeed) syncCursorFromStore() {
+	if f.store == nil {
+		return
+	}
+
+	latestCursor, err := f.store.GetLatestEventCursor()
+	if err == nil && latestCursor > 0 {
+		f.cursor.counter.Store(latestCursor)
+	}
+}
+
+// replayFromStore reads events from SQLite with cursor expiration handling.
+func (f *AttentionFeed) replayFromStore(sinceCursor int64, limit int) ([]AttentionEvent, int64, error) {
+	window, err := f.store.GetAttentionReplayWindow()
+	if err != nil {
+		// Fallback to in-memory journal
+		return f.journal.Replay(sinceCursor, limit)
+	}
+
+	// Handle cursor=-1 (start from now)
+	if sinceCursor == -1 {
+		return []AttentionEvent{}, maxCursor(window.NewestCursor, f.cursor.Current()), nil
+	}
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	// Check cursor expiration
+	if window.CursorExpired(sinceCursor) {
+		return nil, 0, &CursorExpiredError{
+			RequestedCursor: sinceCursor,
+			EarliestCursor:  window.OldestCursor,
+			RetentionPeriod: f.config.RetentionPeriod,
+		}
+	}
+
+	// GC expired events periodically
+	_, _ = f.store.GCExpiredEvents()
+
+	storedEvents, err := f.store.GetAttentionEventsSince(sinceCursor, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("replay attention events from store: %w", err)
+	}
+
+	events := make([]AttentionEvent, 0, len(storedEvents))
+	for _, stored := range storedEvents {
+		events = append(events, attentionEventFromStored(stored))
+	}
+
+	if tailStart := f.ephemeralFromCursor.Load(); tailStart > 0 && len(events) < limit {
+		journalSince := sinceCursor
+		if journalSince < tailStart-1 {
+			journalSince = tailStart - 1
+		}
+		tail, journalCursor, err := f.journal.Replay(journalSince, limit-len(events))
+		if err != nil {
+			return nil, 0, err
+		}
+		events = append(events, tail...)
+		return events, maxCursor(window.NewestCursor, journalCursor), nil
+	}
+
+	return events, maxCursor(window.NewestCursor, f.cursor.Current()), nil
+}
+
+// storeBackedStats returns journal stats from durable storage.
+func (f *AttentionFeed) storeBackedStats() (JournalStats, error) {
+	window, err := f.store.GetAttentionReplayWindow()
+	if err != nil {
+		return JournalStats{}, err
+	}
+
+	latestCursor := window.NewestCursor
+	if latestCursor > f.cursor.Current() {
+		f.cursor.counter.Store(latestCursor)
+	}
+
+	stats := f.journal.Stats()
+	stats.Size = f.config.JournalSize
+	stats.Count = window.EventCount
+	stats.OldestCursor = window.OldestCursor
+	stats.NewestCursor = maxCursor(latestCursor, f.cursor.Current())
+	stats.RetentionPeriod = f.config.RetentionPeriod
+
+	if tailStart := f.ephemeralFromCursor.Load(); tailStart > 0 {
+		tailCount, tailOldest, tailNewest := f.journal.RangeStats(tailStart)
+		stats.Count += tailCount
+		if stats.OldestCursor == 0 && tailCount > 0 {
+			stats.OldestCursor = tailOldest
+		}
+		stats.NewestCursor = maxCursor(stats.NewestCursor, tailNewest)
+	}
+
+	return stats, nil
+}
+
+func maxCursor(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// attentionEventToStored converts an AttentionEvent to StoredAttentionEvent for persistence.
+func attentionEventToStored(event AttentionEvent, retention time.Duration) state.StoredAttentionEvent {
+	ts := parseAttentionEventTime(event.Ts)
+	var expiresAt *time.Time
+	if retention > 0 {
+		expiry := ts.Add(retention)
+		expiresAt = &expiry
+	}
+
+	var details string
+	if len(event.Details) > 0 {
+		if raw, err := json.Marshal(event.Details); err == nil {
+			details = string(raw)
+		}
+	}
+
+	var nextActions string
+	if len(event.NextActions) > 0 {
+		if raw, err := json.Marshal(event.NextActions); err == nil {
+			nextActions = string(raw)
+		}
+	}
+
+	stored := state.StoredAttentionEvent{
+		Ts:            ts,
+		SessionName:   event.Session,
+		Category:      string(event.Category),
+		EventType:     string(event.Type),
+		Source:        event.Source,
+		Actionability: state.Actionability(event.Actionability),
+		Severity:      state.Severity(event.Severity),
+		ReasonCode:    event.ReasonCode,
+		Summary:       event.Summary,
+		Details:       details,
+		NextActions:   nextActions,
+		DedupKey:      event.DedupKey,
+		DedupCount:    1,
+		ExpiresAt:     expiresAt,
+	}
+	if event.Pane > 0 {
+		stored.Pane = strconv.Itoa(event.Pane)
+	}
+	return stored
+}
+
+// attentionEventFromStored converts a StoredAttentionEvent back to AttentionEvent.
+func attentionEventFromStored(event state.StoredAttentionEvent) AttentionEvent {
+	result := AttentionEvent{
+		Cursor:        event.Cursor,
+		Ts:            event.Ts.UTC().Format(time.RFC3339Nano),
+		Session:       event.SessionName,
+		Category:      EventCategory(event.Category),
+		Type:          EventType(event.EventType),
+		Source:        event.Source,
+		Actionability: Actionability(event.Actionability),
+		Severity:      Severity(event.Severity),
+		ReasonCode:    event.ReasonCode,
+		Summary:       event.Summary,
+		NextActions:   []NextAction{},
+		DedupKey:      event.DedupKey,
+	}
+	if event.Pane != "" {
+		if pane, err := strconv.Atoi(event.Pane); err == nil {
+			result.Pane = pane
+		}
+	}
+	if event.Details != "" {
+		var details map[string]any
+		if err := json.Unmarshal([]byte(event.Details), &details); err == nil {
+			result.Details = details
+		}
+	}
+	if event.NextActions != "" {
+		var actions []NextAction
+		if err := json.Unmarshal([]byte(event.NextActions), &actions); err == nil {
+			result.NextActions = sanitizeNextActions(actions)
+		}
+	}
+	return result
+}
+
+// parseAttentionEventTime parses the timestamp from an attention event.
+func parseAttentionEventTime(ts string) time.Time {
+	if ts == "" {
+		return time.Now().UTC()
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Now().UTC()
+}

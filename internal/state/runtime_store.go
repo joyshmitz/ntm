@@ -913,6 +913,27 @@ func (tx *Tx) UpsertSourceHealth(health *SourceHealth) error {
 	return nil
 }
 
+// DeleteSourceHealth removes a source health record.
+func (s *Store) DeleteSourceHealth(sourceName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM source_health WHERE source_name = ?", sourceName)
+	if err != nil {
+		return fmt.Errorf("delete source health: %w", err)
+	}
+	return nil
+}
+
+// DeleteSourceHealth removes a source health record in an existing transaction.
+func (tx *Tx) DeleteSourceHealth(sourceName string) error {
+	_, err := tx.tx.Exec("DELETE FROM source_health WHERE source_name = ?", sourceName)
+	if err != nil {
+		return fmt.Errorf("delete source health: %w", err)
+	}
+	return nil
+}
+
 // GetSourceHealth retrieves health for a specific source.
 func (s *Store) GetSourceHealth(sourceName string) (*SourceHealth, error) {
 	s.mu.RLock()
@@ -1029,11 +1050,11 @@ func (s *Store) AppendAttentionEvent(event *StoredAttentionEvent) (int64, error)
 	result, err := s.db.Exec(`
 		INSERT INTO attention_events (
 			ts, session_name, pane, category, event_type, source,
-			actionability, severity, summary, details, next_actions,
+			actionability, severity, reason_code, summary, details, next_actions,
 			dedup_key, dedup_count, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Ts, event.SessionName, event.Pane, event.Category,
-		event.EventType, event.Source, event.Actionability, event.Severity,
+		event.EventType, event.Source, event.Actionability, event.Severity, event.ReasonCode,
 		event.Summary, event.Details, event.NextActions,
 		event.DedupKey, event.DedupCount, event.ExpiresAt,
 	)
@@ -1053,11 +1074,11 @@ func (tx *Tx) AppendAttentionEvent(event *StoredAttentionEvent) (int64, error) {
 	result, err := tx.tx.Exec(`
 		INSERT INTO attention_events (
 			ts, session_name, pane, category, event_type, source,
-			actionability, severity, summary, details, next_actions,
+			actionability, severity, reason_code, summary, details, next_actions,
 			dedup_key, dedup_count, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Ts, event.SessionName, event.Pane, event.Category,
-		event.EventType, event.Source, event.Actionability, event.Severity,
+		event.EventType, event.Source, event.Actionability, event.Severity, event.ReasonCode,
 		event.Summary, event.Details, event.NextActions,
 		event.DedupKey, event.DedupCount, event.ExpiresAt,
 	)
@@ -1083,7 +1104,7 @@ func (s *Store) GetAttentionEventsSince(sinceCursor int64, limit int) ([]StoredA
 
 	rows, err := s.db.Query(`
 		SELECT cursor, ts, COALESCE(session_name, ''), COALESCE(pane, ''),
-			category, event_type, source, actionability, severity,
+			category, event_type, source, actionability, severity, COALESCE(reason_code, ''),
 			summary, COALESCE(details, ''), COALESCE(next_actions, ''),
 			COALESCE(dedup_key, ''), dedup_count, expires_at
 		FROM attention_events
@@ -1102,7 +1123,7 @@ func (s *Store) GetAttentionEventsSince(sinceCursor int64, limit int) ([]StoredA
 		if err := rows.Scan(
 			&event.Cursor, &event.Ts, &event.SessionName, &event.Pane,
 			&event.Category, &event.EventType, &event.Source,
-			&event.Actionability, &event.Severity, &event.Summary,
+			&event.Actionability, &event.Severity, &event.ReasonCode, &event.Summary,
 			&event.Details, &event.NextActions, &event.DedupKey,
 			&event.DedupCount, &event.ExpiresAt,
 		); err != nil {

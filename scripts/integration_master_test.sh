@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Master Integration Test Suite: Full NTM System Flow
+# Main Integration Test Suite: Full NTM System Flow
 # Implements bd-ak7b: end-to-end system flow with phased logging + JSON report.
 
 set -uo pipefail
@@ -10,15 +10,15 @@ source "${SCRIPT_DIR}/e2e/lib/log.sh"
 set +e
 
 TEST_ID="integration-001"
-TEST_NAME="integration_master_test"
-TEST_PREFIX="e2e-master-$$"
+TEST_NAME="integration_main_test"
+TEST_PREFIX="e2e-main-$$"
 
 E2E_LOG_DIR="${E2E_LOG_DIR:-/tmp/ntm-e2e-logs}"
 export E2E_LOG_DIR
 mkdir -p "$E2E_LOG_DIR"
 
 REPORT_DIR="$E2E_LOG_DIR"
-REPORT_FILE="${REPORT_DIR}/integration_master_report_$(date -u +%Y%m%d_%H%M%S).json"
+REPORT_FILE="${REPORT_DIR}/integration_main_report_$(date -u +%Y%m%d_%H%M%S).json"
 
 PHASE_NAMES=()
 PHASE_STATUS=()
@@ -131,7 +131,7 @@ main() {
     require_jq
 
     if [[ -z "${NTM_BIN:-}" ]]; then
-        NTM_BIN="/tmp/ntm-master-bin-${TEST_PREFIX}"
+        NTM_BIN="/tmp/ntm-main-bin-${TEST_PREFIX}"
         log_section "Build"
         log_info "Building ntm binary: ${NTM_BIN}"
         if ! log_exec go build -o "$NTM_BIN" ./cmd/ntm; then
@@ -142,14 +142,14 @@ main() {
     fi
     export PATH="$(dirname "$NTM_BIN"):$PATH"
 
-    PROJECTS_BASE=$(mktemp -d -t ntm-master-e2e-XXXX)
+    PROJECTS_BASE=$(mktemp -d -t ntm-main-e2e-XXXX)
     export NTM_PROJECTS_BASE="$PROJECTS_BASE"
 
     PROJECT_NAME="${TEST_PREFIX}-project"
     SESSION_NAME="$PROJECT_NAME"
     PROJECT_DIR="${PROJECTS_BASE}/${PROJECT_NAME}"
     mkdir -p "$PROJECT_DIR"
-    printf "E2E master integration test\n" > "${PROJECT_DIR}/README.md"
+    printf "E2E main integration test\n" > "${PROJECT_DIR}/README.md"
 
     # Phase 1: Project Initialization
     phase_start "init"
@@ -181,7 +181,7 @@ main() {
     phase_start "context_build"
     status="pass"
     if pushd "$PROJECT_DIR" >/dev/null; then
-        if log_exec ntm context build --task "Master integration test" --agent cc --bead "${TEST_PREFIX}" --files README.md --verbose --json; then
+        if log_exec ntm context build --task "Main integration test" --agent cc --bead "${TEST_PREFIX}" --files README.md --verbose --json; then
             local output
             output="$(get_last_output)"
             log_assert_valid_json "$output" "context build JSON"
@@ -203,7 +203,7 @@ main() {
             if ! log_exec br init --json; then
                 status="fail"
             fi
-            if log_exec br create "E2E master integration task" -t task -p 2 --json; then
+            if log_exec br create "E2E main integration task" -t task -p 2 --json; then
                 if ! log_exec ntm assign "$SESSION_NAME" --auto --limit 1 --strategy round-robin --json; then
                     status="fail"
                 else
@@ -228,7 +228,7 @@ main() {
     phase_start "file_reservation"
     status="pass"
     if pushd "$PROJECT_DIR" >/dev/null; then
-        if log_exec ntm --json lock "$SESSION_NAME" "README.md" --reason "master integration test" --ttl 5m; then
+        if log_exec ntm --json lock "$SESSION_NAME" "README.md" --reason "main integration test" --ttl 5m; then
             local output
             output="$(get_last_output)"
             if ! echo "$output" | jq -e '.success == true' >/dev/null 2>&1; then
@@ -257,7 +257,7 @@ main() {
     phase_start "agent_communication"
     status="pass"
     if pushd "$PROJECT_DIR" >/dev/null; then
-        if log_exec ntm mail send "$SESSION_NAME" --all --subject "E2E master integration" "Agent mail test message"; then
+        if log_exec ntm mail send "$SESSION_NAME" --all --subject "E2E main integration" "Agent mail test message"; then
             if log_exec ntm mail inbox "$SESSION_NAME" --json --limit 5; then
                 local output
                 output="$(get_last_output)"
@@ -329,7 +329,7 @@ main() {
     phase_start "handoff"
     status="pass"
     if pushd "$PROJECT_DIR" >/dev/null; then
-        if log_exec ntm handoff create "$SESSION_NAME" --goal "Master integration test" --now "Proceed to remaining phases" --json; then
+        if log_exec ntm handoff create "$SESSION_NAME" --goal "Main integration test" --now "Proceed to remaining phases" --json; then
             local output
             output="$(get_last_output)"
             log_assert_valid_json "$output" "handoff JSON"

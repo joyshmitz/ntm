@@ -9,7 +9,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getClient } from "@/lib/api/client";
+import { formatApiErrorMessage, getClient } from "@/lib/api/client";
 
 interface SessionRecord {
   id: string;
@@ -35,30 +35,14 @@ export default function SessionsPage() {
       const client = getClient();
       const response = await client.GET("/api/v1/sessions");
       if (response.error) {
-        throw new Error(`Failed to fetch sessions: ${response.error}`);
+        throw new Error(
+          `Failed to fetch sessions: ${formatApiErrorMessage(response.error)}`
+        );
       }
       return response.data as SessionsResponse | undefined;
     },
     refetchInterval: 10000, // Poll every 10 seconds as backup
   });
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
-        <p className="text-red-700 dark:text-red-400">
-          Error loading sessions: {error.message}
-        </p>
-      </div>
-    );
-  }
 
   const sessionList = sessions?.sessions || [];
   const filteredSessions = useMemo(() => {
@@ -75,6 +59,25 @@ export default function SessionsPage() {
       );
     });
   }, [filter, sessionList]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  if (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return (
+      <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+        <p className="text-red-700 dark:text-red-400">
+          Error loading sessions: {message}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

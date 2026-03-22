@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -169,6 +170,47 @@ type PipelineHints struct {
 	Suggestions []string `json:"suggestions,omitempty"`
 }
 
+// StartBackgroundPipeline registers and starts a background pipeline execution.
+// The returned execution is the registry entry that status and cancel operations use.
+func StartBackgroundPipeline(workflow *Workflow, vars map[string]interface{}, execCfg ExecutorConfig) *PipelineExecution {
+	runID := execCfg.RunID
+	if runID == "" {
+		runID = GenerateRunID()
+	}
+	execCfg.RunID = runID
+
+	executor := NewExecutor(execCfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	progress := make(chan ProgressEvent, 100)
+
+	exec := &PipelineExecution{
+		RunID:      runID,
+		WorkflowID: workflow.Name,
+		Session:    execCfg.Session,
+		Status:     "running",
+		StartedAt:  time.Now(),
+		Steps:      make(map[string]PipelineStep),
+		Progress: PipelineProgress{
+			Total:   len(workflow.Steps),
+			Pending: len(workflow.Steps),
+		},
+		executor: executor,
+		cancelFn: cancel,
+	}
+
+	registerPipeline(exec)
+
+	go func() {
+		defer cancel()
+		defer close(progress)
+
+		state, _ := executor.Run(ctx, workflow, vars, progress)
+		updatePipelineFromState(runID, state)
+	}()
+
+	return exec
+}
+
 // PrintPipelineRun starts a pipeline and returns status
 func PrintPipelineRun(opts PipelineRunOptions) int {
 	output := PipelineRunOutput{}
@@ -242,37 +284,8 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 
 	// Start execution
 	if opts.Background {
-		// Background execution - register and return immediately
-		runID := GenerateRunID()
-
-		// Configure executor with the pre-generated RunID
-		execCfg.RunID = runID
-		executor = NewExecutor(execCfg) // Recreate with RunID
-
-		exec := &PipelineExecution{
-			RunID:      runID,
-			WorkflowID: workflow.Name,
-			Session:    opts.Session,
-			Status:     "running",
-			StartedAt:  time.Now(),
-			Steps:      make(map[string]PipelineStep),
-			Progress: PipelineProgress{
-				Total:   len(workflow.Steps),
-				Pending: len(workflow.Steps),
-			},
-			executor: executor,
-			cancelFn: cancel,
-		}
-
-		registerPipeline(exec)
-
-		go func() {
-			defer cancel()
-			defer close(progress)
-
-			state, _ := executor.Run(ctx, workflow, opts.Variables, progress)
-			updatePipelineFromState(runID, state)
-		}()
+		cancel()
+		exec := StartBackgroundPipeline(workflow, opts.Variables, execCfg)
 
 		output.RobotResponse = NewRobotResponse(true)
 		output.RunID = exec.RunID
@@ -352,7 +365,7 @@ func PrintPipelineStatus(runID string) int {
 		return 1
 	}
 
-	exec := getPipeline(runID)
+	exec := GetPipelineSnapshot(runID)
 	if exec == nil {
 		errMsg := fmt.Sprintf("pipeline not found: %s", runID)
 		output.RobotResponse = NewErrorResponse(
@@ -364,12 +377,6 @@ func PrintPipelineStatus(runID string) int {
 		output.Error = errMsg
 		outputJSON(output)
 		return 1
-	}
-
-	// Get current state
-	var state *ExecutionState
-	if exec.executor != nil {
-		state = exec.executor.GetState()
 	}
 
 	output.RobotResponse = NewRobotResponse(true)
@@ -386,18 +393,10 @@ func PrintPipelineStatus(runID string) int {
 		output.DurationMs = time.Since(exec.StartedAt).Milliseconds()
 	}
 
-	if state != nil {
-		output.CurrentStep = state.CurrentStep
-		output.Progress = calculateProgress(state)
-		output.Steps = convertSteps(state)
-		if len(state.Errors) > 0 {
-			output.Error = state.Errors[len(state.Errors)-1].Message
-		}
-	} else {
-		output.Progress = exec.Progress
-		output.Steps = exec.Steps
-		output.Error = exec.Error
-	}
+	output.CurrentStep = exec.CurrentStep
+	output.Progress = exec.Progress
+	output.Steps = exec.Steps
+	output.Error = exec.Error
 
 	// Generate hints
 	output.AgentHints = &PipelineHints{
@@ -421,8 +420,7 @@ func PrintPipelineList() int {
 		Pipelines:     []PipelineSummary{},
 	}
 
-	pipelineMu.RLock()
-	for _, exec := range pipelineRegistry {
+	for _, exec := range GetAllPipelineSnapshots() {
 		summary := PipelineSummary{
 			RunID:      exec.RunID,
 			WorkflowID: exec.WorkflowID,
@@ -436,7 +434,6 @@ func PrintPipelineList() int {
 		}
 		output.Pipelines = append(output.Pipelines, summary)
 	}
-	pipelineMu.RUnlock()
 
 	// Count by status
 	running := 0
@@ -622,9 +619,58 @@ func getPipeline(runID string) *PipelineExecution {
 	return pipelineRegistry[runID]
 }
 
+func snapshotPipeline(exec *PipelineExecution) *PipelineExecution {
+	if exec == nil {
+		return nil
+	}
+
+	snapshot := *exec
+	if exec.Steps != nil {
+		snapshot.Steps = make(map[string]PipelineStep, len(exec.Steps))
+		for key, value := range exec.Steps {
+			snapshot.Steps[key] = value
+		}
+	}
+
+	if exec.executor == nil {
+		return &snapshot
+	}
+
+	state := exec.executor.GetState()
+	if state == nil {
+		return &snapshot
+	}
+
+	registryTerminal := snapshot.Status != "" && snapshot.Status != "running"
+	if !registryTerminal {
+		snapshot.Status = string(state.Status)
+	}
+	snapshot.CurrentStep = state.CurrentStep
+	snapshot.Progress = progressFromState(state, exec.Progress.Total)
+	snapshot.Steps = convertSteps(state)
+
+	if !registryTerminal && !state.FinishedAt.IsZero() {
+		finishedAt := state.FinishedAt
+		snapshot.FinishedAt = &finishedAt
+	}
+
+	if len(state.Errors) > 0 && (!registryTerminal || snapshot.Error == "") {
+		snapshot.Error = state.Errors[len(state.Errors)-1].Message
+	}
+
+	return &snapshot
+}
+
 // GetPipelineExecution returns a pipeline by run ID (exported for CLI)
 func GetPipelineExecution(runID string) *PipelineExecution {
 	return getPipeline(runID)
+}
+
+// GetPipelineSnapshot returns a read-only snapshot of a pipeline, including live executor state when available.
+func GetPipelineSnapshot(runID string) *PipelineExecution {
+	pipelineMu.RLock()
+	defer pipelineMu.RUnlock()
+	return snapshotPipeline(pipelineRegistry[runID])
 }
 
 // GetAllPipelines returns all tracked pipelines (exported for CLI)
@@ -637,6 +683,22 @@ func GetAllPipelines() []*PipelineExecution {
 		result = append(result, exec)
 	}
 	return result
+}
+
+// GetAllPipelineSnapshots returns stable, read-only pipeline snapshots sorted by start time descending.
+func GetAllPipelineSnapshots() []*PipelineExecution {
+	pipelineMu.RLock()
+	snapshots := make([]*PipelineExecution, 0, len(pipelineRegistry))
+	for _, exec := range pipelineRegistry {
+		snapshots = append(snapshots, snapshotPipeline(exec))
+	}
+	pipelineMu.RUnlock()
+
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].StartedAt.After(snapshots[j].StartedAt)
+	})
+
+	return snapshots
 }
 
 // CancelPipeline cancels a running pipeline by run ID (exported for REST API)
@@ -678,17 +740,7 @@ func updatePipelineFromState(runID string, state *ExecutionState) {
 	exec.Status = string(state.Status)
 	exec.CurrentStep = state.CurrentStep
 
-	// Calculate progress but preserve original Total if it was set correctly
-	newProgress := calculateProgress(state)
-	if exec.Progress.Total > newProgress.Total {
-		// Keep original total from workflow.Steps, recalculate percent
-		newProgress.Total = exec.Progress.Total
-		if newProgress.Total > 0 {
-			done := newProgress.Completed + newProgress.Failed + newProgress.Skipped
-			newProgress.Percent = float64(done) / float64(newProgress.Total) * 100
-		}
-	}
-	exec.Progress = newProgress
+	exec.Progress = progressFromState(state, exec.Progress.Total)
 
 	exec.Steps = convertSteps(state)
 
@@ -699,6 +751,18 @@ func updatePipelineFromState(runID string, state *ExecutionState) {
 	if len(state.Errors) > 0 {
 		exec.Error = state.Errors[len(state.Errors)-1].Message
 	}
+}
+
+func progressFromState(state *ExecutionState, preserveTotal int) PipelineProgress {
+	progress := calculateProgress(state)
+	if preserveTotal > progress.Total {
+		progress.Total = preserveTotal
+		if progress.Total > 0 {
+			done := progress.Completed + progress.Failed + progress.Skipped
+			progress.Percent = float64(done) / float64(progress.Total) * 100
+		}
+	}
+	return progress
 }
 
 // UpdatePipelineFromState updates a registered pipeline from execution state (exported for CLI)

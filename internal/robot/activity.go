@@ -4,13 +4,25 @@ package robot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// WatermarkStore is the interface for persisting velocity baselines across restarts.
+type WatermarkStore interface {
+	GetWatermark(watermarkType, scope string) (*state.OutputWatermark, error)
+	SetWatermark(wm *state.OutputWatermark) error
+}
+
+// WatermarkTypeVelocity is the watermark type used for velocity tracker baselines.
+const WatermarkTypeVelocity = "velocity"
 
 // VelocitySample represents a single velocity measurement at a point in time.
 type VelocitySample struct {
@@ -21,6 +33,7 @@ type VelocitySample struct {
 
 // VelocityTracker tracks output velocity for a single pane.
 // It maintains a sliding window of samples for smoothed velocity calculation.
+// When a WatermarkStore is provided, baselines persist across NTM restarts.
 type VelocityTracker struct {
 	PaneID        string           `json:"pane_id"`
 	Samples       []VelocitySample `json:"samples"`     // circular buffer, last N samples
@@ -28,31 +41,118 @@ type VelocityTracker struct {
 	LastCapture   string           `json:"-"`           // previous capture (not serialized)
 	LastCaptureAt time.Time        `json:"last_capture_at"`
 
+	// Persistence (optional)
+	store             WatermarkStore `json:"-"` // optional store for restart-safe baselines
+	baselineHash      string         `json:"-"` // SHA256 of LastCapture for detecting buffer resets
+	baselineRuneCount int            `json:"-"` // rune count of LastCapture at baseline (for restart)
+
 	mu sync.Mutex
+}
+
+// VelocityTrackerOption configures a VelocityTracker.
+type VelocityTrackerOption func(*VelocityTracker)
+
+// WithWatermarkStore configures the tracker to persist baselines to the store.
+// On initialization, it restores LastCaptureAt from the stored watermark.
+// On each update, it persists the new baseline for restart safety.
+func WithWatermarkStore(store WatermarkStore) VelocityTrackerOption {
+	return func(vt *VelocityTracker) {
+		vt.store = store
+	}
 }
 
 // DefaultMaxSamples is the default number of samples to keep in the sliding window.
 const DefaultMaxSamples = 10
 
 // NewVelocityTracker creates a new velocity tracker for a pane.
-func NewVelocityTracker(paneID string) *VelocityTracker {
-	return &VelocityTracker{
+func NewVelocityTracker(paneID string, opts ...VelocityTrackerOption) *VelocityTracker {
+	vt := &VelocityTracker{
 		PaneID:     paneID,
 		Samples:    make([]VelocitySample, 0, DefaultMaxSamples),
 		MaxSamples: DefaultMaxSamples,
 	}
+	for _, opt := range opts {
+		opt(vt)
+	}
+	vt.restoreFromStore()
+	return vt
 }
 
 // NewVelocityTrackerWithSize creates a tracker with a custom buffer size.
-func NewVelocityTrackerWithSize(paneID string, maxSamples int) *VelocityTracker {
+func NewVelocityTrackerWithSize(paneID string, maxSamples int, opts ...VelocityTrackerOption) *VelocityTracker {
 	if maxSamples <= 0 {
 		maxSamples = DefaultMaxSamples
 	}
-	return &VelocityTracker{
+	vt := &VelocityTracker{
 		PaneID:     paneID,
 		Samples:    make([]VelocitySample, 0, maxSamples),
 		MaxSamples: maxSamples,
 	}
+	for _, opt := range opts {
+		opt(vt)
+	}
+	vt.restoreFromStore()
+	return vt
+}
+
+// restoreFromStore loads the baseline from persistent storage if available.
+// Called during construction; gracefully degrades if store unavailable or no prior data.
+func (vt *VelocityTracker) restoreFromStore() {
+	if vt.store == nil {
+		return
+	}
+
+	wm, err := vt.store.GetWatermark(WatermarkTypeVelocity, vt.PaneID)
+	if err != nil || wm == nil {
+		// No prior baseline or store error - start fresh
+		return
+	}
+
+	// Restore the timestamp, hash, and rune count (not the actual content - we can't recover that)
+	if wm.LastTs != nil {
+		vt.LastCaptureAt = *wm.LastTs
+	}
+	vt.baselineHash = wm.BaselineHash
+	// BaselineCursor stores the rune count for restart-safe delta computation
+	if wm.BaselineCursor != nil {
+		vt.baselineRuneCount = int(*wm.BaselineCursor)
+	}
+}
+
+// persistToStore saves the current baseline to persistent storage.
+// Called after each update; best-effort (failures are silently ignored).
+func (vt *VelocityTracker) persistToStore() {
+	if vt.store == nil {
+		return
+	}
+
+	now := time.Now()
+	runeCount := int64(utf8.RuneCountInString(vt.LastCapture))
+	var lastTs *time.Time
+	if !vt.LastCaptureAt.IsZero() {
+		ts := vt.LastCaptureAt
+		lastTs = &ts
+	}
+	wm := &state.OutputWatermark{
+		WatermarkType:  WatermarkTypeVelocity,
+		Scope:          vt.PaneID,
+		LastCursor:     0, // Not used for velocity tracking
+		LastTs:         lastTs,
+		BaselineCursor: &runeCount, // Store rune count for restart-safe delta
+		BaselineHash:   vt.baselineHash,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	// Best-effort persistence - don't block on errors
+	_ = vt.store.SetWatermark(wm)
+}
+
+// computeContentHash returns a truncated SHA256 hash of the content.
+// Used to detect buffer resets/shrinks across restarts.
+func computeContentHash(content string) string {
+	h := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(h[:8]) // 16 hex chars = 64 bits, sufficient for detection
 }
 
 // Update captures the current pane output and calculates velocity.
@@ -75,10 +175,31 @@ func (vt *VelocityTracker) Update() (*VelocitySample, error) {
 
 	// Strip ANSI escape sequences before counting
 	cleanOutput := status.StripANSI(output)
-
-	// Count runes (Unicode characters), not bytes
+	currentHash := computeContentHash(cleanOutput)
 	currentRunes := utf8.RuneCountInString(cleanOutput)
-	previousRunes := utf8.RuneCountInString(vt.LastCapture)
+
+	// Determine previousRunes, accounting for restart and first-sample scenarios
+	var previousRunes int
+	var isBaselineEstablishment bool
+	if vt.LastCapture == "" {
+		// No in-memory LastCapture - either first sample ever or post-restart
+		isBaselineEstablishment = true
+		if vt.baselineHash != "" {
+			// Post-restart: we have persisted baseline
+			if currentHash == vt.baselineHash {
+				// Content unchanged since last persist - use stored rune count
+				previousRunes = vt.baselineRuneCount
+			} else {
+				// Buffer was reset/scrolled - treat as fresh baseline, no delta
+				previousRunes = currentRunes
+			}
+		} else {
+			// Truly first sample (no store or no prior data) - establish baseline, no delta
+			previousRunes = currentRunes
+		}
+	} else {
+		previousRunes = utf8.RuneCountInString(vt.LastCapture)
+	}
 
 	// Calculate chars added
 	// Handle shrinking buffer (scroll, clear) by treating negative delta as 0
@@ -89,7 +210,8 @@ func (vt *VelocityTracker) Update() (*VelocitySample, error) {
 
 	// Calculate velocity (chars/sec)
 	var velocity float64
-	if !vt.LastCaptureAt.IsZero() {
+	if !vt.LastCaptureAt.IsZero() && !isBaselineEstablishment {
+		// Don't compute velocity on first sample or across restart boundary
 		elapsed := now.Sub(vt.LastCaptureAt).Seconds()
 		if elapsed > 0 {
 			velocity = float64(charsAdded) / elapsed
@@ -108,6 +230,11 @@ func (vt *VelocityTracker) Update() (*VelocitySample, error) {
 	// Update last capture state
 	vt.LastCapture = cleanOutput
 	vt.LastCaptureAt = now
+	vt.baselineHash = currentHash
+	vt.baselineRuneCount = currentRunes
+
+	// Persist to store (best-effort)
+	vt.persistToStore()
 
 	return &sample, nil
 }
@@ -122,10 +249,31 @@ func (vt *VelocityTracker) UpdateWithOutput(output string) (*VelocitySample, err
 
 	// Strip ANSI escape sequences before counting
 	cleanOutput := status.StripANSI(output)
-
-	// Count runes (Unicode characters), not bytes
+	currentHash := computeContentHash(cleanOutput)
 	currentRunes := utf8.RuneCountInString(cleanOutput)
-	previousRunes := utf8.RuneCountInString(vt.LastCapture)
+
+	// Determine previousRunes, accounting for restart and first-sample scenarios
+	var previousRunes int
+	var isBaselineEstablishment bool
+	if vt.LastCapture == "" {
+		// No in-memory LastCapture - either first sample ever or post-restart
+		isBaselineEstablishment = true
+		if vt.baselineHash != "" {
+			// Post-restart: we have persisted baseline
+			if currentHash == vt.baselineHash {
+				// Content unchanged since last persist - use stored rune count
+				previousRunes = vt.baselineRuneCount
+			} else {
+				// Buffer was reset/scrolled - treat as fresh baseline, no delta
+				previousRunes = currentRunes
+			}
+		} else {
+			// Truly first sample (no store or no prior data) - establish baseline, no delta
+			previousRunes = currentRunes
+		}
+	} else {
+		previousRunes = utf8.RuneCountInString(vt.LastCapture)
+	}
 
 	// Calculate chars added
 	// Handle shrinking buffer (scroll, clear) by treating negative delta as 0
@@ -136,7 +284,8 @@ func (vt *VelocityTracker) UpdateWithOutput(output string) (*VelocitySample, err
 
 	// Calculate velocity (chars/sec)
 	var velocity float64
-	if !vt.LastCaptureAt.IsZero() {
+	if !vt.LastCaptureAt.IsZero() && !isBaselineEstablishment {
+		// Don't compute velocity on first sample or across restart boundary
 		elapsed := now.Sub(vt.LastCaptureAt).Seconds()
 		if elapsed > 0 {
 			velocity = float64(charsAdded) / elapsed
@@ -155,6 +304,11 @@ func (vt *VelocityTracker) UpdateWithOutput(output string) (*VelocitySample, err
 	// Update last capture state
 	vt.LastCapture = cleanOutput
 	vt.LastCaptureAt = now
+	vt.baselineHash = currentHash
+	vt.baselineRuneCount = currentRunes
+
+	// Persist to store (best-effort)
+	vt.persistToStore()
 
 	return &sample, nil
 }
@@ -294,19 +448,37 @@ func (vt *VelocityTracker) Reset() {
 	vt.Samples = vt.Samples[:0]
 	vt.LastCapture = ""
 	vt.LastCaptureAt = time.Time{}
+	vt.baselineHash = ""
+	vt.baselineRuneCount = 0
+	vt.persistToStore()
 }
 
 // VelocityManager manages velocity trackers for multiple panes.
 type VelocityManager struct {
 	trackers map[string]*VelocityTracker
+	store    WatermarkStore // optional: passed to new trackers
 	mu       sync.RWMutex
 }
 
+// VelocityManagerOption configures a VelocityManager.
+type VelocityManagerOption func(*VelocityManager)
+
+// WithManagerStore configures the manager to pass the store to all new trackers.
+func WithManagerStore(store WatermarkStore) VelocityManagerOption {
+	return func(vm *VelocityManager) {
+		vm.store = store
+	}
+}
+
 // NewVelocityManager creates a new velocity manager.
-func NewVelocityManager() *VelocityManager {
-	return &VelocityManager{
+func NewVelocityManager(opts ...VelocityManagerOption) *VelocityManager {
+	vm := &VelocityManager{
 		trackers: make(map[string]*VelocityTracker),
 	}
+	for _, opt := range opts {
+		opt(vm)
+	}
+	return vm
 }
 
 // GetOrCreate returns the tracker for a pane, creating one if needed.
@@ -318,7 +490,11 @@ func (vm *VelocityManager) GetOrCreate(paneID string) *VelocityTracker {
 		return tracker
 	}
 
-	tracker := NewVelocityTracker(paneID)
+	var opts []VelocityTrackerOption
+	if vm.store != nil {
+		opts = append(opts, WithWatermarkStore(vm.store))
+	}
+	tracker := NewVelocityTracker(paneID, opts...)
 	vm.trackers[paneID] = tracker
 	return tracker
 }
@@ -475,6 +651,7 @@ type ClassifierConfig struct {
 	StallThreshold     time.Duration
 	HysteresisDuration time.Duration
 	PatternLibrary     *PatternLibrary
+	WatermarkStore     WatermarkStore // optional: for restart-safe velocity baselines
 }
 
 // NewStateClassifier creates a new state classifier for a pane.
@@ -498,8 +675,14 @@ func NewStateClassifier(paneID string, cfg *ClassifierConfig) *StateClassifier {
 		hysteresis = DefaultHysteresisDuration
 	}
 
+	// Create velocity tracker with optional store for restart-safe baselines
+	var vtOpts []VelocityTrackerOption
+	if cfg.WatermarkStore != nil {
+		vtOpts = append(vtOpts, WithWatermarkStore(cfg.WatermarkStore))
+	}
+
 	return &StateClassifier{
-		velocityTracker:    NewVelocityTracker(paneID),
+		velocityTracker:    NewVelocityTracker(paneID, vtOpts...),
 		patternLibrary:     patternLib,
 		agentType:          cfg.AgentType,
 		stallThreshold:     stallThreshold,

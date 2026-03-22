@@ -55,6 +55,21 @@ const (
 	ReasonHealthAgentRateLimited  ReasonCode = "health:agent:rate_limited"
 )
 
+// Work reason codes
+const (
+	ReasonWorkReadyTopRecommendation ReasonCode = "work:ready:top_recommendation"
+)
+
+// Coordination reason codes
+const (
+	ReasonCoordinationUrgentMail          ReasonCode = "coordination:mail:urgent_unread"
+	ReasonCoordinationPendingAck          ReasonCode = "coordination:mail:pending_ack"
+	ReasonCoordinationMailBacklog         ReasonCode = "coordination:mail:backlog"
+	ReasonCoordinationReservationConflict ReasonCode = "coordination:reservation:conflict"
+	ReasonCoordinationFileConflict        ReasonCode = "coordination:file:conflict"
+	ReasonCoordinationHandoffBlocked      ReasonCode = "coordination:handoff:blocked"
+)
+
 // Severity levels
 type Severity string
 
@@ -104,7 +119,7 @@ func ReasonToSeverity(code ReasonCode) Severity {
 	case ReasonQuotaCriticalTokens, ReasonQuotaCriticalRequests,
 		ReasonAlertAgentCrashed, ReasonAlertRotationFailed,
 		ReasonAlertCompactionFailed, ReasonHealthSourceUnavailable,
-		ReasonHealthAgentCrashed:
+		ReasonHealthAgentCrashed, ReasonCoordinationUrgentMail:
 		return SeverityError
 	// Warning
 	case ReasonQuotaWarningTokens, ReasonQuotaWarningRequests,
@@ -114,14 +129,16 @@ func ReasonToSeverity(code ReasonCode) Severity {
 		ReasonAlertSystemDiskLow, ReasonAlertSystemCPUHigh,
 		ReasonAlertConflictFile, ReasonHealthSourceDegraded,
 		ReasonHealthSourceStale, ReasonHealthAgentStale,
-		ReasonHealthAgentRateLimited:
+		ReasonHealthAgentRateLimited, ReasonCoordinationPendingAck,
+		ReasonCoordinationMailBacklog, ReasonCoordinationReservationConflict,
+		ReasonCoordinationFileConflict, ReasonCoordinationHandoffBlocked:
 		return SeverityWarning
 	// Info
 	case ReasonQuotaOK, ReasonAlertBeadStale, ReasonAlertMailBacklog,
 		ReasonAlertRotationStarted, ReasonAlertRotationComplete,
 		ReasonAlertCompactionTriggered, ReasonAlertCompactionComplete,
 		ReasonHealthOK, ReasonHealthAgentOK, ReasonHealthAgentIdle,
-		ReasonHealthAgentBusy:
+		ReasonHealthAgentBusy, ReasonWorkReadyTopRecommendation:
 		return SeverityInfo
 	default:
 		return SeverityInfo

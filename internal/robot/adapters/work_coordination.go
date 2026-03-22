@@ -12,7 +12,6 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
-	"github.com/Dicklesworthstone/ntm/internal/coordinator"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
@@ -154,6 +153,23 @@ type CoordinationProblem struct {
 	ThreadIDs []string `json:"thread_ids,omitempty"`
 }
 
+// ReservationConflict is the adapter-local shape for overlapping file reservations.
+type ReservationConflict struct {
+	ID         string              `json:"id"`
+	FilePath   string              `json:"file_path,omitempty"`
+	Pattern    string              `json:"pattern,omitempty"`
+	Holders    []ReservationHolder `json:"holders,omitempty"`
+	DetectedAt time.Time           `json:"detected_at"`
+}
+
+// ReservationHolder is the adapter-local shape for a conflicting reservation owner.
+type ReservationHolder struct {
+	AgentName  string    `json:"agent_name"`
+	ReservedAt time.Time `json:"reserved_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Reason     string    `json:"reason,omitempty"`
+}
+
 // WorkInputs supplies raw beads/bv data to NormalizeWork.
 type WorkInputs struct {
 	Summary    *bv.BeadsSummary
@@ -167,7 +183,7 @@ type WorkInputs struct {
 type CoordinationInputs struct {
 	InboxByAgent              map[string][]agentmail.InboxMessage
 	Reservations              []agentmail.FileReservation
-	ReservationConflicts      []coordinator.Conflict
+	ReservationConflicts      []ReservationConflict
 	FileConflicts             []tracker.Conflict
 	Handoff                   *handoff.Handoff
 	ThreadStaleAfter          time.Duration
@@ -308,34 +324,28 @@ func (a *WorkCoordinationAdapter) collectCoordination(ctx context.Context, now t
 	agents, err := client.ListProjectAgents(ctx, a.config.ProjectDir)
 	if err != nil {
 		inputs.Reason = fmt.Sprintf("list_agents failed: %v", err)
-		return NormalizeCoordination(inputs)
-	}
-
-	inputs.InboxByAgent = make(map[string][]agentmail.InboxMessage)
-	for _, agent := range agents {
-		if agent.Name == "HumanOverseer" {
-			continue
+	} else {
+		inputs.InboxByAgent = make(map[string][]agentmail.InboxMessage)
+		for _, agent := range agents {
+			if agent.Name == "HumanOverseer" {
+				continue
+			}
+			inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+				ProjectKey:    a.config.ProjectDir,
+				AgentName:     agent.Name,
+				Limit:         25,
+				IncludeBodies: false,
+			})
+			if err != nil {
+				continue
+			}
+			inputs.InboxByAgent[agent.Name] = inbox
 		}
-		inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
-			ProjectKey:    a.config.ProjectDir,
-			AgentName:     agent.Name,
-			Limit:         25,
-			IncludeBodies: false,
-		})
-		if err != nil {
-			continue
-		}
-		inputs.InboxByAgent[agent.Name] = inbox
 	}
 
 	if reservations, err := client.ListReservations(ctx, a.config.ProjectDir, "", true); err == nil {
 		inputs.Reservations = reservations
-	}
-
-	if detector := coordinator.NewConflictDetector(client, a.config.ProjectDir); detector != nil {
-		if conflicts, err := detector.DetectConflicts(ctx); err == nil {
-			inputs.ReservationConflicts = conflicts
-		}
+		inputs.ReservationConflicts = deriveReservationConflicts(reservations, now)
 	}
 
 	return NormalizeCoordination(inputs)
@@ -572,7 +582,7 @@ func summarizeMail(inboxByAgent map[string][]agentmail.InboxMessage, now time.Ti
 	return mail, threads
 }
 
-func summarizeReservations(reservations []agentmail.FileReservation, conflicts []coordinator.Conflict, now time.Time, expiringWithin time.Duration) *ReservationsSummary {
+func summarizeReservations(reservations []agentmail.FileReservation, conflicts []ReservationConflict, now time.Time, expiringWithin time.Duration) *ReservationsSummary {
 	summary := &ReservationsSummary{
 		ByAgent: make(map[string]int),
 	}
@@ -611,7 +621,7 @@ func summarizeHandoff(h *handoff.Handoff) *HandoffSummary {
 	}
 }
 
-func collectCoordinationProblems(mail *MailSummary, threads *ThreadsSummary, reservations *ReservationsSummary, reservationConflicts []coordinator.Conflict, fileConflicts []tracker.Conflict, handoff *HandoffSummary, mailBacklogThreshold int) []CoordinationProblem {
+func collectCoordinationProblems(mail *MailSummary, threads *ThreadsSummary, reservations *ReservationsSummary, reservationConflicts []ReservationConflict, fileConflicts []tracker.Conflict, handoff *HandoffSummary, mailBacklogThreshold int) []CoordinationProblem {
 	var problems []CoordinationProblem
 
 	if mail != nil {
@@ -757,10 +767,10 @@ func graphMetricsForWork(triage *bv.TriageResponse) *WorkGraph {
 	}
 }
 
-func deriveReservationConflicts(reservations []agentmail.FileReservation, now time.Time) []coordinator.Conflict {
+func deriveReservationConflicts(reservations []agentmail.FileReservation, now time.Time) []ReservationConflict {
 	type aggregate struct {
 		pattern string
-		holders map[string]coordinator.Holder
+		holders map[string]ReservationHolder
 	}
 
 	groups := make(map[string]*aggregate)
@@ -789,17 +799,17 @@ func deriveReservationConflicts(reservations []agentmail.FileReservation, now ti
 			if group == nil {
 				group = &aggregate{
 					pattern: pattern,
-					holders: make(map[string]coordinator.Holder),
+					holders: make(map[string]ReservationHolder),
 				}
 				groups[pattern] = group
 			}
-			group.holders[left.AgentName] = coordinator.Holder{
+			group.holders[left.AgentName] = ReservationHolder{
 				AgentName:  left.AgentName,
 				ReservedAt: left.CreatedTS.Time,
 				ExpiresAt:  left.ExpiresTS.Time,
 				Reason:     left.Reason,
 			}
-			group.holders[right.AgentName] = coordinator.Holder{
+			group.holders[right.AgentName] = ReservationHolder{
 				AgentName:  right.AgentName,
 				ReservedAt: right.CreatedTS.Time,
 				ExpiresAt:  right.ExpiresTS.Time,
@@ -808,9 +818,9 @@ func deriveReservationConflicts(reservations []agentmail.FileReservation, now ti
 		}
 	}
 
-	conflicts := make([]coordinator.Conflict, 0, len(groups))
+	conflicts := make([]ReservationConflict, 0, len(groups))
 	for _, group := range groups {
-		conflict := coordinator.Conflict{
+		conflict := ReservationConflict{
 			ID:         group.pattern,
 			Pattern:    group.pattern,
 			DetectedAt: now,
@@ -919,7 +929,7 @@ func coordinationProblemRank(severity string) int {
 	}
 }
 
-func holderNames(holders []coordinator.Holder) []string {
+func holderNames(holders []ReservationHolder) []string {
 	names := make([]string, 0, len(holders))
 	for _, holder := range holders {
 		if strings.TrimSpace(holder.AgentName) == "" {
