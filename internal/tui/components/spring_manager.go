@@ -21,6 +21,7 @@ type AnimatedFloat struct {
 	Spring                  harmonica.Spring
 	DeadZone                float64
 	animating               bool
+	stiffness, damping      float64 // creation params, used to avoid unnecessary recreation
 }
 
 // SpringManager tracks keyed animated values for Bubble Tea components.
@@ -155,8 +156,11 @@ func (sm *SpringManager) IsSettled(id string) bool {
 
 func (sm *SpringManager) ensure(id string, stiffness, damping float64) *AnimatedFloat {
 	if spring, ok := sm.springs[id]; ok && spring != nil {
-		if stiffness > 0 && damping > 0 {
+		// Only recreate the spring physics if params actually changed
+		if stiffness > 0 && damping > 0 && (stiffness != spring.stiffness || damping != spring.damping) {
 			spring.Spring = harmonica.NewSpring(harmonica.FPS(60), stiffness, damping)
+			spring.stiffness = stiffness
+			spring.damping = damping
 		}
 		return spring
 	}
@@ -169,7 +173,9 @@ func (sm *SpringManager) ensure(id string, stiffness, damping float64) *Animated
 	}
 
 	spring := &AnimatedFloat{
-		Spring: harmonica.NewSpring(harmonica.FPS(60), stiffness, damping),
+		Spring:    harmonica.NewSpring(harmonica.FPS(60), stiffness, damping),
+		stiffness: stiffness,
+		damping:   damping,
 	}
 	sm.springs[id] = spring
 	return spring

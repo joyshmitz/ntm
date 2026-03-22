@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
-	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -358,6 +357,7 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup
 	}
 	res.ExplainIfInferred(errW)
 	session = res.Session
+	sessionExplicit := strings.TrimSpace(session) != "" && !res.Inferred
 
 	// Auto-popup: if we're inside tmux AND inside the same session we're
 	// monitoring, launch as an overlay popup instead of consuming a pane.
@@ -382,13 +382,7 @@ func runDashboard(w io.Writer, errW io.Writer, session string, debug bool, popup
 		initialPanes = nil
 	}
 
-	projectDir := ""
-	if cfg != nil {
-		projectDir = cfg.GetProjectDir(session)
-	} else {
-		// Fallback to default if config not loaded
-		projectDir = config.Default().GetProjectDir(session)
-	}
+	projectDir := resolveProjectDirForSession(session, sessionExplicit)
 
 	// Validate project directory exists, warn if not
 	if _, err := os.Stat(projectDir); os.IsNotExist(err) {

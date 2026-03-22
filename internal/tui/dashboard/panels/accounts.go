@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -105,15 +104,11 @@ func (a *AccountsPanel) HasError() bool {
 	return a.data.Error != nil
 }
 
-// Keybindings returns accounts panel specific shortcuts
+// Keybindings returns accounts panel specific shortcuts.
+// Note: "r" refresh is handled by the dashboard's periodic refresh cycle,
+// not by this panel's Update() directly.
 func (a *AccountsPanel) Keybindings() []Keybinding {
-	return []Keybinding{
-		{
-			Key:         key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-			Description: "Refresh account data",
-			Action:      "refresh",
-		},
-	}
+	return nil
 }
 
 // View renders the panel

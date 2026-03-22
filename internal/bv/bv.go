@@ -70,20 +70,16 @@ func run(dir string, args ...string) (string, error) {
 		return "", ErrNotInstalled
 	}
 
-	// Resolve empty dir to current working directory
-	var err error
-	if dir == "" {
-		dir, err = os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("failed to get working directory: %w", err)
-		}
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return "", err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bv", args...)
-	cmd.Dir = dir
+	cmd.Dir = normalizedDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -175,17 +171,14 @@ func CheckDrift(dir string) DriftResult {
 		}
 	}
 
-	// Resolve empty dir to current working directory
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			return DriftResult{
-				Status:  DriftNoBaseline,
-				Message: fmt.Sprintf("failed to get working directory: %v", err),
-			}
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return DriftResult{
+			Status:  DriftNoBaseline,
+			Message: err.Error(),
 		}
 	}
+	dir = normalizedDir
 
 	// Validate directory exists
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -213,7 +206,7 @@ func CheckDrift(dir string) DriftResult {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	// Parse exit code
 	if err == nil {

@@ -57,9 +57,9 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // Implements help.KeyMap interface.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Up, k.Down, k.Left, k.Right, k.Zoom},                                  // Navigation
-		{k.Tab, k.ShiftTab, k.NextPanel, k.ViewToggle, k.Send},                   // Panels & Actions
-		{k.Refresh, k.ContextRefresh, k.MailRefresh, k.CassSearch},               // Data
+		{k.Up, k.Down, k.Left, k.Right, k.Zoom},                                                 // Navigation
+		{k.Tab, k.ShiftTab, k.NextPanel, k.ViewToggle, k.Send},                                  // Panels & Actions
+		{k.Refresh, k.ContextRefresh, k.MailRefresh, k.CassSearch},                              // Data
 		{k.Help, k.Quit, k.Pause, k.Diagnostics, k.ToastDismiss, k.ToastHistory, k.SpawnWizard}, // Control
 	}
 }

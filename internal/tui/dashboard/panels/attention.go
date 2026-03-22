@@ -236,7 +236,7 @@ func (m *AttentionPanel) View() string {
 	t := theme.Current()
 	w, h := m.Width(), m.Height()
 
-	if w <= 0 {
+	if w <= 0 || h <= 0 {
 		return ""
 	}
 

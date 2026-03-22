@@ -122,59 +122,29 @@ func NewTimelinePersister(config *TimelinePersistConfig) (*TimelinePersister, er
 // SaveTimeline persists timeline events for a session to disk.
 // The events are stored in JSONL format (one JSON object per line).
 func (p *TimelinePersister) SaveTimeline(sessionID string, events []AgentEvent) error {
-	if sessionID == "" {
-		return errors.New("session ID cannot be empty")
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	path := p.getTimelinePath(sessionID, false)
+	path := p.getTimelinePath(normalizedSessionID, false)
 
 	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create timeline file: %w", err)
-	}
-	defer file.Close()
-
-	// Write header
-	header := TimelineHeader{
-		Version:    "1.0",
-		SessionID:  sessionID,
-		CreatedAt:  time.Now(),
-		AgentCount: countUniqueAgents(events),
-		EventCount: len(events),
-	}
-	if len(events) > 0 {
-		first := events[0].Timestamp
-		last := events[0].Timestamp
-		for _, ev := range events[1:] {
-			if ev.Timestamp.Before(first) {
-				first = ev.Timestamp
-			}
-			if ev.Timestamp.After(last) {
-				last = ev.Timestamp
-			}
-		}
-		header.FirstEvent = first
-		header.LastEvent = last
+	if err := p.writeTimelineFileLocked(path, normalizedSessionID, events); err != nil {
+		return err
 	}
 
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(header); err != nil {
-		return fmt.Errorf("failed to write header: %w", err)
-	}
-
-	// Write events
-	for _, event := range events {
-		if err := encoder.Encode(event); err != nil {
-			return fmt.Errorf("failed to write event: %w", err)
-		}
+	// A fresh save supersedes any older compressed snapshot for the same session.
+	compressedPath := p.getTimelinePath(normalizedSessionID, true)
+	if err := os.Remove(compressedPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("timeline checkpoint: failed to remove stale compressed sibling", "session", normalizedSessionID, "path", compressedPath, "error", err)
 	}
 
 	return nil
@@ -182,18 +152,19 @@ func (p *TimelinePersister) SaveTimeline(sessionID string, events []AgentEvent) 
 
 // LoadTimeline reads timeline events for a session from disk.
 func (p *TimelinePersister) LoadTimeline(sessionID string) ([]AgentEvent, error) {
-	if sessionID == "" {
-		return nil, errors.New("session ID cannot be empty")
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return nil, err
 	}
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	// Try uncompressed first, then compressed
-	path := p.getTimelinePath(sessionID, false)
+	path := p.getTimelinePath(normalizedSessionID, false)
 	compressed := false
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		path = p.getTimelinePath(sessionID, true)
+		path = p.getTimelinePath(normalizedSessionID, true)
 		compressed = true
 	}
 
@@ -266,7 +237,7 @@ func (p *TimelinePersister) ListTimelines() ([]TimelineInfo, error) {
 		return nil, fmt.Errorf("failed to read timelines directory: %w", err)
 	}
 
-	timelines := make([]TimelineInfo, 0, len(entries))
+	bySessionID := make(map[string]TimelineInfo, len(entries))
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -307,6 +278,14 @@ func (p *TimelinePersister) ListTimelines() ([]TimelineInfo, error) {
 			ti.AgentCount = header.AgentCount
 		}
 
+		existing, exists := bySessionID[sessionID]
+		if !exists || timelineInfoShouldReplace(existing, ti) {
+			bySessionID[sessionID] = ti
+		}
+	}
+
+	timelines := make([]TimelineInfo, 0, len(bySessionID))
+	for _, ti := range bySessionID {
 		timelines = append(timelines, ti)
 	}
 
@@ -320,16 +299,17 @@ func (p *TimelinePersister) ListTimelines() ([]TimelineInfo, error) {
 
 // DeleteTimeline removes a persisted timeline.
 func (p *TimelinePersister) DeleteTimeline(sessionID string) error {
-	if sessionID == "" {
-		return errors.New("session ID cannot be empty")
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// Try to delete both compressed and uncompressed versions
-	pathUncompressed := p.getTimelinePath(sessionID, false)
-	pathCompressed := p.getTimelinePath(sessionID, true)
+	pathUncompressed := p.getTimelinePath(normalizedSessionID, false)
+	pathCompressed := p.getTimelinePath(normalizedSessionID, true)
 
 	var lastErr error
 	if err := os.Remove(pathUncompressed); err != nil && !os.IsNotExist(err) {
@@ -400,38 +380,39 @@ func (p *TimelinePersister) CompressOldTimelines() (int, error) {
 
 // StartCheckpoint starts periodic checkpointing for a session.
 func (p *TimelinePersister) StartCheckpoint(sessionID string, tracker *TimelineTracker) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if strings.TrimSpace(sessionID) == "" || tracker == nil {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil || tracker == nil {
 		return
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	// Stop existing checkpoint if any
-	if stop, exists := p.checkpointStop[sessionID]; exists {
+	if stop, exists := p.checkpointStop[normalizedSessionID]; exists {
 		close(stop)
-		delete(p.checkpointStop, sessionID)
+		delete(p.checkpointStop, normalizedSessionID)
 	}
-	if ticker, exists := p.activeCheckpoints[sessionID]; exists {
+	if ticker, exists := p.activeCheckpoints[normalizedSessionID]; exists {
 		ticker.Stop()
-		delete(p.activeCheckpoints, sessionID)
+		delete(p.activeCheckpoints, normalizedSessionID)
 	}
 
 	ticker := time.NewTicker(p.config.CheckpointInterval)
 	stop := make(chan struct{})
 
-	p.activeCheckpoints[sessionID] = ticker
-	p.checkpointStop[sessionID] = stop
+	p.activeCheckpoints[normalizedSessionID] = ticker
+	p.checkpointStop[normalizedSessionID] = stop
 
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				events := tracker.GetEventsForSession(sessionID, time.Time{})
+				events := tracker.GetEventsForSession(normalizedSessionID, time.Time{})
 				if len(events) > 0 {
-					if err := p.SaveTimeline(sessionID, events); err != nil {
-						slog.Warn("timeline checkpoint: save failed", "session", sessionID, "error", err)
+					if err := p.SaveTimeline(normalizedSessionID, events); err != nil {
+						slog.Warn("timeline checkpoint: save failed", "session", normalizedSessionID, "error", err)
 					}
 				}
 			case <-stop:
@@ -443,44 +424,59 @@ func (p *TimelinePersister) StartCheckpoint(sessionID string, tracker *TimelineT
 
 // StopCheckpoint stops periodic checkpointing for a session.
 func (p *TimelinePersister) StopCheckpoint(sessionID string) {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if stop, exists := p.checkpointStop[sessionID]; exists {
+	if stop, exists := p.checkpointStop[normalizedSessionID]; exists {
 		close(stop)
-		delete(p.checkpointStop, sessionID)
+		delete(p.checkpointStop, normalizedSessionID)
 	}
-	if ticker, exists := p.activeCheckpoints[sessionID]; exists {
+	if ticker, exists := p.activeCheckpoints[normalizedSessionID]; exists {
 		ticker.Stop()
-		delete(p.activeCheckpoints, sessionID)
+		delete(p.activeCheckpoints, normalizedSessionID)
 	}
 }
 
 // FinalizeSession saves the final state of a session's timeline and stops checkpointing.
 func (p *TimelinePersister) FinalizeSession(sessionID string, tracker *TimelineTracker) error {
-	p.StopCheckpoint(sessionID)
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return err
+	}
+
+	p.StopCheckpoint(normalizedSessionID)
 
 	if tracker == nil {
 		return nil
 	}
 
-	events := tracker.GetEventsForSession(sessionID, time.Time{})
+	events := tracker.GetEventsForSession(normalizedSessionID, time.Time{})
 	if len(events) == 0 {
 		return nil
 	}
 
-	return p.SaveTimeline(sessionID, events)
+	return p.SaveTimeline(normalizedSessionID, events)
 }
 
 // GetTimelineInfo returns information about a specific timeline.
 func (p *TimelinePersister) GetTimelineInfo(sessionID string) (*TimelineInfo, error) {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
 	timelines, err := p.ListTimelines()
 	if err != nil {
 		return nil, err
 	}
 
 	for _, ti := range timelines {
-		if ti.SessionID == sessionID {
+		if ti.SessionID == normalizedSessionID {
 			return &ti, nil
 		}
 	}
@@ -512,6 +508,105 @@ func (p *TimelinePersister) getTimelinePath(sessionID string, compressed bool) s
 		filename += ".gz"
 	}
 	return filepath.Join(p.config.BaseDir, filename)
+}
+
+func (p *TimelinePersister) writeTimelineFileLocked(path, sessionID string, events []AgentEvent) error {
+	tempFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp timeline file: %w", err)
+	}
+
+	tempPath := tempFile.Name()
+	defer func() {
+		if tempFile != nil {
+			_ = tempFile.Close()
+		}
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	header := buildTimelineHeader(sessionID, events)
+	encoder := json.NewEncoder(tempFile)
+	if err := encoder.Encode(header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	for _, event := range events {
+		if err := encoder.Encode(event); err != nil {
+			return fmt.Errorf("failed to write event: %w", err)
+		}
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync timeline file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp timeline file: %w", err)
+	}
+	tempFile = nil
+
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("failed to replace timeline file: %w", err)
+	}
+	tempPath = ""
+
+	return nil
+}
+
+func buildTimelineHeader(sessionID string, events []AgentEvent) TimelineHeader {
+	header := TimelineHeader{
+		Version:    "1.0",
+		SessionID:  sessionID,
+		CreatedAt:  time.Now(),
+		AgentCount: countUniqueAgents(events),
+		EventCount: len(events),
+	}
+	if len(events) == 0 {
+		return header
+	}
+
+	first := events[0].Timestamp
+	last := events[0].Timestamp
+	for _, ev := range events[1:] {
+		if ev.Timestamp.Before(first) {
+			first = ev.Timestamp
+		}
+		if ev.Timestamp.After(last) {
+			last = ev.Timestamp
+		}
+	}
+	header.FirstEvent = first
+	header.LastEvent = last
+
+	return header
+}
+
+func validateTimelineSessionID(sessionID string) (string, error) {
+	normalized := strings.TrimSpace(sessionID)
+	if normalized == "" {
+		return "", errors.New("session ID cannot be empty")
+	}
+	if normalized == "." || normalized == ".." {
+		return "", errors.New("session ID cannot be '.' or '..'")
+	}
+	if strings.ContainsAny(normalized, `/\`) {
+		return "", errors.New("session ID cannot contain path separators")
+	}
+	return normalized, nil
+}
+
+func timelineInfoShouldReplace(existing, candidate TimelineInfo) bool {
+	if !candidate.Compressed && existing.Compressed {
+		return true
+	}
+	if candidate.Compressed && !existing.Compressed {
+		return false
+	}
+	if candidate.ModifiedAt.After(existing.ModifiedAt) {
+		return true
+	}
+	return false
 }
 
 func (p *TimelinePersister) readHeader(path string, compressed bool) (*TimelineHeader, error) {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // TriageCacheTTL is the default cache TTL for triage results
@@ -24,13 +26,18 @@ var (
 
 func normalizeTriageDir(dir string) (string, error) {
 	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("getting working directory: %w", err)
+		dir = util.ResolveProjectDir("")
+		if dir == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("getting working directory: %w", err)
+			}
+			dir = cwd
 		}
-		dir = cwd
 	}
-	absDir, err := filepath.Abs(dir)
+
+	resolvedDir := util.ResolveProjectDir(dir)
+	absDir, err := filepath.Abs(resolvedDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving triage directory: %w", err)
 	}

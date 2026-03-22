@@ -76,6 +76,10 @@ func Save(state *SessionState, opts SaveOptions) (path string, err error) {
 		_ = audit.LogEvent(sessionName, audit.EventTypeCommand, audit.ActorSystem, "session.save", payload, nil)
 	}()
 
+	if state == nil {
+		return "", fmt.Errorf("session state cannot be nil")
+	}
+
 	unlock, err := acquireLock()
 	if err != nil {
 		return "", err
@@ -96,7 +100,10 @@ func Save(state *SessionState, opts SaveOptions) (path string, err error) {
 	}
 
 	// Sanitize filename
-	name = sanitizeFilename(name)
+	name, err = normalizeSavedSessionName(name)
+	if err != nil {
+		return "", err
+	}
 	filename := name + fileExtension
 	path = filepath.Join(dir, filename)
 
@@ -153,7 +160,10 @@ func Load(name string) (state *SessionState, err error) {
 		_ = audit.LogEvent(name, audit.EventTypeCommand, audit.ActorSystem, "session.load", payload, nil)
 	}()
 
-	name = sanitizeFilename(name)
+	name, err = normalizeSavedSessionName(name)
+	if err != nil {
+		return nil, err
+	}
 	path := filepath.Join(StorageDir(), name+fileExtension)
 
 	data, err := os.ReadFile(path)
@@ -206,7 +216,10 @@ func Delete(name string) (err error) {
 	}
 	defer unlock()
 
-	name = sanitizeFilename(name)
+	name, err = normalizeSavedSessionName(name)
+	if err != nil {
+		return err
+	}
 	path := filepath.Join(StorageDir(), name+fileExtension)
 
 	err = os.Remove(path)
@@ -289,9 +302,12 @@ func List() ([]SavedSession, error) {
 
 // Exists checks if a saved session exists.
 func Exists(name string) bool {
-	name = sanitizeFilename(name)
+	name, err := normalizeSavedSessionName(name)
+	if err != nil {
+		return false
+	}
 	path := filepath.Join(StorageDir(), name+fileExtension)
-	_, err := os.Stat(path)
+	_, err = os.Stat(path)
 	return err == nil
 }
 
@@ -310,4 +326,15 @@ func sanitizeFilename(name string) string {
 		"|", "_",
 	)
 	return replacer.Replace(name)
+}
+
+func normalizeSavedSessionName(name string) (string, error) {
+	sanitized := strings.TrimSpace(sanitizeFilename(name))
+	if sanitized == "" {
+		return "", fmt.Errorf("session name cannot be empty")
+	}
+	if sanitized == "." || sanitized == ".." {
+		return "", fmt.Errorf("session name cannot be '.' or '..'")
+	}
+	return sanitized, nil
 }

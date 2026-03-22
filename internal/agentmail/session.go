@@ -107,20 +107,59 @@ func sessionAgentPath(sessionName, projectKey string) string {
 	return filepath.Join(base, "agent.json")
 }
 
-// LoadSessionAgent loads the agent info for a session, if it exists.
-func LoadSessionAgent(sessionName, projectKey string) (*SessionAgentInfo, error) {
+func sessionArtifactPaths(sessionName, projectKey, fileName string, includeSubdirs bool) ([]string, error) {
 	if err := validateSessionStorageName(sessionName); err != nil {
 		return nil, err
 	}
 
 	base := filepath.Join(getSessionsBaseDir(), sessionName)
-	paths := []string{}
+	var paths []string
+	seen := make(map[string]struct{})
+	addPath := func(path string) {
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+
 	if projectKey != "" {
 		for _, slug := range projectSlugCandidates(projectKey) {
-			paths = append(paths, filepath.Join(base, slug, "agent.json"))
+			addPath(filepath.Join(base, slug, fileName))
 		}
 	}
-	paths = append(paths, filepath.Join(base, "agent.json"))
+	addPath(filepath.Join(base, fileName))
+	if !includeSubdirs {
+		return paths, nil
+	}
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return paths, nil
+		}
+		return nil, fmt.Errorf("reading session directory: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		addPath(filepath.Join(base, entry.Name(), fileName))
+	}
+
+	return paths, nil
+}
+
+// LoadSessionAgent loads the agent info for a session, if it exists.
+func LoadSessionAgent(sessionName, projectKey string) (*SessionAgentInfo, error) {
+	paths, err := sessionArtifactPaths(sessionName, projectKey, "agent.json", projectKey != "")
+	if err != nil {
+		return nil, err
+	}
 
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -139,6 +178,67 @@ func LoadSessionAgent(sessionName, projectKey string) (*SessionAgentInfo, error)
 		}
 	}
 	return nil, nil
+}
+
+// LoadBestSessionAgent loads the strongest available session agent artifact for
+// a session, preferring any provided project keys but falling back to the best
+// locally stored candidate when the first lookup misses.
+func LoadBestSessionAgent(sessionName string, projectKeys ...string) (*SessionAgentInfo, error) {
+	if err := validateSessionStorageName(sessionName); err != nil {
+		return nil, err
+	}
+
+	for _, projectKey := range projectKeys {
+		projectKey = strings.TrimSpace(projectKey)
+		if projectKey == "" {
+			continue
+		}
+		info, err := LoadSessionAgent(sessionName, projectKey)
+		if err != nil || info != nil {
+			return info, err
+		}
+	}
+
+	paths, err := sessionArtifactPaths(sessionName, "", "agent.json", true)
+	if err != nil {
+		return nil, err
+	}
+
+	var best *SessionAgentInfo
+	bestScore := -1
+	var firstErr error
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) && firstErr == nil {
+				firstErr = fmt.Errorf("reading session agent: %w", err)
+			}
+			continue
+		}
+
+		var info SessionAgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parsing session agent: %w", err)
+			}
+			continue
+		}
+
+		score := util.ProjectDirScore(info.ProjectKey)
+		if best == nil || score > bestScore ||
+			(score == bestScore && info.LastActiveAt.After(best.LastActiveAt)) ||
+			(score == bestScore && info.LastActiveAt.Equal(best.LastActiveAt) && info.RegisteredAt.After(best.RegisteredAt)) {
+			copyInfo := info
+			best = &copyInfo
+			bestScore = score
+		}
+	}
+
+	if best != nil {
+		return best, nil
+	}
+
+	return nil, firstErr
 }
 
 // SaveSessionAgent saves the agent info for a session.
@@ -337,18 +437,10 @@ func registryPath(sessionName, projectKey string) string {
 // LoadSessionAgentRegistry loads the agent registry for a session, if it exists.
 // Returns nil without error if no registry exists.
 func LoadSessionAgentRegistry(sessionName, projectKey string) (*SessionAgentRegistry, error) {
-	if err := validateSessionStorageName(sessionName); err != nil {
+	paths, err := sessionArtifactPaths(sessionName, projectKey, "agent_registry.json", projectKey != "")
+	if err != nil {
 		return nil, err
 	}
-
-	base := filepath.Join(getSessionsBaseDir(), sessionName)
-	paths := []string{}
-	if projectKey != "" {
-		for _, slug := range projectSlugCandidates(projectKey) {
-			paths = append(paths, filepath.Join(base, slug, "agent_registry.json"))
-		}
-	}
-	paths = append(paths, filepath.Join(base, "agent_registry.json"))
 
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -367,6 +459,67 @@ func LoadSessionAgentRegistry(sessionName, projectKey string) (*SessionAgentRegi
 		}
 	}
 	return nil, nil
+}
+
+// LoadBestSessionAgentRegistry loads the strongest available registry for a
+// session, preferring any provided project keys but falling back to the best
+// locally stored candidate when the first lookup misses.
+func LoadBestSessionAgentRegistry(sessionName string, projectKeys ...string) (*SessionAgentRegistry, error) {
+	if err := validateSessionStorageName(sessionName); err != nil {
+		return nil, err
+	}
+
+	for _, projectKey := range projectKeys {
+		projectKey = strings.TrimSpace(projectKey)
+		if projectKey == "" {
+			continue
+		}
+		registry, err := LoadSessionAgentRegistry(sessionName, projectKey)
+		if err != nil || registry != nil {
+			return registry, err
+		}
+	}
+
+	paths, err := sessionArtifactPaths(sessionName, "", "agent_registry.json", true)
+	if err != nil {
+		return nil, err
+	}
+
+	var best *SessionAgentRegistry
+	bestScore := -1
+	var firstErr error
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if !os.IsNotExist(err) && firstErr == nil {
+				firstErr = fmt.Errorf("reading agent registry: %w", err)
+			}
+			continue
+		}
+
+		var registry SessionAgentRegistry
+		if err := json.Unmarshal(data, &registry); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parsing agent registry: %w", err)
+			}
+			continue
+		}
+
+		score := util.ProjectDirScore(registry.ProjectKey)
+		if best == nil || score > bestScore ||
+			(score == bestScore && registry.UpdatedAt.After(best.UpdatedAt)) ||
+			(score == bestScore && registry.UpdatedAt.Equal(best.UpdatedAt) && registry.RegisteredAt.After(best.RegisteredAt)) {
+			copyRegistry := registry
+			best = &copyRegistry
+			bestScore = score
+		}
+	}
+
+	if best != nil {
+		return best, nil
+	}
+
+	return nil, firstErr
 }
 
 // SaveSessionAgentRegistry saves the agent registry for a session.

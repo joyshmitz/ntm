@@ -210,7 +210,7 @@ func (p *EnsemblePanel) View() string {
 		Render(layout.TruncateWidthDefault(fmt.Sprintf("Preset: %s  Started: %s", preset, started), w-4))
 	separator := lipgloss.NewStyle().
 		Foreground(borderColor).
-		Render(strings.Repeat("─", maxInt(0, w)))
+		Render(strings.Repeat("─", max(0, w)))
 
 	content.WriteString(questionLine + "\n")
 	content.WriteString(metaLine + "\n")
@@ -295,7 +295,7 @@ func (p *EnsemblePanel) renderAssignmentLine(a ensemble.ModeAssignment, width in
 		tierBadge = renderTierBadge(mode.Tier, t)
 	}
 
-	progress := renderProgressBar(assignmentProgress(a.Status), maxInt(6, minInt(16, width/6)))
+	progress := renderProgressBar(assignmentProgress(a.Status), max(6, min(16, width/6)))
 	statusText := string(a.Status)
 
 	line := fmt.Sprintf("%s %-6s %-8s %-18s %s %s %s",
@@ -467,16 +467,4 @@ func (p *EnsemblePanel) formatTimeAgo(t time.Time) string {
 	}
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+// minInt/maxInt removed — use Go 1.25 builtins min()/max()

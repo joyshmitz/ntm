@@ -49,29 +49,43 @@ func reserveSharedBeadsProjectDir(t *testing.T) string {
 }
 
 func copyBeadsFixtureTree(srcRoot, dstRoot string) error {
-	return filepath.Walk(srcRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(srcRoot)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if shouldSkipBeadsFixturePath(path, info) {
-			if info.IsDir() {
-				return filepath.SkipDir
+
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
 			}
-			return nil
-		}
-
-		relPath, err := filepath.Rel(srcRoot, path)
-		if err != nil {
 			return err
 		}
-		targetPath := filepath.Join(dstRoot, relPath)
 
-		if info.IsDir() {
-			return os.MkdirAll(targetPath, info.Mode())
+		path := filepath.Join(srcRoot, entry.Name())
+		if shouldSkipBeadsFixturePath(path, info) {
+			continue
 		}
 
-		return copyBeadsFixtureFile(path, targetPath, info.Mode())
-	})
+		targetPath := filepath.Join(dstRoot, entry.Name())
+		if err := copyBeadsFixtureFile(path, targetPath, info.Mode()); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+	}
+
+	return nil
 }
 
 func shouldSkipBeadsFixturePath(path string, info os.FileInfo) bool {
@@ -79,10 +93,21 @@ func shouldSkipBeadsFixturePath(path string, info os.FileInfo) bool {
 		return false
 	}
 	switch filepath.Base(path) {
-	case ".sync.lock", ".bv.lock":
-		return true
-	default:
+	case ".gitignore",
+		".local_version",
+		".migration-hint-ts",
+		"README.md",
+		"beads.db",
+		"beads.db-shm",
+		"beads.db-wal",
+		"config.yaml",
+		"issues.jsonl",
+		"last-touched",
+		"metadata.json",
+		"sync_base.jsonl":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -92,6 +117,10 @@ func copyBeadsFixtureFile(srcPath, dstPath string, mode os.FileMode) error {
 		return err
 	}
 	defer src.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
 
 	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {

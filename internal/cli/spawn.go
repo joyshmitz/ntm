@@ -2376,13 +2376,14 @@ func appendOllamaAgentSpecs(agentSpecs *AgentSpecs, localCount, ollamaCount int,
 		model = "codellama:latest"
 	}
 
-	if localCount > 0 {
+	spawnCount := localCount + ollamaCount
+	if spawnCount > 0 {
 		if !modelPattern.MatchString(model) {
 			return "", fmt.Errorf("invalid characters in --local-model %q; allowed: letters, numbers, . _ / @ : + -", model)
 		}
 		*agentSpecs = append(*agentSpecs, AgentSpec{
 			Type:  AgentTypeOllama,
-			Count: localCount,
+			Count: spawnCount,
 			Model: model,
 		})
 	}

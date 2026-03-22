@@ -14,10 +14,10 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/config"
-	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/palette"
 	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	utilpkg "github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // parseEditorCommand splits the editor string into command and arguments.
@@ -360,12 +360,34 @@ func ResolveCassContext(query, dir string) (string, error) {
 // GetProjectRoot returns the git root of the current working directory,
 // or the cwd itself if no git root is found or on error.
 func GetProjectRoot() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
+	return utilpkg.ResolveProjectDir("")
+}
+
+// resolveProjectDirForSession chooses the project directory for a session-aware command.
+// Explicit session arguments prefer the configured session directory, while inferred
+// sessions prefer the current workspace so robot/TUI commands don't drift into
+// projects_base/<session> when launched from a different checked-out repo.
+func resolveProjectDirForSession(session string, preferSession bool) string {
+	cwdProject := utilpkg.ResolveProjectDir("")
+
+	activeCfg := cfg
+	if activeCfg == nil {
+		activeCfg = config.Default()
 	}
-	if root, err := git.FindProjectRoot(wd); err == nil && root != "" {
-		return root
+
+	sessionProject := ""
+	if session != "" && activeCfg != nil {
+		sessionProject = activeCfg.GetProjectDir(session)
 	}
-	return wd
+
+	if preferSession {
+		if best := utilpkg.BestProjectDir(sessionProject, cwdProject); best != "" {
+			return best
+		}
+	}
+
+	if best := utilpkg.BestProjectDir(cwdProject, sessionProject); best != "" {
+		return best
+	}
+	return ""
 }

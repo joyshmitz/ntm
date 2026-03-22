@@ -100,6 +100,183 @@ func TestDetectAgentType(t *testing.T) {
 	}
 }
 
+func TestGetMail_PrefersUsableWorkspaceProjectKey(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	cwdProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdProject); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := GetMail(MailOptions{
+		ProjectKey: filepath.Join(t.TempDir(), "stale", "ntm"),
+	})
+	if err != nil {
+		t.Fatalf("GetMail error: %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected output")
+	}
+	if output.ProjectKey != cwdProject {
+		t.Fatalf("ProjectKey = %q, want %q", output.ProjectKey, cwdProject)
+	}
+}
+
+func TestGetMail_DropsStaleSessionAgentFromDifferentProject(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cwdProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdProject); err != nil {
+		t.Fatal(err)
+	}
+
+	staleProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(staleProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentmail.SaveSessionAgent("ntm", staleProject, &agentmail.SessionAgentInfo{
+		AgentName:    "LilacBarn",
+		ProjectKey:   staleProject,
+		RegisteredAt: time.Now().Add(-1 * time.Hour),
+		LastActiveAt: time.Now().Add(-1 * time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveSessionAgent error: %v", err)
+	}
+
+	output, err := GetMail(MailOptions{Session: "ntm"})
+	if err != nil {
+		t.Fatalf("GetMail error: %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected output")
+	}
+	if output.ProjectKey != cwdProject {
+		t.Fatalf("ProjectKey = %q, want %q", output.ProjectKey, cwdProject)
+	}
+	if output.SessionAgent != nil {
+		t.Fatalf("expected stale session agent to be ignored, got %+v", output.SessionAgent)
+	}
+}
+
+func TestGetMail_DegradesOnAgentMailListAgentsError(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      interface{}     `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		switch req.Method {
+		case "tools/call":
+			var params struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatalf("decode tool params: %v", err)
+			}
+			switch params.Name {
+			case "health_check":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"status":    "ok",
+						"timestamp": time.Now().UTC().Format(time.RFC3339),
+					},
+				})
+			case "ensure_project":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"id":        1,
+						"slug":      "ntm",
+						"human_key": projectDir,
+					},
+				})
+			default:
+				t.Fatalf("unexpected tool call: %s", params.Name)
+			}
+		case "resources/read":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error": map[string]interface{}{
+					"code":    -32000,
+					"message": "database disk image is malformed",
+				},
+			})
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	output, err := GetMail(MailOptions{})
+	if err != nil {
+		t.Fatalf("GetMail error: %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected output")
+	}
+	if !output.Success {
+		t.Fatalf("Success = false, warnings=%v", output.Warnings)
+	}
+	if !output.Available {
+		t.Fatal("expected Agent Mail to be marked available")
+	}
+	if output.ProjectKey != projectDir {
+		t.Fatalf("ProjectKey = %q, want %q", output.ProjectKey, projectDir)
+	}
+	if len(output.Warnings) == 0 {
+		t.Fatal("expected warnings when list_agents fails")
+	}
+	if !strings.Contains(output.Warnings[0], "list_agents failed") {
+		t.Fatalf("warning = %q, want list_agents failure", output.Warnings[0])
+	}
+}
+
 // TestContains and TestToLower removed - helper functions were inlined/removed during refactoring
 
 func TestStripANSI(t *testing.T) {

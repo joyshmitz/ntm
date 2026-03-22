@@ -628,19 +628,26 @@ func AnimatedGradientDivider(width, tick int, colors ...string) string {
 	return Shimmer(strings.Repeat("─", width), tick, colors...)
 }
 
-// AnimatedBorderColor returns a color that cycles between two colors for shimmer border effects.
+// AnimatedBorderColor returns a color that smoothly cycles between two colors for shimmer border effects.
+// Uses a triangle wave for smooth round-trip animation (no discontinuous jumps).
 // [tui-upgrade: bd-28vsw] Use with BorderForeground() for animated panel borders.
 func AnimatedBorderColor(tick int, baseColor, accentColor string) lipgloss.Color {
 	if ReducedMotionEnabled() {
 		return lipgloss.Color(baseColor)
 	}
-	// Cycle every 20 ticks (2 seconds at 100ms tick rate)
-	phase := (tick / 10) % 2
-	if phase == 0 {
-		return lipgloss.Color(baseColor)
+	// Triangle wave: 0→1→0 over 20 ticks (2 seconds at 100ms tick rate)
+	mod := tick % 20
+	if mod < 0 {
+		mod += 20
 	}
-	// Blend between colors based on tick position within phase
-	t := float64(tick%10) / 10.0
+	pos := float64(mod)
+	var t float64
+	if pos < 10 {
+		t = pos / 10.0
+	} else {
+		t = (20 - pos) / 10.0
+	}
+
 	base := ParseHex(baseColor)
 	accent := ParseHex(accentColor)
 	blended := Color{
@@ -706,6 +713,9 @@ func StatusDot(color lipgloss.Color, animated bool, tick int) string {
 
 // Truncate truncates text to max width with ellipsis
 func Truncate(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
 	return truncate.StringWithTail(text, uint(maxWidth), "…")
 }
 

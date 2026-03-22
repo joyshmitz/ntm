@@ -23,6 +23,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 const (
@@ -59,9 +60,9 @@ var dashboardRunAddAgents = func(ctx context.Context, projectDir, session string
 	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
 		if trimmed != "" {
-			return trimmed, fmt.Errorf("ntm add failed: %w", err)
+			return trimmed, fmt.Errorf("ntm add failed (output: %s): %w", trimmed, err)
 		}
-		return trimmed, fmt.Errorf("ntm add failed: %w", err)
+		return "", fmt.Errorf("ntm add failed: %w", err)
 	}
 	return trimmed, nil
 }
@@ -122,6 +123,10 @@ func (m *Model) fetchAlertsCmd() tea.Cmd {
 	gen := m.nextGen(refreshAlerts)
 	cfg := m.cfg
 	return func() tea.Msg {
+		projectDir := strings.TrimSpace(m.projectDir)
+		if projectDir == "" {
+			projectDir = util.ResolveProjectDir("")
+		}
 		var alertCfg alerts.Config
 		if cfg != nil {
 			alertCfg = alerts.ToConfigAlerts(
@@ -131,10 +136,11 @@ func (m *Model) fetchAlertsCmd() tea.Cmd {
 				cfg.Alerts.MailBacklogThreshold,
 				cfg.Alerts.BeadStaleHours,
 				cfg.Alerts.ResolvedPruneMinutes,
-				cfg.ProjectsBase,
+				projectDir,
 			)
 		} else {
 			alertCfg = alerts.DefaultConfig()
+			alertCfg.ProjectsDir = projectDir
 		}
 
 		// Use GenerateAndTrack to benefit from lifecycle management and error handling
