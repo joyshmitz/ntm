@@ -465,6 +465,7 @@ func (w *FileReservationWatcher) prepareReservationAttempt(
 	for _, f := range files {
 		if !existingFiles[f] {
 			newFiles = append(newFiles, f)
+			existingFiles[f] = true
 		}
 	}
 
