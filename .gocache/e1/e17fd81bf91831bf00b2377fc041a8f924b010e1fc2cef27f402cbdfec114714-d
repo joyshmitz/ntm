@@ -1,0 +1,7 @@
+./compaction.go
+./detector.go
+./errors.go
+./patterns.go
+./recovery.go
+./types.go
+./unified.go

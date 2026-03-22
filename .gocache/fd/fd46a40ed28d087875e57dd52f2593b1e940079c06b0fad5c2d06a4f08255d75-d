@@ -1,0 +1,4 @@
+./commands.go
+./config.go
+./lazy.go
+./startup.go

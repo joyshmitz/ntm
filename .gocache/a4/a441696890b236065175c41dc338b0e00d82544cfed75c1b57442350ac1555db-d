@@ -1,0 +1,9 @@
+./analysis.go
+./autoscan.go
+./bridge.go
+./config_integration.go
+./dedup.go
+./notify.go
+./priority.go
+./scanner.go
+./types.go

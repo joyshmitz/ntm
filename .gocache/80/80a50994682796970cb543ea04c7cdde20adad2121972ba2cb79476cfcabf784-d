@@ -1,0 +1,5 @@
+./encrypt.go
+./entry.go
+./lock_unix.go
+./redact.go
+./storage.go

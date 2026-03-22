@@ -1,0 +1,6 @@
+./capture_helpers.go
+./client.go
+./fifo_unix.go
+./pane_border.go
+./pane_streamer.go
+./session.go

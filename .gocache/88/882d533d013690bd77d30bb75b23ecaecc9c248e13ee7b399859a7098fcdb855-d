@@ -1,0 +1,3 @@
+./lint.go
+./rules.go
+./types.go

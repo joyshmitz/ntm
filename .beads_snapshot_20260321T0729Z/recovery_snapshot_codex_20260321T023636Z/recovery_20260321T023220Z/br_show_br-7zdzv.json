@@ -1,0 +1,70 @@
+[
+  {
+    "id": "br-7zdzv",
+    "title": "PHASE 0: Capture TUI Baselines via VHS Inspector",
+    "description": "# Phase 0: Capture TUI Baselines\n\n## Why This Must Come First\nEvery subsequent TUI change needs a visual reference point. Without baselines, we cannot\nobjectively verify that upgrades improve the UI without introducing regressions. The TUI\nInspector infrastructure already exists — we just need to run it and store the artifacts.\n\n## What To Do\n\n### Step 1: Run doctor check\n  bash /dp/tui_inspector/scripts/doctor_tui_inspector.sh\nVerify: vhs, ttyd, ffmpeg all present and functional. Log the output.\n\n### Step 2: Build NTM binary\n  go build -o /tmp/ntm_baseline ./cmd/ntm\nRecord the binary size and build time.\n\n### Step 3: Capture all 5 profiles\n  bash /dp/tui_inspector/scripts/run_ntm_tui_suite.sh \\\n    --profiles ntm-dashboard-empty,ntm-dashboard-help,ntm-dashboard-navigate,ntm-dashboard-wide,ntm-palette \\\n    --suite-name \"baseline_pre_upgrade\"\nLog: each profile's exit code, video duration, snapshot status.\n\n### Step 4: Run native VHS tapes\n  cd /data/projects/ntm/testdata/vhs && for tape in *.tape; do vhs \"$tape\" 2>&1 | tee /tmp/vhs_${tape%.tape}.log; done\n\n### Step 5: Run existing TUI unit tests as baseline\n  go test -v -short ./internal/tui/... 2>&1 | tee /tmp/tui_tests_baseline.log\nRecord: test count, pass/fail, duration. This is the baseline test count we must not regress.\n\n### Step 6: Archive baseline artifacts\nStore in /tmp/tui_inspector/suites/baseline_pre_upgrade/\nCreate a manifest: baseline_manifest.json with binary size, test count, capture metadata.\n\n## Unit Test Baseline\nRun and record all existing tests:\n  go test -v -count=1 -short ./internal/tui/... 2>&1 | tee /tmp/tui_test_baseline.log\n  go test -v -count=1 -short ./internal/cli/... 2>&1 | tee /tmp/cli_test_baseline.log\nCount passing tests. This number MUST NOT decrease in any subsequent phase.\n\n## Logging\n- Log doctor check output to /tmp/tui_inspector/baseline_doctor.log\n- Log each VHS capture stdout/stderr to /tmp/tui_inspector/baseline_capture_*.log\n- Log test run output to /tmp/tui_test_baseline.log\n- Create /tmp/tui_inspector/baseline_summary.json with:\n  { \"binary_size\": N, \"test_count\": N, \"test_pass\": N, \"capture_count\": 5, \"all_pass\": bool }\n\n## Acceptance Criteria\n- All 5 TUI Inspector profiles capture successfully (exit code 0 in run_meta.json)\n- All 5 snapshots extracted (snapshot_exists: true in each run_meta.json)\n- Suite manifest shows 5/5 passed\n- All existing TUI unit tests pass\n- Baseline artifacts archived and accessible\n- baseline_summary.json created with all metrics\n\n## Files Involved\n- /dp/tui_inspector/scripts/capture_ntm_tui.sh\n- /dp/tui_inspector/scripts/run_ntm_tui_suite.sh\n- /dp/tui_inspector/scripts/doctor_tui_inspector.sh\n- /dp/tui_inspector/profiles/ntm-*.env (5 profiles)\n- /data/projects/ntm/testdata/vhs/*.tape (5 tapes)\n\n## Estimated Effort: 15 minutes (mostly waiting for VHS captures)",
+    "status": "in_progress",
+    "priority": 0,
+    "issue_type": "task",
+    "estimated_minutes": 15,
+    "created_at": "2026-03-20T22:25:00.391931486Z",
+    "created_by": "ubuntu",
+    "updated_at": "2026-03-21T02:32:14.190165718Z",
+    "source_repo": ".",
+    "compaction_level": 0,
+    "original_size": 0,
+    "labels": [
+      "baseline",
+      "phase-0",
+      "tui",
+      "verification"
+    ],
+    "dependencies": [
+      {
+        "id": "br-yybc6",
+        "title": "Phase 0-PRE: Resolve Git Merge Conflict in layout.go Before Any TUI Work",
+        "status": "closed",
+        "priority": 0,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "br-phdna",
+        "title": "EPIC: TUI Glamour Upgrade — Leverage Full Charmbracelet Ecosystem",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "parent-child"
+      }
+    ],
+    "dependents": [
+      {
+        "id": "br-h3z1b",
+        "title": "Phase 1b: Wire Harmonica Spring Animations for Toast Notifications",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "br-08fgf",
+        "title": "Phase 1a: Enable Mouse Support in Dashboard, Palette, and Tutorial",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "br-xz14y",
+        "title": "Phase 1d: Replace Custom Progress Bar with bubbles/progress",
+        "status": "open",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "br-ofwdn",
+        "title": "Phase 1c: Replace Custom Spinner with bubbles/spinner",
+        "status": "open",
+        "priority": 2,
+        "dependency_type": "blocks"
+      }
+    ],
+    "parent": "br-phdna"
+  }
+]

@@ -1,0 +1,3 @@
+./generator.go
+./manifest.go
+./verify.go

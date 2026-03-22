@@ -1,0 +1,7 @@
+./assign.go
+./conflicts.go
+./coordinator.go
+./detect_agent_type.go
+./digest.go
+./monitor.go
+./quality.go

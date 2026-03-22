@@ -1,0 +1,1 @@
+2026-03-21T07:31:01.358083Z DEBUG beads_rust::cli::commands::config: src/cli/commands/config.rs:439: Reading config key key="db"

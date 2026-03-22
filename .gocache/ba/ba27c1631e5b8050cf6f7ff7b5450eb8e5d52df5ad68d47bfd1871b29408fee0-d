@@ -1,0 +1,4 @@
+./config.go
+./executor.go
+./hooks.go
+./precommit.go

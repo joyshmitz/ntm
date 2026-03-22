@@ -1,0 +1,9 @@
+./auto.go
+./capture.go
+./export.go
+./incremental.go
+./integrity.go
+./restore.go
+./scrollback.go
+./storage.go
+./types.go

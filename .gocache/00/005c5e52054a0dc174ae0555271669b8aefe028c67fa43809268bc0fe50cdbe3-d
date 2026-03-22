@@ -1,0 +1,3 @@
+./icons.go
+./env_detection_test.go
+./icons_test.go

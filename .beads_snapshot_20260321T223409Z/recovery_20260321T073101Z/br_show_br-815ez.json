@@ -1,0 +1,41 @@
+[
+  {
+    "id": "br-815ez",
+    "title": "Attention Feed Phase 3a: Build the digest engine that turns feed noise into token-efficient deltas",
+    "description": "# Why this bead exists\nA frontier LLM does not usually want the raw event stream first. Most of the time it wants a compact answer to \"what changed that I should care about?\" This bead builds the digest engine that turns feed noise into token-efficient deltas while preserving the ability to drill into raw events when needed.\n\n# Scope\n1. Coalesce recent feed activity into a compact digest grouped by `actionable`, `interesting`, `background`, and suppressed counts.\n2. Generate a stable summary string that is cheap for an operator LLM to consume.\n3. Preserve cursor boundaries so the digest can be chained cleanly in a long-running tending loop.\n4. Retain event references/details needed for targeted follow-up rather than forcing a fresh snapshot.\n5. Avoid aggressive magic. Coalescing should be rule-based and testable, not mysterious.\n6. Establish explicit suppression rules for repetitive output churn, lifecycle noise, and redundant alert spam so later changes do not quietly make digests unusably noisy.\n\n# Design considerations\n- Repeated passive output should usually be suppressed, not surfaced one-by-one.\n- Important coordination or stall signals must survive coalescing.\n- The digest should remain predictable enough that agents can build habits around it.\n\n# Detailed verification expectations\n- Tests for suppression of noisy output bursts.\n- Tests that important signals survive coalescing.\n- Golden tests for summary stability and bucket assignment.\n- Benchmarks or stress tests for digesting large bursts without pathological allocations.\n- Debug logging in tests that shows which source events were surfaced, coalesced, or suppressed and why.\n\n# Acceptance criteria\n- [ ] The digest separates action-required changes from passive background churn.\n- [ ] Summary strings remain compact but concrete.\n- [ ] Suppression/coalescing rules are deterministic and testable.\n- [ ] Cursor boundaries remain explicit.\n- [ ] Digest noise-control behavior is diagnosable from test output.",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "estimated_minutes": 180,
+    "created_at": "2026-03-21T00:49:20.708651888Z",
+    "created_by": "ubuntu",
+    "updated_at": "2026-03-21T00:57:14.282711741Z",
+    "source_repo": ".",
+    "compaction_level": 0,
+    "original_size": 0,
+    "labels": [
+      "attention-feed",
+      "digest",
+      "phase-3",
+      "robot"
+    ],
+    "dependencies": [
+      {
+        "id": "br-04qv0",
+        "title": "Attention Feed Phase 1c: Derive the first-class attention signals an operator agent actually cares about",
+        "status": "closed",
+        "priority": 1,
+        "dependency_type": "blocks"
+      }
+    ],
+    "dependents": [
+      {
+        "id": "br-6tzh9",
+        "title": "Attention Feed Phase 3b: Ship --robot-digest as the default what-changed surface",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      }
+    ]
+  }
+]

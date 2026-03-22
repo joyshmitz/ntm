@@ -1,0 +1,7 @@
+./constants.go
+./generator.go
+./reader.go
+./transfer.go
+./types.go
+./validate.go
+./writer.go

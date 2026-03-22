@@ -1,0 +1,11 @@
+./conditions.go
+./deps.go
+./executor.go
+./loops.go
+./notify.go
+./parser.go
+./pipeline.go
+./robot.go
+./schema.go
+./state.go
+./variables.go

@@ -1,0 +1,5 @@
+./config.go
+./conflict.go
+./debouncer.go
+./file_reservation.go
+./watcher.go

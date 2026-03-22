@@ -1,0 +1,10 @@
+./confirm.go
+./diff.go
+./errors.go
+./format.go
+./json.go
+./output.go
+./progress.go
+./schema.go
+./success.go
+./text.go

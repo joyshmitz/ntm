@@ -1,0 +1,4 @@
+./atomic.go
+./dirs.go
+./duration.go
+./text.go

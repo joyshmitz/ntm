@@ -1,0 +1,14 @@
+./commands.go
+./dashboard.go
+./dashboard_view.go
+./env.go
+./focus.go
+./keymap.go
+./layout.go
+./local_perf.go
+./messages.go
+./model.go
+./overlay.go
+./pane_delegate.go
+./popup.go
+./run.go

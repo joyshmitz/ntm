@@ -1,0 +1,7 @@
+2026-03-21T02:32:20.306296Z DEBUG beads_rust::cli::commands::sync: src/cli/commands/sync.rs:182: Validating sync paths beads_dir=/data/projects/ntm/.beads jsonl_path=/data/projects/ntm/.beads/issues.jsonl allow_external_jsonl=false
+2026-03-21T02:32:20.306363Z DEBUG beads_rust::sync::path: src/sync/path.rs:214: Validating sync path path=/data/projects/ntm/.beads/issues.jsonl beads_dir=/data/projects/ntm/.beads
+2026-03-21T02:32:20.306414Z DEBUG beads_rust::sync::path: src/sync/path.rs:385: Path validated for sync I/O path=/data/projects/ntm/.beads/issues.jsonl
+2026-03-21T02:32:20.306420Z DEBUG beads_rust::cli::commands::sync: src/cli/commands/sync.rs:242: Sync path validation complete jsonl_path=/data/projects/ntm/.beads/issues.jsonl jsonl_temp_path=/data/projects/ntm/.beads/issues.jsonl.2936324.tmp manifest_path=/data/projects/ntm/.beads/.manifest.json is_external=false
+2026-03-21T02:32:20.306426Z DEBUG beads_rust::cli::commands::sync: src/cli/commands/sync.rs:104: Resolved sync path policy jsonl_path=/data/projects/ntm/.beads/issues.jsonl manifest_path=/data/projects/ntm/.beads/.manifest.json external_jsonl=false
+2026-03-21T02:32:20.311355Z DEBUG beads_rust::cli::commands::sync: src/cli/commands/sync.rs:320: Computed sync status inputs jsonl_path=/data/projects/ntm/.beads/issues.jsonl jsonl_exists=true dirty_count=0
+2026-03-21T02:32:20.311373Z DEBUG beads_rust::cli::commands::sync: src/cli/commands/sync.rs:336: Computed sync staleness jsonl_newer=false db_newer=false

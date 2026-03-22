@@ -1,0 +1,2 @@
+2026-03-21T02:32:20.148987Z DEBUG beads_rust::sync::path: src/sync/path.rs:214: Validating sync path path=/data/projects/ntm/.beads/issues.jsonl beads_dir=/data/projects/ntm/.beads
+2026-03-21T02:32:20.149052Z DEBUG beads_rust::sync::path: src/sync/path.rs:385: Path validated for sync I/O path=/data/projects/ntm/.beads/issues.jsonl
