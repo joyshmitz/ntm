@@ -17,6 +17,7 @@ import {
   getConnectionConfig,
   checkConnection,
   resetClient,
+  DEFAULT_NTM_BASE_URL,
 } from "@/lib/api/client";
 import { resetWsClient } from "@/lib/ws/client";
 import { resetQueryClient } from "@/lib/hooks/use-query";

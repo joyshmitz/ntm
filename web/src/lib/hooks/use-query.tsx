@@ -140,7 +140,7 @@ export function NtmQueryProvider({ children }: NtmQueryProviderProps) {
  * Handle WebSocket events by updating the query cache.
  * Maps event types to query keys for cache invalidation/updates.
  */
-function handleWsEvent(queryClient: QueryClient, event: WSEvent): void {
+export function handleWsEvent(queryClient: QueryClient, event: WSEvent): void {
   const { topic, event_type } = event;
 
   // Log in development
@@ -168,8 +168,12 @@ function handleWsEvent(queryClient: QueryClient, event: WSEvent): void {
     const match = topic.match(/^panes:([^:]+):(\d+)$/);
     if (match) {
       const [, sessionName, paneIdx] = match;
+      const parsedPaneIdx = parseInt(paneIdx, 10);
       queryClient.invalidateQueries({
-        queryKey: ["panes", sessionName, parseInt(paneIdx, 10)],
+        queryKey: ["panes", sessionName, parsedPaneIdx],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["pane-output", sessionName, parsedPaneIdx],
       });
     }
     queryClient.invalidateQueries({ queryKey: ["panes"] });

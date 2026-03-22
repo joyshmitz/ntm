@@ -517,6 +517,9 @@ func formatTimelineDuration(d time.Duration) string {
 }
 
 func timelineTicks(start, end time.Time, count int) []time.Time {
+	if count <= 0 {
+		return []time.Time{start}
+	}
 	duration := end.Sub(start)
 	interval := duration / time.Duration(count)
 	ticks := make([]time.Time, count+1)

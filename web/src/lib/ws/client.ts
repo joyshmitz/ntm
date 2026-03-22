@@ -165,7 +165,6 @@ export class NtmWebSocket {
     }
 
     const ref = this.nextRef();
-
     return new Promise((resolve, reject) => {
       this.pendingAcks.set(ref, { resolve, reject });
       this.sendMessage("unsubscribe", ref, { topics: [topic] });
@@ -266,7 +265,7 @@ export class NtmWebSocket {
       try {
         const message = JSON.parse(frame) as WSMessage;
 
-      // Track sequence for resumption
+        // Track sequence for resumption
         if (message.seq !== undefined) {
           this.lastSeq = message.seq;
         }
@@ -317,7 +316,7 @@ export class NtmWebSocket {
             if (process.env.NODE_ENV === "development") {
               console.log("[WS] Unknown message type:", message.type);
             }
-        }
+          }
       } catch (err) {
         console.error("[WS] Failed to parse message:", err);
       }
@@ -418,7 +417,7 @@ export class NtmWebSocket {
         type,
         ts: new Date().toISOString(),
         request_id: requestId,
-        ...(data ? { data } : {}),
+        data,
       })
     );
   }

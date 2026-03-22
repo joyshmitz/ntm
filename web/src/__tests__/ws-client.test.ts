@@ -4,7 +4,9 @@
  * Tests for connection state and reconnection behavior.
  */
 
+import { QueryClient } from "@tanstack/react-query";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { handleWsEvent } from "../lib/hooks/use-query";
 import { NtmWebSocket, type ConnectionState } from "../lib/ws/client";
 
 // Mock WebSocket
@@ -231,6 +233,32 @@ describe("NtmWebSocket", () => {
 
       expect(errors.length).toBe(1);
       expect((errors[0] as { code: string }).code).toBe("AUTH_FAILED");
+    });
+  });
+});
+
+describe("handleWsEvent", () => {
+  it("invalidates pane output queries for pane websocket events", () => {
+    const queryClient = new QueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    handleWsEvent(queryClient, {
+      type: "event",
+      topic: "panes:demo:2",
+      event_type: "pane.output",
+      data: { lines: ["hello"] },
+      ts: new Date().toISOString(),
+      seq: 17,
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["pane-output", "demo", 2],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["panes", "demo", 2],
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ["panes"],
     });
   });
 });

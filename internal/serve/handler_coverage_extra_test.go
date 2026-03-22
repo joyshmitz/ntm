@@ -286,6 +286,30 @@ func TestIdempotencyMiddlewareReplay(t *testing.T) {
 			t.Error("expected X-Idempotent-Replay header")
 		}
 	})
+
+	t.Run("PATCH replays on second call", func(t *testing.T) {
+		callCount = 0
+		key := "test-key-patch"
+
+		req1 := httptest.NewRequest(http.MethodPatch, "/", nil)
+		req1.Header.Set("Idempotency-Key", key)
+		rec1 := httptest.NewRecorder()
+		handler.ServeHTTP(rec1, req1)
+		if callCount != 1 {
+			t.Fatalf("first PATCH call: callCount = %d, want 1", callCount)
+		}
+
+		req2 := httptest.NewRequest(http.MethodPatch, "/", nil)
+		req2.Header.Set("Idempotency-Key", key)
+		rec2 := httptest.NewRecorder()
+		handler.ServeHTTP(rec2, req2)
+		if callCount != 1 {
+			t.Errorf("second PATCH call: callCount = %d, want 1 (replayed)", callCount)
+		}
+		if rec2.Header().Get("X-Idempotent-Replay") != "true" {
+			t.Error("expected X-Idempotent-Replay header for PATCH replay")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

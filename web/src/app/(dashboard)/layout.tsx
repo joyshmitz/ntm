@@ -15,7 +15,7 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   getAuthHeaders,
-  getBaseUrl as getApiBaseUrl,
+  getBaseUrl,
   getConnectionConfig,
 } from "@/lib/api/client";
 import { NtmQueryProvider, useConnection } from "@/lib/hooks/use-query";

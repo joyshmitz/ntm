@@ -67,7 +67,7 @@ func NewBlockedLogger(path string) (*BlockedLogger, error) {
 
 // Log writes a blocked command entry to the log.
 func (l *BlockedLogger) Log(entry *BlockedEntry) error {
-	if l.file == nil {
+	if l == nil || l.file == nil {
 		return nil
 	}
 

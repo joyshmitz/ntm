@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 const (
@@ -122,7 +124,7 @@ func (s *CheckpointStore) SaveCheckpoint(runID string, checkpoint ModeCheckpoint
 		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0o644); err != nil {
+	if err := util.AtomicWriteFile(filename, data, 0o644); err != nil {
 		return fmt.Errorf("write checkpoint: %w", err)
 	}
 
@@ -161,7 +163,7 @@ func (s *CheckpointStore) SaveMetadata(meta CheckpointMetadata) error {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0o644); err != nil {
+	if err := util.AtomicWriteFile(filename, data, 0o644); err != nil {
 		return fmt.Errorf("write metadata: %w", err)
 	}
 
@@ -201,7 +203,7 @@ func (s *CheckpointStore) SaveSynthesisCheckpoint(runID string, checkpoint Synth
 		return fmt.Errorf("marshal synthesis checkpoint: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0o644); err != nil {
+	if err := util.AtomicWriteFile(filename, data, 0o644); err != nil {
 		return fmt.Errorf("write synthesis checkpoint: %w", err)
 	}
 

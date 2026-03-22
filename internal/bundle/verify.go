@@ -142,7 +142,7 @@ func verifyZip(path string, result *VerifyResult) (_ *VerifyResult, err error) {
 				err = fmt.Errorf("close zip entry %s: %w", path, closeErr)
 			}
 		}()
-		data, err := io.ReadAll(rc)
+		data, err := io.ReadAll(io.LimitReader(rc, 100<<20)) // 100MB max per entry
 		if err != nil {
 			return nil, err
 		}
@@ -196,7 +196,7 @@ func verifyTarGz(path string, result *VerifyResult) (_ *VerifyResult, err error)
 
 		if hdr.Typeflag == tar.TypeReg {
 			name := filepath.Clean(hdr.Name)
-			data, err := io.ReadAll(tr)
+			data, err := io.ReadAll(io.LimitReader(tr, 100<<20)) // 100MB max per entry
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("failed to read %s: %v", name, err))
 				continue
