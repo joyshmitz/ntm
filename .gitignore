@@ -109,3 +109,11 @@ storage.sqlite3-wal.corrupt-*
 .env
 .claude/settings.local.json
 .gomodcache/
+
+# Go build cache (NEVER commit this — an agent did once, 3500+ files, 100+ MB)
+.gocache/
+
+# Beads recovery/snapshot artifacts (ephemeral debugging state)
+.beads/recovery_*/
+.beads/recovery_snapshot_*/
+.beads_snapshot_*/
