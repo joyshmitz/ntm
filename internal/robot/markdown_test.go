@@ -1,11 +1,14 @@
 package robot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -178,6 +181,68 @@ func TestAlertSeverityIcon(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("alertSeverityIcon(%v) = %q, want %q", tc.severity, got, tc.want)
 		}
+	}
+}
+
+func TestAlertConfigForProject_UsesExplicitProjectDir(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Alerts: config.AlertsConfig{
+			Enabled:              true,
+			AgentStuckMinutes:    12,
+			DiskLowThresholdGB:   4.5,
+			MailBacklogThreshold: 9,
+			BeadStaleHours:       36,
+			ResolvedPruneMinutes: 90,
+		},
+		ProjectsBase: "/tmp/wrong-base",
+	}
+
+	got := alertConfigForProject(cfg, "/tmp/right-project")
+	if got.ProjectsDir != "/tmp/right-project" {
+		t.Fatalf("ProjectsDir = %q, want /tmp/right-project", got.ProjectsDir)
+	}
+	if got.AgentStuckMinutes != 12 {
+		t.Fatalf("AgentStuckMinutes = %d, want 12", got.AgentStuckMinutes)
+	}
+	if got.BeadStaleHours != 36 {
+		t.Fatalf("BeadStaleHours = %d, want 36", got.BeadStaleHours)
+	}
+	if !got.Enabled {
+		t.Fatal("expected enabled alert config")
+	}
+}
+
+func TestAlertConfigForProject_ResolvesCurrentProjectDirWhenUnset(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectDir := t.TempDir()
+	nestedDir := filepath.Join(projectDir, "internal", "robot")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "config.toml"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nestedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	got := alertConfigForProject(nil, "")
+	if got.ProjectsDir != projectDir {
+		t.Fatalf("ProjectsDir = %q, want %q", got.ProjectsDir, projectDir)
+	}
+	if !got.Enabled {
+		t.Fatal("expected default alert config to remain enabled")
 	}
 }
 

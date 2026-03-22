@@ -285,9 +285,4 @@ func (m *RateLimitPanel) formatLastActivity(sec int) string {
 	return fmt.Sprintf("%dh", sec/3600)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// min() removed — use Go 1.25 builtin min()

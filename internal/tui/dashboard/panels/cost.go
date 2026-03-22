@@ -108,6 +108,7 @@ func (c *CostPanel) SetData(data CostPanelData, err error) {
 
 	c.data = data
 	c.err = err
+	c.tableInit = false // force table rebuild on next View()
 	if err == nil {
 		c.SetLastUpdate(time.Now())
 	}
@@ -255,7 +256,11 @@ func (c *CostPanel) View() string {
 	}
 
 	// Build the full table and let the shared scrollable viewport handle overflow.
-	c.initCostTable(tableWidth, len(c.data.Agents))
+	// Only reinitialize when data changes (SetData resets tableInit to false).
+	if !c.tableInit {
+		c.initCostTable(tableWidth, len(c.data.Agents))
+		c.tableInit = true
+	}
 	if c.scroll == nil {
 		c.scroll = components.NewScrollablePanel(innerWidth, bodyHeight)
 	}

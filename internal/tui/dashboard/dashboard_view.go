@@ -99,12 +99,9 @@ func (m Model) View() string {
 	}
 
 	if m.showToastHistory {
-		modalWidth := m.width - 8
-		if modalWidth > 72 {
-			modalWidth = 72
-		}
-		if modalWidth < 36 {
-			modalWidth = 36
+		modalWidth := min(72, max(36, m.width-8))
+		if m.width > 0 && modalWidth > m.width-2 {
+			modalWidth = max(10, m.width-2)
 		}
 		modal := m.renderHelpOverlayBox("Toast History", m.renderToastHistoryContent(), modalWidth)
 		backdrop := m.renderHeaderSection() + m.renderMainContentSection() + m.renderFooterSection()

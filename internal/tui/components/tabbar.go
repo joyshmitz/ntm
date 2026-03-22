@@ -83,11 +83,7 @@ func RenderTabBar(opts TabBarOptions) string {
 		// Append badge if present
 		badgeSuffix := ""
 		if opts.ShowBadges && tab.Badge > 0 {
-			count := tab.Badge
-			if count > 99 {
-				count = 99
-			}
-			badgeSuffix = " " + badgeStyle.Render(strings.Repeat("•", min(count, 3)))
+			badgeSuffix = " " + badgeStyle.Render(strings.Repeat("•", min(tab.Badge, 3)))
 		}
 
 		var rendered string

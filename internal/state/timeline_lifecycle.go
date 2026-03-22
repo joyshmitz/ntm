@@ -42,32 +42,47 @@ func NewTimelineLifecycle(tracker *TimelineTracker, persister *TimelinePersister
 // StartSession begins timeline tracking and periodic persistence for a session.
 // This should be called when a session is spawned.
 func (l *TimelineLifecycle) StartSession(sessionID string) {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if _, active := l.activeSessions[sessionID]; active {
+	if _, active := l.activeSessions[normalizedSessionID]; active {
 		return // Already tracking
 	}
 
-	l.activeSessions[sessionID] = struct{}{}
-	l.persister.StartCheckpoint(sessionID, l.tracker)
+	l.activeSessions[normalizedSessionID] = struct{}{}
+	l.persister.StartCheckpoint(normalizedSessionID, l.tracker)
 }
 
 // EndSession finalizes timeline persistence for a session.
 // This should be called when a session is killed.
 func (l *TimelineLifecycle) EndSession(sessionID string) error {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return err
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	delete(l.activeSessions, sessionID)
-	return l.persister.FinalizeSession(sessionID, l.tracker)
+	delete(l.activeSessions, normalizedSessionID)
+	return l.persister.FinalizeSession(normalizedSessionID, l.tracker)
 }
 
 // IsSessionActive returns true if the session has active timeline tracking.
 func (l *TimelineLifecycle) IsSessionActive(sessionID string) bool {
+	normalizedSessionID, err := validateTimelineSessionID(sessionID)
+	if err != nil {
+		return false
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, active := l.activeSessions[sessionID]
+	_, active := l.activeSessions[normalizedSessionID]
 	return active
 }
 
@@ -129,6 +144,10 @@ func GetGlobalTimelineLifecycle() (*TimelineLifecycle, error) {
 // StartSessionTimeline is a convenience function to start timeline tracking for a session.
 // It uses the global lifecycle manager.
 func StartSessionTimeline(sessionID string) error {
+	if _, err := validateTimelineSessionID(sessionID); err != nil {
+		return err
+	}
+
 	lifecycle, err := GetGlobalTimelineLifecycle()
 	if err != nil {
 		return err
@@ -140,6 +159,10 @@ func StartSessionTimeline(sessionID string) error {
 // EndSessionTimeline is a convenience function to finalize timeline for a session.
 // It uses the global lifecycle manager.
 func EndSessionTimeline(sessionID string) error {
+	if _, err := validateTimelineSessionID(sessionID); err != nil {
+		return err
+	}
+
 	lifecycle, err := GetGlobalTimelineLifecycle()
 	if err != nil {
 		return err

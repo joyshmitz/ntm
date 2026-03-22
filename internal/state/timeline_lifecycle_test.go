@@ -78,6 +78,30 @@ func TestTimelineLifecycleStartSession(t *testing.T) {
 	t.Log("PASS: StartSession activates timeline tracking")
 }
 
+func TestTimelineLifecycleStartSession_IgnoresInvalidSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister failed: %v", err)
+	}
+
+	tracker := NewTimelineTracker(nil)
+
+	lifecycle, err := NewTimelineLifecycle(tracker, persister)
+	if err != nil {
+		t.Fatalf("NewTimelineLifecycle failed: %v", err)
+	}
+	defer lifecycle.Stop()
+
+	lifecycle.StartSession("")
+	lifecycle.StartSession("   ")
+	lifecycle.StartSession("../escape")
+
+	if len(lifecycle.ActiveSessions()) != 0 {
+		t.Fatalf("expected no active sessions for invalid input, got %v", lifecycle.ActiveSessions())
+	}
+}
+
 func TestTimelineLifecycleEndSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &TimelinePersistConfig{BaseDir: tmpDir}
@@ -139,6 +163,29 @@ func TestTimelineLifecycleEndSession(t *testing.T) {
 	}
 
 	t.Log("PASS: EndSession finalizes and persists timeline")
+}
+
+func TestTimelineLifecycleEndSession_RejectsInvalidSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister failed: %v", err)
+	}
+
+	tracker := NewTimelineTracker(nil)
+
+	lifecycle, err := NewTimelineLifecycle(tracker, persister)
+	if err != nil {
+		t.Fatalf("NewTimelineLifecycle failed: %v", err)
+	}
+	defer lifecycle.Stop()
+
+	if err := lifecycle.EndSession("   "); err == nil {
+		t.Fatal("expected EndSession to reject blank session IDs")
+	}
+	if err := lifecycle.EndSession("../escape"); err == nil {
+		t.Fatal("expected EndSession to reject path-like session IDs")
+	}
 }
 
 func TestTimelineLifecycleMultipleSessions(t *testing.T) {
@@ -256,6 +303,15 @@ func TestStartSessionTimeline(t *testing.T) {
 	t.Log("PASS: StartSessionTimeline convenience function works")
 }
 
+func TestStartSessionTimeline_RejectsInvalidSessionID(t *testing.T) {
+	if err := StartSessionTimeline("   "); err == nil {
+		t.Fatal("expected StartSessionTimeline to reject blank session IDs")
+	}
+	if err := StartSessionTimeline("../escape"); err == nil {
+		t.Fatal("expected StartSessionTimeline to reject path-like session IDs")
+	}
+}
+
 func TestEndSessionTimeline(t *testing.T) {
 	sessionID := "end-convenience-test-" + time.Now().Format("20060102150405")
 
@@ -281,6 +337,15 @@ func TestEndSessionTimeline(t *testing.T) {
 	}
 
 	t.Log("PASS: EndSessionTimeline convenience function works")
+}
+
+func TestEndSessionTimeline_RejectsInvalidSessionID(t *testing.T) {
+	if err := EndSessionTimeline("   "); err == nil {
+		t.Fatal("expected EndSessionTimeline to reject blank session IDs")
+	}
+	if err := EndSessionTimeline("../escape"); err == nil {
+		t.Fatal("expected EndSessionTimeline to reject path-like session IDs")
+	}
 }
 
 func TestGetGlobalTimelineTracker(t *testing.T) {

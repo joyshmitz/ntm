@@ -581,6 +581,7 @@ Shell Integration:
 		if robotMail {
 			projectKey := GetProjectRoot()
 			sessionName := ""
+			sessionExplicit := len(args) > 0
 			if len(args) > 0 {
 				sessionName = args[0]
 			} else if tmux.IsInstalled() {
@@ -591,8 +592,8 @@ Shell Integration:
 				}
 			}
 
-			if sessionName != "" && cfg != nil {
-				projectKey = cfg.GetProjectDir(sessionName)
+			if sessionName != "" {
+				projectKey = resolveProjectDirForSession(sessionName, sessionExplicit)
 			}
 
 			if err := robot.PrintMail(sessionName, projectKey); err != nil {

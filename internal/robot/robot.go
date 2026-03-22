@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // CASSStatusOutput represents the output for --robot-cass-status
@@ -2191,21 +2193,35 @@ type MailOutput struct {
 	Messages         AgentMailMessageCounts      `json:"messages,omitempty"`
 	FileReservations []AgentMailReservation      `json:"file_reservations,omitempty"`
 	Conflicts        []AgentMailConflict         `json:"conflicts,omitempty"`
+	Warnings         []string                    `json:"warnings,omitempty"`
 }
 
 // GetMail returns detailed Agent Mail state for AI orchestrators.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetMail(opts MailOptions) (*MailOutput, error) {
 	projectKey := opts.ProjectKey
-	if projectKey == "" {
-		wd, err := os.Getwd()
-		if err == nil {
-			if root, err := git.FindProjectRoot(wd); err == nil {
-				projectKey = root
-			} else {
-				projectKey = wd
-			}
+	if cwdProject := util.ResolveProjectDir(""); cwdProject != "" {
+		projectKey = util.BestProjectDir(projectKey, cwdProject)
+	}
+
+	sessionAgent, err := func() (*agentmail.SessionAgentInfo, error) {
+		if opts.Session == "" {
+			return nil, nil
 		}
+		return agentmail.LoadBestSessionAgent(opts.Session, projectKey)
+	}()
+	if err != nil {
+		return nil, err
+	}
+	if sessionAgent != nil {
+		resolvedProjectKey := util.BestProjectDir(projectKey, sessionAgent.ProjectKey)
+		if resolvedProjectKey == "" {
+			resolvedProjectKey = projectKey
+		}
+		if strings.TrimSpace(sessionAgent.ProjectKey) != "" && filepath.Clean(sessionAgent.ProjectKey) != filepath.Clean(resolvedProjectKey) {
+			sessionAgent = nil
+		}
+		projectKey = resolvedProjectKey
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -2221,6 +2237,7 @@ func GetMail(opts MailOptions) (*MailOutput, error) {
 		ProjectKey:    projectKey,
 		Available:     false,
 		ServerURL:     serverURL,
+		SessionAgent:  sessionAgent,
 	}
 
 	if !client.IsAvailable() {
@@ -2230,28 +2247,13 @@ func GetMail(opts MailOptions) (*MailOutput, error) {
 
 	// Ensure project exists
 	if _, err := ensureProjectWithRetry(ctx, client, projectKey); err != nil {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("ensure_project: %w", err),
-			ErrCodeInternalError,
-			"Verify Agent Mail server and project key",
-		)
+		output.Warnings = append(output.Warnings, fmt.Sprintf("ensure_project failed: %v", err))
 		return output, nil
-	}
-
-	// Session coordinator agent info (best-effort, when a session name is provided).
-	if opts.Session != "" {
-		if info, err := agentmail.LoadSessionAgent(opts.Session, projectKey); err == nil && info != nil {
-			output.SessionAgent = info
-		}
 	}
 
 	agents, err := client.ListProjectAgents(ctx, projectKey)
 	if err != nil {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("list_agents: %w", err),
-			ErrCodeInternalError,
-			"Verify Agent Mail server and project key",
-		)
+		output.Warnings = append(output.Warnings, fmt.Sprintf("list_agents failed: %v", err))
 		return output, nil
 	}
 
@@ -2348,6 +2350,8 @@ func GetMail(opts MailOptions) (*MailOutput, error) {
 	if err == nil {
 		output.FileReservations = summarizeReservations(reservations)
 		output.Conflicts = detectReservationConflicts(reservations)
+	} else {
+		output.Warnings = append(output.Warnings, fmt.Sprintf("list_reservations failed: %v", err))
 	}
 
 	return output, nil
@@ -3516,6 +3520,29 @@ func buildSnapshotAgentMail() *SnapshotAgentMail {
 	return summary
 }
 
+func alertConfigForProject(cfg *config.Config, projectDir string) alerts.Config {
+	resolvedProject := strings.TrimSpace(projectDir)
+	if resolvedProject == "" {
+		resolvedProject = util.ResolveProjectDir("")
+	}
+
+	if cfg != nil {
+		return alerts.ToConfigAlerts(
+			cfg.Alerts.Enabled,
+			cfg.Alerts.AgentStuckMinutes,
+			cfg.Alerts.DiskLowThresholdGB,
+			cfg.Alerts.MailBacklogThreshold,
+			cfg.Alerts.BeadStaleHours,
+			cfg.Alerts.ResolvedPruneMinutes,
+			resolvedProject,
+		)
+	}
+
+	alertCfg := alerts.DefaultConfig()
+	alertCfg.ProjectsDir = resolvedProject
+	return alertCfg
+}
+
 // SnapshotOutput provides complete system state for AI orchestration
 type SnapshotOutput struct {
 	RobotResponse
@@ -3846,20 +3873,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 	output.Tools = GetToolsSummary(toolCtx)
 
 	// Generate and add detailed alerts using the alerts package
-	var alertCfg alerts.Config
-	if cfg != nil {
-		alertCfg = alerts.ToConfigAlerts(
-			cfg.Alerts.Enabled,
-			cfg.Alerts.AgentStuckMinutes,
-			cfg.Alerts.DiskLowThresholdGB,
-			cfg.Alerts.MailBacklogThreshold,
-			cfg.Alerts.BeadStaleHours,
-			cfg.Alerts.ResolvedPruneMinutes,
-			cfg.ProjectsBase,
-		)
-	} else {
-		alertCfg = alerts.DefaultConfig()
-	}
+	alertCfg := alertConfigForProject(cfg, projectKey)
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
 
 	if len(activeAlerts) > 0 {
@@ -5614,15 +5628,7 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 	// Get alert breakdown (critical vs warning)
 	var criticalAlerts, warningAlerts int
 	if cfg != nil {
-		alertCfg := alerts.ToConfigAlerts(
-			cfg.Alerts.Enabled,
-			cfg.Alerts.AgentStuckMinutes,
-			cfg.Alerts.DiskLowThresholdGB,
-			cfg.Alerts.MailBacklogThreshold,
-			cfg.Alerts.BeadStaleHours,
-			cfg.Alerts.ResolvedPruneMinutes,
-			cfg.ProjectsBase,
-		)
+		alertCfg := alertConfigForProject(cfg, "")
 		activeAlerts := alerts.GetActiveAlerts(alertCfg)
 		for _, a := range activeAlerts {
 			switch a.Severity {

@@ -1092,6 +1092,123 @@ func TestStartCheckpoint_EmptySessionNoop(t *testing.T) {
 	persister.Stop()
 }
 
+func TestTimelineOperationsRejectInvalidSessionIDs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: "valid", State: TimelineWorking, Timestamp: time.Now()},
+	}
+
+	for _, sessionID := range []string{"", "   ", ".", "..", "../escape", `nested\escape`} {
+		if err := persister.SaveTimeline(sessionID, events); err == nil {
+			t.Fatalf("SaveTimeline(%q) expected error", sessionID)
+		}
+		if _, err := persister.LoadTimeline(sessionID); err == nil {
+			t.Fatalf("LoadTimeline(%q) expected error", sessionID)
+		}
+		if err := persister.DeleteTimeline(sessionID); err == nil {
+			t.Fatalf("DeleteTimeline(%q) expected error", sessionID)
+		}
+		if _, err := persister.GetTimelineInfo(sessionID); err == nil {
+			t.Fatalf("GetTimelineInfo(%q) expected error", sessionID)
+		}
+	}
+}
+
+func TestSaveTimelineRemovesStaleCompressedSibling(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "reused-session"
+	oldEvents := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now().Add(-time.Minute)},
+	}
+	if err := persister.SaveTimeline(sessionID, oldEvents); err != nil {
+		t.Fatalf("initial SaveTimeline: %v", err)
+	}
+	if err := persister.compressTimeline(sessionID); err != nil {
+		t.Fatalf("compressTimeline: %v", err)
+	}
+
+	compressedPath := filepath.Join(tmpDir, sessionID+".jsonl.gz")
+	if _, err := os.Stat(compressedPath); err != nil {
+		t.Fatalf("expected compressed timeline: %v", err)
+	}
+
+	newEvents := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now()},
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineIdle, Timestamp: time.Now().Add(time.Second)},
+	}
+	if err := persister.SaveTimeline(sessionID, newEvents); err != nil {
+		t.Fatalf("replacement SaveTimeline: %v", err)
+	}
+
+	if _, err := os.Stat(compressedPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale compressed timeline to be removed, stat err=%v", err)
+	}
+
+	timelines, err := persister.ListTimelines()
+	if err != nil {
+		t.Fatalf("ListTimelines: %v", err)
+	}
+	if len(timelines) != 1 {
+		t.Fatalf("expected 1 deduplicated timeline entry, got %d", len(timelines))
+	}
+	if timelines[0].Compressed {
+		t.Fatalf("expected live timeline entry to be uncompressed")
+	}
+
+	loaded, err := persister.LoadTimeline(sessionID)
+	if err != nil {
+		t.Fatalf("LoadTimeline: %v", err)
+	}
+	if len(loaded) != len(newEvents) {
+		t.Fatalf("expected %d replacement events, got %d", len(newEvents), len(loaded))
+	}
+}
+
+func TestListTimelinesDeduplicatesCompressedAndUncompressedEntries(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	sessionID := "duplicate-session"
+	events := []AgentEvent{
+		{AgentID: "cc_1", SessionID: sessionID, State: TimelineWorking, Timestamp: time.Now()},
+	}
+	if err := persister.SaveTimeline(sessionID, events); err != nil {
+		t.Fatalf("SaveTimeline: %v", err)
+	}
+
+	gzPath := filepath.Join(tmpDir, sessionID+".jsonl.gz")
+	if err := os.WriteFile(gzPath, []byte(`{"version":"1.0","session_id":"duplicate-session","event_count":999}`+"\n"), 0644); err != nil {
+		t.Fatalf("write stale compressed sibling: %v", err)
+	}
+
+	timelines, err := persister.ListTimelines()
+	if err != nil {
+		t.Fatalf("ListTimelines: %v", err)
+	}
+	if len(timelines) != 1 {
+		t.Fatalf("expected deduplicated timeline list, got %d entries", len(timelines))
+	}
+	if timelines[0].Compressed {
+		t.Fatalf("expected uncompressed timeline to win tie-breaker")
+	}
+}
+
 func TestStopWithActiveCheckpoints(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

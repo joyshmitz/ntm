@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSanitizeSessionName(t *testing.T) {
@@ -455,6 +456,97 @@ func TestLoadSessionAgentRegistry_ProjectKeyValidation(t *testing.T) {
 	}
 	if loaded != nil {
 		t.Error("expected nil for different project key")
+	}
+}
+
+func TestLoadBestSessionAgentRegistry_PrefersUsableProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	sessionName := "test-best-registry"
+	staleProject := filepath.Join(tmpDir, "stale-project")
+	actualProject := filepath.Join(tmpDir, "actual-project")
+	if err := os.MkdirAll(staleProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(actualProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := NewSessionAgentRegistry(sessionName, staleProject)
+	stale.AddAgent("pane-stale", "%1", "OldAgent")
+	if err := SaveSessionAgentRegistry(stale); err != nil {
+		t.Fatalf("SaveSessionAgentRegistry(stale) error: %v", err)
+	}
+
+	actual := NewSessionAgentRegistry(sessionName, actualProject)
+	actual.AddAgent("pane-good", "%2", "GoodAgent")
+	actual.UpdatedAt = time.Now().Add(-1 * time.Hour)
+	if err := SaveSessionAgentRegistry(actual); err != nil {
+		t.Fatalf("SaveSessionAgentRegistry(actual) error: %v", err)
+	}
+
+	loaded, err := LoadBestSessionAgentRegistry(sessionName, filepath.Join(tmpDir, "missing-project"))
+	if err != nil {
+		t.Fatalf("LoadBestSessionAgentRegistry error: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected non-nil registry")
+	}
+	if loaded.ProjectKey != actualProject {
+		t.Fatalf("ProjectKey = %q, want %q", loaded.ProjectKey, actualProject)
+	}
+	if name, ok := loaded.GetAgent("pane-good", "%2"); !ok || name != "GoodAgent" {
+		t.Fatalf("expected GoodAgent mapping, got %q %v", name, ok)
+	}
+}
+
+func TestLoadBestSessionAgent_PrefersUsableProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	sessionName := "test-best-agent"
+	staleProject := filepath.Join(tmpDir, "stale-project")
+	actualProject := filepath.Join(tmpDir, "actual-project")
+	if err := os.MkdirAll(staleProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(actualProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	staleInfo := &SessionAgentInfo{
+		AgentName:    "OldAgent",
+		ProjectKey:   staleProject,
+		RegisteredAt: time.Now().Add(-2 * time.Hour),
+		LastActiveAt: time.Now().Add(-2 * time.Hour),
+	}
+	if err := SaveSessionAgent(sessionName, staleProject, staleInfo); err != nil {
+		t.Fatalf("SaveSessionAgent(stale) error: %v", err)
+	}
+
+	actualInfo := &SessionAgentInfo{
+		AgentName:    "GoodAgent",
+		ProjectKey:   actualProject,
+		RegisteredAt: time.Now().Add(-1 * time.Hour),
+		LastActiveAt: time.Now().Add(-1 * time.Hour),
+	}
+	if err := SaveSessionAgent(sessionName, actualProject, actualInfo); err != nil {
+		t.Fatalf("SaveSessionAgent(actual) error: %v", err)
+	}
+
+	loaded, err := LoadBestSessionAgent(sessionName, filepath.Join(tmpDir, "missing-project"))
+	if err != nil {
+		t.Fatalf("LoadBestSessionAgent error: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected non-nil agent info")
+	}
+	if loaded.ProjectKey != actualProject {
+		t.Fatalf("ProjectKey = %q, want %q", loaded.ProjectKey, actualProject)
+	}
+	if loaded.AgentName != "GoodAgent" {
+		t.Fatalf("AgentName = %q, want %q", loaded.AgentName, "GoodAgent")
 	}
 }
 

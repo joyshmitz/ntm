@@ -589,3 +589,99 @@ func TestInferSessionFromCWD_LabelDisambiguation(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveProjectDirForSession_PrefersCWDForInferredSession(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	configProject := filepath.Join(projectsBase, "ntm")
+	if err := os.MkdirAll(configProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	cwdRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdRepo); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveProjectDirForSession("ntm", false)
+	if got != cwdRepo {
+		t.Errorf("resolveProjectDirForSession inferred = %q, want cwd repo %q", got, cwdRepo)
+	}
+}
+
+func TestResolveProjectDirForSession_PrefersConfiguredDirForExplicitSession(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	configProject := filepath.Join(projectsBase, "ntm")
+	if err := os.MkdirAll(configProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(configProject, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	cwdRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdRepo); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveProjectDirForSession("ntm", true)
+	if got != configProject {
+		t.Errorf("resolveProjectDirForSession explicit = %q, want configured dir %q", got, configProject)
+	}
+}
+
+func TestResolveProjectDirForSession_ExplicitFallsBackToUsableWorkspace(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	configProject := filepath.Join(projectsBase, "ntm")
+	if err := os.MkdirAll(configProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	cwdRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdRepo, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwdRepo); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveProjectDirForSession("ntm", true)
+	if got != cwdRepo {
+		t.Errorf("resolveProjectDirForSession explicit fallback = %q, want workspace dir %q", got, cwdRepo)
+	}
+}

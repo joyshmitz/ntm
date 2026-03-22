@@ -32,9 +32,9 @@ func TestMinInt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := minInt(tc.a, tc.b)
+			got := min(tc.a, tc.b)
 			if got != tc.want {
-				t.Errorf("minInt(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+				t.Errorf("min(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
 			}
 		})
 	}
@@ -60,9 +60,9 @@ func TestMaxInt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := maxInt(tc.a, tc.b)
+			got := max(tc.a, tc.b)
 			if got != tc.want {
-				t.Errorf("maxInt(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+				t.Errorf("max(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
 			}
 		})
 	}

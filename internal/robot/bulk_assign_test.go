@@ -246,6 +246,28 @@ func TestBulkAssignSequentialDeliveryOrdering(t *testing.T) {
 	t.Logf("expected order=%v actual order=%v", expectedOrder, callOrder)
 }
 
+func TestBulkAssignUsesPaneTargetWhenAvailable(t *testing.T) {
+	panes := filterBulkAssignPanes([]tmux.Pane{
+		{ID: "%11", Index: 1, Title: "proj__cc_1"},
+	}, nil)
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "Title1"}})
+
+	var gotTarget string
+	deps := BulkAssignDependencies{
+		SendKeys: func(paneID, message string, enter bool) error {
+			gotTarget = paneID
+			return nil
+		},
+		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+	}
+	output := BulkAssignOutput{Session: "proj"}
+	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+
+	if gotTarget != "%11" {
+		t.Fatalf("expected send target %%11, got %q", gotTarget)
+	}
+}
+
 func TestBulkAssignFailedDelivery(t *testing.T) {
 	panes := mockPanes("proj", []int{1, 2})
 	beads := []bulkBead{{ID: "bd-1", Title: "Title1"}, {ID: "bd-2", Title: "Title2"}}

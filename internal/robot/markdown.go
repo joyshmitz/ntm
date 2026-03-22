@@ -299,21 +299,7 @@ func writeBeadsMarkdown(sb *strings.Builder, opts MarkdownOptions) {
 
 // writeAlertsSection writes the alerts section.
 func writeAlertsSection(sb *strings.Builder, cfg *config.Config, opts MarkdownOptions) {
-	var alertCfg alerts.Config
-	if cfg != nil {
-		alertCfg = alerts.ToConfigAlerts(
-			cfg.Alerts.Enabled,
-			cfg.Alerts.AgentStuckMinutes,
-			cfg.Alerts.DiskLowThresholdGB,
-			cfg.Alerts.MailBacklogThreshold,
-			cfg.Alerts.BeadStaleHours,
-			cfg.Alerts.ResolvedPruneMinutes,
-			cfg.ProjectsBase,
-		)
-	} else {
-		alertCfg = alerts.DefaultConfig()
-	}
-
+	alertCfg := alertConfigForProject(cfg, "")
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
 
 	if len(activeAlerts) == 0 {

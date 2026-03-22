@@ -222,6 +222,15 @@ func TestSave_CustomName(t *testing.T) {
 	}
 }
 
+func TestSave_NilState(t *testing.T) {
+	_, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	if _, err := Save(nil, SaveOptions{Name: "nil-state", Overwrite: true}); err == nil {
+		t.Fatal("Save() with nil state should fail")
+	}
+}
+
 func TestSave_NoOverwrite(t *testing.T) {
 	_, cleanup := setupTestStorage(t)
 	defer cleanup()
@@ -320,6 +329,66 @@ func TestLoad_NotFound(t *testing.T) {
 	_, err := Load("nonexistent-session")
 	if err == nil {
 		t.Errorf("Load() for nonexistent session should fail")
+	}
+}
+
+func TestStorageOperations_RejectEmptySanitizedName(t *testing.T) {
+	_, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	state := createTestState("")
+	if _, err := Save(state, SaveOptions{Overwrite: true}); err == nil {
+		t.Fatal("Save() with empty state name should fail")
+	}
+
+	state = createTestState("ignored")
+	if _, err := Save(state, SaveOptions{Name: "   ", Overwrite: true}); err == nil {
+		t.Fatal("Save() with empty sanitized custom name should fail")
+	}
+	if _, err := Save(state, SaveOptions{Name: ".", Overwrite: true}); err == nil {
+		t.Fatal("Save() with '.' custom name should fail")
+	}
+	if _, err := Save(state, SaveOptions{Name: "..", Overwrite: true}); err == nil {
+		t.Fatal("Save() with '..' custom name should fail")
+	}
+
+	if _, err := Load(""); err == nil {
+		t.Fatal("Load() with empty name should fail")
+	}
+	if _, err := Load("   "); err == nil {
+		t.Fatal("Load() with empty sanitized name should fail")
+	}
+	if _, err := Load("."); err == nil {
+		t.Fatal("Load() with '.' should fail")
+	}
+	if _, err := Load(".."); err == nil {
+		t.Fatal("Load() with '..' should fail")
+	}
+
+	if err := Delete(""); err == nil {
+		t.Fatal("Delete() with empty name should fail")
+	}
+	if err := Delete("   "); err == nil {
+		t.Fatal("Delete() with empty sanitized name should fail")
+	}
+	if err := Delete("."); err == nil {
+		t.Fatal("Delete() with '.' should fail")
+	}
+	if err := Delete(".."); err == nil {
+		t.Fatal("Delete() with '..' should fail")
+	}
+
+	if Exists("") {
+		t.Fatal("Exists() with empty name should be false")
+	}
+	if Exists("   ") {
+		t.Fatal("Exists() with empty sanitized name should be false")
+	}
+	if Exists(".") {
+		t.Fatal("Exists() with '.' should be false")
+	}
+	if Exists("..") {
+		t.Fatal("Exists() with '..' should be false")
 	}
 }
 

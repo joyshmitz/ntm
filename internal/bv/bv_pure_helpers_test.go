@@ -1,6 +1,7 @@
 package bv
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,6 +75,26 @@ func TestNormalizeTriageDir(t *testing.T) {
 		}
 		if !filepath.IsAbs(got) {
 			t.Errorf("expected absolute path, got %q", got)
+		}
+	})
+
+	t.Run("subdir resolves to beads root", func(t *testing.T) {
+		t.Parallel()
+		projectDir := t.TempDir()
+		subDir := filepath.Join(projectDir, "internal", "robot")
+		if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(subDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := normalizeTriageDir(subDir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != projectDir {
+			t.Errorf("normalizeTriageDir(%q) = %q, want %q", subDir, got, projectDir)
 		}
 	})
 }

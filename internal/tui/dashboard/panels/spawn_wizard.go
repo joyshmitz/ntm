@@ -114,7 +114,9 @@ func (sw *SpawnWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch sw.step {
 	case SpawnStepMethod:
 		form, c := sw.methodForm.Update(msg)
-		sw.methodForm = form.(*huh.Form)
+		if f, ok := form.(*huh.Form); ok {
+			sw.methodForm = f
+		}
 		cmd = c
 		if sw.methodForm.State == huh.StateCompleted {
 			sw.step = SpawnStepCounts
@@ -123,7 +125,9 @@ func (sw *SpawnWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case SpawnStepCounts:
 		form, c := sw.countsForm.Update(msg)
-		sw.countsForm = form.(*huh.Form)
+		if f, ok := form.(*huh.Form); ok {
+			sw.countsForm = f
+		}
 		cmd = c
 		if sw.countsForm.State == huh.StateCompleted {
 			// Validate counts
@@ -142,7 +146,9 @@ func (sw *SpawnWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case SpawnStepConfirm:
 		form, c := sw.confirmForm.Update(msg)
-		sw.confirmForm = form.(*huh.Form)
+		if f, ok := form.(*huh.Form); ok {
+			sw.confirmForm = f
+		}
 		cmd = c
 		if sw.confirmForm.State == huh.StateCompleted {
 			result := SpawnWizardResult{
@@ -167,21 +173,15 @@ func (sw *SpawnWizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (sw *SpawnWizard) View() string {
 	t := sw.theme
 
-	// Calculate modal dimensions
-	modalWidth := sw.width - 20
-	if modalWidth > 70 {
-		modalWidth = 70
-	}
-	if modalWidth < 40 {
-		modalWidth = 40
+	// Calculate modal dimensions (clamped to fit within parent)
+	modalWidth := min(70, max(40, sw.width-20))
+	if sw.width > 0 && modalWidth > sw.width-2 {
+		modalWidth = max(10, sw.width-2)
 	}
 
-	modalHeight := sw.height - 10
-	if modalHeight > 20 {
-		modalHeight = 20
-	}
-	if modalHeight < 12 {
-		modalHeight = 12
+	modalHeight := min(20, max(12, sw.height-10))
+	if sw.height > 0 && modalHeight > sw.height-2 {
+		modalHeight = max(6, sw.height-2)
 	}
 
 	// Build content

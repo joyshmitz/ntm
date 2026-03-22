@@ -45,6 +45,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/styles"
 	synthtui "github.com/Dicklesworthstone/ntm/internal/tui/synthesizer"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 )
 
@@ -205,26 +206,15 @@ func (m *Model) recordVelocitySnapshot() {
 		m.velocityByType = make(map[string][]float64)
 	}
 
-	keys := map[string]struct{}{
-		string(tmux.AgentClaude):   {},
-		string(tmux.AgentCodex):    {},
-		string(tmux.AgentGemini):   {},
-		string(tmux.AgentCursor):   {},
-		string(tmux.AgentWindsurf): {},
-		string(tmux.AgentAider):    {},
-		string(tmux.AgentOllama):   {},
-		string(tmux.AgentUser):     {},
-		string(tmux.AgentUnknown):  {},
+	// Only track agent types that have actual velocity data (avoid allocating for all 9 types).
+	// Also append zero samples to types that previously had data but are now idle.
+	for key, val := range byTypeTotals {
+		m.velocityByType[key] = appendVelocitySample(m.velocityByType[key], val, velocityHistoryLimit)
 	}
 	for key := range m.velocityByType {
-		keys[key] = struct{}{}
-	}
-	for key := range byTypeTotals {
-		keys[key] = struct{}{}
-	}
-
-	for key := range keys {
-		m.velocityByType[key] = appendVelocitySample(m.velocityByType[key], byTypeTotals[key], velocityHistoryLimit)
+		if _, reported := byTypeTotals[key]; !reported {
+			m.velocityByType[key] = appendVelocitySample(m.velocityByType[key], 0, velocityHistoryLimit)
+		}
 	}
 }
 
@@ -588,10 +578,26 @@ func (m *Model) newAgentMailClient(projectKey string) *agentmail.Client {
 	return agentmail.NewClient(opts...)
 }
 
+func resolveAgentMailProjectKey(sessionName, projectDir string) string {
+	projectKey := util.BestProjectDir(projectDir, util.ResolveProjectDir(""))
+	if strings.TrimSpace(sessionName) == "" {
+		return projectKey
+	}
+
+	if registry, err := agentmail.LoadBestSessionAgentRegistry(sessionName, projectKey); err == nil && registry != nil {
+		projectKey = util.BestProjectDir(projectKey, registry.ProjectKey)
+	}
+	if info, err := agentmail.LoadBestSessionAgent(sessionName, projectKey); err == nil && info != nil {
+		projectKey = util.BestProjectDir(projectKey, info.ProjectKey)
+	}
+
+	return projectKey
+}
+
 // fetchAgentMailStatus fetches Agent Mail data (locks, connection status)
 func (m *Model) fetchAgentMailStatus() tea.Cmd {
 	gen := m.nextGen(refreshAgentMail)
-	projectKey := m.projectDir
+	projectKey := resolveAgentMailProjectKey(m.session, m.projectDir)
 	return func() tea.Msg {
 		if projectKey == "" {
 			return AgentMailUpdateMsg{Available: false, Gen: gen}
@@ -664,7 +670,7 @@ func (m *Model) fetchAgentMailStatus() tea.Cmd {
 // fetchAgentMailInboxes polls inbox summaries for all registered agents in this session.
 func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 	gen := m.nextGen(refreshAgentMailInbox)
-	projectKey := m.projectDir
+	projectKey := resolveAgentMailProjectKey(m.session, m.projectDir)
 	sessionName := m.session
 	panes := append([]tmux.Pane(nil), m.panes...)
 
@@ -678,7 +684,7 @@ func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 			return AgentMailInboxSummaryMsg{Gen: gen}
 		}
 
-		registry, err := agentmail.LoadSessionAgentRegistry(sessionName, projectKey)
+		registry, err := agentmail.LoadBestSessionAgentRegistry(sessionName, projectKey)
 		if err != nil {
 			return AgentMailInboxSummaryMsg{Err: err, Gen: gen}
 		}
@@ -773,7 +779,7 @@ func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 // fetchAgentMailInboxDetails fetches message bodies for a single agent.
 func (m *Model) fetchAgentMailInboxDetails(pane tmux.Pane) tea.Cmd {
 	gen := m.nextGen(refreshAgentMailInbox)
-	projectKey := m.projectDir
+	projectKey := resolveAgentMailProjectKey(m.session, m.projectDir)
 	sessionName := m.session
 	paneID := pane.ID
 	paneTitle := pane.Title
@@ -788,7 +794,7 @@ func (m *Model) fetchAgentMailInboxDetails(pane tmux.Pane) tea.Cmd {
 			return AgentMailInboxDetailMsg{PaneID: paneID, Gen: gen}
 		}
 
-		registry, err := agentmail.LoadSessionAgentRegistry(sessionName, projectKey)
+		registry, err := agentmail.LoadBestSessionAgentRegistry(sessionName, projectKey)
 		if err != nil || registry == nil {
 			return AgentMailInboxDetailMsg{PaneID: paneID, Err: err, Gen: gen}
 		}
@@ -2833,6 +2839,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor > 0 {
 					m.cursor--
 					m.paneList.Select(m.cursor)
+					if m.paneTable != nil {
+						m.paneTable.Select(m.cursor)
+					}
 				}
 			}
 
@@ -2842,6 +2851,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(m.panes)-1 {
 					m.cursor++
 					m.paneList.Select(m.cursor)
+					if m.paneTable != nil {
+						m.paneTable.Select(m.cursor)
+					}
 				}
 			}
 
@@ -5351,7 +5363,7 @@ func (m *Model) handleConflictAction(conflict watcher.FileConflict, action watch
 	defer cancel()
 
 	// Get project key from project directory or current working directory
-	projectKey := m.projectDir
+	projectKey := resolveAgentMailProjectKey(m.session, m.projectDir)
 	if projectKey == "" {
 		var err error
 		projectKey, err = os.Getwd()

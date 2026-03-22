@@ -101,9 +101,6 @@ func (p *PaneTable) rebuild() {
 	styles.Cell = styles.Cell.Foreground(p.theme.Subtext)
 
 	tableHeight := len(rows) + 1 // account for the header row in bubbles/table
-	if tableHeight < 1 {
-		tableHeight = 1
-	}
 	if p.height > 0 && tableHeight > p.height {
 		tableHeight = p.height
 	}

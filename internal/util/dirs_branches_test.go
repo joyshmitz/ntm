@@ -94,3 +94,144 @@ func TestFindGitRoot_NotARepo(t *testing.T) {
 		t.Error("expected error for non-git directory")
 	}
 }
+
+func TestFindProjectConfigRoot(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	projectDir := filepath.Join(tmp, "repo")
+	subDir := filepath.Join(projectDir, "internal", "robot")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "config.toml"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := FindProjectConfigRoot(subDir)
+	if err != nil {
+		t.Fatalf("FindProjectConfigRoot(%q) error: %v", subDir, err)
+	}
+	if root != projectDir {
+		t.Errorf("FindProjectConfigRoot(%q) = %q, want %q", subDir, root, projectDir)
+	}
+}
+
+func TestFindBeadsRoot(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	projectDir := filepath.Join(tmp, "repo")
+	subDir := filepath.Join(projectDir, "internal", "robot")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := FindBeadsRoot(subDir)
+	if err != nil {
+		t.Fatalf("FindBeadsRoot(%q) error: %v", subDir, err)
+	}
+	if root != projectDir {
+		t.Errorf("FindBeadsRoot(%q) = %q, want %q", subDir, root, projectDir)
+	}
+}
+
+func TestResolveProjectDir_PrefersProjectConfig(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	projectDir := filepath.Join(tmp, "repo")
+	subDir := filepath.Join(projectDir, "pkg")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "config.toml"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveProjectDir(subDir)
+	if got != projectDir {
+		t.Errorf("ResolveProjectDir(%q) = %q, want %q", subDir, got, projectDir)
+	}
+}
+
+func TestResolveProjectDir_PrefersBeadsRoot(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	projectDir := filepath.Join(tmp, "repo")
+	subDir := filepath.Join(projectDir, "pkg", "sub")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveProjectDir(subDir)
+	if got != projectDir {
+		t.Errorf("ResolveProjectDir(%q) = %q, want %q", subDir, got, projectDir)
+	}
+}
+
+func TestResolveProjectDir_FallsBackToGitRoot(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	subDir := filepath.Join(tmp, "a", "b")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "init", tmp)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git init failed: %v: %s", err, out)
+	}
+
+	got := ResolveProjectDir(subDir)
+	wantReal, _ := filepath.EvalSymlinks(tmp)
+	gotReal, _ := filepath.EvalSymlinks(got)
+	if gotReal != wantReal {
+		t.Errorf("ResolveProjectDir(%q) = %q, want %q", subDir, gotReal, wantReal)
+	}
+}
+
+func TestBestProjectDir_PrefersCandidateWithProjectSignals(t *testing.T) {
+	t.Parallel()
+
+	staleDir := filepath.Join(t.TempDir(), "ntm")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := BestProjectDir(staleDir, projectDir)
+	if got != projectDir {
+		t.Errorf("BestProjectDir() = %q, want %q", got, projectDir)
+	}
+}
+
+func TestBestProjectDir_PreservesOrderOnTie(t *testing.T) {
+	t.Parallel()
+
+	first := t.TempDir()
+	second := t.TempDir()
+
+	got := BestProjectDir(first, second)
+	if got != first {
+		t.Errorf("BestProjectDir() = %q, want %q", got, first)
+	}
+}

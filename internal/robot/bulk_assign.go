@@ -76,6 +76,7 @@ type BulkAssignAssignment struct {
 	Status     string `json:"status"`
 	PromptSent bool   `json:"prompt_sent"`
 	Error      string `json:"error,omitempty"`
+	paneTarget string
 }
 
 // BulkAssignSummary aggregates assignment stats.
@@ -107,6 +108,7 @@ type bulkBead struct {
 type bulkPane struct {
 	Index     int
 	AgentType string
+	Target    string
 }
 
 // GetBulkAssign generates the bulk assignment plan and returns the result.
@@ -289,7 +291,11 @@ func filterBulkAssignPanes(panes []tmux.Pane, skip []int) []bulkPane {
 		if agentType == "unknown" || agentType == "user" {
 			continue
 		}
-		filtered = append(filtered, bulkPane{Index: pane.Index, AgentType: agentType})
+		filtered = append(filtered, bulkPane{
+			Index:     pane.Index,
+			AgentType: agentType,
+			Target:    pane.ID,
+		})
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -329,6 +335,7 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 		}
 		assignment.AgentType = pane.AgentType
 		assignment.Reason = "explicit"
+		assignment.paneTarget = pane.Target
 
 		if beadID == "" {
 			assignment.Status = "failed"
@@ -517,12 +524,13 @@ func allocateBulkAssignBeads(panes []bulkPane, beads []bulkBead) bulkAssignPlan 
 		pane := panes[i]
 		bead := beads[i]
 		assignment := BulkAssignAssignment{
-			Pane:      pane.Index,
-			Bead:      bead.ID,
-			BeadTitle: bead.Title,
-			AgentType: pane.AgentType,
-			Reason:    bulkAssignReason(bead),
-			Status:    "planned",
+			Pane:       pane.Index,
+			Bead:       bead.ID,
+			BeadTitle:  bead.Title,
+			AgentType:  pane.AgentType,
+			Reason:     bulkAssignReason(bead),
+			Status:     "planned",
+			paneTarget: pane.Target,
 		}
 		plan.Assignments = append(plan.Assignments, assignment)
 		plan.assigned++
@@ -600,7 +608,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 					return
 				}
 
-				paneID := fmt.Sprintf("%s:.%d", output.Session, a.Pane)
+				paneID := bulkAssignPaneTarget(output.Session, a)
 				if err := deps.SendKeys(paneID, prompt, true); err != nil {
 					a.Status = "failed"
 					a.Error = err.Error()
@@ -634,7 +642,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 				assignment.Status = "planned"
 				assignment.PromptSent = false
 			} else {
-				paneID := fmt.Sprintf("%s:.%d", output.Session, assignment.Pane)
+				paneID := bulkAssignPaneTarget(output.Session, assignment)
 				if err := deps.SendKeys(paneID, prompt, true); err != nil {
 					assignment.Status = "failed"
 					assignment.Error = err.Error()
@@ -673,6 +681,16 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		Skipped:    0,
 		Failed:     failed,
 	}
+}
+
+func bulkAssignPaneTarget(session string, assignment *BulkAssignAssignment) string {
+	if assignment == nil {
+		return session
+	}
+	if assignment.paneTarget != "" {
+		return assignment.paneTarget
+	}
+	return fmt.Sprintf("%s:%d", session, assignment.Pane)
 }
 
 func buildBulkAssignPrompt(template string, deps BulkAssignDependencies, assignment *BulkAssignAssignment, session string, needsDetails bool) (string, error) {

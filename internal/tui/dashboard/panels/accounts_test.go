@@ -107,12 +107,9 @@ func TestAccountsPanel_Keybindings(t *testing.T) {
 	panel := NewAccountsPanel()
 	bindings := panel.Keybindings()
 
-	if len(bindings) != 1 {
-		t.Errorf("Expected 1 keybinding, got %d", len(bindings))
-	}
-
-	if bindings[0].Action != "refresh" {
-		t.Errorf("Expected action 'refresh', got %q", bindings[0].Action)
+	// Accounts panel has no interactive keybindings (refresh is handled externally)
+	if len(bindings) != 0 {
+		t.Errorf("Expected 0 keybindings, got %d", len(bindings))
 	}
 }
 
