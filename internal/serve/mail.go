@@ -699,7 +699,7 @@ func (s *Server) handleMarkMessageRead(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	err = client.MarkMessageRead(ctx, s.projectDir, agentName, messageID)
+	readResult, err := client.MarkMessageRead(ctx, s.projectDir, agentName, messageID)
 	if err != nil {
 		writeAgentMailMessageActionError(w, reqID, err, "marking messages as read is not supported by the configured Agent Mail server")
 		return
@@ -711,8 +711,9 @@ func (s *Server) handleMarkMessageRead(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"message_id": messageID,
-		"read":       true,
+		"message_id": readResult.MessageID,
+		"read":       readResult.Read,
+		"read_at":    readResult.ReadAt,
 	}, reqID)
 }
 
@@ -748,7 +749,7 @@ func (s *Server) handleAckMessage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	err = client.AcknowledgeMessage(ctx, s.projectDir, agentName, messageID)
+	ackResult, err := client.AcknowledgeMessage(ctx, s.projectDir, agentName, messageID)
 	if err != nil {
 		writeAgentMailMessageActionError(w, reqID, err, "message acknowledgements are not supported by the configured Agent Mail server")
 		return
@@ -760,8 +761,10 @@ func (s *Server) handleAckMessage(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"message_id":   messageID,
-		"acknowledged": true,
+		"message_id":      ackResult.MessageID,
+		"acknowledged":    ackResult.Acknowledged,
+		"acknowledged_at": ackResult.AcknowledgedAt,
+		"read_at":         ackResult.ReadAt,
 	}, reqID)
 }
 

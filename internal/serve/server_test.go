@@ -528,6 +528,102 @@ func TestHandleMarkMessageRead_AgentNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.MessageReadResult{
+				MessageID: 42,
+				Read:      true,
+				ReadAt:    &agentmail.FlexTime{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleMarkMessageRead(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success   bool   `json:"success"`
+		MessageID int    `json:"message_id"`
+		Read      bool   `json:"read"`
+		ReadAt    string `json:"read_at"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Success || !resp.Read || resp.MessageID != 42 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.ReadAt == "" {
+		t.Fatal("expected read_at in response")
+	}
+}
+
+func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.MessageAckResult{
+				MessageID:      42,
+				Acknowledged:   true,
+				AcknowledgedAt: &agentmail.FlexTime{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+				ReadAt:         &agentmail.FlexTime{Time: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAckMessage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success        bool   `json:"success"`
+		MessageID      int    `json:"message_id"`
+		Acknowledged   bool   `json:"acknowledged"`
+		AcknowledgedAt string `json:"acknowledged_at"`
+		ReadAt         string `json:"read_at"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Success || !resp.Acknowledged || resp.MessageID != 42 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.AcknowledgedAt == "" || resp.ReadAt == "" {
+		t.Fatal("expected acknowledged_at and read_at in response")
+	}
+}
+
 func TestHandleSearchMessages_NotImplemented(t *testing.T) {
 	t.Parallel()
 

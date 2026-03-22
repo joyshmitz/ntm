@@ -57,14 +57,14 @@ func (f *fakeAMClient) SendMessage(ctx context.Context, opts SendMessageOptions)
 	return &SendResult{}, nil
 }
 
-func (f *fakeAMClient) MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) error {
+func (f *fakeAMClient) MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) (*MessageReadResult, error) {
 	f.readCalls = append(f.readCalls, messageID)
-	return nil
+	return &MessageReadResult{MessageID: messageID, Read: true}, nil
 }
 
-func (f *fakeAMClient) AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) error {
+func (f *fakeAMClient) AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) (*MessageAckResult, error) {
 	f.ackCalls = append(f.ackCalls, messageID)
-	return nil
+	return &MessageAckResult{MessageID: messageID, Acknowledged: true}, nil
 }
 
 type fakeBDClient struct {

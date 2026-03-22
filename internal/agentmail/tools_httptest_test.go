@@ -298,15 +298,31 @@ func TestMarkMessageRead(t *testing.T) {
 
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return map[string]interface{}{"message_id": args["message_id"], "read": true}, nil
+			return map[string]interface{}{
+				"message_id": args["message_id"],
+				"read":       true,
+				"read_at":    "2026-01-02T03:04:05Z",
+			}, nil
 		},
 	}))
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	err := c.MarkMessageRead(context.Background(), "/test", "BlueLake", 42)
+	result, err := c.MarkMessageRead(context.Background(), "/test", "BlueLake", 42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Read {
+		t.Fatal("expected read=true")
+	}
+	if result.MessageID != 42 {
+		t.Fatalf("message_id = %d, want 42", result.MessageID)
+	}
+	if result.ReadAt == nil || result.ReadAt.Time.IsZero() {
+		t.Fatal("expected read_at timestamp")
 	}
 }
 
@@ -315,15 +331,32 @@ func TestAcknowledgeMessage(t *testing.T) {
 
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return map[string]interface{}{"message_id": args["message_id"], "acknowledged": true}, nil
+			return map[string]interface{}{
+				"message_id":      args["message_id"],
+				"acknowledged":    true,
+				"acknowledged_at": "2026-01-02T03:04:05Z",
+				"read_at":         "2026-01-02T03:00:00Z",
+			}, nil
 		},
 	}))
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	err := c.AcknowledgeMessage(context.Background(), "/test", "BlueLake", 42)
+	result, err := c.AcknowledgeMessage(context.Background(), "/test", "BlueLake", 42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Acknowledged {
+		t.Fatal("expected acknowledged=true")
+	}
+	if result.MessageID != 42 {
+		t.Fatalf("message_id = %d, want 42", result.MessageID)
+	}
+	if result.AcknowledgedAt == nil || result.AcknowledgedAt.Time.IsZero() {
+		t.Fatal("expected acknowledged_at timestamp")
 	}
 }
 

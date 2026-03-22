@@ -474,9 +474,9 @@ func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, i
 		var markErr error
 		switch action {
 		case mailActionRead:
-			markErr = client.MarkMessageRead(ctx, projectKey, agent, id)
+			_, markErr = client.MarkMessageRead(ctx, projectKey, agent, id)
 		case mailActionAck:
-			markErr = client.AcknowledgeMessage(ctx, projectKey, agent, id)
+			_, markErr = client.AcknowledgeMessage(ctx, projectKey, agent, id)
 		}
 		if markErr != nil {
 			errs++

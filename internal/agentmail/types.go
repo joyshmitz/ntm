@@ -168,6 +168,21 @@ type HealthStatus struct {
 	Timestamp string `json:"timestamp,omitempty"`
 }
 
+// MessageReadResult contains the result of marking a message as read.
+type MessageReadResult struct {
+	MessageID int       `json:"message_id"`
+	Read      bool      `json:"read"`
+	ReadAt    *FlexTime `json:"read_at,omitempty"`
+}
+
+// MessageAckResult contains the result of acknowledging a message.
+type MessageAckResult struct {
+	MessageID      int       `json:"message_id"`
+	Acknowledged   bool      `json:"acknowledged"`
+	AcknowledgedAt *FlexTime `json:"acknowledged_at,omitempty"`
+	ReadAt         *FlexTime `json:"read_at,omitempty"`
+}
+
 // SessionStartResult contains the result of macro_start_session.
 type SessionStartResult struct {
 	Project          *Project           `json:"project"`

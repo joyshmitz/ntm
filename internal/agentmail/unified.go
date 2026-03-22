@@ -23,8 +23,8 @@ type agentMailClient interface {
 	IsAvailable() bool
 	FetchInbox(ctx context.Context, opts FetchInboxOptions) ([]InboxMessage, error)
 	SendMessage(ctx context.Context, opts SendMessageOptions) (*SendResult, error)
-	MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) error
-	AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) error
+	MarkMessageRead(ctx context.Context, projectKey, agentName string, messageID int) (*MessageReadResult, error)
+	AcknowledgeMessage(ctx context.Context, projectKey, agentName string, messageID int) (*MessageAckResult, error)
 }
 
 type bdMessageClient interface {
@@ -190,7 +190,7 @@ func (m *UnifiedMessenger) Read(ctx context.Context, id string) (*UnifiedMessage
 
 			if found != nil {
 				// Mark as read
-				_ = m.amClient.MarkMessageRead(ctx, m.projectKey, m.agentName, msgID)
+				_, _ = m.amClient.MarkMessageRead(ctx, m.projectKey, m.agentName, msgID)
 				return &UnifiedMessage{
 					ID:        id,
 					Channel:   "agentmail",
@@ -242,7 +242,8 @@ func (m *UnifiedMessenger) Ack(ctx context.Context, id string) error {
 			if err != nil {
 				return fmt.Errorf("invalid agent mail message ID: %w", err)
 			}
-			return m.amClient.AcknowledgeMessage(ctx, m.projectKey, m.agentName, msgID)
+			_, err = m.amClient.AcknowledgeMessage(ctx, m.projectKey, m.agentName, msgID)
+			return err
 		}
 		return fmt.Errorf("agent mail not available")
 
