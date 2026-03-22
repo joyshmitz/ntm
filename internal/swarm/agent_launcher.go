@@ -418,10 +418,15 @@ var DefaultAgentCommands = map[string]string{
 }
 
 // DefaultAgentArgs provides default arguments per agent type.
+// When UseFullPaths is false (the default), agents are launched via shell
+// aliases (cc, cod, gmi) that already include the correct flags, so no
+// extra arguments are needed.  When UseFullPaths is true the binary name
+// is used directly and the caller should supply arguments via
+// WithAgentArgs or a custom LaunchCommandBuilder.
 var DefaultAgentArgs = map[string][]string{
-	"cc":  {"--dangerously-skip-permissions"},
-	"cod": {"--quiet", "--auto-approve"},
-	"gmi": {"--non-interactive"},
+	"cc":  {},
+	"cod": {},
+	"gmi": {},
 }
 
 // LaunchCommand represents a complete agent launch specification.

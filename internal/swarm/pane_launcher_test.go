@@ -108,7 +108,7 @@ func TestPaneLaunchResult(t *testing.T) {
 		PaneTarget:  "test-session:1.1",
 		AgentType:   "cc",
 		Project:     "/projects/foo",
-		Command:     "cc --dangerously-skip-permissions",
+		Command:     "cc",
 		Success:     true,
 		Duration:    100 * time.Millisecond,
 	}

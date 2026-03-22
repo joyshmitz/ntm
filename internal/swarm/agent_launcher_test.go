@@ -614,9 +614,9 @@ func TestDefaultAgentArgs(t *testing.T) {
 		agentType    string
 		expectedArgs []string
 	}{
-		{"cc", []string{"--dangerously-skip-permissions"}},
-		{"cod", []string{"--quiet", "--auto-approve"}},
-		{"gmi", []string{"--non-interactive"}},
+		{"cc", []string{}},
+		{"cod", []string{}},
+		{"gmi", []string{}},
 	}
 
 	for _, tt := range tests {
@@ -779,42 +779,42 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "cc",
 			useFullPaths:   false,
 			expectedBinary: "cc",
-			expectedArgs:   []string{"--dangerously-skip-permissions"},
+			expectedArgs:   []string{},
 		},
 		{
 			name:           "cc with full path",
 			agentType:      "cc",
 			useFullPaths:   true,
 			expectedBinary: "claude",
-			expectedArgs:   []string{"--dangerously-skip-permissions"},
+			expectedArgs:   []string{},
 		},
 		{
 			name:           "cod with shell alias",
 			agentType:      "cod",
 			useFullPaths:   false,
 			expectedBinary: "cod",
-			expectedArgs:   []string{"--quiet", "--auto-approve"},
+			expectedArgs:   []string{},
 		},
 		{
 			name:           "cod with full path",
 			agentType:      "cod",
 			useFullPaths:   true,
 			expectedBinary: "codex",
-			expectedArgs:   []string{"--quiet", "--auto-approve"},
+			expectedArgs:   []string{},
 		},
 		{
 			name:           "gmi with shell alias",
 			agentType:      "gmi",
 			useFullPaths:   false,
 			expectedBinary: "gmi",
-			expectedArgs:   []string{"--non-interactive"},
+			expectedArgs:   []string{},
 		},
 		{
 			name:           "gmi with full path",
 			agentType:      "gmi",
 			useFullPaths:   true,
 			expectedBinary: "gemini",
-			expectedArgs:   []string{"--non-interactive"},
+			expectedArgs:   []string{},
 		},
 	}
 

@@ -30,8 +30,9 @@ func TestAutoRespawnerSpawnAgentWithCommandBuilder(t *testing.T) {
 	}
 
 	call := mock.sendKeysCalls[0]
-	// Expect full path since builder is configured with WithFullPaths(true) and a custom path
-	expected := "/custom/path/to/claude --dangerously-skip-permissions"
+	// Expect full path since builder is configured with WithFullPaths(true) and a custom path.
+	// No default args are appended; shell aliases handle flags.
+	expected := "/custom/path/to/claude"
 	if call.text != expected {
 		t.Errorf("expected command %q, got %q", expected, call.text)
 	}
