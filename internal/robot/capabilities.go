@@ -229,6 +229,26 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-inspect-pane=myproject --inspect-index=1 --inspect-code"},
 		},
 		{
+			Name:        "inspect-session",
+			Flag:        "--robot-inspect-session",
+			Category:    "state",
+			Description: "Projection-backed session drill-down with stable session and agent detail.",
+			Parameters: []RobotParameter{
+				{Name: "session", Flag: "--robot-inspect-session", Type: "string", Required: true, Description: "Session name"},
+			},
+			Examples: []string{"ntm --robot-inspect-session=myproject"},
+		},
+		{
+			Name:        "inspect-agent",
+			Flag:        "--robot-inspect-agent",
+			Category:    "state",
+			Description: "Projection-backed agent drill-down with stable runtime agent identity.",
+			Parameters: []RobotParameter{
+				{Name: "agent_id", Flag: "--robot-inspect-agent", Type: "string", Required: true, Description: "Runtime agent id in SESSION:PANE form"},
+			},
+			Examples: []string{"ntm --robot-inspect-agent=myproject:%1"},
+		},
+		{
 			Name:        "files",
 			Flag:        "--robot-files",
 			Category:    "state",

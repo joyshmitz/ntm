@@ -210,6 +210,11 @@ func buildZoomResponse(session string, paneIdx int) (output.SuccessResponse, err
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SuccessResponse{}, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return output.SuccessResponse{}, err
+	}
+	session = resolvedSession
 	if !tmux.SessionExists(session) {
 		return output.SuccessResponse{}, fmt.Errorf("session '%s' not found", session)
 	}

@@ -234,13 +234,23 @@ in the worktree.`,
 
 func resolveWorktreeScope(session string) (string, string, error) {
 	session = strings.TrimSpace(session)
-	if session == "" {
-		session = strings.TrimSpace(tmux.GetCurrentSession())
-	}
 	if session != "" {
 		if err := tmux.ValidateSessionName(session); err != nil {
 			return "", "", fmt.Errorf("invalid session name: %w", err)
 		}
+		if tmux.IsInstalled() {
+			if sessionList, err := tmux.ListSessions(); err == nil {
+				allowPrefix := !IsJSONOutput()
+				if resolved, _, err := resolveExplicitSessionName(session, sessionList, allowPrefix); err == nil {
+					session = resolved
+				}
+			}
+		}
+	}
+	if session == "" {
+		session = strings.TrimSpace(tmux.GetCurrentSession())
+	}
+	if session != "" {
 		projectDir := resolveProjectDirForSession(session, true)
 		if projectDir == "" {
 			return "", "", fmt.Errorf("getting project root failed")

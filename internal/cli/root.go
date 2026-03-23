@@ -1667,6 +1667,26 @@ Shell Integration:
 			}
 			return
 		}
+		if robotInspectSession != "" {
+			opts := robot.InspectSessionOptions{
+				Session: robotInspectSession,
+			}
+			if err := robot.PrintInspectSession(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotInspectAgent != "" {
+			opts := robot.InspectAgentOptions{
+				AgentID: robotInspectAgent,
+			}
+			if err := robot.PrintInspectAgent(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotContextInject != "" {
 			session := robotContextInject
 			if err := tmux.ValidateSessionName(session); err != nil {
@@ -2565,6 +2585,8 @@ var (
 	robotFiles           string // session name for file changes query
 	robotFilesWindow     string // time window: 5m, 15m, 1h, all (default: 15m)
 	robotFilesLimit      int    // max changes to return
+	robotInspectSession  string // session name for projection-backed session inspection
+	robotInspectAgent    string // runtime agent id for projection-backed agent inspection
 	robotInspectPane     string // session name for pane inspection
 	robotInspectIndex    int    // pane index to inspect
 	robotInspectLines    int    // lines to capture for inspection
@@ -3142,6 +3164,8 @@ func init() {
 	rootCmd.Flags().IntVar(&robotInspectIndex, "inspect-index", 0, "Pane index to inspect. Optional with --robot-inspect-pane. Example: --inspect-index=2")
 	rootCmd.Flags().IntVar(&robotInspectLines, "inspect-lines", 100, "Lines to capture. Optional with --robot-inspect-pane. Example: --inspect-lines=200")
 	rootCmd.Flags().BoolVar(&robotInspectCode, "inspect-code", false, "Parse code blocks from output. Optional with --robot-inspect-pane")
+	rootCmd.Flags().StringVar(&robotInspectSession, "robot-inspect-session", "", "Projection-backed session drill-down. Required: SESSION. Example: ntm --robot-inspect-session=myproject")
+	rootCmd.Flags().StringVar(&robotInspectAgent, "robot-inspect-agent", "", "Projection-backed agent drill-down. Required: SESSION:PANE runtime agent id. Example: ntm --robot-inspect-agent=myproject:%1")
 
 	rootCmd.Flags().StringVar(&robotMetrics, "robot-metrics", "", "Session metrics export. Optional SESSION. Example: ntm --robot-metrics=myproject --metrics-period=24h")
 	rootCmd.Flags().StringVar(&robotMetricsPeriod, "metrics-period", "24h", "Period: 1h, 24h, 7d, all. Optional with --robot-metrics. Example: --metrics-period=7d")

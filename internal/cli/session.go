@@ -642,6 +642,11 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.StatusResponse{}, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return output.StatusResponse{}, err
+	}
+	session = resolvedSession
 
 	if !tmux.SessionExists(session) {
 		return output.StatusResponse{
@@ -857,6 +862,11 @@ func buildAttachResponse(session string) (output.SessionResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SessionResponse{}, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return output.SessionResponse{}, err
+	}
+	session = resolvedSession
 
 	if !tmux.SessionExists(session) {
 		return output.SessionResponse{

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -166,6 +167,33 @@ func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveO
 		Inferred: true,
 		Prompted: true,
 	}, nil
+}
+
+// normalizeExplicitLiveSessionName validates an explicit session name and resolves it
+// to the canonical live tmux session when possible. If no live match exists, the
+// validated raw session name is returned so callers can preserve existing "not found"
+// behavior after normalization.
+func normalizeExplicitLiveSessionName(session string, allowPrefix bool) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", fmt.Errorf("session is required")
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
+	sessionList, err := tmux.ListSessions()
+	if err != nil {
+		return "", err
+	}
+	resolved, _, err := resolveExplicitSessionName(session, sessionList, allowPrefix)
+	if err == nil {
+		return resolved, nil
+	}
+	var resolveErr *sessionPkg.ResolveExplicitSessionNameError
+	if errors.As(err, &resolveErr) && resolveErr.Kind == sessionPkg.ResolveExplicitSessionNameErrorAmbiguous {
+		return "", err
+	}
+	return session, nil
 }
 
 func resolveExplicitSessionName(input string, sessions []tmux.Session, allowPrefix bool) (string, string, error) {

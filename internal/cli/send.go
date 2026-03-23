@@ -1795,6 +1795,11 @@ func buildInterruptResponse(session string, tags []string) (*output.InterruptRes
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return nil, err
+	}
+	session = resolvedSession
 
 	if !tmux.SessionExists(session) {
 		return nil, fmt.Errorf("session '%s' not found", session)
@@ -2165,6 +2170,11 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool, 
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return nil, err
+	}
+	session = resolvedSession
 
 	if !tmux.SessionExists(session) {
 		return nil, fmt.Errorf("session '%s' not found", session)

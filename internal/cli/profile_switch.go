@@ -79,18 +79,20 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 		return outputProfileSwitchError(agentID, "", "", err)
 	}
 
-	// Resolve session name
-	if sessionName == "" {
-		res, err := ResolveSession("", os.Stdout)
-		if err != nil {
-			return outputProfileSwitchError(agentID, "", newProfileName, err)
-		}
-		if res.Session == "" {
-			return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("session selection cancelled"))
-		}
-		res.ExplainIfInferred(os.Stderr)
-		sessionName = res.Session
+	if err := tmux.EnsureInstalled(); err != nil {
+		return outputProfileSwitchError(agentID, "", newProfileName, err)
 	}
+
+	// Resolve session name
+	res, err := ResolveSessionWithOptions(sessionName, os.Stdout, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	if err != nil {
+		return outputProfileSwitchError(agentID, "", newProfileName, err)
+	}
+	if res.Session == "" {
+		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("session selection cancelled"))
+	}
+	res.ExplainIfInferred(os.Stderr)
+	sessionName = res.Session
 
 	projectDir, err := resolveProfileSwitchProjectDir(sessionName)
 	if err != nil {
@@ -160,9 +162,14 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName != "" {
-		if err := tmux.ValidateSessionName(sessionName); err != nil {
-			return "", fmt.Errorf("invalid session name: %w", err)
+		res, err := ResolveSessionWithOptions(sessionName, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+		if err != nil {
+			return "", err
 		}
+		if res.Session == "" {
+			return "", fmt.Errorf("session is required")
+		}
+		sessionName = res.Session
 	}
 
 	projectDir := resolveProjectDirForSession(sessionName, true)

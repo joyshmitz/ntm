@@ -164,6 +164,11 @@ func buildViewResponse(session string) (output.SuccessResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return output.SuccessResponse{}, err
 	}
+	resolvedSession, err := normalizeExplicitLiveSessionName(session, true)
+	if err != nil {
+		return output.SuccessResponse{}, err
+	}
+	session = resolvedSession
 	if !tmux.SessionExists(session) {
 		return output.SuccessResponse{}, fmt.Errorf("session '%s' not found", session)
 	}

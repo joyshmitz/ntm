@@ -2040,10 +2040,7 @@ func (s *Store) GCExpiredEvents() (int64, error) {
 	defer s.mu.Unlock()
 
 	result, err := s.db.Exec(`DELETE FROM attention_events WHERE expires_at < datetime('now')`)
-	if err != nil {
-		return 0, fmt.Errorf("gc expired events: %w", err)
-	}
-	return result.RowsAffected()
+	return rowsAffected(result, err, "gc expired events")
 }
 
 // =============================================================================
@@ -2889,10 +2886,7 @@ func (s *Store) GCExpiredAuditEvents() (int64, error) {
 	result, err := s.db.Exec(`
 		DELETE FROM audit_events
 		WHERE retention_class != 'permanent' AND expires_at < datetime('now')`)
-	if err != nil {
-		return 0, fmt.Errorf("gc expired audit events: %w", err)
-	}
-	return result.RowsAffected()
+	return rowsAffected(result, err, "gc expired audit events")
 }
 
 // GCExpiredAuditDecisions deletes expired decision-history entries.
@@ -2903,10 +2897,7 @@ func (s *Store) GCExpiredAuditDecisions() (int64, error) {
 	result, err := s.db.Exec(`
 		DELETE FROM audit_decision_log
 		WHERE expires_at IS NOT NULL AND expires_at < datetime('now')`)
-	if err != nil {
-		return 0, fmt.Errorf("gc expired audit decisions: %w", err)
-	}
-	return result.RowsAffected()
+	return rowsAffected(result, err, "gc expired audit decisions")
 }
 
 // CompactAuditDecisionLog keeps only the most recent maxRows decisions.
@@ -2926,10 +2917,7 @@ func (s *Store) CompactAuditDecisionLog(maxRows int) (int64, error) {
 			ORDER BY decision_at DESC, id DESC
 			LIMIT ?
 		)`, maxRows)
-	if err != nil {
-		return 0, fmt.Errorf("compact audit decision log: %w", err)
-	}
-	return result.RowsAffected()
+	return rowsAffected(result, err, "compact audit decision log")
 }
 
 // =============================================================================

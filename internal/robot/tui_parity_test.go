@@ -2,12 +2,14 @@ package robot
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
 func TestFormatTerseLine_FeedUnavailableMarker(t *testing.T) {
@@ -888,6 +890,226 @@ func TestInspectPaneOutputStructure(t *testing.T) {
 		if _, ok := parsed[field]; !ok {
 			t.Errorf("missing required field: %s", field)
 		}
+	}
+}
+
+func TestInspectSessionOutputStructure(t *testing.T) {
+	output := InspectSessionOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-session"),
+		SchemaVersion: inspectSessionSchemaVersion,
+		Session:       "alpha",
+		Detail: InspectSessionDetail{
+			Name:       "alpha",
+			Attached:   true,
+			AgentCount: 1,
+			Health:     InspectHealth{Status: "healthy"},
+			Projection: InspectProjectionInfo{Fresh: true},
+			Agents: []InspectAgentDetail{
+				{
+					ID:         "alpha:%1",
+					Session:    "alpha",
+					Pane:       "%1",
+					Type:       "claude",
+					State:      "idle",
+					Health:     InspectHealth{Status: "healthy"},
+					Projection: InspectProjectionInfo{Fresh: true},
+				},
+			},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectSessionOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectSessionOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "session", "detail"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestInspectAgentOutputStructure(t *testing.T) {
+	output := InspectAgentOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-agent"),
+		SchemaVersion: inspectAgentSchemaVersion,
+		AgentID:       "alpha:%1",
+		Detail: InspectAgentDetail{
+			ID:         "alpha:%1",
+			Session:    "alpha",
+			Pane:       "%1",
+			Type:       "claude",
+			State:      "idle",
+			Health:     InspectHealth{Status: "healthy"},
+			Projection: InspectProjectionInfo{Fresh: true},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectAgentOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectAgentOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "agent_id", "detail"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestGetInspectSessionUsesProjectionStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeSession(&state.RuntimeSession{
+		Name:         "alpha",
+		Label:        "frontend",
+		ProjectPath:  "/data/projects/ntm",
+		Attached:     true,
+		WindowCount:  1,
+		PaneCount:    2,
+		AgentCount:   1,
+		ActiveAgents: 1,
+		HealthStatus: state.HealthStatusHealthy,
+		CollectedAt:  now,
+		StaleAfter:   staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeSession: %v", err)
+	}
+	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
+		ID:               "alpha:%1",
+		SessionName:      "alpha",
+		Pane:             "%1",
+		AgentType:        "claude",
+		Variant:          "opus",
+		TypeConfidence:   0.9,
+		TypeMethod:       "process",
+		State:            state.AgentStateBusy,
+		StateReason:      "working",
+		LastOutputAgeSec: 4,
+		OutputTailLines:  12,
+		CurrentBead:      "bd-j9jo3.6.4",
+		PendingMail:      2,
+		AgentMailName:    "BlueLake",
+		HealthStatus:     state.HealthStatusHealthy,
+		CollectedAt:      now,
+		StaleAfter:       staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeAgent: %v", err)
+	}
+
+	output, err := GetInspectSession(InspectSessionOptions{Session: "alpha"})
+	if err != nil {
+		t.Fatalf("GetInspectSession: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectSession failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-session") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-session"))
+	}
+	if output.Detail.Name != "alpha" || output.Detail.Label != "frontend" {
+		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	if len(output.Detail.Agents) != 1 {
+		t.Fatalf("Detail.Agents = %+v", output.Detail.Agents)
+	}
+	if output.Detail.Agents[0].ID != "alpha:%1" || output.Detail.Agents[0].CurrentBead != "bd-j9jo3.6.4" {
+		t.Fatalf("Agent detail = %+v", output.Detail.Agents[0])
+	}
+}
+
+func TestGetInspectAgentUsesProjectionStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeSession(&state.RuntimeSession{
+		Name:         "alpha",
+		Attached:     true,
+		WindowCount:  1,
+		PaneCount:    2,
+		AgentCount:   1,
+		IdleAgents:   1,
+		HealthStatus: state.HealthStatusHealthy,
+		CollectedAt:  now,
+		StaleAfter:   staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeSession: %v", err)
+	}
+	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
+		ID:             "alpha:%2",
+		SessionName:    "alpha",
+		Pane:           "%2",
+		AgentType:      "codex",
+		TypeConfidence: 0.8,
+		TypeMethod:     "title",
+		State:          state.AgentStateIdle,
+		PendingMail:    1,
+		HealthStatus:   state.HealthStatusWarning,
+		HealthReason:   "waiting for prompt",
+		CollectedAt:    now,
+		StaleAfter:     staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeAgent: %v", err)
+	}
+
+	output, err := GetInspectAgent(InspectAgentOptions{AgentID: "alpha:%2"})
+	if err != nil {
+		t.Fatalf("GetInspectAgent: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectAgent failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-agent") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-agent"))
+	}
+	if output.Detail.ID != "alpha:%2" || output.Detail.Type != "codex" || output.Detail.Health.Status != "warning" {
+		t.Fatalf("Detail = %+v", output.Detail)
 	}
 }
 

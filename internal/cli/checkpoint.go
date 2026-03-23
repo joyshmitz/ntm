@@ -2,7 +2,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -11,9 +13,48 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
+	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
+
+func resolveCheckpointLiveSessionArg(session string, w io.Writer) (string, error) {
+	res, err := ResolveSessionWithOptions(session, w, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	if err != nil {
+		return "", err
+	}
+	if res.Session == "" {
+		return "", fmt.Errorf("session is required")
+	}
+	res.ExplainIfInferred(os.Stderr)
+	return res.Session, nil
+}
+
+func resolveCheckpointStorageSessionArg(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", fmt.Errorf("session is required")
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
+	if tmux.IsInstalled() {
+		if sessionList, err := tmux.ListSessions(); err == nil {
+			allowPrefix := !IsJSONOutput()
+			if resolved, _, err := resolveExplicitSessionName(session, sessionList, allowPrefix); err == nil {
+				return resolved, nil
+			} else {
+				var re *sessionPkg.ResolveExplicitSessionNameError
+				if !errors.As(err, &re) ||
+					(re.Kind != sessionPkg.ResolveExplicitSessionNameErrorNoSessions &&
+						re.Kind != sessionPkg.ResolveExplicitSessionNameErrorNotFound) {
+					return "", err
+				}
+			}
+		}
+	}
+	return session, nil
+}
 
 func newCheckpointCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -72,7 +113,10 @@ Examples:
   ntm checkpoint save myproject --no-git`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session := args[0]
+			session, err := resolveCheckpointLiveSessionArg(args[0], cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
 
 			// Verify session exists
 			if !tmux.SessionExists(session) {
@@ -161,7 +205,10 @@ Examples:
 
 			if len(args) == 1 {
 				// List checkpoints for specific session
-				session := args[0]
+				session, err := resolveCheckpointStorageSessionArg(args[0])
+				if err != nil {
+					return err
+				}
 				return listSessionCheckpoints(storage, session)
 			}
 
@@ -312,7 +359,11 @@ Examples:
   ntm checkpoint show myproject 20251210-143052`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session, id := args[0], args[1]
+			session, err := resolveCheckpointStorageSessionArg(args[0])
+			if err != nil {
+				return err
+			}
+			id := args[1]
 
 			storage := checkpoint.NewStorage()
 			cp, err := storage.Load(session, id)
@@ -401,7 +452,11 @@ Examples:
   ntm checkpoint delete myproject 20251210-143052 --force`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session, id := args[0], args[1]
+			session, err := resolveCheckpointStorageSessionArg(args[0])
+			if err != nil {
+				return err
+			}
+			id := args[1]
 
 			storage := checkpoint.NewStorage()
 
@@ -484,7 +539,10 @@ Examples:
 				return fmt.Errorf("--scrollback must be >= 0")
 			}
 
-			sessionName := args[0]
+			sessionName, err := resolveCheckpointStorageSessionArg(args[0])
+			if err != nil {
+				return err
+			}
 			checkpointRef := "last"
 			if len(args) == 2 {
 				checkpointRef = args[1]
@@ -656,7 +714,10 @@ Examples:
   ntm checkpoint verify myproject --all            # Verify all checkpoints for session`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session := args[0]
+			session, err := resolveCheckpointStorageSessionArg(args[0])
+			if err != nil {
+				return err
+			}
 			storage := checkpoint.NewStorage()
 
 			if all {
@@ -837,7 +898,11 @@ Examples:
   ntm checkpoint export myproject 20251210-143052 --redact-secrets`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session, id := args[0], args[1]
+			session, err := resolveCheckpointStorageSessionArg(args[0])
+			if err != nil {
+				return err
+			}
+			id := args[1]
 
 			storage := checkpoint.NewStorage()
 

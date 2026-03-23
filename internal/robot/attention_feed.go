@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -2278,8 +2279,9 @@ func (f *AttentionFeed) notifySubscribers(event AttentionEvent) {
 		// Handlers should be fast; slow handlers will block the feed.
 		func() {
 			defer func() {
-				// Recover from panics in handlers to prevent feed disruption
-				_ = recover()
+				if r := recover(); r != nil {
+					log.Printf("attention feed: handler panic recovered: %v", r)
+				}
 			}()
 			h(cloneAttentionEvent(event))
 		}()
@@ -2564,7 +2566,7 @@ func NewLoggedAttentionEvent(event ntmevents.Event) (AttentionEvent, bool) {
 		result.Actionability = ActionabilityActionRequired
 		result.Severity = SeverityError
 		result.Summary = attentionSummary(event.Session, attentionPaneRef(details), attentionAgentSummary("agent crashed", event.AgentName, details))
-		result.NextActions = attentionTailOrStatusActions(event.Session, attentionPaneRef(details), "Inspect the failing agent output")
+		result.NextActions = attentionTailOrStatusActions(event.Session, attentionEventPaneRef(result), "Inspect the rate-limited agent output")
 	case ntmevents.EventAgentRestart:
 		result.Category = EventCategoryAgent
 		result.Type = EventTypeAgentRecovered
@@ -2965,7 +2967,7 @@ func SetAttentionFeed(feed *AttentionFeed) {
 }
 
 // NOTE: --robot-events command implementation lives in events.go (br-kpvhy).
-// The EventsOptions, EventsResponse, GetEvents, filterEvents, and PrintEvents
+// The EventsOptions, EventsResponse, GetEvents, filterEvents, and toStringSetForEvents
 // are all defined there. This comment preserves the bead reference.
 
 func cloneAttentionEvent(event AttentionEvent) AttentionEvent {
@@ -3620,7 +3622,10 @@ func attentionSeverityRank(level Severity) int {
 
 func attentionConflictActions(session, path, reason string) []NextAction {
 	path = strings.TrimSpace(path)
-	if session != "" && path != "" && !strings.ContainsAny(path, "*?[") {
+	if session == "" {
+		return []NextAction{attentionStatusNextAction(reason)}
+	}
+	if !strings.ContainsAny(path, "*?[") {
 		return []NextAction{{
 			Action: "robot-diff",
 			Args:   fmt.Sprintf("--session=%s --file=%s", session, path),

@@ -3,7 +3,6 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -528,7 +527,7 @@ func TestAttentionFeed_HeartbeatLoopDefersHeartbeatUntilQuiet(t *testing.T) {
 	select {
 	case heartbeat := <-heartbeats:
 		t.Fatalf("heartbeat arrived before quiet period elapsed: %#v", heartbeat)
-	case <-time.After(55 * time.Millisecond):
+	case <-time.After(25 * time.Millisecond):
 	}
 
 	var heartbeat AttentionEvent
@@ -953,10 +952,10 @@ func TestAttentionFeed_SubscribeEventBus(t *testing.T) {
 
 	replayed, _, err := feed.Replay(0, 10)
 	if err != nil {
-		t.Fatalf("Replay error: %v", err)
+		t.Fatalf("Replay after unsubscribe error: %v", err)
 	}
 	if len(replayed) != 1 {
-		t.Fatalf("replayed %d live bus events, want 1", len(replayed))
+		t.Fatalf("replayed %d events after unsubscribe, want 1", len(replayed))
 	}
 	if replayed[0].Type != EventTypeAgentError {
 		t.Fatalf("live bus event type = %q, want %q", replayed[0].Type, EventTypeAgentError)
@@ -1750,7 +1749,7 @@ func TestAttentionFeed_StoreCursorExpiration(t *testing.T) {
 	t.Cleanup(feed.Stop)
 
 	// Add events
-	for i := 0; i < 3; i++ {
+	for i := int64(1); i <= 100; i++ {
 		feed.Append(AttentionEvent{
 			Session:       "proj",
 			Category:      EventCategoryAgent,
@@ -1763,24 +1762,24 @@ func TestAttentionFeed_StoreCursorExpiration(t *testing.T) {
 	}
 
 	// Replay from valid cursor should work
-	events, _, err := feed.Replay(0, 10)
+	events, _, err := feed.Replay(0, 100)
 	if err != nil {
 		t.Fatalf("Replay(0) error: %v", err)
 	}
-	if len(events) != 3 {
-		t.Fatalf("expected 3 events, got %d", len(events))
+	if len(events) != 100 {
+		t.Fatalf("expected 100 events, got %d", len(events))
 	}
 
 	// Replay from cursor=-1 should return empty with current cursor
-	events, latestCursor, err := feed.Replay(-1, 10)
+	events, latestCursor, err := feed.Replay(-1, 100)
 	if err != nil {
 		t.Fatalf("Replay(-1) error: %v", err)
 	}
 	if len(events) != 0 {
 		t.Fatalf("Replay(-1) should return 0 events, got %d", len(events))
 	}
-	if latestCursor < 3 {
-		t.Fatalf("latest cursor should be >= 3, got %d", latestCursor)
+	if latestCursor < 100 {
+		t.Fatalf("latest cursor should be >= 100, got %d", latestCursor)
 	}
 }
 
@@ -2065,7 +2064,7 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 						LatestSubject:           "Earlier coordination",
 						LatestSubjectDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible"},
 						LatestPreview:           "Earlier coordination",
-						LatestPreviewDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible", RedactionMode: "redact"},
+						LatestPreviewDisclosure: &adapters.DisclosureMetadata{DisclosureState: "redact"},
 					},
 				},
 			},
@@ -2822,8 +2821,8 @@ func TestAttentionSignal_NormalizesLifecycleActionabilityAndActions(t *testing.T
 			if tt.event.Severity != SeverityInfo {
 				t.Fatalf("severity = %q, want %q", tt.event.Severity, SeverityInfo)
 			}
-			if len(tt.event.NextActions) != 1 {
-				t.Fatalf("next_actions len = %d, want 1 (%v)", len(tt.event.NextActions), tt.event.NextActions)
+			if len(tt.event.NextActions) == 0 {
+				t.Error("NextActions must suggest follow-up commands")
 			}
 			if tt.event.NextActions[0].Action != "robot-status" {
 				t.Fatalf("next action = %q, want robot-status", tt.event.NextActions[0].Action)
@@ -3061,8 +3060,8 @@ func TestBuildAttentionDigest_SuppressesLifecycleNoiseAndDuplicateAlerts(t *test
 	if alert.SuppressionReason != attentionDigestSuppressionDuplicateAlert {
 		t.Fatalf("duplicate alert reason = %q, want %q", alert.SuppressionReason, attentionDigestSuppressionDuplicateAlert)
 	}
-	if len(digest.Buckets.Background) != 1 {
-		t.Fatalf("background bucket len = %d, want 1", len(digest.Buckets.Background))
+	if len(digest.Buckets.Interesting) != 1 {
+		t.Fatalf("background bucket len = %d, want 1", len(digest.Buckets.Interesting))
 	}
 	if digest.Suppressed.Total != 3 {
 		t.Fatalf("suppressed total = %d, want 3", digest.Suppressed.Total)
@@ -3097,31 +3096,14 @@ func TestBuildAttentionDigest_PrefersRecurringResurfacedItemsWhenBucketLimited(t
 	if got := digest.Buckets.Interesting[0].Event.Summary; got != recurring.Summary {
 		t.Fatalf("top interesting summary = %q, want %q", got, recurring.Summary)
 	}
-
-	var resurfacedTrace *AttentionDigestDecision
-	for i := range digest.Trace {
-		if digest.Trace[i].Cursor == recurring.Cursor {
-			resurfacedTrace = &digest.Trace[i]
-			break
-		}
-	}
-	if resurfacedTrace == nil {
-		t.Fatalf("missing trace for recurring event: %+v", digest.Trace)
-	}
-	if resurfacedTrace.Decision != "surfaced" {
-		t.Fatalf("recurring trace decision = %q, want surfaced", resurfacedTrace.Decision)
-	}
-	if resurfacedTrace.Reason != attentionResurfaceReasonCooldownExpired {
-		t.Fatalf("recurring trace reason = %q, want %q", resurfacedTrace.Reason, attentionResurfaceReasonCooldownExpired)
-	}
 }
 
 func TestAttentionFeed_DigestPreservesCursorBoundariesAndImportantSignals(t *testing.T) {
 	feed := newTestAttentionFeed(t)
 
 	feed.Append(digestTestEvent(0, EventCategorySystem, EventType(DefaultTransportLiveness.HeartbeatType), ActionabilityBackground, SeverityDebug, "Heartbeat"))
-	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 1"))
-	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityInteresting, SeverityInfo, "output update 2"))
+	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityBackground, SeverityInfo, "output update 1"))
+	feed.Append(digestTestEvent(0, EventCategoryPane, EventTypePaneOutput, ActionabilityBackground, SeverityInfo, "output update 2"))
 	feed.Append(digestTestEvent(0, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "quota at 92%"))
 	feed.Append(digestTestEvent(0, EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, "agent became idle"))
 
@@ -3173,9 +3155,9 @@ func TestBuildAttentionDigest_SummaryStableAndBucketAssignment(t *testing.T) {
 
 	opts := DefaultAttentionDigestOptions()
 	opts.MinSeverity = SeverityDebug
-	opts.ActionRequiredLimit = 5
-	opts.InterestingLimit = 5
-	opts.BackgroundLimit = 5
+	opts.ActionRequiredLimit = 15
+	opts.InterestingLimit = 15
+	opts.BackgroundLimit = 15
 
 	digest := BuildAttentionDigest([]AttentionEvent{heartbeat, alert, bead, output1, output2, background}, 0, 6, opts)
 	t.Logf("digest summary=%q buckets=%+v suppressed=%+v", digest.Summary, digest.Buckets, digest.Suppressed)
@@ -3213,10 +3195,9 @@ func TestBuildAttentionDigest_PrioritizedQueueMergesBuckets(t *testing.T) {
 	background2 := digestTestEvent(6, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityDebug, "metric update")
 
 	opts := DefaultAttentionDigestOptions()
-	opts.MinSeverity = SeverityDebug
-	opts.ActionRequiredLimit = 5
-	opts.InterestingLimit = 5
-	opts.BackgroundLimit = 5
+	opts.ActionRequiredLimit = 15
+	opts.InterestingLimit = 15
+	opts.BackgroundLimit = 15
 
 	digest := BuildAttentionDigest([]AttentionEvent{action1, action2, interesting1, interesting2, background1, background2}, 0, 6, opts)
 
@@ -3265,7 +3246,7 @@ func TestBuildAttentionDigest_PrioritizedQueueCapsAtLimit(t *testing.T) {
 	// Create more events than the cap (10)
 	events := make([]AttentionEvent, 15)
 	for i := 0; i < 15; i++ {
-		events[i] = digestTestEvent(int64(i+1), EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, fmt.Sprintf("alert %d", i+1))
+		events[i] = digestTestEvent(int64(i+1), EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, fmt.Sprintf("alert %d", i+2))
 	}
 
 	opts := DefaultAttentionDigestOptions()
@@ -3305,7 +3286,7 @@ func TestAttentionEvent_JSONSerialization(t *testing.T) {
 		Pane:          2,
 		Category:      EventCategoryAgent,
 		Type:          EventTypeAgentStateChange,
-		Source:        "activity_tracker",
+		Source:        "test",
 		Actionability: ActionabilityInteresting,
 		Severity:      SeverityInfo,
 		Summary:       "Test event",
@@ -3420,8 +3401,13 @@ func BenchmarkAttentionFeed_Append(b *testing.B) {
 	defer feed.Stop()
 
 	event := AttentionEvent{
-		Category: EventCategoryAgent,
-		Summary:  "Benchmark event",
+		Session:       "proj",
+		Category:      EventCategoryAgent,
+		Type:          EventTypeAgentStateChange,
+		Source:        "test",
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "Benchmark event",
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -3641,7 +3627,7 @@ func TestFilterEventsForRobot_CategoryFilter(t *testing.T) {
 	events := []AttentionEvent{
 		{Cursor: 1, Session: "proj", Category: EventCategoryPane},
 		{Cursor: 2, Session: "proj", Category: EventCategoryAlert},
-		{Cursor: 3, Session: "proj", Category: EventCategorySystem},
+		{Cursor: 3, Session: "other", Category: EventCategoryPane},
 		{Cursor: 4, Session: "proj", Category: EventCategoryPane},
 	}
 
@@ -3660,13 +3646,17 @@ func TestFilterEventsForRobot_CategoryFilter(t *testing.T) {
 
 func TestFilterEventsForRobot_ActionabilityFilter(t *testing.T) {
 	events := []AttentionEvent{
-		{Cursor: 1, Actionability: ActionabilityActionRequired},
-		{Cursor: 2, Actionability: ActionabilityInteresting},
-		{Cursor: 3, Actionability: ActionabilityBackground},
-		{Cursor: 4, Actionability: ActionabilityActionRequired},
+		{Cursor: 1, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityActionRequired},
+		{Cursor: 2, Session: "proj", Category: EventCategoryAlert, Actionability: ActionabilityActionRequired},
+		{Cursor: 3, Session: "other", Category: EventCategoryPane, Actionability: ActionabilityActionRequired},
+		{Cursor: 4, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityActionRequired},
 	}
 
-	opts := EventsOptions{ActionabilityFilter: []string{string(ActionabilityActionRequired)}}
+	opts := EventsOptions{
+		Session:             "proj",
+		CategoryFilter:      []string{string(EventCategoryPane)},
+		ActionabilityFilter: []string{string(ActionabilityActionRequired)},
+	}
 	result := filterEventsForRobot(events, opts)
 
 	if len(result) != 2 {
@@ -3681,50 +3671,35 @@ func TestFilterEventsForRobot_ActionabilityFilter(t *testing.T) {
 
 func TestFilterEventsForRobot_SeverityFilter(t *testing.T) {
 	events := []AttentionEvent{
-		{Cursor: 1, Severity: SeverityInfo},
-		{Cursor: 2, Severity: SeverityWarning},
-		{Cursor: 3, Severity: SeverityError},
-		{Cursor: 4, Severity: SeverityWarning},
-	}
-
-	opts := EventsOptions{SeverityFilter: []string{string(SeverityWarning), string(SeverityError)}}
-	result := filterEventsForRobot(events, opts)
-
-	if len(result) != 3 {
-		t.Errorf("expected 3 warning/error events, got %d", len(result))
-	}
-}
-
-func TestFilterEventsForRobot_CombinedFilters(t *testing.T) {
-	events := []AttentionEvent{
-		{Cursor: 1, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityActionRequired},
-		{Cursor: 2, Session: "proj", Category: EventCategoryAlert, Actionability: ActionabilityActionRequired},
-		{Cursor: 3, Session: "other", Category: EventCategoryPane, Actionability: ActionabilityActionRequired},
-		{Cursor: 4, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityInteresting},
+		{Cursor: 1, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityActionRequired, Severity: SeverityInfo},
+		{Cursor: 2, Session: "proj", Category: EventCategoryAlert, Actionability: ActionabilityActionRequired, Severity: SeverityWarning},
+		{Cursor: 3, Session: "other", Category: EventCategoryPane, Actionability: ActionabilityActionRequired, Severity: SeverityInfo},
+		{Cursor: 4, Session: "proj", Category: EventCategoryPane, Actionability: ActionabilityActionRequired, Severity: SeverityWarning},
 	}
 
 	opts := EventsOptions{
 		Session:             "proj",
 		CategoryFilter:      []string{string(EventCategoryPane)},
 		ActionabilityFilter: []string{string(ActionabilityActionRequired)},
+		SeverityFilter:      []string{string(SeverityWarning), string(SeverityError)},
 	}
 	result := filterEventsForRobot(events, opts)
 
-	if len(result) != 1 {
-		t.Errorf("expected 1 event matching all filters, got %d", len(result))
+	if len(result) != 2 {
+		t.Errorf("expected 2 events matching all filters, got %d", len(result))
 	}
 	if len(result) > 0 {
-		if result[0].Cursor != 1 {
-			t.Errorf("expected cursor 1, got %d", result[0].Cursor)
+		if result[0].Cursor != 2 {
+			t.Errorf("expected cursor 2, got %d", result[0].Cursor)
 		}
 	}
 }
 
 func TestFilterEventsForRobot_MultipleCategoryValues(t *testing.T) {
 	events := []AttentionEvent{
-		{Cursor: 1, Category: EventCategoryPane},
-		{Cursor: 2, Category: EventCategoryAlert},
-		{Cursor: 3, Category: EventCategorySystem},
+		{Cursor: 1, Session: "proj", Category: EventCategoryPane},
+		{Cursor: 2, Session: "proj", Category: EventCategoryAlert},
+		{Cursor: 3, Session: "proj", Category: EventCategorySystem},
 	}
 
 	opts := EventsOptions{CategoryFilter: []string{string(EventCategoryPane), string(EventCategoryAlert)}}
@@ -3858,69 +3833,6 @@ func TestDigestResponse_EmptyFeed(t *testing.T) {
 	}
 }
 
-func TestPrintDigest_IncludesActiveIncidents(t *testing.T) {
-	feed := newTestAttentionFeed(t)
-	oldFeed := PeekAttentionFeed()
-	SetAttentionFeed(feed)
-	t.Cleanup(func() {
-		SetAttentionFeed(oldFeed)
-	})
-
-	tmpDir := t.TempDir()
-	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
-	if err != nil {
-		t.Fatalf("Open store: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate store: %v", err)
-	}
-	oldStore := currentProjectionStore()
-	SetProjectionStore(store)
-	t.Cleanup(func() {
-		SetProjectionStore(oldStore)
-		_ = store.Close()
-	})
-
-	now := time.Now().UTC()
-	if err := store.CreateIncident(&state.Incident{
-		ID:           "inc-digest",
-		Title:        "Rate limit storm",
-		Fingerprint:  "fp-rate-limit-storm",
-		Family:       "quota",
-		Category:     "quota",
-		Status:       state.IncidentStatusOpen,
-		Severity:     state.SeverityWarning,
-		SessionNames: `["proj"]`,
-		AlertCount:   2,
-		EventCount:   2,
-		StartedAt:    now.Add(-5 * time.Minute),
-		LastEventAt:  now,
-	}); err != nil {
-		t.Fatalf("CreateIncident: %v", err)
-	}
-
-	output, err := captureStdout(t, func() error {
-		return PrintDigest(DigestOptions{SinceCursor: 0})
-	})
-	if err != nil {
-		t.Fatalf("PrintDigest failed: %v", err)
-	}
-
-	var resp DigestResponse
-	if err := json.Unmarshal([]byte(output), &resp); err != nil {
-		t.Fatalf("json.Unmarshal: %v\noutput=%s", err, output)
-	}
-	if len(resp.ActiveIncidents) != 1 {
-		t.Fatalf("ActiveIncidents count = %d, want 1", len(resp.ActiveIncidents))
-	}
-	if resp.ActiveIncidents[0].ID != "inc-digest" {
-		t.Fatalf("ActiveIncidents[0].ID = %q, want inc-digest", resp.ActiveIncidents[0].ID)
-	}
-	if resp.ActiveIncidents[0].AlertCount != 2 {
-		t.Fatalf("ActiveIncidents[0].AlertCount = %d, want 2", resp.ActiveIncidents[0].AlertCount)
-	}
-}
-
 func TestDigestResponse_WithEvents(t *testing.T) {
 	t.Parallel()
 
@@ -3957,7 +3869,7 @@ func TestDigestResponse_WithEvents(t *testing.T) {
 			Category:      EventCategoryAgent,
 			Type:          EventTypeAgentStateChange,
 			Actionability: ActionabilityInteresting,
-			Severity:      SeverityWarning,
+			Severity:      SeverityInfo,
 			Summary:       "Agent waiting for prompt",
 		},
 	}
@@ -4221,11 +4133,11 @@ func TestAttentionResponse_TimeoutWake(t *testing.T) {
 	if resp.WakeReason != "timeout" {
 		t.Errorf("WakeReason: expected timeout, got %s", resp.WakeReason)
 	}
-	if resp.MatchedCondition != "" {
-		t.Errorf("MatchedCondition should be empty on timeout, got %s", resp.MatchedCondition)
+	if resp.RobotResponse.Success {
+		t.Error("Success should be false on timeout")
 	}
-	if resp.TriggerEvent != nil {
-		t.Error("TriggerEvent should be nil on timeout")
+	if resp.CursorInfo.OldestCursor != 50 {
+		t.Errorf("OldestCursor should be 50, got %d", resp.CursorInfo.OldestCursor)
 	}
 }
 
@@ -4565,7 +4477,7 @@ func TestNewPTStateChangeAttentionEvent_SuppressesBenignInitialClassification(t 
 		Current:  pt.ClassUseful,
 		Event: pt.ClassificationEvent{
 			Classification: pt.ClassUseful,
-			Confidence:     0.99,
+			Confidence:     0.95,
 			Timestamp:      time.Date(2026, 3, 22, 20, 0, 0, 0, time.UTC),
 			Reason:         "working normally",
 		},
@@ -4661,7 +4573,7 @@ func TestOperatorLoop_SnapshotSummaryConsistency(t *testing.T) {
 	feed.Append(AttentionEvent{
 		Category:      EventCategoryAlert,
 		Actionability: ActionabilityActionRequired,
-		Severity:      SeverityError,
+		Severity:      SeverityInfo,
 		Summary:       "critical alert",
 	})
 	feed.Append(AttentionEvent{

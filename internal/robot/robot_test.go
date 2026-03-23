@@ -2706,6 +2706,7 @@ func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
 	})
 
 	now := time.Now().UTC()
+	claimedAt := now.Add(-10 * time.Minute)
 	staleAfter := now.Add(time.Hour)
 	for _, item := range []state.RuntimeWork{
 		{
@@ -2732,6 +2733,7 @@ func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
 			Status:      "in_progress",
 			Priority:    1,
 			Assignee:    "BlueLake",
+			ClaimedAt:   &claimedAt,
 			CollectedAt: now,
 			StaleAfter:  staleAfter,
 		},
@@ -2765,6 +2767,9 @@ func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
 	}
 	if len(summary.InProgressList) != 1 || summary.InProgressList[0].ID != "bd-active" || summary.InProgressList[0].Assignee != "BlueLake" {
 		t.Fatalf("InProgressList = %+v", summary.InProgressList)
+	}
+	if !summary.InProgressList[0].UpdatedAt.Equal(claimedAt) {
+		t.Fatalf("InProgressList UpdatedAt = %v, want %v", summary.InProgressList[0].UpdatedAt, claimedAt)
 	}
 }
 

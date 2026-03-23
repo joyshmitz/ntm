@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
@@ -267,6 +268,98 @@ func PrintFiles(opts FilesOptions) error {
 // Provides detailed inspection of a single pane, equivalent to zooming in
 // the TUI dashboard. Includes full output capture, state detection, and context.
 
+const (
+	inspectSessionSchemaVersion = "ntm.robot.inspect_session.v1"
+	inspectAgentSchemaVersion   = "ntm.robot.inspect_agent.v1"
+)
+
+// InspectProjectionInfo describes freshness metadata for projection-backed
+// inspect surfaces.
+type InspectProjectionInfo struct {
+	Fresh       bool   `json:"fresh"`
+	CollectedAt string `json:"collected_at,omitempty"`
+	StaleAfter  string `json:"stale_after,omitempty"`
+}
+
+// InspectHealth summarizes the health of an inspected entity.
+type InspectHealth struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// InspectAgentDetail is the projection-backed drill-down for one agent.
+type InspectAgentDetail struct {
+	ID               string                `json:"id"`
+	Session          string                `json:"session"`
+	Pane             string                `json:"pane"`
+	Type             string                `json:"type"`
+	Variant          string                `json:"variant,omitempty"`
+	TypeConfidence   float64               `json:"type_confidence"`
+	TypeMethod       string                `json:"type_method"`
+	State            string                `json:"state"`
+	StateReason      string                `json:"state_reason,omitempty"`
+	PreviousState    string                `json:"previous_state,omitempty"`
+	StateChangedAt   string                `json:"state_changed_at,omitempty"`
+	LastOutputAt     string                `json:"last_output_at,omitempty"`
+	LastOutputAgeSec int                   `json:"last_output_age_sec,omitempty"`
+	OutputTailLines  int                   `json:"output_tail_lines,omitempty"`
+	CurrentBead      string                `json:"current_bead,omitempty"`
+	PendingMail      int                   `json:"pending_mail"`
+	AgentMailName    string                `json:"agent_mail_name,omitempty"`
+	Health           InspectHealth         `json:"health"`
+	Projection       InspectProjectionInfo `json:"projection"`
+}
+
+// InspectSessionDetail is the projection-backed drill-down for one session.
+type InspectSessionDetail struct {
+	Name           string                `json:"name"`
+	Label          string                `json:"label,omitempty"`
+	ProjectPath    string                `json:"project_path,omitempty"`
+	Attached       bool                  `json:"attached"`
+	WindowCount    int                   `json:"window_count"`
+	PaneCount      int                   `json:"pane_count"`
+	AgentCount     int                   `json:"agent_count"`
+	ActiveAgents   int                   `json:"active_agents"`
+	IdleAgents     int                   `json:"idle_agents"`
+	ErrorAgents    int                   `json:"error_agents"`
+	CreatedAt      string                `json:"created_at,omitempty"`
+	LastAttachedAt string                `json:"last_attached_at,omitempty"`
+	LastActivityAt string                `json:"last_activity_at,omitempty"`
+	Health         InspectHealth         `json:"health"`
+	Projection     InspectProjectionInfo `json:"projection"`
+	Agents         []InspectAgentDetail  `json:"agents"`
+}
+
+// InspectSessionOutput represents a projection-backed session drill-down.
+type InspectSessionOutput struct {
+	RobotResponse
+	SchemaID      string               `json:"schema_id"`
+	SchemaVersion string               `json:"schema_version"`
+	Session       string               `json:"session"`
+	Detail        InspectSessionDetail `json:"detail"`
+	AgentHints    *AgentHints          `json:"_agent_hints,omitempty"`
+}
+
+// InspectAgentOutput represents a projection-backed agent drill-down.
+type InspectAgentOutput struct {
+	RobotResponse
+	SchemaID      string             `json:"schema_id"`
+	SchemaVersion string             `json:"schema_version"`
+	AgentID       string             `json:"agent_id"`
+	Detail        InspectAgentDetail `json:"detail"`
+	AgentHints    *AgentHints        `json:"_agent_hints,omitempty"`
+}
+
+// InspectSessionOptions configures session inspection.
+type InspectSessionOptions struct {
+	Session string
+}
+
+// InspectAgentOptions configures agent inspection.
+type InspectAgentOptions struct {
+	AgentID string
+}
+
 // InspectPaneOutput represents detailed pane inspection
 type InspectPaneOutput struct {
 	RobotResponse
@@ -492,6 +585,233 @@ func GetInspectPane(opts InspectPaneOptions) (*InspectPaneOutput, error) {
 // This is a thin wrapper around GetInspectPane() for CLI output.
 func PrintInspectPane(opts InspectPaneOptions) error {
 	output, err := GetInspectPane(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+func newInspectSessionOutput(session string) *InspectSessionOutput {
+	return &InspectSessionOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-session"),
+		SchemaVersion: inspectSessionSchemaVersion,
+		Session:       strings.TrimSpace(session),
+		Detail: InspectSessionDetail{
+			Agents: []InspectAgentDetail{},
+		},
+	}
+}
+
+func newInspectAgentOutput(agentID string) *InspectAgentOutput {
+	return &InspectAgentOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-agent"),
+		SchemaVersion: inspectAgentSchemaVersion,
+		AgentID:       strings.TrimSpace(agentID),
+	}
+}
+
+func inspectHealth(status state.HealthStatus, reason string) InspectHealth {
+	return InspectHealth{
+		Status: statusHealthString(status),
+		Reason: strings.TrimSpace(reason),
+	}
+}
+
+func inspectProjectionInfo(collectedAt, staleAfter time.Time) InspectProjectionInfo {
+	return InspectProjectionInfo{
+		Fresh:       time.Now().Before(staleAfter),
+		CollectedAt: FormatTimestamp(collectedAt),
+		StaleAfter:  FormatTimestamp(staleAfter),
+	}
+}
+
+func inspectAgentDetailFromRuntime(agent state.RuntimeAgent) InspectAgentDetail {
+	return InspectAgentDetail{
+		ID:               strings.TrimSpace(agent.ID),
+		Session:          strings.TrimSpace(agent.SessionName),
+		Pane:             strings.TrimSpace(agent.Pane),
+		Type:             strings.TrimSpace(agent.AgentType),
+		Variant:          strings.TrimSpace(agent.Variant),
+		TypeConfidence:   agent.TypeConfidence,
+		TypeMethod:       strings.TrimSpace(agent.TypeMethod),
+		State:            strings.TrimSpace(string(agent.State)),
+		StateReason:      strings.TrimSpace(agent.StateReason),
+		PreviousState:    strings.TrimSpace(agent.PreviousState),
+		StateChangedAt:   FormatTimestampPtr(agent.StateChangedAt),
+		LastOutputAt:     FormatTimestampPtr(agent.LastOutputAt),
+		LastOutputAgeSec: agent.LastOutputAgeSec,
+		OutputTailLines:  agent.OutputTailLines,
+		CurrentBead:      strings.TrimSpace(agent.CurrentBead),
+		PendingMail:      agent.PendingMail,
+		AgentMailName:    strings.TrimSpace(agent.AgentMailName),
+		Health:           inspectHealth(agent.HealthStatus, agent.HealthReason),
+		Projection:       inspectProjectionInfo(agent.CollectedAt, agent.StaleAfter),
+	}
+}
+
+func inspectSessionDetailFromRuntime(sess *state.RuntimeSession, agents []state.RuntimeAgent) InspectSessionDetail {
+	detail := InspectSessionDetail{
+		Name:           strings.TrimSpace(sess.Name),
+		Label:          strings.TrimSpace(sess.Label),
+		ProjectPath:    strings.TrimSpace(sess.ProjectPath),
+		Attached:       sess.Attached,
+		WindowCount:    sess.WindowCount,
+		PaneCount:      sess.PaneCount,
+		AgentCount:     sess.AgentCount,
+		ActiveAgents:   sess.ActiveAgents,
+		IdleAgents:     sess.IdleAgents,
+		ErrorAgents:    sess.ErrorAgents,
+		CreatedAt:      FormatTimestampPtr(sess.CreatedAt),
+		LastAttachedAt: FormatTimestampPtr(sess.LastAttachedAt),
+		LastActivityAt: FormatTimestampPtr(sess.LastActivityAt),
+		Health:         inspectHealth(sess.HealthStatus, sess.HealthReason),
+		Projection:     inspectProjectionInfo(sess.CollectedAt, sess.StaleAfter),
+		Agents:         make([]InspectAgentDetail, 0, len(agents)),
+	}
+	for _, agent := range agents {
+		detail.Agents = append(detail.Agents, inspectAgentDetailFromRuntime(agent))
+	}
+	if len(detail.Agents) > 0 {
+		detail.AgentCount = len(detail.Agents)
+	}
+	return detail
+}
+
+// GetInspectSession returns projection-backed session detail.
+func GetInspectSession(opts InspectSessionOptions) (*InspectSessionOutput, error) {
+	output := newInspectSessionOutput(opts.Session)
+	if strings.TrimSpace(opts.Session) == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("session name required"),
+			ErrCodeInvalidFlag,
+			"Specify session with --robot-inspect-session=SESSION",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Projection-backed inspect requires the shared runtime store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	session, err := store.GetRuntimeSession(strings.TrimSpace(opts.Session))
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load session projection")
+		return output, nil
+	}
+	if session == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("session '%s' not found in runtime projection", strings.TrimSpace(opts.Session)),
+			ErrCodeSessionNotFound,
+			"Use ntm --robot-snapshot or ntm --robot-status to list projected sessions",
+		)
+		return output, nil
+	}
+
+	agents, err := store.GetRuntimeAgentsBySession(session.Name)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load session agent projections")
+		return output, nil
+	}
+
+	output.Session = session.Name
+	output.Detail = inspectSessionDetailFromRuntime(session, agents)
+
+	var warnings []string
+	var notes []string
+	if !output.Detail.Projection.Fresh {
+		warnings = append(warnings, "Session projection is stale; refresh snapshot/status if you need the latest state")
+	}
+	if len(output.Detail.Agents) == 0 {
+		notes = append(notes, "No fresh agent projections are attached to this session")
+	} else {
+		notes = append(notes, "Use returned agent ids with --robot-inspect-agent for per-agent drill-down")
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary:  fmt.Sprintf("Session %s: %d projected agents, health %s", output.Detail.Name, len(output.Detail.Agents), output.Detail.Health.Status),
+		Warnings: warnings,
+		Notes:    notes,
+	}
+	return output, nil
+}
+
+// PrintInspectSession outputs projection-backed session inspection.
+func PrintInspectSession(opts InspectSessionOptions) error {
+	output, err := GetInspectSession(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+// GetInspectAgent returns projection-backed agent detail.
+func GetInspectAgent(opts InspectAgentOptions) (*InspectAgentOutput, error) {
+	output := newInspectAgentOutput(opts.AgentID)
+	if strings.TrimSpace(opts.AgentID) == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("agent id required"),
+			ErrCodeInvalidFlag,
+			"Specify agent id with --robot-inspect-agent=SESSION:PANE",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Projection-backed inspect requires the shared runtime store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	agent, err := store.GetRuntimeAgent(strings.TrimSpace(opts.AgentID))
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load agent projection")
+		return output, nil
+	}
+	if agent == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("agent '%s' not found in runtime projection", strings.TrimSpace(opts.AgentID)),
+			ErrCodeInvalidFlag,
+			"Use ntm --robot-inspect-session=SESSION to list stable agent ids for drill-down",
+		)
+		return output, nil
+	}
+
+	output.AgentID = strings.TrimSpace(agent.ID)
+	output.Detail = inspectAgentDetailFromRuntime(*agent)
+
+	var warnings []string
+	var notes []string
+	if !output.Detail.Projection.Fresh {
+		warnings = append(warnings, "Agent projection is stale; refresh snapshot/status if you need the latest state")
+	}
+	if output.Detail.CurrentBead != "" {
+		notes = append(notes, fmt.Sprintf("Current bead: %s", output.Detail.CurrentBead))
+	}
+	notes = append(notes, fmt.Sprintf("Session drill-down: ntm --robot-inspect-session=%s", output.Detail.Session))
+
+	output.AgentHints = &AgentHints{
+		Summary:  fmt.Sprintf("Agent %s: %s %s", output.Detail.ID, output.Detail.Type, output.Detail.State),
+		Warnings: warnings,
+		Notes:    notes,
+	}
+	return output, nil
+}
+
+// PrintInspectAgent outputs projection-backed agent inspection.
+func PrintInspectAgent(opts InspectAgentOptions) error {
+	output, err := GetInspectAgent(opts)
 	if err != nil {
 		return err
 	}

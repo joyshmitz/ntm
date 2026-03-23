@@ -26,7 +26,9 @@ var SchemaCommand = map[string]interface{}{
 	"proxy_status": ProxyStatusOutput{},
 
 	// Pane inspection
-	"inspect": InspectPaneOutput{},
+	"inspect":         InspectPaneOutput{},
+	"inspect_session": InspectSessionOutput{},
+	"inspect_agent":   InspectAgentOutput{},
 
 	// Ensemble
 	"ensemble":       EnsembleOutput{},

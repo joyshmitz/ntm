@@ -371,6 +371,16 @@ func TestResolveProfileSwitchProjectDirRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
+func TestRunProfileSwitchRejectsInvalidSessionName(t *testing.T) {
+	err := runProfileSwitch("cc_1", "reviewer", "../escape", "", true, true)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
 func TestResolveScaleSessionRejectsInvalidSessionName(t *testing.T) {
 	_, err := resolveScaleSession("../escape")
 	if err == nil {
@@ -569,6 +579,126 @@ func TestReviewQueueCmdRejectsInvalidSessionNameInJSONMode(t *testing.T) {
 	cmd.SetArgs([]string{"../escape", "--format", "json"})
 
 	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveCheckpointLiveSessionArgRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveCheckpointLiveSessionArg("../escape", nil)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveCheckpointStorageSessionArgRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveCheckpointStorageSessionArg("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveCheckpointStorageSessionArgAllowsOfflineSession(t *testing.T) {
+	got, err := resolveCheckpointStorageSessionArg("mysession")
+	if err != nil {
+		t.Fatalf("resolveCheckpointStorageSessionArg() error = %v", err)
+	}
+	if got != "mysession" {
+		t.Fatalf("session = %q, want %q", got, "mysession")
+	}
+}
+
+func TestCheckpointListCmdRejectsInvalidSessionName(t *testing.T) {
+	cmd := newCheckpointListCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"../escape"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestCheckpointSaveCmdRejectsInvalidSessionName(t *testing.T) {
+	cmd := newCheckpointSaveCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"../escape"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildAttachResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildAttachResponse("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildStatusResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildStatusResponse("../escape", statusOptions{})
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildInterruptResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildInterruptResponse("../escape", nil)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildKillResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildKillResponse("../escape", true, nil, true, false)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildViewResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildViewResponse("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestBuildZoomResponseRejectsInvalidSessionName(t *testing.T) {
+	_, err := buildZoomResponse("../escape", 1)
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
