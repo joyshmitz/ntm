@@ -164,14 +164,16 @@ Use --show-contributions to include mode contribution scores (requires completed
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				session = tmux.GetCurrentSession()
 			}
-			if session == "" {
-				return fmt.Errorf("session required (not in tmux)")
+			res, err := resolveEnsembleSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
-
-			return runEnsembleStatus(cmd.OutOrStdout(), session, opts)
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+			return runEnsembleStatus(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
 
@@ -233,14 +235,16 @@ Flags:
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				session = tmux.GetCurrentSession()
 			}
-			if session == "" {
-				return fmt.Errorf("session required (not in tmux)")
+			res, err := resolveEnsembleSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
-
-			return runEnsembleStop(cmd.OutOrStdout(), session, opts)
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+			return runEnsembleStop(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
 
@@ -812,14 +816,16 @@ Use --force to synthesize even if some agents haven't completed.`,
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				session = tmux.GetCurrentSession()
 			}
-			if session == "" {
-				return fmt.Errorf("session required (not in tmux)")
+			res, err := resolveEnsembleSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
-
-			return runEnsembleSynthesize(cmd.OutOrStdout(), session, opts)
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+			return runEnsembleSynthesize(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
 
@@ -1106,7 +1112,7 @@ func streamEnsembleSynthesis(
 		return fmt.Errorf("--resume requires --run-id")
 	}
 
-	store, err := ensemble.NewCheckpointStore("")
+	store, err := newEnsembleCheckpointStore()
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -1450,9 +1456,12 @@ func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsO
 		format = "json"
 	}
 
-	ctx, err := loadExportFindingsContext(session, opts)
+	ctx, err := loadExportFindingsContext(w, session, opts)
 	if err != nil {
 		return err
+	}
+	if ctx == nil {
+		return nil
 	}
 
 	findings, err := buildExportFindings(ctx)
@@ -1600,7 +1609,7 @@ func renderExportFindingsOutput(w io.Writer, payload exportFindingsOutput, forma
 	}
 }
 
-func loadExportFindingsContext(session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
+func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
 	if opts.RunID != "" {
 		ctx, err := loadExportFindingsFromRun(opts.RunID)
 		if err != nil {
@@ -1614,12 +1623,15 @@ func loadExportFindingsContext(session string, opts exportFindingsOptions) (*exp
 		return ctx, nil
 	}
 
-	if session == "" {
-		session = tmux.GetCurrentSession()
+	res, err := resolveEnsembleSession(session, w)
+	if err != nil {
+		return nil, err
 	}
-	if session == "" {
-		return nil, fmt.Errorf("session required (not in tmux or use --run-id)")
+	if res.Session == "" {
+		return nil, nil
 	}
+	res.ExplainIfInferred(os.Stderr)
+	session = res.Session
 	projectDir, err := resolveEnsembleProjectDirForSession(session)
 	if err != nil {
 		return nil, err
@@ -1654,7 +1666,7 @@ func resolveEnsembleProjectDirForSession(session string) (string, error) {
 }
 
 func loadExportFindingsFromRun(runID string) (*exportFindingsContext, error) {
-	store, err := ensemble.NewCheckpointStore("")
+	store, err := newEnsembleCheckpointStore()
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2164,12 +2176,15 @@ Formats:
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := opts.Session
-			if session == "" {
-				session = tmux.GetCurrentSession()
+			res, err := resolveEnsembleSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
-			if session == "" {
-				return fmt.Errorf("session required (not in tmux or use --session)")
+			if res.Session == "" {
+				return nil
 			}
+			res.ExplainIfInferred(os.Stderr)
+			session = res.Session
 
 			findingID := ""
 			if len(args) > 0 {
@@ -2186,6 +2201,18 @@ Formats:
 	cmd.Flags().BoolVar(&opts.Stats, "stats", false, "Show provenance statistics")
 	cmd.ValidArgsFunction = completeSessionArgs
 	return cmd
+}
+
+func resolveEnsembleSession(session string, w io.Writer) (SessionResolution, error) {
+	return ResolveSessionWithOptions(session, w, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+}
+
+func newEnsembleCheckpointStore() (*ensemble.CheckpointStore, error) {
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return nil, fmt.Errorf("getting project root failed")
+	}
+	return ensemble.NewCheckpointStore(filepath.Join(projectDir, ".ntm"))
 }
 
 func runEnsembleProvenance(w io.Writer, session, findingID string, opts provenanceOptions) error {
@@ -2454,7 +2481,7 @@ func runEnsembleResume(w io.Writer, runID, format string, quiet, skipDone bool) 
 		format = "json"
 	}
 
-	store, err := ensemble.NewCheckpointStore("")
+	store, err := newEnsembleCheckpointStore()
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2582,7 +2609,7 @@ func runEnsembleRerunMode(w io.Writer, runID, modeRef, format string, quiet bool
 		format = "json"
 	}
 
-	store, err := ensemble.NewCheckpointStore("")
+	store, err := newEnsembleCheckpointStore()
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -2662,7 +2689,7 @@ func runEnsembleCleanCheckpoints(w io.Writer, format, maxAge string, all, dryRun
 		format = "json"
 	}
 
-	store, err := ensemble.NewCheckpointStore("")
+	store, err := newEnsembleCheckpointStore()
 	if err != nil {
 		return fmt.Errorf("open checkpoint store: %w", err)
 	}

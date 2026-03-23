@@ -1516,6 +1516,7 @@ var (
 
 const (
 	statusSchemaVersion       = "ntm.robot.status.v2"
+	snapshotSchemaVersion     = "ntm.robot.snapshot.v1"
 	statusLiveCollectionLimit = 2 * time.Second
 )
 
@@ -2059,6 +2060,110 @@ func newStatusOutput(cfg *config.Config) *StatusOutput {
 		Sources:         &adapters.SourceHealthSection{Sources: map[string]adapters.SourceInfo{}, Degraded: []string{}, AllFresh: true},
 		DegradedSources: []string{},
 	}
+}
+
+func newSnapshotOutput(cfg *config.Config) *SnapshotOutput {
+	if cfg == nil {
+		cfg = config.Default()
+	}
+	return &SnapshotOutput{
+		RobotResponse:            NewRobotResponse(true),
+		SchemaID:                 defaultRobotSchemaID("snapshot"),
+		SchemaVersion:            snapshotSchemaVersion,
+		Timestamp:                time.Now().UTC().Format(time.RFC3339),
+		SafetyProfile:            cfg.Safety.Profile,
+		AttentionContractVersion: AttentionContractVersion,
+		Sessions:                 []SnapshotSession{},
+		ActiveIncidents:          []SnapshotIncident{},
+		Summary:                  StatusSummary{AgentsByState: map[string]int{}, AgentsByType: map[string]int{}},
+		Alerts:                   []string{},
+	}
+}
+
+func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
+	if base == nil {
+		return newSnapshotOutput(config.Default())
+	}
+
+	cloned := *base
+	cloned.Sessions = append([]SnapshotSession(nil), base.Sessions...)
+	cloned.ActiveIncidents = append([]SnapshotIncident(nil), base.ActiveIncidents...)
+	cloned.Tools = append([]ToolInfoOutput(nil), base.Tools...)
+	cloned.Alerts = append([]string(nil), base.Alerts...)
+	cloned.AlertsDetailed = append([]AlertInfo(nil), base.AlertsDetailed...)
+	cloned.Summary = StatusSummary{
+		TotalSessions: base.Summary.TotalSessions,
+		TotalAgents:   base.Summary.TotalAgents,
+		AttachedCount: base.Summary.AttachedCount,
+		ClaudeCount:   base.Summary.ClaudeCount,
+		CodexCount:    base.Summary.CodexCount,
+		GeminiCount:   base.Summary.GeminiCount,
+		CursorCount:   base.Summary.CursorCount,
+		WindsurfCount: base.Summary.WindsurfCount,
+		AiderCount:    base.Summary.AiderCount,
+		AgentsByState: make(map[string]int, len(base.Summary.AgentsByState)),
+		AgentsByType:  make(map[string]int, len(base.Summary.AgentsByType)),
+		ReadyWork:     base.Summary.ReadyWork,
+		InProgress:    base.Summary.InProgress,
+		HealthScore:   base.Summary.HealthScore,
+		HealthStatus:  base.Summary.HealthStatus,
+		AlertsActive:  base.Summary.AlertsActive,
+		MailUnread:    base.Summary.MailUnread,
+		MailUrgent:    base.Summary.MailUrgent,
+	}
+	for key, value := range base.Summary.AgentsByState {
+		cloned.Summary.AgentsByState[key] = value
+	}
+	for key, value := range base.Summary.AgentsByType {
+		cloned.Summary.AgentsByType[key] = value
+	}
+
+	if base.AgentMail != nil {
+		agentMailCopy := *base.AgentMail
+		if base.AgentMail.Agents != nil {
+			agentMailCopy.Agents = make(map[string]SnapshotAgentMailStats, len(base.AgentMail.Agents))
+			for name, stats := range base.AgentMail.Agents {
+				agentMailCopy.Agents[name] = stats
+			}
+		}
+		cloned.AgentMail = &agentMailCopy
+	}
+
+	return &cloned
+}
+
+func populateSnapshotFeedMetadata(output *SnapshotOutput, feed *AttentionFeed) {
+	if output == nil || feed == nil {
+		return
+	}
+
+	feedStats := feed.Stats()
+	output.LatestCursor = feedStats.NewestCursor
+
+	replayWindow := SnapshotReplayWindowInfo{
+		OldestCursor:    feedStats.OldestCursor,
+		LatestCursor:    feedStats.NewestCursor,
+		EventCount:      feedStats.Count,
+		RetentionPeriod: feedStats.RetentionPeriod.String(),
+		ResyncCommand:   "ntm --robot-snapshot",
+	}
+
+	if feedStats.Count == 0 {
+		replayWindow.Supported = false
+		replayWindow.Reason = "no events in feed yet"
+	} else {
+		replayWindow.Supported = true
+		replayWindow.Reason = "ready"
+		if oldestEvents, _, err := feed.Replay(feedStats.OldestCursor-1, 1); err == nil && len(oldestEvents) > 0 {
+			replayWindow.OldestTimestamp = oldestEvents[0].Ts
+		}
+		if newestEvents, _, err := feed.Replay(feedStats.NewestCursor-1, 1); err == nil && len(newestEvents) > 0 {
+			replayWindow.LatestTimestamp = newestEvents[0].Ts
+		}
+	}
+
+	output.ReplayWindow = replayWindow
+	output.AttentionSummary = buildSnapshotAttentionSummary(feed)
 }
 
 func buildProjectionBackedStatus(store *state.Store, cfg *config.Config, opts PaginationOptions) (*StatusOutput, error) {
@@ -3932,24 +4037,33 @@ func alertConfigForProject(cfg *config.Config, projectDir string) alerts.Config 
 // SnapshotOutput provides complete system state for AI orchestration
 type SnapshotOutput struct {
 	RobotResponse
-	Timestamp                string                    `json:"ts"`
-	SafetyProfile            string                    `json:"safety_profile,omitempty"`
-	AttentionContractVersion string                    `json:"attention_contract_version"`
-	LatestCursor             int64                     `json:"latest_cursor"`
-	ReplayWindow             SnapshotReplayWindowInfo  `json:"replay_window"`
-	Sessions                 []SnapshotSession         `json:"sessions"`
-	ActiveIncidents          []SnapshotIncident        `json:"active_incidents"`
-	Pagination               *PaginationInfo           `json:"pagination,omitempty"`
-	AgentHints               *AgentHints               `json:"_agent_hints,omitempty"`
-	BeadsSummary             *bv.BeadsSummary          `json:"beads_summary,omitempty"`
-	AgentMail                *SnapshotAgentMail        `json:"agent_mail,omitempty"`
-	MailUnread               int                       `json:"mail_unread,omitempty"`
-	Tools                    []ToolInfoOutput          `json:"tools,omitempty"`           // Flywheel tool inventory and health
-	Swarm                    *SwarmSnapshot            `json:"swarm,omitempty"`           // Active swarm orchestration state (optional)
-	Alerts                   []string                  `json:"alerts"`                    // Legacy: simple string alerts
-	AlertsDetailed           []AlertInfo               `json:"alerts_detailed,omitempty"` // Rich alert objects
-	AlertSummary             *AlertSummaryInfo         `json:"alert_summary,omitempty"`
-	AttentionSummary         *SnapshotAttentionSummary `json:"attention_summary,omitempty"` // Compact feed summary for bootstrap orientation
+	SchemaID                 string                        `json:"schema_id"`
+	SchemaVersion            string                        `json:"schema_version"`
+	Timestamp                string                        `json:"ts"`
+	SafetyProfile            string                        `json:"safety_profile,omitempty"`
+	AttentionContractVersion string                        `json:"attention_contract_version"`
+	LatestCursor             int64                         `json:"latest_cursor"`
+	ReplayWindow             SnapshotReplayWindowInfo      `json:"replay_window"`
+	Sessions                 []SnapshotSession             `json:"sessions"`
+	ActiveIncidents          []SnapshotIncident            `json:"active_incidents"`
+	Sources                  *adapters.SourceHealthSection `json:"sources,omitempty"`
+	DegradedSources          []string                      `json:"degraded_sources,omitempty"`
+	Pagination               *PaginationInfo               `json:"pagination,omitempty"`
+	AgentHints               *AgentHints                   `json:"_agent_hints,omitempty"`
+	Summary                  StatusSummary                 `json:"summary"`
+	Work                     *adapters.WorkSection         `json:"work,omitempty"`
+	BeadsSummary             *bv.BeadsSummary              `json:"beads_summary,omitempty"`
+	Handoff                  *HandoffSummary               `json:"handoff,omitempty"`
+	Coordination             *SnapshotCoordinationSummary  `json:"coordination,omitempty"`
+	Quota                    *adapters.QuotaSection        `json:"quota,omitempty"`
+	AgentMail                *SnapshotAgentMail            `json:"agent_mail,omitempty"`
+	MailUnread               int                           `json:"mail_unread,omitempty"`
+	Tools                    []ToolInfoOutput              `json:"tools,omitempty"`           // Flywheel tool inventory and health
+	Swarm                    *SwarmSnapshot                `json:"swarm,omitempty"`           // Active swarm orchestration state (optional)
+	Alerts                   []string                      `json:"alerts"`                    // Legacy: simple string alerts
+	AlertsDetailed           []AlertInfo                   `json:"alerts_detailed,omitempty"` // Rich alert objects
+	AlertSummary             *AlertSummaryInfo             `json:"alert_summary,omitempty"`
+	AttentionSummary         *SnapshotAttentionSummary     `json:"attention_summary,omitempty"` // Compact feed summary for bootstrap orientation
 }
 
 // NOTE: SnapshotAttentionSummary and SnapshotAttentionItem types are defined in
@@ -4057,6 +4171,20 @@ type SnapshotAgentMailStats struct {
 	PendingAck int    `json:"pending_ack"`
 }
 
+// SnapshotCoordinationSummary is the compact projection-backed coordination
+// section surfaced by snapshot. It intentionally summarizes the normalized
+// runtime coordination model rather than duplicating full Agent Mail details.
+type SnapshotCoordinationSummary struct {
+	Available      bool   `json:"available"`
+	MailUnread     int    `json:"mail_unread"`
+	MailUrgent     int    `json:"mail_urgent"`
+	PendingAck     int    `json:"pending_ack"`
+	AgentsWithMail int    `json:"agents_with_mail,omitempty"`
+	HasHandoff     bool   `json:"has_handoff"`
+	HandoffSession string `json:"handoff_session,omitempty"`
+	HandoffStatus  string `json:"handoff_status,omitempty"`
+}
+
 type SwarmSnapshot struct {
 	Active       bool               `json:"active"`
 	Plan         SwarmSnapshotPlan  `json:"plan"`
@@ -4116,45 +4244,10 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	output := &SnapshotOutput{
-		RobotResponse:            NewRobotResponse(true),
-		Timestamp:                time.Now().UTC().Format(time.RFC3339),
-		SafetyProfile:            cfg.Safety.Profile,
-		AttentionContractVersion: AttentionContractVersion,
-		Sessions:                 []SnapshotSession{},
-		ActiveIncidents:          []SnapshotIncident{},
-		Alerts:                   []string{},
-	}
+	output := newSnapshotOutput(cfg)
 
 	feed := GetAttentionFeed()
-	feedStats := feed.Stats()
-	output.LatestCursor = feedStats.NewestCursor
-
-	// Build replay window info with full bootstrap metadata
-	replayWindow := SnapshotReplayWindowInfo{
-		OldestCursor:    feedStats.OldestCursor,
-		LatestCursor:    feedStats.NewestCursor,
-		EventCount:      feedStats.Count,
-		RetentionPeriod: feedStats.RetentionPeriod.String(),
-		ResyncCommand:   "ntm --robot-snapshot",
-	}
-
-	// Determine replay support and populate timestamps
-	if feedStats.Count == 0 {
-		replayWindow.Supported = false
-		replayWindow.Reason = "no events in feed yet"
-	} else {
-		replayWindow.Supported = true
-		replayWindow.Reason = "ready"
-		// Get timestamps from oldest and newest events
-		if oldestEvents, _, err := feed.Replay(feedStats.OldestCursor-1, 1); err == nil && len(oldestEvents) > 0 {
-			replayWindow.OldestTimestamp = oldestEvents[0].Ts
-		}
-		if newestEvents, _, err := feed.Replay(feedStats.NewestCursor-1, 1); err == nil && len(newestEvents) > 0 {
-			replayWindow.LatestTimestamp = newestEvents[0].Ts
-		}
-	}
-	output.ReplayWindow = replayWindow
+	populateSnapshotFeedMetadata(output, feed)
 
 	// Check tmux availability
 	if !tmux.IsInstalled() {
@@ -4193,6 +4286,13 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 	if err != nil {
 		// No sessions is not an error for snapshot
 		return output, nil
+	}
+
+	if store := currentProjectionStore(); store != nil {
+		projectionOutput, err := buildProjectionBackedSnapshot(store, cfg, opts, output, sessions, projectKey)
+		if err == nil {
+			return projectionOutput, nil
+		}
 	}
 
 	for _, sess := range sessions {
@@ -4325,12 +4425,167 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 		}
 	}
 
-	// Build attention summary for operator orientation (br-slg9g)
-	output.AttentionSummary = buildSnapshotAttentionSummary(feed)
 	if incidents, err := snapshotIncidentsFromStore(currentProjectionStore()); err == nil {
 		output.ActiveIncidents = incidents
 	} else {
 		output.Alerts = append(output.Alerts, fmt.Sprintf("failed to list active incidents: %v", err))
+	}
+	if store := currentProjectionStore(); store != nil {
+		if workRows, err := store.ListFreshRuntimeWork("", 0); err == nil {
+			output.Work = snapshotWorkFromRuntime(workRows, BeadLimit)
+		}
+		if rows, err := store.GetAllSourceHealth(); err == nil {
+			applySnapshotSourceHealth(output, rows)
+		}
+		handoffRow, handoffErr := store.GetRuntimeHandoff()
+		if handoffErr == nil {
+			output.Handoff = statusHandoffFromRuntime(handoffRow)
+		}
+		if coordinationRows, err := store.ListFreshRuntimeCoordination(""); err == nil {
+			output.Coordination = snapshotCoordinationFromRuntime(coordinationRows, handoffRow)
+		}
+		if quotaRows, err := store.ListFreshRuntimeQuota(""); err == nil {
+			output.Quota = snapshotQuotaFromRuntime(quotaRows)
+		}
+	}
+	snapshotFinalize(output, opts)
+	return output, nil
+}
+
+func buildProjectionBackedSnapshot(
+	store *state.Store,
+	cfg *config.Config,
+	opts PaginationOptions,
+	base *SnapshotOutput,
+	tmuxSessions []tmux.Session,
+	projectKey string,
+) (*SnapshotOutput, error) {
+	if store == nil {
+		return nil, fmt.Errorf("snapshot projection store unavailable")
+	}
+
+	output := cloneSnapshotOutput(base)
+	sessions, err := buildProjectionBackedSnapshotSessions(store, tmuxSessions)
+	if err != nil {
+		return nil, err
+	}
+	output.Sessions = sessions
+	if workRows, err := store.ListFreshRuntimeWork("", 0); err == nil {
+		output.Work = snapshotWorkFromRuntime(workRows, BeadLimit)
+	}
+	if rows, err := store.GetAllSourceHealth(); err == nil {
+		applySnapshotSourceHealth(output, rows)
+	}
+	handoffRow, handoffErr := store.GetRuntimeHandoff()
+	if handoffErr == nil {
+		output.Handoff = statusHandoffFromRuntime(handoffRow)
+	}
+	if coordinationRows, err := store.ListFreshRuntimeCoordination(""); err == nil {
+		output.Coordination = snapshotCoordinationFromRuntime(coordinationRows, handoffRow)
+	}
+	if quotaRows, err := store.ListFreshRuntimeQuota(""); err == nil {
+		output.Quota = snapshotQuotaFromRuntime(quotaRows)
+	}
+	if output.AgentMail != nil && len(output.AgentMail.Agents) > 0 {
+		if paneMap, err := buildProjectionAgentMailPaneMap(store, tmuxSessions); err == nil {
+			for agentName, pane := range paneMap {
+				stats, ok := output.AgentMail.Agents[agentName]
+				if !ok {
+					continue
+				}
+				stats.Pane = pane
+				output.AgentMail.Agents[agentName] = stats
+			}
+		}
+	}
+
+	for _, sess := range output.Sessions {
+		for _, agent := range sess.Agents {
+			if agent.State == "error" {
+				output.Alerts = append(output.Alerts, fmt.Sprintf("agent %s in %s has error state", agent.Pane, sess.Name))
+			}
+		}
+	}
+
+	output.Swarm = buildSwarmSnapshot(cfg, tmuxSessions)
+
+	if beads, err := snapshotBeadsSummaryFromRuntime(store, projectKey, BeadLimit); err == nil {
+		output.BeadsSummary = beads
+	} else if beads := bv.GetBeadsSummary("", BeadLimit); beads != nil {
+		output.BeadsSummary = beads
+	}
+
+	toolCtx, toolCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer toolCancel()
+	output.Tools = GetToolsSummary(toolCtx)
+
+	alertCfg := alertConfigForProject(cfg, projectKey)
+	activeAlerts := alerts.GetActiveAlerts(alertCfg)
+	if len(activeAlerts) > 0 {
+		output.AlertsDetailed = make([]AlertInfo, len(activeAlerts))
+		for i, a := range activeAlerts {
+			output.AlertsDetailed[i] = AlertInfo{
+				ID:         a.ID,
+				Type:       string(a.Type),
+				Severity:   string(a.Severity),
+				Message:    a.Message,
+				Session:    a.Session,
+				Pane:       a.Pane,
+				BeadID:     a.BeadID,
+				Context:    a.Context,
+				CreatedAt:  a.CreatedAt.Format(time.RFC3339),
+				DurationMs: a.Duration().Milliseconds(),
+				Count:      a.Count,
+			}
+		}
+		for _, a := range activeAlerts {
+			msg := a.Message
+			if a.Session != "" {
+				msg = a.Session + ": " + msg
+			}
+			output.Alerts = append(output.Alerts, msg)
+		}
+
+		tracker := alerts.GetGlobalTracker()
+		summary := tracker.Summary()
+		output.AlertSummary = &AlertSummaryInfo{
+			TotalActive: summary.TotalActive,
+			BySeverity:  summary.BySeverity,
+			ByType:      summary.ByType,
+		}
+	}
+
+	incidents, err := snapshotIncidentsFromStore(store)
+	if err != nil {
+		output.Alerts = append(output.Alerts, fmt.Sprintf("failed to list active incidents: %v", err))
+	} else {
+		output.ActiveIncidents = incidents
+	}
+	snapshotFinalize(output, opts)
+	return output, nil
+}
+
+func applySnapshotSourceHealth(output *SnapshotOutput, rows []state.SourceHealth) {
+	if output == nil {
+		return
+	}
+	output.Sources = statusSourceHealthFromRows(rows)
+	if output.Sources == nil {
+		output.DegradedSources = nil
+		return
+	}
+	output.DegradedSources = append([]string(nil), output.Sources.Degraded...)
+}
+
+func snapshotFinalize(output *SnapshotOutput, opts PaginationOptions) {
+	if output == nil {
+		return
+	}
+
+	output.DegradedSources = uniqueSortedStrings(output.DegradedSources)
+	output.Summary = buildSnapshotSummary(output)
+	if output.MailUnread == 0 && output.AgentMail != nil {
+		output.MailUnread = output.AgentMail.TotalUnread
 	}
 
 	if paged, page := ApplyPagination(output.Sessions, opts); page != nil {
@@ -4343,8 +4598,471 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 			}
 		}
 	}
+}
+
+func buildSnapshotSummary(output *SnapshotOutput) StatusSummary {
+	summary := StatusSummary{
+		AgentsByState: map[string]int{},
+		AgentsByType:  map[string]int{},
+	}
+	if output == nil {
+		return summary
+	}
+
+	for _, sess := range output.Sessions {
+		summary.TotalSessions++
+		if sess.Attached {
+			summary.AttachedCount++
+		}
+		summary.TotalAgents += len(sess.Agents)
+		for _, agent := range sess.Agents {
+			statusAccumulateAgentSummary(&summary, agent.Type, agent.State)
+		}
+	}
+
+	if output.Work != nil && output.Work.Summary != nil {
+		summary.ReadyWork = output.Work.Summary.Ready
+		summary.InProgress = output.Work.Summary.InProgress
+	} else if output.BeadsSummary != nil {
+		summary.ReadyWork = output.BeadsSummary.Ready
+		summary.InProgress = output.BeadsSummary.InProgress
+	}
+	if output.Coordination != nil {
+		summary.MailUnread = output.Coordination.MailUnread
+		summary.MailUrgent = output.Coordination.MailUrgent
+	} else if output.AgentMail != nil {
+		summary.MailUnread = output.AgentMail.TotalUnread
+	} else if output.MailUnread > 0 {
+		summary.MailUnread = output.MailUnread
+	}
+
+	alertCounts := snapshotAlertCounts(output)
+	summary.AlertsActive = statusAlertTotal(alertCounts)
+	summary.HealthStatus = snapshotOverallStatus(output, alertCounts)
+	summary.HealthScore = snapshotHealthScore(output, alertCounts)
+	return summary
+}
+
+func snapshotAlertCounts(output *SnapshotOutput) map[string]int {
+	counts := map[string]int{}
+	if output == nil {
+		return counts
+	}
+	if output.AlertSummary != nil && len(output.AlertSummary.BySeverity) > 0 {
+		for key, value := range output.AlertSummary.BySeverity {
+			counts[strings.TrimSpace(key)] += value
+		}
+		return counts
+	}
+	if len(output.AlertsDetailed) > 0 {
+		for _, alert := range output.AlertsDetailed {
+			key := strings.TrimSpace(alert.Severity)
+			if key == "" {
+				key = "warning"
+			}
+			counts[key]++
+		}
+		return counts
+	}
+	if len(output.Alerts) > 0 {
+		counts["warning"] = len(output.Alerts)
+	}
+	return counts
+}
+
+func snapshotOverallStatus(output *SnapshotOutput, alertCounts map[string]int) string {
+	if output == nil {
+		return "unknown"
+	}
+	if alertCounts["critical"] > 0 || snapshotAgentStateCount(output, "error") > 0 {
+		return "critical"
+	}
+	if len(output.DegradedSources) > 0 || alertCounts["error"] > 0 || alertCounts["warning"] > 0 {
+		return "degraded"
+	}
+	return "healthy"
+}
+
+func snapshotHealthScore(output *SnapshotOutput, alertCounts map[string]int) float64 {
+	score := 1.0
+	if output == nil {
+		return 0
+	}
+	score -= float64(len(output.DegradedSources)) * 0.1
+	score -= float64(alertCounts["warning"]) * 0.05
+	score -= float64(alertCounts["error"]) * 0.1
+	score -= float64(alertCounts["critical"]) * 0.2
+	score -= float64(snapshotAgentStateCount(output, "error")) * 0.1
+	if score < 0 {
+		score = 0
+	}
+	if score > 1 {
+		score = 1
+	}
+	return float64(int(score*100+0.5)) / 100
+}
+
+func snapshotAgentStateCount(output *SnapshotOutput, state string) int {
+	if output == nil {
+		return 0
+	}
+	target := strings.TrimSpace(state)
+	count := 0
+	for _, sess := range output.Sessions {
+		for _, agent := range sess.Agents {
+			if strings.TrimSpace(agent.State) == target {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func snapshotCoordinationFromRuntime(rows []state.RuntimeCoordination, handoff *state.RuntimeHandoff) *SnapshotCoordinationSummary {
+	summary := &SnapshotCoordinationSummary{
+		Available: len(rows) > 0 || handoff != nil,
+	}
+	for _, row := range rows {
+		summary.MailUnread += row.UnreadCount
+		summary.MailUrgent += row.UrgentCount
+		summary.PendingAck += row.PendingAckCount
+		if row.UnreadCount > 0 || row.UrgentCount > 0 || row.PendingAckCount > 0 {
+			summary.AgentsWithMail++
+		}
+	}
+	if handoff != nil {
+		summary.HasHandoff = true
+		summary.HandoffSession = strings.TrimSpace(handoff.SessionName)
+		summary.HandoffStatus = strings.TrimSpace(handoff.Status)
+	}
+	return summary
+}
+
+func snapshotWorkFromRuntime(rows []state.RuntimeWork, limit int) *adapters.WorkSection {
+	section := &adapters.WorkSection{
+		Ready:      []adapters.WorkItem{},
+		Blocked:    []adapters.WorkItem{},
+		InProgress: []adapters.WorkItem{},
+		Summary:    &adapters.WorkSummary{},
+		Available:  len(rows) > 0,
+	}
+	if len(rows) == 0 {
+		section.Reason = "runtime projection empty"
+		return section
+	}
+
+	appendCapped := func(items []adapters.WorkItem, item adapters.WorkItem) []adapters.WorkItem {
+		if limit > 0 && len(items) >= limit {
+			return items
+		}
+		return append(items, item)
+	}
+
+	for _, row := range rows {
+		section.Summary.Total++
+		item := snapshotWorkItemFromRuntime(row)
+		switch row.Status {
+		case "open":
+			section.Summary.Open++
+			if row.BlockedByCount > 0 {
+				section.Summary.Blocked++
+				section.Blocked = appendCapped(section.Blocked, item)
+				continue
+			}
+			section.Summary.Ready++
+			section.Ready = appendCapped(section.Ready, item)
+		case "in_progress":
+			section.Summary.InProgress++
+			section.InProgress = appendCapped(section.InProgress, item)
+		case "closed":
+			section.Summary.Closed++
+		default:
+			section.Summary.Open++
+			if row.BlockedByCount > 0 {
+				section.Summary.Blocked++
+				section.Blocked = appendCapped(section.Blocked, item)
+			}
+		}
+	}
+
+	return section
+}
+
+func snapshotWorkItemFromRuntime(row state.RuntimeWork) adapters.WorkItem {
+	item := adapters.WorkItem{
+		ID:              strings.TrimSpace(row.BeadID),
+		Title:           robotFirstNonEmpty(strings.TrimSpace(row.Title), strings.TrimSpace(row.BeadID)),
+		TitleDisclosure: decodeDisclosureMetadata(row.TitleDisclosure),
+		Priority:        row.Priority,
+		Type:            strings.TrimSpace(row.BeadType),
+		Labels:          decodeStringList(row.Labels),
+		Assignee:        strings.TrimSpace(row.Assignee),
+		Unblocks:        row.UnblocksCount,
+	}
+	if row.Score != nil {
+		score := *row.Score
+		item.Score = &score
+	}
+	if row.ClaimedAt != nil && !row.ClaimedAt.IsZero() {
+		item.UpdatedAt = row.ClaimedAt.UTC().Format(time.RFC3339)
+	}
+	return item
+}
+
+func snapshotQuotaFromRuntime(rows []state.RuntimeQuota) *adapters.QuotaSection {
+	section := &adapters.QuotaSection{
+		Accounts:  []adapters.AccountQuota{},
+		Available: len(rows) > 0,
+	}
+	if len(rows) == 0 {
+		section.Reason = "runtime projection empty"
+		return section
+	}
+
+	for _, row := range rows {
+		usagePercent := row.UsedPct
+		account := adapters.AccountQuota{
+			ID:         robotFirstNonEmpty(strings.TrimSpace(row.Account), strings.TrimSpace(row.Provider)),
+			Provider:   strings.TrimSpace(row.Provider),
+			Status:     snapshotQuotaStatus(row),
+			ReasonCode: snapshotQuotaReasonCode(row),
+			IsActive:   row.IsActive,
+			IsPrimary:  row.IsActive,
+		}
+		if row.UsedPctKnown {
+			account.UsagePercent = &usagePercent
+		}
+		if row.ResetsAt != nil && !row.ResetsAt.IsZero() {
+			account.ResetAt = row.ResetsAt.UTC().Format(time.RFC3339)
+		}
+		section.Accounts = append(section.Accounts, account)
+	}
+	section.Summary = snapshotQuotaSummary(section.Accounts)
+	return section
+}
+
+func snapshotQuotaReasonCode(row state.RuntimeQuota) adapters.ReasonCode {
+	switch {
+	case row.LimitHit:
+		if row.UsedPctSource == state.RuntimeQuotaUsedPctSourceRequests {
+			return adapters.ReasonQuotaExceededRequests
+		}
+		return adapters.ReasonQuotaExceededTokens
+	case row.UsedPctKnown && row.UsedPct >= 95:
+		if row.UsedPctSource == state.RuntimeQuotaUsedPctSourceRequests {
+			return adapters.ReasonQuotaCriticalRequests
+		}
+		return adapters.ReasonQuotaCriticalTokens
+	case row.UsedPctKnown && row.UsedPct >= 80:
+		if row.UsedPctSource == state.RuntimeQuotaUsedPctSourceRequests {
+			return adapters.ReasonQuotaWarningRequests
+		}
+		return adapters.ReasonQuotaWarningTokens
+	case !row.Healthy:
+		return adapters.ReasonQuotaUnavailable
+	default:
+		return adapters.ReasonQuotaOK
+	}
+}
+
+func snapshotQuotaStatus(row state.RuntimeQuota) string {
+	switch snapshotQuotaReasonCode(row) {
+	case adapters.ReasonQuotaExceededTokens, adapters.ReasonQuotaExceededRequests,
+		adapters.ReasonQuotaExceededCost, adapters.ReasonQuotaSuspended:
+		return "exceeded"
+	case adapters.ReasonQuotaCriticalTokens, adapters.ReasonQuotaCriticalRequests,
+		adapters.ReasonQuotaWarningTokens, adapters.ReasonQuotaWarningRequests,
+		adapters.ReasonQuotaWarningRateLimit, adapters.ReasonQuotaUnavailable:
+		return "warning"
+	default:
+		return "ok"
+	}
+}
+
+func snapshotQuotaSummary(accounts []adapters.AccountQuota) *adapters.QuotaSummary {
+	summary := &adapters.QuotaSummary{
+		TotalAccounts: len(accounts),
+	}
+	for _, account := range accounts {
+		switch account.Status {
+		case "ok":
+			summary.HealthyAccounts++
+		case "warning", "critical":
+			summary.WarningAccounts++
+		case "exceeded":
+			summary.ExceededAccounts++
+		}
+	}
+	return summary
+}
+
+func buildProjectionBackedSnapshotSessions(store *state.Store, tmuxSessions []tmux.Session) ([]SnapshotSession, error) {
+	rows, err := store.GetFreshRuntimeSessions()
+	if err != nil {
+		return nil, fmt.Errorf("snapshot sessions: %w", err)
+	}
+
+	agentsBySession := make(map[string][]state.RuntimeAgent, len(rows))
+	for _, sess := range rows {
+		agents, err := store.GetRuntimeAgentsBySession(sess.Name)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot agents for %s: %w", sess.Name, err)
+		}
+		agentsBySession[sess.Name] = agents
+	}
+
+	paneLabels := snapshotPaneLabelMap(tmuxSessions)
+	output := make([]SnapshotSession, 0, len(rows))
+	for _, sess := range rows {
+		item := SnapshotSession{
+			Name:     sess.Name,
+			Attached: sess.Attached,
+			Agents:   make([]SnapshotAgent, 0, len(agentsBySession[sess.Name])),
+		}
+		for _, agent := range agentsBySession[sess.Name] {
+			snapshotAgent := snapshotAgentFromRuntime(sess.Name, agent, paneLabels)
+			item.Agents = append(item.Agents, snapshotAgent)
+		}
+		output = append(output, item)
+	}
 
 	return output, nil
+}
+
+func snapshotBeadsSummaryFromRuntime(store *state.Store, projectKey string, limit int) (*bv.BeadsSummary, error) {
+	if store == nil {
+		return nil, fmt.Errorf("snapshot beads summary store unavailable")
+	}
+	if limit < 0 {
+		limit = 0
+	}
+
+	rows, err := store.ListFreshRuntimeWork("", 0)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot beads summary: %w", err)
+	}
+
+	summary := &bv.BeadsSummary{
+		Available:      true,
+		Project:        strings.TrimSpace(projectKey),
+		ReadyPreview:   []bv.BeadPreview{},
+		InProgressList: []bv.BeadInProgress{},
+	}
+	for _, row := range rows {
+		summary.Total++
+		switch row.Status {
+		case "open":
+			summary.Open++
+			if row.BlockedByCount > 0 {
+				summary.Blocked++
+				continue
+			}
+			summary.Ready++
+			if limit == 0 || len(summary.ReadyPreview) < limit {
+				summary.ReadyPreview = append(summary.ReadyPreview, bv.BeadPreview{
+					ID:       row.BeadID,
+					Title:    row.Title,
+					Priority: fmt.Sprintf("P%d", row.Priority),
+				})
+			}
+		case "in_progress":
+			summary.InProgress++
+			if limit == 0 || len(summary.InProgressList) < limit {
+				item := bv.BeadInProgress{
+					ID:       row.BeadID,
+					Title:    row.Title,
+					Assignee: row.Assignee,
+				}
+				if row.ClaimedAt != nil && !row.ClaimedAt.IsZero() {
+					item.UpdatedAt = *row.ClaimedAt
+				}
+				summary.InProgressList = append(summary.InProgressList, item)
+			}
+		case "closed":
+			summary.Closed++
+		default:
+			if row.BlockedByCount > 0 {
+				summary.Blocked++
+			}
+		}
+	}
+
+	return summary, nil
+}
+
+func buildProjectionAgentMailPaneMap(store *state.Store, tmuxSessions []tmux.Session) (map[string]string, error) {
+	if store == nil {
+		return map[string]string{}, nil
+	}
+
+	sessions, err := store.GetFreshRuntimeSessions()
+	if err != nil {
+		return nil, fmt.Errorf("snapshot mail sessions: %w", err)
+	}
+
+	paneLabels := snapshotPaneLabelMap(tmuxSessions)
+	output := make(map[string]string)
+	for _, sess := range sessions {
+		agents, err := store.GetRuntimeAgentsBySession(sess.Name)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot mail agents for %s: %w", sess.Name, err)
+		}
+		for _, agent := range agents {
+			agentName := strings.TrimSpace(agent.AgentMailName)
+			if agentName == "" {
+				continue
+			}
+			paneKey := fmt.Sprintf("%s:%s", sess.Name, strings.TrimSpace(agent.Pane))
+			paneRef := strings.TrimSpace(agent.Pane)
+			if label, ok := paneLabels[paneKey]; ok && strings.TrimSpace(label) != "" {
+				paneRef = label
+			}
+			output[agentName] = paneRef
+		}
+	}
+
+	return output, nil
+}
+
+func snapshotPaneLabelMap(tmuxSessions []tmux.Session) map[string]string {
+	labels := make(map[string]string)
+	for _, sess := range tmuxSessions {
+		panes := append([]tmux.Pane(nil), sess.Panes...)
+		if len(panes) == 0 {
+			if fetched, err := tmux.GetPanes(sess.Name); err == nil {
+				panes = fetched
+			}
+		}
+		for _, pane := range panes {
+			key := fmt.Sprintf("%s:%s", sess.Name, strings.TrimSpace(pane.ID))
+			labels[key] = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+		}
+	}
+	return labels
+}
+
+func snapshotAgentFromRuntime(sessionName string, row state.RuntimeAgent, paneLabels map[string]string) SnapshotAgent {
+	paneKey := fmt.Sprintf("%s:%s", sessionName, strings.TrimSpace(row.Pane))
+	paneRef := strings.TrimSpace(row.Pane)
+	if label, ok := paneLabels[paneKey]; ok && strings.TrimSpace(label) != "" {
+		paneRef = label
+	}
+
+	item := SnapshotAgent{
+		Pane:             paneRef,
+		Type:             strings.TrimSpace(row.AgentType),
+		Variant:          strings.TrimSpace(row.Variant),
+		TypeConfidence:   row.TypeConfidence,
+		TypeMethod:       strings.TrimSpace(row.TypeMethod),
+		State:            strings.TrimSpace(string(row.State)),
+		LastOutputAgeSec: row.LastOutputAgeSec,
+		OutputTailLines:  row.OutputTailLines,
+		PendingMail:      row.PendingMail,
+	}
+	if bead := strings.TrimSpace(row.CurrentBead); bead != "" {
+		item.CurrentBead = &bead
+	}
+	return item
 }
 
 // buildSnapshotAttentionSummary creates a compact attention orientation from
@@ -6229,7 +6947,10 @@ func normalizedIncidentFingerprint(item adapters.IncidentItem) string {
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return ""
+		// Fallback to deterministic hash from key fields when marshal fails
+		fallback := fmt.Sprintf("%s:%s:%s", item.Type, item.Title, item.Session)
+		sum := sha256.Sum256([]byte(fallback))
+		return fmt.Sprintf("incident-%x", sum[:8])
 	}
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("incident-%x", sum[:8])

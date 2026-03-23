@@ -75,6 +75,7 @@ func (s *EnsembleStore) SaveEnsemble(e *EnsembleSession) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit; guards against panics
 
 	if err := func() error {
 		result, err := tx.Exec(`
@@ -351,6 +352,7 @@ func (s *EnsembleStore) DeleteEnsemble(sessionName string) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit; guards against panics
 
 	if err := func() error {
 		var ensembleID int64

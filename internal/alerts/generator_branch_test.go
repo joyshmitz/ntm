@@ -229,3 +229,81 @@ func TestDetectErrorState_NoMatch(t *testing.T) {
 		t.Errorf("expected nil alert for clean output, got %v", alert)
 	}
 }
+
+func TestScanAgentSessions_PartialSessionFailurePreservesHealthyAlerts(t *testing.T) {
+	t.Parallel()
+
+	g := &Generator{config: DefaultConfig()}
+	sessions := []tmux.Session{
+		{Name: "healthy"},
+		{Name: "broken"},
+	}
+
+	alerts, failedSources := g.scanAgentSessions(
+		sessions,
+		func(session string) ([]tmux.Pane, error) {
+			if session == "broken" {
+				return nil, assertErr("pane lookup failed")
+			}
+			return []tmux.Pane{{ID: "%1", Title: "healthy__cod_1", Type: tmux.AgentCodex}}, nil
+		},
+		func(paneID string, lines int) (string, error) {
+			return "fatal: crashed badly", nil
+		},
+	)
+
+	if len(failedSources) != 1 || failedSources[0] != agentAlertSource("broken") {
+		t.Fatalf("failedSources = %#v, want [%q]", failedSources, agentAlertSource("broken"))
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert from healthy session, got %d", len(alerts))
+	}
+	if alerts[0].Session != "healthy" {
+		t.Fatalf("expected alert from healthy session, got %q", alerts[0].Session)
+	}
+	if alerts[0].Source != agentAlertSource("healthy") {
+		t.Fatalf("expected source %q, got %q", agentAlertSource("healthy"), alerts[0].Source)
+	}
+	if alerts[0].Type != AlertAgentError {
+		t.Fatalf("expected AlertAgentError, got %s", alerts[0].Type)
+	}
+}
+
+func TestScanAgentSessions_RespectsSessionFilterBeforePaneLookup(t *testing.T) {
+	t.Parallel()
+
+	g := &Generator{config: Config{Enabled: true, SessionFilter: "target"}}
+	sessions := []tmux.Session{
+		{Name: "target"},
+		{Name: "ignored"},
+	}
+
+	called := make(map[string]int)
+	alerts, failedSources := g.scanAgentSessions(
+		sessions,
+		func(session string) ([]tmux.Pane, error) {
+			called[session]++
+			return []tmux.Pane{{ID: "%1", Title: session + "__cc_1", Type: tmux.AgentClaude}}, nil
+		},
+		func(paneID string, lines int) (string, error) {
+			return "all good", nil
+		},
+	)
+
+	if len(failedSources) != 0 {
+		t.Fatalf("did not expect failed sources, got %#v", failedSources)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("expected no alerts, got %d", len(alerts))
+	}
+	if called["target"] != 1 {
+		t.Fatalf("expected target session to be scanned once, got %d", called["target"])
+	}
+	if called["ignored"] != 0 {
+		t.Fatalf("expected ignored session to be skipped, got %d calls", called["ignored"])
+	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }

@@ -72,13 +72,45 @@ func AutoScannerConfigFromProjectConfig(projectDir string, cfg *config.ScannerCo
 	if cfg != nil {
 		auto.ScanTimeout = cfg.Defaults.GetTimeout()
 		if len(cfg.Defaults.Exclude) > 0 {
-			auto.ExcludePatterns = cfg.Defaults.Exclude
+			auto.ExcludePatterns = mergeExcludePatterns(auto.ExcludePatterns, cfg.Defaults.Exclude)
 		}
 		auto.UBSPath = cfg.UBSPath
 		auto.ScanOptions = ScanOptionsFromConfig(cfg, "dashboard")
 	}
 
 	return auto
+}
+
+func normalizeAutoScannerConfig(cfg AutoScannerConfig) AutoScannerConfig {
+	defaults := DefaultAutoScannerConfig(cfg.ProjectDir)
+
+	if cfg.DebounceDuration <= 0 {
+		cfg.DebounceDuration = defaults.DebounceDuration
+	}
+	if cfg.ScanTimeout <= 0 {
+		cfg.ScanTimeout = defaults.ScanTimeout
+	}
+	if len(cfg.ExcludePatterns) == 0 {
+		cfg.ExcludePatterns = defaults.ExcludePatterns
+	} else {
+		cfg.ExcludePatterns = mergeExcludePatterns(defaults.ExcludePatterns, cfg.ExcludePatterns)
+	}
+	if isZeroScanOptions(cfg.ScanOptions) {
+		cfg.ScanOptions = defaults.ScanOptions
+	}
+
+	return cfg
+}
+
+func isZeroScanOptions(opts ScanOptions) bool {
+	return len(opts.Languages) == 0 &&
+		len(opts.ExcludeLanguages) == 0 &&
+		!opts.CI &&
+		!opts.FailOnWarning &&
+		!opts.Verbose &&
+		opts.Timeout <= 0 &&
+		!opts.StagedOnly &&
+		!opts.DiffOnly
 }
 
 // AutoScanner watches for file changes and triggers UBS scans automatically.
@@ -97,6 +129,8 @@ type AutoScanner struct {
 // NewAutoScanner creates a new AutoScanner instance.
 // Returns an error if UBS is not available.
 func NewAutoScanner(cfg AutoScannerConfig) (*AutoScanner, error) {
+	cfg = normalizeAutoScannerConfig(cfg)
+
 	var s *Scanner
 	var err error
 
@@ -119,6 +153,8 @@ func NewAutoScanner(cfg AutoScannerConfig) (*AutoScanner, error) {
 // NewAutoScannerWithScanner creates an AutoScanner with an existing Scanner.
 // Useful when you want to reuse a scanner instance.
 func NewAutoScannerWithScanner(cfg AutoScannerConfig, scanner *Scanner) *AutoScanner {
+	cfg = normalizeAutoScannerConfig(cfg)
+
 	return &AutoScanner{
 		config:  cfg,
 		scanner: scanner,
@@ -245,6 +281,7 @@ func (a *AutoScanner) isExcluded(path string) bool {
 	if err != nil {
 		rel = path
 	}
+	rel = filepath.Clean(rel)
 
 	for _, pattern := range a.config.ExcludePatterns {
 		// Check if any path component matches the pattern
@@ -259,7 +296,48 @@ func (a *AutoScanner) isExcluded(path string) bool {
 		if match, _ := filepath.Match(pattern, rel); match {
 			return true
 		}
+		if matchRecursivePattern(rel, pattern) {
+			return true
+		}
 	}
+	return false
+}
+
+func mergeExcludePatterns(defaults, extras []string) []string {
+	merged := make([]string, 0, len(defaults)+len(extras))
+	seen := make(map[string]bool, len(defaults)+len(extras))
+
+	for _, pattern := range defaults {
+		if pattern == "" || seen[pattern] {
+			continue
+		}
+		merged = append(merged, pattern)
+		seen[pattern] = true
+	}
+	for _, pattern := range extras {
+		if pattern == "" || seen[pattern] {
+			continue
+		}
+		merged = append(merged, pattern)
+		seen[pattern] = true
+	}
+
+	return merged
+}
+
+func matchRecursivePattern(rel, pattern string) bool {
+	normalizedRel := filepath.ToSlash(strings.TrimPrefix(rel, "."+string(filepath.Separator)))
+	normalizedPattern := filepath.ToSlash(pattern)
+
+	if strings.HasSuffix(normalizedPattern, "/**") {
+		base := strings.TrimSuffix(normalizedPattern, "/**")
+		base = strings.TrimSuffix(base, "/")
+		if base == "" {
+			return normalizedRel != ""
+		}
+		return normalizedRel == base || strings.HasPrefix(normalizedRel, base+"/")
+	}
+
 	return false
 }
 

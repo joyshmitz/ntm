@@ -1110,6 +1110,12 @@ type AttentionDigest struct {
 	Suppressed      AttentionDigestSuppression `json:"suppressed"`
 	Summary         string                     `json:"summary"`
 	Trace           []AttentionDigestDecision  `json:"trace,omitempty"`
+
+	// PrioritizedQueue is a flattened, pre-ordered list of digest items for
+	// operator loops that want a single iteration target. Items appear in
+	// actionability order (action_required first, then interesting, then
+	// background) and are capped at 10 total.
+	PrioritizedQueue []AttentionDigestItem `json:"prioritized_queue,omitempty"`
 }
 
 // AttentionDigestBuckets groups representative digest items by urgency so
@@ -1243,6 +1249,10 @@ func BuildAttentionDigest(events []AttentionEvent, sinceCursor, cursorEnd int64,
 	digest.Buckets.ActionRequired = surfaceAttentionDigestBucket(actionRequired, ActionabilityActionRequired, options.ActionRequiredLimit, options, digest)
 	digest.Buckets.Interesting = surfaceAttentionDigestBucket(interesting, ActionabilityInteresting, options.InterestingLimit, options, digest)
 	digest.Buckets.Background = surfaceAttentionDigestBucket(background, ActionabilityBackground, options.BackgroundLimit, options, digest)
+
+	// Build flattened prioritized queue for operator loops (capped at 10)
+	digest.PrioritizedQueue = buildAttentionDigestPrioritizedQueue(digest.Buckets, 10)
+
 	digest.Summary = buildAttentionDigestSummary(digest)
 
 	if len(digest.Suppressed.ByReason) == 0 {
@@ -1625,6 +1635,39 @@ func attentionDigestRecurrencePriority(event AttentionEvent) float64 {
 
 func attentionDigestSurfaceReason(event AttentionEvent) string {
 	return attentionStringDetail(event.Details, attentionDetailResurfaceReason)
+}
+
+// buildAttentionDigestPrioritizedQueue flattens the three actionability buckets
+// into a single ordered list for operator loops. Items maintain their bucket
+// order (action_required first, then interesting, then background) and are
+// capped at the specified limit.
+func buildAttentionDigestPrioritizedQueue(buckets AttentionDigestBuckets, limit int) []AttentionDigestItem {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	total := len(buckets.ActionRequired) + len(buckets.Interesting) + len(buckets.Background)
+	if total == 0 {
+		return nil
+	}
+
+	queue := make([]AttentionDigestItem, 0, minInt(total, limit))
+	for _, items := range [][]AttentionDigestItem{
+		buckets.ActionRequired,
+		buckets.Interesting,
+		buckets.Background,
+	} {
+		if len(queue) >= limit {
+			break
+		}
+		remaining := limit - len(queue)
+		if remaining > len(items) {
+			remaining = len(items)
+		}
+		queue = append(queue, items[:remaining]...)
+	}
+
+	return queue
 }
 
 func buildAttentionDigestSummary(digest *AttentionDigest) string {

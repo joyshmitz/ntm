@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -112,9 +111,9 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		jsonFormat = true
 	}
 
-	projectDir, err := os.Getwd()
+	projectDir, err := resolveResumeProjectDir(sessionName)
 	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+		return err
 	}
 
 	slog.Debug("resume command",
@@ -133,7 +132,9 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 	if fromPath != "" {
 		// Resolve relative path
 		if !filepath.IsAbs(fromPath) {
-			fromPath = filepath.Join(projectDir, fromPath)
+			if fromPath, err = filepath.Abs(fromPath); err != nil {
+				return fmt.Errorf("failed to resolve handoff path: %w", err)
+			}
 		}
 		h, err = reader.Read(fromPath)
 		if err != nil {
@@ -204,6 +205,9 @@ func runResume(cmd *cobra.Command, sessionName, fromPath string, spawn, inject, 
 		// Use arg session name for operations, but keep handoff data
 	} else if sessionName == "" {
 		sessionName = h.Session
+	}
+	if err := validateResumeSessionName(sessionName); err != nil {
+		return err
 	}
 
 	// Build handoff info for JSON output
@@ -465,6 +469,36 @@ func injectHandoff(cmd *cobra.Command, sessionName string, h *handoff.Handoff,
 		fmt.Fprintf(cmd.OutOrStdout(), "  Warning: %d panes failed to receive context\n", failed)
 	}
 
+	return nil
+}
+
+func resolveResumeProjectDir(sessionName string) (string, error) {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		projectDir := GetProjectRoot()
+		if projectDir == "" {
+			return "", fmt.Errorf("getting project root failed")
+		}
+		return projectDir, nil
+	}
+	if err := validateResumeSessionName(sessionName); err != nil {
+		return "", err
+	}
+	projectDir := resolveProjectDirForSession(sessionName, true)
+	if projectDir == "" {
+		return "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, nil
+}
+
+func validateResumeSessionName(sessionName string) error {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return nil
+	}
+	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		return fmt.Errorf("invalid session name: %w", err)
+	}
 	return nil
 }
 

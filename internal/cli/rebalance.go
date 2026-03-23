@@ -91,17 +91,18 @@ Examples:
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
-			} else {
-				res, err := ResolveSession("", cmd.OutOrStdout())
-				if err != nil {
-					return err
-				}
-				if res.Session == "" {
-					return nil
-				}
-				res.ExplainIfInferred(cmd.ErrOrStderr())
-				session = res.Session
 			}
+			res, err := ResolveSessionWithOptions(session, cmd.OutOrStdout(), SessionResolveOptions{
+				TreatAsJSON: IsJSONOutput() || strings.EqualFold(formatOut, "json"),
+			})
+			if err != nil {
+				return err
+			}
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(cmd.ErrOrStderr())
+			session = res.Session
 
 			return runRebalance(session, dryRun, apply, filter, threshold, formatOut)
 		},

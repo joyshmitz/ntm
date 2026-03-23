@@ -3203,6 +3203,96 @@ func TestBuildAttentionDigest_SummaryStableAndBucketAssignment(t *testing.T) {
 	}
 }
 
+func TestBuildAttentionDigest_PrioritizedQueueMergesBuckets(t *testing.T) {
+	// Create events across all three actionability levels
+	action1 := digestTestEvent(1, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityError, "critical alert 1")
+	action2 := digestTestEvent(2, EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, "critical alert 2")
+	interesting1 := digestTestEvent(3, EventCategoryBead, EventTypeBeadUpdated, ActionabilityInteresting, SeverityInfo, "bead ready")
+	interesting2 := digestTestEvent(4, EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, "agent idle")
+	background1 := digestTestEvent(5, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityInfo, "health check")
+	background2 := digestTestEvent(6, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityDebug, "metric update")
+
+	opts := DefaultAttentionDigestOptions()
+	opts.MinSeverity = SeverityDebug
+	opts.ActionRequiredLimit = 5
+	opts.InterestingLimit = 5
+	opts.BackgroundLimit = 5
+
+	digest := BuildAttentionDigest([]AttentionEvent{action1, action2, interesting1, interesting2, background1, background2}, 0, 6, opts)
+
+	// Verify buckets are populated as expected
+	if len(digest.Buckets.ActionRequired) != 2 {
+		t.Fatalf("ActionRequired = %d, want 2", len(digest.Buckets.ActionRequired))
+	}
+	if len(digest.Buckets.Interesting) != 2 {
+		t.Fatalf("Interesting = %d, want 2", len(digest.Buckets.Interesting))
+	}
+	if len(digest.Buckets.Background) != 2 {
+		t.Fatalf("Background = %d, want 2", len(digest.Buckets.Background))
+	}
+
+	// Verify PrioritizedQueue merges all buckets in order
+	if len(digest.PrioritizedQueue) != 6 {
+		t.Fatalf("PrioritizedQueue = %d, want 6", len(digest.PrioritizedQueue))
+	}
+
+	// First two should be action_required
+	if digest.PrioritizedQueue[0].Event.Actionability != ActionabilityActionRequired {
+		t.Errorf("PrioritizedQueue[0] actionability = %s, want action_required", digest.PrioritizedQueue[0].Event.Actionability)
+	}
+	if digest.PrioritizedQueue[1].Event.Actionability != ActionabilityActionRequired {
+		t.Errorf("PrioritizedQueue[1] actionability = %s, want action_required", digest.PrioritizedQueue[1].Event.Actionability)
+	}
+
+	// Next two should be interesting
+	if digest.PrioritizedQueue[2].Event.Actionability != ActionabilityInteresting {
+		t.Errorf("PrioritizedQueue[2] actionability = %s, want interesting", digest.PrioritizedQueue[2].Event.Actionability)
+	}
+	if digest.PrioritizedQueue[3].Event.Actionability != ActionabilityInteresting {
+		t.Errorf("PrioritizedQueue[3] actionability = %s, want interesting", digest.PrioritizedQueue[3].Event.Actionability)
+	}
+
+	// Last two should be background
+	if digest.PrioritizedQueue[4].Event.Actionability != ActionabilityBackground {
+		t.Errorf("PrioritizedQueue[4] actionability = %s, want background", digest.PrioritizedQueue[4].Event.Actionability)
+	}
+	if digest.PrioritizedQueue[5].Event.Actionability != ActionabilityBackground {
+		t.Errorf("PrioritizedQueue[5] actionability = %s, want background", digest.PrioritizedQueue[5].Event.Actionability)
+	}
+}
+
+func TestBuildAttentionDigest_PrioritizedQueueCapsAtLimit(t *testing.T) {
+	// Create more events than the cap (10)
+	events := make([]AttentionEvent, 15)
+	for i := 0; i < 15; i++ {
+		events[i] = digestTestEvent(int64(i+1), EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, fmt.Sprintf("alert %d", i+1))
+	}
+
+	opts := DefaultAttentionDigestOptions()
+	opts.ActionRequiredLimit = 15 // Allow all in bucket
+
+	digest := BuildAttentionDigest(events, 0, 15, opts)
+
+	// Buckets should have all 15
+	if len(digest.Buckets.ActionRequired) != 15 {
+		t.Fatalf("ActionRequired = %d, want 15", len(digest.Buckets.ActionRequired))
+	}
+
+	// PrioritizedQueue should be capped at 10
+	if len(digest.PrioritizedQueue) != 10 {
+		t.Fatalf("PrioritizedQueue = %d, want 10 (capped)", len(digest.PrioritizedQueue))
+	}
+}
+
+func TestBuildAttentionDigest_PrioritizedQueueEmptyWhenNoBuckets(t *testing.T) {
+	opts := DefaultAttentionDigestOptions()
+	digest := BuildAttentionDigest([]AttentionEvent{}, 0, 0, opts)
+
+	if digest.PrioritizedQueue != nil {
+		t.Fatalf("PrioritizedQueue = %v, want nil for empty digest", digest.PrioritizedQueue)
+	}
+}
+
 // =============================================================================
 // JSON Serialization Tests
 // =============================================================================

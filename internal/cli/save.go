@@ -79,18 +79,15 @@ func runSave(w io.Writer, session, outputDir string, lines int, filter AgentFilt
 
 	t := theme.Current()
 
-	// Determine target session
-	if session == "" {
-		res, err := ResolveSession("", w)
-		if err != nil {
-			return err
-		}
-		if res.Session == "" {
-			return nil
-		}
-		res.ExplainIfInferred(os.Stderr)
-		session = res.Session
+	res, err := ResolveSession(session, w)
+	if err != nil {
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(os.Stderr)
+	session = res.Session
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)

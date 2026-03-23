@@ -19,6 +19,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
+var compareTmuxInstalled = tmux.IsInstalled
+var compareSessionExists = tmux.SessionExists
+
 // compareOptions holds CLI flags for ensemble compare.
 type compareOptions struct {
 	Format  string
@@ -89,10 +92,6 @@ func runEnsembleCompare(w io.Writer, runAID, runBID string, opts compareOptions)
 		"format", format,
 	)
 
-	if err := tmux.EnsureInstalled(); err != nil {
-		return writeCompareError(w, runAID, runBID, err, format)
-	}
-
 	// Load run A
 	inputA, err := loadCompareInput(runAID)
 	if err != nil {
@@ -133,11 +132,31 @@ func runEnsembleCompare(w io.Writer, runAID, runBID string, opts compareOptions)
 
 // loadCompareInput loads an ensemble session and constructs a CompareInput.
 func loadCompareInput(runID string) (*ensemble.CompareInput, error) {
-	// Try to load as session
-	if !tmux.SessionExists(runID) {
-		return nil, fmt.Errorf("session '%s' not found", runID)
+	store, storeErr := newEnsembleCheckpointStore()
+	checkpointExists := storeErr == nil && store.RunExists(runID)
+
+	liveExists := false
+	if compareTmuxInstalled() {
+		liveExists = compareSessionExists(runID)
 	}
 
+	switch {
+	case checkpointExists && liveExists:
+		return nil, fmt.Errorf("identifier %q is ambiguous: both a live session and a checkpoint run exist", runID)
+	case checkpointExists:
+		return loadCheckpointCompareInputFromStore(store, runID)
+	case liveExists:
+		return loadLiveCompareInput(runID)
+	case storeErr != nil && !compareTmuxInstalled():
+		return nil, fmt.Errorf("open checkpoint store: %w", storeErr)
+	case !compareTmuxInstalled():
+		return nil, fmt.Errorf("checkpoint run %q not found and tmux is not installed", runID)
+	default:
+		return nil, fmt.Errorf("no live session or checkpoint run found for %q", runID)
+	}
+}
+
+func loadLiveCompareInput(runID string) (*ensemble.CompareInput, error) {
 	state, err := ensemble.LoadSession(runID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -219,6 +238,72 @@ func loadCompareInput(runID string) (*ensemble.CompareInput, error) {
 		Provenance:      provenance,
 		Contributions:   contributions,
 		SynthesisOutput: synthesisOutput,
+	}, nil
+}
+
+func loadCheckpointCompareInput(runID string) (*ensemble.CompareInput, error) {
+	store, err := newEnsembleCheckpointStore()
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint store: %w", err)
+	}
+	return loadCheckpointCompareInputFromStore(store, runID)
+}
+
+func loadCheckpointCompareInputFromStore(store *ensemble.CheckpointStore, runID string) (*ensemble.CompareInput, error) {
+	if !store.RunExists(runID) {
+		return nil, fmt.Errorf("ensemble run '%s' not found", runID)
+	}
+
+	meta, err := store.LoadMetadata(runID)
+	if err != nil {
+		return nil, fmt.Errorf("load checkpoint metadata: %w", err)
+	}
+	outs, err := store.GetCompletedOutputs(runID)
+	if err != nil {
+		return nil, fmt.Errorf("load checkpoint outputs: %w", err)
+	}
+
+	modeSet := make(map[string]struct{})
+	for _, modeID := range meta.CompletedIDs {
+		modeSet[modeID] = struct{}{}
+	}
+	for _, modeID := range meta.PendingIDs {
+		modeSet[modeID] = struct{}{}
+	}
+	for _, modeID := range meta.ErrorIDs {
+		modeSet[modeID] = struct{}{}
+	}
+
+	outputs := make([]ensemble.ModeOutput, 0, len(outs))
+	for _, output := range outs {
+		if output == nil {
+			continue
+		}
+		modeSet[output.ModeID] = struct{}{}
+		outputs = append(outputs, *output)
+	}
+
+	modeIDs := make([]string, 0, len(modeSet))
+	for modeID := range modeSet {
+		modeIDs = append(modeIDs, modeID)
+	}
+	sort.Strings(modeIDs)
+
+	provenance := ensemble.NewProvenanceTracker(meta.Question, modeIDs)
+
+	var contributions *ensemble.ContributionReport
+	if len(outputs) > 0 {
+		tracker := ensemble.NewContributionTracker()
+		ensemble.TrackOriginalFindings(tracker, outputs)
+		contributions = tracker.GenerateReport()
+	}
+
+	return &ensemble.CompareInput{
+		RunID:         runID,
+		ModeIDs:       modeIDs,
+		Outputs:       outputs,
+		Provenance:    provenance,
+		Contributions: contributions,
 	}, nil
 }
 

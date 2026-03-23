@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -116,18 +117,20 @@ Examples:
 				return fmt.Errorf("--session is required")
 			}
 
-			projectDir, err := os.Getwd()
+			projectDir, err := resolvePipelineProjectDir()
 			if err != nil {
-				return fmt.Errorf("get working directory: %w", err)
+				return err
 			}
 
 			if err := tmux.EnsureInstalled(); err != nil {
 				return err
 			}
 
-			if !tmux.SessionExists(session) {
-				return fmt.Errorf("session %q not found", session)
+			res, err := resolvePipelineSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
+			session = res.Session
 
 			// Parse variables
 			vars := make(map[string]interface{})
@@ -403,9 +406,9 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runID := args[0]
 
-			projectDir, err := os.Getwd()
+			projectDir, err := resolvePipelineProjectDir()
 			if err != nil {
-				return fmt.Errorf("get working directory: %w", err)
+				return err
 			}
 
 			state, err := pipeline.LoadState(projectDir, runID)
@@ -433,9 +436,11 @@ Examples:
 				return err
 			}
 
-			if !tmux.SessionExists(session) {
-				return fmt.Errorf("session %q not found", session)
+			res, err := resolvePipelineSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
+			session = res.Session
 
 			if state.Status == pipeline.StatusCompleted {
 				if jsonOutput {
@@ -624,9 +629,9 @@ Examples:
 			}
 
 			// Get project directory
-			projectDir, err := os.Getwd()
+			projectDir, err := resolvePipelineProjectDir()
 			if err != nil {
-				return fmt.Errorf("get working directory: %w", err)
+				return err
 			}
 
 			if dryRun {
@@ -774,9 +779,11 @@ Examples:
 				return err
 			}
 
-			if !tmux.SessionExists(session) {
-				return fmt.Errorf("session %q not found", session)
+			res, err := resolvePipelineSession(session, cmd.OutOrStdout())
+			if err != nil {
+				return err
 			}
+			session = res.Session
 
 			return pipeline.Execute(context.Background(), pipeline.Pipeline{
 				Session: session,
@@ -788,6 +795,32 @@ Examples:
 	cmd.Flags().StringArrayVar(&stages, "stage", nil, "Pipeline stage (format: 'type: prompt')")
 
 	return cmd
+}
+
+func resolvePipelineProjectDir() (string, error) {
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, nil
+}
+
+func resolvePipelineSession(session string, w io.Writer) (SessionResolution, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return SessionResolution{}, fmt.Errorf("session is required")
+	}
+	res, err := ResolveSessionWithOptions(session, w, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	if err != nil {
+		return SessionResolution{}, err
+	}
+	if res.Session == "" {
+		return SessionResolution{}, fmt.Errorf("session is required")
+	}
+	if !tmux.SessionExists(res.Session) {
+		return SessionResolution{}, fmt.Errorf("session %q not found", res.Session)
+	}
+	return res, nil
 }
 
 // Helper functions for human-friendly output

@@ -67,10 +67,13 @@ func (g *Generator) GenerateAll() ([]Alert, []string) {
 	var failed []string
 
 	// Check agent states
-	if agentAlerts, err := g.checkAgentStates(); err != nil {
+	if agentAlerts, failedSources, err := g.checkAgentStates(); err != nil {
 		failed = append(failed, "agents")
 	} else {
 		alerts = append(alerts, agentAlerts...)
+		if len(failedSources) > 0 {
+			failed = append(failed, failedSources...)
+		}
 	}
 
 	// Check disk space
@@ -91,13 +94,24 @@ func (g *Generator) GenerateAll() ([]Alert, []string) {
 }
 
 // checkAgentStates analyzes tmux panes for stuck, crashed, or error states
-func (g *Generator) checkAgentStates() ([]Alert, error) {
-	var alerts []Alert
-
+func (g *Generator) checkAgentStates() ([]Alert, []string, error) {
 	sessions, err := tmux.ListSessions()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	alerts, failedSources := g.scanAgentSessions(sessions, tmux.GetPanes, tmux.CapturePaneOutput)
+	return alerts, failedSources, nil
+}
+
+func (g *Generator) scanAgentSessions(
+	sessions []tmux.Session,
+	getPanes func(string) ([]tmux.Pane, error),
+	capturePaneOutput func(string, int) (string, error),
+) ([]Alert, []string) {
+	var alerts []Alert
+	failedSources := make([]string, 0)
+	failedSet := make(map[string]bool)
 
 	for _, sess := range sessions {
 		// Filter by session if configured
@@ -105,27 +119,27 @@ func (g *Generator) checkAgentStates() ([]Alert, error) {
 			continue
 		}
 
-		panes, err := tmux.GetPanes(sess.Name)
+		panes, err := getPanes(sess.Name)
 		if err != nil {
-			// If we can't get panes for a session, log it but don't fail the whole check?
-			// Actually if we can't check panes, we shouldn't resolve alerts for this session.
-			// But checkAgentStates is session-scoped? No, it iterates all.
-			// Let's treat getPanes error as a partial failure or ignore it?
-			// If session is gone, getPanes fails.
-			// If session is gone, agents are gone.
+			source := agentAlertSource(sess.Name)
+			if !failedSet[source] {
+				failedSet[source] = true
+				failedSources = append(failedSources, source)
+			}
+			slog.Warn("failed to list panes during alert generation", "session", sess.Name, "error", err)
 			continue
 		}
 
 		for _, pane := range panes {
 			// Capture pane output for analysis
-			output, err := tmux.CapturePaneOutput(pane.ID, 50)
+			output, err := capturePaneOutput(pane.ID, 50)
 			if err != nil {
 				// If we can't capture, the pane may have crashed
 				alerts = append(alerts, Alert{
 					ID:         generateAlertID(AlertAgentCrashed, sess.Name, pane.ID),
 					Type:       AlertAgentCrashed,
 					Severity:   SeverityError,
-					Source:     "agents",
+					Source:     agentAlertSource(sess.Name),
 					Message:    fmt.Sprintf("Cannot capture output from pane %s (may have crashed)", pane.ID),
 					Session:    sess.Name,
 					Pane:       pane.ID,
@@ -152,7 +166,15 @@ func (g *Generator) checkAgentStates() ([]Alert, error) {
 		}
 	}
 
-	return alerts, nil
+	return alerts, failedSources
+}
+
+func agentAlertSource(session string) string {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "agents"
+	}
+	return "agents:" + session
 }
 
 // detectErrorState checks pane output for error patterns
@@ -170,7 +192,7 @@ func (g *Generator) detectErrorState(session string, pane tmux.Pane, lines []str
 					ID:         generateAlertID(AlertAgentError, session, pane.ID),
 					Type:       AlertAgentError,
 					Severity:   ep.severity,
-					Source:     "agents",
+					Source:     agentAlertSource(session),
 					Message:    ep.msg,
 					Session:    session,
 					Pane:       pane.ID,
@@ -220,7 +242,7 @@ func (g *Generator) detectRateLimit(session string, pane tmux.Pane, lines []stri
 					ID:         generateAlertID(AlertRateLimit, session, pane.ID),
 					Type:       AlertRateLimit,
 					Severity:   SeverityWarning,
-					Source:     "agents",
+					Source:     agentAlertSource(session),
 					Message:    msg,
 					Session:    session,
 					Pane:       pane.ID,

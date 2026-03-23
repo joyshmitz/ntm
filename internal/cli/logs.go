@@ -53,13 +53,15 @@ The prefix shows agent type and pane index.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
-			if !IsJSONOutput() {
-				res, err := ResolveSession(session, cmd.OutOrStdout())
-				if err != nil {
-					return err
-				}
-				session = res.Session
+			res, err := ResolveSessionWithOptions(session, cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+			if err != nil {
+				return err
 			}
+			if res.Session == "" {
+				return nil
+			}
+			res.ExplainIfInferred(os.Stderr)
+			session = res.Session
 
 			// Parse panes argument
 			var panes []int

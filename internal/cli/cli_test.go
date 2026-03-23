@@ -18,6 +18,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -382,6 +383,192 @@ func TestResolveScaleSessionRejectsInvalidSessionName(t *testing.T) {
 
 func TestResolveAddSessionRejectsInvalidSessionName(t *testing.T) {
 	_, err := resolveAddSession("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveEnsembleSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveEnsembleSession("../escape", nil)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolvePipelineProjectDirFallsBackToProjectRoot(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
+		t.Fatalf("mkdir ntm root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "config.toml"), []byte(""), 0644); err != nil {
+		t.Fatalf("write ntm config: %v", err)
+	}
+	nestedDir := filepath.Join(projectDir, "nested")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nestedDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	got, err := resolvePipelineProjectDir()
+	if err != nil {
+		t.Fatalf("resolvePipelineProjectDir() error = %v", err)
+	}
+	if got != projectDir {
+		t.Fatalf("project dir = %q, want %q", got, projectDir)
+	}
+}
+
+func TestResolvePipelineSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolvePipelineSession("../escape", nil)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveResumeProjectDirUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	got, err := resolveResumeProjectDir("mysession")
+	if err != nil {
+		t.Fatalf("resolveResumeProjectDir() error = %v", err)
+	}
+	if got != projectDir {
+		t.Fatalf("project dir = %q, want %q", got, projectDir)
+	}
+}
+
+func TestResolveResumeProjectDirRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveResumeProjectDir("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveReplaySessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveReplaySession("history-session", "../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveReplaySessionRejectsEmptyHistorySession(t *testing.T) {
+	_, err := resolveReplaySession("", "")
+	if err == nil {
+		t.Fatal("expected empty session error")
+	}
+	if !strings.Contains(err.Error(), "history entry session is empty") {
+		t.Fatalf("expected empty history session error, got %v", err)
+	}
+}
+
+func TestRunSaveRejectsInvalidSessionName(t *testing.T) {
+	var buf bytes.Buffer
+	err := runSave(&buf, "../escape", t.TempDir(), 10, AgentFilter{All: true})
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRunCopyRejectsInvalidSessionName(t *testing.T) {
+	var buf bytes.Buffer
+	err := runCopy(&buf, "../escape", AgentFilter{}, CopyOptions{Last: 10})
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestLogsCmdRejectsInvalidSessionNameInJSONMode(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	cmd := newLogsCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"../escape"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRunSessionsSaveRejectsInvalidSessionName(t *testing.T) {
+	err := runSessionsSave("../escape", sessionpkg.SaveOptions{})
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRebalanceCmdRejectsInvalidSessionNameInJSONMode(t *testing.T) {
+	cmd := newRebalanceCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"../escape", "--format", "json"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestReviewQueueCmdRejectsInvalidSessionNameInJSONMode(t *testing.T) {
+	cmd := newReviewQueueCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"../escape", "--format", "json"})
+
+	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}

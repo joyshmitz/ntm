@@ -722,6 +722,11 @@ type DigestResponse struct {
 	// Summary is a human-readable summary of the digest.
 	Summary string `json:"summary"`
 
+	// PrioritizedQueue is a flattened, pre-ordered list of digest items for
+	// operator loops. Items appear in actionability order (action_required
+	// first, then interesting, then background) capped at 10 total.
+	PrioritizedQueue []AttentionDigestItem `json:"prioritized_queue,omitempty"`
+
 	// ActiveIncidents surfaces the currently open durable incidents.
 	ActiveIncidents []SnapshotIncident `json:"active_incidents"`
 
@@ -840,19 +845,20 @@ func PrintDigest(opts DigestOptions) error {
 			Version:      AttentionContractVersion,
 			OutputFormat: "json",
 		},
-		CursorStart:     digest.CursorStart,
-		CursorEnd:       digest.CursorEnd,
-		PeriodStart:     digest.PeriodStart,
-		PeriodEnd:       digest.PeriodEnd,
-		EventCount:      digest.EventCount,
-		ByCategory:      digest.ByCategory,
-		ByActionability: digest.ByActionability,
-		Buckets:         digest.Buckets,
-		Suppressed:      digest.Suppressed,
-		Summary:         digest.Summary,
-		ActiveIncidents: activeIncidents,
-		Trace:           digest.Trace,
-		ReplayWindow:    replayWindow,
+		CursorStart:      digest.CursorStart,
+		CursorEnd:        digest.CursorEnd,
+		PeriodStart:      digest.PeriodStart,
+		PeriodEnd:        digest.PeriodEnd,
+		EventCount:       digest.EventCount,
+		ByCategory:       digest.ByCategory,
+		ByActionability:  digest.ByActionability,
+		Buckets:          digest.Buckets,
+		Suppressed:       digest.Suppressed,
+		Summary:          digest.Summary,
+		PrioritizedQueue: digest.PrioritizedQueue,
+		ActiveIncidents:  activeIncidents,
+		Trace:            digest.Trace,
+		ReplayWindow:     replayWindow,
 	})
 }
 

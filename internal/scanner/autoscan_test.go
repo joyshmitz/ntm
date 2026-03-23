@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 func TestDefaultAutoScannerConfig(t *testing.T) {
@@ -51,6 +53,127 @@ func TestAutoScanner_isExcluded(t *testing.T) {
 				t.Errorf("isExcluded(%q) = %v, want %v", tc.path, got, tc.excluded)
 			}
 		})
+	}
+}
+
+func TestAutoScanner_isExcluded_RecursiveGlobPatterns(t *testing.T) {
+	t.Parallel()
+
+	auto := &AutoScanner{config: AutoScannerConfig{
+		ProjectDir: "/project",
+		ExcludePatterns: []string{
+			".git/**",
+			"vendor/**",
+			"build/**",
+		},
+	}}
+
+	tests := []struct {
+		path     string
+		excluded bool
+	}{
+		{"/project/.git/config", true},
+		{"/project/.git/hooks/pre-commit", true},
+		{"/project/vendor/github.com/pkg/errors/errors.go", true},
+		{"/project/build/output/app.js", true},
+		{"/project/internal/build/output.go", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			if got := auto.isExcluded(tc.path); got != tc.excluded {
+				t.Fatalf("isExcluded(%q) = %v, want %v", tc.path, got, tc.excluded)
+			}
+		})
+	}
+}
+
+func TestAutoScannerConfigFromProjectConfig_MergesDefaultExcludes(t *testing.T) {
+	t.Parallel()
+
+	scannerCfg := &config.ScannerConfig{
+		Defaults: config.ScannerDefaults{
+			Timeout: "45s",
+			Exclude: []string{"build/**", ".cache/**"},
+		},
+	}
+
+	auto := AutoScannerConfigFromProjectConfig("/project", scannerCfg)
+
+	if auto.ScanTimeout != 45*time.Second {
+		t.Fatalf("ScanTimeout = %v, want 45s", auto.ScanTimeout)
+	}
+
+	required := []string{".git", "node_modules", "vendor", ".beads", "*.min.js", "*.min.css", "build/**", ".cache/**"}
+	for _, pattern := range required {
+		found := false
+		for _, existing := range auto.ExcludePatterns {
+			if existing == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected merged exclude pattern %q in %#v", pattern, auto.ExcludePatterns)
+		}
+	}
+}
+
+func TestNewAutoScannerWithScanner_AppliesDocumentedDefaults(t *testing.T) {
+	t.Parallel()
+
+	auto := NewAutoScannerWithScanner(AutoScannerConfig{
+		ProjectDir: "/project",
+	}, &Scanner{binaryPath: "ubs"})
+
+	if auto.config.DebounceDuration != time.Second {
+		t.Fatalf("DebounceDuration = %v, want 1s", auto.config.DebounceDuration)
+	}
+	if auto.config.ScanTimeout != 60*time.Second {
+		t.Fatalf("ScanTimeout = %v, want 60s", auto.config.ScanTimeout)
+	}
+	if len(auto.config.ExcludePatterns) == 0 {
+		t.Fatal("expected default exclude patterns to be applied")
+	}
+	if auto.config.ScanOptions.Timeout != 60*time.Second {
+		t.Fatalf("ScanOptions.Timeout = %v, want 60s", auto.config.ScanOptions.Timeout)
+	}
+}
+
+func TestNewAutoScannerWithScanner_MergesCustomExcludesWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	auto := NewAutoScannerWithScanner(AutoScannerConfig{
+		ProjectDir:       "/project",
+		ExcludePatterns:  []string{"build/**"},
+		ScanOptions:      ScanOptions{Verbose: true},
+		DebounceDuration: 25 * time.Millisecond,
+		ScanTimeout:      10 * time.Second,
+	}, &Scanner{binaryPath: "ubs"})
+
+	if auto.config.DebounceDuration != 25*time.Millisecond {
+		t.Fatalf("DebounceDuration = %v, want 25ms", auto.config.DebounceDuration)
+	}
+	if auto.config.ScanTimeout != 10*time.Second {
+		t.Fatalf("ScanTimeout = %v, want 10s", auto.config.ScanTimeout)
+	}
+	if !auto.config.ScanOptions.Verbose {
+		t.Fatal("expected custom ScanOptions to be preserved")
+	}
+
+	required := []string{".git", "node_modules", "vendor", ".beads", "*.min.js", "*.min.css", "build/**"}
+	for _, pattern := range required {
+		found := false
+		for _, existing := range auto.config.ExcludePatterns {
+			if existing == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected exclude pattern %q in %#v", pattern, auto.config.ExcludePatterns)
+		}
 	}
 }
 

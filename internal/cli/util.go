@@ -88,6 +88,9 @@ func ResolveSession(session string, w io.Writer) (SessionResolution, error) {
 
 func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveOptions) (SessionResolution, error) {
 	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return SessionResolution{}, fmt.Errorf("invalid session name: %w", err)
+		}
 		sessionList, err := tmux.ListSessions()
 		if err != nil {
 			return SessionResolution{}, err

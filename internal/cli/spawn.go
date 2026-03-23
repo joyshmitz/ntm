@@ -1782,15 +1782,14 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 					Verbose:            cfg.GeminiSetup.Verbose,
 				}
 				setupCtx, setupCancel := context.WithTimeout(context.Background(), geminiCfg.ReadyTimeout+geminiCfg.ModelSelectTimeout+10*time.Second)
+				defer setupCancel()
 				if err := gemini.PostSpawnSetup(setupCtx, paneID, geminiCfg); err != nil {
-					setupCancel()
 					if !IsJSONOutput() {
 						fmt.Printf("⚠ Warning: Gemini Pro model setup failed for agent %d: %v\n", idx, err)
 						fmt.Printf("  (Agent is running with default model. To disable auto-setup: set gemini_setup.auto_select_pro_model = false in config)\n")
 					}
 					// Don't fail spawn - agent is still running, just possibly with default model
 				} else {
-					setupCancel()
 					if !IsJSONOutput() && cfg.GeminiSetup.Verbose {
 						fmt.Printf("✓ Gemini %d configured for Pro model\n", idx)
 					}
@@ -2638,20 +2637,20 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 		}
 
 		regCtx, regCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer regCancel()
 		registered, err := client.CreateAgentIdentity(regCtx, agentmail.RegisterAgentOptions{
 			ProjectKey: workingDir,
 			Program:    program,
 			Model:      model,
 		})
-		regCancel()
 
 		if err != nil {
 			// On transient busy errors, the agent may have been created server-side
 			// despite the error. Reconcile by listing agents and checking.
 			if errors.Is(err, agentmail.ErrTransientBusy) {
 				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer reconcileCancel()
 				allAgents, listErr := client.ListAgents(reconcileCtx, workingDir)
-				reconcileCancel()
 				if listErr == nil {
 					// Look for a recently-created agent matching our program/model
 					// that hasn't already been claimed by a prior pane in this loop.

@@ -1732,6 +1732,8 @@ func TestTailOutputStructure(t *testing.T) {
 
 func TestSnapshotOutputStructure(t *testing.T) {
 	output := SnapshotOutput{
+		SchemaID:                 defaultRobotSchemaID("snapshot"),
+		SchemaVersion:            snapshotSchemaVersion,
 		Timestamp:                time.Now().UTC().Format(time.RFC3339),
 		AttentionContractVersion: AttentionContractVersion,
 		LatestCursor:             42,
@@ -1751,6 +1753,84 @@ func TestSnapshotOutputStructure(t *testing.T) {
 				},
 			},
 		},
+		Sources: &adapters.SourceHealthSection{
+			Sources: map[string]adapters.SourceInfo{
+				"beads": {
+					Name:           "beads",
+					Available:      true,
+					Fresh:          false,
+					Degraded:       true,
+					DegradedReason: "stale cache",
+				},
+			},
+			Degraded: []string{"beads"},
+			AllFresh: false,
+		},
+		DegradedSources: []string{"beads"},
+		Summary: StatusSummary{
+			TotalSessions: 1,
+			TotalAgents:   1,
+			AttachedCount: 1,
+			AgentsByState: map[string]int{"idle": 1},
+			AgentsByType:  map[string]int{"claude": 1},
+			ReadyWork:     2,
+			InProgress:    2,
+			MailUnread:    3,
+			AlertsActive:  1,
+			HealthScore:   0.85,
+			HealthStatus:  "degraded",
+		},
+		Work: &adapters.WorkSection{
+			Ready: []adapters.WorkItem{
+				{
+					ID:              "bd-ready",
+					Title:           "Ready bead",
+					TitleDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible"},
+					Priority:        1,
+				},
+			},
+			Summary: &adapters.WorkSummary{
+				Total:      3,
+				Open:       2,
+				InProgress: 1,
+				Ready:      1,
+				Blocked:    1,
+			},
+			Available: true,
+		},
+		Handoff: &HandoffSummary{
+			Session:     "myproject",
+			Status:      "blocked",
+			Now:         "Waiting on review",
+			ActiveBeads: []string{"bd-j9jo3.6.1"},
+		},
+		Coordination: &SnapshotCoordinationSummary{
+			Available:      true,
+			MailUnread:     3,
+			MailUrgent:     1,
+			PendingAck:     1,
+			AgentsWithMail: 1,
+			HasHandoff:     true,
+			HandoffSession: "myproject",
+			HandoffStatus:  "blocked",
+		},
+		Quota: &adapters.QuotaSection{
+			Accounts: []adapters.AccountQuota{
+				{
+					ID:           "anthropic-primary",
+					Provider:     "anthropic",
+					UsagePercent: func() *float64 { value := 82.5; return &value }(),
+					Status:       "warning",
+					ReasonCode:   adapters.ReasonQuotaWarningTokens,
+					IsActive:     true,
+				},
+			},
+			Summary: &adapters.QuotaSummary{
+				TotalAccounts:   1,
+				WarningAccounts: 1,
+			},
+			Available: true,
+		},
 		BeadsSummary: &bv.BeadsSummary{Open: 5, InProgress: 2, Blocked: 1, Ready: 2},
 		MailUnread:   3,
 		Alerts:       []string{"agent stuck"},
@@ -1769,6 +1849,12 @@ func TestSnapshotOutputStructure(t *testing.T) {
 	// Verify structure
 	if result.Timestamp == "" {
 		t.Error("Timestamp is empty")
+	}
+	if result.SchemaID != defaultRobotSchemaID("snapshot") {
+		t.Errorf("SchemaID = %q, want %q", result.SchemaID, defaultRobotSchemaID("snapshot"))
+	}
+	if result.SchemaVersion != snapshotSchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", result.SchemaVersion, snapshotSchemaVersion)
 	}
 	if result.AttentionContractVersion != AttentionContractVersion {
 		t.Errorf("AttentionContractVersion = %q, want %q", result.AttentionContractVersion, AttentionContractVersion)
@@ -1817,6 +1903,33 @@ func TestSnapshotOutputStructure(t *testing.T) {
 	}
 	if result.BeadsSummary == nil {
 		t.Error("BeadsSummary should be present")
+	}
+	if result.Sources == nil || !result.Sources.Sources["beads"].Degraded {
+		t.Errorf("Sources = %+v, want degraded beads source", result.Sources)
+	}
+	if len(result.DegradedSources) != 1 || result.DegradedSources[0] != "beads" {
+		t.Errorf("DegradedSources = %v, want [beads]", result.DegradedSources)
+	}
+	if result.Handoff == nil || result.Handoff.Session != "myproject" || result.Handoff.Status != "blocked" {
+		t.Errorf("Handoff = %+v, want myproject blocked handoff", result.Handoff)
+	}
+	if result.Work == nil || !result.Work.Available || result.Work.Summary == nil || result.Work.Summary.Ready != 1 {
+		t.Errorf("Work = %+v, want ready work summary", result.Work)
+	}
+	if result.Coordination == nil || !result.Coordination.Available || result.Coordination.MailUrgent != 1 {
+		t.Errorf("Coordination = %+v, want available coordination with urgent mail", result.Coordination)
+	}
+	if result.Quota == nil || !result.Quota.Available || len(result.Quota.Accounts) != 1 {
+		t.Errorf("Quota = %+v, want one available quota account", result.Quota)
+	}
+	if result.Quota != nil && result.Quota.Accounts[0].ReasonCode != adapters.ReasonQuotaWarningTokens {
+		t.Errorf("Quota reason = %q, want %q", result.Quota.Accounts[0].ReasonCode, adapters.ReasonQuotaWarningTokens)
+	}
+	if result.Summary.TotalSessions != 1 || result.Summary.TotalAgents != 1 {
+		t.Errorf("Summary session/agent totals = %+v, want 1/1", result.Summary)
+	}
+	if result.Summary.HealthStatus != "degraded" || result.Summary.HealthScore != 0.85 {
+		t.Errorf("Summary health = %q/%v, want degraded/0.85", result.Summary.HealthStatus, result.Summary.HealthScore)
 	}
 	if result.BeadsSummary.Open != 5 {
 		t.Errorf("BeadsSummary.Open = %d, want 5", result.BeadsSummary.Open)
@@ -2439,6 +2552,443 @@ func TestGetStatusWithProjectionStoreUsesRuntimeProjection(t *testing.T) {
 	}
 	if result.Beads != nil || result.GraphMetrics != nil || result.AgentMail != nil {
 		t.Fatalf("legacy status extras should be empty, got beads=%v graph=%v agent_mail=%v", result.Beads, result.GraphMetrics, result.AgentMail)
+	}
+}
+
+func TestBuildProjectionBackedSnapshotSessionsUsesRuntimeProjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeSession(&state.RuntimeSession{
+		Name:        "alpha",
+		Attached:    true,
+		CollectedAt: now,
+		StaleAfter:  staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeSession: %v", err)
+	}
+	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
+		ID:               "alpha:%42",
+		SessionName:      "alpha",
+		Pane:             "%42",
+		AgentType:        "claude",
+		Variant:          "opus",
+		TypeConfidence:   0.97,
+		TypeMethod:       "process",
+		State:            state.AgentStateIdle,
+		LastOutputAgeSec: 7,
+		OutputTailLines:  3,
+		CurrentBead:      "bd-ready",
+		PendingMail:      2,
+		CollectedAt:      now,
+		StaleAfter:       staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeAgent: %v", err)
+	}
+
+	sessions, err := buildProjectionBackedSnapshotSessions(store, []tmux.Session{
+		{
+			Name: "alpha",
+			Panes: []tmux.Pane{
+				{ID: "%42", WindowIndex: 0, Index: 1},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildProjectionBackedSnapshotSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("Sessions count = %d, want 1", len(sessions))
+	}
+	if sessions[0].Name != "alpha" || !sessions[0].Attached {
+		t.Fatalf("Session = %+v, want attached alpha", sessions[0])
+	}
+	if len(sessions[0].Agents) != 1 {
+		t.Fatalf("Agent count = %d, want 1", len(sessions[0].Agents))
+	}
+
+	agent := sessions[0].Agents[0]
+	if agent.Pane != "0.1" {
+		t.Fatalf("Pane = %q, want %q", agent.Pane, "0.1")
+	}
+	if agent.Type != "claude" || agent.Variant != "opus" {
+		t.Fatalf("Agent type/variant = %q/%q, want claude/opus", agent.Type, agent.Variant)
+	}
+	if agent.TypeMethod != "process" || agent.TypeConfidence != 0.97 {
+		t.Fatalf("Agent type metadata = %q/%v", agent.TypeMethod, agent.TypeConfidence)
+	}
+	if agent.State != string(state.AgentStateIdle) {
+		t.Fatalf("Agent state = %q, want %q", agent.State, state.AgentStateIdle)
+	}
+	if agent.LastOutputAgeSec != 7 || agent.OutputTailLines != 3 {
+		t.Fatalf("Agent activity = age %d lines %d, want 7/3", agent.LastOutputAgeSec, agent.OutputTailLines)
+	}
+	if agent.PendingMail != 2 {
+		t.Fatalf("Agent pending mail = %d, want 2", agent.PendingMail)
+	}
+	if agent.CurrentBead == nil || *agent.CurrentBead != "bd-ready" {
+		t.Fatalf("CurrentBead = %+v, want bd-ready", agent.CurrentBead)
+	}
+}
+
+func TestBuildProjectionAgentMailPaneMapUsesRuntimeProjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeSession(&state.RuntimeSession{
+		Name:        "alpha",
+		CollectedAt: now,
+		StaleAfter:  staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeSession: %v", err)
+	}
+	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
+		ID:            "alpha:%42",
+		SessionName:   "alpha",
+		Pane:          "%42",
+		AgentType:     "claude",
+		AgentMailName: "BlueLake",
+		CollectedAt:   now,
+		StaleAfter:    staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeAgent: %v", err)
+	}
+
+	paneMap, err := buildProjectionAgentMailPaneMap(store, []tmux.Session{
+		{
+			Name: "alpha",
+			Panes: []tmux.Pane{
+				{ID: "%42", WindowIndex: 0, Index: 1},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildProjectionAgentMailPaneMap: %v", err)
+	}
+	if paneMap["BlueLake"] != "0.1" {
+		t.Fatalf("Pane map BlueLake = %q, want %q", paneMap["BlueLake"], "0.1")
+	}
+}
+
+func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	for _, item := range []state.RuntimeWork{
+		{
+			BeadID:         "bd-ready",
+			Title:          "Ready bead",
+			Status:         "open",
+			Priority:       1,
+			BlockedByCount: 0,
+			CollectedAt:    now,
+			StaleAfter:     staleAfter,
+		},
+		{
+			BeadID:         "bd-blocked",
+			Title:          "Blocked bead",
+			Status:         "open",
+			Priority:       2,
+			BlockedByCount: 2,
+			CollectedAt:    now,
+			StaleAfter:     staleAfter,
+		},
+		{
+			BeadID:      "bd-active",
+			Title:       "Active bead",
+			Status:      "in_progress",
+			Priority:    1,
+			Assignee:    "BlueLake",
+			CollectedAt: now,
+			StaleAfter:  staleAfter,
+		},
+		{
+			BeadID:      "bd-closed",
+			Title:       "Closed bead",
+			Status:      "closed",
+			Priority:    3,
+			CollectedAt: now,
+			StaleAfter:  staleAfter,
+		},
+	} {
+		item := item
+		if err := store.UpsertRuntimeWork(&item); err != nil {
+			t.Fatalf("UpsertRuntimeWork(%s): %v", item.BeadID, err)
+		}
+	}
+
+	summary, err := snapshotBeadsSummaryFromRuntime(store, tmpDir, 5)
+	if err != nil {
+		t.Fatalf("snapshotBeadsSummaryFromRuntime: %v", err)
+	}
+	if !summary.Available || summary.Project != tmpDir {
+		t.Fatalf("Summary availability/project = %+v", summary)
+	}
+	if summary.Total != 4 || summary.Open != 2 || summary.Ready != 1 || summary.Blocked != 1 || summary.InProgress != 1 || summary.Closed != 1 {
+		t.Fatalf("Summary counts = %+v", summary)
+	}
+	if len(summary.ReadyPreview) != 1 || summary.ReadyPreview[0].ID != "bd-ready" || summary.ReadyPreview[0].Priority != "P1" {
+		t.Fatalf("ReadyPreview = %+v", summary.ReadyPreview)
+	}
+	if len(summary.InProgressList) != 1 || summary.InProgressList[0].ID != "bd-active" || summary.InProgressList[0].Assignee != "BlueLake" {
+		t.Fatalf("InProgressList = %+v", summary.InProgressList)
+	}
+}
+
+func TestApplySnapshotSourceHealth(t *testing.T) {
+	output := newSnapshotOutput(config.Default())
+	now := time.Now().UTC()
+
+	applySnapshotSourceHealth(output, []state.SourceHealth{
+		{
+			SourceName:    "beads",
+			Available:     true,
+			Healthy:       false,
+			Reason:        "stale cache",
+			LastCheckAt:   now,
+			LastFailureAt: &now,
+		},
+	})
+
+	if output.Sources == nil || !output.Sources.Sources["beads"].Degraded {
+		t.Fatalf("Sources = %+v, want degraded beads source", output.Sources)
+	}
+	if len(output.DegradedSources) != 1 || output.DegradedSources[0] != "beads" {
+		t.Fatalf("DegradedSources = %v, want [beads]", output.DegradedSources)
+	}
+}
+
+func TestSnapshotQuotaFromRuntime(t *testing.T) {
+	now := time.Now().UTC()
+	reset := now.Add(30 * time.Minute)
+	section := snapshotQuotaFromRuntime([]state.RuntimeQuota{
+		{
+			Provider:      "anthropic",
+			Account:       "primary",
+			UsedPct:       82.5,
+			UsedPctKnown:  true,
+			UsedPctSource: state.RuntimeQuotaUsedPctSourceProvider,
+			IsActive:      true,
+			Healthy:       true,
+			ResetsAt:      &reset,
+		},
+		{
+			Provider:      "openai",
+			Account:       "backup",
+			LimitHit:      true,
+			UsedPct:       100,
+			UsedPctKnown:  true,
+			UsedPctSource: state.RuntimeQuotaUsedPctSourceRequests,
+			IsActive:      false,
+			Healthy:       false,
+		},
+	})
+
+	if section == nil || !section.Available {
+		t.Fatalf("Quota section = %+v, want available section", section)
+	}
+	if len(section.Accounts) != 2 {
+		t.Fatalf("Quota accounts = %+v, want 2 accounts", section.Accounts)
+	}
+	if section.Accounts[0].ReasonCode != adapters.ReasonQuotaWarningTokens || section.Accounts[0].Status != "warning" {
+		t.Fatalf("First quota account = %+v, want warning/tokens", section.Accounts[0])
+	}
+	if section.Accounts[1].ReasonCode != adapters.ReasonQuotaExceededRequests || section.Accounts[1].Status != "exceeded" {
+		t.Fatalf("Second quota account = %+v, want exceeded/requests", section.Accounts[1])
+	}
+	if section.Summary == nil || section.Summary.TotalAccounts != 2 || section.Summary.WarningAccounts != 1 || section.Summary.ExceededAccounts != 1 {
+		t.Fatalf("Quota summary = %+v, want 2 total / 1 warning / 1 exceeded", section.Summary)
+	}
+}
+
+func TestSnapshotCoordinationFromRuntime(t *testing.T) {
+	now := time.Now().UTC()
+	summary := snapshotCoordinationFromRuntime([]state.RuntimeCoordination{
+		{
+			AgentName:       "BlueLake",
+			UnreadCount:     2,
+			PendingAckCount: 1,
+			UrgentCount:     1,
+			CollectedAt:     now,
+			StaleAfter:      now.Add(time.Hour),
+		},
+		{
+			AgentName:       "RedHill",
+			UnreadCount:     1,
+			PendingAckCount: 0,
+			UrgentCount:     0,
+			CollectedAt:     now,
+			StaleAfter:      now.Add(time.Hour),
+		},
+	}, &state.RuntimeHandoff{
+		SessionName: "alpha",
+		Status:      "blocked",
+	})
+
+	if summary == nil || !summary.Available {
+		t.Fatalf("Coordination summary = %+v, want available summary", summary)
+	}
+	if summary.MailUnread != 3 || summary.MailUrgent != 1 || summary.PendingAck != 1 {
+		t.Fatalf("Mail counts = %+v, want unread=3 urgent=1 pending=1", summary)
+	}
+	if summary.AgentsWithMail != 2 {
+		t.Fatalf("AgentsWithMail = %d, want 2", summary.AgentsWithMail)
+	}
+	if !summary.HasHandoff || summary.HandoffSession != "alpha" || summary.HandoffStatus != "blocked" {
+		t.Fatalf("Handoff summary = %+v, want alpha blocked handoff", summary)
+	}
+}
+
+func TestSnapshotWorkFromRuntime(t *testing.T) {
+	now := time.Now().UTC()
+	claimed := now.Add(-5 * time.Minute)
+	section := snapshotWorkFromRuntime([]state.RuntimeWork{
+		{
+			BeadID:          "bd-ready",
+			Title:           "Ready bead",
+			TitleDisclosure: `{"disclosure_state":"visible"}`,
+			Status:          "open",
+			Priority:        1,
+			BeadType:        "task",
+			Labels:          `["robot-redesign","snapshot"]`,
+			UnblocksCount:   2,
+			Score:           func() *float64 { value := 7.5; return &value }(),
+			CollectedAt:     now,
+			StaleAfter:      now.Add(time.Hour),
+		},
+		{
+			BeadID:         "bd-blocked",
+			Title:          "Blocked bead",
+			Status:         "open",
+			Priority:       2,
+			BlockedByCount: 1,
+			CollectedAt:    now,
+			StaleAfter:     now.Add(time.Hour),
+		},
+		{
+			BeadID:      "bd-active",
+			Title:       "Active bead",
+			Status:      "in_progress",
+			Assignee:    "BlueLake",
+			ClaimedAt:   &claimed,
+			CollectedAt: now,
+			StaleAfter:  now.Add(time.Hour),
+		},
+	}, 5)
+
+	if section == nil || !section.Available || section.Summary == nil {
+		t.Fatalf("Work section = %+v, want available summary", section)
+	}
+	if section.Summary.Total != 3 || section.Summary.Ready != 1 || section.Summary.Blocked != 1 || section.Summary.InProgress != 1 {
+		t.Fatalf("Work summary = %+v", section.Summary)
+	}
+	if len(section.Ready) != 1 || section.Ready[0].ID != "bd-ready" {
+		t.Fatalf("Ready items = %+v", section.Ready)
+	}
+	if len(section.Blocked) != 1 || section.Blocked[0].ID != "bd-blocked" {
+		t.Fatalf("Blocked items = %+v", section.Blocked)
+	}
+	if len(section.InProgress) != 1 || section.InProgress[0].ID != "bd-active" || section.InProgress[0].Assignee != "BlueLake" {
+		t.Fatalf("InProgress items = %+v", section.InProgress)
+	}
+	if section.Ready[0].TitleDisclosure == nil || section.Ready[0].TitleDisclosure.DisclosureState != "visible" {
+		t.Fatalf("Ready title disclosure = %+v", section.Ready[0].TitleDisclosure)
+	}
+	if len(section.Ready[0].Labels) != 2 || section.Ready[0].Unblocks != 2 || section.Ready[0].Score == nil || *section.Ready[0].Score != 7.5 {
+		t.Fatalf("Ready item detail = %+v", section.Ready[0])
+	}
+}
+
+func TestSnapshotFinalizeBuildsSummary(t *testing.T) {
+	output := newSnapshotOutput(config.Default())
+	output.Sessions = []SnapshotSession{
+		{
+			Name:     "alpha",
+			Attached: true,
+			Agents: []SnapshotAgent{
+				{Pane: "0.1", Type: "claude", State: "idle"},
+				{Pane: "0.2", Type: "codex", State: "error"},
+			},
+		},
+		{
+			Name:     "beta",
+			Attached: false,
+			Agents: []SnapshotAgent{
+				{Pane: "0.1", Type: "gemini", State: "busy"},
+			},
+		},
+	}
+	output.Work = &adapters.WorkSection{
+		Summary:   &adapters.WorkSummary{Ready: 2, InProgress: 1},
+		Available: true,
+	}
+	output.BeadsSummary = &bv.BeadsSummary{Ready: 2, InProgress: 1}
+	output.AgentMail = &SnapshotAgentMail{TotalUnread: 3}
+	output.Coordination = &SnapshotCoordinationSummary{Available: true, MailUnread: 4, MailUrgent: 1, PendingAck: 2}
+	output.AlertSummary = &AlertSummaryInfo{TotalActive: 1, BySeverity: map[string]int{"warning": 1}}
+	output.DegradedSources = []string{"beads"}
+
+	snapshotFinalize(output, PaginationOptions{})
+
+	if output.Summary.TotalSessions != 2 || output.Summary.TotalAgents != 3 {
+		t.Fatalf("Summary totals = %+v, want 2 sessions and 3 agents", output.Summary)
+	}
+	if output.Summary.AttachedCount != 1 {
+		t.Fatalf("AttachedCount = %d, want 1", output.Summary.AttachedCount)
+	}
+	if output.Summary.AgentsByType["claude"] != 1 || output.Summary.AgentsByType["codex"] != 1 || output.Summary.AgentsByType["gemini"] != 1 {
+		t.Fatalf("AgentsByType = %+v", output.Summary.AgentsByType)
+	}
+	if output.Summary.AgentsByState["idle"] != 1 || output.Summary.AgentsByState["busy"] != 1 || output.Summary.AgentsByState["error"] != 1 {
+		t.Fatalf("AgentsByState = %+v", output.Summary.AgentsByState)
+	}
+	if output.Summary.ReadyWork != 2 || output.Summary.InProgress != 1 {
+		t.Fatalf("Work summary = ready %d in_progress %d, want 2/1", output.Summary.ReadyWork, output.Summary.InProgress)
+	}
+	if output.Summary.MailUnread != 4 || output.Summary.MailUrgent != 1 {
+		t.Fatalf("Mail summary = unread %d urgent %d, want 4/1", output.Summary.MailUnread, output.Summary.MailUrgent)
+	}
+	if output.Summary.AlertsActive != 1 {
+		t.Fatalf("AlertsActive = %d, want 1", output.Summary.AlertsActive)
+	}
+	if output.Summary.HealthStatus != "critical" {
+		t.Fatalf("HealthStatus = %q, want critical", output.Summary.HealthStatus)
+	}
+	if output.Summary.HealthScore != 0.75 {
+		t.Fatalf("HealthScore = %.2f, want 0.75", output.Summary.HealthScore)
 	}
 }
 

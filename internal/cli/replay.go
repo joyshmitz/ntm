@@ -13,6 +13,20 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
+func resolveReplaySession(entrySession, sessionOverride string) (string, error) {
+	session := strings.TrimSpace(entrySession)
+	if sessionOverride != "" {
+		session = strings.TrimSpace(sessionOverride)
+	}
+	if session == "" {
+		return "", fmt.Errorf("history entry session is empty")
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
+	return session, nil
+}
+
 func newReplayCmd() *cobra.Command {
 	var (
 		targetCC, targetCod, targetGmi, targetAll bool
@@ -83,9 +97,9 @@ Examples:
 			}
 
 			// Determine session to use
-			session := entry.Session
-			if sessionOverride != "" {
-				session = sessionOverride
+			session, err := resolveReplaySession(entry.Session, sessionOverride)
+			if err != nil {
+				return err
 			}
 
 			// Get the prompt, optionally edit it

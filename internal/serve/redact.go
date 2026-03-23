@@ -179,7 +179,9 @@ func (rw *redactingResponseWriter) finalize() {
 
 	// Write the actual response
 	rw.ResponseWriter.WriteHeader(rw.statusCode)
-	rw.ResponseWriter.Write(body)
+	if _, err := rw.ResponseWriter.Write(body); err != nil {
+		log.Printf("redact: failed to write response body: %v", err)
+	}
 }
 
 // Flush implements http.Flusher for streaming responses.

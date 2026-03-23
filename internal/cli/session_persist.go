@@ -119,21 +119,18 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 		return err
 	}
 
-	// Determine session name
-	if sessionName == "" {
-		res, err := ResolveSession("", os.Stdout)
-		if err != nil {
-			if IsJSONOutput() {
-				return output.PrintJSON(output.NewError(err.Error()))
-			}
-			return err
+	res, err := ResolveSession(sessionName, os.Stdout)
+	if err != nil {
+		if IsJSONOutput() {
+			return output.PrintJSON(output.NewError(err.Error()))
 		}
-		if res.Session == "" {
-			return nil
-		}
-		res.ExplainIfInferred(os.Stderr)
-		sessionName = res.Session
+		return err
 	}
+	if res.Session == "" {
+		return nil
+	}
+	res.ExplainIfInferred(os.Stderr)
+	sessionName = res.Session
 
 	if !tmux.SessionExists(sessionName) {
 		result := &SessionsSaveResult{
