@@ -546,6 +546,10 @@ func TestViewCommandPhase(t *testing.T) {
 func TestHelpOverlayToggle(t *testing.T) {
 	m := New("test-session", testCommands)
 
+	// Move to PhaseTarget first (? only opens help in non-text-input phases)
+	m.phase = PhaseTarget
+	m.selected = &testCommands[0]
+
 	// Open help overlay with '?'
 	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	m = newModel.(Model)
