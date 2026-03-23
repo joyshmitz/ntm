@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -84,6 +86,19 @@ type Server struct {
 	// Redaction configuration for REST API
 	redactionCfg *RedactionConfig
 }
+
+type attentionHeartbeatSourceSummary struct {
+	healthy         int
+	degraded        int
+	unavailable     int
+	degradedReasons []string
+}
+
+const (
+	attentionHeartbeatIdleInterval         = 5 * time.Second
+	attentionHeartbeatHighActivityInterval = 30 * time.Second
+	attentionHeartbeatRecoveryInterval     = time.Second
+)
 
 // AuthMode configures authentication for the server.
 type AuthMode string
@@ -4076,13 +4091,49 @@ func filterAttentionReplayBoundary(events []robot.AttentionEvent, maxCursor int6
 	return filtered
 }
 
+func writeAttentionReplay(
+	w io.Writer,
+	flusher http.Flusher,
+	events []robot.AttentionEvent,
+	categoryFilter []string,
+	sessionFilter string,
+	actionabilityFilter []string,
+	replayCursor int64,
+) (int64, int, error) {
+	delivered := 0
+	for _, event := range events {
+		if event.Cursor > replayCursor {
+			replayCursor = event.Cursor
+		}
+		if event.Type == robot.EventType(robot.DefaultTransportLiveness.HeartbeatType) {
+			// Match the live stream path: transport heartbeat events are not emitted as attention items.
+			continue
+		}
+		if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
+			continue
+		}
+		data, err := json.Marshal(event)
+		if err != nil {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "event: attention\ndata: %s\n\n", data); err != nil {
+			return replayCursor, delivered, err
+		}
+		delivered++
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return replayCursor, delivered, nil
+}
+
 // handleAttentionStreamV1 handles SSE streaming at /api/v1/attention/stream.
 // Query params:
 //   - since_cursor: replay from this cursor (0 = start from beginning, -1 = from now)
 //   - category: filter by event category (comma-separated)
 //   - session: filter by session name
 //   - actionability: filter by actionability level (comma-separated)
-//   - heartbeat: heartbeat interval in seconds (default 30, 0 to disable)
+//   - heartbeat: heartbeat interval in seconds (default adaptive, 0 to disable)
 func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters
 	sinceCursor := int64(0)
@@ -4099,7 +4150,8 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 	sessionFilter := r.URL.Query().Get("session")
 	actionabilityFilter := parseCSVParam(r.URL.Query().Get("actionability"))
 
-	heartbeatInterval := 30 * time.Second
+	heartbeatInterval := attentionHeartbeatIdleInterval
+	heartbeatOverride := false
 	if hb := r.URL.Query().Get("heartbeat"); hb != "" {
 		parsed, err := strconv.Atoi(hb)
 		if err != nil {
@@ -4107,6 +4159,7 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		heartbeatInterval = time.Duration(parsed) * time.Second
+		heartbeatOverride = true
 	}
 
 	feed := robot.GetAttentionFeed()
@@ -4165,36 +4218,57 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 	}
 	flusher.Flush()
 
+	// Stream bookkeeping spans replayed and live-delivered events.
+	streamStart := time.Now()
+	streamID := fmt.Sprintf("watch_%s", streamStart.UTC().Format("20060102T150405Z"))
+
 	// Replay events from cursor if requested
 	replayCursor := prepared.replayBoundary
-	for _, event := range prepared.replayEvents {
-		if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
-			continue
-		}
-		data, err := json.Marshal(event)
-		if err != nil {
-			continue
-		}
-		if _, err := fmt.Fprintf(w, "event: attention\ndata: %s\n\n", data); err != nil {
-			return
-		}
-	}
-	flusher.Flush()
-
-	// Set up heartbeat ticker
-	var heartbeatTicker *time.Ticker
-	var heartbeatCh <-chan time.Time
-	if heartbeatInterval > 0 {
-		heartbeatTicker = time.NewTicker(heartbeatInterval)
-		heartbeatCh = heartbeatTicker.C
-		defer heartbeatTicker.Stop()
+	replayCursor, eventsSinceStart, err := writeAttentionReplay(
+		w,
+		flusher,
+		prepared.replayEvents,
+		categoryFilter,
+		sessionFilter,
+		actionabilityFilter,
+		replayCursor,
+	)
+	if err != nil {
+		return
 	}
 
 	// Stream events
 	ctx := r.Context()
-	streamStart := time.Now()
+	recoveryMode := sinceCursor > 0 || len(prepared.replayEvents) > 0
 	deliveredSinceHeartbeat := 0
 	filteredSinceHeartbeat := 0
+	var heartbeatTimer *time.Timer
+	var heartbeatCh <-chan time.Time
+	nextHeartbeatInterval := attentionHeartbeatInterval(
+		streamStart,
+		deliveredSinceHeartbeat,
+		recoveryMode,
+		attentionHeartbeatSourceSummary{},
+		heartbeatInterval,
+		heartbeatOverride,
+	)
+	if nextHeartbeatInterval > 0 {
+		heartbeatTimer = time.NewTimer(nextHeartbeatInterval)
+		heartbeatCh = heartbeatTimer.C
+		defer heartbeatTimer.Stop()
+	}
+	resetHeartbeatTimer := func(nextInterval time.Duration) {
+		if heartbeatTimer == nil {
+			return
+		}
+		if !heartbeatTimer.Stop() {
+			select {
+			case <-heartbeatTimer.C:
+			default:
+			}
+		}
+		heartbeatTimer.Reset(nextInterval)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -4221,21 +4295,56 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 			}
 			flusher.Flush()
 			replayCursor = event.Cursor
+			eventsSinceStart++
 			deliveredSinceHeartbeat++
+			if heartbeatTimer != nil {
+				sourceSummary := s.attentionHeartbeatSourceSummary()
+				nextHeartbeatInterval = attentionHeartbeatInterval(
+					streamStart,
+					deliveredSinceHeartbeat,
+					recoveryMode,
+					sourceSummary,
+					heartbeatInterval,
+					heartbeatOverride,
+				)
+				resetHeartbeatTimer(nextHeartbeatInterval)
+			}
 		case <-heartbeatCh:
 			currentStats := feed.Stats()
+			sourceSummary := s.attentionHeartbeatSourceSummary()
+			nextHeartbeatInterval = attentionHeartbeatInterval(
+				streamStart,
+				deliveredSinceHeartbeat,
+				recoveryMode,
+				sourceSummary,
+				heartbeatInterval,
+				heartbeatOverride,
+			)
 			heartbeat := map[string]interface{}{
 				"type":                        "heartbeat",
+				"stream_id":                   streamID,
 				"time":                        time.Now().UTC().Format(time.RFC3339),
 				"oldest_cursor":               attentionReplayEarliestCursor(currentStats),
 				"newest_cursor":               currentStats.NewestCursor,
+				"cursor_position":             replayCursor,
 				"event_count":                 currentStats.Count,
+				"subscriber_count":            feed.SubscriberCount(),
 				"uptime_ms":                   time.Since(streamStart).Milliseconds(),
-				"next_heartbeat_ms":           heartbeatInterval.Milliseconds(),
+				"events_since_start":          eventsSinceStart,
+				"next_heartbeat_ms":           nextHeartbeatInterval.Milliseconds(),
 				"events_since_last_heartbeat": deliveredSinceHeartbeat,
 				"filtered_since_last":         filteredSinceHeartbeat,
 				"dropped_since_last":          prepared.takeDroppedCount(),
+				"sources_healthy":             sourceSummary.healthy,
+				"sources_degraded":            sourceSummary.degraded,
+				"sources_unavailable":         sourceSummary.unavailable,
+				"degraded_reasons":            sourceSummary.degradedReasons,
 				"subscription_active":         true,
+			}
+			if currentStats.LastEventTime != nil && !currentStats.LastEventTime.IsZero() {
+				lastEventTime := currentStats.LastEventTime.UTC()
+				heartbeat["last_event_time"] = lastEventTime.Format(time.RFC3339Nano)
+				heartbeat["idle_ms"] = time.Since(lastEventTime).Milliseconds()
 			}
 			data, _ := json.Marshal(heartbeat)
 			if _, err := fmt.Fprintf(w, "event: heartbeat\ndata: %s\n\n", data); err != nil {
@@ -4244,8 +4353,93 @@ func (s *Server) handleAttentionStreamV1(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 			deliveredSinceHeartbeat = 0
 			filteredSinceHeartbeat = 0
+			recoveryMode = false
+			if heartbeatTimer != nil && nextHeartbeatInterval > 0 {
+				resetHeartbeatTimer(nextHeartbeatInterval)
+			}
 		}
 	}
+}
+
+func attentionHeartbeatInterval(
+	streamStart time.Time,
+	deliveredSinceHeartbeat int,
+	recoveryMode bool,
+	sourceSummary attentionHeartbeatSourceSummary,
+	baseInterval time.Duration,
+	override bool,
+) time.Duration {
+	if baseInterval <= 0 {
+		return 0
+	}
+	if override {
+		return baseInterval
+	}
+	if recoveryMode && deliveredSinceHeartbeat == 0 && time.Since(streamStart) < attentionHeartbeatIdleInterval {
+		return attentionHeartbeatRecoveryInterval
+	}
+	if sourceSummary.degraded > 0 {
+		return attentionHeartbeatIdleInterval
+	}
+	if deliveredSinceHeartbeat > 0 {
+		return attentionHeartbeatHighActivityInterval
+	}
+	return attentionHeartbeatIdleInterval
+}
+
+func (s *Server) attentionHeartbeatSourceSummary() attentionHeartbeatSourceSummary {
+	summary := attentionHeartbeatSourceSummary{
+		degradedReasons: []string{},
+	}
+	if s == nil || s.stateStore == nil {
+		return summary
+	}
+	rows, err := s.stateStore.GetAllSourceHealth()
+	if err != nil {
+		return summary
+	}
+	return summarizeAttentionHeartbeatSources(robot.SourceHealthSectionFromRows(rows))
+}
+
+func summarizeAttentionHeartbeatSources(section *adapters.SourceHealthSection) attentionHeartbeatSourceSummary {
+	summary := attentionHeartbeatSourceSummary{
+		degradedReasons: []string{},
+	}
+	if section == nil {
+		return summary
+	}
+	reasonSet := make(map[string]struct{}, len(section.Degraded))
+	for _, source := range section.Sources {
+		if source.Fresh {
+			summary.healthy++
+		}
+		if source.Degraded {
+			summary.degraded++
+		}
+		if !source.Available {
+			summary.unavailable++
+		}
+		if !source.Degraded {
+			continue
+		}
+		reason := strings.TrimSpace(string(source.ReasonCode))
+		if reason == "" {
+			reason = strings.TrimSpace(source.DegradedReason)
+		}
+		if reason == "" {
+			reason = strings.TrimSpace(source.LastError)
+		}
+		if reason == "" {
+			continue
+		}
+		if _, exists := reasonSet[reason]; exists {
+			continue
+		}
+		reasonSet[reason] = struct{}{}
+		summary.degradedReasons = append(summary.degradedReasons, reason)
+	}
+	sort.Strings(summary.degradedReasons)
+	return summary
 }
 
 // handleAttentionEventsV1 handles HTTP replay at /api/v1/attention/events.

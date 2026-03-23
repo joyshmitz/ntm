@@ -4,6 +4,8 @@ package watcher
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -332,22 +334,39 @@ func (w *FileReservationWatcher) releaseIdleReservations(ctx context.Context) {
 	var idleReservations []PaneReservation
 
 	w.mu.Lock()
-	for paneID, reservation := range w.activeReservations {
+	for _, reservation := range w.activeReservations {
 		if now.Sub(reservation.LastActivity) > w.idleTimeout {
 			idleReservations = append(idleReservations, clonePaneReservation(*reservation))
-			delete(w.activeReservations, paneID)
 		}
 	}
 	w.mu.Unlock()
 
 	for _, reservation := range idleReservations {
 		if len(reservation.ReservationID) == 0 {
+			w.removeTrackedReservation(reservation)
 			continue
 		}
 		releaseResult, err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
-		if err != nil && w.debug {
-			log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", reservation.PaneID, err)
-		} else if w.debug {
+		if err != nil {
+			if w.debug {
+				log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", reservation.PaneID, err)
+			}
+			continue
+		}
+		if !reservationReleaseComplete(reservation, releaseResult) {
+			if w.debug {
+				releasedCount := 0
+				if releaseResult != nil {
+					releasedCount = releaseResult.Released
+				}
+				log.Printf("[FileReservationWatcher] Incomplete release for idle pane %s: released %d of %d",
+					reservation.PaneID, releasedCount, len(reservation.ReservationID))
+			}
+			continue
+		}
+
+		w.removeTrackedReservation(reservation)
+		if w.debug {
 			releasedCount := len(reservation.ReservationID)
 			if releaseResult != nil && releaseResult.Released > 0 {
 				releasedCount = releaseResult.Released
@@ -372,16 +391,34 @@ func (w *FileReservationWatcher) releaseAllReservations() {
 	for _, reservation := range w.activeReservations {
 		reservations = append(reservations, clonePaneReservation(*reservation))
 	}
-	w.activeReservations = make(map[string]*PaneReservation)
 	w.mu.Unlock()
 
 	for _, reservation := range reservations {
-		if len(reservation.ReservationID) > 0 {
-			_, err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
-			if err != nil && w.debug {
+		if len(reservation.ReservationID) == 0 {
+			w.removeTrackedReservation(reservation)
+			continue
+		}
+
+		releaseResult, err := w.client.ReleaseReservations(ctx, w.projectDir, reservation.AgentName, reservation.Files, reservation.ReservationID)
+		if err != nil {
+			if w.debug {
 				log.Printf("[FileReservationWatcher] Error releasing reservations for pane %s: %v", reservation.PaneID, err)
 			}
+			continue
 		}
+		if !reservationReleaseComplete(reservation, releaseResult) {
+			if w.debug {
+				releasedCount := 0
+				if releaseResult != nil {
+					releasedCount = releaseResult.Released
+				}
+				log.Printf("[FileReservationWatcher] Incomplete release for pane %s during stop: released %d of %d",
+					reservation.PaneID, releasedCount, len(reservation.ReservationID))
+			}
+			continue
+		}
+
+		w.removeTrackedReservation(reservation)
 	}
 }
 
@@ -420,21 +457,37 @@ func (w *FileReservationWatcher) RenewReservations(ctx context.Context) error {
 	}
 	w.mu.Unlock()
 
+	var renewErrs []error
 	for _, reservation := range reservations {
 		if len(reservation.ReservationID) > 0 {
-			_, err := w.client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
+			renewResult, err := w.client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
 				ProjectKey:     w.projectDir,
 				AgentName:      reservation.AgentName,
 				ExtendSeconds:  extendSeconds,
 				ReservationIDs: reservation.ReservationID,
 			})
-			if err != nil && w.debug {
-				log.Printf("[FileReservationWatcher] Error renewing reservations for pane %s: %v",
-					reservation.PaneID, err)
+			if err != nil {
+				if w.debug {
+					log.Printf("[FileReservationWatcher] Error renewing reservations for pane %s: %v",
+						reservation.PaneID, err)
+				}
+				renewErrs = append(renewErrs, fmt.Errorf("pane %s: %w", reservation.PaneID, err))
+				continue
+			}
+			if renewResult == nil || renewResult.Renewed < len(reservation.ReservationID) {
+				renewedCount := 0
+				if renewResult != nil {
+					renewedCount = renewResult.Renewed
+				}
+				err := fmt.Errorf("renewed %d of %d reservations for pane %s", renewedCount, len(reservation.ReservationID), reservation.PaneID)
+				if w.debug {
+					log.Printf("[FileReservationWatcher] %v", err)
+				}
+				renewErrs = append(renewErrs, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(renewErrs...)
 }
 
 func (w *FileReservationWatcher) prepareReservationAttempt(
@@ -574,6 +627,61 @@ func clonePaneReservation(reservation PaneReservation) PaneReservation {
 	reservation.Files = append([]string(nil), reservation.Files...)
 	reservation.ReservationID = append([]int(nil), reservation.ReservationID...)
 	return reservation
+}
+
+func reservationReleaseComplete(reservation PaneReservation, result *agentmail.ReleaseReservationsResult) bool {
+	if len(reservation.ReservationID) == 0 {
+		return true
+	}
+	if result == nil {
+		return false
+	}
+	return result.Released >= len(reservation.ReservationID)
+}
+
+func (w *FileReservationWatcher) removeTrackedReservation(snapshot PaneReservation) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	current, ok := w.activeReservations[snapshot.PaneID]
+	if !ok {
+		return
+	}
+
+	if len(snapshot.ReservationID) == 0 {
+		if len(current.ReservationID) == 0 && !current.LastActivity.After(snapshot.LastActivity) {
+			delete(w.activeReservations, snapshot.PaneID)
+		}
+		return
+	}
+
+	removeIDs := make(map[int]struct{}, len(snapshot.ReservationID))
+	for _, id := range snapshot.ReservationID {
+		removeIDs[id] = struct{}{}
+	}
+	filteredIDs := make([]int, 0, len(current.ReservationID))
+	for _, id := range current.ReservationID {
+		if _, remove := removeIDs[id]; !remove {
+			filteredIDs = append(filteredIDs, id)
+		}
+	}
+	current.ReservationID = filteredIDs
+
+	removeFiles := make(map[string]struct{}, len(snapshot.Files))
+	for _, file := range snapshot.Files {
+		removeFiles[file] = struct{}{}
+	}
+	filteredFiles := make([]string, 0, len(current.Files))
+	for _, file := range current.Files {
+		if _, remove := removeFiles[file]; !remove {
+			filteredFiles = append(filteredFiles, file)
+		}
+	}
+	current.Files = filteredFiles
+
+	if len(current.ReservationID) == 0 && len(current.Files) == 0 {
+		delete(w.activeReservations, snapshot.PaneID)
+	}
 }
 
 // =============================================================================

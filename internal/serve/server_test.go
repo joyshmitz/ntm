@@ -789,6 +789,48 @@ func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
 	}
 }
 
+func TestHandleMarkMessageRead_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleMarkMessageRead(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success   bool `json:"success"`
+		MessageID int  `json:"message_id"`
+		Read      bool `json:"read"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Success || resp.Read {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.MessageID != 42 {
+		t.Fatalf("message_id = %d, want 42", resp.MessageID)
+	}
+}
+
 func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -835,6 +877,48 @@ func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 	}
 	if resp.AcknowledgedAt == "" || resp.ReadAt == "" {
 		t.Fatal("expected acknowledged_at and read_at in response")
+	}
+}
+
+func TestHandleAckMessage_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAckMessage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success      bool `json:"success"`
+		MessageID    int  `json:"message_id"`
+		Acknowledged bool `json:"acknowledged"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Success || resp.Acknowledged {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.MessageID != 42 {
+		t.Fatalf("message_id = %d, want 42", resp.MessageID)
 	}
 }
 
@@ -1118,6 +1202,108 @@ func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
 	}
 	if resp.Examples[0].Subject != "Example" {
 		t.Fatalf("examples[0].subject = %q, want Example", resp.Examples[0].Subject)
+	}
+}
+
+func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.MessageReadResult{
+				MessageID: 42,
+				Read:      false,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+	srv.wsHub = hub
+
+	client := &WSClient{
+		id:     "mail-read-watcher",
+		hub:    hub,
+		send:   make(chan []byte, 10),
+		topics: make(map[string]struct{}),
+	}
+	client.Subscribe([]string{"mail:BlueLake"})
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/read?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleMarkMessageRead(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case msg := <-client.send:
+		t.Fatalf("unexpected mail.read event published: %s", string(msg))
+	default:
+	}
+}
+
+func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.MessageAckResult{
+				MessageID:    42,
+				Acknowledged: false,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	hub := NewWSHub()
+	go hub.Run()
+	defer hub.Stop()
+	srv.wsHub = hub
+
+	client := &WSClient{
+		id:     "mail-ack-watcher",
+		hub:    hub,
+		send:   make(chan []byte, 10),
+		topics: make(map[string]struct{}),
+	}
+	client.Subscribe([]string{"mail:BlueLake"})
+	hub.register <- client
+	time.Sleep(20 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/ack?agent_name=BlueLake", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAckMessage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case msg := <-client.send:
+		t.Fatalf("unexpected mail.acknowledged event published: %s", string(msg))
+	default:
 	}
 }
 
@@ -1568,6 +1754,52 @@ func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
 	}
 	if resp["released_at"] != releasedAt {
 		t.Fatalf("released_at = %#v, want %s", resp["released_at"], releasedAt)
+	}
+}
+
+func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"force_release_file_reservation": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ForceReleaseResult{
+				Success:        false,
+				PreviousHolder: "BlueLake",
+				PathPattern:    "internal/serve/*",
+				Notified:       false,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/17/force-release", strings.NewReader(`{"agent_name":"RedStone","notify_previous":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "17")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleForceReleaseReservation(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeConflict {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeConflict)
+	}
+	if resp.Details["previous_holder"] != "BlueLake" {
+		t.Fatalf("previous_holder = %#v, want BlueLake", resp.Details["previous_holder"])
+	}
+	if resp.Details["path_pattern"] != "internal/serve/*" {
+		t.Fatalf("path_pattern = %#v, want internal/serve/*", resp.Details["path_pattern"])
 	}
 }
 
@@ -2511,11 +2743,166 @@ func TestAttentionStreamHeartbeatIncludesCounters(t *testing.T) {
 		t.Fatalf("stream body missing heartbeat event: %s", body)
 	}
 	for _, want := range []string{
+		`"stream_id":"watch_`,
+		`"cursor_position":0`,
+		`"events_since_start":0`,
+		`"subscriber_count":1`,
 		`"next_heartbeat_ms":1000`,
 		`"events_since_last_heartbeat":0`,
 		`"filtered_since_last":0`,
 		`"dropped_since_last":0`,
 		`"subscription_active":true`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestAttentionStreamHeartbeatIncludesSourceHealth(t *testing.T) {
+	srv, store := setupTestServer(t)
+
+	now := time.Now().UTC()
+	successAt := now.Add(-30 * time.Second)
+	failureAt := now.Add(-15 * time.Second)
+	for _, health := range []*state.SourceHealth{
+		{
+			SourceName:    "beads",
+			Available:     true,
+			Healthy:       true,
+			LastSuccessAt: &successAt,
+			LastCheckAt:   now,
+		},
+		{
+			SourceName:          "mail",
+			Available:           true,
+			Healthy:             false,
+			Reason:              "rate limited",
+			LastFailureAt:       &failureAt,
+			LastCheckAt:         now,
+			ConsecutiveFailures: 2,
+			LastError:           "mail quota exceeded",
+			LastErrorCode:       "quota:rate_limited",
+		},
+		{
+			SourceName:          "tmux",
+			Available:           false,
+			Healthy:             false,
+			Reason:              "socket unavailable",
+			LastFailureAt:       &failureAt,
+			LastCheckAt:         now,
+			ConsecutiveFailures: 1,
+			LastError:           "tmux socket missing",
+			LastErrorCode:       "tmux:disconnected",
+		},
+	} {
+		if err := store.UpsertSourceHealth(health); err != nil {
+			t.Fatalf("UpsertSourceHealth(%s): %v", health.SourceName, err)
+		}
+	}
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       10,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	oldFeed := robot.GetAttentionFeed()
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/stream", nil).WithContext(ctx)
+	query := req.URL.Query()
+	query.Set("heartbeat", "1")
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.handleAttentionStreamV1(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(1100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("attention stream handler did not exit after cancel")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: heartbeat") {
+		t.Fatalf("stream body missing heartbeat event: %s", body)
+	}
+	for _, want := range []string{
+		`"sources_healthy":1`,
+		`"sources_degraded":2`,
+		`"sources_unavailable":1`,
+		`"degraded_reasons":["quota:rate_limited","tmux:disconnected"]`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestAttentionStreamHeartbeatIncludesLastEventTimeAfterRealEvent(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       10,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	})
+	feed.Append(robot.AttentionEvent{
+		Session:       "proj",
+		Pane:          2,
+		Category:      robot.EventCategoryAlert,
+		Type:          robot.EventTypeAlertAttentionRequired,
+		Actionability: robot.ActionabilityActionRequired,
+		Severity:      robot.SeverityWarning,
+		Summary:       "operator attention item",
+	})
+	oldFeed := robot.GetAttentionFeed()
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/stream", nil).WithContext(ctx)
+	query := req.URL.Query()
+	query.Set("heartbeat", "1")
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.handleAttentionStreamV1(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(1100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("attention stream handler did not exit after cancel")
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"cursor_position":1`,
+		`"events_since_start":1`,
+		`"last_event_time":"`,
+		`"idle_ms":`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stream body missing %s: %s", want, body)
@@ -4280,6 +4667,70 @@ func TestFormatAge(t *testing.T) {
 	}
 }
 
+func TestAttentionHeartbeatInterval(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	tests := []struct {
+		name       string
+		delivered  int
+		recovery   bool
+		degraded   int
+		base       time.Duration
+		override   bool
+		want       time.Duration
+		streamBump time.Duration
+	}{
+		{
+			name:     "override keeps explicit interval",
+			base:     12 * time.Second,
+			override: true,
+			want:     12 * time.Second,
+		},
+		{
+			name:       "recovery mode uses fast heartbeat",
+			recovery:   true,
+			base:       attentionHeartbeatIdleInterval,
+			want:       attentionHeartbeatRecoveryInterval,
+			streamBump: 500 * time.Millisecond,
+		},
+		{
+			name:     "degraded sources stay chatty",
+			degraded: 1,
+			base:     attentionHeartbeatIdleInterval,
+			want:     attentionHeartbeatIdleInterval,
+		},
+		{
+			name:      "recent delivered activity stretches heartbeat",
+			delivered: 2,
+			base:      attentionHeartbeatIdleInterval,
+			want:      attentionHeartbeatHighActivityInterval,
+		},
+		{
+			name: "idle falls back to idle interval",
+			base: attentionHeartbeatIdleInterval,
+			want: attentionHeartbeatIdleInterval,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := attentionHeartbeatInterval(
+				now.Add(-tc.streamBump),
+				tc.delivered,
+				tc.recovery,
+				attentionHeartbeatSourceSummary{degraded: tc.degraded},
+				tc.base,
+				tc.override,
+			)
+			if got != tc.want {
+				t.Fatalf("attentionHeartbeatInterval() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaimString(t *testing.T) {
 	t.Parallel()
 
@@ -5559,6 +6010,64 @@ func TestPrepareAttentionStream_ReplayBoundaryPreservesLiveEvents(t *testing.T) 
 		}
 	default:
 		t.Fatal("expected live event queued during replay boundary")
+	}
+}
+
+func TestWriteAttentionReplay_AdvancesCursorToLastDeliveredEvent(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	events := []robot.AttentionEvent{
+		{Cursor: 4, Session: "alpha", Summary: "first"},
+		{Cursor: 7, Session: "alpha", Summary: "second"},
+	}
+
+	finalCursor, delivered, err := writeAttentionReplay(rec, rec, events, nil, "", nil, 2)
+	if err != nil {
+		t.Fatalf("writeAttentionReplay() error = %v", err)
+	}
+	if delivered != 2 {
+		t.Fatalf("delivered = %d, want 2", delivered)
+	}
+	if finalCursor != 7 {
+		t.Fatalf("finalCursor = %d, want 7", finalCursor)
+	}
+
+	body := rec.Body.String()
+	if strings.Count(body, "event: attention") != 2 {
+		t.Fatalf("expected 2 replayed attention events, got body %q", body)
+	}
+	if !rec.Flushed {
+		t.Fatal("expected replay writer to flush")
+	}
+}
+
+func TestWriteAttentionReplay_SuppressesReplayHeartbeatEventsAndPreservesCursor(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	events := []robot.AttentionEvent{
+		{Cursor: 12, Type: robot.EventType(robot.DefaultTransportLiveness.HeartbeatType), Summary: "heartbeat"},
+		{Cursor: 7, Session: "alpha", Summary: "real"},
+	}
+
+	finalCursor, delivered, err := writeAttentionReplay(rec, rec, events, nil, "", nil, 10)
+	if err != nil {
+		t.Fatalf("writeAttentionReplay() error = %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered = %d, want 1", delivered)
+	}
+	if finalCursor != 12 {
+		t.Fatalf("finalCursor = %d, want 12", finalCursor)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "heartbeat") {
+		t.Fatalf("replay should not emit transport heartbeat events: %q", body)
+	}
+	if strings.Count(body, "event: attention") != 1 {
+		t.Fatalf("expected 1 replayed attention event, got body %q", body)
 	}
 }
 

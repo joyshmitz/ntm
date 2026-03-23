@@ -461,9 +461,10 @@ type AttentionItemState struct {
 // AttentionReplayWindow describes the currently replayable cursor window.
 // It excludes expired rows so callers can make explicit cursor-expiry decisions.
 type AttentionReplayWindow struct {
-	OldestCursor int64 `json:"oldest_cursor"`
-	NewestCursor int64 `json:"newest_cursor"`
-	EventCount   int   `json:"event_count"`
+	OldestCursor int64      `json:"oldest_cursor"`
+	NewestCursor int64      `json:"newest_cursor"`
+	EventCount   int        `json:"event_count"`
+	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
 }
 
 // EarliestReplayCursor returns the earliest cursor a caller can safely replay

@@ -1,8 +1,73 @@
 package assign
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
+
+type assignToolHandler func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError)
+
+func newAssignMCPServer(t *testing.T, handlers map[string]assignToolHandler) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+			return
+		}
+
+		var req agentmail.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if req.Method != "tools/call" {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &agentmail.JSONRPCError{Code: -32601, Message: "unknown method: " + req.Method},
+			})
+			return
+		}
+
+		params, _ := req.Params.(map[string]interface{})
+		toolName, _ := params["name"].(string)
+		args, _ := params["arguments"].(map[string]interface{})
+
+		handler, ok := handlers[toolName]
+		if !ok {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &agentmail.JSONRPCError{Code: -32601, Message: "unknown tool: " + toolName},
+			})
+			return
+		}
+
+		result, rpcErr := handler(args)
+		if rpcErr != nil {
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   rpcErr,
+			})
+			return
+		}
+
+		resultJSON, _ := json.Marshal(result)
+		_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  json.RawMessage(resultJSON),
+		})
+	}))
+}
 
 func TestExtractFilePaths(t *testing.T) {
 	tests := []struct {
@@ -254,12 +319,63 @@ func TestReleaseByPathsNoClient(t *testing.T) {
 	}
 }
 
+func TestReleaseForBeadIncompleteRelease(t *testing.T) {
+	server := newAssignMCPServer(t, map[string]assignToolHandler{
+		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ReleaseReservationsResult{Released: 0}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	m := NewFileReservationManager(client, "/test/project")
+
+	err := m.ReleaseForBead(nil, "TestAgent", []int{1, 2, 3})
+	if err == nil {
+		t.Fatal("expected incomplete release to return an error")
+	}
+}
+
+func TestReleaseByPathsZeroRelease(t *testing.T) {
+	server := newAssignMCPServer(t, map[string]assignToolHandler{
+		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ReleaseReservationsResult{Released: 0}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	m := NewFileReservationManager(client, "/test/project")
+
+	err := m.ReleaseByPaths(nil, "TestAgent", []string{"src/api/handler.go"})
+	if err == nil {
+		t.Fatal("expected zero-count path release to return an error")
+	}
+}
+
 func TestRenewReservationsNoClient(t *testing.T) {
 	m := NewFileReservationManager(nil, "/test/project")
 
 	err := m.RenewReservations(nil, "TestAgent", 3600)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRenewReservationsZeroRenewed(t *testing.T) {
+	server := newAssignMCPServer(t, map[string]assignToolHandler{
+		"renew_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.RenewReservationsResult{Renewed: 0}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	m := NewFileReservationManager(client, "/test/project")
+
+	err := m.RenewReservations(nil, "TestAgent", 3600)
+	if err == nil {
+		t.Fatal("expected zero-count renew to return an error")
 	}
 }
 

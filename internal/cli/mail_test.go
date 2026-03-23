@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,16 +15,22 @@ import (
 )
 
 type mailStub struct {
-	server        *httptest.Server
-	inbox         []agentmail.InboxMessage
-	fetchCalls    []fetchCall
-	readIDs       []int
-	ackIDs        []int
-	readAgents    []string
-	ackAgents     []string
-	ensureCalled  int
-	overseerCalls []overseerCall
-	failIDs       map[int]string // messageID -> error message
+	server            *httptest.Server
+	inbox             []agentmail.InboxMessage
+	listAgents        []agentmail.Agent
+	fetchCalls        []fetchCall
+	readIDs           []int
+	ackIDs            []int
+	readAgents        []string
+	ackAgents         []string
+	ensureCalled      int
+	ensureProjectKeys []string
+	overseerCalls     []overseerCall
+	releaseCalls      []releaseCall
+	renewCalls        []renewCall
+	releaseResult     agentmail.ReleaseReservationsResult
+	renewResult       agentmail.RenewReservationsResult
+	failIDs           map[int]string // messageID -> error message
 }
 
 type fetchCall struct {
@@ -32,6 +39,21 @@ type fetchCall struct {
 	Urgent  bool
 	From    string
 	Project string
+}
+
+type releaseCall struct {
+	Agent   string
+	Project string
+	Paths   []string
+	IDs     []int
+}
+
+type renewCall struct {
+	Agent         string
+	Project       string
+	ExtendSeconds int
+	Paths         []string
+	IDs           []int
 }
 
 type overseerCall struct {
@@ -43,7 +65,13 @@ type overseerCall struct {
 
 func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 	t.Helper()
-	stub := &mailStub{inbox: inbox, failIDs: make(map[int]string)}
+	stub := &mailStub{
+		inbox:         inbox,
+		listAgents:    []agentmail.Agent{{Name: "BlueLake"}},
+		failIDs:       make(map[int]string),
+		releaseResult: agentmail.ReleaseReservationsResult{Released: 1},
+		renewResult:   agentmail.RenewReservationsResult{Renewed: 1},
+	}
 
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/health/liveness" {
@@ -114,12 +142,15 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 			writeResponse(map[string]interface{}{"status": "ok"})
 		case "ensure_project":
 			stub.ensureCalled++
+			stub.ensureProjectKeys = append(stub.ensureProjectKeys, toString(args["human_key"]))
 			project := map[string]interface{}{
 				"id":        1,
 				"slug":      "stub",
 				"human_key": args["human_key"],
 			}
 			writeResponse(project)
+		case "list_agents":
+			writeResponse(stub.listAgents)
 		case "fetch_inbox":
 			call := fetchCall{
 				Agent:   toString(args["agent_name"]),
@@ -157,6 +188,23 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				return
 			}
 			writeResponse(map[string]interface{}{})
+		case "release_file_reservations":
+			stub.releaseCalls = append(stub.releaseCalls, releaseCall{
+				Agent:   toString(args["agent_name"]),
+				Project: toString(args["project_key"]),
+				Paths:   toStringSlice(args["paths"]),
+				IDs:     toIntSlice(args["file_reservation_ids"]),
+			})
+			writeResponse(stub.releaseResult)
+		case "renew_file_reservations":
+			stub.renewCalls = append(stub.renewCalls, renewCall{
+				Agent:         toString(args["agent_name"]),
+				Project:       toString(args["project_key"]),
+				ExtendSeconds: toInt(args["extend_seconds"]),
+				Paths:         toStringSlice(args["paths"]),
+				IDs:           toIntSlice(args["file_reservation_ids"]),
+			})
+			writeResponse(stub.renewResult)
 		default:
 			http.Error(w, "unknown tool "+name, http.StatusNotFound)
 		}
@@ -199,6 +247,46 @@ func toBool(v interface{}) bool {
 func toString(v interface{}) string {
 	val, _ := v.(string)
 	return val
+}
+
+func toStringSlice(v interface{}) []string {
+	raw, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if str, ok := item.(string); ok {
+			result = append(result, str)
+		}
+	}
+	return result
+}
+
+func toIntSlice(v interface{}) []int {
+	raw, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	result := make([]int, 0, len(raw))
+	for _, item := range raw {
+		result = append(result, toInt(item))
+	}
+	return result
+}
+
+func saveSessionAgentForTest(t *testing.T, session, projectKey, agentName string) {
+	t.Helper()
+	now := time.Now()
+	info := &agentmail.SessionAgentInfo{
+		AgentName:    agentName,
+		ProjectKey:   projectKey,
+		RegisteredAt: now,
+		LastActiveAt: now,
+	}
+	if err := agentmail.SaveSessionAgent(session, projectKey, info); err != nil {
+		t.Fatalf("save session agent: %v", err)
+	}
 }
 
 func execCommand(t *testing.T, args ...string) (string, error) {
@@ -395,5 +483,134 @@ func TestMailReadWithFilters(t *testing.T) {
 	}
 	if len(stub.fetchCalls) != 1 || !stub.fetchCalls[0].Urgent {
 		t.Fatalf("expected urgent fetch, got %+v", stub.fetchCalls)
+	}
+}
+
+func TestRunUnlockErrorsOnZeroSpecificRelease(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectKey := GetProjectRoot()
+	session := "unlock-zero"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	stub.releaseResult = agentmail.ReleaseReservationsResult{Released: 0}
+	defer stub.Close()
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+
+	err := runUnlock(session, []string{"internal/cli/*.go"}, false)
+	if err == nil {
+		t.Fatal("expected unlock to fail when no requested reservations were released")
+	}
+	if !strings.Contains(err.Error(), "released 0 reservations") {
+		t.Fatalf("expected zero-release error, got %v", err)
+	}
+	if len(stub.releaseCalls) != 1 {
+		t.Fatalf("expected one release call, got %d", len(stub.releaseCalls))
+	}
+	if got := stub.releaseCalls[0].Paths; len(got) != 1 || got[0] != "internal/cli/*.go" {
+		t.Fatalf("expected release call for requested pattern, got %v", got)
+	}
+}
+
+func TestRunRenewLocksUsesProjectRootFromSubdir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectKey := GetProjectRoot()
+	session := "renew-root"
+	agentName := "GreenLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	stub.renewResult = agentmail.RenewReservationsResult{Renewed: 2}
+	defer stub.Close()
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(filepath.Join(projectKey, "internal"))
+
+	if err := runRenewLocks(session, 30); err != nil {
+		t.Fatalf("runRenewLocks: %v", err)
+	}
+	if len(stub.renewCalls) != 1 {
+		t.Fatalf("expected one renew call, got %d", len(stub.renewCalls))
+	}
+	if stub.renewCalls[0].Project != projectKey {
+		t.Fatalf("expected renew project %q, got %q", projectKey, stub.renewCalls[0].Project)
+	}
+}
+
+func TestRunRenewLocksErrorsOnZeroRenewed(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectKey := GetProjectRoot()
+	session := "renew-zero"
+	agentName := "RedStone"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	stub.renewResult = agentmail.RenewReservationsResult{Renewed: 0}
+	defer stub.Close()
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+
+	err := runRenewLocks(session, 30)
+	if err == nil {
+		t.Fatal("expected renew to fail when no reservations were renewed")
+	}
+	if !strings.Contains(err.Error(), "no active reservations were renewed") {
+		t.Fatalf("expected zero-renew error, got %v", err)
+	}
+}
+
+func TestMailInboxUsesProjectRootFromSubdir(t *testing.T) {
+	resetFlags()
+	t.Setenv("AGENT_MAIL_URL", "")
+	stub := newMailStub(t, []agentmail.InboxMessage{
+		{ID: 7, Subject: "Inbox subject", From: "BlueLake", CreatedTS: agentmail.FlexTime{Time: time.Now()}},
+	})
+	defer stub.Close()
+
+	projectKey := GetProjectRoot()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(filepath.Join(projectKey, "internal"))
+
+	if _, err := execCommand(t, "mail", "inbox", "--json"); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(stub.fetchCalls) != 1 {
+		t.Fatalf("expected one fetch call, got %d", len(stub.fetchCalls))
+	}
+	if stub.fetchCalls[0].Project != projectKey {
+		t.Fatalf("expected inbox project %q, got %q", projectKey, stub.fetchCalls[0].Project)
+	}
+}
+
+func TestMailReadUsesProjectRootFromSubdir(t *testing.T) {
+	resetFlags()
+	stub := newMailStub(t, []agentmail.InboxMessage{
+		{ID: 9, Subject: "Read me", From: "BlueLake", CreatedTS: agentmail.FlexTime{Time: time.Now()}},
+	})
+	defer stub.Close()
+
+	projectKey := GetProjectRoot()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(filepath.Join(projectKey, "internal"))
+
+	if _, err := execCommand(t, "mail", "read", "mysession", "--agent", "BlueLake", "--all"); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(stub.fetchCalls) != 1 {
+		t.Fatalf("expected one fetch call, got %d", len(stub.fetchCalls))
+	}
+	if stub.fetchCalls[0].Project != projectKey {
+		t.Fatalf("expected read project %q, got %q", projectKey, stub.fetchCalls[0].Project)
+	}
+	if len(stub.ensureProjectKeys) != 1 || stub.ensureProjectKeys[0] != projectKey {
+		t.Fatalf("expected ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
 	}
 }

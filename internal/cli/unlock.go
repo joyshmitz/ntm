@@ -93,9 +93,7 @@ func runUnlock(session string, patterns []string, all bool) error {
 	}
 
 	releaseResult, err := client.ReleaseReservations(ctx, wd, sessionAgent.AgentName, pathsToRelease, nil)
-
-	now := time.Now()
-	result := UnlockResult{Session: session, Agent: sessionAgent.AgentName, ReleasedAt: &now}
+	result := UnlockResult{Session: session, Agent: sessionAgent.AgentName}
 	if releaseResult != nil && releaseResult.ReleasedAt != nil {
 		t := releaseResult.ReleasedAt.Time
 		result.ReleasedAt = &t
@@ -105,9 +103,17 @@ func runUnlock(session string, patterns []string, all bool) error {
 		result.Success = false
 		result.Error = err.Error()
 	} else {
-		result.Success = true
-		if releaseResult != nil {
+		if releaseResult == nil {
+			result.Success = false
+			result.Error = "release returned no result"
+		} else {
 			result.Released = releaseResult.Released
+			if !all && result.Released == 0 {
+				result.Success = false
+				result.Error = fmt.Sprintf("released 0 reservations for %d requested pattern(s)", len(patterns))
+			} else {
+				result.Success = true
+			}
 		}
 	}
 

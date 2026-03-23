@@ -855,11 +855,21 @@ func (s *Server) handleMarkMessageRead(w http.ResponseWriter, r *http.Request) {
 		writeAgentMailMessageActionError(w, reqID, err, "marking messages as read is not supported by the configured Agent Mail server")
 		return
 	}
-
-	s.publishMailEvent(agentName, "mail.read", map[string]interface{}{
-		"agent_name": agentName,
-		"message_id": messageID,
-	})
+	if readResult == nil {
+		readResult = &agentmail.MessageReadResult{MessageID: messageID}
+	} else if readResult.MessageID == 0 {
+		readResult.MessageID = messageID
+	}
+	if readResult.Read {
+		eventPayload := map[string]interface{}{
+			"agent_name": agentName,
+			"message_id": messageID,
+		}
+		if readResult.ReadAt != nil {
+			eventPayload["read_at"] = readResult.ReadAt
+		}
+		s.publishMailEvent(agentName, "mail.read", eventPayload)
+	}
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"message_id": readResult.MessageID,
@@ -905,11 +915,24 @@ func (s *Server) handleAckMessage(w http.ResponseWriter, r *http.Request) {
 		writeAgentMailMessageActionError(w, reqID, err, "message acknowledgements are not supported by the configured Agent Mail server")
 		return
 	}
-
-	s.publishMailEvent(agentName, "mail.acknowledged", map[string]interface{}{
-		"agent_name": agentName,
-		"message_id": messageID,
-	})
+	if ackResult == nil {
+		ackResult = &agentmail.MessageAckResult{MessageID: messageID}
+	} else if ackResult.MessageID == 0 {
+		ackResult.MessageID = messageID
+	}
+	if ackResult.Acknowledged {
+		eventPayload := map[string]interface{}{
+			"agent_name": agentName,
+			"message_id": messageID,
+		}
+		if ackResult.AcknowledgedAt != nil {
+			eventPayload["acknowledged_at"] = ackResult.AcknowledgedAt
+		}
+		if ackResult.ReadAt != nil {
+			eventPayload["read_at"] = ackResult.ReadAt
+		}
+		s.publishMailEvent(agentName, "mail.acknowledged", eventPayload)
+	}
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"message_id":      ackResult.MessageID,
@@ -1697,42 +1720,55 @@ func (s *Server) handleForceReleaseReservation(w http.ResponseWriter, r *http.Re
 		writeAgentMailReservationError(w, reqID, err, "force releasing reservations is not supported by the configured Agent Mail server")
 		return
 	}
+	if result == nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "force release returned no result", nil, reqID)
+		return
+	}
+	if !result.Success {
+		details := map[string]interface{}{
+			"notified": result.Notified,
+		}
+		if result.PreviousHolder != "" {
+			details["previous_holder"] = result.PreviousHolder
+		}
+		if result.PathPattern != "" {
+			details["path_pattern"] = result.PathPattern
+		}
+		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, "force-release denied: reservation may not be stale or agent may still be active", details, reqID)
+		return
+	}
 
 	response := map[string]interface{}{
 		"reservation_id": reservationID,
-		"force_released": result != nil && result.Success,
+		"force_released": true,
 	}
-	if result != nil {
-		if result.ReleasedAt != nil {
-			response["released_at"] = result.ReleasedAt
-		}
-		if result.PreviousHolder != "" {
-			response["previous_holder"] = result.PreviousHolder
-		}
-		if result.PathPattern != "" {
-			response["path_pattern"] = result.PathPattern
-		}
-		response["notified"] = result.Notified
+	if result.ReleasedAt != nil {
+		response["released_at"] = result.ReleasedAt
 	}
+	if result.PreviousHolder != "" {
+		response["previous_holder"] = result.PreviousHolder
+	}
+	if result.PathPattern != "" {
+		response["path_pattern"] = result.PathPattern
+	}
+	response["notified"] = result.Notified
 
-	if result != nil && result.Success {
-		eventPayload := map[string]interface{}{
-			"agent_name":     req.AgentName,
-			"reservation_id": reservationID,
-			"force_released": true,
-			"notified":       result.Notified,
-		}
-		if result.PreviousHolder != "" {
-			eventPayload["previous_holder"] = result.PreviousHolder
-		}
-		if result.PathPattern != "" {
-			eventPayload["path_pattern"] = result.PathPattern
-		}
-		if result.ReleasedAt != nil {
-			eventPayload["released_at"] = result.ReleasedAt
-		}
-		s.publishReservationEvent(req.AgentName, "reservation.released", eventPayload)
+	eventPayload := map[string]interface{}{
+		"agent_name":     req.AgentName,
+		"reservation_id": reservationID,
+		"force_released": true,
+		"notified":       result.Notified,
 	}
+	if result.PreviousHolder != "" {
+		eventPayload["previous_holder"] = result.PreviousHolder
+	}
+	if result.PathPattern != "" {
+		eventPayload["path_pattern"] = result.PathPattern
+	}
+	if result.ReleasedAt != nil {
+		eventPayload["released_at"] = result.ReleasedAt
+	}
+	s.publishReservationEvent(req.AgentName, "reservation.released", eventPayload)
 
 	writeSuccessResponse(w, http.StatusOK, response, reqID)
 }

@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -93,14 +92,18 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	// Get working directory for project key
-	projectKey, _ := os.Getwd()
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
+	}
 	if cfg != nil {
-		projectKey = cfg.GetProjectDir(session)
+		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
+			projectKey = configuredProjectDir
+		}
 	}
 
 	// Create coordinator to get status
-	mailClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	mailClient := newAgentMailClient(projectKey)
 	coord := coordinator.New(session, projectKey, mailClient, "NTM-Coordinator")
 
 	// Get agent states
@@ -280,12 +283,17 @@ func runCoordinatorDigest(cmd *cobra.Command, args []string, sendMail bool) erro
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, _ := os.Getwd()
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
+	}
 	if cfg != nil {
-		projectKey = cfg.GetProjectDir(session)
+		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
+			projectKey = configuredProjectDir
+		}
 	}
 
-	mailClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	mailClient := newAgentMailClient(projectKey)
 	coord := coordinator.New(session, projectKey, mailClient, "NTM-Coordinator")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -404,12 +412,17 @@ func runCoordinatorConflicts(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, _ := os.Getwd()
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
+	}
 	if cfg != nil {
-		projectKey = cfg.GetProjectDir(session)
+		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
+			projectKey = configuredProjectDir
+		}
 	}
 
-	mailClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	mailClient := newAgentMailClient(projectKey)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

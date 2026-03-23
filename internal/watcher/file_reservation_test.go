@@ -713,6 +713,75 @@ func TestReleaseIdleReservationsDoesNotHoldWatcherLock(t *testing.T) {
 	}
 }
 
+func TestReleaseIdleReservationsKeepsStateOnZeroRelease(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return map[string]interface{}{"released": 0}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithIdleTimeout(time.Minute),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "TestAgent",
+		Files:         []string{"/file.go"},
+		ReservationID: []int{1},
+		LastActivity:  time.Now().Add(-2 * time.Minute),
+	}
+	w.mu.Unlock()
+
+	w.releaseIdleReservations(context.Background())
+
+	reservations := w.GetActiveReservations()
+	if reservations["%1"] == nil {
+		t.Fatal("expected reservation to remain tracked after zero-count release")
+	}
+}
+
+func TestReleaseAllReservationsKeepsStateOnFailure(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{Code: -32000, Message: "release failed"}
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "TestAgent",
+		Files:         []string{"/file.go"},
+		ReservationID: []int{1},
+		LastActivity:  time.Now(),
+	}
+	w.mu.Unlock()
+
+	w.releaseAllReservations()
+
+	reservations := w.GetActiveReservations()
+	if reservations["%1"] == nil {
+		t.Fatal("expected reservation to remain tracked after release failure")
+	}
+}
+
 func TestRenewReservationsUsesReservationIDs(t *testing.T) {
 	t.Parallel()
 
@@ -731,7 +800,11 @@ func TestRenewReservationsUsesReservationIDs(t *testing.T) {
 			args = append(args, copied)
 			mu.Unlock()
 
-			return agentmail.RenewReservationsResult{Renewed: 1}, nil
+			renewed := 0
+			if rawIDs, ok := callArgs["file_reservation_ids"].([]interface{}); ok {
+				renewed = len(rawIDs)
+			}
+			return agentmail.RenewReservationsResult{Renewed: renewed}, nil
 		},
 	})
 	defer server.Close()
@@ -771,6 +844,98 @@ func TestRenewReservationsUsesReservationIDs(t *testing.T) {
 		if !ok || len(rawIDs) == 0 {
 			t.Fatalf("expected file_reservation_ids in renew call, got %v", callArgs)
 		}
+	}
+}
+
+func TestRenewReservationsReturnsErrorOnIncompleteRenew(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"renew_file_reservations": func(callArgs map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.RenewReservationsResult{Renewed: 0}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithReservationTTL(15*time.Minute),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "SessionAgent",
+		ReservationID: []int{1, 2},
+	}
+	w.mu.Unlock()
+
+	if err := w.RenewReservations(context.Background()); err == nil {
+		t.Fatal("expected incomplete renew to return an error")
+	}
+}
+
+func TestRenewReservationsContinuesAfterPaneLevelFailure(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu      sync.Mutex
+		seenIDs [][]int
+	)
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"renew_file_reservations": func(callArgs map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			rawIDs, _ := callArgs["file_reservation_ids"].([]interface{})
+			ids := make([]int, 0, len(rawIDs))
+			for _, raw := range rawIDs {
+				if id, ok := raw.(float64); ok {
+					ids = append(ids, int(id))
+				}
+			}
+
+			mu.Lock()
+			seenIDs = append(seenIDs, ids)
+			mu.Unlock()
+
+			if len(ids) == 1 && ids[0] == 1 {
+				return nil, &agentmail.JSONRPCError{Code: -32000, Message: "renew failed"}
+			}
+			return agentmail.RenewReservationsResult{Renewed: len(ids)}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithReservationTTL(15*time.Minute),
+	)
+
+	w.mu.Lock()
+	w.activeReservations["%1"] = &PaneReservation{
+		PaneID:        "%1",
+		AgentName:     "SessionAgent",
+		ReservationID: []int{1},
+	}
+	w.activeReservations["%2"] = &PaneReservation{
+		PaneID:        "%2",
+		AgentName:     "SessionAgent",
+		ReservationID: []int{2},
+	}
+	w.mu.Unlock()
+
+	err := w.RenewReservations(context.Background())
+	if err == nil {
+		t.Fatal("expected renew error when one pane fails")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenIDs) != 2 {
+		t.Fatalf("expected both panes to be renewed despite one failure, saw %d calls: %#v", len(seenIDs), seenIDs)
 	}
 }
 

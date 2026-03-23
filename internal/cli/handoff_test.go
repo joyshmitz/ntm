@@ -358,6 +358,47 @@ func TestRunHandoffCreateJSONOutput(t *testing.T) {
 	}
 }
 
+func TestRunHandoffCreateUsesProjectRootFromSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, ".ntm")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("failed to create config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	subDir := filepath.Join(tmpDir, "nested", "deeper")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	if err := runHandoffCreate(cmd, "testsession", "Test goal", "Next task", "", false, "root-check", false, "", "yaml", false); err != nil {
+		t.Fatalf("runHandoffCreate() error: %v", err)
+	}
+
+	reader := handoff.NewReader(tmpDir)
+	h, path, err := reader.FindLatest("testsession")
+	if err != nil {
+		t.Fatalf("FindLatest() error: %v", err)
+	}
+	if h == nil {
+		t.Fatal("expected handoff to be created at project root")
+	}
+	if !strings.HasPrefix(path, filepath.Join(tmpDir, ".ntm", "handoffs")) {
+		t.Fatalf("expected handoff path under project root, got %s", path)
+	}
+}
+
 func TestRunHandoffList(t *testing.T) {
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "handoff-test-*")
@@ -402,6 +443,42 @@ func TestRunHandoffList(t *testing.T) {
 	}
 	if !strings.Contains(output, "Test goal") {
 		t.Errorf("expected output to contain goal, got: %s", output)
+	}
+}
+
+func TestRunHandoffLedgerUsesProjectRootFromSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, ".ntm")
+	if err := os.MkdirAll(filepath.Join(configDir, "ledgers"), 0755); err != nil {
+		t.Fatalf("failed to create ledger dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	content := "## 2026-01-01T00:00:00Z (manual)\n- goal: nested\n\n"
+	if err := os.WriteFile(filepath.Join(configDir, "ledgers", "CONTINUITY_testsession.md"), []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write ledger: %v", err)
+	}
+	subDir := filepath.Join(tmpDir, "nested", "deeper")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	if err := runHandoffLedger(cmd, "testsession", false); err != nil {
+		t.Fatalf("runHandoffLedger() error: %v", err)
+	}
+	if got := buf.String(); got != content {
+		t.Fatalf("unexpected ledger output: %q", got)
 	}
 }
 

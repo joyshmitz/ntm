@@ -417,6 +417,7 @@ type RenewResult struct {
 	Session       string `json:"session"`
 	Agent         string `json:"agent"`
 	ExtendMinutes int    `json:"extend_minutes"`
+	Renewed       int    `json:"renewed"`
 	Error         string `json:"error,omitempty"`
 }
 
@@ -425,9 +426,9 @@ func runRenewLocks(session string, extendMinutes int) error {
 		return fmt.Errorf("extend time must be at least 1 minute")
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	wd := GetProjectRoot()
+	if wd == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
@@ -463,7 +464,7 @@ func runRenewLocks(session string, extendMinutes int) error {
 	defer cancel()
 
 	extendSeconds := extendMinutes * 60
-	_, err = client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
+	renewResult, err := client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
 		ProjectKey:    wd,
 		AgentName:     agentName,
 		ExtendSeconds: extendSeconds,
@@ -478,8 +479,17 @@ func runRenewLocks(session string, extendMinutes int) error {
 	if err != nil {
 		result.Success = false
 		result.Error = err.Error()
+	} else if renewResult == nil {
+		result.Success = false
+		result.Error = "renewal returned no result"
 	} else {
-		result.Success = true
+		result.Renewed = renewResult.Renewed
+		if renewResult.Renewed == 0 {
+			result.Success = false
+			result.Error = "no active reservations were renewed"
+		} else {
+			result.Success = true
+		}
 	}
 
 	if IsJSONOutput() {
@@ -489,7 +499,7 @@ func runRenewLocks(session string, extendMinutes int) error {
 	}
 
 	if result.Success {
-		fmt.Printf("Extended reservations by %d minutes\n", extendMinutes)
+		fmt.Printf("Extended %d reservation(s) by %d minutes\n", result.Renewed, extendMinutes)
 		fmt.Printf("  Agent: %s\n", agentName)
 		return nil
 	}

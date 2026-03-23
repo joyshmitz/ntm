@@ -19,6 +19,7 @@ type renewCall struct {
 	projectKey    string
 	agentName     string
 	extendSeconds int
+	paths         []string
 }
 
 type fakeTransferClient struct {
@@ -59,6 +60,7 @@ func (f *fakeTransferClient) RenewReservations(ctx context.Context, opts agentma
 		projectKey:    opts.ProjectKey,
 		agentName:     opts.AgentName,
 		extendSeconds: opts.ExtendSeconds,
+		paths:         append([]string(nil), opts.Paths...),
 	})
 	if f.renewFn != nil {
 		return f.renewFn(opts)
@@ -144,6 +146,9 @@ func TestTransferReservationsConflictRollback(t *testing.T) {
 
 func TestTransferReservationsSameAgentRefresh(t *testing.T) {
 	client := &fakeTransferClient{}
+	client.renewFn = func(opts agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error) {
+		return &agentmail.RenewReservationsResult{Renewed: 1}, nil
+	}
 	opts := TransferReservationsOptions{
 		ProjectKey: "proj",
 		FromAgent:  "same",
@@ -164,8 +169,81 @@ func TestTransferReservationsSameAgentRefresh(t *testing.T) {
 	if len(client.renewCalls) != 1 {
 		t.Fatalf("expected 1 renew call, got %d", len(client.renewCalls))
 	}
+	if got := client.renewCalls[0].paths; len(got) != 1 || got[0] != "internal/a.go" {
+		t.Fatalf("expected renew scoped to requested path, got %#v", got)
+	}
+	if len(result.GrantedPaths) != 1 || result.GrantedPaths[0] != "internal/a.go" {
+		t.Fatalf("expected granted paths to mirror refreshed reservation, got %#v", result.GrantedPaths)
+	}
 	if len(client.releaseCalls) != 0 || len(client.reserveCalls) != 0 {
 		t.Fatalf("expected no release/reserve calls for same-agent refresh")
+	}
+}
+
+func TestTransferReservationsSameAgentRefreshScopesRenewalToRequestedPaths(t *testing.T) {
+	client := &fakeTransferClient{}
+	client.renewFn = func(opts agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error) {
+		if len(opts.Paths) != 2 {
+			t.Fatalf("expected 2 requested paths, got %#v", opts.Paths)
+		}
+		if opts.Paths[0] != "internal/a.go" || opts.Paths[1] != "internal/b.go" {
+			t.Fatalf("expected deduplicated requested paths, got %#v", opts.Paths)
+		}
+		return &agentmail.RenewReservationsResult{Renewed: 2}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "same",
+		ToAgent:    "same",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+			{PathPattern: "internal/b.go", Exclusive: false},
+			{PathPattern: "internal/a.go", Exclusive: false},
+		},
+		TTLSeconds: 90,
+	}
+
+	result, err := TransferReservations(context.Background(), client, opts)
+	if err != nil {
+		t.Fatalf("TransferReservations error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %s", result.Error)
+	}
+	if len(client.renewCalls) != 1 {
+		t.Fatalf("expected 1 renew call, got %d", len(client.renewCalls))
+	}
+	if len(result.GrantedPaths) != 2 || result.GrantedPaths[0] != "internal/a.go" || result.GrantedPaths[1] != "internal/b.go" {
+		t.Fatalf("expected granted paths to mirror refreshed reservations, got %#v", result.GrantedPaths)
+	}
+	if len(client.releaseCalls) != 0 || len(client.reserveCalls) != 0 {
+		t.Fatalf("expected no release/reserve calls for same-agent refresh")
+	}
+}
+
+func TestTransferReservationsSameAgentRefreshIncomplete(t *testing.T) {
+	client := &fakeTransferClient{}
+	client.renewFn = func(opts agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error) {
+		return &agentmail.RenewReservationsResult{Renewed: 0}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "same",
+		ToAgent:    "same",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+		TTLSeconds: 90,
+	}
+
+	result, err := TransferReservations(context.Background(), client, opts)
+	if err == nil {
+		t.Fatal("expected incomplete refresh error")
+	}
+	if result.Success {
+		t.Fatal("expected Success=false on incomplete refresh")
 	}
 }
 
@@ -193,6 +271,36 @@ func TestTransferReservationsReleaseFailure(t *testing.T) {
 	}
 	if len(client.reserveCalls) != 0 {
 		t.Fatalf("expected no reserve calls on release failure, got %d", len(client.reserveCalls))
+	}
+}
+
+func TestTransferReservationsReleaseIncomplete(t *testing.T) {
+	client := &fakeTransferClient{}
+	client.releaseFn = func(projectKey, agentName string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+		return &agentmail.ReleaseReservationsResult{Released: 0}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "old",
+		ToAgent:    "new",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+	}
+
+	result, err := TransferReservations(context.Background(), client, opts)
+	if err == nil {
+		t.Fatal("expected incomplete release error")
+	}
+	if result.Success {
+		t.Fatal("expected Success=false on incomplete release")
+	}
+	if len(client.reserveCalls) != 0 {
+		t.Fatalf("expected no reserve calls after incomplete release, got %d", len(client.reserveCalls))
+	}
+	if result.Error == "" {
+		t.Fatal("expected error message on incomplete release")
 	}
 }
 

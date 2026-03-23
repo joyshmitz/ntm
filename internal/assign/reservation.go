@@ -209,8 +209,17 @@ func (m *FileReservationManager) ReleaseForBead(ctx context.Context, agentName s
 		return nil
 	}
 
-	_, err := m.client.ReleaseReservations(ctx, m.projectKey, agentName, nil, reservationIDs)
-	return err
+	releaseResult, err := m.client.ReleaseReservations(ctx, m.projectKey, agentName, nil, reservationIDs)
+	if err != nil {
+		return err
+	}
+	if releaseResult == nil {
+		return fmt.Errorf("release returned no result")
+	}
+	if releaseResult.Released < len(reservationIDs) {
+		return fmt.Errorf("released %d of %d reservations", releaseResult.Released, len(reservationIDs))
+	}
+	return nil
 }
 
 // ReleaseByPaths releases reservations by path patterns.
@@ -219,8 +228,17 @@ func (m *FileReservationManager) ReleaseByPaths(ctx context.Context, agentName s
 		return nil
 	}
 
-	_, err := m.client.ReleaseReservations(ctx, m.projectKey, agentName, paths, nil)
-	return err
+	releaseResult, err := m.client.ReleaseReservations(ctx, m.projectKey, agentName, paths, nil)
+	if err != nil {
+		return err
+	}
+	if releaseResult == nil {
+		return fmt.Errorf("release returned no result")
+	}
+	if releaseResult.Released == 0 {
+		return fmt.Errorf("released 0 reservations for %d path patterns", len(paths))
+	}
+	return nil
 }
 
 // RenewReservations extends the TTL for an agent's reservations.
@@ -229,10 +247,19 @@ func (m *FileReservationManager) RenewReservations(ctx context.Context, agentNam
 		return nil
 	}
 
-	_, err := m.client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
+	renewResult, err := m.client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
 		ProjectKey:    m.projectKey,
 		AgentName:     agentName,
 		ExtendSeconds: extendSeconds,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if renewResult == nil {
+		return fmt.Errorf("renew returned no result")
+	}
+	if renewResult.Renewed == 0 {
+		return fmt.Errorf("renewed 0 reservations")
+	}
+	return nil
 }

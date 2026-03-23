@@ -109,25 +109,52 @@ func TransferReservations(ctx context.Context, client ReservationTransferClient,
 
 	// If transferring to the same agent, just refresh TTL.
 	if opts.FromAgent == opts.ToAgent {
-		_, err := client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
+		renewResult, err := client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
 			ProjectKey:    opts.ProjectKey,
 			AgentName:     opts.ToAgent,
 			ExtendSeconds: ttlSeconds,
+			Paths:         requested,
 		})
 		if err != nil {
 			result.Error = err.Error()
 			logger.Warn("reservation refresh failed", "error", err)
 			return result, err
 		}
+		if renewResult == nil || renewResult.Renewed < len(requested) {
+			renewedCount := 0
+			if renewResult != nil {
+				renewedCount = renewResult.Renewed
+			}
+			err := fmt.Errorf("renewed %d of %d reservations for %s", renewedCount, len(requested), opts.ToAgent)
+			result.Error = err.Error()
+			logger.Warn("reservation refresh incomplete", "error", err)
+			return result, err
+		}
+		result.GrantedPaths = append(result.GrantedPaths, requested...)
 		result.Success = true
 		logger.Info("reservation refresh complete", "agent", opts.ToAgent, "paths", len(requested))
 		return result, nil
 	}
 
 	// Release old reservations first.
-	if _, err := client.ReleaseReservations(ctx, opts.ProjectKey, opts.FromAgent, requested, nil); err != nil {
+	releaseResult, err := client.ReleaseReservations(ctx, opts.ProjectKey, opts.FromAgent, requested, nil)
+	if err != nil {
 		result.Error = err.Error()
 		logger.Warn("reservation release failed", "error", err)
+		return result, err
+	}
+	releasedCount := 0
+	if releaseResult != nil {
+		releasedCount = releaseResult.Released
+	}
+	if releasedCount < len(requested) {
+		err := fmt.Errorf("released %d of %d requested reservations", releasedCount, len(requested))
+		result.Error = err.Error()
+		logger.Warn("reservation release incomplete",
+			"released", releasedCount,
+			"requested", len(requested),
+			"from_agent", opts.FromAgent,
+		)
 		return result, err
 	}
 	result.ReleasedPaths = requested

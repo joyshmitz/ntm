@@ -180,9 +180,9 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 
 // runMailInbox aggregates messages across agents and writes to cmd output.
 func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, sessionAgents bool, agentFilter string, urgent bool, limit int, jsonFmt bool) error {
-	projectKey, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	if client == nil {
@@ -409,9 +409,9 @@ type markSummary struct {
 }
 
 func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, ids []int, urgent bool, fromAgent string, all bool, limit int) error {
-	projectKey, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	client := newAgentMailClient(projectKey)
@@ -523,9 +523,9 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 	}
 
 	// Get project key (current working directory)
-	projectKey, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	// Create Agent Mail client

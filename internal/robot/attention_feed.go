@@ -118,6 +118,7 @@ type AttentionJournal struct {
 	size      int
 	oldest    int64
 	newest    int64
+	lastEvent time.Time
 	retention time.Duration
 
 	// Metrics for observability
@@ -165,6 +166,7 @@ func (j *AttentionJournal) Append(event AttentionEvent) {
 	j.entries = append(j.entries, entry)
 	j.oldest = j.entries[0].event.Cursor
 	j.newest = event.Cursor
+	j.lastEvent = now
 	j.totalAppended.Add(1)
 }
 
@@ -220,11 +222,18 @@ func (j *AttentionJournal) Stats() JournalStats {
 
 	j.pruneLocked(time.Now())
 
+	var lastEventTime *time.Time
+	if !j.lastEvent.IsZero() {
+		ts := j.lastEvent.UTC()
+		lastEventTime = &ts
+	}
+
 	return JournalStats{
 		Size:            j.size,
 		Count:           len(j.entries),
 		OldestCursor:    j.oldest,
 		NewestCursor:    j.newest,
+		LastEventTime:   lastEventTime,
 		RetentionPeriod: j.retention,
 		TotalAppended:   j.totalAppended.Load(),
 		TotalEvicted:    j.totalEvicted.Load(),
@@ -301,6 +310,7 @@ type JournalStats struct {
 	Count           int           `json:"count"`
 	OldestCursor    int64         `json:"oldest_cursor"`
 	NewestCursor    int64         `json:"newest_cursor"`
+	LastEventTime   *time.Time    `json:"last_event_time,omitempty"`
 	RetentionPeriod time.Duration `json:"retention_period"`
 	TotalAppended   int64         `json:"total_appended"`
 	TotalEvicted    int64         `json:"total_evicted"`
@@ -2085,18 +2095,49 @@ func (f *AttentionFeed) subscriberCount() int {
 	return len(f.subs)
 }
 
+// SubscriberCount returns the number of active feed subscriptions.
+func (f *AttentionFeed) SubscriberCount() int {
+	return f.subscriberCount()
+}
+
 // heartbeatLoop emits periodic heartbeat events.
 func (f *AttentionFeed) heartbeatLoop() {
-	ticker := time.NewTicker(f.config.HeartbeatInterval)
-	defer ticker.Stop()
+	if f.config.HeartbeatInterval <= 0 {
+		return
+	}
+	timer := time.NewTimer(f.config.HeartbeatInterval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-f.stopCh:
 			return
-		case t := <-ticker.C:
+		case t := <-timer.C:
+			nextInterval := f.config.HeartbeatInterval
 			if f.subscriberCount() == 0 {
+				timer.Reset(nextInterval)
 				continue
+			}
+			journalStats := f.journal.Stats()
+			if journalStats.LastEventTime != nil && !journalStats.LastEventTime.IsZero() {
+				idle := t.Sub(*journalStats.LastEventTime)
+				if idle < f.config.HeartbeatInterval {
+					nextInterval = f.config.HeartbeatInterval - idle
+					if nextInterval < time.Millisecond {
+						nextInterval = time.Millisecond
+					}
+					timer.Reset(nextInterval)
+					continue
+				}
+			}
+			details := map[string]any{
+				"journal_stats":    journalStats,
+				"subscriber_count": f.subscriberCount(),
+			}
+			if journalStats.LastEventTime != nil && !journalStats.LastEventTime.IsZero() {
+				lastEventTime := journalStats.LastEventTime.UTC()
+				details["last_event_time"] = lastEventTime.Format(time.RFC3339Nano)
+				details["idle_ms"] = t.Sub(lastEventTime).Milliseconds()
 			}
 			f.PublishEphemeral(AttentionEvent{
 				Ts:            t.UTC().Format(time.RFC3339Nano),
@@ -2106,10 +2147,9 @@ func (f *AttentionFeed) heartbeatLoop() {
 				Actionability: ActionabilityBackground,
 				Severity:      SeverityDebug,
 				Summary:       "Heartbeat",
-				Details: map[string]any{
-					"journal_stats": f.journal.Stats(),
-				},
+				Details:       details,
 			})
+			timer.Reset(nextInterval)
 		}
 	}
 }
@@ -3650,6 +3690,10 @@ func (f *AttentionFeed) storeBackedStats() (JournalStats, error) {
 	stats.Count = window.EventCount
 	stats.OldestCursor = window.OldestCursor
 	stats.NewestCursor = maxCursor(latestCursor, f.cursor.Current())
+	if window.LastEventAt != nil && (stats.LastEventTime == nil || window.LastEventAt.After(*stats.LastEventTime)) {
+		ts := window.LastEventAt.UTC()
+		stats.LastEventTime = &ts
+	}
 	stats.RetentionPeriod = f.config.RetentionPeriod
 
 	if tailStart := f.ephemeralFromCursor.Load(); tailStart > 0 {

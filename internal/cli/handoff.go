@@ -192,9 +192,9 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 		format = "json" // --json flag overrides default
 	}
 
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	slog.Debug("handoff create command",
@@ -353,9 +353,9 @@ func runHandoffLedger(cmd *cobra.Command, sessionName string, jsonFormat bool) e
 		return err
 	}
 
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	ledgerPath := filepath.Join(projectDir, ".ntm", "ledgers", fmt.Sprintf("CONTINUITY_%s.md", sessionName))
@@ -544,9 +544,9 @@ func runHandoffList(cmd *cobra.Command, sessionName string, limit int, jsonForma
 		jsonFormat = true
 	}
 
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	reader := handoff.NewReader(projectDir)
@@ -645,9 +645,9 @@ func runHandoffShow(cmd *cobra.Command, path string, jsonFormat bool) error {
 		jsonFormat = true
 	}
 
-	projectDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return fmt.Errorf("getting project root failed")
 	}
 
 	reader := handoff.NewReader(projectDir)

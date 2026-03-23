@@ -263,8 +263,7 @@ func LoadCommandHooksFromMainConfig(mainConfigPath string) (*CommandHooksConfig,
 
 	var cfg CommandHooksConfig
 	if err := toml.Unmarshal(data, &cfg); err != nil {
-		// Main config might not have hooks - that's OK
-		return &CommandHooksConfig{Hooks: []CommandHook{}}, nil
+		return nil, fmt.Errorf("parsing main config: %w", err)
 	}
 
 	// Validate only if we found hooks
@@ -341,8 +340,7 @@ func LoadAllCommandHooks() (*CommandHooksConfig, error) {
 	// 3. Load from main config
 	mainConfig, err := LoadCommandHooksFromMainConfig("")
 	if err != nil {
-		// Non-fatal - main config might not have hooks
-		return &CommandHooksConfig{Hooks: allHooks}, nil
+		return nil, err
 	}
 	allHooks = append(allHooks, mainConfig.Hooks...)
 

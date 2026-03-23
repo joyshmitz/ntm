@@ -1907,12 +1907,14 @@ func (s *Store) GetAttentionReplayWindow() (AttentionReplayWindow, error) {
 
 	window := AttentionReplayWindow{}
 	var oldest, newest sql.NullInt64
+	var lastEventAt sql.NullTime
 	err := s.db.QueryRow(`
 		SELECT
 			(SELECT MIN(cursor) FROM attention_events WHERE expires_at IS NULL OR expires_at >= datetime('now')),
 			(SELECT MAX(cursor) FROM attention_events),
-			(SELECT COUNT(*) FROM attention_events WHERE expires_at IS NULL OR expires_at >= datetime('now'))`,
-	).Scan(&oldest, &newest, &window.EventCount)
+			(SELECT COUNT(*) FROM attention_events WHERE expires_at IS NULL OR expires_at >= datetime('now')),
+			(SELECT MAX(ts) FROM attention_events)`,
+	).Scan(&oldest, &newest, &window.EventCount, &lastEventAt)
 	if err != nil {
 		return AttentionReplayWindow{}, fmt.Errorf("get attention replay window: %w", err)
 	}
@@ -1921,6 +1923,10 @@ func (s *Store) GetAttentionReplayWindow() (AttentionReplayWindow, error) {
 	}
 	if newest.Valid {
 		window.NewestCursor = newest.Int64
+	}
+	if lastEventAt.Valid {
+		ts := lastEventAt.Time.UTC()
+		window.LastEventAt = &ts
 	}
 	return window, nil
 }

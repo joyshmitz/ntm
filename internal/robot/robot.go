@@ -2269,6 +2269,12 @@ func statusSourceHealthFromRows(rows []state.SourceHealth) *adapters.SourceHealt
 	return section
 }
 
+// SourceHealthSectionFromRows rehydrates persisted source health rows into the
+// normalized source-health model used by robot surfaces.
+func SourceHealthSectionFromRows(rows []state.SourceHealth) *adapters.SourceHealthSection {
+	return statusSourceHealthFromRows(rows)
+}
+
 func cloneSourceHealthSection(section *adapters.SourceHealthSection) *adapters.SourceHealthSection {
 	if section == nil {
 		return nil

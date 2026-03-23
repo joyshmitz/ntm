@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,18 +61,17 @@ func TestLoadCommandHooksFromMainConfig_InvalidTOML(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	// Write non-TOML content — should return empty config (non-fatal)
+	// Write non-TOML content — malformed main config should be surfaced.
 	if err := os.WriteFile(configPath, []byte("not valid toml {{{"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadCommandHooksFromMainConfig(configPath)
-	if err != nil {
-		t.Fatalf("unexpected error for invalid TOML: %v", err)
+	_, err := LoadCommandHooksFromMainConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid TOML in main config")
 	}
-	// Invalid TOML in main config returns empty config (non-fatal)
-	if len(cfg.Hooks) != 0 {
-		t.Errorf("expected 0 hooks for invalid TOML, got %d", len(cfg.Hooks))
+	if got := err.Error(); !strings.Contains(got, "parsing main config") {
+		t.Fatalf("expected parsing main config error, got %q", got)
 	}
 }
 
@@ -242,6 +242,30 @@ command = "echo test"
 	_, err := LoadCommandHooks(path)
 	if err == nil {
 		t.Error("expected validation error")
+	}
+}
+
+func TestLoadAllCommandHooks_InvalidMainConfigPropagatesError(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", filepath.Join(xdg, "home"))
+
+	configDir := filepath.Join(xdg, "ntm")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("not valid toml {{{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadAllCommandHooks()
+	if err == nil {
+		t.Fatal("expected error for invalid main config in LoadAllCommandHooks")
+	}
+	if got := err.Error(); !strings.Contains(got, "parsing main config") {
+		t.Fatalf("expected parsing main config error, got %q", got)
 	}
 }
 

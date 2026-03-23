@@ -469,6 +469,22 @@ func TestAttentionFeed_HeartbeatLoopPublishesEphemeralHeartbeats(t *testing.T) {
 	if heartbeat.Cursor <= 0 {
 		t.Fatalf("heartbeat cursor = %d, want positive", heartbeat.Cursor)
 	}
+	switch got := heartbeat.Details["subscriber_count"].(type) {
+	case int:
+		if got != 1 {
+			t.Fatalf("heartbeat subscriber_count = %d, want 1", got)
+		}
+	case int64:
+		if got != 1 {
+			t.Fatalf("heartbeat subscriber_count = %d, want 1", got)
+		}
+	case float64:
+		if got != 1 {
+			t.Fatalf("heartbeat subscriber_count = %v, want 1", got)
+		}
+	default:
+		t.Fatalf("heartbeat subscriber_count type = %T, value = %v, want numeric 1", got, got)
+	}
 
 	events, _, err := feed.Replay(0, 10)
 	if err != nil {
@@ -479,6 +495,62 @@ func TestAttentionFeed_HeartbeatLoopPublishesEphemeralHeartbeats(t *testing.T) {
 	}
 	if got := feed.CurrentCursor(); got < heartbeat.Cursor {
 		t.Fatalf("CurrentCursor() = %d, want at least %d", got, heartbeat.Cursor)
+	}
+}
+
+func TestAttentionFeed_HeartbeatLoopDefersHeartbeatUntilQuiet(t *testing.T) {
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 40 * time.Millisecond,
+	})
+	defer feed.Stop()
+
+	heartbeats := make(chan AttentionEvent, 4)
+	unsub := feed.Subscribe(func(e AttentionEvent) {
+		if e.Type != EventType(DefaultTransportLiveness.HeartbeatType) {
+			return
+		}
+		select {
+		case heartbeats <- e:
+		default:
+		}
+	})
+	defer unsub()
+
+	feed.Append(AttentionEvent{
+		Category: EventCategoryAlert,
+		Type:     EventTypeAlertAttentionRequired,
+		Summary:  "real event proves liveness",
+	})
+
+	select {
+	case heartbeat := <-heartbeats:
+		t.Fatalf("heartbeat arrived before quiet period elapsed: %#v", heartbeat)
+	case <-time.After(55 * time.Millisecond):
+	}
+
+	var heartbeat AttentionEvent
+	select {
+	case heartbeat = <-heartbeats:
+	case <-time.After(120 * time.Millisecond):
+		t.Fatal("timed out waiting for deferred heartbeat")
+	}
+
+	if got, ok := heartbeat.Details["last_event_time"].(string); !ok || got == "" {
+		t.Fatalf("heartbeat last_event_time = %#v, want RFC3339 string", heartbeat.Details["last_event_time"])
+	}
+	switch got := heartbeat.Details["idle_ms"].(type) {
+	case int64:
+		if got < 0 {
+			t.Fatalf("heartbeat idle_ms = %d, want non-negative", got)
+		}
+	case float64:
+		if got < 0 {
+			t.Fatalf("heartbeat idle_ms = %v, want non-negative", got)
+		}
+	default:
+		t.Fatalf("heartbeat idle_ms type = %T, value = %v, want numeric", got, got)
 	}
 }
 
