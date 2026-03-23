@@ -497,13 +497,7 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 
 		// Handle step failure based on error action
 		if result.Status == StatusFailed {
-			onError := nestedStep.OnError
-			if onError == "" {
-				onError = workflow.Settings.OnError
-			}
-			if onError == "" {
-				onError = ErrorActionFail
-			}
+			onError := resolveErrorAction(nestedStep.OnError, workflow.Settings.OnError)
 
 			switch onError {
 			case ErrorActionFail, ErrorActionFailFast:

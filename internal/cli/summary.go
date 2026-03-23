@@ -195,7 +195,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 		Session:        session,
 		Outputs:        outputs,
 		Format:         sumFormat,
-		ProjectKey:     wd,
+		ProjectKey:     projectDir,
 		ProjectDir:     projectDir,
 		IncludeGitDiff: true,
 	}

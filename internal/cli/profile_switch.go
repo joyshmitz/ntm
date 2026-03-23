@@ -81,19 +81,20 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 
 	// Resolve session name
 	if sessionName == "" {
-		sessions, err := tmux.ListSessions()
+		res, err := ResolveSession("", os.Stdout)
 		if err != nil {
-			return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("listing sessions: %w", err))
+			return outputProfileSwitchError(agentID, "", newProfileName, err)
 		}
-		if len(sessions) == 0 {
-			return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("no tmux sessions found"))
+		if res.Session == "" {
+			return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("session selection cancelled"))
 		}
-		sessionName = sessions[0].Name
+		res.ExplainIfInferred(os.Stderr)
+		sessionName = res.Session
 	}
 
-	projectDir := resolveProjectDirForSession(sessionName, true)
-	if projectDir == "" {
-		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("getting project root failed"))
+	projectDir, err := resolveProfileSwitchProjectDir(sessionName)
+	if err != nil {
+		return outputProfileSwitchError(agentID, "", newProfileName, err)
 	}
 
 	// Load persona registry
@@ -154,6 +155,21 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 	}
 
 	return outputProfileSwitchSuccess(agentID, targetPane.ID, oldProfile, newProfile.Name)
+}
+
+func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName != "" {
+		if err := tmux.ValidateSessionName(sessionName); err != nil {
+			return "", fmt.Errorf("invalid session name: %w", err)
+		}
+	}
+
+	projectDir := resolveProjectDirForSession(sessionName, true)
+	if projectDir == "" {
+		return "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, nil
 }
 
 // parseAgentID parses an agent ID like "cc_1" into type and index

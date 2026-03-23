@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -107,14 +108,12 @@ func runScale(session string, targets []scaleTarget, dryRun, force bool) error {
 		return outputError(err)
 	}
 
-	// Resolve session name
-	if !IsJSONOutput() {
-		res, err := ResolveSession(session, nil)
-		if err != nil {
-			return outputError(err)
-		}
-		session = res.Session
+	// Resolve session name consistently across human and JSON modes.
+	resolvedSession, err := resolveScaleSession(session)
+	if err != nil {
+		return outputError(err)
 	}
+	session = resolvedSession
 
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' does not exist", session))
@@ -412,6 +411,24 @@ func runScale(session string, targets []scaleTarget, dryRun, force bool) error {
 	}
 
 	return nil
+}
+
+func resolveScaleSession(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", fmt.Errorf("invalid session name: %w", err)
+		}
+	}
+
+	res, err := ResolveSessionWithOptions(session, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	if err != nil {
+		return "", err
+	}
+	if res.Session == "" {
+		return "", fmt.Errorf("session is required")
+	}
+	return res.Session, nil
 }
 
 // scaleAgentTypeLabel maps a tmux.AgentType to the short string label used in scale

@@ -264,6 +264,10 @@ func performRollback(cp *checkpoint.Checkpoint, workDir string, noStash, noGit b
 
 // getSessionWorkDir gets the working directory from a tmux session.
 func getSessionWorkDir(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
 	if !tmux.SessionExists(session) {
 		return "", fmt.Errorf("session %q does not exist", session)
 	}

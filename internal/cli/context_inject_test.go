@@ -263,6 +263,19 @@ func TestSelectContextInjectTargetPanes(t *testing.T) {
 	})
 }
 
+func TestNewContextInjectCmdRejectsInvalidSessionName(t *testing.T) {
+	cmd := newContextInjectCmd()
+	cmd.SetArgs([]string{"../escape"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestGetRepoRev_DirectoryGitDir(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := filepath.Join(dir, ".git")

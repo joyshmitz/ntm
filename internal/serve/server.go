@@ -4526,6 +4526,10 @@ func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	payload := map[string]interface{}{
+		"success":       output.Success,
+		"timestamp":     output.Timestamp,
+		"version":       output.Version,
+		"output_format": output.OutputFormat,
 		"events":        output.Events,
 		"since_cursor":  opts.SinceCursor,
 		"next_cursor":   output.NextCursor,
@@ -4549,6 +4553,15 @@ func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request)
 	}
 	if output.Incident != nil {
 		payload["incident"] = output.Incident
+	}
+	if output.Error != "" {
+		payload["error"] = output.Error
+	}
+	if output.ErrorCode != "" {
+		payload["error_code"] = output.ErrorCode
+	}
+	if output.Hint != "" {
+		payload["hint"] = output.Hint
 	}
 	writeJSON(w, status, payload)
 }

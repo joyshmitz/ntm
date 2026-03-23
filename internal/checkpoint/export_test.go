@@ -480,6 +480,17 @@ func TestImport_WithOverrides(t *testing.T) {
 	if imported.WorkingDir != newProject {
 		t.Errorf("WorkingDir = %s, want %s", imported.WorkingDir, newProject)
 	}
+
+	loaded, err := importStorage.Load(newSession, checkpointID)
+	if err != nil {
+		t.Fatalf("Load after import failed: %v", err)
+	}
+	if loaded.SessionName != newSession {
+		t.Errorf("loaded.SessionName = %s, want %s", loaded.SessionName, newSession)
+	}
+	if loaded.WorkingDir != newProject {
+		t.Errorf("loaded.WorkingDir = %s, want %s", loaded.WorkingDir, newProject)
+	}
 }
 
 func TestExportImport_RoundTrip(t *testing.T) {

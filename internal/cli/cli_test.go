@@ -350,6 +350,70 @@ func TestResolveEnsembleProjectDirForSessionFallsBackToProjectRoot(t *testing.T)
 	}
 }
 
+func TestResolveGitProjectDirRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveGitProjectDir("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveProfileSwitchProjectDirRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveProfileSwitchProjectDir("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveScaleSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveScaleSession("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveAddSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveAddSession("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRunExtractRejectsInvalidSessionName(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	err := runExtract("../escape", "", "", false, 10, false, false, 0)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestGetSessionWorkDirRejectsInvalidSessionName(t *testing.T) {
+	_, err := getSessionWorkDir("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
 func TestResolveRobotFormat_NtmOutputFormatFallback(t *testing.T) {
 	resetFlags()
 	t.Setenv("NTM_ROBOT_FORMAT", "")

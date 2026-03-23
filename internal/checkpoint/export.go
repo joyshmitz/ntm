@@ -436,8 +436,8 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 	// Apply overrides
 	if opts.TargetSession != "" {
 		sessionName = opts.TargetSession
-		cp.SessionName = opts.TargetSession
 	}
+	cp.SessionName = sessionName
 
 	// Apply TargetDir override or expand ${WORKING_DIR} placeholder
 	if opts.TargetDir != "" {
@@ -452,8 +452,17 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 		cp.WorkingDir = cwd
 	}
 
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal imported checkpoint: %w", err)
+	}
+	fileContents[MetadataFile] = cpJSON
+
 	// Check for existing checkpoint
-	cpDir := s.CheckpointDir(sessionName, cp.ID)
+	cpDir, err := s.safeCheckpointDir(sessionName, cp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid imported checkpoint metadata: %w", err)
+	}
 	if _, err := os.Stat(cpDir); err == nil && !opts.AllowOverwrite {
 		return nil, fmt.Errorf("checkpoint %s already exists (use AllowOverwrite to replace)", cp.ID)
 	}
@@ -561,8 +570,8 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 	// Apply overrides
 	if opts.TargetSession != "" {
 		sessionName = opts.TargetSession
-		cp.SessionName = opts.TargetSession
 	}
+	cp.SessionName = sessionName
 
 	// Apply TargetDir override or expand ${WORKING_DIR} placeholder
 	if opts.TargetDir != "" {
@@ -577,8 +586,17 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 		cp.WorkingDir = cwd
 	}
 
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal imported checkpoint: %w", err)
+	}
+	fileContents[MetadataFile] = cpJSON
+
 	// Check for existing
-	cpDir := s.CheckpointDir(sessionName, cp.ID)
+	cpDir, err := s.safeCheckpointDir(sessionName, cp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid imported checkpoint metadata: %w", err)
+	}
 	if _, err := os.Stat(cpDir); err == nil && !opts.AllowOverwrite {
 		return nil, fmt.Errorf("checkpoint %s already exists", cp.ID)
 	}

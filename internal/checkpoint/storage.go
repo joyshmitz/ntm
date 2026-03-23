@@ -245,8 +245,30 @@ func (s *Storage) Load(sessionName, checkpointID string) (*Checkpoint, error) {
 	if err := json.Unmarshal(data, &cp); err != nil {
 		return nil, fmt.Errorf("parsing checkpoint metadata: %w", err)
 	}
+	if err := validateLoadedCheckpointMetadata(&cp, sessionName, checkpointID); err != nil {
+		return nil, err
+	}
 
 	return &cp, nil
+}
+
+func validateLoadedCheckpointMetadata(cp *Checkpoint, sessionName, checkpointID string) error {
+	if cp == nil {
+		return fmt.Errorf("checkpoint metadata is nil")
+	}
+	if err := validateCheckpointID(cp.ID); err != nil {
+		return fmt.Errorf("invalid checkpoint metadata: %w", err)
+	}
+	if err := tmux.ValidateSessionName(cp.SessionName); err != nil {
+		return fmt.Errorf("invalid checkpoint metadata: invalid session name: %w", err)
+	}
+	if cp.ID != checkpointID {
+		return fmt.Errorf("checkpoint metadata ID mismatch: expected %q, got %q", checkpointID, cp.ID)
+	}
+	if cp.SessionName != sessionName {
+		return fmt.Errorf("checkpoint metadata session mismatch: expected %q, got %q", sessionName, cp.SessionName)
+	}
+	return nil
 }
 
 // List returns all checkpoints for a session, sorted by creation time (newest first).

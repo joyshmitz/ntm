@@ -2682,6 +2682,47 @@ func TestExecutor_Run_DryRun_FailedDependency(t *testing.T) {
 	}
 }
 
+func TestExecuteStep_UsesWorkflowRetryPolicy(t *testing.T) {
+	t.Parallel()
+
+	step := Step{
+		ID:         "step1",
+		PromptFile: "/nonexistent/prompt.txt",
+		RetryCount: 2,
+	}
+
+	workflow := &Workflow{
+		Name: "test-workflow-retry",
+		Settings: WorkflowSettings{
+			OnError: ErrorActionRetry,
+		},
+		Steps: []Step{step},
+	}
+
+	cfg := DefaultExecutorConfig("test")
+	e := NewExecutor(cfg)
+	e.graph = NewDependencyGraph(workflow)
+	e.state = &ExecutionState{
+		RunID:      "test-run",
+		WorkflowID: workflow.Name,
+		Status:     StatusRunning,
+		StartedAt:  time.Now(),
+		Steps:      make(map[string]StepResult),
+		Variables:  make(map[string]interface{}),
+	}
+
+	result := e.executeStep(context.Background(), &step, workflow)
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %v, want %v", result.Status, StatusFailed)
+	}
+	if result.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3", result.Attempts)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "failed to resolve prompt") {
+		t.Fatalf("expected prompt resolution error, got %+v", result.Error)
+	}
+}
+
 func TestExecutor_Run_DryRun_WhenConditionTrue(t *testing.T) {
 	t.Parallel()
 

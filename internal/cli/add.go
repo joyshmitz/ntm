@@ -204,14 +204,12 @@ func runAdd(opts AddOptions) error {
 		return outputError(err)
 	}
 
-	if !IsJSONOutput() {
-		res, err := ResolveSession(session, nil)
-		if err != nil {
-			return outputError(err)
-		}
-		session = res.Session
-		opts.Session = session
+	resolvedSession, err := resolveAddSession(session)
+	if err != nil {
+		return outputError(err)
 	}
+	session = resolvedSession
+	opts.Session = session
 
 	if !tmux.SessionExists(session) {
 		return outputError(fmt.Errorf("session '%s' does not exist (use 'ntm spawn' to create)", session))
@@ -676,4 +674,22 @@ func runAdd(opts AddOptions) error {
 	// Show "What's next?" suggestions
 	output.SuccessFooter(output.AddSuggestions(session, totalAgents)...)
 	return nil
+}
+
+func resolveAddSession(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", fmt.Errorf("invalid session name: %w", err)
+		}
+	}
+
+	res, err := ResolveSessionWithOptions(session, nil, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	if err != nil {
+		return "", err
+	}
+	if res.Session == "" {
+		return "", fmt.Errorf("session is required")
+	}
+	return res.Session, nil
 }

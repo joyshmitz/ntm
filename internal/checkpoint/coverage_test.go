@@ -693,13 +693,22 @@ func TestImportTarGz_SessionNameFromManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import failed: %v", err)
 	}
+	if imported.SessionName != "manifest-session" {
+		t.Fatalf("imported.SessionName = %q, want manifest-session", imported.SessionName)
+	}
 
 	// The checkpoint dir should use the manifest session name
 	cpDir := storage.CheckpointDir("manifest-session", "mn-cp")
 	if _, err := os.Stat(cpDir); err != nil {
 		t.Errorf("checkpoint not stored under manifest session name: %v", err)
 	}
-	_ = imported
+	loaded, err := storage.Load("manifest-session", "mn-cp")
+	if err != nil {
+		t.Fatalf("Load after import failed: %v", err)
+	}
+	if loaded.SessionName != "manifest-session" {
+		t.Fatalf("loaded.SessionName = %q, want manifest-session", loaded.SessionName)
+	}
 }
 
 // =============================================================================

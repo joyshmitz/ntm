@@ -1251,6 +1251,173 @@ func TestAttentionFeed_ReconstructAsOfReturnsRecentWindowAndMetadata(t *testing.
 	}
 }
 
+func TestBuildEventsOutput_IncidentReplayIncludesHistoricalMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	appendStored := func(ts time.Time, summary string) int64 {
+		t.Helper()
+		cursor, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "proj",
+			Category:      "incident",
+			EventType:     "incident.replayed",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityWarning,
+			Summary:       summary,
+		})
+		if err != nil {
+			t.Fatalf("AppendAttentionEvent(%q): %v", summary, err)
+		}
+		return cursor
+	}
+
+	contextCursor := appendStored(now.Add(-25*time.Second), "context")
+	firstIncidentCursor := appendStored(now.Add(-18*time.Second), "incident-1")
+	secondIncidentCursor := appendStored(now.Add(-11*time.Second), "incident-2")
+	appendStored(now.Add(-5*time.Second), "after")
+
+	if err := store.CreateIncident(&state.Incident{
+		ID:          "inc-replay",
+		Title:       "incident replay",
+		Fingerprint: "incident.replay:test",
+		Family:      "incident.replay",
+		Category:    "testing",
+		Status:      state.IncidentStatusOpen,
+		Severity:    state.SeverityWarning,
+		EventCount:  2,
+		StartedAt:   now.Add(-18 * time.Second),
+		LastEventAt: now.Add(-11 * time.Second),
+	}); err != nil {
+		t.Fatalf("CreateIncident(): %v", err)
+	}
+	for _, cursor := range []int64{firstIncidentCursor, secondIncidentCursor} {
+		if err := store.LinkEventToIncident("inc-replay", cursor); err != nil {
+			t.Fatalf("LinkEventToIncident(%d): %v", cursor, err)
+		}
+	}
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	oldFeed := PeekAttentionFeed()
+	SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	output, status := BuildEventsOutput(EventsOptions{
+		IncidentID:   "inc-replay",
+		Limit:        10,
+		WindowBefore: 10 * time.Second,
+	})
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !output.Success {
+		t.Fatalf("expected success, got %#v", output)
+	}
+	if output.ReplayTarget == nil || output.ReplayTarget.Mode != "incident_replay" {
+		t.Fatalf("ReplayTarget = %#v, want incident_replay", output.ReplayTarget)
+	}
+	if output.ReplayTarget.Ref != "incident:inc-replay" {
+		t.Fatalf("ReplayTarget.Ref = %q, want incident:inc-replay", output.ReplayTarget.Ref)
+	}
+	if output.Incident == nil || output.Incident.ID != "inc-replay" {
+		t.Fatalf("Incident = %#v, want inc-replay anchor", output.Incident)
+	}
+	if output.Boundedness == nil || output.Boundedness.RequestedRangeMS != (10*time.Second+DefaultIncidentReplayWindowAfter).Milliseconds() {
+		t.Fatalf("Boundedness = %#v, want requested_range_ms=%d", output.Boundedness, (10*time.Second + DefaultIncidentReplayWindowAfter).Milliseconds())
+	}
+	if len(output.Events) != 4 {
+		t.Fatalf("len(output.Events) = %d, want 4", len(output.Events))
+	}
+	if got := []int64{output.Events[0].Cursor, output.Events[1].Cursor, output.Events[2].Cursor, output.Events[3].Cursor}; got[0] != contextCursor || got[1] != firstIncidentCursor || got[2] != secondIncidentCursor || got[3] <= secondIncidentCursor {
+		t.Fatalf("output event cursors = %v", got)
+	}
+}
+
+func TestBuildEventsOutput_AsOfIncludesHistoricalMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	appendStored := func(ts time.Time, summary string) {
+		t.Helper()
+		if _, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "proj",
+			Category:      "incident",
+			EventType:     "incident.replayed",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityWarning,
+			Summary:       summary,
+		}); err != nil {
+			t.Fatalf("AppendAttentionEvent(%q): %v", summary, err)
+		}
+	}
+
+	appendStored(now.Add(-40*time.Second), "older")
+	appendStored(now.Add(-20*time.Second), "target-1")
+	appendStored(now.Add(-15*time.Second), "target-2")
+	appendStored(now.Add(-5*time.Second), "future")
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	oldFeed := PeekAttentionFeed()
+	SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	asOf := now.Add(-10 * time.Second)
+	output, status := BuildEventsOutput(EventsOptions{
+		AsOf:  asOf,
+		Limit: 2,
+	})
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !output.Success {
+		t.Fatalf("expected success, got %#v", output)
+	}
+	if output.ReplayTarget == nil || output.ReplayTarget.Mode != "as_of" {
+		t.Fatalf("ReplayTarget = %#v, want as_of", output.ReplayTarget)
+	}
+	if output.ReplayTarget.RequestedAt != asOf.Format(time.RFC3339Nano) {
+		t.Fatalf("ReplayTarget.RequestedAt = %q, want %q", output.ReplayTarget.RequestedAt, asOf.Format(time.RFC3339Nano))
+	}
+	if output.Reconstruction == nil || output.Reconstruction.Method != "event_replay" {
+		t.Fatalf("Reconstruction = %#v, want event_replay metadata", output.Reconstruction)
+	}
+	if !output.Reconstruction.Partial {
+		t.Fatalf("Reconstruction.Partial = %v, want true", output.Reconstruction.Partial)
+	}
+	if output.Boundedness == nil || !output.Boundedness.Truncated {
+		t.Fatalf("Boundedness = %#v, want truncated historical metadata", output.Boundedness)
+	}
+	if len(output.Events) != 2 {
+		t.Fatalf("len(output.Events) = %d, want 2", len(output.Events))
+	}
+}
+
 func TestAttentionFeed_ReplayAnnotatesDurableOperatorState(t *testing.T) {
 	t.Parallel()
 

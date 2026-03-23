@@ -145,6 +145,8 @@ func Validate(w *Workflow) ValidationResult {
 		})
 	}
 
+	validateSettings(w.Settings, &result)
+
 	// Validate steps
 	stepIDs := make(map[string]bool)
 	for i, step := range w.Steps {
@@ -166,6 +168,16 @@ func Validate(w *Workflow) ValidationResult {
 	validateVariableRefs(w, &result)
 
 	return result
+}
+
+func validateSettings(settings WorkflowSettings, result *ValidationResult) {
+	if settings.OnError != "" && !isValidErrorAction(settings.OnError) {
+		result.addError(ParseError{
+			Field:   "settings.on_error",
+			Message: fmt.Sprintf("invalid on_error value: %s", settings.OnError),
+			Hint:    "Valid values: fail, fail_fast, continue, retry",
+		})
+	}
 }
 
 func (r *ValidationResult) addError(e ParseError) {
@@ -277,7 +289,7 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 		result.addError(ParseError{
 			Field:   stepField + ".on_error",
 			Message: fmt.Sprintf("invalid on_error value: %s", step.OnError),
-			Hint:    "Valid values: fail, continue, retry",
+			Hint:    "Valid values: fail, fail_fast, continue, retry",
 		})
 	}
 
@@ -485,7 +497,7 @@ func isValidRoute(r RoutingStrategy) bool {
 
 func isValidErrorAction(a ErrorAction) bool {
 	switch a {
-	case ErrorActionFail, ErrorActionContinue, ErrorActionRetry:
+	case ErrorActionFail, ErrorActionFailFast, ErrorActionContinue, ErrorActionRetry:
 		return true
 	}
 	return false

@@ -2910,6 +2910,147 @@ func TestAttentionStreamHeartbeatIncludesLastEventTimeAfterRealEvent(t *testing.
 	}
 }
 
+func TestAttentionEventsAsOfIncludesHistoricalMetadata(t *testing.T) {
+	srv, store := setupTestServer(t)
+
+	robot.SetProjectionStore(store)
+	t.Cleanup(func() {
+		robot.SetProjectionStore(nil)
+	})
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, robot.WithAttentionStore(store))
+	oldFeed := robot.GetAttentionFeed()
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	appendStored := func(ts time.Time, summary string) {
+		t.Helper()
+		if _, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "proj",
+			Category:      "incident",
+			EventType:     "incident.replayed",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityWarning,
+			Summary:       summary,
+		}); err != nil {
+			t.Fatalf("AppendAttentionEvent(%q): %v", summary, err)
+		}
+	}
+
+	appendStored(now.Add(-40*time.Second), "older")
+	appendStored(now.Add(-20*time.Second), "target-1")
+	appendStored(now.Add(-15*time.Second), "target-2")
+	appendStored(now.Add(-5*time.Second), "future")
+
+	asOf := now.Add(-10 * time.Second)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/events", nil)
+	query := req.URL.Query()
+	query.Set("as_of", asOf.Format(time.RFC3339))
+	query.Set("limit", "2")
+	req.URL.RawQuery = query.Encode()
+
+	rec := httptest.NewRecorder()
+	srv.handleAttentionEventsV1(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Events         []robot.AttentionEvent        `json:"events"`
+		SinceCursor    int64                         `json:"since_cursor"`
+		EventCount     int                           `json:"event_count"`
+		Truncated      bool                          `json:"truncated"`
+		ReplayTarget   *robot.HistoricalReplayTarget `json:"replay_target"`
+		Reconstruction *robot.ReconstructionMeta     `json:"reconstruction"`
+		Boundedness    *robot.HistoricalBoundedness  `json:"boundedness"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SinceCursor != 0 {
+		t.Fatalf("since_cursor = %d, want 0", resp.SinceCursor)
+	}
+	if resp.EventCount != 2 || len(resp.Events) != 2 {
+		t.Fatalf("event_count/events = %d/%d, want 2/2", resp.EventCount, len(resp.Events))
+	}
+	if resp.ReplayTarget == nil || resp.ReplayTarget.Mode != "as_of" {
+		t.Fatalf("ReplayTarget = %#v, want as_of", resp.ReplayTarget)
+	}
+	if resp.Reconstruction == nil || resp.Reconstruction.Method != "event_replay" {
+		t.Fatalf("Reconstruction = %#v, want event_replay", resp.Reconstruction)
+	}
+	if resp.Boundedness == nil || !resp.Boundedness.Truncated {
+		t.Fatalf("Boundedness = %#v, want truncated historical metadata", resp.Boundedness)
+	}
+	if resp.Truncated {
+		t.Fatalf("truncated = %v, want false when pagination is complete", resp.Truncated)
+	}
+}
+
+func TestAttentionEventsIncidentNotFoundIncludesRobotErrorEnvelope(t *testing.T) {
+	srv, store := setupTestServer(t)
+
+	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, robot.WithAttentionStore(store))
+	oldFeed := robot.GetAttentionFeed()
+	robot.SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		robot.SetAttentionFeed(oldFeed)
+		feed.Stop()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/attention/events?incident_id=missing-incident", nil)
+	rec := httptest.NewRecorder()
+
+	srv.handleAttentionEventsV1(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	var resp struct {
+		Success     bool                   `json:"success"`
+		Error       string                 `json:"error"`
+		ErrorCode   string                 `json:"error_code"`
+		SinceCursor int64                  `json:"since_cursor"`
+		EventCount  int                    `json:"event_count"`
+		Truncated   bool                   `json:"truncated"`
+		Events      []robot.AttentionEvent `json:"events"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Success {
+		t.Fatalf("success = %v, want false", resp.Success)
+	}
+	if resp.ErrorCode != robot.ErrCodeNotFound {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, robot.ErrCodeNotFound)
+	}
+	if resp.Error == "" {
+		t.Fatal("error = empty, want incident-not-found message")
+	}
+	if resp.SinceCursor != 0 || resp.EventCount != 0 || resp.Truncated {
+		t.Fatalf("since_cursor/event_count/truncated = %d/%d/%v, want 0/0/false", resp.SinceCursor, resp.EventCount, resp.Truncated)
+	}
+	if len(resp.Events) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(resp.Events))
+	}
+}
+
 func TestAttentionEventsCursorExpiredUsesResyncCommand(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	feed, _ := installServeTestAttentionFeed(t)

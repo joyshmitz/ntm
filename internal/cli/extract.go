@@ -72,6 +72,14 @@ Examples:
 }
 
 func runExtract(sessionName, paneIndex, language string, lastPane bool, lines int, copyFlag, applyFlag bool, selectBlock int) error {
+	sessionName = strings.TrimSpace(sessionName)
+	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		if IsJSONOutput() {
+			return output.PrintJSON(output.NewError(fmt.Sprintf("invalid session name: %v", err)))
+		}
+		return fmt.Errorf("invalid session name: %w", err)
+	}
+
 	// Check session exists
 	if !tmux.SessionExists(sessionName) {
 		if IsJSONOutput() {

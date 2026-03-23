@@ -119,19 +119,76 @@ func TestStorage_Load_MissingRequiredFields(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	// Load should succeed (Go struct unmarshaling is lenient)
-	// but the resulting Checkpoint will have zero values
-	cp, err := storage.Load(sessionName, checkpointID)
-	if err != nil {
-		t.Fatalf("Load() failed: %v", err)
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail when required metadata fields are missing")
+	}
+	if !containsSubstr(err.Error(), "invalid checkpoint metadata") {
+		t.Fatalf("expected invalid metadata error, got %v", err)
+	}
+}
+
+func TestStorage_Load_RejectsSessionMetadataMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-mismatch"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
 	}
 
-	// Verify that ID and SessionName are empty
-	if cp.ID != "" {
-		t.Error("ID should be empty when not in JSON")
+	mismatchedCP := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: "other-session",
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
 	}
-	if cp.SessionName != "" {
-		t.Error("SessionName should be empty when not in JSON")
+	data, _ := json.Marshal(mismatchedCP)
+	metaPath := filepath.Join(cpDir, MetadataFile)
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail for mismatched session metadata")
+	}
+	if !containsSubstr(err.Error(), "session mismatch") {
+		t.Fatalf("expected session mismatch error, got %v", err)
+	}
+}
+
+func TestStorage_Load_RejectsCheckpointIDMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-expected"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	mismatchedCP := &Checkpoint{
+		ID:          "20251210-120000-actual",
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	data, _ := json.Marshal(mismatchedCP)
+	metaPath := filepath.Join(cpDir, MetadataFile)
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail for mismatched checkpoint ID metadata")
+	}
+	if !containsSubstr(err.Error(), "ID mismatch") {
+		t.Fatalf("expected ID mismatch error, got %v", err)
 	}
 }
 

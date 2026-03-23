@@ -126,6 +126,40 @@ func TestExecuteParallel_ErrorModes(t *testing.T) {
 	}
 }
 
+func TestExecuteParallel_UsesWorkflowRetryPolicyForSubsteps(t *testing.T) {
+	t.Parallel()
+
+	e, workflow := createTestExecutor()
+	workflow.Settings.OnError = ErrorActionRetry
+
+	step := &Step{
+		ID: "parallel_group",
+		Parallel: []Step{
+			{
+				ID:         "step1",
+				PromptFile: "/nonexistent/prompt.txt",
+				RetryCount: 2,
+			},
+		},
+	}
+
+	result := e.executeParallel(context.Background(), step, workflow)
+	if result.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed, got %s", result.Status)
+	}
+
+	child, ok := e.state.Steps["step1"]
+	if !ok {
+		t.Fatal("missing step result for step1")
+	}
+	if child.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3", child.Attempts)
+	}
+	if child.Error == nil || child.Error.Type != "prompt" {
+		t.Fatalf("expected prompt error after retries, got %+v", child.Error)
+	}
+}
+
 func TestExecuteParallel_GroupTimeout(t *testing.T) {
 	t.Parallel()
 

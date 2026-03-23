@@ -360,6 +360,53 @@ func TestValidate_InvalidErrorAction(t *testing.T) {
 	}
 }
 
+func TestValidate_AllowsFailFastErrorAction(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:      "s1",
+				Prompt:  "test",
+				OnError: ErrorActionFailFast,
+			},
+		},
+	}
+
+	result := Validate(w)
+	if !result.Valid {
+		t.Fatalf("expected validation to pass for fail_fast, got errors: %+v", result.Errors)
+	}
+}
+
+func TestValidate_InvalidWorkflowSettingsErrorAction(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Settings: WorkflowSettings{
+			OnError: ErrorAction("invalid"),
+		},
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Prompt: "test",
+			},
+		},
+	}
+
+	result := Validate(w)
+	if result.Valid {
+		t.Fatal("expected validation to fail for invalid settings.on_error")
+	}
+	if len(result.Errors) == 0 || result.Errors[0].Field != "settings.on_error" {
+		t.Fatalf("expected settings.on_error validation error, got %+v", result.Errors)
+	}
+}
+
 func TestValidate_RetryWithZeroCount(t *testing.T) {
 	t.Parallel()
 
@@ -1026,6 +1073,7 @@ func TestIsValidErrorAction(t *testing.T) {
 		want   bool
 	}{
 		{ErrorActionFail, true},
+		{ErrorActionFailFast, true},
 		{ErrorActionContinue, true},
 		{ErrorActionRetry, true},
 		{ErrorAction("unknown"), false},

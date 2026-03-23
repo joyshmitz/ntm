@@ -86,11 +86,15 @@ Examples:
 			if len(args) > 0 {
 				session = args[0]
 			} else {
-				sessions, err := tmux.ListSessions()
-				if err != nil || len(sessions) == 0 {
-					return fmt.Errorf("no session specified and no active sessions found")
+				res, err := ResolveSession("", cmd.OutOrStdout())
+				if err != nil {
+					return err
 				}
-				session = sessions[0].Name
+				if res.Session == "" {
+					return nil
+				}
+				res.ExplainIfInferred(cmd.ErrOrStderr())
+				session = res.Session
 			}
 
 			return runReviewQueue(session, filter, idleThreshold, send, formatOut, commitLimit)

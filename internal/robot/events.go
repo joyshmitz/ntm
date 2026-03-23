@@ -314,7 +314,7 @@ func BuildEventsOutput(opts EventsOptions) (EventsOutput, int) {
 	}
 
 	if boundedness != nil {
-		boundedness.Truncated = hasMore
+		boundedness.Truncated = boundedness.Truncated || hasMore
 	}
 	if reconstruction != nil && hasMore && !containsReplayWarning(reconstruction.Warnings, "PARTIAL_DATA") {
 		reconstruction.Warnings = append(reconstruction.Warnings, "PARTIAL_DATA")

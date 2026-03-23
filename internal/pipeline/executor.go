@@ -384,13 +384,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 				// Mark step as failed in dependency graph
 				_ = e.graph.MarkFailed(stepID)
 
-				onError := step.OnError
-				if onError == "" {
-					onError = workflow.Settings.OnError
-				}
-				if onError == "" {
-					onError = ErrorActionFail
-				}
+				onError := resolveErrorAction(step.OnError, workflow.Settings.OnError)
 
 				switch onError {
 				case ErrorActionFail, ErrorActionFailFast:
@@ -460,7 +454,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 
 	// Calculate retry parameters
 	maxAttempts := 1
-	if step.OnError == ErrorActionRetry {
+	if resolveErrorAction(step.OnError, workflow.Settings.OnError) == ErrorActionRetry {
 		maxAttempts = step.RetryCount + 1
 		if maxAttempts < 1 {
 			maxAttempts = 1
@@ -681,13 +675,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	}
 
 	// Determine error handling mode
-	onError := step.OnError
-	if onError == "" {
-		onError = workflow.Settings.OnError
-	}
-	if onError == "" {
-		onError = ErrorActionFail
-	}
+	onError := resolveErrorAction(step.OnError, workflow.Settings.OnError)
 
 	// Apply group-level timeout if specified
 	if step.Timeout.Duration > 0 {
@@ -812,7 +800,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 				Message:   fmt.Sprintf("%d failed, %d cancelled (fail_fast mode)", failed, cancelledCount),
 				Timestamp: time.Now(),
 			}
-		default: // ErrorActionFail
+		default: // ErrorActionFail or ErrorActionRetry after step-level retries are exhausted
 			result.Status = StatusFailed
 			result.Error = &StepError{
 				Type:      "parallel",
@@ -938,7 +926,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 
 	// Calculate retry parameters
 	maxAttempts := 1
-	if step.OnError == ErrorActionRetry {
+	if resolveErrorAction(step.OnError, workflow.Settings.OnError) == ErrorActionRetry {
 		maxAttempts = step.RetryCount + 1
 		if maxAttempts < 1 {
 			maxAttempts = 1
@@ -1118,6 +1106,16 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 
 	// Failed after all attempts
 	return result
+}
+
+func resolveErrorAction(stepOnError, workflowOnError ErrorAction) ErrorAction {
+	if stepOnError != "" {
+		return stepOnError
+	}
+	if workflowOnError != "" {
+		return workflowOnError
+	}
+	return ErrorActionFail
 }
 
 // selectAndMarkPane selects a pane for a step and marks it as used atomically.

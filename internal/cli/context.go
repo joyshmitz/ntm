@@ -390,6 +390,9 @@ Use --files to override the file list.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
+			if err := tmux.ValidateSessionName(session); err != nil {
+				return fmt.Errorf("invalid session name: %w", err)
+			}
 
 			// Resolve project directory
 			projectDir := resolveProjectDirForSession(session, true)
