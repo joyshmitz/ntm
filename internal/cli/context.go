@@ -375,13 +375,9 @@ Use --files to override the file list.`,
 			session := args[0]
 
 			// Resolve project directory
-			projectDir := ""
-			if cfg != nil {
-				projectDir = cfg.GetProjectDir(session)
-			}
+			projectDir := resolveProjectDirForSession(session, true)
 			if projectDir == "" {
-				dir, _ := os.Getwd()
-				projectDir = dir
+				return fmt.Errorf("getting project root failed")
 			}
 
 			// Determine files to inject

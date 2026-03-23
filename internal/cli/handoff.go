@@ -212,6 +212,7 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 	reader := handoff.NewReader(projectDir)
 	generator := handoff.NewGenerator(projectDir)
 	var h *handoff.Handoff
+	var err error
 
 	if fromFile != "" {
 		// Load from file

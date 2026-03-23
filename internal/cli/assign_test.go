@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -178,6 +182,104 @@ func TestAssignOutputEnhancedStructure(t *testing.T) {
 	}
 	if output.Summary.BlockedCount != 1 {
 		t.Errorf("Expected BlockedCount=1, got %d", output.Summary.BlockedCount)
+	}
+}
+
+func createAssignProjectRoot(t *testing.T) (string, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".ntm"), 0755); err != nil {
+		t.Fatalf("creating .ntm dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".ntm", "config.toml"), []byte(""), 0644); err != nil {
+		t.Fatalf("writing config marker: %v", err)
+	}
+	nested := filepath.Join(root, "nested", "pkg")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("creating nested dir: %v", err)
+	}
+
+	return root, nested
+}
+
+func TestResolveAssignProjectDirUsesProjectRootFromSubdir(t *testing.T) {
+	root, nested := createAssignProjectRoot(t)
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: filepath.Join(root, "projects-base")}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	if got := resolveAssignProjectDir("demo"); got != root {
+		t.Fatalf("resolveAssignProjectDir() = %q, want %q", got, root)
+	}
+}
+
+func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
+	root, nested := createAssignProjectRoot(t)
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: filepath.Join(root, "projects-base")}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	if _, err := releaseFileReservationsWithIDs("demo", "bd-123", "BlueLake", []int{42}); err != nil {
+		t.Fatalf("releaseFileReservationsWithIDs() error = %v", err)
+	}
+
+	if len(stub.releaseCalls) != 1 {
+		t.Fatalf("expected 1 release call, got %d", len(stub.releaseCalls))
+	}
+	if got := stub.releaseCalls[0].Project; got != root {
+		t.Fatalf("release project = %q, want %q", got, root)
+	}
+}
+
+func TestReserveFilesForBeadUsesResolvedProjectDir(t *testing.T) {
+	root, nested := createAssignProjectRoot(t)
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: filepath.Join(root, "projects-base")}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir nested: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	result := reserveFilesForBead("demo", "bd-123", "Update internal/cli/assign.go", "claude", false, time.Second)
+	if result == nil {
+		t.Fatal("reserveFilesForBead() returned nil result")
+	}
+	if !result.Success {
+		t.Fatalf("reserveFilesForBead() success = false, error = %q", result.Error)
+	}
+
+	if len(stub.reserveCalls) != 1 {
+		t.Fatalf("expected 1 reserve call, got %d", len(stub.reserveCalls))
+	}
+	if got := stub.reserveCalls[0].Project; got != root {
+		t.Fatalf("reserve project = %q, want %q", got, root)
 	}
 }
 

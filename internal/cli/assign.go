@@ -18,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
-	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assign"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -232,6 +231,10 @@ Examples:
 	return cmd
 }
 
+func resolveAssignProjectDir(session string) string {
+	return resolveProjectDirForSession(session, true)
+}
+
 func runAssign(cmd *cobra.Command, args []string) error {
 	var session string
 	if len(args) > 0 {
@@ -255,12 +258,7 @@ func runAssign(cmd *cobra.Command, args []string) error {
 
 	// Enable project webhooks (if configured) so assignment lifecycle events
 	// can fan out while this command runs (including watch mode).
-	projectDir := ""
-	if cfg != nil {
-		projectDir = cfg.GetProjectDir(session)
-	} else if wd, err := os.Getwd(); err == nil {
-		projectDir = wd
-	}
+	projectDir := resolveAssignProjectDir(session)
 	if cfg != nil && projectDir != "" {
 		redactCfg := cfg.Redaction.ToRedactionLibConfig()
 		bridge, err := webhook.StartBridgeFromProjectConfig(projectDir, session, events.DefaultBus, &redactCfg)
@@ -1834,21 +1832,27 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 	// Set up file reservation manager if enabled
 	var reservationMgr *assign.FileReservationManager
 	if opts.ReserveFiles {
-		wd, _ := os.Getwd()
-		amClient := agentmail.NewClient(agentmail.WithProjectKey(wd))
-		if amClient.IsAvailable() {
-			reservationMgr = assign.NewFileReservationManager(amClient, wd)
-			// Set TTL to 2x timeout, minimum 1 hour
-			ttlSeconds := int(opts.Timeout.Seconds()) * 2
-			if ttlSeconds < 3600 {
-				ttlSeconds = 3600
-			}
-			reservationMgr.SetTTL(ttlSeconds)
+		projectDir := resolveAssignProjectDir(session)
+		if projectDir == "" {
 			if !opts.Quiet && opts.Verbose {
-				fmt.Println("  File reservation enabled via Agent Mail")
+				fmt.Println("  Warning: Could not resolve project directory, skipping file reservations")
 			}
-		} else if !opts.Quiet && opts.Verbose {
-			fmt.Println("  Warning: Agent Mail not available, skipping file reservations")
+		} else {
+			amClient := newAgentMailClient(projectDir)
+			if amClient.IsAvailable() {
+				reservationMgr = assign.NewFileReservationManager(amClient, projectDir)
+				// Set TTL to 2x timeout, minimum 1 hour
+				ttlSeconds := int(opts.Timeout.Seconds()) * 2
+				if ttlSeconds < 3600 {
+					ttlSeconds = 3600
+				}
+				reservationMgr.SetTTL(ttlSeconds)
+				if !opts.Quiet && opts.Verbose {
+					fmt.Println("  File reservation enabled via Agent Mail")
+				}
+			} else if !opts.Quiet && opts.Verbose {
+				fmt.Println("  Warning: Agent Mail not available, skipping file reservations")
+			}
 		}
 	}
 
@@ -3023,11 +3027,13 @@ func findAssignmentForPane(store *assignment.AssignmentStore, pane int) *assignm
 
 // releaseFileReservationsWithIDs releases file reservations using stored reservation IDs
 func releaseFileReservationsWithIDs(session, beadID, agentName string, reservationIDs []int) ([]string, error) {
-	// Get project key
-	projectKey, _ := os.Getwd()
+	projectKey := resolveAssignProjectDir(session)
+	if projectKey == "" {
+		return nil, fmt.Errorf("getting project root failed")
+	}
 
 	// Create Agent Mail client
-	amClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	amClient := newAgentMailClient(projectKey)
 	if !amClient.IsAvailable() {
 		return nil, nil // No error if Agent Mail isn't available
 	}
@@ -3055,11 +3061,13 @@ func releaseFileReservationsWithIDs(session, beadID, agentName string, reservati
 // releaseFileReservations releases file reservations for a bead via Agent Mail
 // This is used when we don't have reservation IDs stored
 func releaseFileReservations(session, beadID, agentName string) ([]string, error) {
-	// Get project key
-	projectKey, _ := os.Getwd()
+	projectKey := resolveAssignProjectDir(session)
+	if projectKey == "" {
+		return nil, fmt.Errorf("getting project root failed")
+	}
 
 	// Create Agent Mail client
-	amClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	amClient := newAgentMailClient(projectKey)
 	if !amClient.IsAvailable() {
 		return nil, nil // No error if Agent Mail isn't available
 	}
@@ -3701,15 +3709,21 @@ func getBeadTitle(beadID string) string {
 
 // reserveFilesForBead reserves files mentioned in a bead for an agent
 func reserveFilesForBead(session, beadID, beadTitle, agentType string, verbose bool, timeout time.Duration) *assign.FileReservationResult {
-	// Get project key (use working directory)
-	projectKey, _ := os.Getwd()
-
 	// Create agent name from session and agent type
 	agentName := fmt.Sprintf("%s_%s", session, agentType)
+	projectKey := resolveAssignProjectDir(session)
+	if projectKey == "" {
+		return &assign.FileReservationResult{
+			BeadID:    beadID,
+			AgentName: agentName,
+			Success:   false,
+			Error:     "getting project root failed",
+		}
+	}
 
 	// Create reservation manager (use Agent Mail if available)
 	var manager *assign.FileReservationManager
-	amClient := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	amClient := newAgentMailClient(projectKey)
 	if amClient.IsAvailable() {
 		manager = assign.NewFileReservationManager(amClient, projectKey)
 	} else {

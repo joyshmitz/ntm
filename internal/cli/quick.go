@@ -102,12 +102,7 @@ func runQuick(name string, opts quickOptions) error {
 	if cfg != nil {
 		projectDir = cfg.GetProjectDir(name)
 	} else {
-		// Fallback: preserve legacy behavior if config somehow isn't initialized.
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to get home directory: %w", err)
-		}
-		projectDir = filepath.Join(home, "projects", name)
+		projectDir = config.Default().GetProjectDir(name)
 	}
 
 	// Check if directory exists

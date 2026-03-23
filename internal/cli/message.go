@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -36,14 +35,17 @@ func newMessageInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "View unified inbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, _ := os.Getwd()
+			dir := GetProjectRoot()
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 			session := tmux.GetCurrentSession()
 			if session == "" {
 				session = filepath.Base(dir)
 			}
 			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := agentmail.NewClient(agentmail.WithProjectKey(dir))
+			amClient := newAgentMailClient(dir)
 			bdClient := bd.NewMessageClient(dir, agentName)
 
 			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
@@ -77,14 +79,17 @@ func newMessageSendCmd() *cobra.Command {
 			to := args[0]
 			body := args[1]
 
-			dir, _ := os.Getwd()
+			dir := GetProjectRoot()
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 			session := tmux.GetCurrentSession()
 			if session == "" {
 				session = filepath.Base(dir)
 			}
 			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := agentmail.NewClient(agentmail.WithProjectKey(dir))
+			amClient := newAgentMailClient(dir)
 			bdClient := bd.NewMessageClient(dir, agentName)
 
 			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
@@ -106,14 +111,17 @@ This marks the message as read.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			dir, _ := os.Getwd()
+			dir := GetProjectRoot()
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 			session := tmux.GetCurrentSession()
 			if session == "" {
 				session = filepath.Base(dir)
 			}
 			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := agentmail.NewClient(agentmail.WithProjectKey(dir))
+			amClient := newAgentMailClient(dir)
 			bdClient := bd.NewMessageClient(dir, agentName)
 
 			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
@@ -156,14 +164,17 @@ This marks the message as both read and acknowledged.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			dir, _ := os.Getwd()
+			dir := GetProjectRoot()
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 			session := tmux.GetCurrentSession()
 			if session == "" {
 				session = filepath.Base(dir)
 			}
 			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := agentmail.NewClient(agentmail.WithProjectKey(dir))
+			amClient := newAgentMailClient(dir)
 			bdClient := bd.NewMessageClient(dir, agentName)
 
 			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)

@@ -512,6 +512,9 @@ type DigestResponse struct {
 	// Summary is a human-readable summary of the digest.
 	Summary string `json:"summary"`
 
+	// ActiveIncidents surfaces the currently open durable incidents.
+	ActiveIncidents []SnapshotIncident `json:"active_incidents"`
+
 	// Trace contains detailed decision logs when IncludeTrace is enabled.
 	Trace []AttentionDigestDecision `json:"trace,omitempty"`
 
@@ -537,7 +540,8 @@ func PrintDigest(opts DigestOptions) error {
 				Interesting:    []AttentionDigestItem{},
 				Background:     []AttentionDigestItem{},
 			},
-			Suppressed: AttentionDigestSuppression{ByReason: map[string]int{}},
+			ActiveIncidents: []SnapshotIncident{},
+			Suppressed:      AttentionDigestSuppression{ByReason: map[string]int{}},
 		})
 	}
 
@@ -581,7 +585,8 @@ func PrintDigest(opts DigestOptions) error {
 					Interesting:    []AttentionDigestItem{},
 					Background:     []AttentionDigestItem{},
 				},
-				Suppressed: AttentionDigestSuppression{ByReason: map[string]int{}},
+				ActiveIncidents: []SnapshotIncident{},
+				Suppressed:      AttentionDigestSuppression{ByReason: map[string]int{}},
 				ReplayWindow: &SnapshotReplayWindowInfo{
 					Supported:       true,
 					OldestCursor:    details.EarliestCursor,
@@ -599,7 +604,8 @@ func PrintDigest(opts DigestOptions) error {
 				Interesting:    []AttentionDigestItem{},
 				Background:     []AttentionDigestItem{},
 			},
-			Suppressed: AttentionDigestSuppression{ByReason: map[string]int{}},
+			ActiveIncidents: []SnapshotIncident{},
+			Suppressed:      AttentionDigestSuppression{ByReason: map[string]int{}},
 		})
 	}
 
@@ -611,6 +617,10 @@ func PrintDigest(opts DigestOptions) error {
 		LatestCursor:    stats.NewestCursor,
 		RetentionPeriod: stats.RetentionPeriod.String(),
 		ResyncCommand:   "ntm --robot-snapshot",
+	}
+	activeIncidents, err := snapshotIncidentsFromStore(currentProjectionStore())
+	if err != nil {
+		activeIncidents = []SnapshotIncident{}
 	}
 
 	return outputJSON(DigestResponse{
@@ -630,6 +640,7 @@ func PrintDigest(opts DigestOptions) error {
 		Buckets:         digest.Buckets,
 		Suppressed:      digest.Suppressed,
 		Summary:         digest.Summary,
+		ActiveIncidents: activeIncidents,
 		Trace:           digest.Trace,
 		ReplayWindow:    replayWindow,
 	})

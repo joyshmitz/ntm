@@ -1639,13 +1639,16 @@ Shell Integration:
 		}
 		if robotContextInject != "" {
 			session := robotContextInject
-			projectDir := ""
-			if cfg != nil {
-				projectDir = cfg.GetProjectDir(session)
-			}
+			projectDir := resolveProjectDirForSession(session, true)
 			if projectDir == "" {
-				dir, _ := os.Getwd()
-				projectDir = dir
+				output.PrintJSON(ContextInjectResult{
+					Success:       false,
+					Session:       session,
+					Error:         "getting project root failed",
+					InjectedFiles: []string{},
+					PanesInjected: []int{},
+				})
+				os.Exit(1)
 			}
 			files := defaultContextFiles()
 			if robotContextInjectFiles != "" {

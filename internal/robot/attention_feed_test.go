@@ -3,6 +3,7 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2111,8 +2112,8 @@ func TestPublishNormalizedAttentionSignals_DeduplicatesRefreshOutput(t *testing.
 		},
 	}
 
-	publishNormalizedAttentionSignals(feed, "ntm--proj", signals)
-	publishNormalizedAttentionSignals(feed, "ntm--proj", signals)
+	publishNormalizedAttentionSignals(feed, nil, "ntm--proj", signals)
+	publishNormalizedAttentionSignals(feed, nil, "ntm--proj", signals)
 
 	events, _, err := feed.Replay(0, 100)
 	if err != nil {
@@ -3419,6 +3420,69 @@ func TestDigestResponse_EmptyFeed(t *testing.T) {
 	}
 	if len(digest.Buckets.Interesting) != 0 {
 		t.Errorf("expected 0 interesting items, got %d", len(digest.Buckets.Interesting))
+	}
+}
+
+func TestPrintDigest_IncludesActiveIncidents(t *testing.T) {
+	feed := newTestAttentionFeed(t)
+	oldFeed := PeekAttentionFeed()
+	SetAttentionFeed(feed)
+	t.Cleanup(func() {
+		SetAttentionFeed(oldFeed)
+	})
+
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	if err := store.CreateIncident(&state.Incident{
+		ID:           "inc-digest",
+		Title:        "Rate limit storm",
+		Fingerprint:  "fp-rate-limit-storm",
+		Family:       "quota",
+		Category:     "quota",
+		Status:       state.IncidentStatusOpen,
+		Severity:     state.SeverityWarning,
+		SessionNames: `["proj"]`,
+		AlertCount:   2,
+		EventCount:   2,
+		StartedAt:    now.Add(-5 * time.Minute),
+		LastEventAt:  now,
+	}); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	output, err := captureStdout(t, func() error {
+		return PrintDigest(DigestOptions{SinceCursor: 0})
+	})
+	if err != nil {
+		t.Fatalf("PrintDigest failed: %v", err)
+	}
+
+	var resp DigestResponse
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v\noutput=%s", err, output)
+	}
+	if len(resp.ActiveIncidents) != 1 {
+		t.Fatalf("ActiveIncidents count = %d, want 1", len(resp.ActiveIncidents))
+	}
+	if resp.ActiveIncidents[0].ID != "inc-digest" {
+		t.Fatalf("ActiveIncidents[0].ID = %q, want inc-digest", resp.ActiveIncidents[0].ID)
+	}
+	if resp.ActiveIncidents[0].AlertCount != 2 {
+		t.Fatalf("ActiveIncidents[0].AlertCount = %d, want 2", resp.ActiveIncidents[0].AlertCount)
 	}
 }
 

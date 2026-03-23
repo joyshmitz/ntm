@@ -150,7 +150,7 @@ func runCreate(session string, panes int) (err error) {
 		panes = cfg.Tmux.DefaultPanes
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := resolveProjectDirForSession(session, true)
 	auditStart := time.Now()
 	auditCreated := false
 	auditAlreadyExisted := false
@@ -366,7 +366,7 @@ func buildCreateResponse(session string, panes int) (resp output.CreateResponse,
 		panes = cfg.Tmux.DefaultPanes
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := resolveProjectDirForSession(session, true)
 	auditStart := time.Now()
 	auditCreated := false
 	auditAlreadyExisted := false

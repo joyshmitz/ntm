@@ -667,7 +667,7 @@ func buildStatusResponse(session string, opts statusOptions) (output.StatusRespo
 		panes = filtered
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := resolveProjectDirForSession(session, true)
 
 	// Load handoff info (best-effort)
 	var handoffGoal, handoffNow, handoffStatus, handoffPath string
@@ -1023,7 +1023,7 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		panes = filtered
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := resolveProjectDirForSession(session, true)
 
 	// Load handoff info (best-effort)
 	var handoffGoal, handoffNow, handoffStatus string
@@ -1597,9 +1597,9 @@ func runStatusWatch(w io.Writer, session string, opts statusOptions) error {
 // updateSessionActivity updates the Agent Mail activity for a session.
 // This is non-blocking and silently ignores errors.
 func updateSessionActivity(sessionName string) {
-	projectKey := ""
-	if cfg != nil {
-		projectKey = cfg.GetProjectDir(sessionName)
+	projectKey := resolveProjectDirForSession(sessionName, true)
+	if projectKey == "" {
+		return
 	}
 
 	client := newAgentMailClient(projectKey)
@@ -1628,6 +1628,9 @@ func fetchAgentMailStatus(projectKey string) *output.AgentMailStatus {
 		return status
 	}
 	status.Available = true
+	if strings.TrimSpace(projectKey) == "" {
+		return status
+	}
 
 	// Ensure project exists
 	_, err := client.EnsureProject(ctx, projectKey)

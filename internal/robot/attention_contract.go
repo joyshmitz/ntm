@@ -66,7 +66,7 @@ import (
 
 // AttentionContractVersion is the semantic version of the attention feed contract.
 // Increment major version for breaking changes, minor for additions, patch for fixes.
-const AttentionContractVersion = "1.1.0"
+const AttentionContractVersion = "1.2.0"
 
 // =============================================================================
 // Event Categories and Types
@@ -103,6 +103,9 @@ const (
 
 	// EventCategoryAlert events are synthesized attention signals.
 	EventCategoryAlert EventCategory = "alert"
+
+	// EventCategoryIncident events relate to durable incident lifecycle state.
+	EventCategoryIncident EventCategory = "incident"
 
 	// EventCategoryHealth events relate to system health checks.
 	EventCategoryHealth EventCategory = "health"
@@ -193,6 +196,15 @@ const (
 	EventTypeAlertInfo              EventType = "alert.info"
 	EventTypeAlert                  EventType = "alert.generic"
 	EventTypeHealthChange           EventType = "health.change"
+)
+
+// Incident events
+const (
+	EventTypeIncidentOpened   EventType = "incident.opened"
+	EventTypeIncidentPromoted EventType = "incident.promoted"
+	EventTypeIncidentRecurred EventType = "incident.recurred"
+	EventTypeIncidentResolved EventType = "incident.resolved"
+	EventTypeIncidentMuted    EventType = "incident.muted"
 )
 
 // =============================================================================

@@ -218,7 +218,7 @@ func runAdd(opts AddOptions) error {
 		return outputError(fmt.Errorf("no agents specified"))
 	}
 
-	dir := cfg.GetProjectDir(session)
+	dir := resolveProjectDirForSession(session, true)
 
 	// Enable project webhooks (if configured) so add lifecycle events can fan out.
 	// Best-effort: failures should not block add.

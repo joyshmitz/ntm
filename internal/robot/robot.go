@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3937,6 +3938,7 @@ type SnapshotOutput struct {
 	LatestCursor             int64                     `json:"latest_cursor"`
 	ReplayWindow             SnapshotReplayWindowInfo  `json:"replay_window"`
 	Sessions                 []SnapshotSession         `json:"sessions"`
+	ActiveIncidents          []SnapshotIncident        `json:"active_incidents"`
 	Pagination               *PaginationInfo           `json:"pagination,omitempty"`
 	AgentHints               *AgentHints               `json:"_agent_hints,omitempty"`
 	BeadsSummary             *bv.BeadsSummary          `json:"beads_summary,omitempty"`
@@ -3991,6 +3993,30 @@ type AlertSummaryInfo struct {
 	TotalActive int            `json:"total_active"`
 	BySeverity  map[string]int `json:"by_severity"`
 	ByType      map[string]int `json:"by_type"`
+}
+
+// SnapshotIncident is the stable incident shape surfaced to robot clients.
+type SnapshotIncident struct {
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Family           string   `json:"family,omitempty"`
+	Category         string   `json:"category,omitempty"`
+	Status           string   `json:"status"`
+	Severity         string   `json:"severity"`
+	SessionNames     []string `json:"session_names"`
+	AgentIDs         []string `json:"agent_ids"`
+	AlertCount       int      `json:"alert_count"`
+	EventCount       int      `json:"event_count"`
+	FirstEventCursor *int64   `json:"first_event_cursor,omitempty"`
+	LastEventCursor  *int64   `json:"last_event_cursor,omitempty"`
+	StartedAt        string   `json:"started_at"`
+	LastEventAt      string   `json:"last_event_at"`
+	AcknowledgedAt   string   `json:"acknowledged_at,omitempty"`
+	ResolvedAt       string   `json:"resolved_at,omitempty"`
+	MutedAt          string   `json:"muted_at,omitempty"`
+	RootCause        string   `json:"root_cause,omitempty"`
+	Resolution       string   `json:"resolution,omitempty"`
+	Notes            string   `json:"notes,omitempty"`
 }
 
 // SnapshotSession represents a session in the snapshot
@@ -4096,6 +4122,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 		SafetyProfile:            cfg.Safety.Profile,
 		AttentionContractVersion: AttentionContractVersion,
 		Sessions:                 []SnapshotSession{},
+		ActiveIncidents:          []SnapshotIncident{},
 		Alerts:                   []string{},
 	}
 
@@ -4300,6 +4327,11 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 
 	// Build attention summary for operator orientation (br-slg9g)
 	output.AttentionSummary = buildSnapshotAttentionSummary(feed)
+	if incidents, err := snapshotIncidentsFromStore(currentProjectionStore()); err == nil {
+		output.ActiveIncidents = incidents
+	} else {
+		output.Alerts = append(output.Alerts, fmt.Sprintf("failed to list active incidents: %v", err))
+	}
 
 	if paged, page := ApplyPagination(output.Sessions, opts); page != nil {
 		output.Sessions = paged
@@ -4445,6 +4477,64 @@ func buildSnapshotAttentionSummary(feed *AttentionFeed) *SnapshotAttentionSummar
 	}
 
 	return summary
+}
+
+func snapshotIncidentsFromStore(store *state.Store) ([]SnapshotIncident, error) {
+	if store == nil {
+		return []SnapshotIncident{}, nil
+	}
+
+	rows, err := store.ListOpenIncidents()
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]SnapshotIncident, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, snapshotIncidentFromState(row))
+	}
+	return items, nil
+}
+
+func snapshotIncidentFromState(row state.Incident) SnapshotIncident {
+	sessionNames := decodeStringList(row.SessionNames)
+	if sessionNames == nil {
+		sessionNames = []string{}
+	}
+	agentIDs := decodeStringList(row.AgentIDs)
+	if agentIDs == nil {
+		agentIDs = []string{}
+	}
+
+	item := SnapshotIncident{
+		ID:           strings.TrimSpace(row.ID),
+		Title:        strings.TrimSpace(row.Title),
+		Family:       strings.TrimSpace(row.Family),
+		Category:     strings.TrimSpace(row.Category),
+		Status:       strings.TrimSpace(string(row.Status)),
+		Severity:     strings.TrimSpace(string(row.Severity)),
+		SessionNames: sessionNames,
+		AgentIDs:     agentIDs,
+		AlertCount:   row.AlertCount,
+		EventCount:   row.EventCount,
+		StartedAt:    FormatTimestamp(row.StartedAt),
+		LastEventAt:  FormatTimestamp(row.LastEventAt),
+		RootCause:    strings.TrimSpace(row.RootCause),
+		Resolution:   strings.TrimSpace(row.Resolution),
+		Notes:        strings.TrimSpace(row.Notes),
+	}
+	if row.FirstEventCursor != nil {
+		cursor := *row.FirstEventCursor
+		item.FirstEventCursor = &cursor
+	}
+	if row.LastEventCursor != nil {
+		cursor := *row.LastEventCursor
+		item.LastEventCursor = &cursor
+	}
+	item.AcknowledgedAt = FormatTimestampPtr(row.AcknowledgedAt)
+	item.ResolvedAt = FormatTimestampPtr(row.ResolvedAt)
+	item.MutedAt = FormatTimestampPtr(row.MutedAt)
+	return item
 }
 
 func buildSwarmSnapshot(cfg *config.Config, sessions []tmux.Session) *SwarmSnapshot {
@@ -5769,7 +5859,7 @@ func RefreshNormalizedProjection(ctx context.Context, store *state.Store, projec
 		return err
 	}
 
-	publishNormalizedAttentionSignals(GetAttentionFeed(), sessionName, signals)
+	publishNormalizedAttentionSignals(GetAttentionFeed(), store, sessionName, signals)
 	return nil
 }
 
@@ -5942,6 +6032,9 @@ func persistNormalizedProjection(store *state.Store, signals *adapters.Aggregate
 		}
 		existingAgentsBySession[item.Name] = agents
 	}
+	if err := persistNormalizedIncidents(store, signals); err != nil {
+		return err
+	}
 
 	return store.Transaction(func(tx *state.Tx) error {
 		for _, item := range existingWork {
@@ -6038,6 +6131,173 @@ func persistNormalizedProjection(store *state.Store, signals *adapters.Aggregate
 		}
 		return nil
 	})
+}
+
+func persistNormalizedIncidents(store *state.Store, signals *adapters.AggregatedSignals) error {
+	if store == nil || signals == nil || len(signals.Incidents) == 0 {
+		return reconcileNormalizedIncidents(store, nil)
+	}
+
+	activeFingerprints := make(map[string]struct{}, len(signals.Incidents))
+	for i := range signals.Incidents {
+		draft := runtimeIncidentFromAdapter(signals.Incidents[i])
+		if draft.Fingerprint != "" {
+			activeFingerprints[draft.Fingerprint] = struct{}{}
+		}
+		persisted, err := store.CreateOrUpdateIncident(draft)
+		if err != nil {
+			return fmt.Errorf("upsert incident %s: %w", robotFirstNonEmpty(signals.Incidents[i].ID, signals.Incidents[i].Title), err)
+		}
+		signals.Incidents[i] = adapterIncidentFromState(signals.Incidents[i], persisted)
+	}
+	return reconcileNormalizedIncidents(store, activeFingerprints)
+}
+
+func runtimeIncidentFromAdapter(item adapters.IncidentItem) *state.Incident {
+	now := time.Now().UTC()
+	startedAt := parseRobotTimestamp(item.CreatedAt)
+	if startedAt == nil || startedAt.IsZero() {
+		startedAt = &now
+	}
+	lastEventAt := parseRobotTimestamp(item.UpdatedAt)
+	if lastEventAt == nil || lastEventAt.IsZero() {
+		lastEventAt = startedAt
+	}
+
+	alertCount := item.AlertCount
+	if alertCount <= 0 {
+		alertCount = 1
+	}
+
+	return &state.Incident{
+		ID:           strings.TrimSpace(item.ID),
+		Title:        robotFirstNonEmpty(strings.TrimSpace(item.Title), strings.TrimSpace(item.Type)),
+		Fingerprint:  normalizedIncidentFingerprint(item),
+		Family:       robotFirstNonEmpty(strings.TrimSpace(item.Type), "incident"),
+		Category:     robotFirstNonEmpty(strings.TrimSpace(item.Type), "incident"),
+		Status:       normalizedIncidentStatus(item.Status),
+		Severity:     normalizedIncidentStoreSeverity(item.Severity),
+		SessionNames: jsonStringOrEmpty(sortedCompactStrings([]string{strings.TrimSpace(item.Session)})),
+		AgentIDs:     jsonStringOrEmpty(sortedCompactStrings(item.Agents)),
+		AlertCount:   alertCount,
+		EventCount:   item.EventCount,
+		StartedAt:    startedAt.UTC(),
+		LastEventAt:  lastEventAt.UTC(),
+		ResolvedAt:   parseRobotTimestamp(item.ResolvedAt),
+		RootCause:    strings.TrimSpace(item.RootCause),
+		Resolution:   strings.TrimSpace(item.Resolution),
+		Notes:        strings.TrimSpace(item.Description),
+	}
+}
+
+func adapterIncidentFromState(base adapters.IncidentItem, incident *state.Incident) adapters.IncidentItem {
+	if incident == nil {
+		return base
+	}
+
+	updated := base
+	updated.ID = strings.TrimSpace(incident.ID)
+	updated.Title = robotFirstNonEmpty(strings.TrimSpace(incident.Title), updated.Title)
+	updated.Type = robotFirstNonEmpty(strings.TrimSpace(incident.Category), updated.Type)
+	updated.Status = strings.TrimSpace(string(incident.Status))
+	updated.Severity = strings.TrimSpace(string(incident.Severity))
+	updated.AlertCount = incident.AlertCount
+	updated.EventCount = incident.EventCount
+	updated.CreatedAt = FormatTimestamp(incident.StartedAt)
+	updated.UpdatedAt = FormatTimestamp(incident.LastEventAt)
+	updated.ResolvedAt = FormatTimestampPtr(incident.ResolvedAt)
+	if updated.Session == "" {
+		sessions := decodeStringList(incident.SessionNames)
+		if len(sessions) > 0 {
+			updated.Session = sessions[0]
+		}
+	}
+	if len(updated.Agents) == 0 {
+		updated.Agents = decodeStringList(incident.AgentIDs)
+	}
+	return updated
+}
+
+func normalizedIncidentFingerprint(item adapters.IncidentItem) string {
+	payload := map[string]any{
+		"type":          strings.TrimSpace(item.Type),
+		"title":         strings.TrimSpace(item.Title),
+		"session":       strings.TrimSpace(item.Session),
+		"panes":         sortedCompactStrings(item.Panes),
+		"agents":        sortedCompactStrings(item.Agents),
+		"related_beads": sortedCompactStrings(item.RelatedBeads),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("incident-%x", sum[:8])
+}
+
+func normalizedIncidentStatus(raw string) state.IncidentStatus {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(state.IncidentStatusResolved):
+		return state.IncidentStatusResolved
+	case string(state.IncidentStatusMuted):
+		return state.IncidentStatusMuted
+	case string(state.IncidentStatusInvestigating):
+		return state.IncidentStatusInvestigating
+	default:
+		return state.IncidentStatusOpen
+	}
+}
+
+func normalizedIncidentStoreSeverity(raw string) state.Severity {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "p0", string(SeverityCritical):
+		return state.SeverityCritical
+	case "p1", string(SeverityError):
+		return state.SeverityError
+	case "p2", string(SeverityWarning):
+		return state.SeverityWarning
+	case string(SeverityInfo):
+		return state.SeverityInfo
+	default:
+		return state.SeverityWarning
+	}
+}
+
+func reconcileNormalizedIncidents(store *state.Store, activeFingerprints map[string]struct{}) error {
+	if store == nil {
+		return nil
+	}
+
+	openIncidents, err := store.ListOpenIncidents()
+	if err != nil {
+		return fmt.Errorf("list open incidents for reconciliation: %w", err)
+	}
+
+	for _, incident := range openIncidents {
+		if !shouldAutoResolveNormalizedIncident(incident) {
+			continue
+		}
+		if _, ok := activeFingerprints[incident.Fingerprint]; ok {
+			continue
+		}
+		if err := store.UpdateIncidentStatus(
+			incident.ID,
+			state.IncidentStatusResolved,
+			"system",
+			"auto-resolved: promoted source alert no longer active in normalized projection",
+		); err != nil {
+			return fmt.Errorf("auto-resolve incident %s: %w", incident.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func shouldAutoResolveNormalizedIncident(incident state.Incident) bool {
+	if strings.TrimSpace(incident.Fingerprint) == "" {
+		return false
+	}
+	return strings.Contains(incident.Notes, "Promoted from alert ")
 }
 
 func buildRuntimeSessionRows(snapshot *NormalizedSnapshot, collectedAt, staleAfter time.Time) map[string]*state.RuntimeSession {
@@ -6304,13 +6564,27 @@ func buildSourceHealthRows(section *adapters.SourceHealthSection, collectedAt ti
 	return rows
 }
 
-func publishNormalizedAttentionSignals(feed *AttentionFeed, sessionName string, signals *adapters.AggregatedSignals) {
+func publishNormalizedAttentionSignals(feed *AttentionFeed, store *state.Store, sessionName string, signals *adapters.AggregatedSignals) {
 	if feed == nil || signals == nil {
 		return
 	}
 	for _, event := range normalizedAttentionEvents(sessionName, signals) {
-		feed.AppendDeduplicated(event, normalizedAttentionDedupWindow)
+		appended, ok := feed.AppendDeduplicated(event, normalizedAttentionDedupWindow)
+		if ok {
+			linkIncidentAttentionEvent(store, appended)
+		}
 	}
+}
+
+func linkIncidentAttentionEvent(store *state.Store, event AttentionEvent) {
+	if store == nil || event.Category != EventCategoryIncident || event.Cursor <= 0 {
+		return
+	}
+	incidentID := attentionStringDetail(event.Details, "incident_id")
+	if incidentID == "" {
+		return
+	}
+	_ = store.LinkEventToIncident(incidentID, event.Cursor)
 }
 
 func normalizedAttentionEvents(sessionName string, signals *adapters.AggregatedSignals) []AttentionEvent {
@@ -6328,9 +6602,154 @@ func normalizedAttentionEvents(sessionName string, signals *adapters.AggregatedS
 	if event := normalizedTopRecommendationEvent(ts, session, signals.Work); event != nil {
 		events = append(events, *event)
 	}
+	events = append(events, normalizedIncidentEvents(ts, session, signals.Incidents)...)
 	events = append(events, normalizedSourceHealthEvents(ts, session, signals.Health)...)
 	events = append(events, normalizedCoordinationProblemEvents(ts, session, signals.Coordination)...)
 	return events
+}
+
+func normalizedIncidentEvents(ts time.Time, session string, incidents []adapters.IncidentItem) []AttentionEvent {
+	if len(incidents) == 0 {
+		return nil
+	}
+
+	events := make([]AttentionEvent, 0, len(incidents))
+	for _, incident := range incidents {
+		event, ok := normalizedIncidentEvent(ts, session, incident)
+		if !ok {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func normalizedIncidentEvent(ts time.Time, session string, incident adapters.IncidentItem) (AttentionEvent, bool) {
+	incidentID := strings.TrimSpace(incident.ID)
+	if incidentID == "" {
+		return AttentionEvent{}, false
+	}
+
+	eventType := normalizedIncidentEventType(incident)
+	severity := normalizedIncidentEventSeverity(incident.Severity)
+	actionability := normalizedIncidentActionability(eventType, severity)
+	summaryVerb := "incident promoted"
+	switch eventType {
+	case EventTypeIncidentOpened:
+		summaryVerb = "incident opened"
+	case EventTypeIncidentRecurred:
+		summaryVerb = "incident recurred"
+	case EventTypeIncidentResolved:
+		summaryVerb = "incident resolved"
+	case EventTypeIncidentMuted:
+		summaryVerb = "incident muted"
+	}
+
+	details := map[string]any{
+		"incident_id": incidentID,
+		"type":        strings.TrimSpace(incident.Type),
+		"status":      strings.TrimSpace(incident.Status),
+		"alert_count": incident.AlertCount,
+		"event_count": incident.EventCount,
+	}
+	if detectedBy := strings.TrimSpace(incident.DetectedBy); detectedBy != "" {
+		details["detected_by"] = detectedBy
+	}
+	if len(incident.Panes) > 0 {
+		details["panes"] = append([]string(nil), incident.Panes...)
+	}
+	if len(incident.Agents) > 0 {
+		details["agents"] = append([]string(nil), incident.Agents...)
+	}
+	if len(incident.RelatedAlerts) > 0 {
+		details["related_alerts"] = append([]string(nil), incident.RelatedAlerts...)
+	}
+	if len(incident.RelatedBeads) > 0 {
+		details["related_beads"] = append([]string(nil), incident.RelatedBeads...)
+		details["bead_id"] = incident.RelatedBeads[0]
+	}
+
+	nextActions := []NextAction{
+		{
+			Action: "robot-snapshot",
+			Args:   "--robot-snapshot",
+			Reason: "Inspect the current active incidents and related runtime state",
+		},
+	}
+	if len(incident.RelatedBeads) > 0 {
+		nextActions = append(nextActions, attentionBeadActions(incident.RelatedBeads[0], "Inspect the related bead")...)
+	}
+
+	event := annotateAttentionSignal(AttentionEvent{
+		Ts:            ts.Format(time.RFC3339Nano),
+		Session:       robotFirstNonEmpty(strings.TrimSpace(incident.Session), session),
+		Category:      EventCategoryIncident,
+		Type:          eventType,
+		Source:        normalizedProjectionEventSource,
+		Actionability: actionability,
+		Severity:      severity,
+		ReasonCode:    normalizedIncidentReasonCode(eventType),
+		Summary:       attentionSummary(robotFirstNonEmpty(strings.TrimSpace(incident.Session), session), "", fmt.Sprintf("%s: %s", summaryVerb, robotFirstNonEmpty(strings.TrimSpace(incident.Title), incidentID))),
+		Details:       details,
+		NextActions:   nextActions,
+		DedupKey:      normalizedDedupKey("incident", incidentID, strings.ToLower(strings.TrimSpace(incident.Status)), string(eventType)),
+	})
+	return event, true
+}
+
+func normalizedIncidentEventType(incident adapters.IncidentItem) EventType {
+	switch strings.ToLower(strings.TrimSpace(incident.Status)) {
+	case string(state.IncidentStatusResolved):
+		return EventTypeIncidentResolved
+	case string(state.IncidentStatusMuted):
+		return EventTypeIncidentMuted
+	}
+	if incident.AlertCount > 1 || incident.EventCount > 1 {
+		return EventTypeIncidentRecurred
+	}
+	if strings.EqualFold(strings.TrimSpace(incident.DetectedBy), "alert_promotion") {
+		return EventTypeIncidentPromoted
+	}
+	return EventTypeIncidentOpened
+}
+
+func normalizedIncidentEventSeverity(raw string) Severity {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "p0", string(SeverityCritical):
+		return SeverityCritical
+	case "p1", string(SeverityError):
+		return SeverityError
+	case "p2", string(SeverityWarning):
+		return SeverityWarning
+	default:
+		return SeverityInfo
+	}
+}
+
+func normalizedIncidentActionability(eventType EventType, severity Severity) Actionability {
+	switch eventType {
+	case EventTypeIncidentResolved, EventTypeIncidentMuted:
+		return ActionabilityBackground
+	}
+	if attentionSeverityRank(severity) >= attentionSeverityRank(SeverityError) {
+		return ActionabilityActionRequired
+	}
+	return ActionabilityInteresting
+}
+
+func normalizedIncidentReasonCode(eventType EventType) string {
+	switch eventType {
+	case EventTypeIncidentOpened:
+		return "incident:opened"
+	case EventTypeIncidentRecurred:
+		return "incident:recurred"
+	case EventTypeIncidentResolved:
+		return "incident:resolved"
+	case EventTypeIncidentMuted:
+		return "incident:muted"
+	default:
+		return "incident:promoted"
+	}
 }
 
 func normalizedTopRecommendationEvent(ts time.Time, session string, section *adapters.WorkSection) *AttentionEvent {

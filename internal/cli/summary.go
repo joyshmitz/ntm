@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/archive"
-	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -256,15 +255,11 @@ func parseSummaryFormat(format string) (summary.SummaryFormat, bool, error) {
 }
 
 func resolveProjectDir(session, wd string) string {
-	if session != "" && cfg != nil {
-		if dir := cfg.GetProjectDir(session); dir != "" {
-			return dir
-		}
+	if dir := resolveProjectDirForSession(session, true); dir != "" {
+		return dir
 	}
-	if session != "" {
-		if dir := config.Default().GetProjectDir(session); dir != "" {
-			return dir
-		}
+	if dir := util.ResolveProjectDir(wd); dir != "" {
+		return dir
 	}
 	return wd
 }

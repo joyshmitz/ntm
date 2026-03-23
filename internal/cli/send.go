@@ -1914,10 +1914,7 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	var dir string
-	if cfg != nil {
-		dir = cfg.GetProjectDir(session)
-	}
+	dir := resolveProjectDirForSession(session, true)
 	auditStart := time.Now()
 	auditAborted := false
 	auditKilled := false
@@ -2173,16 +2170,7 @@ func buildKillResponse(session string, force bool, tags []string, noHooks bool, 
 		return nil, fmt.Errorf("session '%s' not found", session)
 	}
 
-	dir := ""
-	if cfg != nil {
-		dir = cfg.GetProjectDir(session)
-	}
-	if strings.TrimSpace(dir) == "" {
-		// Best-effort fallback for webhook config resolution and hooks context.
-		if wd, err := os.Getwd(); err == nil {
-			dir = wd
-		}
-	}
+	dir := resolveProjectDirForSession(session, true)
 	auditStart := time.Now()
 	auditScope := "session"
 	if len(tags) > 0 {
@@ -2425,20 +2413,16 @@ func generateKillSummary(session string) (*summary.SessionSummary, error) {
 		return nil, fmt.Errorf("no agent outputs to summarize")
 	}
 
-	wd, _ := os.Getwd()
-	var projectDir string
-	if cfg != nil {
-		projectDir = cfg.GetProjectDir(session)
-	}
+	projectDir := resolveProjectDirForSession(session, true)
 	if projectDir == "" {
-		projectDir = wd
+		return nil, fmt.Errorf("getting project root failed")
 	}
 
 	opts := summary.Options{
 		Session:        session,
 		Outputs:        outputs,
 		Format:         summary.FormatBrief,
-		ProjectKey:     wd,
+		ProjectKey:     projectDir,
 		ProjectDir:     projectDir,
 		IncludeGitDiff: true, // Include git changes in summary
 	}
@@ -2506,10 +2490,7 @@ func buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst
 
 // getSessionWorkingDir returns the working directory for a session
 func getSessionWorkingDir(session string) string {
-	if cfg != nil {
-		return cfg.GetProjectDir(session)
-	}
-	return ""
+	return resolveProjectDirForSession(session, true)
 }
 
 // boolToStr converts a boolean to "true" or "false" string
@@ -2799,10 +2780,7 @@ func checkCassDuplicates(session, prompt string, threshold float64, days int) er
 	}
 
 	// Get workspace from session
-	var dir string
-	if cfg != nil {
-		dir = cfg.GetProjectDir(session)
-	}
+	dir := resolveProjectDirForSession(session, true)
 
 	since := fmt.Sprintf("%dd", days)
 

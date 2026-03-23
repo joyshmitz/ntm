@@ -189,6 +189,8 @@ type WebhookManager struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	started    atomic.Bool
+	stopping   atomic.Bool
+	pending    atomic.Int64
 	deliveries atomic.Int64 // Total successful deliveries
 	failures   atomic.Int64 // Total failed deliveries
 
@@ -270,6 +272,11 @@ func (m *WebhookManager) Register(cfg WebhookConfig) error {
 			return err
 		}
 	}
+	if strings.TrimSpace(cfg.Template) != "" {
+		if _, err := parseWebhookTemplate(cfg.Template); err != nil {
+			return err
+		}
+	}
 
 	m.webhooksMu.Lock()
 	defer m.webhooksMu.Unlock()
@@ -326,6 +333,7 @@ func (m *WebhookManager) Dispatch(event Event) error {
 			Webhook: wh,
 			Attempt: 0,
 		}
+		m.pending.Add(1)
 
 		// Non-blocking send to queue
 		select {
@@ -334,9 +342,11 @@ func (m *WebhookManager) Dispatch(event Event) error {
 		default:
 			// Queue full. Drop the oldest delivery so we keep the newest.
 			select {
-			case <-m.queue:
+			case dropped := <-m.queue:
 				// Count actual dropped deliveries (oldest).
 				m.queueFull.Add(1)
+				m.completePendingDelivery()
+				m.log("webhook queue full, dropping oldest delivery %s", dropped.ID)
 			default:
 				// Race: another worker/drainer freed space before we could drop.
 			}
@@ -345,6 +355,7 @@ func (m *WebhookManager) Dispatch(event Event) error {
 			default:
 				// Queue still full. Drop the new delivery too.
 				m.queueFull.Add(1)
+				m.completePendingDelivery()
 				m.log("webhook queue full, dropping event %s for webhook %s", event.ID, wh.ID)
 			}
 		}
@@ -387,6 +398,7 @@ func (m *WebhookManager) Start() error {
 	}
 
 	m.ctx, m.cancel = newManagerContext()
+	m.stopping.Store(false)
 
 	// Start worker goroutines
 	for i := 0; i < m.config.WorkerCount; i++ {
@@ -409,24 +421,39 @@ func (m *WebhookManager) Stop() error {
 	}
 
 	m.log("stopping webhook manager...")
+	m.stopping.Store(true)
 
-	// Cancel context to stop workers
+	// Retries that have not started yet cannot outlive shutdown. Convert them to
+	// dead letters now so Stop only has to wait for queued or in-flight work.
+	m.abandonPendingRetries()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for m.pending.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Cancel context to stop idle workers and in-flight retry waits.
 	m.cancel()
 
-	// Signal retry processor to wake up and exit
+	// Signal retry processor to wake up and exit.
 	m.retryCond.Broadcast()
 
-	// Wait for workers to finish with timeout
+	// Wait for workers to finish within the remaining shutdown budget.
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
 		close(done)
 	}()
 
+	waitTimeout := time.Until(deadline)
+	if waitTimeout < 0 {
+		waitTimeout = 0
+	}
+
 	select {
 	case <-done:
 		m.log("webhook manager stopped gracefully")
-	case <-time.After(10 * time.Second):
+	case <-time.After(waitTimeout):
 		m.log("webhook manager stop timed out")
 	}
 
@@ -601,16 +628,18 @@ func (m *WebhookManager) processDelivery(d *Delivery) {
 	if err == nil {
 		// Success
 		m.deliveries.Add(1)
+		m.completePendingDelivery()
 		m.log("webhook %s delivered successfully (attempt %d, %v)", d.ID, d.Attempt, duration)
 		return
 	}
 
 	// Check if we should retry
 	shouldRetry := m.shouldRetry(d, statusCode, err)
-	if !shouldRetry {
+	if !shouldRetry || m.stopping.Load() {
 		// Move to dead letter queue
 		m.addToDeadLetter(*d, attemptLog)
 		m.failures.Add(1)
+		m.completePendingDelivery()
 		m.log("webhook %s failed permanently: %v", d.ID, err)
 		return
 	}
@@ -687,14 +716,9 @@ func (m *WebhookManager) buildPayload(d *Delivery) ([]byte, error) {
 		return json.Marshal(d.Event)
 	}
 
-	funcMap := template.FuncMap{
-		"jsonEscape": jsonEscape,
-		"json":       func(v interface{}) string { b, _ := json.Marshal(v); return string(b) },
-	}
-
-	tmpl, err := template.New("webhook").Funcs(funcMap).Parse(tmplStr)
+	tmpl, err := parseWebhookTemplate(tmplStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid template: %w", err)
+		return nil, err
 	}
 
 	var buf bytes.Buffer
@@ -749,6 +773,49 @@ func (m *WebhookManager) scheduleRetry(d Delivery) {
 	m.retryQueue = append(m.retryQueue, d)
 	m.retryQueueMu.Unlock()
 	m.retryCond.Signal()
+}
+
+func webhookTemplateFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"jsonEscape": jsonEscape,
+		"json":       func(v interface{}) string { b, _ := json.Marshal(v); return string(b) },
+	}
+}
+
+func parseWebhookTemplate(tmplStr string) (*template.Template, error) {
+	tmpl, err := template.New("webhook").Funcs(webhookTemplateFuncMap()).Parse(tmplStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid template: %w", err)
+	}
+	return tmpl, nil
+}
+
+func (m *WebhookManager) completePendingDelivery() {
+	if remaining := m.pending.Add(-1); remaining < 0 {
+		m.pending.Store(0)
+		m.log("webhook pending delivery count went negative")
+	}
+}
+
+func (m *WebhookManager) abandonPendingRetries() {
+	m.retryQueueMu.Lock()
+	pendingRetries := m.retryQueue
+	m.retryQueue = nil
+	m.retryQueueMu.Unlock()
+
+	for _, delivery := range pendingRetries {
+		lastError := "manager stopping before retry"
+		if delivery.Error != nil {
+			lastError = fmt.Sprintf("manager stopping before retry: %v", delivery.Error)
+		}
+		m.addToDeadLetter(delivery, AttemptLog{
+			Attempt:   delivery.Attempt,
+			Timestamp: time.Now().UTC(),
+			Error:     lastError,
+		})
+		m.failures.Add(1)
+		m.completePendingDelivery()
+	}
 }
 
 // addToDeadLetter adds a failed delivery to the dead letter queue

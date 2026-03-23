@@ -14,6 +14,12 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestNewManager(t *testing.T) {
 	t.Parallel()
 
@@ -81,6 +87,22 @@ func TestRegisterWebhook(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRegisterRejectsInvalidTemplate(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager(DefaultManagerConfig())
+
+	err := m.Register(WebhookConfig{
+		ID:       "bad-template",
+		URL:      "https://example.com/webhook",
+		Enabled:  true,
+		Template: `{{if}`,
+	})
+	if err == nil {
+		t.Fatal("expected invalid template error")
 	}
 }
 
@@ -1105,6 +1127,82 @@ func TestStartStop(t *testing.T) {
 	// Dispatch after stop should fail
 	if err := m.Dispatch(Event{Type: "test"}); err == nil {
 		t.Error("expected error dispatching after stop")
+	}
+}
+
+func TestStopWaitsForInFlightDelivery(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	m := NewManager(ManagerConfig{
+		QueueSize:   10,
+		WorkerCount: 1,
+	})
+	if err := m.Register(WebhookConfig{
+		ID:      "slow-stop",
+		URL:     "https://example.com/webhook",
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+
+	m.httpClient.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+
+		select {
+		case <-release:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+	})
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	if err := m.Dispatch(Event{Type: "test.stop"}); err != nil {
+		t.Fatalf("dispatch failed: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for webhook request to start")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- m.Stop()
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("stop failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for stop")
+	}
+
+	stats := m.Stats()
+	if stats.Deliveries != 1 {
+		t.Fatalf("expected 1 successful delivery during stop, got %+v", stats)
+	}
+	if stats.Failures != 0 {
+		t.Fatalf("expected 0 failures during stop, got %+v", stats)
 	}
 }
 

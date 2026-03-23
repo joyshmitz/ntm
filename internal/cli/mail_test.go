@@ -19,6 +19,7 @@ type mailStub struct {
 	inbox             []agentmail.InboxMessage
 	listAgents        []agentmail.Agent
 	fetchCalls        []fetchCall
+	reserveCalls      []reserveCall
 	readIDs           []int
 	ackIDs            []int
 	readAgents        []string
@@ -46,6 +47,15 @@ type releaseCall struct {
 	Project string
 	Paths   []string
 	IDs     []int
+}
+
+type reserveCall struct {
+	Agent     string
+	Project   string
+	Paths     []string
+	TTL       int
+	Exclusive bool
+	Reason    string
 }
 
 type renewCall struct {
@@ -196,6 +206,33 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				IDs:     toIntSlice(args["file_reservation_ids"]),
 			})
 			writeResponse(stub.releaseResult)
+		case "file_reservation_paths":
+			call := reserveCall{
+				Agent:     toString(args["agent_name"]),
+				Project:   toString(args["project_key"]),
+				Paths:     toStringSlice(args["paths"]),
+				TTL:       toInt(args["ttl_seconds"]),
+				Exclusive: toBool(args["exclusive"]),
+				Reason:    toString(args["reason"]),
+			}
+			stub.reserveCalls = append(stub.reserveCalls, call)
+			granted := make([]map[string]interface{}, 0, len(call.Paths))
+			for i, path := range call.Paths {
+				granted = append(granted, map[string]interface{}{
+					"id":           i + 1,
+					"path_pattern": path,
+					"agent_name":   call.Agent,
+					"project_id":   1,
+					"exclusive":    call.Exclusive,
+					"reason":       call.Reason,
+					"expires_ts":   "2026-02-01T01:00:00Z",
+					"created_ts":   "2026-02-01T00:00:00Z",
+				})
+			}
+			writeResponse(map[string]interface{}{
+				"granted":   granted,
+				"conflicts": []map[string]interface{}{},
+			})
 		case "renew_file_reservations":
 			stub.renewCalls = append(stub.renewCalls, renewCall{
 				Agent:         toString(args["agent_name"]),

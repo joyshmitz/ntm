@@ -205,7 +205,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 
 	// Batch Rotation Flow
 	orchestrator := auth.NewOrchestrator(cfg)
-	projectDir := cfg.GetProjectDir(session)
+	projectDir := resolveProjectDirForSession(session, true)
 
 	// 1. Terminate all
 	fmt.Println("\nStep 1/3: Terminating sessions...")
@@ -264,7 +264,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 func executeRestartRotation(session string, paneIdx int, paneID, provider, targetAccount, modelAlias string) error {
 	// Initialize Orchestrator
 	orchestrator := auth.NewOrchestrator(cfg)
-	projectDir := cfg.GetProjectDir(session)
+	projectDir := resolveProjectDirForSession(session, true)
 
 	fmt.Printf("╔════════════════════════════════════════════════════════╗\n")
 	fmt.Printf("║  ACCOUNT ROTATION - Restart Strategy                   ║\n")

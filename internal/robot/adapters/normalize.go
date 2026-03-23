@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ type AggregatedSignals struct {
 	Coordination     *CoordinationSection
 	Quota            *QuotaSection
 	Alerts           *AlertsSection
+	Incidents        []IncidentItem
 	Health           *SourceHealthSection
 	DegradedFeatures []DegradedFeature
 	CollectionErrors []error
@@ -686,6 +688,7 @@ func (a *SignalAggregator) Collect(ctx context.Context) (*AggregatedSignals, err
 		Coordination: NewCoordinationSection(),
 		Quota:        &QuotaSection{Accounts: []AccountQuota{}},
 		Alerts:       &AlertsSection{Active: []AlertItem{}, Summary: &AlertsSummary{BySeverity: make(map[string]int), ByType: make(map[string]int)}},
+		Incidents:    []IncidentItem{},
 		Health:       &SourceHealthSection{Sources: make(map[string]SourceInfo)},
 	}
 
@@ -783,6 +786,23 @@ func mergeSignalBatch(target *AggregatedSignals, batch *SignalBatch) {
 			for k, v := range batch.Alerts.Summary.ByType {
 				target.Alerts.Summary.ByType[k] += v
 			}
+		}
+		for _, alert := range batch.Alerts.Active {
+			promote, reason := ShouldPromote(alert, nil)
+			if !promote {
+				continue
+			}
+			incident := PromoteToIncident(alert, reason)
+			if incident == nil {
+				continue
+			}
+			if agent := strings.TrimSpace(alert.Agent); agent != "" {
+				incident.Agents = append(incident.Agents, agent)
+			}
+			if beadID := strings.TrimSpace(alert.BeadID); beadID != "" {
+				incident.RelatedBeads = append(incident.RelatedBeads, beadID)
+			}
+			target.Incidents = append(target.Incidents, *incident)
 		}
 	}
 

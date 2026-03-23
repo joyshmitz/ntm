@@ -2442,6 +2442,107 @@ func TestGetStatusWithProjectionStoreUsesRuntimeProjection(t *testing.T) {
 	}
 }
 
+func TestSnapshotIncidentsFromStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	if err := store.CreateIncident(&state.Incident{
+		ID:           "inc-test",
+		Title:        "Agent crash loop",
+		Fingerprint:  "fp-agent-crash-loop",
+		Family:       "agent_crash",
+		Category:     "agent_crash",
+		Status:       state.IncidentStatusOpen,
+		Severity:     state.SeverityError,
+		SessionNames: `["proj"]`,
+		AgentIDs:     `["cc_1"]`,
+		AlertCount:   2,
+		EventCount:   3,
+		StartedAt:    now.Add(-10 * time.Minute),
+		LastEventAt:  now,
+		Notes:        "recurring failures",
+	}); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	incidents, err := snapshotIncidentsFromStore(store)
+	if err != nil {
+		t.Fatalf("snapshotIncidentsFromStore: %v", err)
+	}
+	if len(incidents) != 1 {
+		t.Fatalf("incident count = %d, want 1", len(incidents))
+	}
+	if incidents[0].ID != "inc-test" {
+		t.Fatalf("incident ID = %q, want inc-test", incidents[0].ID)
+	}
+	if len(incidents[0].SessionNames) != 1 || incidents[0].SessionNames[0] != "proj" {
+		t.Fatalf("SessionNames = %#v", incidents[0].SessionNames)
+	}
+	if len(incidents[0].AgentIDs) != 1 || incidents[0].AgentIDs[0] != "cc_1" {
+		t.Fatalf("AgentIDs = %#v", incidents[0].AgentIDs)
+	}
+	if incidents[0].AlertCount != 2 || incidents[0].EventCount != 3 {
+		t.Fatalf("counts = alert:%d event:%d, want 2/3", incidents[0].AlertCount, incidents[0].EventCount)
+	}
+}
+
+func TestPersistNormalizedIncidents_AutoResolvesClearedPromotedIncidents(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	if err := store.CreateIncident(&state.Incident{
+		ID:          "inc-cleared",
+		Title:       "Recovered quota storm",
+		Fingerprint: "incident-fp-cleared",
+		Family:      "quota",
+		Category:    "quota",
+		Status:      state.IncidentStatusOpen,
+		Severity:    state.SeverityWarning,
+		AlertCount:  1,
+		EventCount:  1,
+		StartedAt:   now.Add(-15 * time.Minute),
+		LastEventAt: now.Add(-10 * time.Minute),
+		Notes:       "Promoted from alert alert-123: duration_exceeded",
+	}); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	if err := persistNormalizedIncidents(store, &adapters.AggregatedSignals{Incidents: []adapters.IncidentItem{}}); err != nil {
+		t.Fatalf("persistNormalizedIncidents: %v", err)
+	}
+
+	incident, err := store.GetIncident("inc-cleared")
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if incident.Status != state.IncidentStatusResolved {
+		t.Fatalf("incident status = %s, want %s", incident.Status, state.IncidentStatusResolved)
+	}
+	if incident.Resolution == "" {
+		t.Fatal("expected auto-resolution note to be recorded")
+	}
+}
+
 // ====================
 // Test TerseState
 // ====================

@@ -79,6 +79,34 @@ func TestResolveRobotFormat_EnvFallback(t *testing.T) {
 	}
 }
 
+func TestRunQuickUsesDefaultProjectsBaseWhenConfigNil(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("NTM_PROJECTS_BASE", base)
+
+	oldCfg := cfg
+	oldJSON := jsonOutput
+	cfg = nil
+	jsonOutput = true
+	t.Cleanup(func() {
+		cfg = oldCfg
+		jsonOutput = oldJSON
+	})
+
+	name := "quick-fallback"
+	if err := runQuick(name, quickOptions{
+		NoGit:          true,
+		NoVSCode:       true,
+		NoClaudeConfig: true,
+	}); err != nil {
+		t.Fatalf("runQuick() error = %v", err)
+	}
+
+	want := filepath.Join(base, name)
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected project directory %q to exist: %v", want, err)
+	}
+}
+
 func TestResolveRobotFormat_NtmOutputFormatFallback(t *testing.T) {
 	resetFlags()
 	t.Setenv("NTM_ROBOT_FORMAT", "")

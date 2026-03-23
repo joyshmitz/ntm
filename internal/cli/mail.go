@@ -178,9 +178,33 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 	return agentmail.NewClient(opts...)
 }
 
+func resolveMailProjectKey(session string) string {
+	if strings.TrimSpace(session) != "" {
+		return resolveProjectDirForSession(session, true)
+	}
+	return GetProjectRoot()
+}
+
 // runMailInbox aggregates messages across agents and writes to cmd output.
 func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, sessionAgents bool, agentFilter string, urgent bool, limit int, jsonFmt bool) error {
-	projectKey := GetProjectRoot()
+	// Filter to session agents if requested
+	if sessionAgents {
+		if session == "" {
+			res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: jsonFmt})
+			if err != nil {
+				return err
+			}
+			if res.Session == "" {
+				return nil
+			}
+			if !jsonFmt {
+				res.ExplainIfInferred(cmd.ErrOrStderr())
+			}
+			session = res.Session
+		}
+	}
+
+	projectKey := resolveMailProjectKey(session)
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -211,24 +235,7 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 		}
 	}
 
-	// Aggregated messages by ID (to dedupe across multiple agents)
-	agg := make(map[int]*aggregatedMessage)
-
-	// Filter to session agents if requested
 	if sessionAgents {
-		if session == "" {
-			res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{TreatAsJSON: jsonFmt})
-			if err != nil {
-				return err
-			}
-			if res.Session == "" {
-				return nil
-			}
-			if !jsonFmt {
-				res.ExplainIfInferred(cmd.ErrOrStderr())
-			}
-			session = res.Session
-		}
 		panes, err := tmux.GetPanes(session)
 		if err != nil {
 			return fmt.Errorf("getting session panes: %w", err)
@@ -251,6 +258,9 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 			return fmt.Errorf("no agents found in session '%s'", session)
 		}
 	}
+
+	// Aggregated messages by ID (to dedupe across multiple agents)
+	agg := make(map[int]*aggregatedMessage)
 
 	for _, name := range targetAgents {
 		msgs, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
@@ -409,7 +419,7 @@ type markSummary struct {
 }
 
 func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, ids []int, urgent bool, fromAgent string, all bool, limit int) error {
-	projectKey := GetProjectRoot()
+	projectKey := resolveMailProjectKey(session)
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -522,8 +532,7 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 		}
 	}
 
-	// Get project key (current working directory)
-	projectKey := GetProjectRoot()
+	projectKey := resolveMailProjectKey(session)
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}

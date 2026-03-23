@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -94,5 +95,29 @@ func TestStatusRealSession(t *testing.T) {
 		if !regexp.MustCompile(regexp.QuoteMeta(check)).MatchString(output) {
 			t.Errorf("output missing %q\nGot:\n%s", check, output)
 		}
+	}
+}
+
+func TestFetchAgentMailStatusSkipsEmptyProjectKey(t *testing.T) {
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+
+	oldCfg := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	status := fetchAgentMailStatus("")
+	if status == nil {
+		t.Fatal("fetchAgentMailStatus returned nil")
+	}
+	if !status.Available {
+		t.Fatalf("expected available status when server health endpoint is reachable")
+	}
+	if status.Connected {
+		t.Fatalf("expected disconnected status for empty project key")
+	}
+	if stub.ensureCalled != 0 {
+		t.Fatalf("expected no ensure_project call for empty project key, got %d", stub.ensureCalled)
 	}
 }

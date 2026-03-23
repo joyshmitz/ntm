@@ -17,6 +17,8 @@ type IncidentItem struct {
 	Panes         []string `json:"panes,omitempty"`
 	Agents        []string `json:"agents,omitempty"`
 	Status        string   `json:"status"` // investigating, mitigating, resolved
+	AlertCount    int      `json:"alert_count,omitempty"`
+	EventCount    int      `json:"event_count,omitempty"`
 	CreatedAt     string   `json:"created_at"`
 	UpdatedAt     string   `json:"updated_at"`
 	ResolvedAt    string   `json:"resolved_at,omitempty"`
@@ -103,6 +105,7 @@ func PromoteToIncident(alert AlertItem, reason string) *IncidentItem {
 		Session:       alert.Session,
 		Panes:         panes,
 		Status:        "investigating",
+		AlertCount:    1,
 		CreatedAt:     FormatTimestamp(now),
 		UpdatedAt:     FormatTimestamp(now),
 		DetectedBy:    "alert_promotion",
