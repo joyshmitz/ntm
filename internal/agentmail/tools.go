@@ -47,7 +47,7 @@ func (c *Client) RegisterAgent(ctx context.Context, opts RegisterAgentOptions) (
 		args["task_description"] = opts.TaskDescription
 	}
 
-	result, err := c.callTool(ctx, "register_agent", args)
+	result, err := c.callToolWithBusyRetry(ctx, "register_agent", args, 3*time.Second, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -284,6 +284,13 @@ type ContactRequestResult struct {
 	ExpiresTS *string      `json:"expires_ts,omitempty"`
 }
 
+// ContactRespondResult contains the result of responding to a contact request.
+type ContactRespondResult struct {
+	Status    string       `json:"status,omitempty"`
+	Link      *ContactLink `json:"link,omitempty"`
+	ExpiresTS *string      `json:"expires_ts,omitempty"`
+}
+
 // RequestContact requests contact approval from another agent.
 func (c *Client) RequestContact(ctx context.Context, opts RequestContactOptions) (*ContactRequestResult, error) {
 	args := map[string]interface{}{
@@ -315,7 +322,7 @@ func (c *Client) RequestContact(ctx context.Context, opts RequestContactOptions)
 }
 
 // RespondContact approves or denies a contact request.
-func (c *Client) RespondContact(ctx context.Context, opts RespondContactOptions) error {
+func (c *Client) RespondContact(ctx context.Context, opts RespondContactOptions) (*ContactRespondResult, error) {
 	args := map[string]interface{}{
 		"project_key": opts.ProjectKey,
 		"to_agent":    opts.ToAgent,
@@ -326,8 +333,22 @@ func (c *Client) RespondContact(ctx context.Context, opts RespondContactOptions)
 		args["ttl_seconds"] = opts.TTLSeconds
 	}
 
-	_, err := c.callTool(ctx, "respond_contact", args)
-	return err
+	result, err := c.callTool(ctx, "respond_contact", args)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := bytes.TrimSpace(result)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return &ContactRespondResult{}, nil
+	}
+
+	var respondResult ContactRespondResult
+	if err := json.Unmarshal(result, &respondResult); err != nil {
+		return nil, NewAPIError("respond_contact", 0, err)
+	}
+
+	return &respondResult, nil
 }
 
 // ListContacts lists contact links for an agent.
@@ -391,8 +412,8 @@ func (c *Client) SummarizeThread(ctx context.Context, opts SummarizeThreadOption
 		"thread_id":        opts.ThreadID,
 		"include_examples": opts.IncludeExamples,
 	}
-	if opts.LLMMode {
-		args["llm_mode"] = opts.LLMMode
+	if opts.LLMMode != nil {
+		args["llm_mode"] = *opts.LLMMode
 	}
 	if opts.LLMModel != "" {
 		args["llm_model"] = opts.LLMModel
@@ -920,15 +941,29 @@ func (c *Client) GetMessage(ctx context.Context, projectKey string, messageID in
 }
 
 // SetContactPolicy sets the contact policy for an agent.
-func (c *Client) SetContactPolicy(ctx context.Context, projectKey, agentName, policy string) error {
+func (c *Client) SetContactPolicy(ctx context.Context, projectKey, agentName, policy string) (*ContactPolicyResult, error) {
 	args := map[string]interface{}{
 		"project_key": projectKey,
 		"agent_name":  agentName,
 		"policy":      policy,
 	}
 
-	_, err := c.callTool(ctx, "set_contact_policy", args)
-	return err
+	result, err := c.callTool(ctx, "set_contact_policy", args)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := bytes.TrimSpace(result)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return &ContactPolicyResult{}, nil
+	}
+
+	var policyResult ContactPolicyResult
+	if err := json.Unmarshal(result, &policyResult); err != nil {
+		return nil, NewAPIError("set_contact_policy", 0, err)
+	}
+
+	return &policyResult, nil
 }
 
 // CheckConflicts checks for file reservation conflicts on the given paths.
