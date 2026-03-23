@@ -4445,19 +4445,29 @@ func summarizeAttentionHeartbeatSources(section *adapters.SourceHealthSection) a
 // handleAttentionEventsV1 handles HTTP replay at /api/v1/attention/events.
 // Query params:
 //   - since_cursor: replay from this cursor (required)
+//   - incident_id: bounded replay around a durable incident
+//   - as_of: reconstruct bounded attention context at or before an RFC3339 timestamp
+//   - window_before_ms/window_after_ms: incident replay context bounds
 //   - category: filter by event category (comma-separated)
 //   - session: filter by session name
 //   - actionability: filter by actionability level (comma-separated)
 //   - limit: max events to return (default 100)
 func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request) {
-	sinceCursor := int64(0)
+	opts := robot.EventsOptions{
+		Limit:               100,
+		Session:             r.URL.Query().Get("session"),
+		CategoryFilter:      parseCSVParam(r.URL.Query().Get("category")),
+		ActionabilityFilter: parseCSVParam(r.URL.Query().Get("actionability")),
+		IncidentID:          strings.TrimSpace(r.URL.Query().Get("incident_id")),
+	}
+
 	if sc := r.URL.Query().Get("since_cursor"); sc != "" {
 		parsed, err := strconv.ParseInt(sc, 10, 64)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid since_cursor: "+err.Error())
 			return
 		}
-		sinceCursor = parsed
+		opts.SinceCursor = parsed
 	}
 
 	limit := 100
@@ -4471,53 +4481,51 @@ func (s *Server) handleAttentionEventsV1(w http.ResponseWriter, r *http.Request)
 			limit = parsed
 		}
 	}
+	opts.Limit = limit
 
-	categoryFilter := parseCSVParam(r.URL.Query().Get("category"))
-	sessionFilter := r.URL.Query().Get("session")
-	actionabilityFilter := parseCSVParam(r.URL.Query().Get("actionability"))
+	if raw := strings.TrimSpace(r.URL.Query().Get("as_of")); raw != "" {
+		asOf, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid as_of: "+err.Error())
+			return
+		}
+		opts.AsOf = asOf
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("window_before_ms")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "invalid window_before_ms")
+			return
+		}
+		opts.WindowBefore = time.Duration(parsed) * time.Millisecond
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("window_after_ms")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "invalid window_after_ms")
+			return
+		}
+		opts.WindowAfter = time.Duration(parsed) * time.Millisecond
+	}
 
-	feed := robot.GetAttentionFeed()
-	stats := feed.Stats()
-	earliestCursor := attentionReplayEarliestCursor(stats)
-
-	// Check for cursor expiration using the same boundary as the underlying journal.
-	if expired, earliest := attentionCursorExpired(sinceCursor, stats); expired {
+	output, status := robot.BuildEventsOutput(opts)
+	if !output.Success && output.ErrorCode == robot.ErrCodeCursorExpired {
+		oldestCursor := int64(0)
+		retention := time.Duration(0)
+		if output.ReplayWindow != nil {
+			oldestCursor = output.ReplayWindow.OldestCursor
+			if parsed, err := time.ParseDuration(output.ReplayWindow.RetentionPeriod); err == nil {
+				retention = parsed
+			}
+		}
 		writeJSON(w, http.StatusConflict, attentionCursorExpiredPayload(&robot.CursorExpiredError{
-			RequestedCursor: sinceCursor,
-			EarliestCursor:  earliest,
-			RetentionPeriod: stats.RetentionPeriod,
-		}, stats.NewestCursor))
+			RequestedCursor: opts.SinceCursor,
+			EarliestCursor:  oldestCursor,
+			RetentionPeriod: retention,
+		}, output.NextCursor))
 		return
 	}
-
-	events, newestCursor, err := feed.Replay(sinceCursor, limit*2) // Fetch extra to account for filtering
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "replay failed: "+err.Error())
-		return
-	}
-
-	// Apply filters
-	filtered := make([]robot.AttentionEvent, 0, len(events))
-	for _, event := range events {
-		if !matchesAttentionFilters(event, categoryFilter, sessionFilter, actionabilityFilter) {
-			continue
-		}
-		filtered = append(filtered, event)
-		if len(filtered) >= limit {
-			break
-		}
-	}
-
-	truncated := len(filtered) >= limit && len(events) > len(filtered)
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"events":        filtered,
-		"since_cursor":  sinceCursor,
-		"newest_cursor": newestCursor,
-		"oldest_cursor": earliestCursor,
-		"event_count":   len(filtered),
-		"truncated":     truncated,
-	})
+	writeJSON(w, status, output)
 }
 
 // handleAttentionDigestV1 handles digest at /api/v1/attention/digest.

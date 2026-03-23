@@ -378,11 +378,17 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "since-cursor", Flag: "--since-cursor", Type: "int", Required: false, Default: "0", Description: "Replay events after this cursor (0 = all)"},
 				{Name: "limit", Flag: "--limit", Type: "int", Required: false, Default: "100", Description: "Max events to return"},
+				{Name: "events-incident", Flag: "--events-incident", Type: "string", Required: false, Description: "Bounded historical replay around a durable incident ID"},
+				{Name: "events-as-of", Flag: "--events-as-of", Type: "string", Required: false, Description: "Bounded historical reconstruction at or before an RFC3339 timestamp"},
+				{Name: "events-window-before", Flag: "--events-window-before", Type: "duration", Required: false, Default: "5m", Description: "Context before incident start for incident replay"},
+				{Name: "events-window-after", Flag: "--events-window-after", Type: "duration", Required: false, Default: "1m", Description: "Context after incident end for incident replay"},
 				{Name: "profile", Flag: "--profile", Type: "string", Required: false, Default: "operator", Description: "Attention profile: operator, debug, minimal, alerts"},
 			},
 			Examples: []string{
 				"ntm --robot-events",
 				"ntm --robot-events --since-cursor=42 --limit=50",
+				"ntm --robot-events --events-incident=inc-20260322-abc --events-window-before=5m --events-window-after=1m",
+				"ntm --robot-events --events-as-of=2026-03-22T03:50:00Z --events-limit=25",
 				"ntm --robot-events --profile=debug",
 			},
 		},

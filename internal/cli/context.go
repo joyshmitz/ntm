@@ -53,19 +53,13 @@ func newContextBuildCmd() *cobra.Command {
 			- Claude (cc), Cursor, Windsurf, Aider: XML format
 			- Codex (cod), Gemini (gmi): Markdown format`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := GetProjectRoot()
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			dir, session, err := resolveContextBuildScope(tmux.GetCurrentSession())
+			if err != nil {
+				return err
 			}
 
 			// Get repo revision
 			repoRev := getRepoRev(dir)
-
-			// Get session info
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
-			}
 
 			// Open state store
 			store, err := state.Open("")
@@ -179,6 +173,26 @@ func newContextShowCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func resolveContextBuildScope(session string) (string, string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", "", fmt.Errorf("invalid session name: %w", err)
+		}
+		projectDir := resolveProjectDirForSession(session, true)
+		if projectDir == "" {
+			return "", "", fmt.Errorf("getting project root failed")
+		}
+		return projectDir, session, nil
+	}
+
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return "", "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, filepath.Base(projectDir), nil
 }
 
 func newContextStatsCmd() *cobra.Command {

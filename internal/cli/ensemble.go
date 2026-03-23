@@ -892,7 +892,7 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 	var cacheContextHash string
 
 	if cacheEnabled {
-		projectDir, projErr := resolveEnsembleProjectDir("")
+		projectDir, projErr := resolveEnsembleProjectDirForSession(session)
 		if projErr != nil {
 			logger.Warn("mode output cache disabled (project dir)", "error", projErr)
 			cacheEnabled = false
@@ -1601,13 +1601,12 @@ func renderExportFindingsOutput(w io.Writer, payload exportFindingsOutput, forma
 }
 
 func loadExportFindingsContext(session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
-	projectDir, err := resolveEnsembleProjectDir("")
-	if err != nil {
-		return nil, err
-	}
-
 	if opts.RunID != "" {
 		ctx, err := loadExportFindingsFromRun(opts.RunID)
+		if err != nil {
+			return nil, err
+		}
+		projectDir, err := resolveEnsembleProjectDirForSession(ctx.Session)
 		if err != nil {
 			return nil, err
 		}
@@ -1621,6 +1620,10 @@ func loadExportFindingsContext(session string, opts exportFindingsOptions) (*exp
 	if session == "" {
 		return nil, fmt.Errorf("session required (not in tmux or use --run-id)")
 	}
+	projectDir, err := resolveEnsembleProjectDirForSession(session)
+	if err != nil {
+		return nil, err
+	}
 
 	ctx, err := loadExportFindingsFromSession(session)
 	if err != nil {
@@ -1628,6 +1631,26 @@ func loadExportFindingsContext(session string, opts exportFindingsOptions) (*exp
 	}
 	ctx.ProjectDir = projectDir
 	return ctx, nil
+}
+
+func resolveEnsembleProjectDirForSession(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		projectDir := GetProjectRoot()
+		if projectDir == "" {
+			return "", fmt.Errorf("getting project root failed")
+		}
+		return projectDir, nil
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
+
+	projectDir := resolveProjectDirForSession(session, true)
+	if projectDir == "" {
+		return "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, nil
 }
 
 func loadExportFindingsFromRun(runID string) (*exportFindingsContext, error) {

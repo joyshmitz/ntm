@@ -25,6 +25,18 @@ type EventsOptions struct {
 	// Limit is the maximum number of events to return.
 	Limit int
 
+	// IncidentID enables bounded replay around a durable incident timeline.
+	IncidentID string
+
+	// AsOf reconstructs the most recent bounded attention context at or before a timestamp.
+	AsOf time.Time
+
+	// WindowBefore controls bounded incident replay context before the incident start.
+	WindowBefore time.Duration
+
+	// WindowAfter controls bounded incident replay context after the incident end.
+	WindowAfter time.Duration
+
 	// Session filters events to a specific session.
 	Session string
 
@@ -58,21 +70,62 @@ type EventsOutput struct {
 
 	// ReplayWindow describes the available cursor range.
 	ReplayWindow *SnapshotReplayWindowInfo `json:"replay_window,omitempty"`
+
+	// ReplayTarget describes the historical replay mode when replay is not cursor-based.
+	ReplayTarget *HistoricalReplayTarget `json:"replay_target,omitempty"`
+
+	// Reconstruction describes how historical replay was built when applicable.
+	Reconstruction *ReconstructionMeta `json:"reconstruction,omitempty"`
+
+	// Boundedness describes the effective limits applied to a historical replay.
+	Boundedness *HistoricalBoundedness `json:"boundedness,omitempty"`
+
+	// Incident surfaces the durable incident anchor for incident replay mode.
+	Incident *SnapshotIncident `json:"incident,omitempty"`
+}
+
+const (
+	DefaultIncidentReplayWindowBefore = 5 * time.Minute
+	DefaultIncidentReplayWindowAfter  = time.Minute
+	MaxIncidentReplayWindow           = time.Hour
+	MaxHistoricalAsOfAge              = 24 * time.Hour
+)
+
+// HistoricalReplayTarget identifies the explicit historical replay target.
+type HistoricalReplayTarget struct {
+	Mode        string `json:"mode"`
+	Ref         string `json:"ref,omitempty"`
+	RequestedAt string `json:"requested_at,omitempty"`
+}
+
+// HistoricalBoundedness reports the effective limits applied to a historical replay query.
+type HistoricalBoundedness struct {
+	RequestedRangeMS int64  `json:"requested_range_ms,omitempty"`
+	AllowedRangeMS   int64  `json:"allowed_range_ms,omitempty"`
+	EventsRequested  string `json:"events_requested,omitempty"`
+	EventsLimit      int    `json:"events_limit,omitempty"`
+	Truncated        bool   `json:"truncated"`
 }
 
 // PrintEvents outputs attention events since a cursor with optional filtering.
 // This is the raw replay/feed surface for robot clients.
 func PrintEvents(opts EventsOptions) error {
+	output, _ := BuildEventsOutput(opts)
+	return outputJSON(output)
+}
+
+// BuildEventsOutput resolves a robot attention replay request and returns the JSON payload plus suggested HTTP status.
+func BuildEventsOutput(opts EventsOptions) (EventsOutput, int) {
 	feed := GetAttentionFeed()
 	if feed == nil {
-		return outputJSON(EventsOutput{
+		return EventsOutput{
 			RobotResponse: NewErrorResponse(
 				errors.New("attention feed not initialized"),
 				"FEED_UNAVAILABLE",
 				"The attention feed service is not running",
 			),
 			Events: []AttentionEvent{},
-		})
+		}, 503
 	}
 
 	limit := opts.Limit
@@ -83,31 +136,154 @@ func PrintEvents(opts EventsOptions) error {
 		limit = 1000
 	}
 
-	// Replay events from the feed
-	events, newestCursor, err := feed.Replay(opts.SinceCursor, limit+1)
-	if err != nil {
-		var cursorErr *CursorExpiredError
-		if errors.As(err, &cursorErr) {
-			details := cursorErr.ToDetails()
-			return outputJSON(EventsOutput{
+	modeCount := 0
+	if strings.TrimSpace(opts.IncidentID) != "" {
+		modeCount++
+	}
+	if !opts.AsOf.IsZero() {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return EventsOutput{
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("historical replay modes are mutually exclusive"),
+				ErrCodeInvalidFlag,
+				"Use either --events-incident or --events-as-of, not both",
+			),
+			Events: []AttentionEvent{},
+		}, 400
+	}
+
+	var (
+		events          []AttentionEvent
+		newestCursor    int64
+		err             error
+		reconstruction  *ReconstructionMeta
+		replayTarget    *HistoricalReplayTarget
+		boundedness     *HistoricalBoundedness
+		incidentSummary *SnapshotIncident
+	)
+
+	switch {
+	case strings.TrimSpace(opts.IncidentID) != "":
+		windowBefore := opts.WindowBefore
+		if windowBefore <= 0 {
+			windowBefore = DefaultIncidentReplayWindowBefore
+		}
+		windowAfter := opts.WindowAfter
+		if windowAfter <= 0 {
+			windowAfter = DefaultIncidentReplayWindowAfter
+		}
+		requestedRange := windowBefore + windowAfter
+		if requestedRange > MaxIncidentReplayWindow {
+			return EventsOutput{
 				RobotResponse: NewErrorResponse(
-					cursorErr,
-					ErrCodeCursorExpired,
-					details.ResyncCommand,
+					fmt.Errorf("incident replay window %s exceeds max %s", requestedRange, MaxIncidentReplayWindow),
+					ErrCodeInvalidFlag,
+					fmt.Sprintf("Reduce the replay window so it is <= %s", MaxIncidentReplayWindow),
 				),
 				Events: []AttentionEvent{},
-				ReplayWindow: &SnapshotReplayWindowInfo{
-					Supported:       true,
-					OldestCursor:    details.EarliestCursor,
-					RetentionPeriod: details.RetentionPeriod,
-					ResyncCommand:   details.ResyncCommand,
-				},
-			})
+			}, 400
 		}
-		return outputJSON(EventsOutput{
-			RobotResponse: NewErrorResponse(err, ErrCodeInternalError, ""),
-			Events:        []AttentionEvent{},
-		})
+
+		events, newestCursor, err = feed.ReplayForIncident(opts.IncidentID, windowBefore, windowAfter)
+		if err != nil {
+			code := ErrCodeInternalError
+			status := 500
+			if strings.Contains(err.Error(), "not found") {
+				code = ErrCodeNotFound
+				status = 404
+			}
+			return EventsOutput{
+				RobotResponse: NewErrorResponse(err, code, ""),
+				Events:        []AttentionEvent{},
+			}, status
+		}
+		if store := currentProjectionStore(); store != nil {
+			if incident, incidentErr := store.GetIncident(opts.IncidentID); incidentErr == nil && incident != nil {
+				summary := snapshotIncidentFromState(*incident)
+				incidentSummary = &summary
+			}
+		}
+		replayTarget = &HistoricalReplayTarget{
+			Mode: "incident_replay",
+			Ref:  "incident:" + strings.TrimSpace(opts.IncidentID),
+		}
+		boundedness = &HistoricalBoundedness{
+			RequestedRangeMS: requestedRange.Milliseconds(),
+			AllowedRangeMS:   MaxIncidentReplayWindow.Milliseconds(),
+			EventsRequested:  "bounded_context",
+			EventsLimit:      limit,
+		}
+	case !opts.AsOf.IsZero():
+		asOf := opts.AsOf.UTC()
+		now := time.Now().UTC()
+		if asOf.After(now) {
+			return EventsOutput{
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("as-of time cannot be in the future"),
+					ErrCodeInvalidFlag,
+					"Use an RFC3339 timestamp at or before the current time",
+				),
+				Events: []AttentionEvent{},
+			}, 400
+		}
+		if now.Sub(asOf) > MaxHistoricalAsOfAge {
+			return EventsOutput{
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("as-of time is older than %s", MaxHistoricalAsOfAge),
+					ErrCodeInvalidFlag,
+					fmt.Sprintf("Use an as-of timestamp within the last %s", MaxHistoricalAsOfAge),
+				),
+				Events: []AttentionEvent{},
+			}, 400
+		}
+
+		events, reconstruction, err = feed.ReconstructAsOf(asOf, limit)
+		if err != nil {
+			return EventsOutput{
+				RobotResponse: NewErrorResponse(err, ErrCodeInternalError, ""),
+				Events:        []AttentionEvent{},
+			}, 500
+		}
+		newestCursor = maxAttentionEventCursor(events)
+		replayTarget = &HistoricalReplayTarget{
+			Mode:        "as_of",
+			RequestedAt: asOf.Format(time.RFC3339Nano),
+		}
+		boundedness = &HistoricalBoundedness{
+			RequestedRangeMS: feed.Stats().RetentionPeriod.Milliseconds(),
+			AllowedRangeMS:   MaxHistoricalAsOfAge.Milliseconds(),
+			EventsRequested:  "bounded_context",
+			EventsLimit:      limit,
+			Truncated:        reconstruction != nil && reconstruction.Partial,
+		}
+	default:
+		events, newestCursor, err = feed.Replay(opts.SinceCursor, limit+1)
+		if err != nil {
+			var cursorErr *CursorExpiredError
+			if errors.As(err, &cursorErr) {
+				details := cursorErr.ToDetails()
+				return EventsOutput{
+					RobotResponse: NewErrorResponse(
+						cursorErr,
+						ErrCodeCursorExpired,
+						details.ResyncCommand,
+					),
+					Events: []AttentionEvent{},
+					ReplayWindow: &SnapshotReplayWindowInfo{
+						Supported:       true,
+						OldestCursor:    details.EarliestCursor,
+						RetentionPeriod: details.RetentionPeriod,
+						ResyncCommand:   details.ResyncCommand,
+					},
+				}, 409
+			}
+			return EventsOutput{
+				RobotResponse: NewErrorResponse(err, ErrCodeInternalError, ""),
+				Events:        []AttentionEvent{},
+			}, 500
+		}
 	}
 
 	// Apply filters
@@ -137,18 +313,33 @@ func PrintEvents(opts EventsOptions) error {
 		ResyncCommand:   "ntm --robot-snapshot",
 	}
 
-	return outputJSON(EventsOutput{
+	if boundedness != nil {
+		boundedness.Truncated = hasMore
+	}
+	if reconstruction != nil && hasMore && !containsString(reconstruction.Warnings, "PARTIAL_DATA") {
+		reconstruction.Warnings = append(reconstruction.Warnings, "PARTIAL_DATA")
+		reconstruction.Partial = true
+		if reconstruction.Confidence == "" || reconstruction.Confidence == ReconstructionConfidenceHigh {
+			reconstruction.Confidence = ReconstructionConfidenceMedium
+		}
+	}
+
+	return EventsOutput{
 		RobotResponse: RobotResponse{
 			Success:      true,
 			Timestamp:    time.Now().UTC().Format(time.RFC3339),
 			Version:      AttentionContractVersion,
 			OutputFormat: "json",
 		},
-		Events:       filtered,
-		NextCursor:   nextCursor,
-		HasMore:      hasMore,
-		ReplayWindow: replayWindow,
-	})
+		Events:         filtered,
+		NextCursor:     nextCursor,
+		HasMore:        hasMore,
+		ReplayWindow:   replayWindow,
+		ReplayTarget:   replayTarget,
+		Reconstruction: reconstruction,
+		Boundedness:    boundedness,
+		Incident:       incidentSummary,
+	}, 200
 }
 
 // filterEventsForRobot applies profile-based and explicit filters.
@@ -209,6 +400,25 @@ func toStringSetForEvents(strs []string) map[string]bool {
 		set[s] = true
 	}
 	return set
+}
+
+func maxAttentionEventCursor(events []AttentionEvent) int64 {
+	var cursor int64
+	for _, event := range events {
+		if event.Cursor > cursor {
+			cursor = event.Cursor
+		}
+	}
+	return cursor
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func applyProfileToDigestOptions(profile string, opts AttentionDigestOptions) AttentionDigestOptions {

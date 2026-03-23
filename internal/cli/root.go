@@ -285,8 +285,33 @@ Shell Integration:
 			opts := robot.EventsOptions{
 				SinceCursor: robotEventsSinceCursor,
 				Limit:       robotEventsLimit,
+				IncidentID:  robotEventsIncident,
 				Session:     robotEventsSession,
 				Profile:     robotProfile,
+			}
+			if robotEventsAsOf != "" {
+				asOf, err := time.Parse(time.RFC3339, robotEventsAsOf)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --events-as-of timestamp (expected RFC3339): %v\n", err)
+					os.Exit(1)
+				}
+				opts.AsOf = asOf
+			}
+			if robotEventsWindowBefore != "" {
+				windowBefore, err := time.ParseDuration(robotEventsWindowBefore)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --events-window-before duration: %v\n", err)
+					os.Exit(1)
+				}
+				opts.WindowBefore = windowBefore
+			}
+			if robotEventsWindowAfter != "" {
+				windowAfter, err := time.ParseDuration(robotEventsWindowAfter)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --events-window-after duration: %v\n", err)
+					os.Exit(1)
+				}
+				opts.WindowAfter = windowAfter
 			}
 			if robotEventsCategory != "" {
 				opts.CategoryFilter = []string{robotEventsCategory}
@@ -602,7 +627,12 @@ Shell Integration:
 			}
 
 			if sessionName != "" {
-				projectKey = resolveProjectDirForSession(sessionName, sessionExplicit)
+				resolvedProjectKey, err := resolveAgentMailProjectKeyWithPreference(sessionName, sessionExplicit)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				projectKey = resolvedProjectKey
 			}
 
 			if err := robot.PrintMail(sessionName, projectKey); err != nil {
@@ -1639,6 +1669,16 @@ Shell Integration:
 		}
 		if robotContextInject != "" {
 			session := robotContextInject
+			if err := tmux.ValidateSessionName(session); err != nil {
+				output.PrintJSON(ContextInjectResult{
+					Success:       false,
+					Session:       session,
+					Error:         fmt.Sprintf("invalid session name: %v", err),
+					InjectedFiles: []string{},
+					PanesInjected: []int{},
+				})
+				os.Exit(1)
+			}
 			projectDir := resolveProjectDirForSession(session, true)
 			if projectDir == "" {
 				output.PrintJSON(ContextInjectResult{
@@ -2257,6 +2297,10 @@ var (
 	robotEvents                bool   // raw replay/feed surface
 	robotEventsSinceCursor     int64  // cursor for --robot-events
 	robotEventsLimit           int    // max events for --robot-events
+	robotEventsIncident        string // durable incident id for bounded replay
+	robotEventsAsOf            string // RFC3339 timestamp for bounded as-of reconstruction
+	robotEventsWindowBefore    string // duration before incident start for replay context
+	robotEventsWindowAfter     string // duration after incident end for replay context
 	robotEventsCategory        string // category filter for --robot-events
 	robotEventsSession         string // session filter for --robot-events
 	robotEventsActionability   string // actionability filter for --robot-events
@@ -2746,6 +2790,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotEvents, "robot-events", false, "Stream attention events since cursor. Use for raw replay/feed. Example: ntm --robot-events --since-cursor=42 --limit=50")
 	rootCmd.Flags().Int64Var(&robotEventsSinceCursor, "since-cursor", 0, "Cursor position to replay from. Optional with --robot-events. Example: --since-cursor=42")
 	rootCmd.Flags().IntVar(&robotEventsLimit, "events-limit", 100, "Max events to return. Optional with --robot-events. Example: --events-limit=50")
+	rootCmd.Flags().StringVar(&robotEventsIncident, "events-incident", "", "Durable incident ID for bounded historical replay. Optional with --robot-events. Example: --events-incident=inc-20260322-abc")
+	rootCmd.Flags().StringVar(&robotEventsAsOf, "events-as-of", "", "RFC3339 timestamp for bounded historical reconstruction. Optional with --robot-events. Example: --events-as-of=2026-03-22T03:50:00Z")
+	rootCmd.Flags().StringVar(&robotEventsWindowBefore, "events-window-before", "", "Replay context before incident start. Optional with --robot-events --events-incident. Example: --events-window-before=5m")
+	rootCmd.Flags().StringVar(&robotEventsWindowAfter, "events-window-after", "", "Replay context after incident end. Optional with --robot-events --events-incident. Example: --events-window-after=1m")
 	rootCmd.Flags().StringVar(&robotEventsCategory, "events-category", "", "Filter by event category. Optional with --robot-events. Example: --events-category=agent")
 	rootCmd.Flags().StringVar(&robotEventsSession, "events-session", "", "Filter by session name. Optional with --robot-events. Example: --events-session=myproject")
 	rootCmd.Flags().StringVar(&robotEventsActionability, "events-actionability", "", "Filter by actionability level. Optional with --robot-events. Values: action_required, interesting, background")

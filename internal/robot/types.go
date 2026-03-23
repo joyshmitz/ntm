@@ -100,6 +100,9 @@ const (
 	// ErrCodeInternalError indicates an unexpected internal error.
 	ErrCodeInternalError = "INTERNAL_ERROR"
 
+	// ErrCodeNotFound indicates a requested durable resource was not found.
+	ErrCodeNotFound = "NOT_FOUND"
+
 	// ErrCodePermissionDenied indicates insufficient permissions.
 	ErrCodePermissionDenied = "PERMISSION_DENIED"
 

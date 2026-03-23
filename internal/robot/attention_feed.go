@@ -697,6 +697,13 @@ func attentionItemKeyForStoredEvent(event state.StoredAttentionEvent) string {
 	return fmt.Sprintf("cursor:%d", event.Cursor)
 }
 
+func attentionItemKeyForReplayEvent(event AttentionEvent) string {
+	if key := strings.TrimSpace(event.DedupKey); key != "" {
+		return "dedup:" + key
+	}
+	return fmt.Sprintf("cursor:%d", event.Cursor)
+}
+
 func attentionEventFingerprint(event AttentionEvent) string {
 	payload := map[string]any{
 		"session":       strings.TrimSpace(event.Session),
@@ -958,21 +965,30 @@ func (f *AttentionFeed) ReplayForIncident(incidentID string, windowBefore, windo
 		windowAfter = 0
 	}
 
-	start := incident.StartedAt.UTC().Add(-windowBefore)
-	end := incident.LastEventAt.UTC().Add(windowAfter)
-	if end.Before(start) {
-		end = start
-	}
-
 	limit := minInt(maxInt(incident.EventCount+64, 128), 2048)
-	rangeEvents, err := f.store.GetAttentionEventsInTimeRange(start, end, limit)
-	if err != nil {
-		return nil, 0, fmt.Errorf("load incident replay window: %w", err)
-	}
 	linkedEvents, err := f.store.GetEventsForIncident(incidentID, limit)
 	if err != nil {
 		return nil, 0, fmt.Errorf("load linked incident events: %w", err)
 	}
+
+	replayEnd := incident.LastEventAt.UTC()
+	if len(linkedEvents) > 0 {
+		lastLinked := linkedEvents[len(linkedEvents)-1].Ts.UTC()
+		if !lastLinked.IsZero() && (replayEnd.IsZero() || lastLinked.Before(replayEnd)) {
+			replayEnd = lastLinked
+		}
+	}
+	start := incident.StartedAt.UTC().Add(-windowBefore)
+	end := replayEnd.Add(windowAfter)
+	if end.Before(start) {
+		end = start
+	}
+
+	rangeEvents, err := f.store.GetAttentionEventsInTimeRange(start, end, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load incident replay window: %w", err)
+	}
+	rangeEvents = filterStoredAttentionEventsByTimeRange(rangeEvents, start, end)
 
 	merged := mergeStoredAttentionEvents(rangeEvents, linkedEvents)
 	return f.hydrateStoredAttentionEvents(merged), maxStoredAttentionCursor(merged, f.cursor.Current()), nil
@@ -3749,7 +3765,11 @@ func (f *AttentionFeed) replayFromStore(sinceCursor int64, limit int) ([]Attenti
 	window, err := f.store.GetAttentionReplayWindow()
 	if err != nil {
 		// Fallback to in-memory journal
-		return f.journal.Replay(sinceCursor, limit)
+		events, newestCursor, replayErr := f.journal.Replay(sinceCursor, limit)
+		if replayErr != nil {
+			return nil, 0, replayErr
+		}
+		return f.hydrateReplayEvents(events), newestCursor, nil
 	}
 
 	// Handle cursor=-1 (start from now)
@@ -3788,7 +3808,7 @@ func (f *AttentionFeed) replayFromStore(sinceCursor int64, limit int) ([]Attenti
 		if err != nil {
 			return nil, 0, err
 		}
-		events = append(events, tail...)
+		events = append(events, f.hydrateReplayEvents(tail)...)
 		return events, maxCursor(window.NewestCursor, journalCursor), nil
 	}
 
@@ -3822,6 +3842,39 @@ func (f *AttentionFeed) hydrateStoredAttentionEvents(storedEvents []state.Stored
 	return events
 }
 
+func (f *AttentionFeed) hydrateReplayEvents(events []AttentionEvent) []AttentionEvent {
+	if f.store == nil || len(events) == 0 {
+		return events
+	}
+
+	cursors := make([]int64, 0, len(events))
+	for _, event := range events {
+		if event.Cursor > 0 {
+			cursors = append(cursors, event.Cursor)
+		}
+	}
+
+	itemStates := map[int64]state.AttentionItemState{}
+	if len(cursors) > 0 {
+		if loaded, err := f.store.GetAttentionItemStatesForCursors(cursors); err == nil {
+			itemStates = loaded
+		}
+	}
+
+	hydrated := make([]AttentionEvent, 0, len(events))
+	for _, event := range events {
+		itemKey := attentionItemKeyForReplayEvent(event)
+		if itemState, ok := itemStates[event.Cursor]; ok {
+			itemStateCopy := itemState
+			event = annotateAttentionOperatorState(event, itemKey, &itemStateCopy)
+		} else {
+			event = annotateAttentionOperatorState(event, itemKey, nil)
+		}
+		hydrated = append(hydrated, event)
+	}
+	return hydrated
+}
+
 func mergeStoredAttentionEvents(groups ...[]state.StoredAttentionEvent) []state.StoredAttentionEvent {
 	byCursor := make(map[int64]state.StoredAttentionEvent)
 	for _, group := range groups {
@@ -3841,6 +3894,20 @@ func mergeStoredAttentionEvents(groups ...[]state.StoredAttentionEvent) []state.
 		merged = append(merged, byCursor[cursor])
 	}
 	return merged
+}
+
+func filterStoredAttentionEventsByTimeRange(events []state.StoredAttentionEvent, start, end time.Time) []state.StoredAttentionEvent {
+	start = start.UTC()
+	end = end.UTC()
+	filtered := make([]state.StoredAttentionEvent, 0, len(events))
+	for _, event := range events {
+		ts := event.Ts.UTC()
+		if ts.Before(start) || ts.After(end) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
 }
 
 func maxStoredAttentionCursor(events []state.StoredAttentionEvent, fallback int64) int64 {

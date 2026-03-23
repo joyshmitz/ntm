@@ -862,6 +862,41 @@ func TestResolveAgentMailProjectKeyRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
+func TestResolveAgentMailProjectKeyWithPreferenceUsesCWDForInferredSession(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	configProject := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(configProject, 0o755); err != nil {
+		t.Fatalf("mkdir configured project: %v", err)
+	}
+
+	cwdRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwdRepo, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir cwd repo: %v", err)
+	}
+	if err := os.Chdir(cwdRepo); err != nil {
+		t.Fatalf("chdir cwd repo: %v", err)
+	}
+
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	projectKey, err := resolveAgentMailProjectKeyWithPreference("mysession", false)
+	if err != nil {
+		t.Fatalf("resolveAgentMailProjectKeyWithPreference() error = %v", err)
+	}
+	if projectKey != cwdRepo {
+		t.Fatalf("resolveAgentMailProjectKeyWithPreference() = %q, want cwd repo %q", projectKey, cwdRepo)
+	}
+}
+
 func TestRunLockUsesSessionProjectDir(t *testing.T) {
 	resetFlags()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

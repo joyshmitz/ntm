@@ -179,18 +179,24 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 }
 
 func resolveAgentMailProjectKey(session string) (string, error) {
+	return resolveAgentMailProjectKeyWithPreference(session, true)
+}
+
+func resolveAgentMailProjectKeyWithPreference(session string, preferSession bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
 		if err := tmux.ValidateSessionName(session); err != nil {
 			return "", fmt.Errorf("invalid session name: %w", err)
 		}
-		return resolveProjectDirForSession(session, true), nil
+		return resolveProjectDirForSession(session, preferSession), nil
 	}
 	return GetProjectRoot(), nil
 }
 
 // runMailInbox aggregates messages across agents and writes to cmd output.
 func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, sessionAgents bool, agentFilter string, urgent bool, limit int, jsonFmt bool) error {
+	preferSession := strings.TrimSpace(session) != ""
+
 	// Filter to session agents if requested
 	if sessionAgents {
 		if session == "" {
@@ -208,7 +214,7 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 		}
 	}
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	projectKey, err := resolveAgentMailProjectKeyWithPreference(session, preferSession)
 	if err != nil {
 		return err
 	}
