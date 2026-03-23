@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
@@ -609,6 +610,24 @@ func TestResolveCheckpointStorageSessionArgRejectsInvalidSessionName(t *testing.
 
 func TestResolveCheckpointStorageSessionArgAllowsOfflineSession(t *testing.T) {
 	got, err := resolveCheckpointStorageSessionArg("mysession")
+	if err != nil {
+		t.Fatalf("resolveCheckpointStorageSessionArg() error = %v", err)
+	}
+	if got != "mysession" {
+		t.Fatalf("session = %q, want %q", got, "mysession")
+	}
+}
+
+func TestResolveCheckpointStorageSessionArgResolvesOfflinePrefixMatch(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	storage := checkpoint.NewStorage()
+	if err := os.MkdirAll(filepath.Join(storage.BaseDir, "mysession"), 0o755); err != nil {
+		t.Fatalf("mkdir storage session: %v", err)
+	}
+
+	got, err := resolveCheckpointStorageSessionArg("my")
 	if err != nil {
 		t.Fatalf("resolveCheckpointStorageSessionArg() error = %v", err)
 	}

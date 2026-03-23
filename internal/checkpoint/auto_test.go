@@ -152,6 +152,89 @@ func TestBackgroundWorkerStart_NilContextAndDoubleStartAreSafe(t *testing.T) {
 	worker.Stop()
 }
 
+func TestBackgroundWorker_RestartsAfterParentContextCancellation(t *testing.T) {
+	config := AutoCheckpointConfig{
+		Enabled:         true,
+		IntervalMinutes: 0,
+		OnRotation:      true,
+		OnError:         true,
+	}
+
+	worker := NewBackgroundWorker("test-session", config)
+	parentCtx, cancel := context.WithCancel(context.Background())
+
+	worker.Start(parentCtx)
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		worker.mu.Lock()
+		running := worker.started || worker.cancel != nil
+		worker.mu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not fully stop after parent context cancellation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	worker.Start(context.Background())
+
+	worker.mu.Lock()
+	restarted := worker.started && worker.cancel != nil
+	worker.mu.Unlock()
+	if !restarted {
+		t.Fatal("worker did not restart after parent context cancellation")
+	}
+
+	worker.Stop()
+}
+
+func TestBackgroundWorker_SendEventDoesNothingWhenInactive(t *testing.T) {
+	config := AutoCheckpointConfig{
+		Enabled:         true,
+		IntervalMinutes: 0,
+		OnRotation:      true,
+		OnError:         true,
+	}
+
+	worker := NewBackgroundWorker("test-session", config)
+	worker.SendEvent(AutoEvent{Type: EventRotation, SessionName: "test-session"})
+
+	if got := len(worker.events); got != 0 {
+		t.Fatalf("expected no queued events for inactive worker, got %d", got)
+	}
+}
+
+func TestBackgroundWorker_StartDrainsStaleEvents(t *testing.T) {
+	config := AutoCheckpointConfig{
+		Enabled:         true,
+		IntervalMinutes: 0,
+		OnRotation:      true,
+	}
+
+	worker := NewBackgroundWorker("missing-session", config)
+	worker.events <- AutoEvent{
+		Type:        EventRotation,
+		SessionName: "missing-session",
+		Description: "stale",
+	}
+
+	worker.Start(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	worker.Stop()
+
+	count, _, lastErr := worker.Stats()
+	if count != 0 {
+		t.Fatalf("expected stale event to be discarded, got checkpoint count %d", count)
+	}
+	if lastErr != nil {
+		t.Fatalf("expected stale event to be drained before restart, got error %v", lastErr)
+	}
+}
+
 func TestBackgroundWorker_EventChannel(t *testing.T) {
 	config := AutoCheckpointConfig{
 		Enabled:    true,

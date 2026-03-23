@@ -141,6 +141,26 @@ func TestGetRobotRegistry_KeySurfaceMetadata(t *testing.T) {
 			schemaType: "inspect_agent",
 			sections:   []string{"sessions", "next_actions"},
 		},
+		{
+			name:       "inspect-work",
+			schemaType: "inspect_work",
+			sections:   []string{"work", "next_actions"},
+		},
+		{
+			name:       "inspect-coordination",
+			schemaType: "inspect_coordination",
+			sections:   []string{"coordination", "next_actions"},
+		},
+		{
+			name:       "inspect-quota",
+			schemaType: "inspect_quota",
+			sections:   []string{"quota", "next_actions"},
+		},
+		{
+			name:       "inspect-incident",
+			schemaType: "inspect_incident",
+			sections:   []string{"incidents", "next_actions"},
+		},
 	}
 
 	for _, tc := range tests {

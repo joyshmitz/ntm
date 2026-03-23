@@ -253,6 +253,7 @@ func (w *BackgroundWorker) Start(ctx context.Context) {
 		return
 	}
 
+	drainAutoEvents(w.events)
 	ctx, w.cancel = context.WithCancel(ctx)
 	w.started = true
 	w.wg.Add(1)
@@ -288,11 +289,28 @@ func (w *BackgroundWorker) Stop() {
 
 // SendEvent sends an event to the worker to potentially trigger a checkpoint.
 func (w *BackgroundWorker) SendEvent(event AutoEvent) {
+	w.mu.Lock()
+	running := w.started && w.cancel != nil
+	w.mu.Unlock()
+	if !running {
+		return
+	}
+
 	select {
 	case w.events <- event:
 	default:
 		// Channel full, log and drop
 		log.Printf("Warning: auto-checkpoint event channel full, dropping event: %v", event.Type)
+	}
+}
+
+func drainAutoEvents(events chan AutoEvent) {
+	for {
+		select {
+		case <-events:
+		default:
+			return
+		}
 	}
 }
 
@@ -305,7 +323,13 @@ func (w *BackgroundWorker) Stats() (checkpointCount int, lastCheckpoint time.Tim
 
 // run is the main worker loop.
 func (w *BackgroundWorker) run(ctx context.Context) {
-	defer w.wg.Done()
+	defer func() {
+		w.mu.Lock()
+		w.cancel = nil
+		w.started = false
+		w.mu.Unlock()
+		w.wg.Done()
+	}()
 
 	// Set up interval ticker (nil if disabled)
 	var ticker *time.Ticker

@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
@@ -269,22 +270,43 @@ func PrintFiles(opts FilesOptions) error {
 // the TUI dashboard. Includes full output capture, state detection, and context.
 
 const (
-	inspectSessionSchemaVersion = "ntm.robot.inspect_session.v1"
-	inspectAgentSchemaVersion   = "ntm.robot.inspect_agent.v1"
+	inspectSessionSchemaVersion      = "ntm.robot.inspect_session.v1"
+	inspectAgentSchemaVersion        = "ntm.robot.inspect_agent.v1"
+	inspectWorkSchemaVersion         = "ntm.robot.inspect_work.v1"
+	inspectCoordinationSchemaVersion = "ntm.robot.inspect_coordination.v1"
+	inspectQuotaSchemaVersion        = "ntm.robot.inspect_quota.v1"
+	inspectIncidentSchemaVersion     = "ntm.robot.inspect_incident.v1"
 )
 
 // InspectProjectionInfo describes freshness metadata for projection-backed
 // inspect surfaces.
 type InspectProjectionInfo struct {
-	Fresh       bool   `json:"fresh"`
-	CollectedAt string `json:"collected_at,omitempty"`
-	StaleAfter  string `json:"stale_after,omitempty"`
+	Fresh        bool     `json:"fresh"`
+	CollectedAt  string   `json:"collected_at,omitempty"`
+	StaleAfter   string   `json:"stale_after,omitempty"`
+	StaleReasons []string `json:"stale_reasons,omitempty"`
 }
 
 // InspectHealth summarizes the health of an inspected entity.
 type InspectHealth struct {
 	Status string `json:"status"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// InspectDiagnosticEntry is one machine-readable explanation item attached to an inspect surface.
+type InspectDiagnosticEntry struct {
+	Code     string   `json:"code"`
+	Severity string   `json:"severity,omitempty"`
+	Summary  string   `json:"summary"`
+	Source   string   `json:"source,omitempty"`
+	Evidence []string `json:"evidence,omitempty"`
+}
+
+// InspectDiagnosticSection groups related explainability entries for an inspect surface.
+type InspectDiagnosticSection struct {
+	Kind    string                   `json:"kind"`
+	Summary string                   `json:"summary"`
+	Entries []InspectDiagnosticEntry `json:"entries"`
 }
 
 // InspectAgentDetail is the projection-backed drill-down for one agent.
@@ -333,21 +355,152 @@ type InspectSessionDetail struct {
 // InspectSessionOutput represents a projection-backed session drill-down.
 type InspectSessionOutput struct {
 	RobotResponse
-	SchemaID      string               `json:"schema_id"`
-	SchemaVersion string               `json:"schema_version"`
-	Session       string               `json:"session"`
-	Detail        InspectSessionDetail `json:"detail"`
-	AgentHints    *AgentHints          `json:"_agent_hints,omitempty"`
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	Session       string                     `json:"session"`
+	Detail        InspectSessionDetail       `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
 }
 
 // InspectAgentOutput represents a projection-backed agent drill-down.
 type InspectAgentOutput struct {
 	RobotResponse
-	SchemaID      string             `json:"schema_id"`
-	SchemaVersion string             `json:"schema_version"`
-	AgentID       string             `json:"agent_id"`
-	Detail        InspectAgentDetail `json:"detail"`
-	AgentHints    *AgentHints        `json:"_agent_hints,omitempty"`
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	AgentID       string                     `json:"agent_id"`
+	Detail        InspectAgentDetail         `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
+}
+
+// InspectWorkDetail is the projection-backed drill-down for one work item.
+type InspectWorkDetail struct {
+	ID              string                       `json:"id"`
+	Title           string                       `json:"title"`
+	TitleDisclosure *adapters.DisclosureMetadata `json:"title_disclosure,omitempty"`
+	Status          string                       `json:"status"`
+	Queue           string                       `json:"queue"`
+	Priority        int                          `json:"priority"`
+	Type            string                       `json:"type,omitempty"`
+	Assignee        string                       `json:"assignee,omitempty"`
+	ClaimedAt       string                       `json:"claimed_at,omitempty"`
+	BlockedByCount  int                          `json:"blocked_by_count"`
+	UnblocksCount   int                          `json:"unblocks_count"`
+	Labels          []string                     `json:"labels"`
+	Score           *float64                     `json:"score,omitempty"`
+	ScoreReason     string                       `json:"score_reason,omitempty"`
+	Health          InspectHealth                `json:"health"`
+	Projection      InspectProjectionInfo        `json:"projection"`
+}
+
+// InspectCoordinationDetail is the projection-backed drill-down for one agent's coordination state.
+type InspectCoordinationDetail struct {
+	AgentName        string                         `json:"agent_name"`
+	Session          string                         `json:"session,omitempty"`
+	Pane             string                         `json:"pane,omitempty"`
+	Mail             adapters.AgentMailStats        `json:"mail"`
+	LastMessageAt    string                         `json:"last_message_at,omitempty"`
+	LastSentAt       string                         `json:"last_sent_at,omitempty"`
+	LastReceivedAt   string                         `json:"last_received_at,omitempty"`
+	Handoff          *HandoffSummary                `json:"handoff,omitempty"`
+	RelatedIncidents []string                       `json:"related_incidents"`
+	Problems         []adapters.CoordinationProblem `json:"problems"`
+	Health           InspectHealth                  `json:"health"`
+	Projection       InspectProjectionInfo          `json:"projection"`
+}
+
+// InspectQuotaDetail is the projection-backed drill-down for one provider/account quota row.
+type InspectQuotaDetail struct {
+	ID            string                `json:"id"`
+	Provider      string                `json:"provider"`
+	Account       string                `json:"account"`
+	Status        string                `json:"status"`
+	ReasonCode    adapters.ReasonCode   `json:"reason_code"`
+	UsedPctKnown  bool                  `json:"used_pct_known"`
+	UsagePercent  *float64              `json:"usage_percent,omitempty"`
+	UsedPctSource string                `json:"used_pct_source,omitempty"`
+	LimitHit      bool                  `json:"limit_hit"`
+	ResetAt       string                `json:"reset_at,omitempty"`
+	IsActive      bool                  `json:"is_active"`
+	Healthy       bool                  `json:"healthy"`
+	HealthReason  string                `json:"health_reason,omitempty"`
+	Health        InspectHealth         `json:"health"`
+	Projection    InspectProjectionInfo `json:"projection"`
+}
+
+// InspectIncidentDetail is the store-backed drill-down for one incident.
+type InspectIncidentDetail struct {
+	ID               string        `json:"id"`
+	Fingerprint      string        `json:"fingerprint"`
+	Title            string        `json:"title"`
+	Family           string        `json:"family,omitempty"`
+	Category         string        `json:"category,omitempty"`
+	Status           string        `json:"status"`
+	Severity         string        `json:"severity"`
+	SessionNames     []string      `json:"session_names"`
+	AgentIDs         []string      `json:"agent_ids"`
+	AlertCount       int           `json:"alert_count"`
+	EventCount       int           `json:"event_count"`
+	FirstEventCursor *int64        `json:"first_event_cursor,omitempty"`
+	LastEventCursor  *int64        `json:"last_event_cursor,omitempty"`
+	StartedAt        string        `json:"started_at"`
+	LastEventAt      string        `json:"last_event_at"`
+	AcknowledgedAt   string        `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy   string        `json:"acknowledged_by,omitempty"`
+	ResolvedAt       string        `json:"resolved_at,omitempty"`
+	ResolvedBy       string        `json:"resolved_by,omitempty"`
+	MutedAt          string        `json:"muted_at,omitempty"`
+	MutedBy          string        `json:"muted_by,omitempty"`
+	MutedReason      string        `json:"muted_reason,omitempty"`
+	RootCause        string        `json:"root_cause,omitempty"`
+	Resolution       string        `json:"resolution,omitempty"`
+	Notes            string        `json:"notes,omitempty"`
+	Health           InspectHealth `json:"health"`
+}
+
+// InspectWorkOutput represents a projection-backed work drill-down.
+type InspectWorkOutput struct {
+	RobotResponse
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	BeadID        string                     `json:"bead_id"`
+	Detail        InspectWorkDetail          `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
+}
+
+// InspectCoordinationOutput represents a projection-backed coordination drill-down.
+type InspectCoordinationOutput struct {
+	RobotResponse
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	AgentName     string                     `json:"agent_name"`
+	Detail        InspectCoordinationDetail  `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
+}
+
+// InspectQuotaOutput represents a projection-backed quota drill-down.
+type InspectQuotaOutput struct {
+	RobotResponse
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	QuotaID       string                     `json:"quota_id"`
+	Detail        InspectQuotaDetail         `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
+}
+
+// InspectIncidentOutput represents a store-backed incident drill-down.
+type InspectIncidentOutput struct {
+	RobotResponse
+	SchemaID      string                     `json:"schema_id"`
+	SchemaVersion string                     `json:"schema_version"`
+	IncidentID    string                     `json:"incident_id"`
+	Detail        InspectIncidentDetail      `json:"detail"`
+	Diagnostics   []InspectDiagnosticSection `json:"diagnostics"`
+	AgentHints    *AgentHints                `json:"_agent_hints,omitempty"`
 }
 
 // InspectSessionOptions configures session inspection.
@@ -358,6 +511,26 @@ type InspectSessionOptions struct {
 // InspectAgentOptions configures agent inspection.
 type InspectAgentOptions struct {
 	AgentID string
+}
+
+// InspectWorkOptions configures work inspection.
+type InspectWorkOptions struct {
+	BeadID string
+}
+
+// InspectCoordinationOptions configures coordination inspection.
+type InspectCoordinationOptions struct {
+	AgentName string
+}
+
+// InspectQuotaOptions configures quota inspection.
+type InspectQuotaOptions struct {
+	QuotaID string
+}
+
+// InspectIncidentOptions configures incident inspection.
+type InspectIncidentOptions struct {
+	IncidentID string
 }
 
 // InspectPaneOutput represents detailed pane inspection
@@ -597,6 +770,7 @@ func newInspectSessionOutput(session string) *InspectSessionOutput {
 		SchemaID:      defaultRobotSchemaID("inspect-session"),
 		SchemaVersion: inspectSessionSchemaVersion,
 		Session:       strings.TrimSpace(session),
+		Diagnostics:   []InspectDiagnosticSection{},
 		Detail: InspectSessionDetail{
 			Agents: []InspectAgentDetail{},
 		},
@@ -609,6 +783,58 @@ func newInspectAgentOutput(agentID string) *InspectAgentOutput {
 		SchemaID:      defaultRobotSchemaID("inspect-agent"),
 		SchemaVersion: inspectAgentSchemaVersion,
 		AgentID:       strings.TrimSpace(agentID),
+		Diagnostics:   []InspectDiagnosticSection{},
+	}
+}
+
+func newInspectWorkOutput(beadID string) *InspectWorkOutput {
+	return &InspectWorkOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-work"),
+		SchemaVersion: inspectWorkSchemaVersion,
+		BeadID:        strings.TrimSpace(beadID),
+		Diagnostics:   []InspectDiagnosticSection{},
+		Detail: InspectWorkDetail{
+			Labels: []string{},
+		},
+	}
+}
+
+func newInspectCoordinationOutput(agentName string) *InspectCoordinationOutput {
+	return &InspectCoordinationOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-coordination"),
+		SchemaVersion: inspectCoordinationSchemaVersion,
+		AgentName:     strings.TrimSpace(agentName),
+		Diagnostics:   []InspectDiagnosticSection{},
+		Detail: InspectCoordinationDetail{
+			RelatedIncidents: []string{},
+			Problems:         []adapters.CoordinationProblem{},
+		},
+	}
+}
+
+func newInspectQuotaOutput(quotaID string) *InspectQuotaOutput {
+	return &InspectQuotaOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-quota"),
+		SchemaVersion: inspectQuotaSchemaVersion,
+		QuotaID:       strings.TrimSpace(quotaID),
+		Diagnostics:   []InspectDiagnosticSection{},
+	}
+}
+
+func newInspectIncidentOutput(incidentID string) *InspectIncidentOutput {
+	return &InspectIncidentOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-incident"),
+		SchemaVersion: inspectIncidentSchemaVersion,
+		IncidentID:    strings.TrimSpace(incidentID),
+		Diagnostics:   []InspectDiagnosticSection{},
+		Detail: InspectIncidentDetail{
+			SessionNames: []string{},
+			AgentIDs:     []string{},
+		},
 	}
 }
 
@@ -619,12 +845,735 @@ func inspectHealth(status state.HealthStatus, reason string) InspectHealth {
 	}
 }
 
-func inspectProjectionInfo(collectedAt, staleAfter time.Time) InspectProjectionInfo {
-	return InspectProjectionInfo{
-		Fresh:       time.Now().Before(staleAfter),
-		CollectedAt: FormatTimestamp(collectedAt),
-		StaleAfter:  FormatTimestamp(staleAfter),
+func compactDiagnosticEvidence(values ...string) []string {
+	evidence := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		evidence = append(evidence, trimmed)
 	}
+	return evidence
+}
+
+func diagnosticTimestamp(label string, ts *time.Time) string {
+	if ts == nil || ts.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("%s=%s", label, FormatTimestamp(*ts))
+}
+
+func diagnosticSeverityFromHealth(status string) string {
+	switch strings.TrimSpace(status) {
+	case "", "healthy":
+		return "info"
+	default:
+		return strings.TrimSpace(status)
+	}
+}
+
+func inspectProjectionStaleReasons(fresh bool, reasons ...string) []string {
+	if fresh {
+		return nil
+	}
+	return compactDiagnosticEvidence(append([]string{"projection freshness window expired"}, reasons...)...)
+}
+
+func inspectProjectionInfoWithReasons(collectedAt, staleAfter time.Time, reasons ...string) InspectProjectionInfo {
+	return InspectProjectionInfo{
+		Fresh:        time.Now().Before(staleAfter),
+		CollectedAt:  FormatTimestamp(collectedAt),
+		StaleAfter:   FormatTimestamp(staleAfter),
+		StaleReasons: compactDiagnosticEvidence(reasons...),
+	}
+}
+
+func inspectProjectionInfo(collectedAt, staleAfter time.Time) InspectProjectionInfo {
+	return inspectProjectionInfoWithReasons(collectedAt, staleAfter)
+}
+
+func inspectDiagnosticEntry(code, severity, summary, source string, evidence ...string) InspectDiagnosticEntry {
+	return InspectDiagnosticEntry{
+		Code:     strings.TrimSpace(code),
+		Severity: strings.TrimSpace(severity),
+		Summary:  strings.TrimSpace(summary),
+		Source:   strings.TrimSpace(source),
+		Evidence: compactDiagnosticEvidence(evidence...),
+	}
+}
+
+func appendInspectDiagnosticSection(sections []InspectDiagnosticSection, section *InspectDiagnosticSection) []InspectDiagnosticSection {
+	if section == nil || len(section.Entries) == 0 {
+		return sections
+	}
+	return append(sections, *section)
+}
+
+func buildProjectionDiagnosticSection(subject string, projection InspectProjectionInfo, health InspectHealth) *InspectDiagnosticSection {
+	trimmedSubject := strings.TrimSpace(subject)
+	if trimmedSubject == "" {
+		trimmedSubject = "Inspect"
+	}
+	statusWord := "fresh"
+	severity := "info"
+	if !projection.Fresh {
+		statusWord = "stale"
+		severity = "warning"
+	}
+	evidence := []string{}
+	if projection.CollectedAt != "" {
+		evidence = append(evidence, fmt.Sprintf("collected_at=%s", projection.CollectedAt))
+	}
+	if projection.StaleAfter != "" {
+		evidence = append(evidence, fmt.Sprintf("stale_after=%s", projection.StaleAfter))
+	}
+	for _, reason := range projection.StaleReasons {
+		evidence = append(evidence, fmt.Sprintf("stale_reason=%s", reason))
+	}
+	entries := []InspectDiagnosticEntry{
+		inspectDiagnosticEntry(
+			"projection_freshness",
+			severity,
+			fmt.Sprintf("%s projection is %s", trimmedSubject, statusWord),
+			"",
+			evidence...,
+		),
+	}
+	if strings.TrimSpace(health.Reason) != "" {
+		entries = append(entries, inspectDiagnosticEntry(
+			"health_reason",
+			diagnosticSeverityFromHealth(health.Status),
+			health.Reason,
+			"",
+		))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "projection",
+		Summary: fmt.Sprintf("%s projection %s", trimmedSubject, statusWord),
+		Entries: entries,
+	}
+}
+
+func inspectRelevantSourceRows(rows []state.SourceHealth, names ...string) []state.SourceHealth {
+	if len(rows) == 0 || len(names) == 0 {
+		return nil
+	}
+	index := make(map[string]state.SourceHealth, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(row.SourceName)
+		if name == "" {
+			continue
+		}
+		index[name] = row
+	}
+	relevant := make([]state.SourceHealth, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		row, ok := index[trimmed]
+		if !ok {
+			continue
+		}
+		relevant = append(relevant, row)
+	}
+	return relevant
+}
+
+func inspectSourceHealthSeverity(row state.SourceHealth) string {
+	switch row.Status(normalizedProjectionStaleAfter) {
+	case state.SourceStatusUnavailable:
+		return "critical"
+	case state.SourceStatusStale:
+		return "warning"
+	default:
+		if row.Healthy {
+			return "info"
+		}
+		return "warning"
+	}
+}
+
+func inspectSourceHealthSummary(row state.SourceHealth) string {
+	status := row.Status(normalizedProjectionStaleAfter)
+	sourceName := strings.TrimSpace(row.SourceName)
+	switch status {
+	case state.SourceStatusUnavailable:
+		return fmt.Sprintf("%s source unavailable", sourceName)
+	case state.SourceStatusStale:
+		return fmt.Sprintf("%s source stale", sourceName)
+	default:
+		if row.Healthy {
+			return fmt.Sprintf("%s source healthy", sourceName)
+		}
+		return fmt.Sprintf("%s source degraded", sourceName)
+	}
+}
+
+func buildSourceHealthDiagnosticSection(rows []state.SourceHealth, names ...string) *InspectDiagnosticSection {
+	relevant := inspectRelevantSourceRows(rows, names...)
+	if len(relevant) == 0 {
+		return nil
+	}
+	entries := make([]InspectDiagnosticEntry, 0, len(relevant))
+	degraded := 0
+	for _, row := range relevant {
+		status := row.Status(normalizedProjectionStaleAfter)
+		if status != state.SourceStatusFresh {
+			degraded++
+		}
+		evidence := compactDiagnosticEvidence(
+			fmt.Sprintf("status=%s", status),
+			fmt.Sprintf("available=%t", row.Available),
+			fmt.Sprintf("healthy=%t", row.Healthy),
+			fmt.Sprintf("last_check_at=%s", FormatTimestamp(row.LastCheckAt)),
+			diagnosticTimestamp("last_success_at", row.LastSuccessAt),
+			diagnosticTimestamp("last_failure_at", row.LastFailureAt),
+			robotFirstNonEmpty("", func() string {
+				if strings.TrimSpace(row.Reason) == "" {
+					return ""
+				}
+				return fmt.Sprintf("reason=%s", row.Reason)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if strings.TrimSpace(row.LastErrorCode) == "" {
+					return ""
+				}
+				return fmt.Sprintf("last_error_code=%s", row.LastErrorCode)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if strings.TrimSpace(row.LastError) == "" {
+					return ""
+				}
+				return fmt.Sprintf("last_error=%s", row.LastError)
+			}()),
+		)
+		entries = append(entries, inspectDiagnosticEntry(
+			"source_health",
+			inspectSourceHealthSeverity(row),
+			inspectSourceHealthSummary(row),
+			row.SourceName,
+			evidence...,
+		))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "source_health",
+		Summary: fmt.Sprintf("%d relevant source(s), %d degraded", len(relevant), degraded),
+		Entries: entries,
+	}
+}
+
+func buildSessionStateDiagnosticSection(detail InspectSessionDetail) *InspectDiagnosticSection {
+	return &InspectDiagnosticSection{
+		Kind:    "session_state",
+		Summary: fmt.Sprintf("Session %s activity and agent counts", detail.Name),
+		Entries: []InspectDiagnosticEntry{
+			inspectDiagnosticEntry(
+				"session_activity",
+				diagnosticSeverityFromHealth(detail.Health.Status),
+				fmt.Sprintf("Session %s is %s with %d projected agents", detail.Name, robotFirstNonEmpty(detail.Health.Status, "healthy"), detail.AgentCount),
+				"",
+				fmt.Sprintf("attached=%t", detail.Attached),
+				fmt.Sprintf("window_count=%d", detail.WindowCount),
+				fmt.Sprintf("pane_count=%d", detail.PaneCount),
+				fmt.Sprintf("agent_count=%d", detail.AgentCount),
+				fmt.Sprintf("active_agents=%d", detail.ActiveAgents),
+				fmt.Sprintf("idle_agents=%d", detail.IdleAgents),
+				fmt.Sprintf("error_agents=%d", detail.ErrorAgents),
+				robotFirstNonEmpty("", func() string {
+					if detail.LastActivityAt == "" {
+						return ""
+					}
+					return fmt.Sprintf("last_activity_at=%s", detail.LastActivityAt)
+				}()),
+			),
+		},
+	}
+}
+
+func buildAgentStateDiagnosticSection(detail InspectAgentDetail) *InspectDiagnosticSection {
+	entries := []InspectDiagnosticEntry{
+		inspectDiagnosticEntry(
+			"agent_state",
+			diagnosticSeverityFromHealth(detail.Health.Status),
+			fmt.Sprintf("Agent %s is %s", detail.ID, detail.State),
+			"",
+			fmt.Sprintf("type=%s", detail.Type),
+			robotFirstNonEmpty("", func() string {
+				if detail.StateReason == "" {
+					return ""
+				}
+				return fmt.Sprintf("state_reason=%s", detail.StateReason)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.PreviousState == "" {
+					return ""
+				}
+				return fmt.Sprintf("previous_state=%s", detail.PreviousState)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.CurrentBead == "" {
+					return ""
+				}
+				return fmt.Sprintf("current_bead=%s", detail.CurrentBead)
+			}()),
+			fmt.Sprintf("pending_mail=%d", detail.PendingMail),
+			robotFirstNonEmpty("", func() string {
+				if detail.LastOutputAt == "" {
+					return ""
+				}
+				return fmt.Sprintf("last_output_at=%s", detail.LastOutputAt)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.LastOutputAgeSec == 0 {
+					return ""
+				}
+				return fmt.Sprintf("last_output_age_sec=%d", detail.LastOutputAgeSec)
+			}()),
+		),
+	}
+	if detail.OutputTailLines > 0 {
+		entries = append(entries, inspectDiagnosticEntry(
+			"output_tail_bounded",
+			"info",
+			fmt.Sprintf("Agent output is bounded to the last %d line(s) in the runtime projection", detail.OutputTailLines),
+			"",
+			fmt.Sprintf("output_tail_lines=%d", detail.OutputTailLines),
+		))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "agent_state",
+		Summary: fmt.Sprintf("Agent %s projected state", detail.ID),
+		Entries: entries,
+	}
+}
+
+func disclosureDiagnosticEntry(code, label string, meta *adapters.DisclosureMetadata) *InspectDiagnosticEntry {
+	if meta == nil {
+		return nil
+	}
+	entry := inspectDiagnosticEntry(
+		code,
+		"info",
+		fmt.Sprintf("%s disclosure is %s", strings.TrimSpace(label), robotFirstNonEmpty(strings.TrimSpace(meta.DisclosureState), "visible")),
+		"",
+		robotFirstNonEmpty("", func() string {
+			if strings.TrimSpace(meta.DisclosureState) == "" {
+				return ""
+			}
+			return fmt.Sprintf("disclosure_state=%s", strings.TrimSpace(meta.DisclosureState))
+		}()),
+		robotFirstNonEmpty("", func() string {
+			if strings.TrimSpace(meta.Preview) == "" {
+				return ""
+			}
+			return fmt.Sprintf("preview=%s", strings.TrimSpace(meta.Preview))
+		}()),
+		robotFirstNonEmpty("", func() string {
+			if strings.TrimSpace(meta.RedactionMode) == "" {
+				return ""
+			}
+			return fmt.Sprintf("redaction_mode=%s", strings.TrimSpace(meta.RedactionMode))
+		}()),
+		robotFirstNonEmpty("", func() string {
+			if meta.Findings == 0 {
+				return ""
+			}
+			return fmt.Sprintf("findings=%d", meta.Findings)
+		}()),
+	)
+	return &entry
+}
+
+func buildWorkStateDiagnosticSection(detail InspectWorkDetail) *InspectDiagnosticSection {
+	entries := []InspectDiagnosticEntry{
+		inspectDiagnosticEntry(
+			"queue_state",
+			diagnosticSeverityFromHealth(detail.Health.Status),
+			fmt.Sprintf("Work %s is %s", detail.ID, detail.Queue),
+			"",
+			fmt.Sprintf("status=%s", detail.Status),
+			fmt.Sprintf("priority=%d", detail.Priority),
+			fmt.Sprintf("blocked_by_count=%d", detail.BlockedByCount),
+			fmt.Sprintf("unblocks_count=%d", detail.UnblocksCount),
+			robotFirstNonEmpty("", func() string {
+				if detail.Assignee == "" {
+					return ""
+				}
+				return fmt.Sprintf("assignee=%s", detail.Assignee)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.Score == nil {
+					return ""
+				}
+				return fmt.Sprintf("score=%.2f", *detail.Score)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.ScoreReason == "" {
+					return ""
+				}
+				return fmt.Sprintf("score_reason=%s", detail.ScoreReason)
+			}()),
+		),
+	}
+	if entry := disclosureDiagnosticEntry("title_disclosure", "work title", detail.TitleDisclosure); entry != nil {
+		entries = append(entries, *entry)
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "work_state",
+		Summary: fmt.Sprintf("Work %s queue and disclosure evidence", detail.ID),
+		Entries: entries,
+	}
+}
+
+func buildCoordinationProblemDiagnosticSection(detail InspectCoordinationDetail) *InspectDiagnosticSection {
+	entries := make([]InspectDiagnosticEntry, 0, len(detail.Problems)+4)
+	for _, problem := range detail.Problems {
+		entries = append(entries, inspectDiagnosticEntry(
+			problem.Kind,
+			problem.Severity,
+			problem.Summary,
+			"",
+			robotFirstNonEmpty("", func() string {
+				if len(problem.Agents) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("agents=%s", strings.Join(problem.Agents, ","))
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if len(problem.ThreadIDs) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("thread_ids=%s", strings.Join(problem.ThreadIDs, ","))
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if len(problem.Paths) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("paths=%s", strings.Join(problem.Paths, ","))
+			}()),
+		))
+	}
+	if entry := disclosureDiagnosticEntry("latest_subject_disclosure", "latest mail subject", detail.Mail.LatestSubjectDisclosure); entry != nil {
+		entries = append(entries, *entry)
+	}
+	if entry := disclosureDiagnosticEntry("latest_preview_disclosure", "latest mail preview", detail.Mail.LatestPreviewDisclosure); entry != nil {
+		entries = append(entries, *entry)
+	}
+	if detail.Handoff != nil {
+		entries = append(entries, inspectDiagnosticEntry(
+			"handoff_state",
+			diagnosticSeverityFromHealth(detail.Health.Status),
+			fmt.Sprintf("Latest handoff for %s is %s", detail.Handoff.Session, robotFirstNonEmpty(detail.Handoff.Status, "present")),
+			"",
+			robotFirstNonEmpty("", func() string {
+				if detail.Handoff.UpdatedAt == "" {
+					return ""
+				}
+				return fmt.Sprintf("updated_at=%s", detail.Handoff.UpdatedAt)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if len(detail.Handoff.Blockers) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("blockers=%s", strings.Join(detail.Handoff.Blockers, ","))
+			}()),
+		))
+	}
+	if len(entries) == 0 {
+		entries = append(entries, inspectDiagnosticEntry(
+			"coordination_clear",
+			"info",
+			"No projected coordination problems are active",
+			"",
+		))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "coordination_problems",
+		Summary: fmt.Sprintf("Coordination evidence for %s", detail.AgentName),
+		Entries: entries,
+	}
+}
+
+func buildQuotaStateDiagnosticSection(detail InspectQuotaDetail) *InspectDiagnosticSection {
+	return &InspectDiagnosticSection{
+		Kind:    "quota_state",
+		Summary: fmt.Sprintf("Quota %s usage and limit evidence", detail.ID),
+		Entries: []InspectDiagnosticEntry{
+			inspectDiagnosticEntry(
+				"quota_status",
+				diagnosticSeverityFromHealth(detail.Health.Status),
+				fmt.Sprintf("Quota %s is %s", detail.ID, detail.Status),
+				"",
+				fmt.Sprintf("reason_code=%s", detail.ReasonCode),
+				fmt.Sprintf("used_pct_known=%t", detail.UsedPctKnown),
+				robotFirstNonEmpty("", func() string {
+					if detail.UsagePercent == nil {
+						return ""
+					}
+					return fmt.Sprintf("usage_percent=%.2f", *detail.UsagePercent)
+				}()),
+				robotFirstNonEmpty("", func() string {
+					if detail.UsedPctSource == "" {
+						return ""
+					}
+					return fmt.Sprintf("used_pct_source=%s", detail.UsedPctSource)
+				}()),
+				fmt.Sprintf("limit_hit=%t", detail.LimitHit),
+				fmt.Sprintf("is_active=%t", detail.IsActive),
+				robotFirstNonEmpty("", func() string {
+					if detail.ResetAt == "" {
+						return ""
+					}
+					return fmt.Sprintf("reset_at=%s", detail.ResetAt)
+				}()),
+				robotFirstNonEmpty("", func() string {
+					if detail.HealthReason == "" {
+						return ""
+					}
+					return fmt.Sprintf("health_reason=%s", detail.HealthReason)
+				}()),
+			),
+		},
+	}
+}
+
+func buildIncidentEvidenceDiagnosticSection(detail InspectIncidentDetail) *InspectDiagnosticSection {
+	entries := []InspectDiagnosticEntry{
+		inspectDiagnosticEntry(
+			"incident_state",
+			diagnosticSeverityFromHealth(detail.Health.Status),
+			fmt.Sprintf("Incident %s is %s with %s severity", detail.ID, detail.Status, detail.Severity),
+			"",
+			fmt.Sprintf("alert_count=%d", detail.AlertCount),
+			fmt.Sprintf("event_count=%d", detail.EventCount),
+			robotFirstNonEmpty("", func() string {
+				if detail.StartedAt == "" {
+					return ""
+				}
+				return fmt.Sprintf("started_at=%s", detail.StartedAt)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.LastEventAt == "" {
+					return ""
+				}
+				return fmt.Sprintf("last_event_at=%s", detail.LastEventAt)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.FirstEventCursor == nil {
+					return ""
+				}
+				return fmt.Sprintf("first_event_cursor=%d", *detail.FirstEventCursor)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if detail.LastEventCursor == nil {
+					return ""
+				}
+				return fmt.Sprintf("last_event_cursor=%d", *detail.LastEventCursor)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if len(detail.SessionNames) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("session_names=%s", strings.Join(detail.SessionNames, ","))
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if len(detail.AgentIDs) == 0 {
+					return ""
+				}
+				return fmt.Sprintf("agent_ids=%s", strings.Join(detail.AgentIDs, ","))
+			}()),
+		),
+	}
+	if detail.MutedReason != "" {
+		entries = append(entries, inspectDiagnosticEntry("muted_reason", "warning", detail.MutedReason, ""))
+	}
+	if detail.RootCause != "" {
+		entries = append(entries, inspectDiagnosticEntry("root_cause", "info", detail.RootCause, ""))
+	}
+	if detail.Resolution != "" {
+		entries = append(entries, inspectDiagnosticEntry("resolution", "info", detail.Resolution, ""))
+	}
+	if detail.Notes != "" {
+		entries = append(entries, inspectDiagnosticEntry("notes", "info", detail.Notes, ""))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "incident_evidence",
+		Summary: fmt.Sprintf("Incident evidence for %s", detail.ID),
+		Entries: entries,
+	}
+}
+
+func buildAttentionStateDiagnosticSection(cursor *int64, itemState *state.AttentionItemState, replayWindow state.AttentionReplayWindow) *InspectDiagnosticSection {
+	if cursor == nil && itemState == nil {
+		return nil
+	}
+	entries := make([]InspectDiagnosticEntry, 0, 2)
+	if cursor != nil {
+		summary := fmt.Sprintf("Attention cursor %d is within the retained replay window", *cursor)
+		severity := "info"
+		evidence := []string{
+			fmt.Sprintf("replay_oldest_cursor=%d", replayWindow.OldestCursor),
+			fmt.Sprintf("replay_newest_cursor=%d", replayWindow.NewestCursor),
+			fmt.Sprintf("replay_event_count=%d", replayWindow.EventCount),
+		}
+		switch {
+		case replayWindow.EventCount == 0 || replayWindow.NewestCursor == 0:
+			summary = fmt.Sprintf("Attention cursor %d cannot be validated because no retained replay window is available", *cursor)
+			severity = "warning"
+		case replayWindow.CursorExpired(*cursor):
+			summary = fmt.Sprintf("Attention cursor %d has expired from the retained replay window", *cursor)
+			severity = "warning"
+		case itemState == nil:
+			summary = fmt.Sprintf("Attention cursor %d is retained but has no durable operator-state record", *cursor)
+		}
+		if replayWindow.LastEventAt != nil {
+			evidence = append(evidence, diagnosticTimestamp("replay_last_event_at", replayWindow.LastEventAt))
+		}
+		entries = append(entries, inspectDiagnosticEntry("cursor_window", severity, summary, "", evidence...))
+	}
+	if itemState != nil {
+		entries = append(entries, inspectDiagnosticEntry(
+			"attention_state",
+			"info",
+			fmt.Sprintf("Attention state is %s", itemState.State),
+			"",
+			fmt.Sprintf("item_key=%s", itemState.ItemKey),
+			robotFirstNonEmpty("", func() string {
+				if itemState.DedupKey == "" {
+					return ""
+				}
+				return fmt.Sprintf("dedup_key=%s", itemState.DedupKey)
+			}()),
+			fmt.Sprintf("pinned=%t", itemState.Pinned),
+			diagnosticTimestamp("pinned_at", itemState.PinnedAt),
+			robotFirstNonEmpty("", func() string {
+				if itemState.PinnedBy == "" {
+					return ""
+				}
+				return fmt.Sprintf("pinned_by=%s", itemState.PinnedBy)
+			}()),
+			fmt.Sprintf("muted=%t", itemState.Muted),
+			diagnosticTimestamp("muted_at", itemState.MutedAt),
+			robotFirstNonEmpty("", func() string {
+				if itemState.MutedBy == "" {
+					return ""
+				}
+				return fmt.Sprintf("muted_by=%s", itemState.MutedBy)
+			}()),
+			diagnosticTimestamp("acknowledged_at", itemState.AcknowledgedAt),
+			robotFirstNonEmpty("", func() string {
+				if itemState.AcknowledgedBy == "" {
+					return ""
+				}
+				return fmt.Sprintf("acknowledged_by=%s", itemState.AcknowledgedBy)
+			}()),
+			diagnosticTimestamp("snoozed_until", itemState.SnoozedUntil),
+			diagnosticTimestamp("dismissed_at", itemState.DismissedAt),
+			robotFirstNonEmpty("", func() string {
+				if itemState.DismissedBy == "" {
+					return ""
+				}
+				return fmt.Sprintf("dismissed_by=%s", itemState.DismissedBy)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if itemState.OverridePriority == "" {
+					return ""
+				}
+				return fmt.Sprintf("override_priority=%s", itemState.OverridePriority)
+			}()),
+			robotFirstNonEmpty("", func() string {
+				if itemState.OverrideReason == "" {
+					return ""
+				}
+				return fmt.Sprintf("override_reason=%s", itemState.OverrideReason)
+			}()),
+			diagnosticTimestamp("override_expires_at", itemState.OverrideExpiresAt),
+			robotFirstNonEmpty("", func() string {
+				if itemState.ResurfacingPolicy == "" {
+					return ""
+				}
+				return fmt.Sprintf("resurfacing_policy=%s", itemState.ResurfacingPolicy)
+			}()),
+			fmt.Sprintf("created_at=%s", FormatTimestamp(itemState.CreatedAt)),
+			fmt.Sprintf("updated_at=%s", FormatTimestamp(itemState.UpdatedAt)),
+		))
+	}
+	return &InspectDiagnosticSection{
+		Kind:    "attention_state",
+		Summary: "Attention operator-state and cursor evidence",
+		Entries: entries,
+	}
+}
+
+func buildSessionDiagnostics(detail InspectSessionDetail, sourceRows []state.SourceHealth) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 3)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildProjectionDiagnosticSection("Session", detail.Projection, detail.Health))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSessionStateDiagnosticSection(detail))
+	relevantSources := []string{"tmux"}
+	for _, agent := range detail.Agents {
+		if agent.PendingMail > 0 || agent.AgentMailName != "" {
+			relevantSources = append(relevantSources, "mail")
+			break
+		}
+	}
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSourceHealthDiagnosticSection(sourceRows, relevantSources...))
+	return diagnostics
+}
+
+func buildAgentDiagnostics(detail InspectAgentDetail, sourceRows []state.SourceHealth) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 3)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildProjectionDiagnosticSection("Agent", detail.Projection, detail.Health))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildAgentStateDiagnosticSection(detail))
+	relevantSources := []string{"tmux"}
+	if detail.PendingMail > 0 || detail.AgentMailName != "" {
+		relevantSources = append(relevantSources, "mail")
+	}
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSourceHealthDiagnosticSection(sourceRows, relevantSources...))
+	return diagnostics
+}
+
+func buildWorkDiagnostics(detail InspectWorkDetail, sourceRows []state.SourceHealth) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 3)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildProjectionDiagnosticSection("Work", detail.Projection, detail.Health))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildWorkStateDiagnosticSection(detail))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSourceHealthDiagnosticSection(sourceRows, "beads"))
+	return diagnostics
+}
+
+func buildCoordinationDiagnostics(detail InspectCoordinationDetail, sourceRows []state.SourceHealth) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 3)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildProjectionDiagnosticSection("Coordination", detail.Projection, detail.Health))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildCoordinationProblemDiagnosticSection(detail))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSourceHealthDiagnosticSection(sourceRows, "mail"))
+	return diagnostics
+}
+
+func buildQuotaDiagnostics(detail InspectQuotaDetail, sourceRows []state.SourceHealth) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 3)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildProjectionDiagnosticSection("Quota", detail.Projection, detail.Health))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildQuotaStateDiagnosticSection(detail))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildSourceHealthDiagnosticSection(sourceRows, detail.Provider))
+	return diagnostics
+}
+
+func buildIncidentDiagnostics(detail InspectIncidentDetail, itemState *state.AttentionItemState, replayWindow state.AttentionReplayWindow) []InspectDiagnosticSection {
+	diagnostics := make([]InspectDiagnosticSection, 0, 2)
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildIncidentEvidenceDiagnosticSection(detail))
+	diagnostics = appendInspectDiagnosticSection(diagnostics, buildAttentionStateDiagnosticSection(detail.LastEventCursor, itemState, replayWindow))
+	return diagnostics
 }
 
 func inspectAgentDetailFromRuntime(agent state.RuntimeAgent) InspectAgentDetail {
@@ -647,7 +1596,7 @@ func inspectAgentDetailFromRuntime(agent state.RuntimeAgent) InspectAgentDetail 
 		PendingMail:      agent.PendingMail,
 		AgentMailName:    strings.TrimSpace(agent.AgentMailName),
 		Health:           inspectHealth(agent.HealthStatus, agent.HealthReason),
-		Projection:       inspectProjectionInfo(agent.CollectedAt, agent.StaleAfter),
+		Projection:       inspectProjectionInfoWithReasons(agent.CollectedAt, agent.StaleAfter, inspectProjectionStaleReasons(agent.IsFresh(), agent.HealthReason)...),
 	}
 }
 
@@ -667,7 +1616,7 @@ func inspectSessionDetailFromRuntime(sess *state.RuntimeSession, agents []state.
 		LastAttachedAt: FormatTimestampPtr(sess.LastAttachedAt),
 		LastActivityAt: FormatTimestampPtr(sess.LastActivityAt),
 		Health:         inspectHealth(sess.HealthStatus, sess.HealthReason),
-		Projection:     inspectProjectionInfo(sess.CollectedAt, sess.StaleAfter),
+		Projection:     inspectProjectionInfoWithReasons(sess.CollectedAt, sess.StaleAfter, inspectProjectionStaleReasons(sess.IsFresh(), sess.HealthReason)...),
 		Agents:         make([]InspectAgentDetail, 0, len(agents)),
 	}
 	for _, agent := range agents {
@@ -677,6 +1626,374 @@ func inspectSessionDetailFromRuntime(sess *state.RuntimeSession, agents []state.
 		detail.AgentCount = len(detail.Agents)
 	}
 	return detail
+}
+
+func inspectWorkQueue(row state.RuntimeWork) string {
+	switch {
+	case row.Status == "in_progress":
+		return "in_progress"
+	case row.Status == "closed":
+		return "closed"
+	case row.BlockedByCount > 0:
+		return "blocked"
+	default:
+		return "ready"
+	}
+}
+
+func inspectWorkHealth(row state.RuntimeWork) InspectHealth {
+	if !row.IsFresh() {
+		return InspectHealth{
+			Status: "warning",
+			Reason: "Work projection is stale; refresh snapshot/status if you need the latest state",
+		}
+	}
+	switch inspectWorkQueue(row) {
+	case "blocked":
+		return InspectHealth{
+			Status: "warning",
+			Reason: fmt.Sprintf("Blocked by %d upstream issue(s)", row.BlockedByCount),
+		}
+	case "in_progress":
+		reason := "Actively in progress"
+		if assignee := strings.TrimSpace(row.Assignee); assignee != "" {
+			reason = fmt.Sprintf("Claimed by %s", assignee)
+		}
+		return InspectHealth{Status: "healthy", Reason: reason}
+	case "closed":
+		return InspectHealth{Status: "healthy", Reason: "Closed"}
+	default:
+		return InspectHealth{Status: "healthy", Reason: "Ready to claim"}
+	}
+}
+
+func inspectWorkDetailFromRuntime(row *state.RuntimeWork) InspectWorkDetail {
+	item := snapshotWorkItemFromRuntime(*row)
+	labels := item.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	return InspectWorkDetail{
+		ID:              item.ID,
+		Title:           item.Title,
+		TitleDisclosure: item.TitleDisclosure,
+		Status:          strings.TrimSpace(row.Status),
+		Queue:           inspectWorkQueue(*row),
+		Priority:        row.Priority,
+		Type:            strings.TrimSpace(row.BeadType),
+		Assignee:        strings.TrimSpace(row.Assignee),
+		ClaimedAt:       FormatTimestampPtr(row.ClaimedAt),
+		BlockedByCount:  row.BlockedByCount,
+		UnblocksCount:   row.UnblocksCount,
+		Labels:          labels,
+		Score:           item.Score,
+		ScoreReason:     strings.TrimSpace(row.ScoreReason),
+		Health:          inspectWorkHealth(*row),
+		Projection:      inspectProjectionInfoWithReasons(row.CollectedAt, row.StaleAfter, inspectProjectionStaleReasons(row.IsFresh())...),
+	}
+}
+
+func inspectCoordinationMailFromRuntime(row state.RuntimeCoordination) adapters.AgentMailStats {
+	return adapters.AgentMailStats{
+		Unread:                  row.UnreadCount,
+		Pending:                 row.PendingAckCount,
+		Urgent:                  row.UrgentCount,
+		Pane:                    strings.TrimSpace(row.Pane),
+		LatestMessage:           robotFirstNonEmpty(strings.TrimSpace(row.LastMessageSubject), strings.TrimSpace(row.LastMessagePreview)),
+		LatestSubject:           strings.TrimSpace(row.LastMessageSubject),
+		LatestSubjectDisclosure: decodeDisclosureMetadata(row.LastMessageSubjectDisclosure),
+		LatestPreview:           strings.TrimSpace(row.LastMessagePreview),
+		LatestPreviewDisclosure: decodeDisclosureMetadata(row.LastMessagePreviewDisclosure),
+	}
+}
+
+func incidentMatchesCoordination(incident state.Incident, row state.RuntimeCoordination) bool {
+	agentName := strings.TrimSpace(row.AgentName)
+	sessionName := strings.TrimSpace(row.SessionName)
+	for _, candidate := range decodeStringList(incident.AgentIDs) {
+		if strings.TrimSpace(candidate) == agentName {
+			return true
+		}
+	}
+	if sessionName == "" {
+		return false
+	}
+	for _, candidate := range decodeStringList(incident.SessionNames) {
+		if strings.TrimSpace(candidate) == sessionName {
+			return true
+		}
+	}
+	return false
+}
+
+func relatedIncidentIDsForCoordination(incidents []state.Incident, row state.RuntimeCoordination) []string {
+	related := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, incident := range incidents {
+		if !incidentMatchesCoordination(incident, row) {
+			continue
+		}
+		id := strings.TrimSpace(incident.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		related = append(related, id)
+	}
+	return related
+}
+
+func inspectCoordinationProblems(row state.RuntimeCoordination, handoff *state.RuntimeHandoff, incidentIDs []string) []adapters.CoordinationProblem {
+	problems := make([]adapters.CoordinationProblem, 0)
+	agentName := strings.TrimSpace(row.AgentName)
+	if row.UrgentCount > 0 {
+		problems = append(problems, adapters.CoordinationProblem{
+			Kind:     "urgent_mail",
+			Severity: "error",
+			Summary:  fmt.Sprintf("%d urgent message(s) need attention", row.UrgentCount),
+			Agents:   []string{agentName},
+		})
+	}
+	if row.PendingAckCount > 0 {
+		problems = append(problems, adapters.CoordinationProblem{
+			Kind:     "pending_ack",
+			Severity: "warning",
+			Summary:  fmt.Sprintf("%d message(s) still require acknowledgement", row.PendingAckCount),
+			Agents:   []string{agentName},
+		})
+	}
+	if row.UnreadCount >= 5 {
+		problems = append(problems, adapters.CoordinationProblem{
+			Kind:     "mail_backlog",
+			Severity: "warning",
+			Summary:  fmt.Sprintf("Unread mail backlog is %d messages", row.UnreadCount),
+			Agents:   []string{agentName},
+		})
+	}
+	if handoff != nil && strings.TrimSpace(handoff.SessionName) == strings.TrimSpace(row.SessionName) {
+		blockers := decodeStringList(handoff.Blockers)
+		if len(blockers) > 0 {
+			problems = append(problems, adapters.CoordinationProblem{
+				Kind:      "handoff_blockers",
+				Severity:  "warning",
+				Summary:   fmt.Sprintf("Latest handoff for %s reports %d blocker(s)", strings.TrimSpace(row.SessionName), len(blockers)),
+				Agents:    []string{agentName},
+				ThreadIDs: decodeStringList(handoff.AgentMailThreads),
+			})
+		}
+	}
+	if len(incidentIDs) > 0 {
+		problems = append(problems, adapters.CoordinationProblem{
+			Kind:      "related_incidents",
+			Severity:  "error",
+			Summary:   fmt.Sprintf("%d open incident(s) match this agent or session", len(incidentIDs)),
+			Agents:    []string{agentName},
+			ThreadIDs: append([]string(nil), incidentIDs...),
+		})
+	}
+	return problems
+}
+
+func inspectCoordinationHealth(row state.RuntimeCoordination, handoff *state.RuntimeHandoff, incidentIDs []string) InspectHealth {
+	switch {
+	case !row.IsFresh():
+		return InspectHealth{
+			Status: "warning",
+			Reason: "Coordination projection is stale; refresh snapshot/status if you need the latest state",
+		}
+	case len(incidentIDs) > 0:
+		return InspectHealth{
+			Status: "critical",
+			Reason: fmt.Sprintf("%d open incident(s) are linked to this coordination surface", len(incidentIDs)),
+		}
+	case row.UrgentCount > 0:
+		return InspectHealth{
+			Status: "critical",
+			Reason: fmt.Sprintf("%d urgent message(s) need attention", row.UrgentCount),
+		}
+	case row.PendingAckCount > 0:
+		return InspectHealth{
+			Status: "warning",
+			Reason: fmt.Sprintf("%d acknowledgement(s) are still pending", row.PendingAckCount),
+		}
+	case row.UnreadCount >= 5:
+		return InspectHealth{
+			Status: "warning",
+			Reason: fmt.Sprintf("Unread mail backlog is %d messages", row.UnreadCount),
+		}
+	case handoff != nil && strings.TrimSpace(handoff.SessionName) == strings.TrimSpace(row.SessionName) && len(decodeStringList(handoff.Blockers)) > 0:
+		return InspectHealth{
+			Status: "warning",
+			Reason: "Latest session handoff still carries blockers",
+		}
+	default:
+		return InspectHealth{
+			Status: "healthy",
+			Reason: "No urgent coordination pressure detected",
+		}
+	}
+}
+
+func inspectCoordinationDetailFromRuntime(row *state.RuntimeCoordination, handoff *state.RuntimeHandoff, incidents []state.Incident) InspectCoordinationDetail {
+	relatedIncidents := relatedIncidentIDsForCoordination(incidents, *row)
+	detail := InspectCoordinationDetail{
+		AgentName:        strings.TrimSpace(row.AgentName),
+		Session:          strings.TrimSpace(row.SessionName),
+		Pane:             strings.TrimSpace(row.Pane),
+		Mail:             inspectCoordinationMailFromRuntime(*row),
+		LastMessageAt:    FormatTimestampPtr(row.LastMessageAt),
+		LastSentAt:       FormatTimestampPtr(row.LastSentAt),
+		LastReceivedAt:   FormatTimestampPtr(row.LastReceivedAt),
+		RelatedIncidents: relatedIncidents,
+		Problems:         []adapters.CoordinationProblem{},
+		Health:           inspectCoordinationHealth(*row, handoff, relatedIncidents),
+		Projection:       inspectProjectionInfoWithReasons(row.CollectedAt, row.StaleAfter, inspectProjectionStaleReasons(row.IsFresh())...),
+	}
+	if handoff != nil && strings.TrimSpace(handoff.SessionName) == detail.Session {
+		detail.Handoff = statusHandoffFromRuntime(handoff)
+	}
+	detail.Problems = inspectCoordinationProblems(*row, handoff, relatedIncidents)
+	return detail
+}
+
+func canonicalInspectQuotaID(provider, account string) string {
+	provider = strings.TrimSpace(provider)
+	account = strings.TrimSpace(account)
+	if provider == "" {
+		return account
+	}
+	if account == "" {
+		return provider
+	}
+	return provider + "/" + account
+}
+
+func parseInspectQuotaID(value string) (string, string) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", ""
+	}
+	if strings.Contains(trimmed, "/") {
+		parts := strings.SplitN(trimmed, "/", 2)
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	if strings.Contains(trimmed, ":") {
+		parts := strings.SplitN(trimmed, ":", 2)
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return "", ""
+}
+
+func inspectQuotaHealth(row state.RuntimeQuota) InspectHealth {
+	reasonCode := snapshotQuotaReasonCode(row)
+	switch reasonCode {
+	case adapters.ReasonQuotaExceededTokens, adapters.ReasonQuotaExceededRequests,
+		adapters.ReasonQuotaExceededCost, adapters.ReasonQuotaSuspended:
+		return InspectHealth{
+			Status: "critical",
+			Reason: robotFirstNonEmpty(strings.TrimSpace(row.HealthReason), fmt.Sprintf("Quota status %s", snapshotQuotaStatus(row))),
+		}
+	case adapters.ReasonQuotaCriticalTokens, adapters.ReasonQuotaCriticalRequests,
+		adapters.ReasonQuotaWarningTokens, adapters.ReasonQuotaWarningRequests,
+		adapters.ReasonQuotaWarningRateLimit, adapters.ReasonQuotaUnavailable:
+		return InspectHealth{
+			Status: "warning",
+			Reason: robotFirstNonEmpty(strings.TrimSpace(row.HealthReason), fmt.Sprintf("Quota status %s", snapshotQuotaStatus(row))),
+		}
+	default:
+		return InspectHealth{
+			Status: "healthy",
+			Reason: robotFirstNonEmpty(strings.TrimSpace(row.HealthReason), "Quota healthy"),
+		}
+	}
+}
+
+func inspectQuotaDetailFromRuntime(row *state.RuntimeQuota) InspectQuotaDetail {
+	detail := InspectQuotaDetail{
+		ID:            canonicalInspectQuotaID(row.Provider, row.Account),
+		Provider:      strings.TrimSpace(row.Provider),
+		Account:       strings.TrimSpace(row.Account),
+		Status:        snapshotQuotaStatus(*row),
+		ReasonCode:    snapshotQuotaReasonCode(*row),
+		UsedPctKnown:  row.UsedPctKnown,
+		UsedPctSource: strings.TrimSpace(string(row.UsedPctSource)),
+		LimitHit:      row.LimitHit,
+		ResetAt:       FormatTimestampPtr(row.ResetsAt),
+		IsActive:      row.IsActive,
+		Healthy:       row.Healthy,
+		HealthReason:  strings.TrimSpace(row.HealthReason),
+		Health:        inspectQuotaHealth(*row),
+		Projection:    inspectProjectionInfoWithReasons(row.CollectedAt, row.StaleAfter, inspectProjectionStaleReasons(row.IsFresh(), row.HealthReason)...),
+	}
+	if row.UsedPctKnown {
+		usagePercent := row.UsedPct
+		detail.UsagePercent = &usagePercent
+	}
+	return detail
+}
+
+func inspectIncidentHealth(incident *state.Incident) InspectHealth {
+	status := strings.TrimSpace(string(incident.Status))
+	severity := strings.TrimSpace(string(incident.Severity))
+	switch incident.Status {
+	case state.IncidentStatusResolved:
+		return InspectHealth{Status: "healthy", Reason: "Incident resolved"}
+	case state.IncidentStatusMuted:
+		return InspectHealth{Status: "warning", Reason: robotFirstNonEmpty(strings.TrimSpace(incident.MutedReason), "Incident muted")}
+	case state.IncidentStatusInvestigating:
+		return InspectHealth{Status: "warning", Reason: fmt.Sprintf("Incident investigating with %s severity", severity)}
+	default:
+		switch severity {
+		case "critical", "error":
+			return InspectHealth{Status: "critical", Reason: fmt.Sprintf("Incident %s with %s severity", status, severity)}
+		case "warning":
+			return InspectHealth{Status: "warning", Reason: fmt.Sprintf("Incident %s with warning severity", status)}
+		default:
+			return InspectHealth{Status: "healthy", Reason: fmt.Sprintf("Incident %s", robotFirstNonEmpty(status, "open"))}
+		}
+	}
+}
+
+func inspectIncidentDetailFromState(incident *state.Incident) InspectIncidentDetail {
+	sessionNames := decodeStringList(incident.SessionNames)
+	if sessionNames == nil {
+		sessionNames = []string{}
+	}
+	agentIDs := decodeStringList(incident.AgentIDs)
+	if agentIDs == nil {
+		agentIDs = []string{}
+	}
+	return InspectIncidentDetail{
+		ID:               strings.TrimSpace(incident.ID),
+		Fingerprint:      strings.TrimSpace(incident.Fingerprint),
+		Title:            strings.TrimSpace(incident.Title),
+		Family:           strings.TrimSpace(incident.Family),
+		Category:         strings.TrimSpace(incident.Category),
+		Status:           strings.TrimSpace(string(incident.Status)),
+		Severity:         strings.TrimSpace(string(incident.Severity)),
+		SessionNames:     sessionNames,
+		AgentIDs:         agentIDs,
+		AlertCount:       incident.AlertCount,
+		EventCount:       incident.EventCount,
+		FirstEventCursor: incident.FirstEventCursor,
+		LastEventCursor:  incident.LastEventCursor,
+		StartedAt:        FormatTimestamp(incident.StartedAt),
+		LastEventAt:      FormatTimestamp(incident.LastEventAt),
+		AcknowledgedAt:   FormatTimestampPtr(incident.AcknowledgedAt),
+		AcknowledgedBy:   strings.TrimSpace(incident.AcknowledgedBy),
+		ResolvedAt:       FormatTimestampPtr(incident.ResolvedAt),
+		ResolvedBy:       strings.TrimSpace(incident.ResolvedBy),
+		MutedAt:          FormatTimestampPtr(incident.MutedAt),
+		MutedBy:          strings.TrimSpace(incident.MutedBy),
+		MutedReason:      strings.TrimSpace(incident.MutedReason),
+		RootCause:        strings.TrimSpace(incident.RootCause),
+		Resolution:       strings.TrimSpace(incident.Resolution),
+		Notes:            strings.TrimSpace(incident.Notes),
+		Health:           inspectIncidentHealth(incident),
+	}
 }
 
 // GetInspectSession returns projection-backed session detail.
@@ -723,6 +2040,8 @@ func GetInspectSession(opts InspectSessionOptions) (*InspectSessionOutput, error
 
 	output.Session = session.Name
 	output.Detail = inspectSessionDetailFromRuntime(session, agents)
+	sourceRows, _ := store.GetAllSourceHealth()
+	output.Diagnostics = buildSessionDiagnostics(output.Detail, sourceRows)
 
 	var warnings []string
 	var notes []string
@@ -790,6 +2109,8 @@ func GetInspectAgent(opts InspectAgentOptions) (*InspectAgentOutput, error) {
 
 	output.AgentID = strings.TrimSpace(agent.ID)
 	output.Detail = inspectAgentDetailFromRuntime(*agent)
+	sourceRows, _ := store.GetAllSourceHealth()
+	output.Diagnostics = buildAgentDiagnostics(output.Detail, sourceRows)
 
 	var warnings []string
 	var notes []string
@@ -812,6 +2133,305 @@ func GetInspectAgent(opts InspectAgentOptions) (*InspectAgentOutput, error) {
 // PrintInspectAgent outputs projection-backed agent inspection.
 func PrintInspectAgent(opts InspectAgentOptions) error {
 	output, err := GetInspectAgent(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+// GetInspectWork returns projection-backed work detail.
+func GetInspectWork(opts InspectWorkOptions) (*InspectWorkOutput, error) {
+	output := newInspectWorkOutput(opts.BeadID)
+	if strings.TrimSpace(opts.BeadID) == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("bead id required"),
+			ErrCodeInvalidFlag,
+			"Specify bead id with --robot-inspect-work=BEAD_ID",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Projection-backed inspect requires the shared runtime store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	work, err := store.GetRuntimeWork(strings.TrimSpace(opts.BeadID))
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load work projection")
+		return output, nil
+	}
+	if work == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("work item '%s' not found in runtime projection", strings.TrimSpace(opts.BeadID)),
+			ErrCodeInvalidFlag,
+			"Use ntm --robot-snapshot to list projected bead ids for drill-down",
+		)
+		return output, nil
+	}
+
+	output.BeadID = strings.TrimSpace(work.BeadID)
+	output.Detail = inspectWorkDetailFromRuntime(work)
+	sourceRows, _ := store.GetAllSourceHealth()
+	output.Diagnostics = buildWorkDiagnostics(output.Detail, sourceRows)
+
+	var warnings []string
+	var notes []string
+	if !output.Detail.Projection.Fresh {
+		warnings = append(warnings, "Work projection is stale; refresh snapshot/status if you need the latest state")
+	}
+	switch output.Detail.Queue {
+	case "blocked":
+		notes = append(notes, fmt.Sprintf("Blocked by %d upstream issue(s)", output.Detail.BlockedByCount))
+	case "in_progress":
+		if output.Detail.Assignee != "" {
+			notes = append(notes, fmt.Sprintf("Assigned to %s", output.Detail.Assignee))
+		}
+	default:
+		notes = append(notes, fmt.Sprintf("Queue state: %s", output.Detail.Queue))
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary:  fmt.Sprintf("Work %s: %s (%s)", output.Detail.ID, output.Detail.Title, output.Detail.Queue),
+		Warnings: warnings,
+		Notes:    notes,
+	}
+	return output, nil
+}
+
+// PrintInspectWork outputs projection-backed work inspection.
+func PrintInspectWork(opts InspectWorkOptions) error {
+	output, err := GetInspectWork(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+// GetInspectCoordination returns projection-backed coordination detail.
+func GetInspectCoordination(opts InspectCoordinationOptions) (*InspectCoordinationOutput, error) {
+	output := newInspectCoordinationOutput(opts.AgentName)
+	if strings.TrimSpace(opts.AgentName) == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("agent name required"),
+			ErrCodeInvalidFlag,
+			"Specify Agent Mail identity with --robot-inspect-coordination=AGENT_NAME",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Projection-backed inspect requires the shared runtime store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	coord, err := store.GetRuntimeCoordination(strings.TrimSpace(opts.AgentName))
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load coordination projection")
+		return output, nil
+	}
+	if coord == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("coordination state for '%s' not found in runtime projection", strings.TrimSpace(opts.AgentName)),
+			ErrCodeInvalidFlag,
+			"Use ntm --robot-inspect-agent=SESSION:PANE to discover Agent Mail identity for coordination drill-down",
+		)
+		return output, nil
+	}
+
+	handoff, handoffErr := store.GetRuntimeHandoff()
+	if handoffErr != nil {
+		output.RobotResponse = NewErrorResponse(handoffErr, ErrCodeInternalError, "Failed to load runtime handoff projection")
+		return output, nil
+	}
+	incidents, incidentErr := store.ListOpenIncidents()
+	if incidentErr != nil {
+		output.RobotResponse = NewErrorResponse(incidentErr, ErrCodeInternalError, "Failed to load related incidents")
+		return output, nil
+	}
+
+	output.AgentName = strings.TrimSpace(coord.AgentName)
+	output.Detail = inspectCoordinationDetailFromRuntime(coord, handoff, incidents)
+	sourceRows, _ := store.GetAllSourceHealth()
+	output.Diagnostics = buildCoordinationDiagnostics(output.Detail, sourceRows)
+
+	var warnings []string
+	var notes []string
+	if !output.Detail.Projection.Fresh {
+		warnings = append(warnings, "Coordination projection is stale; refresh snapshot/status if you need the latest state")
+	}
+	if len(output.Detail.RelatedIncidents) > 0 {
+		notes = append(notes, fmt.Sprintf("Related incidents: %s", strings.Join(output.Detail.RelatedIncidents, ", ")))
+	}
+	if output.Detail.Handoff != nil {
+		notes = append(notes, fmt.Sprintf("Latest handoff session: %s", output.Detail.Handoff.Session))
+	}
+	if len(notes) == 0 {
+		notes = append(notes, "Reservation and conflict escalation remain visible through incidents and attention until they are projected directly")
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary:  fmt.Sprintf("Coordination %s: unread=%d urgent=%d pending_ack=%d", output.Detail.AgentName, output.Detail.Mail.Unread, output.Detail.Mail.Urgent, output.Detail.Mail.Pending),
+		Warnings: warnings,
+		Notes:    notes,
+	}
+	return output, nil
+}
+
+// PrintInspectCoordination outputs projection-backed coordination inspection.
+func PrintInspectCoordination(opts InspectCoordinationOptions) error {
+	output, err := GetInspectCoordination(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+// GetInspectQuota returns projection-backed quota detail.
+func GetInspectQuota(opts InspectQuotaOptions) (*InspectQuotaOutput, error) {
+	output := newInspectQuotaOutput(opts.QuotaID)
+	provider, account := parseInspectQuotaID(opts.QuotaID)
+	if provider == "" || account == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("quota id required"),
+			ErrCodeInvalidFlag,
+			"Specify quota identity with --robot-inspect-quota=PROVIDER/ACCOUNT",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Projection-backed inspect requires the shared runtime store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	quota, err := store.GetRuntimeQuota(provider, account)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load quota projection")
+		return output, nil
+	}
+	if quota == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("quota '%s' not found in runtime projection", canonicalInspectQuotaID(provider, account)),
+			ErrCodeInvalidFlag,
+			"Use ntm --robot-snapshot to list projected provider/account quota identities",
+		)
+		return output, nil
+	}
+
+	output.QuotaID = canonicalInspectQuotaID(quota.Provider, quota.Account)
+	output.Detail = inspectQuotaDetailFromRuntime(quota)
+	sourceRows, _ := store.GetAllSourceHealth()
+	output.Diagnostics = buildQuotaDiagnostics(output.Detail, sourceRows)
+
+	var warnings []string
+	var notes []string
+	if !output.Detail.Projection.Fresh {
+		warnings = append(warnings, "Quota projection is stale; refresh snapshot/status if you need the latest state")
+	}
+	if output.Detail.ResetAt != "" {
+		notes = append(notes, fmt.Sprintf("Next reset at %s", output.Detail.ResetAt))
+	}
+	if output.Detail.HealthReason != "" {
+		notes = append(notes, output.Detail.HealthReason)
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary:  fmt.Sprintf("Quota %s: %s", output.Detail.ID, output.Detail.Status),
+		Warnings: warnings,
+		Notes:    notes,
+	}
+	return output, nil
+}
+
+// PrintInspectQuota outputs projection-backed quota inspection.
+func PrintInspectQuota(opts InspectQuotaOptions) error {
+	output, err := GetInspectQuota(opts)
+	if err != nil {
+		return err
+	}
+	return encodeJSON(output)
+}
+
+// GetInspectIncident returns store-backed incident detail.
+func GetInspectIncident(opts InspectIncidentOptions) (*InspectIncidentOutput, error) {
+	output := newInspectIncidentOutput(opts.IncidentID)
+	if strings.TrimSpace(opts.IncidentID) == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("incident id required"),
+			ErrCodeInvalidFlag,
+			"Specify incident id with --robot-inspect-incident=INCIDENT_ID",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("runtime projection store unavailable"),
+			ErrCodeNotImplemented,
+			"Incident drill-down requires the shared store; refresh snapshot/status after projection initialization",
+		)
+		return output, nil
+	}
+
+	incident, err := store.GetIncident(strings.TrimSpace(opts.IncidentID))
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load incident detail")
+		return output, nil
+	}
+	if incident == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("incident '%s' not found", strings.TrimSpace(opts.IncidentID)),
+			ErrCodeInvalidFlag,
+			"Use ntm --robot-snapshot or ntm --robot-attention to list active incident ids",
+		)
+		return output, nil
+	}
+
+	output.IncidentID = strings.TrimSpace(incident.ID)
+	output.Detail = inspectIncidentDetailFromState(incident)
+	var replayWindow state.AttentionReplayWindow
+	var attentionState *state.AttentionItemState
+	if output.Detail.LastEventCursor != nil {
+		replayWindow, _ = store.GetAttentionReplayWindow()
+		attentionState, _ = store.GetAttentionItemStateByCursor(*output.Detail.LastEventCursor)
+	}
+	output.Diagnostics = buildIncidentDiagnostics(output.Detail, attentionState, replayWindow)
+
+	var notes []string
+	if output.Detail.LastEventCursor != nil {
+		notes = append(notes, fmt.Sprintf("Last attention/event cursor: %d", *output.Detail.LastEventCursor))
+	}
+	if output.Detail.ResolvedAt != "" {
+		notes = append(notes, fmt.Sprintf("Resolved at %s", output.Detail.ResolvedAt))
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary: fmt.Sprintf("Incident %s: %s %s", output.Detail.ID, output.Detail.Status, output.Detail.Severity),
+		Notes:   notes,
+	}
+	return output, nil
+}
+
+// PrintInspectIncident outputs store-backed incident inspection.
+func PrintInspectIncident(opts InspectIncidentOptions) error {
+	output, err := GetInspectIncident(opts)
 	if err != nil {
 		return err
 	}

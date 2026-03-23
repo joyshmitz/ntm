@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path"
@@ -1178,7 +1179,9 @@ func (oc *OutputCapture) Stats() OutputCaptureStats {
 	for paneID, captures := range oc.captures {
 		stats.TotalCaptures += len(captures)
 		if len(captures) > 0 {
-			stats.OldestCapture = captures[0].Timestamp
+			if stats.OldestCapture.IsZero() || captures[0].Timestamp.Before(stats.OldestCapture) {
+				stats.OldestCapture = captures[0].Timestamp
+			}
 			if stats.NewestCapture.IsZero() || captures[len(captures)-1].Timestamp.After(stats.NewestCapture) {
 				stats.NewestCapture = captures[len(captures)-1].Timestamp
 			}
@@ -1317,7 +1320,10 @@ func (g *SessionSummaryGenerator) GenerateSummary(session string, since time.Dur
 
 	// Add detected conflicts if conflict detector is available
 	if g.conflictDetector != nil {
-		conflicts, _ := g.conflictDetector.DetectConflicts(context.Background())
+		conflicts, err := g.conflictDetector.DetectConflicts(context.Background())
+		if err != nil {
+			log.Printf("conflict detection failed: %v", err)
+		}
 		for _, c := range conflicts {
 			summary.Conflicts = append(summary.Conflicts, FileConflict{
 				Path:   c.Path,

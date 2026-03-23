@@ -205,8 +205,8 @@ func TestStorage_Load_NullValues(t *testing.T) {
 
 	// Write JSON with null values
 	nullCP := `{
-		"id": "test-id",
-		"session_name": "test",
+		"id": "20251210-120000-nulls",
+		"session_name": "testproject",
 		"session": null,
 		"git": null
 	}`
@@ -221,8 +221,8 @@ func TestStorage_Load_NullValues(t *testing.T) {
 	}
 
 	// Verify graceful handling of nulls
-	if cp.ID != "test-id" {
-		t.Errorf("ID should be 'test-id', got %q", cp.ID)
+	if cp.ID != checkpointID {
+		t.Errorf("ID should be %q, got %q", checkpointID, cp.ID)
 	}
 	// Session and Git should be zero values
 	if len(cp.Session.Panes) != 0 {

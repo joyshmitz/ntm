@@ -665,6 +665,26 @@ func TestStorage_LoadGitPatch(t *testing.T) {
 	}
 }
 
+func TestStorage_SaveGitPatch_CreatesCheckpointDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-autocreate"
+	expectedPatch := "diff --git a/file.go b/file.go\n"
+
+	if err := storage.SaveGitPatch(sessionName, checkpointID, expectedPatch); err != nil {
+		t.Fatalf("SaveGitPatch() failed: %v", err)
+	}
+
+	loaded, err := storage.LoadGitPatch(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitPatch() failed: %v", err)
+	}
+	if loaded != expectedPatch {
+		t.Errorf("LoadGitPatch() = %q, want %q", loaded, expectedPatch)
+	}
+}
+
 func TestStorage_SaveGitStatus(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
 	if err != nil {
@@ -695,6 +715,27 @@ func TestStorage_SaveGitStatus(t *testing.T) {
 	}
 
 	// Verify status was saved
+	statusPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitStatusFile)
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("Failed to read status file: %v", err)
+	}
+	if string(data) != status {
+		t.Errorf("Status content mismatch: got %q, want %q", string(data), status)
+	}
+}
+
+func TestStorage_SaveGitStatus_CreatesCheckpointDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-autocreate"
+	status := "M  file.go\n?? newfile.go"
+
+	if err := storage.SaveGitStatus(sessionName, checkpointID, status); err != nil {
+		t.Fatalf("SaveGitStatus() failed: %v", err)
+	}
+
 	statusPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitStatusFile)
 	data, err := os.ReadFile(statusPath)
 	if err != nil {

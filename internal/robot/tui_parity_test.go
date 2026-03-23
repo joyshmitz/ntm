@@ -9,8 +9,20 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
+
+func ptrInt64(v int64) *int64 { return &v }
+
+func diagnosticSectionByKind(sections []InspectDiagnosticSection, kind string) *InspectDiagnosticSection {
+	for i := range sections {
+		if sections[i].Kind == kind {
+			return &sections[i]
+		}
+	}
+	return nil
+}
 
 func TestFormatTerseLine_FeedUnavailableMarker(t *testing.T) {
 	state := TerseState{
@@ -899,6 +911,13 @@ func TestInspectSessionOutputStructure(t *testing.T) {
 		SchemaID:      defaultRobotSchemaID("inspect-session"),
 		SchemaVersion: inspectSessionSchemaVersion,
 		Session:       "alpha",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "projection",
+				Summary: "Session projection fresh",
+				Entries: []InspectDiagnosticEntry{{Code: "projection_freshness", Summary: "Session projection is fresh"}},
+			},
+		},
 		Detail: InspectSessionDetail{
 			Name:       "alpha",
 			Attached:   true,
@@ -929,7 +948,7 @@ func TestInspectSessionOutputStructure(t *testing.T) {
 		t.Fatalf("failed to unmarshal InspectSessionOutput: %v", err)
 	}
 
-	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "session", "detail"}
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "session", "detail", "diagnostics"}
 	for _, field := range requiredFields {
 		if _, ok := parsed[field]; !ok {
 			t.Errorf("missing required field: %s", field)
@@ -943,6 +962,13 @@ func TestInspectAgentOutputStructure(t *testing.T) {
 		SchemaID:      defaultRobotSchemaID("inspect-agent"),
 		SchemaVersion: inspectAgentSchemaVersion,
 		AgentID:       "alpha:%1",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "agent_state",
+				Summary: "Agent projected state",
+				Entries: []InspectDiagnosticEntry{{Code: "agent_state", Summary: "Agent alpha:%1 is idle"}},
+			},
+		},
 		Detail: InspectAgentDetail{
 			ID:         "alpha:%1",
 			Session:    "alpha",
@@ -964,7 +990,7 @@ func TestInspectAgentOutputStructure(t *testing.T) {
 		t.Fatalf("failed to unmarshal InspectAgentOutput: %v", err)
 	}
 
-	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "agent_id", "detail"}
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "agent_id", "detail", "diagnostics"}
 	for _, field := range requiredFields {
 		if _, ok := parsed[field]; !ok {
 			t.Errorf("missing required field: %s", field)
@@ -1027,6 +1053,15 @@ func TestGetInspectSessionUsesProjectionStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertRuntimeAgent: %v", err)
 	}
+	if err := store.UpsertSourceHealth(&state.SourceHealth{
+		SourceName:  "tmux",
+		Available:   true,
+		Healthy:     false,
+		Reason:      "socket refresh lagging",
+		LastCheckAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertSourceHealth(tmux): %v", err)
+	}
 
 	output, err := GetInspectSession(InspectSessionOptions{Session: "alpha"})
 	if err != nil {
@@ -1046,6 +1081,13 @@ func TestGetInspectSessionUsesProjectionStore(t *testing.T) {
 	}
 	if output.Detail.Agents[0].ID != "alpha:%1" || output.Detail.Agents[0].CurrentBead != "bd-j9jo3.6.4" {
 		t.Fatalf("Agent detail = %+v", output.Detail.Agents[0])
+	}
+	if diagnosticSectionByKind(output.Diagnostics, "projection") == nil {
+		t.Fatalf("Diagnostics = %+v, want projection section", output.Diagnostics)
+	}
+	sourceSection := diagnosticSectionByKind(output.Diagnostics, "source_health")
+	if sourceSection == nil || len(sourceSection.Entries) != 1 || sourceSection.Entries[0].Source != "tmux" {
+		t.Fatalf("Diagnostics source health = %+v", output.Diagnostics)
 	}
 }
 
@@ -1082,20 +1124,29 @@ func TestGetInspectAgentUsesProjectionStore(t *testing.T) {
 		t.Fatalf("UpsertRuntimeSession: %v", err)
 	}
 	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
-		ID:             "alpha:%2",
-		SessionName:    "alpha",
-		Pane:           "%2",
-		AgentType:      "codex",
-		TypeConfidence: 0.8,
-		TypeMethod:     "title",
-		State:          state.AgentStateIdle,
-		PendingMail:    1,
-		HealthStatus:   state.HealthStatusWarning,
-		HealthReason:   "waiting for prompt",
-		CollectedAt:    now,
-		StaleAfter:     staleAfter,
+		ID:              "alpha:%2",
+		SessionName:     "alpha",
+		Pane:            "%2",
+		AgentType:       "codex",
+		TypeConfidence:  0.8,
+		TypeMethod:      "title",
+		State:           state.AgentStateIdle,
+		OutputTailLines: 24,
+		PendingMail:     1,
+		HealthStatus:    state.HealthStatusWarning,
+		HealthReason:    "waiting for prompt",
+		CollectedAt:     now,
+		StaleAfter:      staleAfter,
 	}); err != nil {
 		t.Fatalf("UpsertRuntimeAgent: %v", err)
+	}
+	if err := store.UpsertSourceHealth(&state.SourceHealth{
+		SourceName:  "tmux",
+		Available:   true,
+		Healthy:     true,
+		LastCheckAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertSourceHealth(tmux): %v", err)
 	}
 
 	output, err := GetInspectAgent(InspectAgentOptions{AgentID: "alpha:%2"})
@@ -1110,6 +1161,489 @@ func TestGetInspectAgentUsesProjectionStore(t *testing.T) {
 	}
 	if output.Detail.ID != "alpha:%2" || output.Detail.Type != "codex" || output.Detail.Health.Status != "warning" {
 		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	agentSection := diagnosticSectionByKind(output.Diagnostics, "agent_state")
+	if agentSection == nil || len(agentSection.Entries) < 2 {
+		t.Fatalf("Diagnostics = %+v, want agent_state section with bounded output entry", output.Diagnostics)
+	}
+}
+
+func TestInspectWorkOutputStructure(t *testing.T) {
+	output := InspectWorkOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-work"),
+		SchemaVersion: inspectWorkSchemaVersion,
+		BeadID:        "bd-j9jo3.6.6",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "work_state",
+				Summary: "Work queue evidence",
+				Entries: []InspectDiagnosticEntry{{Code: "queue_state", Summary: "Work is ready"}},
+			},
+		},
+		Detail: InspectWorkDetail{
+			ID:         "bd-j9jo3.6.6",
+			Title:      "Targeted inspect surfaces",
+			Status:     "open",
+			Queue:      "ready",
+			Priority:   1,
+			Labels:     []string{"robot-redesign"},
+			Health:     InspectHealth{Status: "healthy"},
+			Projection: InspectProjectionInfo{Fresh: true},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectWorkOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectWorkOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "bead_id", "detail", "diagnostics"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestInspectCoordinationOutputStructure(t *testing.T) {
+	output := InspectCoordinationOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-coordination"),
+		SchemaVersion: inspectCoordinationSchemaVersion,
+		AgentName:     "BlueLake",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "coordination_problems",
+				Summary: "Coordination evidence",
+				Entries: []InspectDiagnosticEntry{{Code: "urgent_mail", Summary: "1 urgent message"}},
+			},
+		},
+		Detail: InspectCoordinationDetail{
+			AgentName:        "BlueLake",
+			Mail:             adapters.AgentMailStats{Unread: 2, Pending: 1, Urgent: 1},
+			RelatedIncidents: []string{"inc-demo"},
+			Problems:         []adapters.CoordinationProblem{{Kind: "urgent_mail", Severity: "error", Summary: "1 urgent message"}},
+			Health:           InspectHealth{Status: "critical"},
+			Projection:       InspectProjectionInfo{Fresh: true},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectCoordinationOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectCoordinationOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "agent_name", "detail", "diagnostics"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestInspectQuotaOutputStructure(t *testing.T) {
+	output := InspectQuotaOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-quota"),
+		SchemaVersion: inspectQuotaSchemaVersion,
+		QuotaID:       "anthropic/default",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "quota_state",
+				Summary: "Quota evidence",
+				Entries: []InspectDiagnosticEntry{{Code: "quota_status", Summary: "Quota warning"}},
+			},
+		},
+		Detail: InspectQuotaDetail{
+			ID:         "anthropic/default",
+			Provider:   "anthropic",
+			Account:    "default",
+			Status:     "warning",
+			ReasonCode: adapters.ReasonQuotaWarningTokens,
+			Health:     InspectHealth{Status: "warning"},
+			Projection: InspectProjectionInfo{Fresh: true},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectQuotaOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectQuotaOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "quota_id", "detail", "diagnostics"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestInspectIncidentOutputStructure(t *testing.T) {
+	output := InspectIncidentOutput{
+		RobotResponse: NewRobotResponse(true),
+		SchemaID:      defaultRobotSchemaID("inspect-incident"),
+		SchemaVersion: inspectIncidentSchemaVersion,
+		IncidentID:    "inc-demo",
+		Diagnostics: []InspectDiagnosticSection{
+			{
+				Kind:    "incident_evidence",
+				Summary: "Incident evidence",
+				Entries: []InspectDiagnosticEntry{{Code: "incident_state", Summary: "Incident open"}},
+			},
+		},
+		Detail: InspectIncidentDetail{
+			ID:           "inc-demo",
+			Fingerprint:  "incident:fingerprint",
+			Title:        "Reservation conflict",
+			Status:       "open",
+			Severity:     "error",
+			SessionNames: []string{"alpha"},
+			AgentIDs:     []string{"BlueLake"},
+			StartedAt:    time.Now().UTC().Format(time.RFC3339),
+			LastEventAt:  time.Now().UTC().Format(time.RFC3339),
+			Health:       InspectHealth{Status: "critical"},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal InspectIncidentOutput: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal InspectIncidentOutput: %v", err)
+	}
+
+	requiredFields := []string{"success", "timestamp", "schema_id", "schema_version", "incident_id", "detail", "diagnostics"}
+	for _, field := range requiredFields {
+		if _, ok := parsed[field]; !ok {
+			t.Errorf("missing required field: %s", field)
+		}
+	}
+}
+
+func TestGetInspectWorkUsesProjectionStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	score := 0.91
+	if err := store.UpsertRuntimeWork(&state.RuntimeWork{
+		BeadID:         "bd-j9jo3.6.6",
+		Title:          "Inspect surfaces",
+		Status:         "open",
+		Priority:       1,
+		BeadType:       "task",
+		BlockedByCount: 2,
+		UnblocksCount:  4,
+		Labels:         `["robot-redesign","inspect"]`,
+		Score:          &score,
+		ScoreReason:    "high impact",
+		CollectedAt:    now,
+		StaleAfter:     staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeWork: %v", err)
+	}
+	if err := store.UpsertSourceHealth(&state.SourceHealth{
+		SourceName:  "beads",
+		Available:   true,
+		Healthy:     false,
+		Reason:      "cache lagging",
+		LastCheckAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertSourceHealth(beads): %v", err)
+	}
+
+	output, err := GetInspectWork(InspectWorkOptions{BeadID: "bd-j9jo3.6.6"})
+	if err != nil {
+		t.Fatalf("GetInspectWork: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectWork failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-work") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-work"))
+	}
+	if output.Detail.Queue != "blocked" || output.Detail.BlockedByCount != 2 || len(output.Detail.Labels) != 2 {
+		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	if diagnosticSectionByKind(output.Diagnostics, "work_state") == nil {
+		t.Fatalf("Diagnostics = %+v, want work_state section", output.Diagnostics)
+	}
+	sourceSection := diagnosticSectionByKind(output.Diagnostics, "source_health")
+	if sourceSection == nil || len(sourceSection.Entries) == 0 || sourceSection.Entries[0].Source != "beads" {
+		t.Fatalf("Diagnostics source health = %+v", output.Diagnostics)
+	}
+}
+
+func TestGetInspectCoordinationUsesProjectionStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeCoordination(&state.RuntimeCoordination{
+		AgentName:                    "BlueLake",
+		SessionName:                  "alpha",
+		Pane:                         "%1",
+		UnreadCount:                  6,
+		PendingAckCount:              2,
+		UrgentCount:                  1,
+		LastMessageSubject:           "Need ack",
+		LastMessageSubjectDisclosure: `{"disclosure_state":"visible"}`,
+		LastMessagePreview:           "Please ack the handoff",
+		LastMessagePreviewDisclosure: `{"disclosure_state":"preview_only","preview":"Please ack the handoff"}`,
+		CollectedAt:                  now,
+		StaleAfter:                   staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeCoordination: %v", err)
+	}
+	if err := store.UpsertSourceHealth(&state.SourceHealth{
+		SourceName:  "mail",
+		Available:   true,
+		Healthy:     false,
+		Reason:      "mail poll delayed",
+		LastCheckAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertSourceHealth(mail): %v", err)
+	}
+	if err := store.UpsertRuntimeHandoff(&state.RuntimeHandoff{
+		SessionName:      "alpha",
+		Status:           "waiting",
+		Blockers:         `["mail ack"]`,
+		AgentMailThreads: `["br-123"]`,
+		CollectedAt:      now,
+		StaleAfter:       staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeHandoff: %v", err)
+	}
+	if err := store.CreateIncident(&state.Incident{
+		ID:           "inc-demo",
+		Title:        "Coordination incident",
+		Fingerprint:  "incident:fingerprint",
+		Family:       "coordination",
+		Category:     "reservation_conflict",
+		Status:       state.IncidentStatusOpen,
+		Severity:     state.SeverityError,
+		SessionNames: `["alpha"]`,
+		AgentIDs:     `["BlueLake"]`,
+		StartedAt:    now,
+		LastEventAt:  now,
+	}); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	output, err := GetInspectCoordination(InspectCoordinationOptions{AgentName: "BlueLake"})
+	if err != nil {
+		t.Fatalf("GetInspectCoordination: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectCoordination failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-coordination") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-coordination"))
+	}
+	if output.Detail.Mail.Unread != 6 || output.Detail.Handoff == nil || len(output.Detail.RelatedIncidents) != 1 {
+		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	if diagnosticSectionByKind(output.Diagnostics, "coordination_problems") == nil {
+		t.Fatalf("Diagnostics = %+v, want coordination_problems section", output.Diagnostics)
+	}
+}
+
+func TestGetInspectQuotaUsesProjectionStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	staleAfter := now.Add(time.Hour)
+	if err := store.UpsertRuntimeQuota(&state.RuntimeQuota{
+		Provider:      "anthropic",
+		Account:       "default",
+		UsedPct:       87,
+		UsedPctKnown:  true,
+		UsedPctSource: state.RuntimeQuotaUsedPctSourceTokens,
+		IsActive:      true,
+		Healthy:       true,
+		CollectedAt:   now,
+		StaleAfter:    staleAfter,
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeQuota: %v", err)
+	}
+	if err := store.UpsertSourceHealth(&state.SourceHealth{
+		SourceName:  "anthropic",
+		Available:   true,
+		Healthy:     true,
+		LastCheckAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertSourceHealth(anthropic): %v", err)
+	}
+
+	output, err := GetInspectQuota(InspectQuotaOptions{QuotaID: "anthropic/default"})
+	if err != nil {
+		t.Fatalf("GetInspectQuota: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectQuota failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-quota") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-quota"))
+	}
+	if output.Detail.ID != "anthropic/default" || output.Detail.Status != "warning" {
+		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	if diagnosticSectionByKind(output.Diagnostics, "quota_state") == nil {
+		t.Fatalf("Diagnostics = %+v, want quota_state section", output.Diagnostics)
+	}
+}
+
+func TestGetInspectIncidentUsesStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	cursor, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+		Ts:            now,
+		SessionName:   "alpha",
+		Category:      "incident",
+		EventType:     "opened",
+		Source:        "attention_feed",
+		Actionability: state.ActionabilityActionRequired,
+		Severity:      state.SeverityCritical,
+		Summary:       "Repeated crash incident opened",
+		DedupKey:      "incident:inc-demo",
+	})
+	if err != nil {
+		t.Fatalf("AppendAttentionEvent: %v", err)
+	}
+	itemKey, err := store.ResolveAttentionItemKey(cursor)
+	if err != nil {
+		t.Fatalf("ResolveAttentionItemKey: %v", err)
+	}
+	snoozedUntil := now.Add(15 * time.Minute)
+	if err := store.UpsertAttentionItemState(&state.AttentionItemState{
+		ItemKey:      itemKey,
+		DedupKey:     "incident:inc-demo",
+		State:        state.AttentionStateSnoozed,
+		SnoozedUntil: &snoozedUntil,
+		Pinned:       true,
+		PinnedAt:     &now,
+		PinnedBy:     "operator",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertAttentionItemState: %v", err)
+	}
+	if err := store.CreateIncident(&state.Incident{
+		ID:               "inc-demo",
+		Title:            "Repeated crash",
+		Fingerprint:      "incident:fingerprint",
+		Family:           "agent",
+		Category:         "crash_loop",
+		Status:           state.IncidentStatusInvestigating,
+		Severity:         state.SeverityCritical,
+		SessionNames:     `["alpha"]`,
+		AgentIDs:         `["alpha:%1"]`,
+		AlertCount:       3,
+		EventCount:       5,
+		FirstEventCursor: ptrInt64(cursor),
+		LastEventCursor:  ptrInt64(cursor),
+		StartedAt:        now.Add(-time.Hour),
+		LastEventAt:      now,
+		RootCause:        "quota exhaustion",
+	}); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	output, err := GetInspectIncident(InspectIncidentOptions{IncidentID: "inc-demo"})
+	if err != nil {
+		t.Fatalf("GetInspectIncident: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectIncident failed: %+v", output.RobotResponse)
+	}
+	if output.SchemaID != defaultRobotSchemaID("inspect-incident") {
+		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-incident"))
+	}
+	if output.Detail.ID != "inc-demo" || output.Detail.Fingerprint != "incident:fingerprint" || output.Detail.Health.Status != "warning" {
+		t.Fatalf("Detail = %+v", output.Detail)
+	}
+	if diagnosticSectionByKind(output.Diagnostics, "incident_evidence") == nil {
+		t.Fatalf("Diagnostics = %+v, want incident_evidence section", output.Diagnostics)
+	}
+	attentionSection := diagnosticSectionByKind(output.Diagnostics, "attention_state")
+	if attentionSection == nil || len(attentionSection.Entries) < 2 {
+		t.Fatalf("Diagnostics = %+v, want attention_state section with cursor and state entries", output.Diagnostics)
 	}
 }
 

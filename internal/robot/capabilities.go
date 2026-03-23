@@ -249,6 +249,46 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-inspect-agent=myproject:%1"},
 		},
 		{
+			Name:        "inspect-work",
+			Flag:        "--robot-inspect-work",
+			Category:    "state",
+			Description: "Projection-backed work-item drill-down with stable bead identity.",
+			Parameters: []RobotParameter{
+				{Name: "bead_id", Flag: "--robot-inspect-work", Type: "string", Required: true, Description: "Bead id from snapshot/work surfaces"},
+			},
+			Examples: []string{"ntm --robot-inspect-work=bd-j9jo3.6.6"},
+		},
+		{
+			Name:        "inspect-coordination",
+			Flag:        "--robot-inspect-coordination",
+			Category:    "state",
+			Description: "Projection-backed coordination drill-down keyed by Agent Mail identity.",
+			Parameters: []RobotParameter{
+				{Name: "agent_name", Flag: "--robot-inspect-coordination", Type: "string", Required: true, Description: "Agent Mail identity / coordination key"},
+			},
+			Examples: []string{"ntm --robot-inspect-coordination=BlueLake"},
+		},
+		{
+			Name:        "inspect-quota",
+			Flag:        "--robot-inspect-quota",
+			Category:    "state",
+			Description: "Projection-backed quota drill-down keyed by provider/account.",
+			Parameters: []RobotParameter{
+				{Name: "quota_id", Flag: "--robot-inspect-quota", Type: "string", Required: true, Description: "Provider/account identity, e.g. anthropic/default"},
+			},
+			Examples: []string{"ntm --robot-inspect-quota=anthropic/default"},
+		},
+		{
+			Name:        "inspect-incident",
+			Flag:        "--robot-inspect-incident",
+			Category:    "state",
+			Description: "Store-backed incident drill-down keyed by stable incident id.",
+			Parameters: []RobotParameter{
+				{Name: "incident_id", Flag: "--robot-inspect-incident", Type: "string", Required: true, Description: "Incident id from snapshot/attention surfaces"},
+			},
+			Examples: []string{"ntm --robot-inspect-incident=inc_20260323_abc123"},
+		},
+		{
 			Name:        "files",
 			Flag:        "--robot-files",
 			Category:    "state",

@@ -80,6 +80,7 @@ func run(dir string, args ...string) (string, error) {
 
 	cmd := exec.CommandContext(ctx, "bv", args...)
 	cmd.Dir = normalizedDir
+	cmd.WaitDelay = time.Second // Prevent hanging on open pipes if child processes outlive context
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -201,6 +202,7 @@ func CheckDrift(dir string) DriftResult {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bv", "--check-drift")
+	cmd.WaitDelay = time.Second // Prevent hanging on open pipes
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -667,6 +669,7 @@ func RunBd(dir string, args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 
 		cmd := exec.CommandContext(ctx, "br", args...)
+		cmd.WaitDelay = time.Second // Prevent hanging on open pipes
 		cmd.Dir = dir
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout

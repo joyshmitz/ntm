@@ -1167,7 +1167,9 @@ func replaceBinary(newBinaryPath, currentBinaryPath string) error {
 	}
 	// Ensure we close and remove if something fails before the rename
 	defer func() {
-		dstFile.Close()
+		if dstFile != nil {
+			dstFile.Close()
+		}
 		// Only remove if it still exists (rename moves it)
 		if _, err := os.Stat(tmpDstPath); err == nil {
 			os.Remove(tmpDstPath)
@@ -1178,11 +1180,14 @@ func replaceBinary(newBinaryPath, currentBinaryPath string) error {
 		return fmt.Errorf("failed to copy binary: %w", err)
 	}
 
-	// Ensure data is flushed to disk
+	// Ensure data is flushed to disk and close before rename
 	if err := dstFile.Sync(); err != nil {
 		return fmt.Errorf("failed to sync binary: %w", err)
 	}
-	dstFile.Close()
+	if err := dstFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp binary: %w", err)
+	}
+	dstFile = nil // Prevent defer from closing again
 
 	// Rename the current binary to .old (backup) to allow rollback if needed,
 	// and also to work around Windows locking issues if running.

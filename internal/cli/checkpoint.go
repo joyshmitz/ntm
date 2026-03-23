@@ -38,9 +38,22 @@ func resolveCheckpointStorageSessionArg(session string) (string, error) {
 	if err := tmux.ValidateSessionName(session); err != nil {
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
+	allowPrefix := !IsJSONOutput()
+	storage := checkpoint.NewStorage()
+	if storedSessions, err := listCheckpointSessions(storage); err == nil {
+		if resolved, _, err := resolveExplicitSessionName(session, checkpointSessionCandidates(storedSessions), allowPrefix); err == nil {
+			return resolved, nil
+		} else {
+			var re *sessionPkg.ResolveExplicitSessionNameError
+			if errors.As(err, &re) &&
+				re.Kind != sessionPkg.ResolveExplicitSessionNameErrorNoSessions &&
+				re.Kind != sessionPkg.ResolveExplicitSessionNameErrorNotFound {
+				return "", err
+			}
+		}
+	}
 	if tmux.IsInstalled() {
 		if sessionList, err := tmux.ListSessions(); err == nil {
-			allowPrefix := !IsJSONOutput()
 			if resolved, _, err := resolveExplicitSessionName(session, sessionList, allowPrefix); err == nil {
 				return resolved, nil
 			} else {
@@ -54,6 +67,14 @@ func resolveCheckpointStorageSessionArg(session string) (string, error) {
 		}
 	}
 	return session, nil
+}
+
+func checkpointSessionCandidates(names []string) []tmux.Session {
+	sessions := make([]tmux.Session, 0, len(names))
+	for _, name := range names {
+		sessions = append(sessions, tmux.Session{Name: name})
+	}
+	return sessions
 }
 
 func newCheckpointCmd() *cobra.Command {

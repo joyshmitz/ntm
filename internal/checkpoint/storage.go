@@ -399,6 +399,9 @@ func (s *Storage) SaveGitPatch(sessionName, checkpointID, patch string) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating checkpoint directory: %w", err)
+	}
 	path := filepath.Join(dir, GitPatchFile)
 	return util.AtomicWriteFile(path, []byte(patch), 0600)
 }
@@ -427,6 +430,9 @@ func (s *Storage) SaveGitStatus(sessionName, checkpointID, status string) error 
 	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating checkpoint directory: %w", err)
 	}
 	path := filepath.Join(dir, GitStatusFile)
 	return util.AtomicWriteFile(path, []byte(status), 0600)

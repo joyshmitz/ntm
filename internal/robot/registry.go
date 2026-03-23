@@ -277,6 +277,22 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			SchemaType: "inspect_agent",
 			Sections:   []string{"sessions", "next_actions"},
 		},
+		"inspect-work": {
+			SchemaType: "inspect_work",
+			Sections:   []string{"work", "next_actions"},
+		},
+		"inspect-coordination": {
+			SchemaType: "inspect_coordination",
+			Sections:   []string{"coordination", "next_actions"},
+		},
+		"inspect-quota": {
+			SchemaType: "inspect_quota",
+			Sections:   []string{"quota", "next_actions"},
+		},
+		"inspect-incident": {
+			SchemaType: "inspect_incident",
+			Sections:   []string{"incidents", "next_actions"},
+		},
 	}
 }
 

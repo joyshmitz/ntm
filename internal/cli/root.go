@@ -1687,6 +1687,46 @@ Shell Integration:
 			}
 			return
 		}
+		if robotInspectWork != "" {
+			opts := robot.InspectWorkOptions{
+				BeadID: robotInspectWork,
+			}
+			if err := robot.PrintInspectWork(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotInspectCoord != "" {
+			opts := robot.InspectCoordinationOptions{
+				AgentName: robotInspectCoord,
+			}
+			if err := robot.PrintInspectCoordination(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotInspectQuota != "" {
+			opts := robot.InspectQuotaOptions{
+				QuotaID: robotInspectQuota,
+			}
+			if err := robot.PrintInspectQuota(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		if robotInspectIncident != "" {
+			opts := robot.InspectIncidentOptions{
+				IncidentID: robotInspectIncident,
+			}
+			if err := robot.PrintInspectIncident(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotContextInject != "" {
 			session := robotContextInject
 			if err := tmux.ValidateSessionName(session); err != nil {
@@ -2585,6 +2625,10 @@ var (
 	robotFiles           string // session name for file changes query
 	robotFilesWindow     string // time window: 5m, 15m, 1h, all (default: 15m)
 	robotFilesLimit      int    // max changes to return
+	robotInspectWork     string // bead id for projection-backed work inspection
+	robotInspectCoord    string // agent mail identity for projection-backed coordination inspection
+	robotInspectQuota    string // provider/account for projection-backed quota inspection
+	robotInspectIncident string // incident id for store-backed incident inspection
 	robotInspectSession  string // session name for projection-backed session inspection
 	robotInspectAgent    string // runtime agent id for projection-backed agent inspection
 	robotInspectPane     string // session name for pane inspection
@@ -3166,6 +3210,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotInspectCode, "inspect-code", false, "Parse code blocks from output. Optional with --robot-inspect-pane")
 	rootCmd.Flags().StringVar(&robotInspectSession, "robot-inspect-session", "", "Projection-backed session drill-down. Required: SESSION. Example: ntm --robot-inspect-session=myproject")
 	rootCmd.Flags().StringVar(&robotInspectAgent, "robot-inspect-agent", "", "Projection-backed agent drill-down. Required: SESSION:PANE runtime agent id. Example: ntm --robot-inspect-agent=myproject:%1")
+	rootCmd.Flags().StringVar(&robotInspectWork, "robot-inspect-work", "", "Projection-backed work drill-down. Required: BEAD_ID. Example: ntm --robot-inspect-work=bd-j9jo3.6.6")
+	rootCmd.Flags().StringVar(&robotInspectCoord, "robot-inspect-coordination", "", "Projection-backed coordination drill-down. Required: AGENT_NAME. Example: ntm --robot-inspect-coordination=BlueLake")
+	rootCmd.Flags().StringVar(&robotInspectQuota, "robot-inspect-quota", "", "Projection-backed quota drill-down. Required: PROVIDER/ACCOUNT. Example: ntm --robot-inspect-quota=anthropic/default")
+	rootCmd.Flags().StringVar(&robotInspectIncident, "robot-inspect-incident", "", "Store-backed incident drill-down. Required: INCIDENT_ID. Example: ntm --robot-inspect-incident=inc_20260323_abc123")
 
 	rootCmd.Flags().StringVar(&robotMetrics, "robot-metrics", "", "Session metrics export. Optional SESSION. Example: ntm --robot-metrics=myproject --metrics-period=24h")
 	rootCmd.Flags().StringVar(&robotMetricsPeriod, "metrics-period", "24h", "Period: 1h, 24h, 7d, all. Optional with --robot-metrics. Example: --metrics-period=7d")
