@@ -92,14 +92,12 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey := GetProjectRoot()
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
-	}
-	if cfg != nil {
-		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
-			projectKey = configuredProjectDir
-		}
 	}
 
 	// Create coordinator to get status
@@ -283,14 +281,12 @@ func runCoordinatorDigest(cmd *cobra.Command, args []string, sendMail bool) erro
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey := GetProjectRoot()
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
-	}
-	if cfg != nil {
-		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
-			projectKey = configuredProjectDir
-		}
 	}
 
 	mailClient := newAgentMailClient(projectKey)
@@ -412,14 +408,12 @@ func runCoordinatorConflicts(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey := GetProjectRoot()
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
-	}
-	if cfg != nil {
-		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
-			projectKey = configuredProjectDir
-		}
 	}
 
 	mailClient := newAgentMailClient(projectKey)

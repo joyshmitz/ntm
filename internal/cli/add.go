@@ -89,7 +89,10 @@ func newAddCmd() *cobra.Command {
 				sessionName = config.FormatSessionName(sessionName, label)
 			}
 
-			dir := cfg.GetProjectDir(sessionName)
+			dir := resolveProjectDirForSession(sessionName, true)
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 
 			// Update CASS config from flags
 			if contextLimit > 0 {

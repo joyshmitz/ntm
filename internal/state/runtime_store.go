@@ -1591,6 +1591,92 @@ func (s *Store) GetAttentionEventsSince(sinceCursor int64, limit int) ([]StoredA
 	return events, rows.Err()
 }
 
+// GetEventsForIncident returns replayable attention events linked to the given incident.
+func (s *Store) GetEventsForIncident(incidentID string, limit int) ([]StoredAttentionEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(`
+		SELECT ae.cursor, ae.ts, COALESCE(ae.session_name, ''), COALESCE(ae.pane, ''),
+			ae.category, ae.event_type, ae.source, ae.actionability, ae.severity, COALESCE(ae.reason_code, ''),
+			ae.summary, COALESCE(ae.details, ''), COALESCE(ae.next_actions, ''),
+			COALESCE(ae.dedup_key, ''), ae.dedup_count, ae.expires_at
+		FROM incident_events ie
+		JOIN attention_events ae ON ae.cursor = ie.event_cursor
+		WHERE ie.incident_id = ?
+		  AND (ae.expires_at IS NULL OR ae.expires_at >= datetime('now'))
+		ORDER BY ae.cursor ASC
+		LIMIT ?`, incidentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get events for incident: %w", err)
+	}
+	defer rows.Close()
+
+	var events []StoredAttentionEvent
+	for rows.Next() {
+		var event StoredAttentionEvent
+		if err := rows.Scan(
+			&event.Cursor, &event.Ts, &event.SessionName, &event.Pane,
+			&event.Category, &event.EventType, &event.Source,
+			&event.Actionability, &event.Severity, &event.ReasonCode, &event.Summary,
+			&event.Details, &event.NextActions, &event.DedupKey,
+			&event.DedupCount, &event.ExpiresAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan incident attention event: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// GetAttentionEventsInTimeRange returns replayable attention events between the provided timestamps.
+func (s *Store) GetAttentionEventsInTimeRange(start, end time.Time, limit int) ([]StoredAttentionEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if end.Before(start) {
+		return []StoredAttentionEvent{}, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(`
+		SELECT cursor, ts, COALESCE(session_name, ''), COALESCE(pane, ''),
+			category, event_type, source, actionability, severity, COALESCE(reason_code, ''),
+			summary, COALESCE(details, ''), COALESCE(next_actions, ''),
+			COALESCE(dedup_key, ''), dedup_count, expires_at
+		FROM attention_events
+		WHERE ts BETWEEN ? AND ?
+		  AND (expires_at IS NULL OR expires_at >= datetime('now'))
+		ORDER BY cursor ASC
+		LIMIT ?`, start.UTC(), end.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("get events in time range: %w", err)
+	}
+	defer rows.Close()
+
+	var events []StoredAttentionEvent
+	for rows.Next() {
+		var event StoredAttentionEvent
+		if err := rows.Scan(
+			&event.Cursor, &event.Ts, &event.SessionName, &event.Pane,
+			&event.Category, &event.EventType, &event.Source,
+			&event.Actionability, &event.Severity, &event.ReasonCode, &event.Summary,
+			&event.Details, &event.NextActions, &event.DedupKey,
+			&event.DedupCount, &event.ExpiresAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan ranged attention event: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func attentionItemKeyForEvent(dedupKey string, cursor int64) string {
 	if key := strings.TrimSpace(dedupKey); key != "" {
 		return "dedup:" + key

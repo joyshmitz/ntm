@@ -178,11 +178,15 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 	return agentmail.NewClient(opts...)
 }
 
-func resolveMailProjectKey(session string) string {
-	if strings.TrimSpace(session) != "" {
-		return resolveProjectDirForSession(session, true)
+func resolveAgentMailProjectKey(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", fmt.Errorf("invalid session name: %w", err)
+		}
+		return resolveProjectDirForSession(session, true), nil
 	}
-	return GetProjectRoot()
+	return GetProjectRoot(), nil
 }
 
 // runMailInbox aggregates messages across agents and writes to cmd output.
@@ -204,7 +208,10 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 		}
 	}
 
-	projectKey := resolveMailProjectKey(session)
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -419,7 +426,10 @@ type markSummary struct {
 }
 
 func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, ids []int, urgent bool, fromAgent string, all bool, limit int) error {
-	projectKey := resolveMailProjectKey(session)
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -532,7 +542,10 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 		}
 	}
 
-	projectKey := resolveMailProjectKey(session)
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
 	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}

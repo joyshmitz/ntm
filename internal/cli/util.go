@@ -368,6 +368,13 @@ func GetProjectRoot() string {
 // sessions prefer the current workspace so robot/TUI commands don't drift into
 // projects_base/<session> when launched from a different checked-out repo.
 func resolveProjectDirForSession(session string, preferSession bool) string {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return ""
+		}
+	}
+
 	cwdProject := utilpkg.ResolveProjectDir("")
 
 	activeCfg := cfg

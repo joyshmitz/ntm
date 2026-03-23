@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -35,20 +36,15 @@ func newMessageInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "View unified inbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := GetProjectRoot()
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			if err != nil {
+				return err
 			}
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
-			}
-			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := newAgentMailClient(dir)
-			bdClient := bd.NewMessageClient(dir, agentName)
+			amClient := newAgentMailClient(projectDir)
+			bdClient := bd.NewMessageClient(projectDir, agentName)
 
-			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
+			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, projectDir, agentName)
 
 			msgs, err := unified.Inbox(context.Background())
 			if err != nil {
@@ -79,20 +75,15 @@ func newMessageSendCmd() *cobra.Command {
 			to := args[0]
 			body := args[1]
 
-			dir := GetProjectRoot()
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			if err != nil {
+				return err
 			}
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
-			}
-			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := newAgentMailClient(dir)
-			bdClient := bd.NewMessageClient(dir, agentName)
+			amClient := newAgentMailClient(projectDir)
+			bdClient := bd.NewMessageClient(projectDir, agentName)
 
-			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
+			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, projectDir, agentName)
 
 			return unified.Send(context.Background(), to, subject, body)
 		},
@@ -111,20 +102,15 @@ This marks the message as read.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			dir := GetProjectRoot()
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			if err != nil {
+				return err
 			}
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
-			}
-			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := newAgentMailClient(dir)
-			bdClient := bd.NewMessageClient(dir, agentName)
+			amClient := newAgentMailClient(projectDir)
+			bdClient := bd.NewMessageClient(projectDir, agentName)
 
-			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
+			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, projectDir, agentName)
 
 			msg, err := unified.Read(context.Background(), id)
 			if err != nil {
@@ -164,20 +150,15 @@ This marks the message as both read and acknowledged.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			dir := GetProjectRoot()
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			if err != nil {
+				return err
 			}
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
-			}
-			agentName := fmt.Sprintf("ntm_%s", session)
 
-			amClient := newAgentMailClient(dir)
-			bdClient := bd.NewMessageClient(dir, agentName)
+			amClient := newAgentMailClient(projectDir)
+			bdClient := bd.NewMessageClient(projectDir, agentName)
 
-			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, dir, agentName)
+			unified := agentmail.NewUnifiedMessenger(amClient, bdClient, projectDir, agentName)
 
 			if err := unified.Ack(context.Background(), id); err != nil {
 				return err
@@ -187,4 +168,28 @@ This marks the message as both read and acknowledged.`,
 			return nil
 		},
 	}
+}
+
+func resolveMessageScope(session string) (string, string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", "", fmt.Errorf("invalid session name: %w", err)
+		}
+	}
+
+	projectDir := ""
+	if session != "" {
+		projectDir = resolveProjectDirForSession(session, true)
+	} else {
+		projectDir = GetProjectRoot()
+	}
+	if projectDir == "" {
+		return "", "", fmt.Errorf("getting project root failed")
+	}
+
+	if session == "" {
+		session = filepath.Base(projectDir)
+	}
+	return projectDir, fmt.Sprintf("ntm_%s", session), nil
 }

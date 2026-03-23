@@ -27,14 +27,47 @@ type AttentionStore interface {
 	AppendAttentionEvent(event *state.StoredAttentionEvent) (int64, error)
 	// GetAttentionEventsSince returns events with cursor > sinceCursor.
 	GetAttentionEventsSince(sinceCursor int64, limit int) ([]state.StoredAttentionEvent, error)
+	// GetAttentionEventsInTimeRange returns events inside a bounded time window.
+	GetAttentionEventsInTimeRange(start, end time.Time, limit int) ([]state.StoredAttentionEvent, error)
 	// GetAttentionItemStatesForCursors returns durable operator state keyed by cursor.
 	GetAttentionItemStatesForCursors(cursors []int64) (map[int64]state.AttentionItemState, error)
 	// GetAttentionReplayWindow returns the currently replayable cursor range.
 	GetAttentionReplayWindow() (state.AttentionReplayWindow, error)
 	// GetLatestEventCursor returns the most recent event cursor.
 	GetLatestEventCursor() (int64, error)
+	// GetEventsForIncident returns attention events linked to an incident.
+	GetEventsForIncident(incidentID string, limit int) ([]state.StoredAttentionEvent, error)
+	// GetIncident loads an incident row by ID.
+	GetIncident(id string) (*state.Incident, error)
 	// GCExpiredEvents deletes events past their expiration time.
 	GCExpiredEvents() (int64, error)
+}
+
+type ReconstructionConfidence string
+
+const (
+	ReconstructionConfidenceHigh        ReconstructionConfidence = "high"
+	ReconstructionConfidenceMedium      ReconstructionConfidence = "medium"
+	ReconstructionConfidenceLow         ReconstructionConfidence = "low"
+	ReconstructionConfidenceUnavailable ReconstructionConfidence = "unavailable"
+)
+
+// ReconstructionMeta describes how a bounded historical response was reconstructed.
+type ReconstructionMeta struct {
+	RequestedAt    string                   `json:"requested_at,omitempty"`
+	Method         string                   `json:"method"`
+	Source         string                   `json:"source"`
+	EventsReplayed int                      `json:"events_replayed"`
+	GapsDetected   int                      `json:"gaps_detected"`
+	Interpolations int                      `json:"interpolations"`
+	StartedAt      string                   `json:"started_at"`
+	CompletedAt    string                   `json:"completed_at"`
+	DurationMs     int64                    `json:"duration_ms"`
+	Confidence     ReconstructionConfidence `json:"confidence"`
+	Warnings       []string                 `json:"warnings,omitempty"`
+	ActualStart    string                   `json:"actual_start,omitempty"`
+	ActualEnd      string                   `json:"actual_end,omitempty"`
+	Partial        bool                     `json:"partial,omitempty"`
 }
 
 // =============================================================================
@@ -902,6 +935,111 @@ func (f *AttentionFeed) Replay(sinceCursor int64, limit int) ([]AttentionEvent, 
 		return f.replayFromStore(sinceCursor, limit)
 	}
 	return f.journal.Replay(sinceCursor, limit)
+}
+
+// ReplayForIncident returns replayable attention events around an incident's timeline.
+func (f *AttentionFeed) ReplayForIncident(incidentID string, windowBefore, windowAfter time.Duration) ([]AttentionEvent, int64, error) {
+	if f.store == nil {
+		return nil, 0, fmt.Errorf("attention replay store unavailable")
+	}
+
+	incident, err := f.store.GetIncident(incidentID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load incident: %w", err)
+	}
+	if incident == nil {
+		return nil, 0, fmt.Errorf("incident %q not found", incidentID)
+	}
+
+	if windowBefore < 0 {
+		windowBefore = 0
+	}
+	if windowAfter < 0 {
+		windowAfter = 0
+	}
+
+	start := incident.StartedAt.UTC().Add(-windowBefore)
+	end := incident.LastEventAt.UTC().Add(windowAfter)
+	if end.Before(start) {
+		end = start
+	}
+
+	limit := minInt(maxInt(incident.EventCount+64, 128), 2048)
+	rangeEvents, err := f.store.GetAttentionEventsInTimeRange(start, end, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load incident replay window: %w", err)
+	}
+	linkedEvents, err := f.store.GetEventsForIncident(incidentID, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("load linked incident events: %w", err)
+	}
+
+	merged := mergeStoredAttentionEvents(rangeEvents, linkedEvents)
+	return f.hydrateStoredAttentionEvents(merged), maxStoredAttentionCursor(merged, f.cursor.Current()), nil
+}
+
+// ReconstructAsOf returns the most recent bounded replayable attention context at or before a timestamp.
+func (f *AttentionFeed) ReconstructAsOf(timestamp time.Time, limit int) ([]AttentionEvent, *ReconstructionMeta, error) {
+	if f.store == nil {
+		return nil, nil, fmt.Errorf("attention replay store unavailable")
+	}
+
+	requestedAt := timestamp.UTC()
+	if requestedAt.IsZero() {
+		requestedAt = time.Now().UTC()
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	startedAt := time.Now().UTC()
+	lookback := f.config.RetentionPeriod
+	if lookback <= 0 {
+		lookback = time.Hour
+	}
+	queryLimit := minInt(maxInt(limit*4, limit), 4096)
+
+	storedEvents, err := f.store.GetAttentionEventsInTimeRange(requestedAt.Add(-lookback), requestedAt, queryLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconstruct attention as-of: %w", err)
+	}
+
+	confidence := ReconstructionConfidenceHigh
+	warnings := []string{"RECONSTRUCTED"}
+	partial := false
+	if len(storedEvents) > limit {
+		storedEvents = storedEvents[len(storedEvents)-limit:]
+		confidence = ReconstructionConfidenceMedium
+		warnings = append(warnings, "PARTIAL_DATA")
+		partial = true
+	}
+	if len(storedEvents) == 0 {
+		confidence = ReconstructionConfidenceUnavailable
+		warnings = append(warnings, "PARTIAL_DATA")
+	}
+
+	events := f.hydrateStoredAttentionEvents(storedEvents)
+	completedAt := time.Now().UTC()
+	meta := &ReconstructionMeta{
+		RequestedAt:    requestedAt.Format(time.RFC3339Nano),
+		Method:         "event_replay",
+		Source:         "attention_store",
+		EventsReplayed: len(events),
+		GapsDetected:   0,
+		Interpolations: 0,
+		StartedAt:      startedAt.Format(time.RFC3339Nano),
+		CompletedAt:    completedAt.Format(time.RFC3339Nano),
+		DurationMs:     completedAt.Sub(startedAt).Milliseconds(),
+		Confidence:     confidence,
+		Warnings:       warnings,
+		Partial:        partial,
+	}
+	if len(events) > 0 {
+		meta.ActualStart = events[0].Ts
+		meta.ActualEnd = events[len(events)-1].Ts
+	}
+
+	return events, meta, nil
 }
 
 // CurrentCursor returns the most recently allocated cursor.
@@ -3578,6 +3716,13 @@ func minInt(a, b int) int {
 	return b
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // NOTE: buildSnapshotAttentionSummary is defined in robot.go (br-slg9g)
 
 // NOTE: EventsOptions, filterEventsForRobot, and toStringSetForEvents are
@@ -3632,7 +3777,25 @@ func (f *AttentionFeed) replayFromStore(sinceCursor int64, limit int) ([]Attenti
 	if err != nil {
 		return nil, 0, fmt.Errorf("replay attention events from store: %w", err)
 	}
+	events := f.hydrateStoredAttentionEvents(storedEvents)
 
+	if tailStart := f.ephemeralFromCursor.Load(); tailStart > 0 && len(events) < limit {
+		journalSince := sinceCursor
+		if journalSince < tailStart-1 {
+			journalSince = tailStart - 1
+		}
+		tail, journalCursor, err := f.journal.Replay(journalSince, limit-len(events))
+		if err != nil {
+			return nil, 0, err
+		}
+		events = append(events, tail...)
+		return events, maxCursor(window.NewestCursor, journalCursor), nil
+	}
+
+	return events, maxCursor(window.NewestCursor, f.cursor.Current()), nil
+}
+
+func (f *AttentionFeed) hydrateStoredAttentionEvents(storedEvents []state.StoredAttentionEvent) []AttentionEvent {
 	itemStates := map[int64]state.AttentionItemState{}
 	if len(storedEvents) > 0 {
 		cursors := make([]int64, 0, len(storedEvents))
@@ -3656,21 +3819,35 @@ func (f *AttentionFeed) replayFromStore(sinceCursor int64, limit int) ([]Attenti
 		}
 		events = append(events, event)
 	}
+	return events
+}
 
-	if tailStart := f.ephemeralFromCursor.Load(); tailStart > 0 && len(events) < limit {
-		journalSince := sinceCursor
-		if journalSince < tailStart-1 {
-			journalSince = tailStart - 1
+func mergeStoredAttentionEvents(groups ...[]state.StoredAttentionEvent) []state.StoredAttentionEvent {
+	byCursor := make(map[int64]state.StoredAttentionEvent)
+	for _, group := range groups {
+		for _, event := range group {
+			byCursor[event.Cursor] = event
 		}
-		tail, journalCursor, err := f.journal.Replay(journalSince, limit-len(events))
-		if err != nil {
-			return nil, 0, err
-		}
-		events = append(events, tail...)
-		return events, maxCursor(window.NewestCursor, journalCursor), nil
 	}
+	cursors := make([]int64, 0, len(byCursor))
+	for cursor := range byCursor {
+		cursors = append(cursors, cursor)
+	}
+	sort.Slice(cursors, func(i, j int) bool {
+		return cursors[i] < cursors[j]
+	})
+	merged := make([]state.StoredAttentionEvent, 0, len(cursors))
+	for _, cursor := range cursors {
+		merged = append(merged, byCursor[cursor])
+	}
+	return merged
+}
 
-	return events, maxCursor(window.NewestCursor, f.cursor.Current()), nil
+func maxStoredAttentionCursor(events []state.StoredAttentionEvent, fallback int64) int64 {
+	if len(events) == 0 {
+		return fallback
+	}
+	return maxCursor(events[len(events)-1].Cursor, fallback)
 }
 
 // storeBackedStats returns journal stats from durable storage.

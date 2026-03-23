@@ -2400,7 +2400,10 @@ func generateKillSummary(session string) (*summary.SessionSummary, error) {
 		}
 
 		// Capture output (500 lines)
-		out, _ := tmux.CapturePaneOutput(pane.ID, 500)
+		out, err := tmux.CapturePaneOutput(pane.ID, 500)
+		if err != nil {
+			slog.Default().Debug("failed to capture pane output for summary", "pane_id", pane.ID, "error", err)
+		}
 
 		outputs = append(outputs, summary.AgentOutput{
 			AgentID:   pane.ID,
@@ -3460,7 +3463,7 @@ func runSendBatch(opts SendOptions) error {
 
 		// Handle --confirm-each
 		if opts.BatchConfirm && !jsonOutput {
-			fmt.Printf("Prompt %d/%d: %s\n", i+2, total, preview)
+			fmt.Printf("Prompt %d/%d: %s\n", i+1, total, preview)
 			if !confirm("Send this prompt?") {
 				fmt.Println("Skipped.")
 				result.Skipped = true
@@ -3469,7 +3472,7 @@ func runSendBatch(opts SendOptions) error {
 				continue
 			}
 		} else if !jsonOutput {
-			fmt.Printf("Sending prompt %d/%d: %s... ", i+2, total, preview)
+			fmt.Printf("Sending prompt %d/%d: %s... ", i+1, total, preview)
 		}
 
 		// Determine target panes

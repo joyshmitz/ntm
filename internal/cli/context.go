@@ -49,11 +49,14 @@ func newContextBuildCmd() *cobra.Command {
 - CASS history (prior solutions)
 - S2P file context
 
-The context is rendered in agent-appropriate format:
-- Claude (cc), Cursor, Windsurf, Aider: XML format
-- Codex (cod), Gemini (gmi): Markdown format`,
+			The context is rendered in agent-appropriate format:
+			- Claude (cc), Cursor, Windsurf, Aider: XML format
+			- Codex (cod), Gemini (gmi): Markdown format`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, _ := os.Getwd()
+			dir := GetProjectRoot()
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 
 			// Get repo revision
 			repoRev := getRepoRev(dir)

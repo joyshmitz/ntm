@@ -54,12 +54,15 @@ func runUnlock(session string, patterns []string, all bool) error {
 		return fmt.Errorf("specify patterns to release or use --all")
 	}
 
-	wd := GetProjectRoot()
-	if wd == "" {
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
+	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
 
-	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
+	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
 	if err != nil {
 		return fmt.Errorf("loading session agent: %w", err)
 	}
@@ -73,7 +76,7 @@ func runUnlock(session string, patterns []string, all bool) error {
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
 
-	client := newAgentMailClient(wd)
+	client := newAgentMailClient(projectKey)
 	if !client.IsAvailable() {
 		if IsJSONOutput() {
 			result := UnlockResult{Success: false, Session: session, Agent: sessionAgent.AgentName, Error: "Agent Mail server unavailable"}
@@ -92,7 +95,7 @@ func runUnlock(session string, patterns []string, all bool) error {
 		pathsToRelease = patterns
 	}
 
-	releaseResult, err := client.ReleaseReservations(ctx, wd, sessionAgent.AgentName, pathsToRelease, nil)
+	releaseResult, err := client.ReleaseReservations(ctx, projectKey, sessionAgent.AgentName, pathsToRelease, nil)
 	result := UnlockResult{Session: session, Agent: sessionAgent.AgentName}
 	if releaseResult != nil && releaseResult.ReleasedAt != nil {
 		t := releaseResult.ReleasedAt.Time

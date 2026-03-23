@@ -110,17 +110,9 @@ type PushResult struct {
 }
 
 func runGitSync(session string, pullOnly, pushOnly, force, dryRun bool) error {
-	wd := GetProjectRoot()
-	if wd == "" {
+	workDir := resolveProjectDirForSession(session, true)
+	if workDir == "" {
 		return fmt.Errorf("getting project root failed")
-	}
-
-	// Use session's working directory if specified
-	workDir := wd
-	if session != "" && cfg != nil {
-		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
-			workDir = configuredProjectDir
-		}
 	}
 
 	result := GitSyncResult{
@@ -432,17 +424,9 @@ type AgentMailStatus struct {
 }
 
 func runGitStatus(session string, allAgents bool) error {
-	wd := GetProjectRoot()
-	if wd == "" {
+	workDir := resolveProjectDirForSession(session, true)
+	if workDir == "" {
 		return fmt.Errorf("getting project root failed")
-	}
-
-	// Use session's working directory if specified
-	workDir := wd
-	if session != "" && cfg != nil {
-		if configuredProjectDir := cfg.GetProjectDir(session); configuredProjectDir != "" {
-			workDir = configuredProjectDir
-		}
 	}
 
 	result := GitStatusResult{

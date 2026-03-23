@@ -28,7 +28,7 @@ func newQuickCmd() *cobra.Command {
 		Short:   "Quick project setup with git, VSCode, and Claude config",
 		Long: `Create a new project directory with sensible defaults:
 
-	- Creates directory in projects_base/<name> (defaults: ~/Developer on macOS, /data/projects on Linux)
+	- Creates directory in projects_base/<name> (defaults: ~/Developer on macOS, ~/ntm_Dev on Linux, or $NTM_PROJECTS_BASE)
 	- Initializes git repository
 	- Creates VSCode workspace settings
 	- Creates Claude Code configuration
@@ -213,9 +213,11 @@ func runQuick(name string, opts quickOptions) error {
 func initGit(dir string) error {
 	cmd := exec.Command("git", "init")
 	cmd.Dir = dir
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git init: %w: %s", err, out)
+	}
+	return nil
 }
 
 func createGitignore(dir, template string) error {

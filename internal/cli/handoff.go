@@ -187,12 +187,20 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 		jsonFormat = true
 	}
 
+	if strings.TrimSpace(sessionName) != "" {
+		normalizedSession, err := normalizeHandoffSession(sessionName)
+		if err != nil {
+			return err
+		}
+		sessionName = normalizedSession
+	}
+
 	// Normalize format flag
 	if jsonFormat && format == "yaml" {
 		format = "json" // --json flag overrides default
 	}
 
-	projectDir := GetProjectRoot()
+	projectDir := resolveHandoffProjectDir(sessionName)
 	if projectDir == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -354,7 +362,7 @@ func runHandoffLedger(cmd *cobra.Command, sessionName string, jsonFormat bool) e
 		return err
 	}
 
-	projectDir := GetProjectRoot()
+	projectDir := resolveHandoffProjectDir(sessionName)
 	if projectDir == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -545,7 +553,15 @@ func runHandoffList(cmd *cobra.Command, sessionName string, limit int, jsonForma
 		jsonFormat = true
 	}
 
-	projectDir := GetProjectRoot()
+	if strings.TrimSpace(sessionName) != "" {
+		normalizedSession, err := normalizeHandoffSession(sessionName)
+		if err != nil {
+			return err
+		}
+		sessionName = normalizedSession
+	}
+
+	projectDir := resolveHandoffProjectDir(sessionName)
 	if projectDir == "" {
 		return fmt.Errorf("getting project root failed")
 	}
@@ -814,6 +830,14 @@ func normalizeHandoffSession(sessionName string) (string, error) {
 		return "", fmt.Errorf("invalid session name: %s", sessionName)
 	}
 	return sessionName, nil
+}
+
+func resolveHandoffProjectDir(sessionName string) string {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" || sessionName == "general" {
+		return GetProjectRoot()
+	}
+	return resolveProjectDirForSession(sessionName, true)
 }
 
 func generateDescription(goal string) string {

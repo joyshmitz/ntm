@@ -172,7 +172,9 @@ func TestDispatch_QueueOverflowDropsOldest(t *testing.T) {
 	// and registered webhooks. Mark as started without launching worker goroutines.
 	m.started.Store(true)
 
-	// Pre-fill the queue to force overflow.
+	// Pre-fill the queue to force overflow. Keep the pending count aligned with
+	// a real accepted delivery so the test matches production invariants.
+	m.pending.Add(1)
 	m.queue <- Delivery{ID: "old_delivery"}
 
 	if err := m.Dispatch(Event{
@@ -185,6 +187,9 @@ func TestDispatch_QueueOverflowDropsOldest(t *testing.T) {
 
 	if got := m.queueFull.Load(); got != 1 {
 		t.Fatalf("expected 1 dropped delivery, got %d", got)
+	}
+	if got := m.pending.Load(); got != 1 {
+		t.Fatalf("expected 1 pending delivery after overflow replacement, got %d", got)
 	}
 
 	select {

@@ -71,12 +71,15 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 		return fmt.Errorf("TTL must be at least 1 minute")
 	}
 
-	wd := GetProjectRoot()
-	if wd == "" {
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
+	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
 
-	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
+	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
 	if err != nil {
 		return fmt.Errorf("loading session agent: %w", err)
 	}
@@ -90,7 +93,7 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
 
-	client := newAgentMailClient(wd)
+	client := newAgentMailClient(projectKey)
 	if !client.IsAvailable() {
 		if IsJSONOutput() {
 			result := LockResult{Success: false, Session: session, Agent: sessionAgent.AgentName, Error: "Agent Mail server unavailable"}
@@ -105,7 +108,7 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 	defer cancel()
 
 	opts := agentmail.FileReservationOptions{
-		ProjectKey: wd,
+		ProjectKey: projectKey,
 		AgentName:  sessionAgent.AgentName,
 		Paths:      patterns,
 		TTLSeconds: ttlSeconds,

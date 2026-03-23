@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 )
 
@@ -399,6 +400,68 @@ func TestRunHandoffCreateUsesProjectRootFromSubdir(t *testing.T) {
 	}
 }
 
+func TestRunHandoffCreateUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "testsession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	if err := runHandoffCreate(cmd, "testsession", "Scoped goal", "Scoped next", "", false, "session-scope", false, "", "yaml", false); err != nil {
+		t.Fatalf("runHandoffCreate() error: %v", err)
+	}
+
+	reader := handoff.NewReader(projectDir)
+	h, path, err := reader.FindLatest("testsession")
+	if err != nil {
+		t.Fatalf("FindLatest() error: %v", err)
+	}
+	if h == nil {
+		t.Fatal("expected handoff to be created under session project")
+	}
+	if !strings.HasPrefix(path, filepath.Join(projectDir, ".ntm", "handoffs")) {
+		t.Fatalf("expected handoff path under session project, got %s", path)
+	}
+}
+
+func TestRunHandoffCreateRejectsInvalidSessionBeforePathResolution(t *testing.T) {
+	projectsBase := t.TempDir()
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	cmd := &cobra.Command{}
+	err := runHandoffCreate(cmd, "../escape", "Goal", "Now", "", false, "invalid", false, "", "yaml", false)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
 func TestRunHandoffList(t *testing.T) {
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "handoff-test-*")
@@ -443,6 +506,70 @@ func TestRunHandoffList(t *testing.T) {
 	}
 	if !strings.Contains(output, "Test goal") {
 		t.Errorf("expected output to contain goal, got: %s", output)
+	}
+}
+
+func TestRunHandoffListUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "testsession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	writer := handoff.NewWriter(projectDir)
+	h := handoff.New("testsession")
+	h.Goal = "Scoped goal"
+	h.Now = "Scoped now"
+	h.Status = handoff.StatusComplete
+	if _, err := writer.Write(h, "scoped"); err != nil {
+		t.Fatalf("failed to write handoff: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	if err := runHandoffList(cmd, "testsession", 10, false); err != nil {
+		t.Fatalf("runHandoffList() error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Scoped goal") {
+		t.Fatalf("expected output to contain session-project handoff, got: %s", output)
+	}
+}
+
+func TestRunHandoffListRejectsInvalidSessionBeforePathResolution(t *testing.T) {
+	projectsBase := t.TempDir()
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	cmd := &cobra.Command{}
+	err := runHandoffList(cmd, "../escape", 10, false)
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
 	}
 }
 
@@ -763,6 +890,53 @@ func TestRunHandoffCreateFromFile(t *testing.T) {
 	}
 	if len(h.Blockers) != 1 || h.Blockers[0] != "Blocker from file" {
 		t.Errorf("Blockers not preserved: %v", h.Blockers)
+	}
+}
+
+func TestRunHandoffCreateFromFileUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "newsession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	sourceDir := t.TempDir()
+	writer := handoff.NewWriter(sourceDir)
+	sourceHandoff := handoff.New("sourcesession")
+	sourceHandoff.Goal = "Source goal"
+	sourceHandoff.Now = "Source now"
+	sourceHandoff.Status = handoff.StatusComplete
+	sourcePath, err := writer.Write(sourceHandoff, "source")
+	if err != nil {
+		t.Fatalf("failed to write source handoff: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	cmd := &cobra.Command{}
+	if err := runHandoffCreate(cmd, "newsession", "", "", sourcePath, false, "from-file", false, "", "yaml", false); err != nil {
+		t.Fatalf("runHandoffCreate() error: %v", err)
+	}
+
+	reader := handoff.NewReader(projectDir)
+	h, path, err := reader.FindLatest("newsession")
+	if err != nil {
+		t.Fatalf("FindLatest() error: %v", err)
+	}
+	if h == nil {
+		t.Fatal("expected handoff to be created under session project")
+	}
+	if !strings.HasPrefix(path, filepath.Join(projectDir, ".ntm", "handoffs")) {
+		t.Fatalf("expected handoff path under session project, got %s", path)
 	}
 }
 

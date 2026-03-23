@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -40,14 +39,9 @@ func newWorktreesListCmd() *cobra.Command {
 		Short: "List all worktrees for the current session",
 		Long:  `List all Git worktrees created for agents in the current session.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := os.Getwd()
+			dir, session, err := resolveWorktreeScope("")
 			if err != nil {
-				return fmt.Errorf("failed to get working directory: %w", err)
-			}
-
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
+				return err
 			}
 
 			manager := worktrees.NewManager(dir, session)
@@ -101,15 +95,9 @@ a non-fast-forward merge to preserve the merge history.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agentName := args[0]
-
-			dir, err := os.Getwd()
+			dir, session, err := resolveWorktreeScope("")
 			if err != nil {
-				return fmt.Errorf("failed to get working directory: %w", err)
-			}
-
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
+				return err
 			}
 
 			manager := worktrees.NewManager(dir, session)
@@ -154,19 +142,11 @@ func newWorktreesCleanCmd() *cobra.Command {
 		Long: `Remove all worktrees and branches for the specified session.
 
 By default, cleans up the current session. Use --session to specify
-a different session.`,
+		a different session.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := os.Getwd()
+			dir, session, err := resolveWorktreeScope(sessionName)
 			if err != nil {
-				return fmt.Errorf("failed to get working directory: %w", err)
-			}
-
-			session := sessionName
-			if session == "" {
-				session = tmux.GetCurrentSession()
-				if session == "" {
-					session = filepath.Base(dir)
-				}
+				return err
 			}
 
 			manager := worktrees.NewManager(dir, session)
@@ -224,15 +204,9 @@ in the worktree.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agentName := args[0]
-
-			dir, err := os.Getwd()
+			dir, session, err := resolveWorktreeScope("")
 			if err != nil {
-				return fmt.Errorf("failed to get working directory: %w", err)
-			}
-
-			session := tmux.GetCurrentSession()
-			if session == "" {
-				session = filepath.Base(dir)
+				return err
 			}
 
 			manager := worktrees.NewManager(dir, session)
@@ -256,4 +230,27 @@ in the worktree.`,
 			return nil
 		},
 	}
+}
+
+func resolveWorktreeScope(session string) (string, string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		session = strings.TrimSpace(tmux.GetCurrentSession())
+	}
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", "", fmt.Errorf("invalid session name: %w", err)
+		}
+		projectDir := resolveProjectDirForSession(session, true)
+		if projectDir == "" {
+			return "", "", fmt.Errorf("getting project root failed")
+		}
+		return projectDir, session, nil
+	}
+
+	projectDir := GetProjectRoot()
+	if projectDir == "" {
+		return "", "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, filepath.Base(projectDir), nil
 }

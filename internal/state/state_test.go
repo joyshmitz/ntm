@@ -1799,6 +1799,87 @@ func TestCreateOrUpdateIncidentDeduplicatesByFingerprint(t *testing.T) {
 	}
 }
 
+func TestAttentionReplayQueriesByIncidentAndTimeRange(t *testing.T) {
+	store := testStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := store.CreateIncident(&Incident{
+		ID:          "inc-replay",
+		Title:       "incident replay",
+		Fingerprint: "incident.replay:test",
+		Family:      "incident.replay",
+		Category:    "testing",
+		Status:      IncidentStatusOpen,
+		Severity:    SeverityWarning,
+		StartedAt:   now.Add(-time.Minute),
+		LastEventAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateIncident() error: %v", err)
+	}
+
+	liveExpiry := now.Add(time.Hour)
+	expiredAt := now.Add(-time.Minute)
+	appendEvent := func(ts time.Time, eventType, summary string, expiresAt *time.Time) int64 {
+		t.Helper()
+		cursor, err := store.AppendAttentionEvent(&StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "ntm--vibe-cockpit",
+			Category:      "incident",
+			EventType:     eventType,
+			Source:        "test",
+			Actionability: ActionabilityInteresting,
+			Severity:      SeverityWarning,
+			Summary:       summary,
+			ExpiresAt:     expiresAt,
+		})
+		if err != nil {
+			t.Fatalf("AppendAttentionEvent(%s) error: %v", eventType, err)
+		}
+		return cursor
+	}
+
+	earlyCursor := appendEvent(now.Add(-40*time.Second), "incident.promoted", "early", &liveExpiry)
+	expiredCursor := appendEvent(now.Add(-30*time.Second), "incident.noise", "expired", &expiredAt)
+	lateCursor := appendEvent(now.Add(-20*time.Second), "incident.recurred", "late", &liveExpiry)
+	otherCursor := appendEvent(now.Add(-10*time.Second), "incident.opened", "other", &liveExpiry)
+
+	for _, cursor := range []int64{earlyCursor, expiredCursor, lateCursor} {
+		if err := store.LinkEventToIncident("inc-replay", cursor); err != nil {
+			t.Fatalf("LinkEventToIncident(%d) error: %v", cursor, err)
+		}
+	}
+
+	incidentEvents, err := store.GetEventsForIncident("inc-replay", 10)
+	if err != nil {
+		t.Fatalf("GetEventsForIncident() error: %v", err)
+	}
+	if len(incidentEvents) != 2 {
+		t.Fatalf("len(GetEventsForIncident()) = %d, want 2", len(incidentEvents))
+	}
+	if incidentEvents[0].Cursor != earlyCursor || incidentEvents[1].Cursor != lateCursor {
+		t.Fatalf("unexpected incident event cursors: %+v", incidentEvents)
+	}
+
+	rangedEvents, err := store.GetAttentionEventsInTimeRange(now.Add(-25*time.Second), now.Add(-5*time.Second), 10)
+	if err != nil {
+		t.Fatalf("GetAttentionEventsInTimeRange() error: %v", err)
+	}
+	if len(rangedEvents) != 2 {
+		t.Fatalf("len(GetAttentionEventsInTimeRange()) = %d, want 2", len(rangedEvents))
+	}
+	if rangedEvents[0].Cursor != lateCursor || rangedEvents[1].Cursor != otherCursor {
+		t.Fatalf("unexpected ranged event cursors: %+v", rangedEvents)
+	}
+
+	empty, err := store.GetAttentionEventsInTimeRange(now, now.Add(-time.Second), 10)
+	if err != nil {
+		t.Fatalf("GetAttentionEventsInTimeRange(reversed) error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected reversed time range to return no events, got %+v", empty)
+	}
+}
+
 func TestCreateOrUpdateIncidentReopensRecentlyResolvedFingerprint(t *testing.T) {
 	store := testStore(t)
 	now := time.Now().UTC()

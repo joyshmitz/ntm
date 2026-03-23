@@ -2,36 +2,45 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/startup"
+	"github.com/spf13/cobra"
 )
 
 type mailStub struct {
-	server            *httptest.Server
-	inbox             []agentmail.InboxMessage
-	listAgents        []agentmail.Agent
-	fetchCalls        []fetchCall
-	reserveCalls      []reserveCall
-	readIDs           []int
-	ackIDs            []int
-	readAgents        []string
-	ackAgents         []string
-	ensureCalled      int
-	ensureProjectKeys []string
-	overseerCalls     []overseerCall
-	releaseCalls      []releaseCall
-	renewCalls        []renewCall
-	releaseResult     agentmail.ReleaseReservationsResult
-	renewResult       agentmail.RenewReservationsResult
-	failIDs           map[int]string // messageID -> error message
+	server             *httptest.Server
+	inbox              []agentmail.InboxMessage
+	listAgents         []agentmail.Agent
+	reservations       []agentmail.FileReservation
+	fetchCalls         []fetchCall
+	listCalls          []listCall
+	reserveCalls       []reserveCall
+	readIDs            []int
+	ackIDs             []int
+	readAgents         []string
+	ackAgents          []string
+	ensureCalled       int
+	ensureProjectKeys  []string
+	overseerCalls      []overseerCall
+	releaseCalls       []releaseCall
+	renewCalls         []renewCall
+	forceReleaseCalls  []forceReleaseCall
+	releaseResult      agentmail.ReleaseReservationsResult
+	renewResult        agentmail.RenewReservationsResult
+	forceReleaseResult agentmail.ForceReleaseResult
+	failIDs            map[int]string // messageID -> error message
 }
 
 type fetchCall struct {
@@ -47,6 +56,11 @@ type releaseCall struct {
 	Project string
 	Paths   []string
 	IDs     []int
+}
+
+type listCall struct {
+	Project string
+	URI     string
 }
 
 type reserveCall struct {
@@ -66,6 +80,14 @@ type renewCall struct {
 	IDs           []int
 }
 
+type forceReleaseCall struct {
+	Agent          string
+	Project        string
+	ReservationID  int
+	Note           string
+	NotifyPrevious bool
+}
+
 type overseerCall struct {
 	Recipients []string `json:"recipients"`
 	Subject    string   `json:"subject"`
@@ -76,11 +98,12 @@ type overseerCall struct {
 func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 	t.Helper()
 	stub := &mailStub{
-		inbox:         inbox,
-		listAgents:    []agentmail.Agent{{Name: "BlueLake"}},
-		failIDs:       make(map[int]string),
-		releaseResult: agentmail.ReleaseReservationsResult{Released: 1},
-		renewResult:   agentmail.RenewReservationsResult{Renewed: 1},
+		inbox:              inbox,
+		listAgents:         []agentmail.Agent{{Name: "BlueLake"}},
+		failIDs:            make(map[int]string),
+		releaseResult:      agentmail.ReleaseReservationsResult{Released: 1},
+		renewResult:        agentmail.RenewReservationsResult{Renewed: 1},
+		forceReleaseResult: agentmail.ForceReleaseResult{Success: true},
 	}
 
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,15 +136,6 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 			return
 		}
 
-		params, ok := rpc.Params.(map[string]interface{})
-		if !ok {
-			http.Error(w, "invalid params", http.StatusBadRequest)
-			return
-		}
-
-		name, _ := params["name"].(string)
-		args, _ := params["arguments"].(map[string]interface{})
-
 		writeResponse := func(result interface{}) {
 			resp := agentmail.JSONRPCResponse{
 				JSONRPC: "2.0",
@@ -146,6 +160,53 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(&resp)
 		}
+
+		if rpc.Method == "resources/read" {
+			params, _ := rpc.Params.(map[string]interface{})
+			uri := toString(params["uri"])
+			projectKey := ""
+			if strings.HasPrefix(uri, "resource://file_reservations/") {
+				projectKey = strings.TrimPrefix(uri, "resource://file_reservations/")
+				if idx := strings.Index(projectKey, "?"); idx >= 0 {
+					projectKey = projectKey[:idx]
+				}
+				if decoded, err := url.PathUnescape(projectKey); err == nil {
+					projectKey = filepath.Clean(decoded)
+				}
+			}
+			stub.listCalls = append(stub.listCalls, listCall{Project: projectKey, URI: uri})
+
+			rows := make([]map[string]interface{}, 0, len(stub.reservations))
+			for _, reservation := range stub.reservations {
+				rows = append(rows, map[string]interface{}{
+					"id":           reservation.ID,
+					"agent":        reservation.AgentName,
+					"agent_name":   reservation.AgentName,
+					"path_pattern": reservation.PathPattern,
+					"exclusive":    reservation.Exclusive,
+					"reason":       reservation.Reason,
+					"expires_ts":   reservation.ExpiresTS,
+					"created_ts":   reservation.CreatedTS,
+				})
+			}
+			writeResponse(map[string]interface{}{
+				"contents": []map[string]interface{}{
+					{
+						"text": mustJSONString(t, rows),
+					},
+				},
+			})
+			return
+		}
+
+		params, ok := rpc.Params.(map[string]interface{})
+		if !ok {
+			http.Error(w, "invalid params", http.StatusBadRequest)
+			return
+		}
+
+		name, _ := params["name"].(string)
+		args, _ := params["arguments"].(map[string]interface{})
 
 		switch name {
 		case "health_check":
@@ -242,6 +303,15 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				IDs:           toIntSlice(args["file_reservation_ids"]),
 			})
 			writeResponse(stub.renewResult)
+		case "force_release_file_reservation":
+			stub.forceReleaseCalls = append(stub.forceReleaseCalls, forceReleaseCall{
+				Agent:          toString(args["agent_name"]),
+				Project:        toString(args["project_key"]),
+				ReservationID:  toInt(args["file_reservation_id"]),
+				Note:           toString(args["note"]),
+				NotifyPrevious: toBool(args["notify_previous"]),
+			})
+			writeResponse(stub.forceReleaseResult)
 		default:
 			http.Error(w, "unknown tool "+name, http.StatusNotFound)
 		}
@@ -256,6 +326,36 @@ func (s *mailStub) Close() {
 	}
 }
 
+func (s *mailStub) IsAvailable() bool {
+	return true
+}
+
+func (s *mailStub) ListProjectAgents(ctx context.Context, projectKey string) ([]agentmail.Agent, error) {
+	return append([]agentmail.Agent(nil), s.listAgents...), nil
+}
+
+func (s *mailStub) FetchInbox(ctx context.Context, opts agentmail.FetchInboxOptions) ([]agentmail.InboxMessage, error) {
+	call := fetchCall{
+		Agent:   opts.AgentName,
+		Project: opts.ProjectKey,
+		Urgent:  opts.UrgentOnly,
+		Limit:   opts.Limit,
+	}
+	s.fetchCalls = append(s.fetchCalls, call)
+
+	messages := append([]agentmail.InboxMessage(nil), s.inbox...)
+	if call.Urgent {
+		filtered := make([]agentmail.InboxMessage, 0, len(messages))
+		for _, m := range messages {
+			if m.Importance == "urgent" {
+				filtered = append(filtered, m)
+			}
+		}
+		messages = filtered
+	}
+	return messages, nil
+}
+
 func mustMarshalRaw(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -263,6 +363,11 @@ func mustMarshalRaw(t *testing.T, v interface{}) json.RawMessage {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+func mustJSONString(t *testing.T, v interface{}) string {
+	t.Helper()
+	return string(mustMarshalRaw(t, v))
 }
 
 func toInt(v interface{}) int {
@@ -649,5 +754,285 @@ func TestMailReadUsesProjectRootFromSubdir(t *testing.T) {
 	}
 	if len(stub.ensureProjectKeys) != 1 || stub.ensureProjectKeys[0] != projectKey {
 		t.Fatalf("expected ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
+	}
+}
+
+func TestRunMailInboxUsesSessionProjectDir(t *testing.T) {
+	stub := newMailStub(t, []agentmail.InboxMessage{
+		{ID: 11, Subject: "Scoped inbox", From: "BlueLake", CreatedTS: agentmail.FlexTime{Time: time.Now()}},
+	})
+	defer stub.Close()
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runMailInbox(cmd, stub, "mysession", false, "", false, 50, true); err != nil {
+		t.Fatalf("runMailInbox() error = %v", err)
+	}
+	if len(stub.fetchCalls) != 1 {
+		t.Fatalf("expected one fetch call, got %d", len(stub.fetchCalls))
+	}
+	if stub.fetchCalls[0].Project != projectKey {
+		t.Fatalf("expected inbox project %q, got %q", projectKey, stub.fetchCalls[0].Project)
+	}
+}
+
+func TestRunMailMarkUsesSessionProjectDir(t *testing.T) {
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runMailMark(cmd, "mysession", "BlueLake", mailActionRead, []int{42}, false, "", false, 50); err != nil {
+		t.Fatalf("runMailMark() error = %v", err)
+	}
+	if len(stub.ensureProjectKeys) != 1 || stub.ensureProjectKeys[0] != projectKey {
+		t.Fatalf("expected ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
+	}
+}
+
+func TestRunMailSendOverseerUsesSessionProjectDir(t *testing.T) {
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runMailSendOverseer(cmd, "mysession", []string{"BlueLake"}, "Subject", "Body", "", false); err != nil {
+		t.Fatalf("runMailSendOverseer() error = %v", err)
+	}
+	if len(stub.ensureProjectKeys) != 1 || stub.ensureProjectKeys[0] != projectKey {
+		t.Fatalf("expected ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
+	}
+}
+
+func TestResolveAgentMailProjectKeyRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveAgentMailProjectKey("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestRunLockUsesSessionProjectDir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	session := "mysession"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	if err := runLock(session, []string{"internal/**/*.go"}, "scope test", "1h", false); err != nil {
+		t.Fatalf("runLock: %v", err)
+	}
+	if len(stub.reserveCalls) != 1 {
+		t.Fatalf("expected one reserve call, got %d", len(stub.reserveCalls))
+	}
+	if got := stub.reserveCalls[0].Project; got != projectKey {
+		t.Fatalf("expected reserve project %q, got %q", projectKey, got)
+	}
+}
+
+func TestRunLocksUsesSessionProjectDir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	session := "mysession"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	if err := runLocks(session, false); err != nil {
+		t.Fatalf("runLocks: %v", err)
+	}
+	if len(stub.listCalls) != 1 {
+		t.Fatalf("expected one reservation list call, got %d", len(stub.listCalls))
+	}
+	if got := stub.listCalls[0].Project; got != projectKey {
+		t.Fatalf("expected list project %q, got %q", projectKey, got)
+	}
+}
+
+func TestRunUnlockUsesSessionProjectDir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	session := "mysession"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	if err := runUnlock(session, []string{"internal/cli/*.go"}, false); err != nil {
+		t.Fatalf("runUnlock: %v", err)
+	}
+	if len(stub.releaseCalls) != 1 {
+		t.Fatalf("expected one release call, got %d", len(stub.releaseCalls))
+	}
+	if got := stub.releaseCalls[0].Project; got != projectKey {
+		t.Fatalf("expected release project %q, got %q", projectKey, got)
+	}
+}
+
+func TestRunForceReleaseUsesSessionProjectDir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	session := "mysession"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	if err := runForceRelease(session, 42, "stale", true, true); err != nil {
+		t.Fatalf("runForceRelease: %v", err)
+	}
+	if len(stub.forceReleaseCalls) != 1 {
+		t.Fatalf("expected one force-release call, got %d", len(stub.forceReleaseCalls))
+	}
+	if got := stub.forceReleaseCalls[0].Project; got != projectKey {
+		t.Fatalf("expected force-release project %q, got %q", projectKey, got)
+	}
+}
+
+func TestRunRenewLocksUsesSessionProjectDir(t *testing.T) {
+	resetFlags()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectKey, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	session := "mysession"
+	agentName := "BlueLake"
+	saveSessionAgentForTest(t, session, projectKey, agentName)
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Chdir(t.TempDir())
+
+	if err := runRenewLocks(session, 30); err != nil {
+		t.Fatalf("runRenewLocks: %v", err)
+	}
+	if len(stub.renewCalls) != 1 {
+		t.Fatalf("expected one renew call, got %d", len(stub.renewCalls))
+	}
+	if got := stub.renewCalls[0].Project; got != projectKey {
+		t.Fatalf("expected renew project %q, got %q", projectKey, got)
 	}
 }

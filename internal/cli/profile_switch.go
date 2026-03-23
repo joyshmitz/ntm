@@ -79,24 +79,6 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 		return outputProfileSwitchError(agentID, "", "", err)
 	}
 
-	// Get project directory
-	cwd, err := os.Getwd()
-	if err != nil {
-		return outputProfileSwitchError(agentID, "", "", fmt.Errorf("getting working directory: %w", err))
-	}
-
-	// Load persona registry
-	registry, err := persona.LoadRegistry(cwd)
-	if err != nil {
-		return outputProfileSwitchError(agentID, "", "", fmt.Errorf("loading persona registry: %w", err))
-	}
-
-	// Find the new profile
-	newProfile, ok := registry.Get(newProfileName)
-	if !ok {
-		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("profile %q not found", newProfileName))
-	}
-
 	// Resolve session name
 	if sessionName == "" {
 		sessions, err := tmux.ListSessions()
@@ -107,6 +89,23 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 			return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("no tmux sessions found"))
 		}
 		sessionName = sessions[0].Name
+	}
+
+	projectDir := resolveProjectDirForSession(sessionName, true)
+	if projectDir == "" {
+		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("getting project root failed"))
+	}
+
+	// Load persona registry
+	registry, err := persona.LoadRegistry(projectDir)
+	if err != nil {
+		return outputProfileSwitchError(agentID, "", "", fmt.Errorf("loading persona registry: %w", err))
+	}
+
+	// Find the new profile
+	newProfile, ok := registry.Get(newProfileName)
+	if !ok {
+		return outputProfileSwitchError(agentID, "", newProfileName, fmt.Errorf("profile %q not found", newProfileName))
 	}
 
 	// Get session panes
@@ -127,7 +126,7 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 	}
 
 	// Prepare system prompt file
-	promptFile, err := persona.PrepareSystemPrompt(newProfile, cwd)
+	promptFile, err := persona.PrepareSystemPrompt(newProfile, projectDir)
 	if err != nil {
 		// Non-fatal: log warning but continue
 		if !IsJSONOutput() {

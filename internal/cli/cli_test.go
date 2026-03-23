@@ -107,6 +107,129 @@ func TestRunQuickUsesDefaultProjectsBaseWhenConfigNil(t *testing.T) {
 	}
 }
 
+func TestResolveMessageScopeUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, gotAgent, err := resolveMessageScope("mysession")
+	if err != nil {
+		t.Fatalf("resolveMessageScope() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotAgent != "ntm_mysession" {
+		t.Fatalf("agent name = %q, want %q", gotAgent, "ntm_mysession")
+	}
+}
+
+func TestResolveMessageScopeFallsBackToProjectRoot(t *testing.T) {
+	projectDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, gotAgent, err := resolveMessageScope("")
+	if err != nil {
+		t.Fatalf("resolveMessageScope() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	wantAgent := "ntm_" + filepath.Base(projectDir)
+	if gotAgent != wantAgent {
+		t.Fatalf("agent name = %q, want %q", gotAgent, wantAgent)
+	}
+}
+
+func TestResolveMessageScopeRejectsInvalidSessionName(t *testing.T) {
+	_, _, err := resolveMessageScope("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveWorktreeScopeUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, gotSession, err := resolveWorktreeScope("mysession")
+	if err != nil {
+		t.Fatalf("resolveWorktreeScope() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotSession != "mysession" {
+		t.Fatalf("session = %q, want %q", gotSession, "mysession")
+	}
+}
+
+func TestResolveWorktreeScopeFallsBackToProjectRoot(t *testing.T) {
+	projectDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, gotSession, err := resolveWorktreeScope("")
+	if err != nil {
+		t.Fatalf("resolveWorktreeScope() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotSession != filepath.Base(projectDir) {
+		t.Fatalf("session = %q, want %q", gotSession, filepath.Base(projectDir))
+	}
+}
+
+func TestResolveWorktreeScopeRejectsInvalidSessionName(t *testing.T) {
+	_, _, err := resolveWorktreeScope("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
 func TestResolveRobotFormat_NtmOutputFormatFallback(t *testing.T) {
 	resetFlags()
 	t.Setenv("NTM_ROBOT_FORMAT", "")

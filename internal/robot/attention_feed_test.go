@@ -1105,6 +1105,152 @@ func TestAttentionFeed_StoreSyncCursorOnStartup(t *testing.T) {
 	}
 }
 
+func TestAttentionFeed_ReplayForIncidentIncludesBoundedContext(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	appendStored := func(ts time.Time, summary string) int64 {
+		t.Helper()
+		cursor, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "proj",
+			Category:      "incident",
+			EventType:     "incident.replayed",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityWarning,
+			Summary:       summary,
+		})
+		if err != nil {
+			t.Fatalf("AppendAttentionEvent(%q): %v", summary, err)
+		}
+		return cursor
+	}
+
+	contextCursor := appendStored(now.Add(-25*time.Second), "context")
+	firstIncidentCursor := appendStored(now.Add(-18*time.Second), "incident-1")
+	secondIncidentCursor := appendStored(now.Add(-11*time.Second), "incident-2")
+	appendStored(now.Add(-5*time.Second), "after")
+
+	if err := store.CreateIncident(&state.Incident{
+		ID:          "inc-replay",
+		Title:       "incident replay",
+		Fingerprint: "incident.replay:test",
+		Family:      "incident.replay",
+		Category:    "testing",
+		Status:      state.IncidentStatusOpen,
+		Severity:    state.SeverityWarning,
+		EventCount:  2,
+		StartedAt:   now.Add(-18 * time.Second),
+		LastEventAt: now.Add(-11 * time.Second),
+	}); err != nil {
+		t.Fatalf("CreateIncident(): %v", err)
+	}
+	for _, cursor := range []int64{firstIncidentCursor, secondIncidentCursor} {
+		if err := store.LinkEventToIncident("inc-replay", cursor); err != nil {
+			t.Fatalf("LinkEventToIncident(%d): %v", cursor, err)
+		}
+	}
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	events, latestCursor, err := feed.ReplayForIncident("inc-replay", 10*time.Second, 0)
+	if err != nil {
+		t.Fatalf("ReplayForIncident() error: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("ReplayForIncident() returned %d events, want 3", len(events))
+	}
+	if got := []int64{events[0].Cursor, events[1].Cursor, events[2].Cursor}; got[0] != contextCursor || got[1] != firstIncidentCursor || got[2] != secondIncidentCursor {
+		t.Fatalf("ReplayForIncident() cursors = %v", got)
+	}
+	if latestCursor < secondIncidentCursor {
+		t.Fatalf("latestCursor = %d, want >= %d", latestCursor, secondIncidentCursor)
+	}
+}
+
+func TestAttentionFeed_ReconstructAsOfReturnsRecentWindowAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := newTestAttentionStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	appendStored := func(ts time.Time, summary string) {
+		t.Helper()
+		if _, err := store.AppendAttentionEvent(&state.StoredAttentionEvent{
+			Ts:            ts,
+			SessionName:   "proj",
+			Category:      "incident",
+			EventType:     "incident.replayed",
+			Source:        "test",
+			Actionability: state.ActionabilityInteresting,
+			Severity:      state.SeverityWarning,
+			Summary:       summary,
+		}); err != nil {
+			t.Fatalf("AppendAttentionEvent(%q): %v", summary, err)
+		}
+	}
+
+	appendStored(now.Add(-40*time.Second), "older")
+	appendStored(now.Add(-20*time.Second), "target-1")
+	appendStored(now.Add(-15*time.Second), "target-2")
+	appendStored(now.Add(-5*time.Second), "future")
+
+	feed := NewAttentionFeed(AttentionFeedConfig{
+		JournalSize:       100,
+		RetentionPeriod:   time.Hour,
+		HeartbeatInterval: 0,
+	}, WithAttentionStore(store))
+	t.Cleanup(feed.Stop)
+
+	events, meta, err := feed.ReconstructAsOf(now.Add(-10*time.Second), 2)
+	if err != nil {
+		t.Fatalf("ReconstructAsOf() error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("ReconstructAsOf() returned %d events, want 2", len(events))
+	}
+	if events[0].Summary != "target-1" || events[1].Summary != "target-2" {
+		t.Fatalf("ReconstructAsOf() summaries = [%q %q], want [target-1 target-2]", events[0].Summary, events[1].Summary)
+	}
+	if meta == nil {
+		t.Fatal("ReconstructAsOf() meta is nil")
+	}
+	if meta.Method != "event_replay" {
+		t.Fatalf("meta.Method = %q, want event_replay", meta.Method)
+	}
+	if meta.Confidence != ReconstructionConfidenceMedium {
+		t.Fatalf("meta.Confidence = %q, want %q", meta.Confidence, ReconstructionConfidenceMedium)
+	}
+	if meta.EventsReplayed != 2 {
+		t.Fatalf("meta.EventsReplayed = %d, want 2", meta.EventsReplayed)
+	}
+	if meta.ActualEnd != events[1].Ts {
+		t.Fatalf("meta.ActualEnd = %q, want %q", meta.ActualEnd, events[1].Ts)
+	}
+
+	foundReconstructed := false
+	foundPartial := false
+	for _, warning := range meta.Warnings {
+		if warning == "RECONSTRUCTED" {
+			foundReconstructed = true
+		}
+		if warning == "PARTIAL_DATA" {
+			foundPartial = true
+		}
+	}
+	if !foundReconstructed || !foundPartial {
+		t.Fatalf("meta.Warnings = %#v, want RECONSTRUCTED and PARTIAL_DATA", meta.Warnings)
+	}
+}
+
 func TestAttentionFeed_ReplayAnnotatesDurableOperatorState(t *testing.T) {
 	t.Parallel()
 
@@ -2238,6 +2384,30 @@ func (s *stubAttentionStore) GetAttentionEventsSince(sinceCursor int64, limit in
 	return events, nil
 }
 
+func (s *stubAttentionStore) GetAttentionEventsInTimeRange(start, end time.Time, limit int) ([]state.StoredAttentionEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if end.Before(start) {
+		return []state.StoredAttentionEvent{}, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	events := make([]state.StoredAttentionEvent, 0, len(s.events))
+	for _, event := range s.events {
+		if event.Ts.Before(start) || event.Ts.After(end) {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return events, nil
+}
+
 func (s *stubAttentionStore) GetAttentionItemStatesForCursors(cursors []int64) (map[int64]state.AttentionItemState, error) {
 	return map[int64]state.AttentionItemState{}, nil
 }
@@ -2264,6 +2434,14 @@ func (s *stubAttentionStore) GetLatestEventCursor() (int64, error) {
 		return 0, nil
 	}
 	return s.events[len(s.events)-1].Cursor, nil
+}
+
+func (s *stubAttentionStore) GetEventsForIncident(incidentID string, limit int) ([]state.StoredAttentionEvent, error) {
+	return []state.StoredAttentionEvent{}, nil
+}
+
+func (s *stubAttentionStore) GetIncident(id string) (*state.Incident, error) {
+	return nil, nil
 }
 
 func (s *stubAttentionStore) GCExpiredEvents() (int64, error) {

@@ -131,7 +131,14 @@ func GenerateIncidentID() string {
 
 	// Generate random suffix
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based suffix if crypto/rand fails
+		ts := now.UnixNano()
+		b[0] = byte(ts)
+		b[1] = byte(ts >> 8)
+		b[2] = byte(ts >> 16)
+		b[3] = byte(ts >> 24)
+	}
 
 	return fmt.Sprintf("inc-%s-%x", dateStr, b)
 }

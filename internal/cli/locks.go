@@ -80,12 +80,15 @@ type LocksResult struct {
 }
 
 func runLocks(session string, allAgents bool) error {
-	wd := GetProjectRoot()
-	if wd == "" {
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
+	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
 
-	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
+	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
 	if err != nil {
 		return fmt.Errorf("loading session agent: %w", err)
 	}
@@ -95,10 +98,10 @@ func runLocks(session string, allAgents bool) error {
 		agentName = sessionAgent.AgentName
 	}
 
-	client := newAgentMailClient(wd)
+	client := newAgentMailClient(projectKey)
 	if !client.IsAvailable() {
 		if IsJSONOutput() {
-			result := LocksResult{Success: false, Session: session, Agent: agentName, ProjectKey: wd, Error: "Agent Mail server unavailable"}
+			result := LocksResult{Success: false, Session: session, Agent: agentName, ProjectKey: projectKey, Error: "Agent Mail server unavailable"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			return enc.Encode(result)
@@ -109,12 +112,12 @@ func runLocks(session string, allAgents bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	reservations, err := fetchActiveReservations(ctx, client, wd, agentName, allAgents)
+	reservations, err := fetchActiveReservations(ctx, client, projectKey, agentName, allAgents)
 
 	result := LocksResult{
 		Session:      session,
 		Agent:        agentName,
-		ProjectKey:   wd,
+		ProjectKey:   projectKey,
 		Reservations: reservations,
 		Count:        len(reservations),
 	}
@@ -271,12 +274,15 @@ type ForceReleaseResult struct {
 }
 
 func runForceRelease(session string, reservationID int, note string, notify, skipConfirm bool) error {
-	wd := GetProjectRoot()
-	if wd == "" {
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
+	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
 
-	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
+	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
 	if err != nil {
 		return fmt.Errorf("loading session agent: %w", err)
 	}
@@ -294,7 +300,7 @@ func runForceRelease(session string, reservationID int, note string, notify, ski
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
 
-	client := newAgentMailClient(wd)
+	client := newAgentMailClient(projectKey)
 	if !client.IsAvailable() {
 		if IsJSONOutput() {
 			result := ForceReleaseResult{Success: false, Session: session, Agent: agentName, ReservationID: reservationID, Error: "Agent Mail server unavailable"}
@@ -326,7 +332,7 @@ func runForceRelease(session string, reservationID int, note string, notify, ski
 	defer cancel()
 
 	opts := agentmail.ForceReleaseOptions{
-		ProjectKey:     wd,
+		ProjectKey:     projectKey,
 		AgentName:      agentName,
 		ReservationID:  reservationID,
 		Note:           note,
@@ -426,12 +432,15 @@ func runRenewLocks(session string, extendMinutes int) error {
 		return fmt.Errorf("extend time must be at least 1 minute")
 	}
 
-	wd := GetProjectRoot()
-	if wd == "" {
+	projectKey, err := resolveAgentMailProjectKey(session)
+	if err != nil {
+		return err
+	}
+	if projectKey == "" {
 		return fmt.Errorf("getting project root failed")
 	}
 
-	sessionAgent, err := agentmail.LoadSessionAgent(session, wd)
+	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
 	if err != nil {
 		return fmt.Errorf("loading session agent: %w", err)
 	}
@@ -449,7 +458,7 @@ func runRenewLocks(session string, extendMinutes int) error {
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
 
-	client := newAgentMailClient(wd)
+	client := newAgentMailClient(projectKey)
 	if !client.IsAvailable() {
 		if IsJSONOutput() {
 			result := RenewResult{Success: false, Session: session, Agent: agentName, Error: "Agent Mail server unavailable"}
@@ -465,7 +474,7 @@ func runRenewLocks(session string, extendMinutes int) error {
 
 	extendSeconds := extendMinutes * 60
 	renewResult, err := client.RenewReservations(ctx, agentmail.RenewReservationsOptions{
-		ProjectKey:    wd,
+		ProjectKey:    projectKey,
 		AgentName:     agentName,
 		ExtendSeconds: extendSeconds,
 	})

@@ -730,7 +730,10 @@ Examples:
 				sessionName = config.FormatSessionName(sessionName, label)
 			}
 
-			dir := cfg.GetProjectDir(sessionName)
+			dir := resolveProjectDirForSession(sessionName, true)
+			if dir == "" {
+				return fmt.Errorf("getting project root failed")
+			}
 
 			// Interactive wizard: triggered by --interactive flag or when no agents specified and TTY available
 			if interactive && len(agentSpecs) == 0 && recipeName == "" && templateName == "" && len(personaSpecs) == 0 {
@@ -1141,7 +1144,10 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		totalAgents = len(opts.Agents)
 	}
 
-	dir := cfg.GetProjectDir(opts.Session)
+	dir := resolveProjectDirForSession(opts.Session, true)
+	if dir == "" {
+		return outputError(fmt.Errorf("getting project root failed"))
+	}
 	auditStart := time.Now()
 	auditSessionCreated := false
 	auditPanesAdded := 0
@@ -1472,7 +1478,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		}
 
 		if query != "" {
-			ctx, err := ResolveCassContext(query, cfg.GetProjectDir(opts.Session))
+			ctx, err := ResolveCassContext(query, dir)
 			if err == nil {
 				cassContext = ctx
 			}
