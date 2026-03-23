@@ -512,7 +512,9 @@ func (s *Server) handleExportCheckpoint(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("REST: failed to write checkpoint export data request_id=%s: %v", reqID, err)
+		}
 		return
 	}
 

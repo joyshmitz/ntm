@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +124,7 @@ func TestRunMailInbox(t *testing.T) {
 			},
 			wantErr: false,
 			wantOutput: []string{
-				"Project Inbox: cli",
+				"Project Inbox: " + filepath.Base(GetProjectRoot()),
 				"Test Message",
 				"GreenCastle → BlueLake",
 			},

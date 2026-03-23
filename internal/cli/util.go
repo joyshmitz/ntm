@@ -522,3 +522,34 @@ func resolveProjectDirForSession(session string, preferSession bool) string {
 	}
 	return ""
 }
+
+// resolveCreationProjectDirForSession resolves the configured project directory for
+// commands that create or spawn a target session. Unlike resolveProjectDirForSession,
+// this must not prefer the current workspace just because the target directory does
+// not exist yet: creation commands are expected to create that directory.
+func resolveCreationProjectDirForSession(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		if projectRoot := GetProjectRoot(); projectRoot != "" {
+			return projectRoot, nil
+		}
+		return "", fmt.Errorf("getting project root failed")
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", err
+	}
+
+	activeCfg := cfg
+	if activeCfg == nil {
+		activeCfg = config.Default()
+	}
+	if activeCfg == nil {
+		return "", fmt.Errorf("getting project root failed")
+	}
+
+	projectDir := filepath.Clean(activeCfg.GetProjectDir(session))
+	if strings.TrimSpace(projectDir) == "" {
+		return "", fmt.Errorf("getting project root failed")
+	}
+	return projectDir, nil
+}

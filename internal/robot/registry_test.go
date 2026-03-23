@@ -227,3 +227,32 @@ func TestGetRobotRegistry_SurfaceReturnsDetachedSlices(t *testing.T) {
 		t.Fatal("surface transports alias registry storage")
 	}
 }
+
+func TestGetRobotRegistry_ReturnsDetachedRegistrySnapshots(t *testing.T) {
+	t.Parallel()
+
+	first := GetRobotRegistry()
+	second := GetRobotRegistry()
+
+	if len(first.Surfaces) == 0 || len(first.Sections) == 0 || len(first.Categories) == 0 || len(first.SchemaTypes) == 0 {
+		t.Fatal("expected populated registry snapshots")
+	}
+
+	first.Surfaces[0].Name = "mutated-surface"
+	first.Sections[0].Name = "mutated-section"
+	first.Categories[0] = "mutated-category"
+	first.SchemaTypes[0] = "mutated-schema"
+
+	if second.Surfaces[0].Name == "mutated-surface" {
+		t.Fatal("GetRobotRegistry returned shared surfaces slice")
+	}
+	if second.Sections[0].Name == "mutated-section" {
+		t.Fatal("GetRobotRegistry returned shared sections slice")
+	}
+	if second.Categories[0] == "mutated-category" {
+		t.Fatal("GetRobotRegistry returned shared categories slice")
+	}
+	if second.SchemaTypes[0] == "mutated-schema" {
+		t.Fatal("GetRobotRegistry returned shared schema types slice")
+	}
+}

@@ -73,7 +73,7 @@ func GetRobotRegistry() *RobotRegistry {
 	robotRegistryOnce.Do(func() {
 		robotRegistry = buildRobotRegistry()
 	})
-	return robotRegistry
+	return cloneRobotRegistry(robotRegistry)
 }
 
 // Surface returns a registry surface by name.
@@ -547,6 +547,60 @@ func cloneRobotSurfaceDescriptors(surfaces []RobotSurfaceDescriptor) []RobotSurf
 		cloned[i].Transports = cloneTransports(surface.Transports)
 	}
 
+	return cloned
+}
+
+func cloneRobotRegistry(src *RobotRegistry) *RobotRegistry {
+	if src == nil {
+		return nil
+	}
+
+	cloned := &RobotRegistry{
+		Surfaces:      cloneRobotSurfaceDescriptors(src.Surfaces),
+		Sections:      cloneRobotSections(src.Sections),
+		Categories:    cloneStrings(src.Categories),
+		SchemaTypes:   cloneStrings(src.SchemaTypes),
+		surfaceByName: cloneSurfaceDescriptorMap(src.surfaceByName),
+		sectionByName: cloneSectionDescriptorMap(src.sectionByName),
+		schemaByType:  cloneSchemaBindings(src.schemaByType),
+	}
+
+	return cloned
+}
+
+func cloneRobotSections(sections []RobotSectionDescriptor) []RobotSectionDescriptor {
+	if sections == nil {
+		return nil
+	}
+	cloned := make([]RobotSectionDescriptor, len(sections))
+	copy(cloned, sections)
+	return cloned
+}
+
+func cloneSurfaceDescriptorMap(src map[string]RobotSurfaceDescriptor) map[string]RobotSurfaceDescriptor {
+	if src == nil {
+		return nil
+	}
+	cloned := make(map[string]RobotSurfaceDescriptor, len(src))
+	for name, surface := range src {
+		copied := surface
+		copied.Sections = cloneStrings(surface.Sections)
+		copied.Parameters = cloneRobotParameters(surface.Parameters)
+		copied.Examples = cloneStrings(surface.Examples)
+		copied.Transports = cloneTransports(surface.Transports)
+		cloned[name] = copied
+	}
+	return cloned
+}
+
+func cloneSectionDescriptorMap(src map[string]RobotSectionDescriptor) map[string]RobotSectionDescriptor {
+	if src == nil {
+		return nil
+	}
+	cloned := make(map[string]RobotSectionDescriptor, len(src))
+	for name, section := range src {
+		cloned[name] = section
+	}
 	return cloned
 }
 

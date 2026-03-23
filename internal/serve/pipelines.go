@@ -5,6 +5,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -327,7 +328,7 @@ func (s *Server) handleResumePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req PipelineResumeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body", nil, reqID)
 		return
 	}
@@ -466,7 +467,7 @@ func (s *Server) handleCleanupPipelines(w http.ResponseWriter, r *http.Request) 
 	reqID := requestIDFromContext(r.Context())
 
 	var req PipelineCleanupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body", nil, reqID)
 		return
 	}

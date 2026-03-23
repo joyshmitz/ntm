@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -149,7 +150,10 @@ func SummarizeSession(ctx context.Context, opts Options) (*SessionSummary, error
 	// Optional LLM summarization for brief/detailed formats
 	if opts.Summarizer != nil && opts.Format != FormatHandoff {
 		prompt := buildLLMPrompt(opts.Format, summary)
-		if text, err := opts.Summarizer.Summarize(ctx, prompt, opts.MaxTokens); err == nil && strings.TrimSpace(text) != "" {
+		text, err := opts.Summarizer.Summarize(ctx, prompt, opts.MaxTokens)
+		if err != nil {
+			log.Printf("summary: LLM summarization failed, using fallback: %v", err)
+		} else if strings.TrimSpace(text) != "" {
 			summary.Text = strings.TrimSpace(text)
 		}
 	}

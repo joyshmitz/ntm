@@ -88,6 +88,9 @@ func newAddCmd() *cobra.Command {
 				}
 				sessionName = config.FormatSessionName(sessionName, label)
 			}
+			if err := tmux.ValidateSessionName(sessionName); err != nil {
+				return err
+			}
 
 			dir := resolveProjectDirForSession(sessionName, true)
 			if dir == "" {

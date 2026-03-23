@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -1108,6 +1110,21 @@ func TestSpawnValidation(t *testing.T) {
 	}
 }
 
+func TestSessionsCreateKernelHandlerDecodesMapInputAndValidatesLabelShape(t *testing.T) {
+	resetFlags()
+
+	_, err := kernel.Run(context.Background(), "sessions.create", map[string]interface{}{
+		"session": "project--bad--label",
+		"panes":   1,
+	})
+	if err == nil {
+		t.Fatal("expected label validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid label") {
+		t.Fatalf("expected invalid-label validation error, got %v", err)
+	}
+}
+
 func TestAddValidationRejectsReservedLabelSeparatorInProjectName(t *testing.T) {
 	cfg = config.Default()
 
@@ -1136,6 +1153,42 @@ func TestAddValidationRejectsReservedLabelSeparatorInProjectName(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "contains '--'") {
 				t.Fatalf("expected reserved-separator validation error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestAddValidationRejectsInvalidSessionNames(t *testing.T) {
+	cfg = config.Default()
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "colon",
+			args:    []string{"add", "test:project", "--cc=1"},
+			wantErr: "cannot contain ':'",
+		},
+		{
+			name:    "dot",
+			args:    []string{"add", "test.project", "--cc=1"},
+			wantErr: "cannot contain",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags()
+			rootCmd.SetArgs(tt.args)
+
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
 		})
 	}

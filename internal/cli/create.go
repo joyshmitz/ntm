@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -64,9 +65,26 @@ func init() {
 			if value != nil {
 				opts = *value
 			}
+		case map[string]interface{}:
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return nil, fmt.Errorf("marshal sessions.create input: %w", err)
+			}
+			if err := json.Unmarshal(raw, &opts); err != nil {
+				return nil, fmt.Errorf("decode sessions.create input: %w", err)
+			}
 		}
 		if strings.TrimSpace(opts.Session) == "" {
 			return nil, fmt.Errorf("session is required")
+		}
+		base, label := config.ParseSessionLabel(opts.Session)
+		if err := config.ValidateProjectName(base); err != nil {
+			return nil, err
+		}
+		if label != "" {
+			if err := config.ValidateLabel(label); err != nil {
+				return nil, fmt.Errorf("invalid label: %w", err)
+			}
 		}
 		return buildCreateResponse(opts.Session, opts.Panes)
 	})
@@ -150,7 +168,10 @@ func runCreate(session string, panes int) (err error) {
 		panes = cfg.Tmux.DefaultPanes
 	}
 
-	dir := resolveProjectDirForSession(session, true)
+	dir, err := resolveCreationProjectDirForSession(session)
+	if err != nil {
+		return err
+	}
 	auditStart := time.Now()
 	auditCreated := false
 	auditAlreadyExisted := false
@@ -366,7 +387,10 @@ func buildCreateResponse(session string, panes int) (resp output.CreateResponse,
 		panes = cfg.Tmux.DefaultPanes
 	}
 
-	dir := resolveProjectDirForSession(session, true)
+	dir, err := resolveCreationProjectDirForSession(session)
+	if err != nil {
+		return output.CreateResponse{}, err
+	}
 	auditStart := time.Now()
 	auditCreated := false
 	auditAlreadyExisted := false

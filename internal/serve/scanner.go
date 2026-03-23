@@ -923,16 +923,22 @@ func (s *Server) handleBugsNotify(w http.ResponseWriter, r *http.Request) {
 		minSeverity = string(scanner.SeverityWarning)
 	}
 
-	findings := scannerStore.GetFindings("", false, "", 1000, 0)
-
 	// Filter by minimum severity
-	var toNotify []*FindingRecord
 	severityOrder := map[string]int{
 		string(scanner.SeverityCritical): 3,
 		string(scanner.SeverityWarning):  2,
 		string(scanner.SeverityInfo):     1,
 	}
-	minSevLevel := severityOrder[minSeverity]
+	minSevLevel, validSev := severityOrder[minSeverity]
+	if !validSev {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid min_severity: %q", minSeverity), nil, reqID)
+		return
+	}
+
+	findings := scannerStore.GetFindings("", false, "", 1000, 0)
+
+	var toNotify []*FindingRecord
 
 	for _, f := range findings {
 		if severityOrder[string(f.Finding.Severity)] >= minSevLevel {

@@ -730,9 +730,9 @@ Examples:
 				sessionName = config.FormatSessionName(sessionName, label)
 			}
 
-			dir := resolveProjectDirForSession(sessionName, true)
-			if dir == "" {
-				return fmt.Errorf("getting project root failed")
+			dir, resolveErr := resolveCreationProjectDirForSession(sessionName)
+			if resolveErr != nil {
+				return resolveErr
 			}
 
 			// Interactive wizard: triggered by --interactive flag or when no agents specified and TTY available
@@ -1144,9 +1144,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		totalAgents = len(opts.Agents)
 	}
 
-	dir := resolveProjectDirForSession(opts.Session, true)
-	if dir == "" {
-		return outputError(fmt.Errorf("getting project root failed"))
+	dir, err := resolveCreationProjectDirForSession(opts.Session)
+	if err != nil {
+		return outputError(err)
 	}
 	auditStart := time.Now()
 	auditSessionCreated := false

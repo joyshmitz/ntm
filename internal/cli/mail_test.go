@@ -166,6 +166,7 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 			params, _ := rpc.Params.(map[string]interface{})
 			uri := toString(params["uri"])
 			projectKey := ""
+			resourceText := ""
 			if strings.HasPrefix(uri, "resource://file_reservations/") {
 				projectKey = strings.TrimPrefix(uri, "resource://file_reservations/")
 				if idx := strings.Index(projectKey, "?"); idx >= 0 {
@@ -174,26 +175,38 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				if decoded, err := url.PathUnescape(projectKey); err == nil {
 					projectKey = filepath.Clean(decoded)
 				}
+				rows := make([]map[string]interface{}, 0, len(stub.reservations))
+				for _, reservation := range stub.reservations {
+					rows = append(rows, map[string]interface{}{
+						"id":           reservation.ID,
+						"agent":        reservation.AgentName,
+						"agent_name":   reservation.AgentName,
+						"path_pattern": reservation.PathPattern,
+						"exclusive":    reservation.Exclusive,
+						"reason":       reservation.Reason,
+						"expires_ts":   reservation.ExpiresTS,
+						"created_ts":   reservation.CreatedTS,
+					})
+				}
+				resourceText = mustJSONString(t, rows)
 			}
-			stub.listCalls = append(stub.listCalls, listCall{Project: projectKey, URI: uri})
-
-			rows := make([]map[string]interface{}, 0, len(stub.reservations))
-			for _, reservation := range stub.reservations {
-				rows = append(rows, map[string]interface{}{
-					"id":           reservation.ID,
-					"agent":        reservation.AgentName,
-					"agent_name":   reservation.AgentName,
-					"path_pattern": reservation.PathPattern,
-					"exclusive":    reservation.Exclusive,
-					"reason":       reservation.Reason,
-					"expires_ts":   reservation.ExpiresTS,
-					"created_ts":   reservation.CreatedTS,
+			if strings.HasPrefix(uri, "resource://agents/") {
+				projectKey = strings.TrimPrefix(uri, "resource://agents/")
+				if idx := strings.Index(projectKey, "?"); idx >= 0 {
+					projectKey = projectKey[:idx]
+				}
+				if decoded, err := url.PathUnescape(projectKey); err == nil {
+					projectKey = filepath.Clean(decoded)
+				}
+				resourceText = mustJSONString(t, map[string]interface{}{
+					"agents": stub.listAgents,
 				})
 			}
+			stub.listCalls = append(stub.listCalls, listCall{Project: projectKey, URI: uri})
 			writeResponse(map[string]interface{}{
 				"contents": []map[string]interface{}{
 					{
-						"text": mustJSONString(t, rows),
+						"text": resourceText,
 					},
 				},
 			})
