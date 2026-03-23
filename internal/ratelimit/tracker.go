@@ -352,9 +352,9 @@ func (t *RateLimitTracker) LoadFromDir(dir string) error {
 	if pd.State != nil {
 		// Sanitize loaded state: reset corrupted delays and cooldowns
 		// that may have been persisted from a previous overflow bug.
-		for _, ps := range pd.State {
-			if ps.CurrentDelay < 0 || ps.CurrentDelay > time.Hour {
-				ps.CurrentDelay = 0
+		for provider, ps := range pd.State {
+			if ps.CurrentDelay <= 0 || ps.CurrentDelay > time.Hour {
+				ps.CurrentDelay = getDefaultDelay(provider)
 			}
 			if !ps.CooldownUntil.IsZero() && ps.CooldownUntil.After(time.Now().Add(time.Hour)) {
 				ps.CooldownUntil = time.Time{}

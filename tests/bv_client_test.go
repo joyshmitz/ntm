@@ -264,6 +264,9 @@ func TestBVClientCachingUsesCache(t *testing.T) {
 }
 
 func TestBVClientIntegrationOrderAndLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping slow integration test in short mode")
+	}
 	logger := testutil.NewTestLoggerStdout(t)
 	purpose := "Call real bv and verify recommendation order and limit behavior"
 	logger.Log("Test: %s", t.Name())
@@ -293,7 +296,7 @@ func TestBVClientIntegrationOrderAndLimit(t *testing.T) {
 		t.Fatalf("unable to read bv triage: %v", err)
 	}
 
-	client := bv.NewBVClientWithOptions(root, 30*time.Second, 30*time.Second)
+	client := bv.NewBVClientWithOptions(root, 5*time.Second, 10*time.Second)
 	limit := 5
 	logger.Log("Expected: recommendations preserve bv order, limit=%d", limit)
 
@@ -325,6 +328,9 @@ func TestBVClientIntegrationOrderAndLimit(t *testing.T) {
 }
 
 func TestBVClientIntegrationCacheConsistency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping slow integration test in short mode")
+	}
 	logger := testutil.NewTestLoggerStdout(t)
 	purpose := "Ensure repeated GetRecommendations calls return consistent results with real bv"
 	logger.Log("Test: %s", t.Name())
@@ -341,7 +347,7 @@ func TestBVClientIntegrationCacheConsistency(t *testing.T) {
 		t.Skip("no .beads directory found")
 	}
 
-	client := bv.NewBVClientWithOptions(root, time.Minute, 30*time.Second)
+	client := bv.NewBVClientWithOptions(root, time.Minute, 10*time.Second)
 	logger.Log("Input: CacheTTL=%s", client.CacheTTL)
 	logger.Log("Expected: identical recommendation IDs across back-to-back calls")
 

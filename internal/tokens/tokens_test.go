@@ -95,6 +95,7 @@ func TestDetectContentType(t *testing.T) {
 		want  ContentType
 	}{
 		{`{"key": "value"}`, ContentJSON},
+		{"\u00a0{\"key\": \"value\"}\u00a0", ContentJSON},
 		{"# Markdown Title\n- Item", ContentMarkdown},
 		{"func main() { fmt.Println() }", ContentCode},
 		{"Just some regular text.", ContentUnknown}, // Now unknown, as it's not clearly code/json/md

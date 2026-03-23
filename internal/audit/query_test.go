@@ -102,7 +102,7 @@ func TestSearcher_Search_BasicFilters(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 3 {
-			t.Errorf("Expected 3 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 3 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -115,10 +115,10 @@ func TestSearcher_Search_BasicFilters(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 		if result.Entries[0].EventType != EventTypeSend {
-			t.Errorf("Expected EventTypeSend, got %s", result.Entries[0].EventType)
+			t.Fatalf("Expected EventTypeSend, got %s", result.Entries[0].EventType)
 		}
 	})
 
@@ -131,7 +131,7 @@ func TestSearcher_Search_BasicFilters(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 2 {
-			t.Errorf("Expected 2 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 2 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -144,7 +144,7 @@ func TestSearcher_Search_BasicFilters(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 3 {
-			t.Errorf("Expected 3 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 3 entries, got %d", len(result.Entries))
 		}
 
 		// Non-existent session
@@ -155,7 +155,7 @@ func TestSearcher_Search_BasicFilters(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 0 {
-			t.Errorf("Expected 0 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 0 entries, got %d", len(result.Entries))
 		}
 	})
 }
@@ -164,7 +164,8 @@ func TestSearcher_Search_TimeRange(t *testing.T) {
 	auditDir, cleanup := setupTestAuditDir(t)
 	defer cleanup()
 
-	now := time.Now().UTC()
+	// Use a fixed time to avoid day-boundary flakiness
+	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 	entries := []AuditEntry{
 		{
 			Timestamp:   now.Add(-2 * time.Hour),
@@ -200,7 +201,7 @@ func TestSearcher_Search_TimeRange(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 		if result.Entries[0].Target != "recent-entry" {
 			t.Errorf("Expected recent-entry, got %s", result.Entries[0].Target)
@@ -217,7 +218,7 @@ func TestSearcher_Search_TimeRange(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 		if result.Entries[0].Target != "old-entry" {
 			t.Errorf("Expected old-entry, got %s", result.Entries[0].Target)
@@ -236,7 +237,7 @@ func TestSearcher_Search_TimeRange(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 	})
 }
@@ -468,7 +469,7 @@ func TestSearcher_Search_TargetPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 2 {
-			t.Errorf("Expected 2 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 2 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -481,7 +482,7 @@ func TestSearcher_Search_TargetPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 2 {
-			t.Errorf("Expected 2 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 2 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -494,7 +495,7 @@ func TestSearcher_Search_TargetPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 3 {
-			t.Errorf("Expected 3 entries (cc_1, cod_1, gmi_1), got %d", len(result.Entries))
+			t.Fatalf("Expected 3 entries (cc_1, cod_1, gmi_1), got %d", len(result.Entries))
 		}
 	})
 }
@@ -550,7 +551,7 @@ func TestSearcher_Search_GrepPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 	})
 
@@ -563,7 +564,7 @@ func TestSearcher_Search_GrepPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 2 {
-			t.Errorf("Expected 2 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 2 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -577,7 +578,7 @@ func TestSearcher_Search_GrepPattern(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 1 {
-			t.Errorf("Expected 1 entry, got %d", len(result.Entries))
+			t.Fatalf("Expected 1 entry, got %d", len(result.Entries))
 		}
 	})
 }
@@ -613,7 +614,7 @@ func TestSearcher_Search_Pagination(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 3 {
-			t.Errorf("Expected 3 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 3 entries, got %d", len(result.Entries))
 		}
 		if !result.Truncated {
 			t.Error("Expected Truncated to be true")
@@ -630,7 +631,7 @@ func TestSearcher_Search_Pagination(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 5 {
-			t.Errorf("Expected 5 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 5 entries, got %d", len(result.Entries))
 		}
 	})
 
@@ -644,7 +645,7 @@ func TestSearcher_Search_Pagination(t *testing.T) {
 			t.Fatalf("Search failed: %v", err)
 		}
 		if len(result.Entries) != 3 {
-			t.Errorf("Expected 3 entries, got %d", len(result.Entries))
+			t.Fatalf("Expected 3 entries, got %d", len(result.Entries))
 		}
 	})
 }
@@ -695,7 +696,7 @@ func TestSearcher_Count(t *testing.T) {
 			t.Fatalf("Count failed: %v", err)
 		}
 		if count != 3 {
-			t.Errorf("Expected count 3, got %d", count)
+			t.Fatalf("Expected count 3, got %d", count)
 		}
 	})
 
@@ -708,7 +709,7 @@ func TestSearcher_Count(t *testing.T) {
 			t.Fatalf("Count failed: %v", err)
 		}
 		if count != 2 {
-			t.Errorf("Expected count 2, got %d", count)
+			t.Fatalf("Expected count 2, got %d", count)
 		}
 	})
 }

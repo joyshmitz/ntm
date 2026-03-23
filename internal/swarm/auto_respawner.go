@@ -1016,20 +1016,28 @@ func (r *AutoRespawner) emitEvent(result *RespawnResult) {
 		NewAccount:      result.NewAccount,
 	}
 
-	// Non-blocking send.
-	// Take a local copy under lock to avoid racing with Stop() closing the channel.
-	r.mu.RLock()
-	ch := r.eventChan
-	r.mu.RUnlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- event:
-		// Event sent successfully
-	default:
+	// Non-blocking send while holding the read lock so Stop() cannot close the
+	// channel between the nil check and the send.
+	sent, available := r.trySendEvent(event)
+	if available && !sent {
 		r.logger().Warn("[AutoRespawner] event_channel_full",
 			"session_pane", result.SessionPane)
+	}
+}
+
+func (r *AutoRespawner) trySendEvent(event RespawnEvent) (sent bool, available bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.eventChan == nil {
+		return false, false
+	}
+
+	select {
+	case r.eventChan <- event:
+		return true, true
+	default:
+		return false, true
 	}
 }
 

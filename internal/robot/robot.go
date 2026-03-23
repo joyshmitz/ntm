@@ -5648,17 +5648,18 @@ func buildRuntimeWorkRows(section *adapters.WorkSection, collectedAt, staleAfter
 		}
 
 		row := &state.RuntimeWork{
-			BeadID:         beadID,
-			Title:          robotFirstNonEmpty(item.Title, beadID),
-			Status:         status,
-			Priority:       item.Priority,
-			BeadType:       strings.TrimSpace(item.Type),
-			Assignee:       strings.TrimSpace(item.Assignee),
-			BlockedByCount: len(item.BlockedBy),
-			UnblocksCount:  item.Unblocks,
-			Labels:         jsonStringOrEmpty(item.Labels),
-			CollectedAt:    collectedAt,
-			StaleAfter:     staleAfter,
+			BeadID:          beadID,
+			Title:           robotFirstNonEmpty(item.Title, beadID),
+			TitleDisclosure: jsonStringOrEmpty(item.TitleDisclosure),
+			Status:          status,
+			Priority:        item.Priority,
+			BeadType:        strings.TrimSpace(item.Type),
+			Assignee:        strings.TrimSpace(item.Assignee),
+			BlockedByCount:  len(item.BlockedBy),
+			UnblocksCount:   item.Unblocks,
+			Labels:          jsonStringOrEmpty(item.Labels),
+			CollectedAt:     collectedAt,
+			StaleAfter:      staleAfter,
 		}
 		if item.Score != nil {
 			score := *item.Score
@@ -5703,17 +5704,25 @@ func buildRuntimeCoordinationRows(section *adapters.CoordinationSection, collect
 		if trimmedName == "" {
 			continue
 		}
+		agentLatestMessageAt := parseRobotTimestamp(stats.LatestMessage)
+		if agentLatestMessageAt == nil {
+			agentLatestMessageAt = latestMessageAt
+		}
 		rows[trimmedName] = &state.RuntimeCoordination{
-			AgentName:       trimmedName,
-			SessionName:     "",
-			Pane:            strings.TrimSpace(stats.Pane),
-			UnreadCount:     stats.Unread,
-			PendingAckCount: stats.Pending,
-			UrgentCount:     stats.Urgent,
-			LastMessageAt:   latestMessageAt,
-			LastReceivedAt:  latestMessageAt,
-			CollectedAt:     collectedAt,
-			StaleAfter:      staleAfter,
+			AgentName:                    trimmedName,
+			SessionName:                  "",
+			Pane:                         strings.TrimSpace(stats.Pane),
+			UnreadCount:                  stats.Unread,
+			PendingAckCount:              stats.Pending,
+			UrgentCount:                  stats.Urgent,
+			LastMessageSubject:           strings.TrimSpace(stats.LatestSubject),
+			LastMessageSubjectDisclosure: jsonStringOrEmpty(stats.LatestSubjectDisclosure),
+			LastMessagePreview:           strings.TrimSpace(stats.LatestPreview),
+			LastMessagePreviewDisclosure: jsonStringOrEmpty(stats.LatestPreviewDisclosure),
+			LastMessageAt:                agentLatestMessageAt,
+			LastReceivedAt:               agentLatestMessageAt,
+			CollectedAt:                  collectedAt,
+			StaleAfter:                   staleAfter,
 		}
 	}
 

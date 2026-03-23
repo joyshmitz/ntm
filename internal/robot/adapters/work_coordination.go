@@ -113,10 +113,15 @@ type MailSummary struct {
 
 // AgentMailStats captures per-agent inbox load.
 type AgentMailStats struct {
-	Unread  int    `json:"unread"`
-	Pending int    `json:"pending"`
-	Urgent  int    `json:"urgent"`
-	Pane    string `json:"pane,omitempty"`
+	Unread                  int                 `json:"unread"`
+	Pending                 int                 `json:"pending"`
+	Urgent                  int                 `json:"urgent"`
+	Pane                    string              `json:"pane,omitempty"`
+	LatestMessage           string              `json:"latest_message,omitempty"`
+	LatestSubject           string              `json:"latest_subject,omitempty"`
+	LatestSubjectDisclosure *DisclosureMetadata `json:"latest_subject_disclosure,omitempty"`
+	LatestPreview           string              `json:"latest_preview,omitempty"`
+	LatestPreviewDisclosure *DisclosureMetadata `json:"latest_preview_disclosure,omitempty"`
 }
 
 // ThreadsSummary captures recent message thread activity.
@@ -350,7 +355,7 @@ func (a *WorkCoordinationAdapter) collectCoordination(ctx context.Context, now t
 				ProjectKey:    a.config.ProjectDir,
 				AgentName:     agent.Name,
 				Limit:         25,
-				IncludeBodies: false,
+				IncludeBodies: true,
 			})
 			if err != nil {
 				continue
@@ -530,6 +535,7 @@ func summarizeMail(inboxByAgent map[string][]agentmail.InboxMessage, now time.Ti
 
 	for agentName, inbox := range inboxByAgent {
 		stats := AgentMailStats{}
+		var latestAt time.Time
 		for _, msg := range inbox {
 			stats.Unread++
 			mail.TotalUnread++
@@ -544,6 +550,16 @@ func summarizeMail(inboxByAgent map[string][]agentmail.InboxMessage, now time.Ti
 			if msg.CreatedTS.After(parseTimestamp(mail.LatestMessage)) {
 				mail.LatestMessage = FormatTimestamp(msg.CreatedTS.Time)
 			}
+			if msg.CreatedTS.After(latestAt) {
+				latestAt = msg.CreatedTS.Time
+				stats.LatestMessage = FormatTimestamp(latestAt)
+				stats.LatestSubject, stats.LatestSubjectDisclosure = NormalizeDisclosureText(msg.Subject)
+				previewSource := strings.TrimSpace(msg.BodyMD)
+				if previewSource == "" {
+					previewSource = msg.Subject
+				}
+				stats.LatestPreview, stats.LatestPreviewDisclosure = NormalizeDisclosureText(previewSource)
+			}
 
 			threadKey := fmt.Sprintf("msg:%d", msg.ID)
 			if msg.ThreadID != nil && *msg.ThreadID != "" {
@@ -551,14 +567,16 @@ func summarizeMail(inboxByAgent map[string][]agentmail.InboxMessage, now time.Ti
 			}
 			activity := threadsByKey[threadKey]
 			if activity == nil {
-				activity = &threadActivity{key: threadKey, subject: msg.Subject}
+				subject, _ := NormalizeDisclosureText(msg.Subject)
+				activity = &threadActivity{key: threadKey, subject: subject}
 				threadsByKey[threadKey] = activity
 			}
 			activity.count++
 			if msg.CreatedTS.After(activity.lastAt) {
 				activity.lastAt = msg.CreatedTS.Time
 				if strings.TrimSpace(msg.Subject) != "" {
-					activity.subject = msg.Subject
+					subject, _ := NormalizeDisclosureText(msg.Subject)
+					activity.subject = subject
 				}
 			}
 		}
@@ -797,6 +815,12 @@ func normalizeFreeText(raw string) (string, *DisclosureMetadata) {
 	}
 
 	return normalized, disclosure
+}
+
+// NormalizeDisclosureText applies the shared disclosure-control semantics used by
+// normalized robot-visible free-text fields.
+func NormalizeDisclosureText(raw string) (string, *DisclosureMetadata) {
+	return normalizeFreeText(raw)
 }
 
 func normalizeFreeTextList(values []string) ([]string, []DisclosureMetadata) {

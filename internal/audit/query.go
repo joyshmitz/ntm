@@ -494,8 +494,8 @@ func (s *Searcher) searchFile(ctx context.Context, filePath string, filter func(
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	// Increase buffer size for potentially long lines
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+	// Set max line size for large audit payloads (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	for scanner.Scan() {
 		select {

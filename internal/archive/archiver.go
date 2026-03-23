@@ -192,7 +192,7 @@ func (a *Archiver) archiveNewContent(ctx context.Context) error {
 
 // capturePane captures new content from a single pane.
 func (a *Archiver) capturePane(ctx context.Context, pane tmux.Pane) error {
-	target := fmt.Sprintf("%s:1.%d", a.sessionName, pane.Index)
+	target := fmt.Sprintf("%s:%d.%d", a.sessionName, pane.WindowIndex, pane.Index)
 
 	// Capture content
 	content, err := tmux.DefaultClient.CapturePaneOutputContext(ctx, target, a.linesPerCapture)
@@ -384,6 +384,8 @@ func findNewContent(previous, current string) string {
 func splitLines(s string) []string {
 	var lines []string
 	scanner := bufio.NewScanner(strings.NewReader(s))
+	// Set max line size for large terminal outputs (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}

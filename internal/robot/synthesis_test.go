@@ -293,8 +293,10 @@ func TestMatchesPattern(t *testing.T) {
 		{"file.go", "*.go", true},
 		{"file.txt", "*.go", false},
 		{"dir/file.go", "*.go", true}, // matches basename
+		{"dir/sub/file.go", "*.go", true},
 		{"dir/file.go", "dir/*.go", true},
 		{"dir/sub/file.go", "dir/*.go", false},
+		{"dir/sub/nested/file.go", "dir/*/*.go", false},
 
 		// Directory glob patterns
 		{"internal/robot/file.go", "internal/**", true},

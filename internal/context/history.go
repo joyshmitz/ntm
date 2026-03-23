@@ -338,7 +338,12 @@ func (s *RotationHistoryStore) Prune(keep int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	writer := bufio.NewWriter(tmpFile)
 	for _, record := range toKeep {
@@ -368,6 +373,7 @@ func (s *RotationHistoryStore) Prune(keep int) (int, error) {
 	if err := os.Rename(tmpFile.Name(), s.storagePath); err != nil {
 		return 0, err
 	}
+	tmpPath = "" // Prevent defer from removing the successfully renamed file
 
 	return removed, nil
 }
@@ -400,7 +406,12 @@ func (s *RotationHistoryStore) PruneByTime(cutoff time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	writer := bufio.NewWriter(tmpFile)
 	for _, record := range toKeep {
@@ -430,6 +441,7 @@ func (s *RotationHistoryStore) PruneByTime(cutoff time.Time) (int, error) {
 	if err := os.Rename(tmpFile.Name(), s.storagePath); err != nil {
 		return 0, err
 	}
+	tmpPath = "" // Prevent defer from removing the successfully renamed file
 
 	return removed, nil
 }

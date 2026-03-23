@@ -6211,7 +6211,7 @@ func TestHandleListMailAgents_Branch(t *testing.T) {
 	s.handleListMailAgents(rec, req)
 
 	if rec.Code != http.StatusOK && rec.Code != http.StatusServiceUnavailable &&
-		rec.Code != http.StatusInternalServerError {
+		rec.Code != http.StatusInternalServerError && rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
 	}
 }

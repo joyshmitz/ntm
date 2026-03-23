@@ -154,14 +154,37 @@ func (t *CostTracker) SaveToDir(dir string) error {
 	}
 
 	costPath := filepath.Join(ntmDir, "costs.json")
+	
+	// Create atomic temp file
+	tmpFile, err := os.CreateTemp(ntmDir, "costs-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	data, err := json.MarshalIndent(t.sessions, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal costs: %w", err)
 	}
 
-	if err := os.WriteFile(costPath, data, 0644); err != nil {
-		return fmt.Errorf("write costs file: %w", err)
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("write temp file: %w", err)
 	}
+	
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, costPath); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	tmpPath = "" // Prevent defer from removing successfully renamed file
 
 	return nil
 }

@@ -214,6 +214,136 @@ func TestHandleGetMessage_NotImplemented(t *testing.T) {
 	}
 }
 
+func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
+	t.Parallel()
+
+	secret := strings.Repeat("s", 20)
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return []agentmail.InboxMessage{
+				{
+					ID:         7,
+					Subject:    "Rotate credential",
+					BodyMD:     "Need token=" + secret + " before merge",
+					From:       "BlueLake",
+					Importance: "urgent",
+					Kind:       "to",
+					CreatedTS:  agentmail.FlexTime{},
+				},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=GreenStone&include_bodies=true", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success  bool                       `json:"success"`
+		Messages []MailInboxMessageResponse `json:"messages"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Messages) != 1 {
+		t.Fatalf("message count = %d, want 1", len(resp.Messages))
+	}
+	msg := resp.Messages[0]
+	if msg.Subject != "Rotate credential" {
+		t.Fatalf("subject = %q", msg.Subject)
+	}
+	if msg.SubjectDisclosure == nil || msg.SubjectDisclosure.DisclosureState != "visible" {
+		t.Fatalf("unexpected subject disclosure: %+v", msg.SubjectDisclosure)
+	}
+	if !strings.Contains(msg.Preview, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted preview, got %q", msg.Preview)
+	}
+	if msg.PreviewDisclosure == nil || msg.PreviewDisclosure.DisclosureState != "redacted" || msg.PreviewDisclosure.Findings != 1 {
+		t.Fatalf("unexpected preview disclosure: %+v", msg.PreviewDisclosure)
+	}
+	if msg.BodyMD == nil || !strings.Contains(*msg.BodyMD, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted body_md, got %+v", msg.BodyMD)
+	}
+	if msg.BodyDisclosure == nil || msg.BodyDisclosure.DisclosureState != "redacted" || msg.BodyDisclosure.RedactionMode != "redact" || msg.BodyDisclosure.Findings != 1 {
+		t.Fatalf("unexpected body disclosure: %+v", msg.BodyDisclosure)
+	}
+}
+
+func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
+	t.Parallel()
+
+	secret := strings.Repeat("s", 20)
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"get_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return &agentmail.Message{
+				ID:          42,
+				ProjectID:   1,
+				SenderID:    2,
+				Subject:     "Rotate credential",
+				BodyMD:      "Need token=" + secret + " before merge",
+				From:        "BlueLake",
+				To:          []string{"GreenStone"},
+				Importance:  "urgent",
+				AckRequired: true,
+				CreatedTS:   agentmail.FlexTime{},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/messages/42", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleGetMessage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Success bool                 `json:"success"`
+		Message *MailMessageResponse `json:"message"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Message == nil {
+		t.Fatal("expected message payload")
+	}
+	if resp.Message.Subject != "Rotate credential" {
+		t.Fatalf("subject = %q", resp.Message.Subject)
+	}
+	if resp.Message.SubjectDisclosure == nil || resp.Message.SubjectDisclosure.DisclosureState != "visible" {
+		t.Fatalf("unexpected subject disclosure: %+v", resp.Message.SubjectDisclosure)
+	}
+	if !strings.Contains(resp.Message.Preview, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted preview, got %q", resp.Message.Preview)
+	}
+	if resp.Message.BodyMD == nil || !strings.Contains(*resp.Message.BodyMD, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted body_md, got %+v", resp.Message.BodyMD)
+	}
+	if resp.Message.BodyDisclosure == nil || resp.Message.BodyDisclosure.DisclosureState != "redacted" || resp.Message.BodyDisclosure.Findings != 1 {
+		t.Fatalf("unexpected body disclosure: %+v", resp.Message.BodyDisclosure)
+	}
+}
+
 func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -246,6 +376,79 @@ func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
 	}
 	if resp.ErrorCode != ErrCodeMessageNotFound {
 		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeMessageNotFound)
+	}
+}
+
+func TestHandleSendMessage_ContactBlocked(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"send_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "CONTACT_BLOCKED: target agent only accepts approved contacts",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages", strings.NewReader(`{"sender_name":"BlueLake","to":["RedStone"],"subject":"hello","body_md":"hi"}`))
+
+	srv.handleSendMessage(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeContactDenied {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeContactDenied)
+	}
+}
+
+func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"reply_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "CONTACT_BLOCKED: target agent only accepts approved contacts",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/messages/42/reply", strings.NewReader(`{"sender_name":"BlueLake","body_md":"reply"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleReplyMessage(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeContactDenied {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeContactDenied)
 	}
 }
 
@@ -649,6 +852,658 @@ func TestHandleSearchMessages_NotImplemented(t *testing.T) {
 	}
 	if resp.ErrorCode != ErrCodeNotImplemented {
 		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotImplemented)
+	}
+}
+
+func TestHandleMailInbox_InvalidSinceTS(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake&since_ts=not-a-timestamp", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleMailInbox_InvalidLimit(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake&limit=zero", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleMailInbox_InvalidUrgentOnly(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake&urgent_only=maybe", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleMailInbox_InvalidIncludeBodies(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake&include_bodies=maybe", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleSearchMessages_InvalidLimit(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/search?q=test&limit=bogus", nil)
+
+	srv.handleSearchMessages(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleThreadSummary_InvalidLLMMode(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary?llm_mode=definitely", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "TKT-123")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleThreadSummary(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleThreadSummary_InvalidIncludeExamples(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:8765/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary?include_examples=maybe", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "TKT-123")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleThreadSummary(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
+	t.Parallel()
+
+	var receivedArgs map[string]interface{}
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"summarize_thread": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			receivedArgs = args
+			return agentmail.ThreadSummaryResponse{
+				ThreadID: args["thread_id"].(string),
+				Summary: agentmail.ThreadSummary{
+					Participants: []string{"BlueLake"},
+				},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/threads/TKT-123/summary?llm_mode=false", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "TKT-123")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleThreadSummary(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got, ok := receivedArgs["llm_mode"]; !ok {
+		t.Fatal("expected llm_mode argument to be forwarded")
+	} else if got != false {
+		t.Fatalf("llm_mode = %#v, want false", got)
+	}
+}
+
+func TestHandleListMailProjects_NotImplemented(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/projects", nil)
+
+	srv.handleListMailProjects(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotImplemented, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotImplemented)
+	}
+}
+
+func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32602,
+				Message: "invalid params: name must be adjective+noun",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/agents", strings.NewReader(`{"program":"claude-code","model":"opus-4.5","name":"bad-name"}`))
+
+	srv.handleCreateMailAgent(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeBadRequest {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeBadRequest)
+	}
+}
+
+func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "resource temporarily busy",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/agents", strings.NewReader(`{"program":"claude-code","model":"opus-4.5","name":"BlueLake"}`))
+
+	srv.handleCreateMailAgent(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeServiceUnavail {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeServiceUnavail)
+	}
+}
+
+func TestHandleMailInbox_AgentNotFound(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "agent not registered in project",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=BlueLake", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeAgentNotFound {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeAgentNotFound)
+	}
+}
+
+func TestHandleMailInbox_DoesNotEmitMailReceivedEvent(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return []agentmail.InboxMessage{
+				{ID: 1, Subject: "Hello", From: "BlueLake", Importance: "normal", Kind: "to"},
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+	srv.wsHub = NewWSHub()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mail/inbox?agent_name=GreenStone", nil)
+
+	srv.handleMailInbox(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := len(srv.wsHub.broadcast); got != 0 {
+		t.Fatalf("expected inbox reads to emit no mail event, found %d queued events", got)
+	}
+}
+
+func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
+	t.Parallel()
+
+	expiresAt := "2026-03-22T12:34:56Z"
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"request_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ContactRequestResult{
+				Status: "pending",
+				Link: &agentmail.ContactLink{
+					FromAgent: "BlueLake",
+					ToAgent:   "RedStone",
+					Status:    "pending",
+				},
+				ExpiresTS: &expiresAt,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone","reason":"coordination"}`))
+
+	srv.handleRequestContact(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "pending" {
+		t.Fatalf("status = %v, want pending", resp["status"])
+	}
+	if resp["expires_ts"] != expiresAt {
+		t.Fatalf("expires_ts = %v, want %s", resp["expires_ts"], expiresAt)
+	}
+	link, ok := resp["link"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("link = %#v, want object", resp["link"])
+	}
+	if link["from_agent"] != "BlueLake" || link["to_agent"] != "RedStone" {
+		t.Fatalf("unexpected link payload: %#v", link)
+	}
+}
+
+func TestHandleRequestContact_NotImplemented(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone"}`))
+
+	srv.handleRequestContact(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotImplemented, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotImplemented)
+	}
+}
+
+func TestHandleRequestContact_AgentNotFound(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"request_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "agent not registered: RedStone",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/request", strings.NewReader(`{"from_agent":"BlueLake","to_agent":"RedStone"}`))
+
+	srv.handleRequestContact(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeAgentNotFound {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeAgentNotFound)
+	}
+}
+
+func TestHandleRespondContact_NotImplemented(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
+
+	srv.handleRespondContact(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotImplemented, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotImplemented)
+	}
+}
+
+func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
+	t.Parallel()
+
+	expiresAt := "2026-03-23T00:00:00Z"
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"respond_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ContactRespondResult{
+				Status: "approved",
+				Link: &agentmail.ContactLink{
+					FromAgent: "RedStone",
+					ToAgent:   "BlueLake",
+					Status:    "approved",
+				},
+				ExpiresTS: &expiresAt,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
+
+	srv.handleRespondContact(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "approved" {
+		t.Fatalf("status = %v, want approved", resp["status"])
+	}
+	if resp["expires_ts"] != expiresAt {
+		t.Fatalf("expires_ts = %v, want %s", resp["expires_ts"], expiresAt)
+	}
+	link, ok := resp["link"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("link = %#v, want object", resp["link"])
+	}
+	if link["from_agent"] != "RedStone" || link["to_agent"] != "BlueLake" {
+		t.Fatalf("unexpected link payload: %#v", link)
+	}
+}
+
+func TestHandleRespondContact_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"respond_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return nil, &agentmail.JSONRPCError{
+				Code:    -32000,
+				Message: "contact request not found",
+			}
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mail/contacts/respond", strings.NewReader(`{"to_agent":"BlueLake","from_agent":"RedStone","accept":true}`))
+
+	srv.handleRespondContact(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	var resp APIError
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ErrorCode != ErrCodeNotFound {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeNotFound)
+	}
+}
+
+func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
+	t.Parallel()
+
+	releasedAt := "2026-03-23T01:02:03Z"
+	releasedTime, err := time.Parse(time.RFC3339, releasedAt)
+	if err != nil {
+		t.Fatalf("parse released_at: %v", err)
+	}
+	releasedFlexTime := agentmail.FlexTime{Time: releasedTime}
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"force_release_file_reservation": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ForceReleaseResult{
+				Success:        true,
+				ReleasedAt:     &releasedFlexTime,
+				PreviousHolder: "BlueLake",
+				PathPattern:    "internal/serve/*",
+				Notified:       false,
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reservations/17/force-release", strings.NewReader(`{"agent_name":"RedStone","notify_previous":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "17")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleForceReleaseReservation(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["force_released"] != true {
+		t.Fatalf("force_released = %#v, want true", resp["force_released"])
+	}
+	if resp["previous_holder"] != "BlueLake" {
+		t.Fatalf("previous_holder = %#v, want BlueLake", resp["previous_holder"])
+	}
+	if resp["path_pattern"] != "internal/serve/*" {
+		t.Fatalf("path_pattern = %#v, want internal/serve/*", resp["path_pattern"])
+	}
+	if resp["notified"] != false {
+		t.Fatalf("notified = %#v, want false", resp["notified"])
+	}
+	if resp["released_at"] != releasedAt {
+		t.Fatalf("released_at = %#v, want %s", resp["released_at"], releasedAt)
+	}
+}
+
+func TestHandleSetContactPolicy_ReturnsMCPResultFields(t *testing.T) {
+	t.Parallel()
+
+	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
+		"set_contact_policy": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ContactPolicyResult{
+				AgentName: "BlueLake",
+				Policy:    "contacts_only",
+			}, nil
+		},
+	})
+	defer mcpServer.Close()
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	srv.mailClient = agentmail.NewClient(agentmail.WithBaseURL(mcpServer.URL + "/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/mail/contacts/policy", strings.NewReader(`{"agent_name":"BlueLake","policy":"open"}`))
+
+	srv.handleSetContactPolicy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["agent_name"] != "BlueLake" {
+		t.Fatalf("agent_name = %#v, want BlueLake", resp["agent_name"])
+	}
+	if resp["policy"] != "contacts_only" {
+		t.Fatalf("policy = %#v, want contacts_only", resp["policy"])
 	}
 }
 

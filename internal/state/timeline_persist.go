@@ -190,7 +190,7 @@ func (p *TimelinePersister) LoadTimeline(sessionID string) ([]AgentEvent, error)
 	scanner := bufio.NewScanner(reader)
 	// Increase buffer size for large lines
 	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
 
 	events := make([]AgentEvent, 0, 100)
 	lineNum := 0

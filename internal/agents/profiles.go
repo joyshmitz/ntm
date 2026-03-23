@@ -399,7 +399,7 @@ func matchGlobPattern(path, pattern string) bool {
 			return matched
 		}
 		// Pattern like **/foo - match if path contains or ends with foo
-		return strings.HasSuffix(path, suffix) || strings.Contains(path, "/"+suffix)
+		return path == suffix || strings.HasSuffix(path, "/"+suffix) || strings.Contains(path, "/"+suffix+"/")
 	}
 
 	// Handle prefix/**/*.ext patterns (e.g., internal/**/*.go)
@@ -416,7 +416,7 @@ func matchGlobPattern(path, pattern string) bool {
 			matched, _ := filepath.Match(suffix, filepath.Base(remaining))
 			return matched
 		}
-		return strings.HasSuffix(remaining, suffix)
+		return remaining == suffix || strings.HasSuffix(remaining, "/"+suffix) || strings.Contains(remaining, "/"+suffix+"/")
 	}
 
 	// Handle suffix/** patterns (match any path under directory)

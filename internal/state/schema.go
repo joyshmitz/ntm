@@ -269,6 +269,7 @@ func ApplyMigrations(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate migrations: %w", err)
 	}
+	_ = rows.Close() // Explicitly close to release read lock before executing write transactions
 
 	// Apply pending migrations
 	for _, filename := range files {

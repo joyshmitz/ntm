@@ -1676,8 +1676,8 @@ func TestRenderStateAlignmentModes(t *testing.T) {
 			Message: "Test",
 			Width:   40,
 		})
-		// Left-aligned starts with indent
-		if !strings.HasPrefix(out, " ") {
+		// Left-aligned should contain the indent (ANSI codes may appear first)
+		if !strings.Contains(out, "  ") {
 			t.Error("default alignment should have left indent")
 		}
 	})

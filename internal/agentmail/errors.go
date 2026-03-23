@@ -36,6 +36,9 @@ var (
 	// ErrReservationConflict is returned when a file reservation conflicts with existing ones.
 	ErrReservationConflict = errors.New("file reservation conflict")
 
+	// ErrContactBlocked is returned when a contact policy blocks communication.
+	ErrContactBlocked = errors.New("contact blocked")
+
 	// ErrTransientBusy is returned when the server reports a temporary busy
 	// condition (e.g. non-atomic create_agent_identity partially completed).
 	// Callers should retry with backoff rather than treating this as a hard failure.
@@ -101,6 +104,11 @@ func IsNotFound(err error) bool {
 	return errors.Is(err, ErrNotFound)
 }
 
+// IsInvalidRequest returns true if the error indicates invalid request parameters.
+func IsInvalidRequest(err error) bool {
+	return errors.Is(err, ErrInvalidRequest)
+}
+
 // IsTimeout returns true if the error indicates a request timeout.
 func IsTimeout(err error) bool {
 	return errors.Is(err, ErrTimeout)
@@ -114,6 +122,11 @@ func IsNotImplemented(err error) bool {
 // IsReservationConflict returns true if the error indicates a file reservation conflict.
 func IsReservationConflict(err error) bool {
 	return errors.Is(err, ErrReservationConflict)
+}
+
+// IsContactBlocked returns true if the error indicates a contact policy block.
+func IsContactBlocked(err error) bool {
+	return errors.Is(err, ErrContactBlocked)
 }
 
 // IsTransientBusy returns true if the error indicates a temporary busy condition
@@ -135,6 +148,8 @@ func mapJSONRPCError(rpcErr *JSONRPCError) error {
 		return fmt.Errorf("%w: %s", ErrAgentNotRegistered, rpcErr.Message)
 	case strings.Contains(msg, "message not found"):
 		return fmt.Errorf("%w: %s", ErrMessageNotFound, rpcErr.Message)
+	case strings.Contains(msg, "contact_blocked") || (strings.Contains(msg, "contact") && strings.Contains(msg, "blocked")):
+		return fmt.Errorf("%w: %s", ErrContactBlocked, rpcErr.Message)
 	case strings.Contains(msg, "conflict") && strings.Contains(msg, "reservation"):
 		return fmt.Errorf("%w: %s", ErrReservationConflict, rpcErr.Message)
 	case strings.Contains(msg, "not found") && !strings.Contains(msg, "method not found"):

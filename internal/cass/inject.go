@@ -655,6 +655,32 @@ func FilterResults(hits []CASSHit, config FilterConfig) FilterResult {
 				breakdown.ProjectBonus = 0.15
 			}
 		}
+
+		if config.TopicFilter.Enabled {
+			hitTopics := DetectTopics(hit.Content)
+			breakdown.DetectedTopics = hitTopics
+
+			if config.TopicFilter.MatchTopics && len(config.PromptTopics) > 0 {
+				if topicsOverlap(config.PromptTopics, hitTopics) {
+					breakdown.TopicMultiplier = config.TopicFilter.SameTopicBoost
+				} else {
+					breakdown.TopicMultiplier = config.TopicFilter.DifferentTopicPenalty
+				}
+			}
+
+			excluded := false
+			for _, exclude := range config.TopicFilter.ExcludeTopics {
+				if containsTopic(hitTopics, exclude) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				result.RemovedByTopic++
+				continue
+			}
+		}
+
 		finalScore := breakdown.BaseScore + breakdown.RecencyBonus + breakdown.ProjectBonus - breakdown.AgePenalty
 		finalScore *= breakdown.TopicMultiplier
 		if finalScore > 1.0 {

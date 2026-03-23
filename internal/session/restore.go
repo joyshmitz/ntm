@@ -216,7 +216,18 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 		return fmt.Errorf("getting panes: %w", err)
 	}
 
-	for i, paneState := range state.Panes {
+	// Sort panes by WindowIndex, then Index to ensure mapping matches creation order.
+	// Copy to avoid mutating the caller's slice.
+	sortedPaneStates := make([]PaneState, len(state.Panes))
+	copy(sortedPaneStates, state.Panes)
+	sort.Slice(sortedPaneStates, func(i, j int) bool {
+		if sortedPaneStates[i].WindowIndex != sortedPaneStates[j].WindowIndex {
+			return sortedPaneStates[i].WindowIndex < sortedPaneStates[j].WindowIndex
+		}
+		return sortedPaneStates[i].Index < sortedPaneStates[j].Index
+	})
+
+	for i, paneState := range sortedPaneStates {
 		if i >= len(panes) {
 			break
 		}

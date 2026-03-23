@@ -424,6 +424,9 @@ type FairScheduler struct {
 	// running tracks currently running jobs by session.
 	running map[string]int
 
+	// runningBatches tracks currently running jobs by batch.
+	runningBatches map[string]int
+
 	// mu protects running map.
 	mu sync.RWMutex
 }
@@ -445,10 +448,11 @@ func DefaultFairSchedulerConfig() FairSchedulerConfig {
 // NewFairScheduler creates a new fair scheduler.
 func NewFairScheduler(cfg FairSchedulerConfig) *FairScheduler {
 	return &FairScheduler{
-		queue:         NewJobQueue(),
-		maxPerSession: cfg.MaxPerSession,
-		maxPerBatch:   cfg.MaxPerBatch,
-		running:       make(map[string]int),
+		queue:          NewJobQueue(),
+		maxPerSession:  cfg.MaxPerSession,
+		maxPerBatch:    cfg.MaxPerBatch,
+		running:        make(map[string]int),
+		runningBatches: make(map[string]int),
 	}
 }
 
@@ -472,14 +476,7 @@ func (f *FairScheduler) TryDequeue() *SpawnJob {
 
 		// Check per-batch limit
 		if f.maxPerBatch > 0 && job.BatchID != "" {
-			// Count running jobs in this batch
-			batchRunning := 0
-			for _, j := range f.queue.ListAll() {
-				if j.BatchID == job.BatchID && j.GetStatus() == StatusRunning {
-					batchRunning++
-				}
-			}
-			if batchRunning >= f.maxPerBatch {
+			if f.runningBatches[job.BatchID] >= f.maxPerBatch {
 				continue
 			}
 		}
@@ -488,6 +485,9 @@ func (f *FairScheduler) TryDequeue() *SpawnJob {
 		removed := f.queue.Remove(job.ID)
 		if removed != nil {
 			f.running[job.SessionName]++
+			if removed.BatchID != "" {
+				f.runningBatches[removed.BatchID]++
+			}
 		}
 		return removed
 	}
@@ -503,6 +503,13 @@ func (f *FairScheduler) MarkComplete(job *SpawnJob) {
 	f.running[job.SessionName]--
 	if f.running[job.SessionName] <= 0 {
 		delete(f.running, job.SessionName)
+	}
+
+	if job.BatchID != "" {
+		f.runningBatches[job.BatchID]--
+		if f.runningBatches[job.BatchID] <= 0 {
+			delete(f.runningBatches, job.BatchID)
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 )
 
 // Mail-specific error codes
@@ -108,6 +109,122 @@ type ForceReleaseRequest struct {
 	NotifyPrevious bool   `json:"notify_previous,omitempty"`
 }
 
+type MailInboxMessageResponse struct {
+	ID                int                          `json:"id"`
+	Subject           string                       `json:"subject"`
+	SubjectDisclosure *adapters.DisclosureMetadata `json:"subject_disclosure,omitempty"`
+	Preview           string                       `json:"preview,omitempty"`
+	PreviewDisclosure *adapters.DisclosureMetadata `json:"preview_disclosure,omitempty"`
+	BodyMD            *string                      `json:"body_md,omitempty"`
+	BodyDisclosure    *adapters.DisclosureMetadata `json:"body_disclosure,omitempty"`
+	From              string                       `json:"from"`
+	CreatedTS         agentmail.FlexTime           `json:"created_ts"`
+	ThreadID          *string                      `json:"thread_id,omitempty"`
+	Importance        string                       `json:"importance"`
+	AckRequired       bool                         `json:"ack_required"`
+	Kind              string                       `json:"kind"`
+	ReadAt            *agentmail.FlexTime          `json:"read_at,omitempty"`
+}
+
+type MailMessageResponse struct {
+	ID                int                          `json:"id"`
+	ProjectID         int                          `json:"project_id"`
+	SenderID          int                          `json:"sender_id"`
+	ThreadID          *string                      `json:"thread_id,omitempty"`
+	Subject           string                       `json:"subject"`
+	SubjectDisclosure *adapters.DisclosureMetadata `json:"subject_disclosure,omitempty"`
+	Preview           string                       `json:"preview,omitempty"`
+	PreviewDisclosure *adapters.DisclosureMetadata `json:"preview_disclosure,omitempty"`
+	BodyMD            *string                      `json:"body_md,omitempty"`
+	BodyDisclosure    *adapters.DisclosureMetadata `json:"body_disclosure,omitempty"`
+	From              string                       `json:"from"`
+	To                []string                     `json:"to"`
+	CC                []string                     `json:"cc,omitempty"`
+	BCC               []string                     `json:"bcc,omitempty"`
+	Importance        string                       `json:"importance"`
+	AckRequired       bool                         `json:"ack_required"`
+	CreatedTS         agentmail.FlexTime           `json:"created_ts"`
+	Kind              string                       `json:"kind,omitempty"`
+}
+
+func sanitizeMailText(subject, body string, includeBody bool) (string, *adapters.DisclosureMetadata, string, *adapters.DisclosureMetadata, *string, *adapters.DisclosureMetadata) {
+	safeSubject, subjectDisclosure := adapters.NormalizeDisclosureText(subject)
+	safeBody, bodyDisclosure := adapters.NormalizeDisclosureText(body)
+
+	preview := safeBody
+	previewDisclosure := bodyDisclosure
+	if preview == "" {
+		preview = safeSubject
+		previewDisclosure = subjectDisclosure
+	}
+
+	var bodyMD *string
+	if includeBody && safeBody != "" {
+		bodyCopy := safeBody
+		bodyMD = &bodyCopy
+	}
+
+	return safeSubject, subjectDisclosure, preview, previewDisclosure, bodyMD, bodyDisclosure
+}
+
+func sanitizeInboxMessages(messages []agentmail.InboxMessage, includeBodies bool) []MailInboxMessageResponse {
+	safeMessages := make([]MailInboxMessageResponse, 0, len(messages))
+	for _, msg := range messages {
+		safeMessages = append(safeMessages, sanitizeInboxMessage(msg, includeBodies))
+	}
+	return safeMessages
+}
+
+func sanitizeInboxMessage(msg agentmail.InboxMessage, includeBodies bool) MailInboxMessageResponse {
+	subject, subjectDisclosure, preview, previewDisclosure, bodyMD, bodyDisclosure := sanitizeMailText(msg.Subject, msg.BodyMD, includeBodies)
+
+	return MailInboxMessageResponse{
+		ID:                msg.ID,
+		Subject:           subject,
+		SubjectDisclosure: subjectDisclosure,
+		Preview:           preview,
+		PreviewDisclosure: previewDisclosure,
+		BodyMD:            bodyMD,
+		BodyDisclosure:    bodyDisclosure,
+		From:              msg.From,
+		CreatedTS:         msg.CreatedTS,
+		ThreadID:          msg.ThreadID,
+		Importance:        msg.Importance,
+		AckRequired:       msg.AckRequired,
+		Kind:              msg.Kind,
+		ReadAt:            msg.ReadAt,
+	}
+}
+
+func sanitizeMessage(msg *agentmail.Message) *MailMessageResponse {
+	if msg == nil {
+		return nil
+	}
+
+	subject, subjectDisclosure, preview, previewDisclosure, bodyMD, bodyDisclosure := sanitizeMailText(msg.Subject, msg.BodyMD, true)
+
+	return &MailMessageResponse{
+		ID:                msg.ID,
+		ProjectID:         msg.ProjectID,
+		SenderID:          msg.SenderID,
+		ThreadID:          msg.ThreadID,
+		Subject:           subject,
+		SubjectDisclosure: subjectDisclosure,
+		Preview:           preview,
+		PreviewDisclosure: previewDisclosure,
+		BodyMD:            bodyMD,
+		BodyDisclosure:    bodyDisclosure,
+		From:              msg.From,
+		To:                append([]string(nil), msg.To...),
+		CC:                append([]string(nil), msg.CC...),
+		BCC:               append([]string(nil), msg.BCC...),
+		Importance:        msg.Importance,
+		AckRequired:       msg.AckRequired,
+		CreatedTS:         msg.CreatedTS,
+		Kind:              msg.Kind,
+	}
+}
+
 func writeAgentMailHandlerError(
 	w http.ResponseWriter,
 	reqID string,
@@ -127,10 +244,14 @@ func writeAgentMailHandlerError(
 		writeErrorResponse(w, http.StatusNotImplemented, ErrCodeNotImplemented, notImplementedMessage, details, reqID)
 	case notFoundMatch != nil && notFoundMatch(err):
 		writeErrorResponse(w, http.StatusNotFound, notFoundCode, err.Error(), nil, reqID)
+	case agentmail.IsInvalidRequest(err):
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil, reqID)
 	case agentmail.IsUnauthorized(err):
 		writeErrorResponse(w, http.StatusUnauthorized, ErrCodeUnauthorized, err.Error(), nil, reqID)
 	case agentmail.IsServerUnavailable(err):
 		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeMailUnavailable, err.Error(), nil, reqID)
+	case agentmail.IsTransientBusy(err):
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, err.Error(), nil, reqID)
 	case agentmail.IsTimeout(err):
 		writeErrorResponse(w, http.StatusGatewayTimeout, ErrCodeTimeout, err.Error(), nil, reqID)
 	default:
@@ -146,6 +267,8 @@ func writeAgentMailAgentActionError(w http.ResponseWriter, reqID string, err err
 
 func writeAgentMailMessageActionError(w http.ResponseWriter, reqID string, err error, notImplementedMessage string) {
 	switch {
+	case agentmail.IsContactBlocked(err):
+		writeErrorResponse(w, http.StatusForbidden, ErrCodeContactDenied, err.Error(), nil, reqID)
 	case errors.Is(err, agentmail.ErrAgentNotRegistered):
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeAgentNotFound, err.Error(), nil, reqID)
 	default:
@@ -161,6 +284,26 @@ func writeAgentMailReservationError(w http.ResponseWriter, reqID string, err err
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeAgentNotFound, err.Error(), nil, reqID)
 	case agentmail.IsReservationConflict(err):
 		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil, reqID)
+	default:
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, notImplementedMessage, "")
+	}
+}
+
+func writeAgentMailContactActionError(w http.ResponseWriter, reqID string, err error, notImplementedMessage string) {
+	switch {
+	case errors.Is(err, agentmail.ErrAgentNotRegistered):
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeAgentNotFound, err.Error(), nil, reqID)
+	default:
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, notImplementedMessage, "")
+	}
+}
+
+func writeAgentMailSendActionError(w http.ResponseWriter, reqID string, err error, notImplementedMessage string) {
+	switch {
+	case agentmail.IsContactBlocked(err):
+		writeErrorResponse(w, http.StatusForbidden, ErrCodeContactDenied, err.Error(), nil, reqID)
+	case errors.Is(err, agentmail.ErrAgentNotRegistered):
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeAgentNotFound, err.Error(), nil, reqID)
 	default:
 		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, notImplementedMessage, "")
 	}
@@ -329,7 +472,7 @@ func (s *Server) handleListMailProjects(w http.ResponseWriter, r *http.Request) 
 
 	project, err := client.EnsureProject(ctx, s.projectDir)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, "project inspection is not supported by the configured Agent Mail server", "")
 		return
 	}
 
@@ -359,7 +502,7 @@ func (s *Server) handleListMailAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, err := client.ListAgents(ctx, s.projectDir)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, "agent listing is not supported by the configured Agent Mail server", "")
 		return
 	}
 
@@ -406,7 +549,7 @@ func (s *Server) handleCreateMailAgent(w http.ResponseWriter, r *http.Request) {
 		TaskDescription: req.TaskDescription,
 	})
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailHandlerError(w, reqID, err, ErrCodeNotFound, agentmail.IsNotFound, "agent registration is not supported by the configured Agent Mail server", "")
 		return
 	}
 
@@ -483,41 +626,49 @@ func (s *Server) handleMailInbox(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional query params
 	if sinceTS := r.URL.Query().Get("since_ts"); sinceTS != "" {
-		if t, err := time.Parse(time.RFC3339, sinceTS); err == nil {
-			opts.SinceTS = &t
+		t, err := time.Parse(time.RFC3339, sinceTS)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "since_ts must be a valid RFC3339 timestamp", nil, reqID)
+			return
 		}
+		opts.SinceTS = &t
 	}
 	if limit := r.URL.Query().Get("limit"); limit != "" {
-		if l, err := strconv.Atoi(limit); err == nil {
-			opts.Limit = l
+		l, err := strconv.Atoi(limit)
+		if err != nil || l <= 0 {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "limit must be a positive integer", nil, reqID)
+			return
 		}
+		opts.Limit = l
 	}
-	if urgentOnly := r.URL.Query().Get("urgent_only"); urgentOnly == "true" {
-		opts.UrgentOnly = true
+	if rawUrgentOnly := r.URL.Query().Get("urgent_only"); rawUrgentOnly != "" {
+		parsed, err := strconv.ParseBool(rawUrgentOnly)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "urgent_only must be a boolean", nil, reqID)
+			return
+		}
+		opts.UrgentOnly = parsed
 	}
-	if includeBodies := r.URL.Query().Get("include_bodies"); includeBodies == "true" {
-		opts.IncludeBodies = true
+	if rawIncludeBodies := r.URL.Query().Get("include_bodies"); rawIncludeBodies != "" {
+		parsed, err := strconv.ParseBool(rawIncludeBodies)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "include_bodies must be a boolean", nil, reqID)
+			return
+		}
+		opts.IncludeBodies = parsed
 	}
 
 	messages, err := client.FetchInbox(ctx, opts)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailAgentActionError(w, reqID, err, "mail inbox retrieval is not supported by the configured Agent Mail server")
 		return
 	}
 
-	messageIDs := make([]int, 0, len(messages))
-	for _, m := range messages {
-		messageIDs = append(messageIDs, m.ID)
-	}
-	s.publishMailEvent(agentName, "mail.received", map[string]interface{}{
-		"agent_name":  agentName,
-		"count":       len(messages),
-		"message_ids": messageIDs,
-	})
+	safeMessages := sanitizeInboxMessages(messages, opts.IncludeBodies)
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"messages": messages,
-		"count":    len(messages),
+		"messages": safeMessages,
+		"count":    len(safeMessages),
 	}, reqID)
 }
 
@@ -563,7 +714,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		ThreadID:    req.ThreadID,
 	})
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailSendActionError(w, reqID, err, "sending messages is not supported by the configured Agent Mail server")
 		return
 	}
 
@@ -608,7 +759,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"message": message,
+		"message": sanitizeMessage(message),
 	}, reqID)
 }
 
@@ -795,9 +946,12 @@ func (s *Server) handleSearchMessages(w http.ResponseWriter, r *http.Request) {
 
 	limit := 20
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
+		parsed, err := strconv.Atoi(l)
+		if err != nil || parsed <= 0 {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "limit must be a positive integer", nil, reqID)
+			return
 		}
+		limit = parsed
 	}
 
 	results, err := client.SearchMessages(ctx, agentmail.SearchOptions{
@@ -842,8 +996,25 @@ func (s *Server) handleThreadSummary(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	includeExamples := r.URL.Query().Get("include_examples") == "true"
-	llmMode := r.URL.Query().Get("llm_mode") != "false"
+	includeExamples := false
+	if rawIncludeExamples := r.URL.Query().Get("include_examples"); rawIncludeExamples != "" {
+		parsed, err := strconv.ParseBool(rawIncludeExamples)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "include_examples must be a boolean", nil, reqID)
+			return
+		}
+		includeExamples = parsed
+	}
+
+	var llmMode *bool
+	if rawLLMMode := r.URL.Query().Get("llm_mode"); rawLLMMode != "" {
+		parsed, err := strconv.ParseBool(rawLLMMode)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "llm_mode must be a boolean", nil, reqID)
+			return
+		}
+		llmMode = &parsed
+	}
 
 	summary, err := client.SummarizeThread(ctx, agentmail.SummarizeThreadOptions{
 		ProjectKey:      s.projectDir,
@@ -936,15 +1107,23 @@ func (s *Server) handleRequestContact(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds: req.TTLSeconds,
 	})
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailContactActionError(w, reqID, err, "requesting contact is not supported by the configured Agent Mail server")
 		return
 	}
 
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"from_agent": req.FromAgent,
 		"to_agent":   req.ToAgent,
 		"status":     result.Status,
-	}, reqID)
+	}
+	if result.Link != nil {
+		response["link"] = result.Link
+	}
+	if result.ExpiresTS != nil {
+		response["expires_ts"] = *result.ExpiresTS
+	}
+
+	writeSuccessResponse(w, http.StatusOK, response, reqID)
 }
 
 // handleRespondContact handles POST /api/v1/mail/contacts/respond
@@ -976,7 +1155,7 @@ func (s *Server) handleRespondContact(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	err = client.RespondContact(ctx, agentmail.RespondContactOptions{
+	result, err := client.RespondContact(ctx, agentmail.RespondContactOptions{
 		ProjectKey: s.projectDir,
 		ToAgent:    req.ToAgent,
 		FromAgent:  req.FromAgent,
@@ -984,15 +1163,28 @@ func (s *Server) handleRespondContact(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds: req.TTLSeconds,
 	})
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeAgentMailContactActionError(w, reqID, err, "responding to contact requests is not supported by the configured Agent Mail server")
 		return
 	}
 
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"to_agent":   req.ToAgent,
 		"from_agent": req.FromAgent,
 		"accepted":   req.Accept,
-	}, reqID)
+	}
+	if result != nil {
+		if result.Status != "" {
+			response["status"] = result.Status
+		}
+		if result.Link != nil {
+			response["link"] = result.Link
+		}
+		if result.ExpiresTS != nil {
+			response["expires_ts"] = *result.ExpiresTS
+		}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, response, reqID)
 }
 
 // handleSetContactPolicy handles PUT /api/v1/mail/contacts/policy
@@ -1032,16 +1224,26 @@ func (s *Server) handleSetContactPolicy(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	err = client.SetContactPolicy(ctx, s.projectDir, req.AgentName, req.Policy)
+	result, err := client.SetContactPolicy(ctx, s.projectDir, req.AgentName, req.Policy)
 	if err != nil {
 		writeAgentMailAgentActionError(w, reqID, err, "setting contact policy is not supported by the configured Agent Mail server")
 		return
 	}
 
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"agent_name": req.AgentName,
 		"policy":     req.Policy,
-	}, reqID)
+	}
+	if result != nil {
+		if result.AgentName != "" {
+			response["agent_name"] = result.AgentName
+		}
+		if result.Policy != "" {
+			response["policy"] = result.Policy
+		}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, response, reqID)
 }
 
 // Reservation handlers
@@ -1444,7 +1646,7 @@ func (s *Server) handleForceReleaseReservation(w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	_, err = client.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
+	result, err := client.ForceReleaseReservation(ctx, agentmail.ForceReleaseOptions{
 		ProjectKey:     s.projectDir,
 		AgentName:      req.AgentName,
 		ReservationID:  reservationID,
@@ -1456,15 +1658,41 @@ func (s *Server) handleForceReleaseReservation(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.publishReservationEvent(req.AgentName, "reservation.released", map[string]interface{}{
-		"agent_name":      req.AgentName,
-		"reservation_id":  reservationID,
-		"force_released":  true,
-		"notify_previous": req.NotifyPrevious,
-	})
-
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"reservation_id": reservationID,
-		"force_released": true,
-	}, reqID)
+		"force_released": result != nil && result.Success,
+	}
+	if result != nil {
+		if result.ReleasedAt != nil {
+			response["released_at"] = result.ReleasedAt
+		}
+		if result.PreviousHolder != "" {
+			response["previous_holder"] = result.PreviousHolder
+		}
+		if result.PathPattern != "" {
+			response["path_pattern"] = result.PathPattern
+		}
+		response["notified"] = result.Notified
+	}
+
+	if result != nil && result.Success {
+		eventPayload := map[string]interface{}{
+			"agent_name":     req.AgentName,
+			"reservation_id": reservationID,
+			"force_released": true,
+			"notified":       result.Notified,
+		}
+		if result.PreviousHolder != "" {
+			eventPayload["previous_holder"] = result.PreviousHolder
+		}
+		if result.PathPattern != "" {
+			eventPayload["path_pattern"] = result.PathPattern
+		}
+		if result.ReleasedAt != nil {
+			eventPayload["released_at"] = result.ReleasedAt
+		}
+		s.publishReservationEvent(req.AgentName, "reservation.released", eventPayload)
+	}
+
+	writeSuccessResponse(w, http.StatusOK, response, reqID)
 }

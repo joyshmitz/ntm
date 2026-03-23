@@ -387,7 +387,8 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 			return nil, fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		data, err := io.ReadAll(tr)
+		// Prevent zip slip / tar bomb OOM by limiting read size (100MB per file)
+		data, err := io.ReadAll(io.LimitReader(tr, 100<<20))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file %s: %w", header.Name, err)
 		}
@@ -510,7 +511,8 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 			return nil, fmt.Errorf("failed to open %s: %w", f.Name, err)
 		}
 
-		data, err := io.ReadAll(rc)
+		// Prevent zip bomb OOM by limiting read size (100MB per file)
+		data, err := io.ReadAll(io.LimitReader(rc, 100<<20))
 		rc.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read %s: %w", f.Name, err)

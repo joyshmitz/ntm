@@ -204,8 +204,10 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 
 	// Validate requested panes exist
 	paneExists := make(map[int]bool)
+	paneTargets := make(map[int]string)
 	for _, p := range allPanes {
 		paneExists[p.Index] = true
+		paneTargets[p.Index] = fmt.Sprintf("%s:%d.%d", opts.Session, p.WindowIndex, p.Index)
 	}
 
 	// Create parser
@@ -228,7 +230,7 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		}
 
 		// Capture pane output
-		target := fmt.Sprintf("%s:1.%d", opts.Session, paneIdx)
+		target := paneTargets[paneIdx]
 		content, err := tmux.CapturePaneOutput(target, opts.LinesCaptured)
 		if err != nil {
 			output.Panes[paneKey] = PaneWorkStatus{

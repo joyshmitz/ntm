@@ -186,10 +186,11 @@ type RuntimeWork struct {
 	BeadID string `json:"bead_id"`
 
 	// Content
-	Title    string `json:"title"`
-	Status   string `json:"status"` // open, in_progress, closed
-	Priority int    `json:"priority"`
-	BeadType string `json:"bead_type"`
+	Title           string `json:"title"`
+	TitleDisclosure string `json:"title_disclosure,omitempty"` // JSON DisclosureMetadata
+	Status          string `json:"status"`                     // open, in_progress, closed
+	Priority        int    `json:"priority"`
+	BeadType        string `json:"bead_type"`
 
 	// Assignment
 	Assignee  string     `json:"assignee,omitempty"`
@@ -230,9 +231,13 @@ type RuntimeCoordination struct {
 	Pane        string `json:"pane,omitempty"`
 
 	// Mail state
-	UnreadCount     int `json:"unread_count"`
-	PendingAckCount int `json:"pending_ack_count"`
-	UrgentCount     int `json:"urgent_count"`
+	UnreadCount                  int    `json:"unread_count"`
+	PendingAckCount              int    `json:"pending_ack_count"`
+	UrgentCount                  int    `json:"urgent_count"`
+	LastMessageSubject           string `json:"last_message_subject,omitempty"`
+	LastMessageSubjectDisclosure string `json:"last_message_subject_disclosure,omitempty"` // JSON DisclosureMetadata
+	LastMessagePreview           string `json:"last_message_preview,omitempty"`
+	LastMessagePreviewDisclosure string `json:"last_message_preview_disclosure,omitempty"` // JSON DisclosureMetadata
 
 	// Last activity
 	LastMessageAt  *time.Time `json:"last_message_at,omitempty"`

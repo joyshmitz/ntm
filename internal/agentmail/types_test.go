@@ -189,6 +189,7 @@ func TestMapJSONRPCError(t *testing.T) {
 		{"nil input", nil, true, nil},
 		{"agent not registered", &JSONRPCError{Code: -32000, Message: "Agent not registered in project"}, false, ErrAgentNotRegistered},
 		{"message not found", &JSONRPCError{Code: -32000, Message: "Message not found"}, false, ErrMessageNotFound},
+		{"contact blocked", &JSONRPCError{Code: -32000, Message: "CONTACT_BLOCKED: target agent only accepts approved contacts"}, false, ErrContactBlocked},
 		{"reservation conflict", &JSONRPCError{Code: -32000, Message: "Reservation conflict detected"}, false, ErrReservationConflict},
 		{"reservation not found", &JSONRPCError{Code: -32000, Message: "Reservation 42 not found"}, false, ErrNotFound},
 		{"generic not found", &JSONRPCError{Code: -32000, Message: "Thread not found"}, false, ErrNotFound},
@@ -250,6 +251,13 @@ func TestErrorSentinelHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("IsInvalidRequest", func(t *testing.T) {
+		t.Parallel()
+		if !IsInvalidRequest(ErrInvalidRequest) {
+			t.Error("should detect ErrInvalidRequest")
+		}
+	})
+
 	t.Run("IsTimeout", func(t *testing.T) {
 		t.Parallel()
 		if !IsTimeout(ErrTimeout) {
@@ -268,6 +276,13 @@ func TestErrorSentinelHelpers(t *testing.T) {
 		t.Parallel()
 		if !IsReservationConflict(ErrReservationConflict) {
 			t.Error("should detect ErrReservationConflict")
+		}
+	})
+
+	t.Run("IsContactBlocked", func(t *testing.T) {
+		t.Parallel()
+		if !IsContactBlocked(ErrContactBlocked) {
+			t.Error("should detect ErrContactBlocked")
 		}
 	})
 

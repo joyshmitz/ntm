@@ -856,8 +856,14 @@ func waitForSwarmAgentsReady(ctx context.Context, plan *swarm.SwarmPlan, client 
 		if longType == "" {
 			longType = sess.AgentType
 		}
+
+		firstWin, err := client.GetFirstWindow(sess.Name)
+		if err != nil {
+			firstWin = 1 // fallback
+		}
+
 		for _, ps := range sess.Panes {
-			target := fmt.Sprintf("%s:0.%d", sess.Name, ps.Index)
+			target := fmt.Sprintf("%s:%d.%d", sess.Name, firstWin, ps.Index)
 			panes = append(panes, paneInfo{
 				target:    target,
 				shortType: sess.AgentType,

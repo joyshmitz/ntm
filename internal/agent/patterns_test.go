@@ -541,6 +541,13 @@ func TestGetPatternSet(t *testing.T) {
 			hasContextPattern: false,
 		},
 		{
+			agentType:         AgentTypeOllama,
+			hasRateLimitPats:  true,
+			hasWorkingPats:    true,
+			hasIdlePats:       true,
+			hasContextPattern: false,
+		},
+		{
 			agentType:         AgentTypeUnknown,
 			hasRateLimitPats:  false,
 			hasWorkingPats:    false,

@@ -313,7 +313,12 @@ func (s *PendingRotationStore) writeAllLocked(entries []StoredPendingRotation) e
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	writer := bufio.NewWriter(tmpFile)
 	for _, entry := range entries {
@@ -336,11 +341,15 @@ func (s *PendingRotationStore) writeAllLocked(entries []StoredPendingRotation) e
 		return err
 	}
 
-	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+	if err := os.Chmod(tmpPath, 0600); err != nil {
 		return err
 	}
 
-	return os.Rename(tmpFile.Name(), s.storagePath)
+	if err := os.Rename(tmpPath, s.storagePath); err != nil {
+		return err
+	}
+	tmpPath = "" // Prevent defer from removing the successfully renamed file
+	return nil
 }
 
 // DefaultPendingRotationStore is the default global pending rotation store.

@@ -2,7 +2,11 @@ package robot
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 )
 
 // TestMailCheckOptionsValidate tests validation of MailCheckOptions.
@@ -153,16 +157,19 @@ func TestMailCheckOutputJSONSerialization(t *testing.T) {
 		Count:         10,
 		Messages: []MailCheckMessage{
 			{
-				ID:         1,
-				From:       "BlueLake",
-				To:         "cc_1",
-				Subject:    "Test message",
-				Preview:    "This is a preview...",
-				Body:       &body,
-				ThreadID:   &thread,
-				Importance: "high",
-				Read:       false,
-				Timestamp:  "2025-01-20T14:30:00Z",
+				ID:                1,
+				From:              "BlueLake",
+				To:                "cc_1",
+				Subject:           "Test message",
+				SubjectDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible", Preview: "Test message", RedactionMode: "redact"},
+				Preview:           "This is a preview...",
+				PreviewDisclosure: &adapters.DisclosureMetadata{DisclosureState: "preview_only", Preview: "This is a preview...", RedactionMode: "redact"},
+				Body:              &body,
+				BodyDisclosure:    &adapters.DisclosureMetadata{DisclosureState: "visible", Preview: "Test body content", RedactionMode: "redact"},
+				ThreadID:          &thread,
+				Importance:        "high",
+				Read:              false,
+				Timestamp:         "2025-01-20T14:30:00Z",
 			},
 		},
 		HasMore: true,
@@ -209,6 +216,66 @@ func TestMailCheckOutputJSONSerialization(t *testing.T) {
 			t.Errorf("suggested_action mismatch: got %q, want %q",
 				decoded.AgentHints.SuggestedAction, output.AgentHints.SuggestedAction)
 		}
+	}
+}
+
+func TestMailCheckMessageFromInboxAppliesDisclosureControl(t *testing.T) {
+	thread := "bd-j9jo3.3.5"
+	secret := strings.Repeat("s", 20)
+	msg := agentmail.InboxMessage{
+		ID:         7,
+		From:       "BlueLake",
+		Subject:    "Rotate credential",
+		BodyMD:     "Need token=" + secret + " and " + strings.Repeat("harmless coordination detail ", 8),
+		ThreadID:   &thread,
+		Importance: "urgent",
+		CreatedTS:  agentmail.FlexTime{},
+	}
+
+	safe := mailCheckMessageFromInbox(msg, "GreenStone", true)
+
+	if safe.Subject != "Rotate credential" {
+		t.Fatalf("subject = %q, want %q", safe.Subject, "Rotate credential")
+	}
+	if safe.SubjectDisclosure == nil || safe.SubjectDisclosure.DisclosureState != "visible" {
+		t.Fatalf("expected visible subject disclosure, got %+v", safe.SubjectDisclosure)
+	}
+	if !strings.Contains(safe.Preview, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted preview, got %q", safe.Preview)
+	}
+	if safe.PreviewDisclosure == nil || safe.PreviewDisclosure.DisclosureState != "redacted" {
+		t.Fatalf("expected redacted preview disclosure, got %+v", safe.PreviewDisclosure)
+	}
+	if safe.Body == nil || !strings.Contains(*safe.Body, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("expected redacted body, got %+v", safe.Body)
+	}
+	if safe.BodyDisclosure == nil || safe.BodyDisclosure.DisclosureState != "redacted" {
+		t.Fatalf("expected redacted body disclosure, got %+v", safe.BodyDisclosure)
+	}
+}
+
+func TestMailCheckMessageFromInboxPreviewsLongSafeBody(t *testing.T) {
+	msg := agentmail.InboxMessage{
+		ID:        8,
+		From:      "BlueLake",
+		Subject:   "Coordination",
+		BodyMD:    strings.Repeat("harmless coordination detail ", 8),
+		CreatedTS: agentmail.FlexTime{},
+	}
+
+	safe := mailCheckMessageFromInbox(msg, "GreenStone", true)
+
+	if safe.Body == nil {
+		t.Fatal("expected body output")
+	}
+	if safe.BodyDisclosure == nil || safe.BodyDisclosure.DisclosureState != "preview_only" {
+		t.Fatalf("expected preview_only body disclosure, got %+v", safe.BodyDisclosure)
+	}
+	if *safe.Body != safe.BodyDisclosure.Preview {
+		t.Fatalf("expected preview-only body to match preview, got body=%q preview=%q", *safe.Body, safe.BodyDisclosure.Preview)
+	}
+	if !strings.HasSuffix(*safe.Body, "...") {
+		t.Fatalf("expected preview-only body to truncate long content, got %q", *safe.Body)
 	}
 }
 

@@ -9,6 +9,7 @@ package tokens
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // EstimateTokens provides a rough token count estimate.
@@ -228,10 +229,23 @@ func DetectContentType(text string) ContentType {
 		return ContentUnknown
 	}
 
-	// Check for JSON
-	trimmed := strings.TrimSpace(text)
-	if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
-		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+	// Check for JSON without allocating a new string via TrimSpace
+	var first, last rune
+	for _, r := range text {
+		if !unicode.IsSpace(r) {
+			first = r
+			break
+		}
+	}
+	for len(text) > 0 {
+		r, size := utf8.DecodeLastRuneInString(text)
+		if !unicode.IsSpace(r) {
+			last = r
+			break
+		}
+		text = text[:len(text)-size]
+	}
+	if (first == '{' && last == '}') || (first == '[' && last == ']') {
 		return ContentJSON
 	}
 

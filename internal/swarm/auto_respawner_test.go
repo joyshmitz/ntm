@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -833,6 +834,60 @@ func TestAutoRespawnerEmitEventChannelFull(t *testing.T) {
 		// Good - didn't block
 	case <-time.After(100 * time.Millisecond):
 		t.Error("emitEvent blocked on full channel")
+	}
+}
+
+func TestAutoRespawnerEmitEventConcurrentStopDoesNotPanic(t *testing.T) {
+	const emitters = 8
+	const emitsPerWorker = 200
+
+	r := NewAutoRespawner()
+	result := &RespawnResult{
+		SessionPane: "test:1.1",
+		AgentType:   "cc",
+		RespawnedAt: time.Now(),
+	}
+
+	panicCh := make(chan any, 1)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for range emitters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			defer func() {
+				if rec := recover(); rec != nil {
+					select {
+					case panicCh <- rec:
+					default:
+					}
+				}
+			}()
+
+			for range emitsPerWorker {
+				r.emitEvent(result)
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		runtime.Gosched()
+		r.Stop()
+	}()
+
+	close(start)
+	wg.Wait()
+
+	select {
+	case p := <-panicCh:
+		t.Fatalf("emitEvent panicked during concurrent Stop: %v", p)
+	default:
 	}
 }
 

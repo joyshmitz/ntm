@@ -375,21 +375,29 @@ func (d *LimitDetector) handleLimitEvent(event *LimitEvent) {
 		}
 	}
 
-	// Send event to channel (non-blocking).
-	// Take a local copy under lock to avoid racing with Stop() closing the channel.
-	d.mu.RLock()
-	ch := d.eventChan
-	d.mu.RUnlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- *event:
-		// Event sent successfully
-	default:
+	// Send event to channel (non-blocking), while holding the read lock so
+	// Stop() cannot close the channel between the nil check and the send.
+	sent, available := d.trySendEvent(*event)
+	if available && !sent {
 		d.logger().Warn("[LimitDetector] event_channel_full",
 			"session_pane", event.SessionPane,
 			"pattern", event.Pattern)
+	}
+}
+
+func (d *LimitDetector) trySendEvent(event LimitEvent) (sent bool, available bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if d.eventChan == nil {
+		return false, false
+	}
+
+	select {
+	case d.eventChan <- event:
+		return true, true
+	default:
+		return false, true
 	}
 }
 

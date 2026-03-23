@@ -374,6 +374,12 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 	var attemptedActions []string
 	var softExitFailed bool
 
+	firstWin, err := tmux.GetFirstWindow(session)
+	if err != nil {
+		firstWin = 1 // fallback
+	}
+	target := fmt.Sprintf("%s:%d.%d", session, firstWin, pane)
+
 	// Step 1: Exit the current agent using agent-specific method (unless HardKillOnly)
 	if !opts.HardKillOnly {
 		attemptedActions = append(attemptedActions, "exit-agent-"+agentType)
@@ -403,7 +409,6 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 
 		// Step 3: Verify shell prompt
 		attemptedActions = append(attemptedActions, "verify-shell-prompt")
-		target := fmt.Sprintf("%s:1.%d", session, pane)
 		output, err := tmux.CapturePaneOutput(target, 10)
 		if err != nil {
 			if opts.HardKill {
@@ -470,7 +475,6 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 		time.Sleep(1 * time.Second)
 
 		// Verify shell prompt after hard kill
-		target := fmt.Sprintf("%s:1.%d", session, pane)
 		output, err := tmux.CapturePaneOutput(target, 10)
 		if err != nil {
 			structErr := newRestartError(
@@ -550,8 +554,12 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 
 // verifyRestart checks the post-restart state of a pane.
 func verifyRestart(session string, pane int, opts SmartRestartOptions) *PostStateInfo {
+	firstWin, err := tmux.GetFirstWindow(session)
+	if err != nil {
+		firstWin = 1 // fallback
+	}
 	// Capture current state
-	target := fmt.Sprintf("%s:1.%d", session, pane)
+	target := fmt.Sprintf("%s:%d.%d", session, firstWin, pane)
 	content, err := tmux.CapturePaneOutput(target, 50)
 	if err != nil {
 		return &PostStateInfo{

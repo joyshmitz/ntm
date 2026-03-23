@@ -105,9 +105,13 @@ func (l *AgentLauncher) logger() *slog.Logger {
 }
 
 // formatPaneTarget formats a target string for tmux send-keys.
-// Uses the format "session:window.pane" where window is typically 1.
+// It resolves the first window index of the session.
 func formatPaneTarget(session string, pane int) string {
-	return fmt.Sprintf("%s:1.%d", session, pane)
+	firstWin, err := tmux.GetFirstWindow(session)
+	if err != nil {
+		firstWin = 1 // fallback
+	}
+	return fmt.Sprintf("%s:%d.%d", session, firstWin, pane)
 }
 
 type tmuxContextRunner interface {

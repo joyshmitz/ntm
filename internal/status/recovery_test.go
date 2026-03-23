@@ -370,6 +370,9 @@ func TestBuildContextAwarePrompt_NoContext(t *testing.T) {
 }
 
 func TestBuildContextAwarePrompt_WithContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping slow integration test in short mode")
+	}
 	basePrompt := "Reread AGENTS.md"
 
 	// With bead context - this tests the real bv integration
@@ -385,6 +388,9 @@ func TestBuildContextAwarePrompt_WithContext(t *testing.T) {
 }
 
 func TestGetBeadContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping slow integration test in short mode")
+	}
 	ctx := GetBeadContext()
 
 	// If bv is not installed, ctx should be nil

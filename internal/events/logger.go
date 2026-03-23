@@ -181,7 +181,11 @@ func (l *Logger) rotateOldEntries() error {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath) // Cleanup on error
+	defer func() {
+		if tmpPath != "" {
+			os.Remove(tmpPath) // Cleanup on error
+		}
+	}()
 
 	// Open source file for reading
 	// We need to read from the current path, but we have l.file open for writing.
@@ -198,6 +202,8 @@ func (l *Logger) rotateOldEntries() error {
 
 	cutoff := time.Now().AddDate(0, 0, -l.retentionDays)
 	scanner := bufio.NewScanner(srcFile)
+	// Set max line size for large events (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	// Buffer for writing to temp file
 	writer := bufio.NewWriter(tmpFile)
@@ -371,6 +377,9 @@ func (l *Logger) Replay(since time.Time) (<-chan *Event, error) {
 		defer f.Close()
 
 		scanner := bufio.NewScanner(f)
+		// Set max line size for large events (10MB), start with 64KB
+		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
@@ -483,6 +492,9 @@ func (l *Logger) LastEvent() (*Event, error) {
 
 	var lastEvent *Event
 	scanner := bufio.NewScanner(f)
+	// Set max line size for large events (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

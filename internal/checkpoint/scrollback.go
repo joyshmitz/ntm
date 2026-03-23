@@ -141,7 +141,8 @@ func gzipDecompress(data []byte) ([]byte, error) {
 	}
 	defer reader.Close()
 
-	return io.ReadAll(reader)
+	// Prevent gzip bomb OOM by limiting read size (50MB is plenty for a scrollback)
+	return io.ReadAll(io.LimitReader(reader, 50<<20))
 }
 
 // SaveCompressedScrollback saves compressed scrollback to a file.

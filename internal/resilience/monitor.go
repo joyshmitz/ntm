@@ -705,6 +705,7 @@ func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
 	// Copy fields while holding lock to avoid race
 	agentCommand := currentAgent.Command
 	shellPID := currentAgent.ShellPID
+	restartCount := currentAgent.RestartCount
 	m.mu.Unlock()
 
 	// Re-run the agent command in the pane
@@ -735,18 +736,18 @@ func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
 	}
 
 	log.Printf("[resilience] Agent %s restarted (attempt %d/%d)",
-		agent.PaneID, currentAgent.RestartCount, m.cfg.Resilience.MaxRestarts)
+		agent.PaneID, restartCount, m.cfg.Resilience.MaxRestarts)
 
 	events.DefaultEmitter().Emit(events.NewWebhookEvent(
 		events.WebhookAgentRestarted,
 		m.session,
 		agent.PaneID,
 		agent.AgentType,
-		fmt.Sprintf("Agent %s restarted (attempt %d/%d)", agent.AgentType, currentAgent.RestartCount, m.cfg.Resilience.MaxRestarts),
+		fmt.Sprintf("Agent %s restarted (attempt %d/%d)", agent.AgentType, restartCount, m.cfg.Resilience.MaxRestarts),
 		map[string]string{
 			"project_dir":   m.projectDir,
 			"pane_index":    fmt.Sprintf("%d", agent.PaneIndex),
-			"restart_count": fmt.Sprintf("%d", currentAgent.RestartCount),
+			"restart_count": fmt.Sprintf("%d", restartCount),
 			"max_restarts":  fmt.Sprintf("%d", m.cfg.Resilience.MaxRestarts),
 			"auto_restart":  fmt.Sprintf("%t", m.autoRestart),
 		},
@@ -760,9 +761,9 @@ func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
 			Pane:    agent.PaneID,
 			Agent:   agent.AgentType,
 			Message: fmt.Sprintf("Agent %s restarted (attempt %d/%d)",
-				agent.AgentType, currentAgent.RestartCount, m.cfg.Resilience.MaxRestarts),
+				agent.AgentType, restartCount, m.cfg.Resilience.MaxRestarts),
 			Details: map[string]string{
-				"restart_count": fmt.Sprintf("%d", currentAgent.RestartCount),
+				"restart_count": fmt.Sprintf("%d", restartCount),
 				"max_restarts":  fmt.Sprintf("%d", m.cfg.Resilience.MaxRestarts),
 			},
 		}

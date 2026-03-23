@@ -158,17 +158,17 @@ func TestNormalizeWorkMarksLongSafeTitlesPreviewOnly(t *testing.T) {
 		t.Fatalf("expected 1 ready item, got %d", len(section.Ready))
 	}
 	item := section.Ready[0]
-	if item.Title != strings.TrimSpace(longTitle) {
-		t.Fatalf("expected full safe title to remain visible, got %q", item.Title)
-	}
 	if item.TitleDisclosure == nil {
 		t.Fatal("expected title disclosure metadata")
 	}
 	if item.TitleDisclosure.DisclosureState != "preview_only" {
 		t.Fatalf("disclosure_state = %q, want preview_only", item.TitleDisclosure.DisclosureState)
 	}
-	if item.TitleDisclosure.Preview == item.Title {
-		t.Fatalf("expected truncated preview, got %q", item.TitleDisclosure.Preview)
+	if item.Title != item.TitleDisclosure.Preview {
+		t.Fatalf("expected preview-only title to match preview, got title=%q preview=%q", item.Title, item.TitleDisclosure.Preview)
+	}
+	if item.Title == strings.TrimSpace(longTitle) {
+		t.Fatalf("expected preview-only title to truncate long content, got %q", item.Title)
 	}
 	if !strings.HasSuffix(item.TitleDisclosure.Preview, "...") {
 		t.Fatalf("expected ellipsis in preview, got %q", item.TitleDisclosure.Preview)
@@ -197,6 +197,7 @@ func TestNormalizeCoordination(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 3, 22, 4, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("s", 20)
 	expiringSoon := agentmail.FlexTime{Time: now.Add(30 * time.Minute)}
 	later := agentmail.FlexTime{Time: now.Add(3 * time.Hour)}
 
@@ -211,6 +212,7 @@ func TestNormalizeCoordination(t *testing.T) {
 					CreatedTS:   agentmail.FlexTime{Time: now.Add(-10 * time.Minute)},
 					Importance:  "urgent",
 					AckRequired: true,
+					BodyMD:      "Need restart token=" + secret + " before merge",
 				},
 			},
 			"RedHill": {
@@ -282,6 +284,19 @@ func TestNormalizeCoordination(t *testing.T) {
 	}
 	if section.Mail == nil || section.Mail.TotalUnread != 2 || section.Mail.UrgentUnread != 1 || section.Mail.PendingAck != 1 {
 		t.Fatalf("unexpected mail summary: %+v", section.Mail)
+	}
+	blue := section.Mail.ByAgent["BlueLake"]
+	if blue.LatestSubject != "Claim update" {
+		t.Fatalf("latest subject = %q, want %q", blue.LatestSubject, "Claim update")
+	}
+	if !strings.Contains(blue.LatestPreview, "[REDACTED:GENERIC_SECRET:") {
+		t.Fatalf("latest preview = %q", blue.LatestPreview)
+	}
+	if blue.LatestSubjectDisclosure == nil || blue.LatestSubjectDisclosure.DisclosureState != "visible" {
+		t.Fatalf("expected visible latest subject disclosure, got %+v", blue.LatestSubjectDisclosure)
+	}
+	if blue.LatestPreviewDisclosure == nil || blue.LatestPreviewDisclosure.DisclosureState != "redacted" || blue.LatestPreviewDisclosure.Findings != 1 {
+		t.Fatalf("expected redacted latest preview disclosure, got %+v", blue.LatestPreviewDisclosure)
 	}
 	if section.Threads == nil || section.Threads.Active != 1 || section.Threads.TopThreads[0] != "bd-j9jo3.3.2" {
 		t.Fatalf("unexpected threads summary: %+v", section.Threads)
@@ -373,17 +388,17 @@ func TestNormalizeCoordinationMarksLongSafeHandoffPreviewOnly(t *testing.T) {
 	if section.Handoff == nil {
 		t.Fatal("expected handoff summary")
 	}
-	if section.Handoff.Now != strings.TrimSpace(longNow) {
-		t.Fatalf("expected full safe handoff text to remain visible, got %q", section.Handoff.Now)
-	}
 	if section.Handoff.NowDisclosure == nil {
 		t.Fatal("expected now disclosure metadata")
 	}
 	if section.Handoff.NowDisclosure.DisclosureState != "preview_only" {
 		t.Fatalf("disclosure_state = %q, want preview_only", section.Handoff.NowDisclosure.DisclosureState)
 	}
-	if section.Handoff.NowDisclosure.Preview == section.Handoff.Now {
-		t.Fatalf("expected truncated preview, got %q", section.Handoff.NowDisclosure.Preview)
+	if section.Handoff.Now != section.Handoff.NowDisclosure.Preview {
+		t.Fatalf("expected preview-only handoff text to match preview, got now=%q preview=%q", section.Handoff.Now, section.Handoff.NowDisclosure.Preview)
+	}
+	if section.Handoff.Now == strings.TrimSpace(longNow) {
+		t.Fatalf("expected preview-only handoff text to truncate long content, got %q", section.Handoff.Now)
 	}
 	if !strings.HasSuffix(section.Handoff.NowDisclosure.Preview, "...") {
 		t.Fatalf("expected ellipsis in preview, got %q", section.Handoff.NowDisclosure.Preview)

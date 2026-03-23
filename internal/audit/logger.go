@@ -376,6 +376,9 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 				}
 
 				scanner := bufio.NewScanner(readFile)
+				// Set max line size for large audit payloads (10MB), start with 64KB
+				scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 				if scanner.Scan() {
 					line := scanner.Text()
 					var entry AuditEntry
@@ -393,6 +396,9 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 		return nil, err
 	}
 	scanner := bufio.NewScanner(readFile)
+	// Set max line size for large audit payloads (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 	if scanner.Scan() {
 		line := scanner.Text()
 		var entry AuditEntry
@@ -531,6 +537,9 @@ func VerifyIntegrity(logPath string) error {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Set max line size for large audit payloads (10MB), start with 64KB
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 	var prevHash string
 	var sequenceNum uint64
 

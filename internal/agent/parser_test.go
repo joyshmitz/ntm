@@ -161,6 +161,38 @@ func TestParser_DetectAgentType_Aider(t *testing.T) {
 	}
 }
 
+func TestParser_DetectAgentType_Ollama(t *testing.T) {
+	t.Parallel()
+	p := NewParser()
+
+	outputs := []string{
+		"ollama run codellama:latest",
+		"ollama> ",
+		"ollama serve",
+	}
+
+	for _, output := range outputs {
+		t.Run(output, func(t *testing.T) {
+			t.Parallel()
+			agentType := p.DetectAgentType(output)
+			if agentType != AgentTypeOllama {
+				t.Errorf("DetectAgentType(%q) = %v, want %v", output, agentType, AgentTypeOllama)
+			}
+		})
+	}
+}
+
+func TestParser_DetectAgentType_OllamaMentionDoesNotFalsePositive(t *testing.T) {
+	t.Parallel()
+	p := NewParser()
+
+	output := "Can we use ollama for local inference on this task?"
+	agentType := p.DetectAgentType(output)
+	if agentType != AgentTypeUnknown {
+		t.Errorf("DetectAgentType(%q) = %v, want %v", output, agentType, AgentTypeUnknown)
+	}
+}
+
 func TestParser_Parse_RateLimited_Claude(t *testing.T) {
 	p := NewParser()
 	output := `Claude Opus 4.5 ready
@@ -945,7 +977,6 @@ func TestParser_ParseWithHint_Aider_Error(t *testing.T) {
 func TestParser_ParseWithHint_Ollama_RateLimited(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
-	// Ollama has no explicit case in detect functions, hits default branch
 	output := "rate limit exceeded. Please wait and try again later."
 
 	state, err := p.ParseWithHint(output, AgentTypeOllama)
@@ -956,17 +987,16 @@ func TestParser_ParseWithHint_Ollama_RateLimited(t *testing.T) {
 		t.Errorf("Type = %v, want %v", state.Type, AgentTypeOllama)
 	}
 	if !state.IsRateLimited {
-		t.Error("Expected IsRateLimited=true via default branch")
+		t.Error("Expected IsRateLimited=true")
 	}
 	if len(state.LimitIndicators) == 0 {
-		t.Error("Expected LimitIndicators to be populated via default branch")
+		t.Error("Expected LimitIndicators to be populated")
 	}
 }
 
 func TestParser_ParseWithHint_Ollama_Working(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
-	// Ollama hits default branch in detectWorking/collectWorkIndicators
 	output := "writing to main.go\n" + "```go\npackage main\n```"
 
 	state, err := p.ParseWithHint(output, AgentTypeOllama)
@@ -977,17 +1007,16 @@ func TestParser_ParseWithHint_Ollama_Working(t *testing.T) {
 		t.Errorf("Type = %v, want %v", state.Type, AgentTypeOllama)
 	}
 	if !state.IsWorking {
-		t.Error("Expected IsWorking=true via default branch")
+		t.Error("Expected IsWorking=true")
 	}
 	if len(state.WorkIndicators) == 0 {
-		t.Error("Expected WorkIndicators to be populated via default branch")
+		t.Error("Expected WorkIndicators to be populated")
 	}
 }
 
 func TestParser_ParseWithHint_Ollama_Idle(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
-	// Ollama hits default branch in detectIdle
 	output := "Done.\n> "
 
 	state, err := p.ParseWithHint(output, AgentTypeOllama)
@@ -1002,16 +1031,14 @@ func TestParser_ParseWithHint_Ollama_Idle(t *testing.T) {
 func TestParser_ParseWithHint_Ollama_Error(t *testing.T) {
 	t.Parallel()
 	p := NewParser()
-	// Ollama hits default in detectError which checks all patterns
 	output := "error: something broke\nfatal crash"
 
 	state, err := p.ParseWithHint(output, AgentTypeOllama)
 	if err != nil {
 		t.Fatalf("ParseWithHint error: %v", err)
 	}
-	// Default detectError checks all patterns, so it should detect the error
 	if !state.IsInError {
-		t.Error("Expected IsInError=true for Ollama (detectError checks all patterns for default)")
+		t.Error("Expected IsInError=true for Ollama")
 	}
 }
 

@@ -61,24 +61,26 @@ func builtinWorkflows() ([]WorkflowTemplate, error) {
 			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
 		}
 
-		tmpl, err := parseWorkflowFromContent(string(content))
+		tmpls, err := parseWorkflowsFromContent(string(content))
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", entry.Name(), err)
 		}
-		tmpl.Source = "builtin"
-		workflows = append(workflows, *tmpl)
+		for i := range tmpls {
+			tmpls[i].Source = "builtin"
+			workflows = append(workflows, tmpls[i])
+		}
 	}
 
 	return workflows, nil
 }
 
-// parseWorkflowFromContent parses a workflow from TOML content.
+// parseWorkflowsFromContent parses workflows from TOML content.
 // It handles both single workflow format and workflows array format.
-func parseWorkflowFromContent(content string) (*WorkflowTemplate, error) {
+func parseWorkflowsFromContent(content string) ([]WorkflowTemplate, error) {
 	// Try workflows array format first (used by builtins)
 	var wf WorkflowsFile
 	if _, err := toml.Decode(content, &wf); err == nil && len(wf.Workflows) > 0 {
-		return &wf.Workflows[0], nil
+		return validateWorkflows(wf.Workflows)
 	}
 
 	// Try single workflow format
@@ -86,7 +88,16 @@ func parseWorkflowFromContent(content string) (*WorkflowTemplate, error) {
 	if _, err := toml.Decode(content, &tmpl); err != nil {
 		return nil, fmt.Errorf("parse TOML: %w", err)
 	}
-	return &tmpl, nil
+	return validateWorkflows([]WorkflowTemplate{tmpl})
+}
+
+func validateWorkflows(workflows []WorkflowTemplate) ([]WorkflowTemplate, error) {
+	for i := range workflows {
+		if err := workflows[i].Validate(); err != nil {
+			return nil, fmt.Errorf("validate workflow[%d]: %w", i, err)
+		}
+	}
+	return workflows, nil
 }
 
 // LoadAll loads workflow templates from all sources with proper precedence.
@@ -158,12 +169,14 @@ func loadFromDir(dir, source string) ([]WorkflowTemplate, error) {
 			continue // Skip files we can't read
 		}
 
-		tmpl, err := parseWorkflowFromContent(string(content))
+		tmpls, err := parseWorkflowsFromContent(string(content))
 		if err != nil {
 			continue // Skip files we can't parse
 		}
-		tmpl.Source = source
-		workflows = append(workflows, *tmpl)
+		for i := range tmpls {
+			tmpls[i].Source = source
+			workflows = append(workflows, tmpls[i])
+		}
 	}
 
 	return workflows, nil

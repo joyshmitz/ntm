@@ -404,19 +404,14 @@ func (m *WebhookManager) Start() error {
 
 // Stop gracefully shuts down the manager
 func (m *WebhookManager) Stop() error {
-	if !m.started.Load() {
+	if !m.started.Swap(false) {
 		return nil
 	}
 
 	m.log("stopping webhook manager...")
 
-	// Set started=false BEFORE closing the channel to prevent Dispatch()
-	// from sending on a closed channel (panic).
-	m.started.Store(false)
+	// Cancel context to stop workers
 	m.cancel()
-
-	// Close the queue channel to unblock workers.
-	close(m.queue)
 
 	// Signal retry processor to wake up and exit
 	m.retryCond.Broadcast()

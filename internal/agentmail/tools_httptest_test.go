@@ -363,10 +363,18 @@ func TestAcknowledgeMessage(t *testing.T) {
 func TestRequestContact(t *testing.T) {
 	t.Parallel()
 
+	expiresAt := "2026-03-22T12:34:56Z"
+
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"request_contact": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
 			return ContactRequestResult{
 				Status: "pending",
+				Link: &ContactLink{
+					FromAgent: "TestAgent",
+					ToAgent:   "BlueLake",
+					Status:    "pending",
+				},
+				ExpiresTS: &expiresAt,
 			}, nil
 		},
 	}))
@@ -387,20 +395,36 @@ func TestRequestContact(t *testing.T) {
 	if result.Status != "pending" {
 		t.Errorf("status = %q, want pending", result.Status)
 	}
+	if result.Link == nil || result.Link.ToAgent != "BlueLake" {
+		t.Fatalf("unexpected link = %#v", result.Link)
+	}
+	if result.ExpiresTS == nil || *result.ExpiresTS != expiresAt {
+		t.Fatalf("expires_ts = %#v, want %q", result.ExpiresTS, expiresAt)
+	}
 }
 
 func TestRespondContact(t *testing.T) {
 	t.Parallel()
 
+	expiresAt := "2026-03-23T00:00:00Z"
+
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"respond_contact": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return map[string]interface{}{"status": "approved"}, nil
+			return ContactRespondResult{
+				Status: "approved",
+				Link: &ContactLink{
+					FromAgent: "TestAgent",
+					ToAgent:   "BlueLake",
+					Status:    "approved",
+				},
+				ExpiresTS: &expiresAt,
+			}, nil
 		},
 	}))
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	err := c.RespondContact(context.Background(), RespondContactOptions{
+	result, err := c.RespondContact(context.Background(), RespondContactOptions{
 		ProjectKey: "/test",
 		ToAgent:    "BlueLake",
 		FromAgent:  "TestAgent",
@@ -409,6 +433,15 @@ func TestRespondContact(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "approved" {
+		t.Fatalf("status = %q, want approved", result.Status)
+	}
+	if result.Link == nil || result.Link.ToAgent != "BlueLake" {
+		t.Fatalf("unexpected link = %#v", result.Link)
+	}
+	if result.ExpiresTS == nil || *result.ExpiresTS != expiresAt {
+		t.Fatalf("expires_ts = %#v, want %q", result.ExpiresTS, expiresAt)
 	}
 }
 
@@ -489,11 +522,12 @@ func TestSummarizeThread(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
+	trueVal := true
 	summary, err := c.SummarizeThread(context.Background(), SummarizeThreadOptions{
 		ProjectKey:      "/test",
 		ThreadID:        "TKT-123",
 		IncludeExamples: true,
-		LLMMode:         true,
+		LLMMode:         &trueVal,
 		LLMModel:        "opus-4.5",
 	})
 	if err != nil {
@@ -504,6 +538,41 @@ func TestSummarizeThread(t *testing.T) {
 	}
 	if len(summary.Participants) != 2 {
 		t.Errorf("len(participants) = %d, want 2", len(summary.Participants))
+	}
+}
+
+func TestSummarizeThread_ForwardsExplicitFalseLLMMode(t *testing.T) {
+	t.Parallel()
+
+	var receivedArgs map[string]interface{}
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"summarize_thread": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			receivedArgs = args
+			return ThreadSummaryResponse{
+				ThreadID: args["thread_id"].(string),
+				Summary: ThreadSummary{
+					Participants: []string{"BlueLake"},
+				},
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	falseVal := false
+	_, err := c.SummarizeThread(context.Background(), SummarizeThreadOptions{
+		ProjectKey:      "/test",
+		ThreadID:        "TKT-456",
+		IncludeExamples: false,
+		LLMMode:         &falseVal,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, ok := receivedArgs["llm_mode"]; !ok {
+		t.Fatal("expected llm_mode argument to be forwarded")
+	} else if got != false {
+		t.Fatalf("llm_mode = %#v, want false", got)
 	}
 }
 
@@ -952,15 +1021,27 @@ func TestSetContactPolicy(t *testing.T) {
 
 	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
 		"set_contact_policy": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
-			return map[string]interface{}{"policy": args["policy"]}, nil
+			return ContactPolicyResult{
+				AgentName: "BlueLake",
+				Policy:    args["policy"].(string),
+			}, nil
 		},
 	}))
 	defer server.Close()
 
 	c := NewClient(WithBaseURL(server.URL + "/"))
-	err := c.SetContactPolicy(context.Background(), "/test", "BlueLake", "open")
+	result, err := c.SetContactPolicy(context.Background(), "/test", "BlueLake", "open")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.AgentName != "BlueLake" {
+		t.Fatalf("agent_name = %q, want BlueLake", result.AgentName)
+	}
+	if result.Policy != "open" {
+		t.Fatalf("policy = %q, want open", result.Policy)
 	}
 }
 

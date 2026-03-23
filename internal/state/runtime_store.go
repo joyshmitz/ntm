@@ -385,12 +385,13 @@ func (s *Store) UpsertRuntimeWork(work *RuntimeWork) error {
 
 	_, err := s.db.Exec(`
 		INSERT INTO runtime_work (
-			bead_id, title, status, priority, bead_type, assignee, claimed_at,
+			bead_id, title, title_disclosure, status, priority, bead_type, assignee, claimed_at,
 			blocked_by_count, unblocks_count, labels, score, score_reason,
 			collected_at, stale_after
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bead_id) DO UPDATE SET
 			title = excluded.title,
+			title_disclosure = excluded.title_disclosure,
 			status = excluded.status,
 			priority = excluded.priority,
 			bead_type = excluded.bead_type,
@@ -403,7 +404,7 @@ func (s *Store) UpsertRuntimeWork(work *RuntimeWork) error {
 			score_reason = excluded.score_reason,
 			collected_at = excluded.collected_at,
 			stale_after = excluded.stale_after`,
-		work.BeadID, work.Title, work.Status, work.Priority, work.BeadType,
+		work.BeadID, work.Title, nullableString(work.TitleDisclosure), work.Status, work.Priority, work.BeadType,
 		nullableString(work.Assignee), work.ClaimedAt, work.BlockedByCount, work.UnblocksCount,
 		nullableString(work.Labels), work.Score, nullableString(work.ScoreReason),
 		work.CollectedAt, work.StaleAfter,
@@ -421,13 +422,13 @@ func (s *Store) GetRuntimeWork(beadID string) (*RuntimeWork, error) {
 
 	work := &RuntimeWork{}
 	err := s.db.QueryRow(`
-		SELECT bead_id, title, status, priority, bead_type, COALESCE(assignee, ''),
+		SELECT bead_id, title, COALESCE(title_disclosure, ''), status, priority, bead_type, COALESCE(assignee, ''),
 			claimed_at, blocked_by_count, unblocks_count, COALESCE(labels, ''),
 			score, COALESCE(score_reason, ''), collected_at, stale_after
 		FROM runtime_work
 		WHERE bead_id = ?`, beadID,
 	).Scan(
-		&work.BeadID, &work.Title, &work.Status, &work.Priority, &work.BeadType,
+		&work.BeadID, &work.Title, &work.TitleDisclosure, &work.Status, &work.Priority, &work.BeadType,
 		&work.Assignee, &work.ClaimedAt, &work.BlockedByCount, &work.UnblocksCount,
 		&work.Labels, &work.Score, &work.ScoreReason, &work.CollectedAt, &work.StaleAfter,
 	)
@@ -450,7 +451,7 @@ func (s *Store) ListFreshRuntimeWork(status string, limit int) ([]RuntimeWork, e
 	}
 
 	query := `
-		SELECT bead_id, title, status, priority, bead_type, COALESCE(assignee, ''),
+		SELECT bead_id, title, COALESCE(title_disclosure, ''), status, priority, bead_type, COALESCE(assignee, ''),
 			claimed_at, blocked_by_count, unblocks_count, COALESCE(labels, ''),
 			score, COALESCE(score_reason, ''), collected_at, stale_after
 		FROM runtime_work
@@ -473,7 +474,7 @@ func (s *Store) ListFreshRuntimeWork(status string, limit int) ([]RuntimeWork, e
 	for rows.Next() {
 		var work RuntimeWork
 		if err := rows.Scan(
-			&work.BeadID, &work.Title, &work.Status, &work.Priority, &work.BeadType,
+			&work.BeadID, &work.Title, &work.TitleDisclosure, &work.Status, &work.Priority, &work.BeadType,
 			&work.Assignee, &work.ClaimedAt, &work.BlockedByCount, &work.UnblocksCount,
 			&work.Labels, &work.Score, &work.ScoreReason, &work.CollectedAt, &work.StaleAfter,
 		); err != nil {
@@ -500,12 +501,13 @@ func (s *Store) DeleteRuntimeWork(beadID string) error {
 func (tx *Tx) UpsertRuntimeWork(work *RuntimeWork) error {
 	_, err := tx.tx.Exec(`
 		INSERT INTO runtime_work (
-			bead_id, title, status, priority, bead_type, assignee, claimed_at,
+			bead_id, title, title_disclosure, status, priority, bead_type, assignee, claimed_at,
 			blocked_by_count, unblocks_count, labels, score, score_reason,
 			collected_at, stale_after
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bead_id) DO UPDATE SET
 			title = excluded.title,
+			title_disclosure = excluded.title_disclosure,
 			status = excluded.status,
 			priority = excluded.priority,
 			bead_type = excluded.bead_type,
@@ -518,7 +520,7 @@ func (tx *Tx) UpsertRuntimeWork(work *RuntimeWork) error {
 			score_reason = excluded.score_reason,
 			collected_at = excluded.collected_at,
 			stale_after = excluded.stale_after`,
-		work.BeadID, work.Title, work.Status, work.Priority, work.BeadType,
+		work.BeadID, work.Title, nullableString(work.TitleDisclosure), work.Status, work.Priority, work.BeadType,
 		nullableString(work.Assignee), work.ClaimedAt, work.BlockedByCount, work.UnblocksCount,
 		nullableString(work.Labels), work.Score, nullableString(work.ScoreReason),
 		work.CollectedAt, work.StaleAfter,
@@ -550,14 +552,20 @@ func (s *Store) UpsertRuntimeCoordination(coord *RuntimeCoordination) error {
 	_, err := s.db.Exec(`
 		INSERT INTO runtime_coordination (
 			agent_name, session_name, pane, unread_count, pending_ack_count, urgent_count,
+			last_message_subject, last_message_subject_disclosure,
+			last_message_preview, last_message_preview_disclosure,
 			last_message_at, last_sent_at, last_received_at, collected_at, stale_after
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_name) DO UPDATE SET
 			session_name = excluded.session_name,
 			pane = excluded.pane,
 			unread_count = excluded.unread_count,
 			pending_ack_count = excluded.pending_ack_count,
 			urgent_count = excluded.urgent_count,
+			last_message_subject = excluded.last_message_subject,
+			last_message_subject_disclosure = excluded.last_message_subject_disclosure,
+			last_message_preview = excluded.last_message_preview,
+			last_message_preview_disclosure = excluded.last_message_preview_disclosure,
 			last_message_at = excluded.last_message_at,
 			last_sent_at = excluded.last_sent_at,
 			last_received_at = excluded.last_received_at,
@@ -565,6 +573,8 @@ func (s *Store) UpsertRuntimeCoordination(coord *RuntimeCoordination) error {
 			stale_after = excluded.stale_after`,
 		coord.AgentName, nullableString(coord.SessionName), nullableString(coord.Pane),
 		coord.UnreadCount, coord.PendingAckCount, coord.UrgentCount,
+		nullableString(coord.LastMessageSubject), nullableString(coord.LastMessageSubjectDisclosure),
+		nullableString(coord.LastMessagePreview), nullableString(coord.LastMessagePreviewDisclosure),
 		coord.LastMessageAt, coord.LastSentAt, coord.LastReceivedAt,
 		coord.CollectedAt, coord.StaleAfter,
 	)
@@ -583,12 +593,16 @@ func (s *Store) GetRuntimeCoordination(agentName string) (*RuntimeCoordination, 
 	err := s.db.QueryRow(`
 		SELECT agent_name, COALESCE(session_name, ''), COALESCE(pane, ''),
 			unread_count, pending_ack_count, urgent_count,
+			COALESCE(last_message_subject, ''), COALESCE(last_message_subject_disclosure, ''),
+			COALESCE(last_message_preview, ''), COALESCE(last_message_preview_disclosure, ''),
 			last_message_at, last_sent_at, last_received_at, collected_at, stale_after
 		FROM runtime_coordination
 		WHERE agent_name = ?`, agentName,
 	).Scan(
 		&coord.AgentName, &coord.SessionName, &coord.Pane,
 		&coord.UnreadCount, &coord.PendingAckCount, &coord.UrgentCount,
+		&coord.LastMessageSubject, &coord.LastMessageSubjectDisclosure,
+		&coord.LastMessagePreview, &coord.LastMessagePreviewDisclosure,
 		&coord.LastMessageAt, &coord.LastSentAt, &coord.LastReceivedAt,
 		&coord.CollectedAt, &coord.StaleAfter,
 	)
@@ -609,6 +623,8 @@ func (s *Store) ListFreshRuntimeCoordination(sessionName string) ([]RuntimeCoord
 	query := `
 		SELECT agent_name, COALESCE(session_name, ''), COALESCE(pane, ''),
 			unread_count, pending_ack_count, urgent_count,
+			COALESCE(last_message_subject, ''), COALESCE(last_message_subject_disclosure, ''),
+			COALESCE(last_message_preview, ''), COALESCE(last_message_preview_disclosure, ''),
 			last_message_at, last_sent_at, last_received_at, collected_at, stale_after
 		FROM runtime_coordination
 		WHERE stale_after > datetime('now')`
@@ -631,6 +647,8 @@ func (s *Store) ListFreshRuntimeCoordination(sessionName string) ([]RuntimeCoord
 		if err := rows.Scan(
 			&coord.AgentName, &coord.SessionName, &coord.Pane,
 			&coord.UnreadCount, &coord.PendingAckCount, &coord.UrgentCount,
+			&coord.LastMessageSubject, &coord.LastMessageSubjectDisclosure,
+			&coord.LastMessagePreview, &coord.LastMessagePreviewDisclosure,
 			&coord.LastMessageAt, &coord.LastSentAt, &coord.LastReceivedAt,
 			&coord.CollectedAt, &coord.StaleAfter,
 		); err != nil {
@@ -658,14 +676,20 @@ func (tx *Tx) UpsertRuntimeCoordination(coord *RuntimeCoordination) error {
 	_, err := tx.tx.Exec(`
 		INSERT INTO runtime_coordination (
 			agent_name, session_name, pane, unread_count, pending_ack_count, urgent_count,
+			last_message_subject, last_message_subject_disclosure,
+			last_message_preview, last_message_preview_disclosure,
 			last_message_at, last_sent_at, last_received_at, collected_at, stale_after
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_name) DO UPDATE SET
 			session_name = excluded.session_name,
 			pane = excluded.pane,
 			unread_count = excluded.unread_count,
 			pending_ack_count = excluded.pending_ack_count,
 			urgent_count = excluded.urgent_count,
+			last_message_subject = excluded.last_message_subject,
+			last_message_subject_disclosure = excluded.last_message_subject_disclosure,
+			last_message_preview = excluded.last_message_preview,
+			last_message_preview_disclosure = excluded.last_message_preview_disclosure,
 			last_message_at = excluded.last_message_at,
 			last_sent_at = excluded.last_sent_at,
 			last_received_at = excluded.last_received_at,
@@ -673,6 +697,8 @@ func (tx *Tx) UpsertRuntimeCoordination(coord *RuntimeCoordination) error {
 			stale_after = excluded.stale_after`,
 		coord.AgentName, nullableString(coord.SessionName), nullableString(coord.Pane),
 		coord.UnreadCount, coord.PendingAckCount, coord.UrgentCount,
+		nullableString(coord.LastMessageSubject), nullableString(coord.LastMessageSubjectDisclosure),
+		nullableString(coord.LastMessagePreview), nullableString(coord.LastMessagePreviewDisclosure),
 		coord.LastMessageAt, coord.LastSentAt, coord.LastReceivedAt,
 		coord.CollectedAt, coord.StaleAfter,
 	)

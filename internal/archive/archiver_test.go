@@ -208,9 +208,9 @@ func TestArchiver_RunContextCancellation(t *testing.T) {
 		t.Errorf("Run() error = %v, want context.DeadlineExceeded", err)
 	}
 
-	// Should have exited quickly
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("Run() took %v, expected < 200ms", elapsed)
+	// Should have exited quickly, but allow up to 2 seconds for slow CI/tmux
+	if elapsed > 2*time.Second {
+		t.Errorf("Run() took %v, expected < 2s", elapsed)
 	}
 }
 

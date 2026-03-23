@@ -316,6 +316,38 @@ var (
 	aiderHeaderPattern = regexp.MustCompile(`(?i)(aider|aider\s+chat)`)
 )
 
+// Ollama (ollama) patterns.
+var (
+	ollamaRateLimitPatterns = []string{
+		"rate limit",
+		"too many requests",
+		"quota exceeded",
+	}
+
+	ollamaWorkingPatterns = []string{
+		"```",
+		"pulling manifest",
+		"verifying sha256 digest",
+		"writing manifest",
+		"removing any unused layers",
+		"generating ",
+		"thinking",
+	}
+
+	ollamaIdlePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`>\s*$`),
+		regexp.MustCompile(`ollama>\s*$`),
+	}
+
+	ollamaErrorPatterns = []string{
+		"error:",
+		"failed:",
+		"exception:",
+	}
+
+	ollamaHeaderPattern = regexp.MustCompile(`(?im)(^ollama>\s*$|\bollama\s+(run|chat|serve|pull)\b|^\s*ollama\s+cli\b)`)
+)
+
 // matchAny returns true if text contains any of the patterns (case-insensitive).
 func matchAny(text string, patterns []string) bool {
 	textLower := strings.ToLower(text)
@@ -476,6 +508,14 @@ func GetPatternSet(agentType AgentType) *PatternSet {
 			IdlePatterns:      aiderIdlePatterns,
 			ErrorPatterns:     aiderErrorPatterns,
 			HeaderPattern:     aiderHeaderPattern,
+		}
+	case AgentTypeOllama:
+		return &PatternSet{
+			RateLimitPatterns: ollamaRateLimitPatterns,
+			WorkingPatterns:   ollamaWorkingPatterns,
+			IdlePatterns:      ollamaIdlePatterns,
+			ErrorPatterns:     ollamaErrorPatterns,
+			HeaderPattern:     ollamaHeaderPattern,
 		}
 	default:
 		return &PatternSet{} // Empty pattern set for unknown types

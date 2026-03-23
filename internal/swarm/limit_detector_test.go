@@ -2,6 +2,8 @@ package swarm
 
 import (
 	"context"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -574,5 +576,61 @@ func TestLimitDetectorHandleLimitEventUpdatesTracker(t *testing.T) {
 	}
 	if remaining < time.Second || remaining > 3*time.Second {
 		t.Fatalf("expected cooldown near 2s, got %v", remaining)
+	}
+}
+
+func TestLimitDetectorHandleLimitEventConcurrentStopDoesNotPanic(t *testing.T) {
+	const emitters = 8
+	const emitsPerWorker = 200
+
+	detector := NewLimitDetector()
+	event := &LimitEvent{
+		SessionPane: "test:1.1",
+		AgentType:   "cc",
+		Pattern:     "rate limit",
+		RawOutput:   "rate limit exceeded",
+		DetectedAt:  time.Now(),
+	}
+
+	panicCh := make(chan any, 1)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for range emitters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			defer func() {
+				if r := recover(); r != nil {
+					select {
+					case panicCh <- r:
+					default:
+					}
+				}
+			}()
+
+			for range emitsPerWorker {
+				detector.handleLimitEvent(event)
+				runtime.Gosched()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		runtime.Gosched()
+		detector.Stop()
+	}()
+
+	close(start)
+	wg.Wait()
+
+	select {
+	case p := <-panicCh:
+		t.Fatalf("handleLimitEvent panicked during concurrent Stop: %v", p)
+	default:
 	}
 }

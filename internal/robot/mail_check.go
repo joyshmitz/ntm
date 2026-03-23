@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 )
 
 // MailCheckOutput represents the response from --robot-mail-check
@@ -36,16 +37,19 @@ type MailCheckFilters struct {
 
 // MailCheckMessage represents a message in the mail check output
 type MailCheckMessage struct {
-	ID         int     `json:"id"`
-	From       string  `json:"from"`
-	To         string  `json:"to"`
-	Subject    string  `json:"subject"`
-	Preview    string  `json:"preview,omitempty"`
-	Body       *string `json:"body"` // null unless --include-bodies
-	ThreadID   *string `json:"thread_id,omitempty"`
-	Importance string  `json:"importance"`
-	Read       bool    `json:"read"`
-	Timestamp  string  `json:"timestamp"`
+	ID                int                          `json:"id"`
+	From              string                       `json:"from"`
+	To                string                       `json:"to"`
+	Subject           string                       `json:"subject"`
+	SubjectDisclosure *adapters.DisclosureMetadata `json:"subject_disclosure,omitempty"`
+	Preview           string                       `json:"preview,omitempty"`
+	PreviewDisclosure *adapters.DisclosureMetadata `json:"preview_disclosure,omitempty"`
+	Body              *string                      `json:"body"` // null unless --include-bodies
+	BodyDisclosure    *adapters.DisclosureMetadata `json:"body_disclosure,omitempty"`
+	ThreadID          *string                      `json:"thread_id,omitempty"`
+	Importance        string                       `json:"importance"`
+	Read              bool                         `json:"read"`
+	Timestamp         string                       `json:"timestamp"`
 }
 
 // MailCheckAgentHints provides actionable suggestions for AI agents
@@ -258,29 +262,7 @@ func GetMailCheck(opts MailCheckOptions) (*MailCheckOutput, error) {
 	// Convert to output format
 	outputMsgs := make([]MailCheckMessage, len(filtered))
 	for i, msg := range filtered {
-		var body *string
-		if opts.IncludeBodies && msg.BodyMD != "" {
-			b := msg.BodyMD
-			body = &b
-		}
-
-		preview := ""
-		if msg.BodyMD != "" {
-			preview = truncateStringMail(msg.BodyMD, 100)
-		}
-
-		outputMsgs[i] = MailCheckMessage{
-			ID:         msg.ID,
-			From:       msg.From,
-			To:         opts.Agent, // The recipient
-			Subject:    msg.Subject,
-			Preview:    preview,
-			Body:       body,
-			ThreadID:   msg.ThreadID,
-			Importance: msg.Importance,
-			Read:       msg.ReadAt != nil,
-			Timestamp:  msg.CreatedTS.Format(time.RFC3339),
-		}
+		outputMsgs[i] = mailCheckMessageFromInbox(msg, opts.Agent, opts.IncludeBodies)
 	}
 
 	// Build filters object
@@ -354,6 +336,40 @@ func GetMailCheck(opts MailCheckOptions) (*MailCheckOutput, error) {
 		HasMore:       hasMore,
 		AgentHints:    hints,
 	}, nil
+}
+
+func mailCheckMessageFromInbox(msg agentmail.InboxMessage, recipient string, includeBodies bool) MailCheckMessage {
+	subject, subjectDisclosure := adapters.NormalizeDisclosureText(msg.Subject)
+	bodyText, bodyDisclosure := adapters.NormalizeDisclosureText(msg.BodyMD)
+
+	preview := bodyText
+	previewDisclosure := bodyDisclosure
+	if preview == "" {
+		preview = subject
+		previewDisclosure = subjectDisclosure
+	}
+
+	var body *string
+	if includeBodies && bodyText != "" {
+		b := bodyText
+		body = &b
+	}
+
+	return MailCheckMessage{
+		ID:                msg.ID,
+		From:              msg.From,
+		To:                recipient,
+		Subject:           subject,
+		SubjectDisclosure: subjectDisclosure,
+		Preview:           preview,
+		PreviewDisclosure: previewDisclosure,
+		Body:              body,
+		BodyDisclosure:    bodyDisclosure,
+		ThreadID:          msg.ThreadID,
+		Importance:        msg.Importance,
+		Read:              msg.ReadAt != nil,
+		Timestamp:         msg.CreatedTS.Format(time.RFC3339),
+	}
 }
 
 // PrintMailCheck outputs mail check results as JSON.

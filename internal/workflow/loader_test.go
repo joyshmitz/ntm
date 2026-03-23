@@ -248,10 +248,14 @@ coordination = "parallel"
 profile = "worker"
 role = "builder"
 `
-	w, err := parseWorkflowFromContent(single)
+	ws, err := parseWorkflowsFromContent(single)
 	if err != nil {
-		t.Fatalf("parseWorkflowFromContent (single) failed: %v", err)
+		t.Fatalf("parseWorkflowsFromContent (single) failed: %v", err)
 	}
+	if len(ws) == 0 {
+		t.Fatalf("expected at least 1 workflow, got 0")
+	}
+	w := ws[0]
 	if w.Name != "test" {
 		t.Errorf("expected name 'test', got %q", w.Name)
 	}
@@ -266,12 +270,62 @@ coordination = "parallel"
 profile = "worker"
 role = "builder"
 `
-	w, err = parseWorkflowFromContent(array)
+	ws, err = parseWorkflowsFromContent(array)
 	if err != nil {
-		t.Fatalf("parseWorkflowFromContent (array) failed: %v", err)
+		t.Fatalf("parseWorkflowsFromContent (array) failed: %v", err)
 	}
+	if len(ws) == 0 {
+		t.Fatalf("expected at least 1 workflow, got 0")
+	}
+	w = ws[0]
 	if w.Name != "array-test" {
 		t.Errorf("expected name 'array-test', got %q", w.Name)
+	}
+}
+
+func TestParseWorkflowFromContent_RejectsInvalidWorkflow(t *testing.T) {
+	t.Parallel()
+
+	invalid := `description = "missing required fields"
+coordination = "parallel"
+`
+
+	if _, err := parseWorkflowsFromContent(invalid); err == nil {
+		t.Fatal("expected invalid workflow content to fail validation")
+	}
+}
+
+func TestLoadFromDir_SkipsInvalidWorkflowFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	valid := `name = "valid-workflow"
+description = "Valid workflow"
+coordination = "parallel"
+
+[[agents]]
+profile = "worker"
+role = "builder"
+`
+	invalid := `description = "missing required fields"
+coordination = "parallel"
+`
+	if err := os.WriteFile(filepath.Join(dir, "valid.toml"), []byte(valid), 0644); err != nil {
+		t.Fatalf("write valid workflow: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "invalid.toml"), []byte(invalid), 0644); err != nil {
+		t.Fatalf("write invalid workflow: %v", err)
+	}
+
+	workflows, err := loadFromDir(dir, "project")
+	if err != nil {
+		t.Fatalf("loadFromDir failed: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected 1 valid workflow, got %d", len(workflows))
+	}
+	if workflows[0].Name != "valid-workflow" {
+		t.Fatalf("loaded workflow name = %q, want %q", workflows[0].Name, "valid-workflow")
 	}
 }
 

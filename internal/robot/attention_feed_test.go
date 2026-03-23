@@ -1142,7 +1142,16 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 		CollectedAt: firstCollectedAt,
 		Work: &adapters.WorkSection{
 			Ready: []adapters.WorkItem{
-				{ID: "bd-1", Title: "Top ready bead", Priority: 1, Type: "task", Labels: []string{"robot-redesign"}, Unblocks: 2, Score: float64Pointer(8.5)},
+				{
+					ID:              "bd-1",
+					Title:           "Top ready bead",
+					TitleDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible"},
+					Priority:        1,
+					Type:            "task",
+					Labels:          []string{"robot-redesign"},
+					Unblocks:        2,
+					Score:           float64Pointer(8.5),
+				},
 			},
 			Blocked: []adapters.WorkItem{
 				{ID: "bd-2", Title: "Blocked bead", Priority: 2, Type: "task", BlockedBy: []string{"bd-9"}},
@@ -1165,7 +1174,24 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 			Mail: &adapters.MailSummary{
 				LatestMessage: firstCollectedAt.Format(time.RFC3339),
 				ByAgent: map[string]adapters.AgentMailStats{
-					"BlueLake": {Unread: 2, Pending: 1, Urgent: 1},
+					"BlueLake": {
+						Unread:                  2,
+						Pending:                 1,
+						Urgent:                  1,
+						LatestMessage:           firstCollectedAt.Format(time.RFC3339),
+						LatestSubject:           "Claim update",
+						LatestSubjectDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible"},
+						LatestPreview:           "Need restart token [REDACTED:generic-secret] before merge",
+						LatestPreviewDisclosure: &adapters.DisclosureMetadata{DisclosureState: "redacted", RedactionMode: "detector", Findings: 1},
+					},
+					"RedHill": {
+						Unread:                  1,
+						LatestMessage:           firstCollectedAt.Add(-30 * time.Minute).Format(time.RFC3339),
+						LatestSubject:           "Earlier coordination",
+						LatestSubjectDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible"},
+						LatestPreview:           "Earlier coordination",
+						LatestPreviewDisclosure: &adapters.DisclosureMetadata{DisclosureState: "visible", RedactionMode: "redact"},
+					},
 				},
 			},
 		},
@@ -1218,6 +1244,13 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 	if workByID["bd-1"].ScoreReason != "high impact; unblocks downstream" {
 		t.Fatalf("bd-1 score reason = %q", workByID["bd-1"].ScoreReason)
 	}
+	var titleDisclosure adapters.DisclosureMetadata
+	if err := json.Unmarshal([]byte(workByID["bd-1"].TitleDisclosure), &titleDisclosure); err != nil {
+		t.Fatalf("unmarshal title disclosure: %v", err)
+	}
+	if titleDisclosure.DisclosureState != "visible" {
+		t.Fatalf("title disclosure = %+v", titleDisclosure)
+	}
 	if workByID["bd-3"].Status != normalizedProjectionInProgStatus {
 		t.Fatalf("bd-3 status = %q, want %q", workByID["bd-3"].Status, normalizedProjectionInProgStatus)
 	}
@@ -1226,8 +1259,48 @@ func TestPersistNormalizedProjection_ReplacesRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListFreshRuntimeCoordination() error: %v", err)
 	}
-	if len(coordinationRows) != 1 || coordinationRows[0].AgentName != "BlueLake" {
+	if len(coordinationRows) != 2 {
 		t.Fatalf("unexpected coordination rows: %+v", coordinationRows)
+	}
+	coordinationByAgent := make(map[string]state.RuntimeCoordination, len(coordinationRows))
+	for _, row := range coordinationRows {
+		coordinationByAgent[row.AgentName] = row
+	}
+	blueCoordination, ok := coordinationByAgent["BlueLake"]
+	if !ok {
+		t.Fatalf("missing BlueLake coordination row: %+v", coordinationByAgent)
+	}
+	if blueCoordination.LastMessageSubject != "Claim update" {
+		t.Fatalf("coordination subject = %q", blueCoordination.LastMessageSubject)
+	}
+	if blueCoordination.LastMessagePreview != "Need restart token [REDACTED:generic-secret] before merge" {
+		t.Fatalf("coordination preview = %q", blueCoordination.LastMessagePreview)
+	}
+	expectedBlueTime := firstCollectedAt.UTC().Truncate(time.Second)
+	if blueCoordination.LastMessageAt == nil || !blueCoordination.LastMessageAt.Equal(expectedBlueTime) {
+		t.Fatalf("blue LastMessageAt = %v, want %v", blueCoordination.LastMessageAt, expectedBlueTime)
+	}
+	var subjectDisclosure adapters.DisclosureMetadata
+	if err := json.Unmarshal([]byte(blueCoordination.LastMessageSubjectDisclosure), &subjectDisclosure); err != nil {
+		t.Fatalf("unmarshal subject disclosure: %v", err)
+	}
+	if subjectDisclosure.DisclosureState != "visible" {
+		t.Fatalf("subject disclosure = %+v", subjectDisclosure)
+	}
+	var previewDisclosure adapters.DisclosureMetadata
+	if err := json.Unmarshal([]byte(blueCoordination.LastMessagePreviewDisclosure), &previewDisclosure); err != nil {
+		t.Fatalf("unmarshal preview disclosure: %v", err)
+	}
+	if previewDisclosure.DisclosureState != "redacted" || previewDisclosure.Findings != 1 {
+		t.Fatalf("preview disclosure = %+v", previewDisclosure)
+	}
+	redCoordination, ok := coordinationByAgent["RedHill"]
+	if !ok {
+		t.Fatalf("missing RedHill coordination row: %+v", coordinationByAgent)
+	}
+	expectedRedTime := firstCollectedAt.Add(-30 * time.Minute).UTC().Truncate(time.Second)
+	if redCoordination.LastMessageAt == nil || !redCoordination.LastMessageAt.Equal(expectedRedTime) {
+		t.Fatalf("red LastMessageAt = %v, want %v", redCoordination.LastMessageAt, expectedRedTime)
 	}
 
 	sessionRows, err := store.GetFreshRuntimeSessions()

@@ -607,7 +607,7 @@ func GetProbe(opts ProbeOptions) (*ProbeOutput, error) {
 	}
 
 	// Build target string for tmux commands
-	target := fmt.Sprintf("%s:1.%d", opts.Session, opts.Pane)
+	target := fmt.Sprintf("%s:%d.%d", opts.Session, targetPane.WindowIndex, opts.Pane)
 	timeout := time.Duration(opts.Flags.TimeoutMs) * time.Millisecond
 
 	// Execute probe based on method

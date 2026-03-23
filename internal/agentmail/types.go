@@ -411,12 +411,18 @@ type RespondContactOptions struct {
 	TTLSeconds int
 }
 
+// ContactPolicyResult contains the result of setting an agent's contact policy.
+type ContactPolicyResult struct {
+	AgentName string `json:"agent_name,omitempty"`
+	Policy    string `json:"policy,omitempty"`
+}
+
 // SummarizeThreadOptions contains options for summarizing a thread.
 type SummarizeThreadOptions struct {
 	ProjectKey      string
 	ThreadID        string
 	IncludeExamples bool
-	LLMMode         bool
+	LLMMode         *bool
 	LLMModel        string
 }
 

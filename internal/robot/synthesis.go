@@ -368,6 +368,9 @@ func matchesPattern(filePath, pattern string) bool {
 
 		// Path must end with suffix (after stripping prefix)
 		remaining := strings.TrimPrefix(filePath, prefix)
+		if strings.Contains(suffix, "*") {
+			return matchesWildcardSuffix(remaining, suffix)
+		}
 		return strings.HasSuffix(remaining, suffix)
 	}
 
@@ -379,30 +382,8 @@ func matchesPattern(filePath, pattern string) bool {
 			matched, err := path.Match(normalizedPattern, normalizedPath)
 			return err == nil && matched
 		}
-
-		parts := strings.Split(pattern, "*")
-
-		// Must start with first part and end with last part
-		if !strings.HasPrefix(filePath, parts[0]) {
-			return false
-		}
-		if !strings.HasSuffix(filePath, parts[len(parts)-1]) {
-			return false
-		}
-
-		// For multiple wildcards, check that all parts appear in order
-		remaining := filePath
-		for _, part := range parts {
-			if part == "" {
-				continue
-			}
-			idx := strings.Index(remaining, part)
-			if idx == -1 {
-				return false
-			}
-			remaining = remaining[idx+len(part):]
-		}
-		return true
+		matched, err := path.Match(pattern, path.Base(filePath))
+		return err == nil && matched
 	}
 
 	// Prefix match (pattern is a directory)
@@ -410,6 +391,39 @@ func matchesPattern(filePath, pattern string) bool {
 		return strings.HasPrefix(filePath, pattern)
 	}
 	return strings.HasPrefix(filePath, pattern+"/")
+}
+
+func matchesWildcard(filePath, pattern string) bool {
+	parts := strings.Split(pattern, "*")
+	if !strings.HasPrefix(filePath, parts[0]) {
+		return false
+	}
+	if !strings.HasSuffix(filePath, parts[len(parts)-1]) {
+		return false
+	}
+
+	remaining := filePath
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(remaining, part)
+		if idx == -1 {
+			return false
+		}
+		remaining = remaining[idx+len(part):]
+	}
+	return true
+}
+
+func matchesWildcardSuffix(filePath, suffixPattern string) bool {
+	suffixSegments := strings.Count(suffixPattern, "/") + 1
+	pathParts := strings.Split(filePath, "/")
+	if len(pathParts) < suffixSegments {
+		return false
+	}
+	trailingPath := strings.Join(pathParts[len(pathParts)-suffixSegments:], "/")
+	return matchesWildcard(trailingPath, suffixPattern)
 }
 
 // findLikelyModifiers returns pane IDs with activity around the file modification time.
@@ -819,22 +833,20 @@ func ExtractFileMentions(content string) []FileMention {
 	return mentions
 }
 
+var filePathPatterns = []*regexp.Regexp{
+	// Paths starting with common prefixes
+	regexp.MustCompile(`(?:^|[\s'"(,])((src|internal|pkg|cmd|lib|test|tests|spec|app|api|web|frontend|backend|client|server|utils|util|common|shared|core|modules|components|services|models|views|controllers|middleware|config|configs|scripts|tools|build|dist|bin|docs|examples|assets|resources|public|private|vendor|third_party|node_modules)\/[\w\-./]+\.\w+)`),
+	// Relative paths
+	regexp.MustCompile(`(?:^|[\s'"(,])(\.\/[\w\-./]+\.\w+)`),
+	// Paths with file extensions
+	regexp.MustCompile(`(?:^|[\s'"(,])([\w\-./]+\.(?:go|py|js|ts|jsx|tsx|rs|rb|java|c|cpp|h|hpp|cs|php|swift|kt|scala|vue|svelte|md|txt|json|yaml|yml|toml|xml|html|css|scss|sass|less))(?:[\s'")\]:,]|$)`),
+}
+
 // extractPathsFromLine extracts file paths from a single line.
 func extractPathsFromLine(line string) []string {
 	var paths []string
 
-	// Common file path patterns
-	patterns := []string{
-		// Paths starting with common prefixes
-		`(?:^|[\s'"(,])((src|internal|pkg|cmd|lib|test|tests|spec|app|api|web|frontend|backend|client|server|utils|util|common|shared|core|modules|components|services|models|views|controllers|middleware|config|configs|scripts|tools|build|dist|bin|docs|examples|assets|resources|public|private|vendor|third_party|node_modules)\/[\w\-./]+\.\w+)`,
-		// Relative paths
-		`(?:^|[\s'"(,])(\.\/[\w\-./]+\.\w+)`,
-		// Paths with file extensions
-		`(?:^|[\s'"(,])([\w\-./]+\.(?:go|py|js|ts|jsx|tsx|rs|rb|java|c|cpp|h|hpp|cs|php|swift|kt|scala|vue|svelte|md|txt|json|yaml|yml|toml|xml|html|css|scss|sass|less))(?:[\s'")\]:,]|$)`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range filePathPatterns {
 		matches := re.FindAllStringSubmatch(line, -1)
 		for _, match := range matches {
 			if len(match) > 1 {
@@ -963,20 +975,18 @@ func ExtractCommands(content string) []CommandMention {
 	return commands
 }
 
+var exitCodePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`exit(?:\s+code)?[:\s]+(\d+)`),
+	regexp.MustCompile(`returned?\s+(\d+)`),
+	regexp.MustCompile(`status[:\s]+(\d+)`),
+	regexp.MustCompile(`\[(\d+)\]$`),
+}
+
 // parseExitCode tries to parse an exit code from a line.
 func parseExitCode(line string) *int {
 	lineLower := strings.ToLower(line)
 
-	// Common patterns for exit codes
-	patterns := []string{
-		`exit(?:\s+code)?[:\s]+(\d+)`,
-		`returned?\s+(\d+)`,
-		`status[:\s]+(\d+)`,
-		`\[(\d+)\]$`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range exitCodePatterns {
 		if match := re.FindStringSubmatch(lineLower); len(match) > 1 {
 			var code int
 			if _, err := fmt.Sscanf(match[1], "%d", &code); err == nil {

@@ -310,6 +310,13 @@ func (t *Tracker) pruneLocked(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("creating prune temp file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
 	for _, line := range kept {
 		if _, err := tmpFile.Write(line); err != nil {
 			tmpFile.Close()
@@ -324,9 +331,10 @@ func (t *Tracker) pruneLocked(now time.Time) error {
 		return fmt.Errorf("closing prune temp file: %w", err)
 	}
 
-	if err := os.Rename(tmpFile.Name(), t.path); err != nil {
+	if err := os.Rename(tmpPath, t.path); err != nil {
 		return fmt.Errorf("replacing score file: %w", err)
 	}
+	tmpPath = "" // Prevent defer from removing the successfully renamed file
 
 	return nil
 }
