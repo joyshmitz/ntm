@@ -2512,7 +2512,7 @@ func registerSessionAgent(sessionName, workingDir string) {
 		}
 	}
 	client := agentmail.NewClient(opts...)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	info, err := client.RegisterSessionAgent(ctx, sessionName, workingDir)
