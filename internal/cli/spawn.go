@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1965,6 +1966,12 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			// Launch monitor in background
 			exe, err := os.Executable()
 			if err == nil {
+					// Kill any existing monitor to prevent duplicates
+				if isMonitorAlive(opts.Session) {
+					_ = exec.Command("pkill", "-f", `\bntm\s+internal-monitor\s+`+regexp.QuoteMeta(opts.Session)).Run()
+					time.Sleep(500 * time.Millisecond) // Brief pause for cleanup
+				}
+
 				cmd := exec.Command(exe, "internal-monitor", opts.Session)
 
 				// Setup logging

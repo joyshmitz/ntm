@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -2086,6 +2088,12 @@ func runKill(w io.Writer, session string, force bool, tags []string, noHooks boo
 		if !jsonOutput {
 			fmt.Printf("⚠ Timeline finalization failed: %v\n", err)
 		}
+	}
+
+	// Kill the monitor process before destroying the session
+	if output, err := exec.Command("pkill", "-f", `\bntm\s+internal-monitor\s+`+regexp.QuoteMeta(session)).CombinedOutput(); err != nil {
+		// Monitor may not be running — that's fine
+		_ = output
 	}
 
 	if err := tmux.KillSession(session); err != nil {

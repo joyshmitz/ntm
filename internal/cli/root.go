@@ -1858,10 +1858,9 @@ Shell Integration:
 
 		// Robot-diff handler for comparing agent activity (synthesis)
 		if robotDiff != "" {
-			// Parse duration
-			since, err := util.ParseDurationWithDefault(resolveRobotDiffSince(cmd), time.Minute, "diff-since")
+			since, err := parseRobotSinceWindow(resolveRobotDiffSince(cmd), time.Minute, "since")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --diff-since: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: invalid --since/--diff-since: %v\n", err)
 				os.Exit(1)
 			}
 			opts := robot.DiffOptions{
@@ -1963,9 +1962,9 @@ Shell Integration:
 
 		// Robot-summary handler for session activity summary
 		if robotSummary != "" {
-			since, err := util.ParseDurationWithDefault(resolveRobotSummarySince(cmd), time.Minute, "summary-since")
+			since, err := parseRobotSinceWindow(resolveRobotSummarySince(cmd), time.Minute, "since")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --summary-since: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: invalid --since/--summary-since: %v\n", err)
 				os.Exit(1)
 			}
 			opts := robot.SummaryOptions{
@@ -2644,7 +2643,7 @@ var (
 
 	// Robot-diff flags for comparing agent activity
 	robotDiff      string // session name for diff
-	robotDiffSince string // duration like "10m", "1h"
+	robotDiffSince string // duration like "10m" or RFC3339 timestamp
 
 	// Robot-alerts flags for alert listing
 	robotAlerts         bool   // list alerts
@@ -2676,7 +2675,7 @@ var (
 
 	// Robot-summary flags for session summary
 	robotSummary      string // session name for summary
-	robotSummarySince string // duration like "30m", "1h"
+	robotSummarySince string // duration like "30m" or RFC3339 timestamp
 
 	// Robot-triage flag for direct bv triage integration
 	robotTriage      bool // bv triage output
@@ -2846,7 +2845,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotDocs, "robot-docs", "", "Get documentation for a topic (JSON). Topics: quickstart, commands, examples, exit-codes. Example: ntm --robot-docs=quickstart")
 	rootCmd.Flags().BoolVar(&robotPlan, "robot-plan", false, "Get bv execution plan with parallelizable tracks (JSON). Example: ntm --robot-plan")
 	rootCmd.Flags().BoolVar(&robotSnapshot, "robot-snapshot", false, "Unified state: sessions + beads + alerts + mail. Use --since for delta. Example: ntm --robot-snapshot")
-	rootCmd.Flags().StringVar(&robotSince, "since", "", "Shared time filter for commands that support --since. Snapshot uses RFC3339; history/diff/summary accept duration or ISO8601; tokens accepts ISO8601 or YYYY-MM-DD. Examples: --since=2025-12-15T10:00:00Z, --since=1h")
+	rootCmd.Flags().StringVar(&robotSince, "since", "", "Shared time filter for commands that support --since. Snapshot uses RFC3339; history/diff/summary accept duration or RFC3339 timestamps; tokens accepts ISO8601 or YYYY-MM-DD. Examples: --since=2025-12-15T10:00:00Z, --since=1h")
 	rootCmd.Flags().BoolVar(&robotEvents, "robot-events", false, "Stream attention events since cursor. Use for raw replay/feed. Example: ntm --robot-events --since-cursor=42 --events-limit=50")
 	rootCmd.Flags().Int64Var(&robotEventsSinceCursor, "since-cursor", 0, "Cursor position to replay from. Optional with --robot-events. Example: --since-cursor=42")
 	rootCmd.Flags().IntVar(&robotEventsLimit, "events-limit", 100, "Max events to return. Optional with --robot-events. Example: --events-limit=50")
@@ -3019,7 +3018,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotSetup, "robot-setup", false, "Alias for --robot-acfs-status")
 
 	// Robot-ack flags for send confirmation tracking
-	rootCmd.Flags().StringVar(&robotAck, "robot-ack", "", "Watch for agent responses after send. Required: SESSION. Example: ntm --robot-ack=proj --ack-timeout=30s")
+	rootCmd.Flags().StringVar(&robotAck, "robot-ack", "", "Watch for agent responses after send. Required: SESSION. Example: ntm --robot-ack=proj --timeout=30s")
 	rootCmd.Flags().StringVar(&robotAckTimeout, "ack-timeout", "30s", "Max wait time for responses (e.g., 30s, 5000ms, 1m). Works with --robot-ack, --track")
 	rootCmd.Flags().IntVar(&robotAckPoll, "ack-poll", 500, "Poll interval in ms. Optional with --robot-ack. Lower = faster detection, higher CPU")
 	rootCmd.Flags().BoolVar(&robotAckTrack, "track", false, "Combined send+ack: send --msg and wait for response. Use with --robot-send. Example: ntm --robot-send=proj --msg='hello' --track")
@@ -3156,7 +3155,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotHistoryPane, "history-pane", "", "Filter by pane ID. Optional with --robot-history. Example: --history-pane=0.1")
 	rootCmd.Flags().StringVar(&robotHistoryType, "history-type", "", "Filter by agent type. Optional with --robot-history. Example: --history-type=claude")
 	rootCmd.Flags().IntVar(&robotHistoryLast, "history-last", 0, "Show last N entries. Optional with --robot-history. Example: --history-last=10")
-	rootCmd.Flags().StringVar(&robotHistorySince, "history-since", "", "Show entries since time (1h, 30m, 2d, or ISO8601). Optional with --robot-history")
+	rootCmd.Flags().StringVar(&robotHistorySince, "history-since", "", "Show entries since time (1h, 30m, 2d, or RFC3339). Optional with --robot-history")
 	rootCmd.Flags().BoolVar(&robotHistoryStats, "history-stats", false, "Show statistics instead of entries. Optional with --robot-history")
 
 	// Robot-activity flags for agent activity detection
@@ -3165,12 +3164,12 @@ func init() {
 
 	// Robot-wait flags for waiting on agent states
 	rootCmd.Flags().StringVar(&robotWait, "robot-wait", "", "Wait for agents to reach state. Required: SESSION. Example: ntm --robot-wait=myproject --wait-until=idle")
-	rootCmd.Flags().StringVar(&robotWaitUntil, "wait-until", "idle", "Wait condition: idle, complete, generating, healthy. Optional with --robot-wait. Example: --wait-until=idle")
-	rootCmd.Flags().StringVar(&robotWaitUntil, "condition", "idle", "Alias for --wait-until. Wait condition: idle, complete, generating, healthy")
+	rootCmd.Flags().StringVar(&robotWaitUntil, "wait-until", "idle", "Wait condition: idle, complete, generating, healthy, stalled, rate_limited, attention, action_required, mail_pending, mail_ack_required, context_hot, reservation_conflict, file_conflict, session_changed, pane_changed. Optional with --robot-wait. Use --attention-cursor and --profile for attention-feed waits.")
+	rootCmd.Flags().StringVar(&robotWaitUntil, "condition", "idle", "Alias for --wait-until. Same condition set, including attention-feed waits.")
 	rootCmd.Flags().StringVar(&robotWaitTimeout, "wait-timeout", "5m", "Maximum wait time. Optional with --robot-wait. Example: --wait-timeout=2m")
 	rootCmd.Flags().StringVar(&robotWaitPoll, "wait-poll", "2s", "Polling interval. Optional with --robot-wait. Example: --wait-poll=500ms")
 	rootCmd.Flags().StringVar(&robotWaitPanes, "wait-panes", "", "Comma-separated pane indices. Optional with --robot-wait. Example: --wait-panes=1,2")
-	rootCmd.Flags().StringVar(&robotWaitType, "wait-type", "", "Filter by agent type: claude, codex, gemini. Optional with --robot-wait. Example: --wait-type=claude")
+	rootCmd.Flags().StringVar(&robotWaitType, "wait-type", "", "Deprecated alias for --type. Filter by agent type with --robot-wait. Example: --type=claude")
 	rootCmd.Flags().BoolVar(&robotWaitAny, "wait-any", false, "Wait for ANY agent instead of ALL. Optional with --robot-wait")
 	rootCmd.Flags().BoolVar(&robotWaitOnError, "wait-exit-on-error", false, "Exit immediately if ERROR state detected. Optional with --robot-wait")
 	rootCmd.Flags().BoolVar(&robotWaitOnError, "exit-on-error", false, "Alias for --wait-exit-on-error. Exit immediately if ERROR state detected")
@@ -3180,7 +3179,7 @@ func init() {
 	// Robot-route flags for routing recommendations
 	rootCmd.Flags().StringVar(&robotRoute, "robot-route", "", "Get routing recommendation. Required: SESSION. Example: ntm --robot-route=myproject --route-strategy=least-loaded")
 	rootCmd.Flags().StringVar(&robotRouteStrategy, "route-strategy", "least-loaded", "Routing strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit. Optional with --robot-route")
-	rootCmd.Flags().StringVar(&robotRouteType, "route-type", "", "Filter by agent type: claude, codex, gemini. Optional with --robot-route. Example: --route-type=claude")
+	rootCmd.Flags().StringVar(&robotRouteType, "route-type", "", "Deprecated alias for --type. Filter by agent type with --robot-route. Example: --type=claude")
 	rootCmd.Flags().StringVar(&robotRouteExclude, "route-exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-route. Example: --route-exclude=0,3")
 
 	// Robot-pipeline flags for workflow execution
@@ -3226,8 +3225,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotDismissAll, "dismiss-all", false, "Dismiss all matching alerts. Optional with --robot-dismiss-alert")
 
 	// Robot-diff flags for comparing agent activity (synthesis)
-	rootCmd.Flags().StringVar(&robotDiff, "robot-diff", "", "Compare agent activity and file changes. Required: SESSION. Example: ntm --robot-diff=myproject --diff-since=10m")
-	rootCmd.Flags().StringVar(&robotDiffSince, "diff-since", "15m", "Duration to look back (e.g., 10m, 1h). Optional with --robot-diff. Default: 15m")
+	rootCmd.Flags().StringVar(&robotDiff, "robot-diff", "", "Compare agent activity and file changes. Required: SESSION. Example: ntm --robot-diff=myproject --since=10m")
+	rootCmd.Flags().StringVar(&robotDiffSince, "diff-since", "15m", "Deprecated alias for --since. Duration or RFC3339 timestamp to look back from. Optional with --robot-diff. Default: 15m")
 
 	// Robot-alerts flags for alert listing (TUI parity)
 	rootCmd.Flags().BoolVar(&robotAlerts, "robot-alerts", false, "List active alerts with filtering. TUI parity for Alerts panel. Example: ntm --robot-alerts --alerts-severity=critical")
@@ -3258,8 +3257,8 @@ func init() {
 	rootCmd.Flags().StringVar(&beadCloseReason, "bead-close-reason", "", "Reason for closing. Optional with --robot-bead-close")
 
 	// Robot-summary flags for session activity summary
-	rootCmd.Flags().StringVar(&robotSummary, "robot-summary", "", "Get session activity summary with agent metrics. Required: SESSION. Example: ntm --robot-summary=myproject --summary-since=30m")
-	rootCmd.Flags().StringVar(&robotSummarySince, "summary-since", "30m", "Duration to look back (e.g., 30m, 1h). Optional with --robot-summary. Default: 30m")
+	rootCmd.Flags().StringVar(&robotSummary, "robot-summary", "", "Get session activity summary with agent metrics. Required: SESSION. Example: ntm --robot-summary=myproject --since=30m")
+	rootCmd.Flags().StringVar(&robotSummarySince, "summary-since", "30m", "Deprecated alias for --since. Duration or RFC3339 timestamp to look back from. Optional with --robot-summary. Default: 30m")
 
 	// Help verbosity flags
 	rootCmd.Flags().BoolVar(&helpMinimal, "minimal", false, "Show minimal help with essential commands only (spawn, send, status, kill, help)")
@@ -3730,7 +3729,6 @@ func init() {
 		newTemplateCmd(),
 		newSessionTemplatesCmd(),
 		newSessionProfileCmd(), // bd-29kr: session profiles
-		newMonitorCmd(),
 	)
 
 	// Load command plugins
@@ -3801,6 +3799,26 @@ func resolveRobotDiffSince(cmd *cobra.Command) string {
 
 func resolveRobotSummarySince(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "summary-since", robotSummarySince, "since", robotSince)
+}
+
+func parseRobotSinceWindow(value string, defaultUnit time.Duration, flagName string) (time.Duration, error) {
+	if duration, err := util.ParseDurationWithDefault(value, defaultUnit, flagName); err == nil {
+		return duration, nil
+	}
+
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if ts, err := time.Parse(layout, value); err == nil {
+			now := time.Now().UTC()
+			ts = ts.UTC()
+			if ts.After(now) {
+				return 0, fmt.Errorf("timestamp %q is in the future", value)
+			}
+			return now.Sub(ts), nil
+		}
+	}
+
+	return 0, fmt.Errorf("invalid time %q: use duration like 10m or RFC3339 timestamp", value)
 }
 
 func newVersionCmd() *cobra.Command {
