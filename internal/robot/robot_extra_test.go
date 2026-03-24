@@ -9,6 +9,7 @@ import (
 )
 
 func TestPrintTerse(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintTerse walks live runtime collectors and is too expensive for go test -short")
 	if !tmux.IsInstalled() {
 		t.Skip("tmux not installed")
 	}
@@ -34,6 +35,7 @@ func TestPrintTerse(t *testing.T) {
 }
 
 func TestPrintTerseNoTmux(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintTerseNoTmux still exercises live terse collection and is too expensive for go test -short")
 	// Without mocking, we can only test the parsing logic helper if we extract it,
 	// or rely on PrintTerse behavior in current env.
 

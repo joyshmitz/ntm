@@ -56,6 +56,7 @@ func TestServiceLayerOutputStructure(t *testing.T) {
 	})
 
 	t.Run("GetPlan_Structure", func(t *testing.T) {
+		skipSlowRobotShortIntegrationTest(t, "GetPlan_Structure shells into live planning and belongs in longer integration runs")
 		output, err := GetPlan()
 		if err != nil {
 			t.Fatalf("GetPlan failed: %v", err)
@@ -131,6 +132,7 @@ func TestServiceLayerJSONCompliance(t *testing.T) {
 	})
 
 	t.Run("GetPlan_JSON", func(t *testing.T) {
+		skipSlowRobotShortIntegrationTest(t, "GetPlan_JSON shells into live planning and belongs in longer integration runs")
 		output, err := GetPlan()
 		if err != nil {
 			t.Fatalf("GetPlan failed: %v", err)

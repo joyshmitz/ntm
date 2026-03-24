@@ -1847,6 +1847,85 @@ type PlanAction struct {
 	Args        []string `json:"args,omitempty"`
 }
 
+type robotHelpSection struct {
+	Title        string
+	SurfaceNames []string
+	Postlude     string
+}
+
+var robotHelpSections = []robotHelpSection{
+	{
+		Title: "Core Commands",
+		SurfaceNames: []string{
+			"status",
+			"snapshot",
+			"capabilities",
+			"version",
+		},
+	},
+	{
+		Title: "Session Operations",
+		SurfaceNames: []string{
+			"spawn",
+			"ensemble_spawn",
+			"send",
+			"tail",
+			"ensemble",
+			"interrupt",
+			"overlay",
+			"is-working",
+			"wait",
+		},
+		Postlude: `                        Conditions: idle, complete, generating, healthy
+                        Note: bead_orphaned is deliberately unsupported — see --robot-capabilities
+
+Note: Pane-targeting commands exclude the user pane by default.
+Use --all to include the user pane (index depends on tmux pane-base-index).
+`,
+	},
+	{
+		Title: "Work Distribution",
+		SurfaceNames: []string{
+			"assign",
+			"beads-list",
+			"bead-claim",
+			"bead-create",
+			"bead-close",
+		},
+	},
+	{
+		Title: "Analysis & Monitoring",
+		SurfaceNames: []string{
+			"triage",
+			"plan",
+			"graph",
+			"context",
+			"health",
+			"diagnose",
+		},
+	},
+	{
+		Title: "Tool Bridges",
+		SurfaceNames: []string{
+			"cass-search",
+			"acfs-status",
+			"setup-status",
+			"giil-fetch",
+			"jfp-search",
+			"jfp-install",
+			"jfp-export",
+			"jfp-update",
+			"ms-search",
+			"ms-show",
+			"slb-pending",
+			"slb-approve",
+			"slb-deny",
+			"tokens",
+			"history",
+		},
+	},
+}
+
 // PrintHelp outputs AI agent help documentation
 func PrintHelp() {
 	var builder strings.Builder
@@ -1861,65 +1940,13 @@ API Design Principles (see docs/robot-api-design.md):
 3. Modifiers: unprefixed global flags (--limit, --offset, --since, --type)
 4. Output: JSON by default, TOON for token-efficient (--robot-format=toon)
 `)
-	builder.WriteString(renderHelpCommandSection("Core Commands", []string{
-		"status",
-		"snapshot",
-		"capabilities",
-		"version",
-	}))
-	builder.WriteString("\n")
-	builder.WriteString(renderHelpCommandSection("Session Operations", []string{
-		"spawn",
-		"ensemble_spawn",
-		"send",
-		"tail",
-		"ensemble",
-		"interrupt",
-		"overlay",
-		"is-working",
-		"wait",
-	}))
-	builder.WriteString("                        Conditions: idle, complete, generating, healthy\n")
-	builder.WriteString("                        Note: bead_orphaned is deliberately unsupported — see --robot-capabilities\n")
-
-	builder.WriteString(`
-Note: Pane-targeting commands exclude the user pane by default.
-Use --all to include the user pane (index depends on tmux pane-base-index).
-`)
-	builder.WriteString(renderHelpCommandSection("Work Distribution", []string{
-		"assign",
-		"beads-list",
-		"bead-claim",
-		"bead-create",
-		"bead-close",
-	}))
-	builder.WriteString("\n")
-	builder.WriteString(renderHelpCommandSection("Analysis & Monitoring", []string{
-		"triage",
-		"plan",
-		"graph",
-		"context",
-		"health",
-		"diagnose",
-	}))
-	builder.WriteString("\n")
-	builder.WriteString(renderHelpCommandSection("Tool Bridges", []string{
-		"cass-search",
-		"acfs-status",
-		"setup-status",
-		"giil-fetch",
-		"jfp-search",
-		"jfp-install",
-		"jfp-export",
-		"jfp-update",
-		"ms-search",
-		"ms-show",
-		"slb-pending",
-		"slb-approve",
-		"slb-deny",
-		"tokens",
-		"history",
-	}))
+	for _, section := range robotHelpSections {
+		builder.WriteString(renderHelpCommandSection(section))
+		builder.WriteString("\n")
+		if section.Postlude != "" {
+			builder.WriteString(section.Postlude)
+		}
+	}
 	builder.WriteString(`
 Output Formats:
 ---------------
@@ -2011,19 +2038,19 @@ For machine-readable schema:    ntm --robot-capabilities
 	fmt.Println(builder.String())
 }
 
-func renderHelpCommandSection(title string, surfaceNames []string) string {
+func renderHelpCommandSection(section robotHelpSection) string {
 	registry := GetRobotRegistry()
 	if registry == nil {
 		return ""
 	}
 
 	var builder strings.Builder
-	builder.WriteString(title)
+	builder.WriteString(section.Title)
 	builder.WriteString(":\n")
-	builder.WriteString(strings.Repeat("-", len(title)+1))
+	builder.WriteString(strings.Repeat("-", len(section.Title)+1))
 	builder.WriteString("\n")
 
-	for _, name := range surfaceNames {
+	for _, name := range section.SurfaceNames {
 		surface, ok := registry.Surface(name)
 		if !ok {
 			continue

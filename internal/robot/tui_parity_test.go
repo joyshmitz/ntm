@@ -397,6 +397,8 @@ func TestTruncateString(t *testing.T) {
 // =============================================================================
 
 func TestPrintAlertsTUI(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintAlertsTUI walks live alert collection and is too expensive for go test -short")
+
 	// Create a config with alerts enabled
 	cfg := config.Default()
 	cfg.Alerts.Enabled = true
@@ -413,6 +415,8 @@ func TestPrintAlertsTUI(t *testing.T) {
 }
 
 func TestPrintAlertsTUIWithFilters(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintAlertsTUIWithFilters walks live alert collection and is too expensive for go test -short")
+
 	cfg := config.Default()
 	cfg.Alerts.Enabled = true
 
@@ -448,6 +452,8 @@ func TestPrintAlertsTUIWithFilters(t *testing.T) {
 }
 
 func TestPrintAlertsTUINilConfig(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintAlertsTUINilConfig walks live alert collection and is too expensive for go test -short")
+
 	// Test with nil config - should use defaults
 	opts := TUIAlertsOptions{}
 
@@ -807,31 +813,56 @@ func TestFormatTimestampConsistency(t *testing.T) {
 
 func TestAlertInfoFromRealAlert(t *testing.T) {
 	// Test that TUIAlertInfo can be properly created from alerts.Alert
-	cfg := alerts.DefaultConfig()
-	alertList := alerts.GetActiveAlerts(cfg)
-
-	// We don't know if there are alerts, but the function should not panic
 	now := time.Now()
-	for _, a := range alertList {
-		info := TUIAlertInfo{
-			ID:          a.ID,
-			Type:        string(a.Type),
-			Severity:    string(a.Severity),
-			Session:     a.Session,
-			Pane:        a.Pane,
-			Message:     a.Message,
-			CreatedAt:   FormatTimestamp(a.CreatedAt),
-			AgeSeconds:  int(now.Sub(a.CreatedAt).Seconds()),
-			Dismissible: true,
-		}
+	alertCreatedAt := now.Add(-2 * time.Minute)
+	alert := alerts.Alert{
+		ID:         "alert-demo",
+		Type:       alerts.AlertAgentError,
+		Severity:   alerts.SeverityCritical,
+		Session:    "alpha",
+		Pane:       "%1",
+		Message:    "agent crashed repeatedly",
+		CreatedAt:  alertCreatedAt,
+		LastSeenAt: now,
+		Count:      3,
+	}
 
-		// Verify the info is valid
-		if info.ID == "" {
-			t.Error("alert ID should not be empty")
-		}
-		if info.Type == "" {
-			t.Error("alert type should not be empty")
-		}
+	info := TUIAlertInfo{
+		ID:          alert.ID,
+		Type:        string(alert.Type),
+		Severity:    string(alert.Severity),
+		Session:     alert.Session,
+		Pane:        alert.Pane,
+		Message:     alert.Message,
+		CreatedAt:   FormatTimestamp(alert.CreatedAt),
+		AgeSeconds:  int(now.Sub(alert.CreatedAt).Seconds()),
+		Dismissible: true,
+	}
+
+	// Verify the info is valid
+	if info.ID == "" {
+		t.Error("alert ID should not be empty")
+	}
+	if info.Type == "" {
+		t.Error("alert type should not be empty")
+	}
+	if info.Severity != string(alerts.SeverityCritical) {
+		t.Errorf("severity = %q, want %q", info.Severity, alerts.SeverityCritical)
+	}
+	if info.Session != "alpha" {
+		t.Errorf("session = %q, want %q", info.Session, "alpha")
+	}
+	if info.Pane != "%1" {
+		t.Errorf("pane = %q, want %q", info.Pane, "%1")
+	}
+	if info.Message != alert.Message {
+		t.Errorf("message = %q, want %q", info.Message, alert.Message)
+	}
+	if info.AgeSeconds < 119 || info.AgeSeconds > 121 {
+		t.Errorf("age_seconds = %d, want about 120", info.AgeSeconds)
+	}
+	if !info.Dismissible {
+		t.Error("dismissible = false, want true")
 	}
 }
 

@@ -228,6 +228,22 @@ func buildCommandRegistry() []RobotCommandInfo {
 			},
 		},
 		{
+			Name:        "is-working",
+			Flag:        "--robot-is-working",
+			Category:    "state",
+			Description: "Check if agents are actively working, idle, rate-limited, or safe to restart. Returns per-pane recommendations and an aggregate work-state summary.",
+			Parameters: []RobotParameter{
+				{Name: "session", Flag: "--robot-is-working", Type: "string", Required: true, Description: "Session name"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "is-working-verbose", Flag: "--is-working-verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
+			},
+			Examples: []string{
+				"ntm --robot-is-working=myproject",
+				"ntm --robot-is-working=myproject --panes=2,3",
+				"ntm --robot-is-working=myproject --is-working-verbose",
+			},
+		},
+		{
 			Name:        "watch-bead",
 			Flag:        "--robot-watch-bead",
 			Category:    "state",

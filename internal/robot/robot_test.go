@@ -54,6 +54,13 @@ func captureStdout(t *testing.T, f func() error) (string, error) {
 // Test Helper Functions
 // ====================
 
+func skipSlowRobotShortIntegrationTest(t *testing.T, reason string) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip(reason)
+	}
+}
+
 func TestDetectAgentType(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -811,7 +818,43 @@ func TestPrintHelp_IncludesRequiredSecondaryFlags(t *testing.T) {
 	}
 }
 
+func TestPrintHelp_CommandSectionsResolveAgainstRegistry(t *testing.T) {
+	registry := GetRobotRegistry()
+
+	for _, section := range robotHelpSections {
+		if section.Title == "" {
+			t.Fatal("help section title should not be empty")
+		}
+		if len(section.SurfaceNames) == 0 {
+			t.Fatalf("help section %q should not be empty", section.Title)
+		}
+		for _, name := range section.SurfaceNames {
+			if _, ok := registry.Surface(name); !ok {
+				t.Fatalf("help section %q references unknown registry surface %q", section.Title, name)
+			}
+		}
+	}
+}
+
+func TestPrintHelp_RendersConfiguredSectionTitles(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		PrintHelp()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PrintHelp capture failed: %v", err)
+	}
+
+	for _, section := range robotHelpSections {
+		if !strings.Contains(output, section.Title+":") {
+			t.Fatalf("help output missing section title %q", section.Title)
+		}
+	}
+}
+
 func TestPrintPlan(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintPlan exercises live project planning and is covered in longer integration runs")
+
 	output, err := captureStdout(t, PrintPlan)
 	if err != nil {
 		t.Fatalf("PrintPlan failed: %v", err)
@@ -839,6 +882,8 @@ func TestPrintPlan(t *testing.T) {
 }
 
 func TestPrintStatus(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintStatus probes live runtime state and is too expensive for go test -short")
+
 	output, err := captureStdout(t, PrintStatus)
 	if err != nil {
 		t.Fatalf("PrintStatus failed: %v", err)
@@ -910,6 +955,7 @@ func TestPrintSessions(t *testing.T) {
 // ====================
 
 func TestPrintStatusWithSession(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintStatusWithSession uses real tmux integration and belongs in longer runs")
 	testutil.RequireTmuxThrottled(t)
 
 	// Create a test session
@@ -1293,6 +1339,8 @@ func TestPrintTailWithPaneFilter(t *testing.T) {
 // ====================
 
 func TestPrintSnapshot(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintSnapshot collects live system state and is too slow for go test -short")
+
 	oldFeed := PeekAttentionFeed()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
@@ -1390,10 +1438,8 @@ func TestGetSnapshotIncludesReplayWindowMetadata(t *testing.T) {
 	feed.Append(AttentionEvent{Summary: "second"})
 	feed.Append(AttentionEvent{Summary: "third"})
 
-	result, err := GetSnapshot(config.Default())
-	if err != nil {
-		t.Fatalf("GetSnapshot failed: %v", err)
-	}
+	result := newSnapshotOutput(config.Default())
+	populateSnapshotFeedMetadata(result, feed)
 
 	t.Logf("snapshot cursor handoff oldest=%d latest=%d resync=%q",
 		result.ReplayWindow.OldestCursor,
@@ -1474,6 +1520,7 @@ func TestRecordStateChangePublishesToAttentionFeed(t *testing.T) {
 }
 
 func TestPrintSnapshotIncludesSwarmWhenActive(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintSnapshotIncludesSwarmWhenActive exercises live tmux and swarm discovery")
 	testutil.RequireTmuxThrottled(t)
 
 	// Set up attention feed for tests - earlier tests may leave globalFeed nil
@@ -1552,6 +1599,7 @@ func TestPrintSnapshotIncludesSwarmWhenActive(t *testing.T) {
 }
 
 func TestPrintSnapshotWithSession(t *testing.T) {
+	skipSlowRobotShortIntegrationTest(t, "PrintSnapshotWithSession uses real tmux integration and belongs in longer runs")
 	testutil.RequireTmuxThrottled(t)
 
 	// Set up attention feed for tests - earlier tests may leave globalFeed nil

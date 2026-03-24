@@ -68,7 +68,7 @@ var (
 	robotRegistry     *RobotRegistry
 )
 
-// GetRobotRegistry returns the cached shared robot registry.
+// GetRobotRegistry returns a detached snapshot of the cached robot registry.
 func GetRobotRegistry() *RobotRegistry {
 	robotRegistryOnce.Do(func() {
 		robotRegistry = buildRobotRegistry()
