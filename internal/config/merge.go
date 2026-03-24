@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,8 +86,9 @@ func MergeConfig(global *Config, project *ProjectConfig, projectDir string) *Con
 		// Prevent traversal
 		cleanFile := filepath.Clean(project.Palette.File)
 		if isUnsafeProjectRelativePath(cleanFile) {
-			// Don't error, just ignore unsafe path
-			fmt.Printf("Warning: ignoring unsafe project palette path: %s\n", project.Palette.File)
+			// Don't error, just ignore unsafe path. Log to stderr so robot/json
+			// stdout streams remain machine-readable.
+			log.Printf("warning: ignoring unsafe project palette path: %s", project.Palette.File)
 		} else {
 			// Try .ntm/ first (legacy/convention)
 			palettePath := filepath.Join(projectDir, ".ntm", cleanFile)

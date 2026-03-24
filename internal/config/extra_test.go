@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -674,10 +676,30 @@ func TestMergeConfig(t *testing.T) {
 			},
 		}
 
-		// Should not panic or error, just ignore
+		oldStdout := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		os.Stdout = w
+		t.Cleanup(func() {
+			os.Stdout = oldStdout
+		})
+
+		// Should not panic or error, just ignore, and must not corrupt stdout.
 		result := MergeConfig(global, project, "/project")
+		if err := w.Close(); err != nil {
+			t.Fatalf("closing writer: %v", err)
+		}
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatalf("reading stdout: %v", err)
+		}
 		if len(result.Palette) != 0 {
 			t.Errorf("expected empty palette for unsafe path, got=%d commands", len(result.Palette))
+		}
+		if buf.Len() != 0 {
+			t.Errorf("expected no stdout output for unsafe palette path, got %q", buf.String())
 		}
 	})
 
