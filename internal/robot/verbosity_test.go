@@ -163,13 +163,13 @@ func TestApplyVerbosity_TerseNestedShortKeys(t *testing.T) {
 }
 
 func TestEncodeJSON_RespectsVerbosityTerse(t *testing.T) {
-	originalVerbosity := OutputVerbosity
-	originalFormat := OutputFormat
-	OutputVerbosity = VerbosityTerse
-	OutputFormat = FormatJSON
+	originalVerbosity := GetOutputVerbosity()
+	originalFormat := GetOutputFormat()
+	SetOutputVerbosity(VerbosityTerse)
+	SetOutputFormat(FormatJSON)
 	defer func() {
-		OutputVerbosity = originalVerbosity
-		OutputFormat = originalFormat
+		SetOutputVerbosity(originalVerbosity)
+		SetOutputFormat(originalFormat)
 	}()
 
 	payload := AddAgentHints(NewRobotResponse(true), &AgentHints{Summary: "ok"})
@@ -177,7 +177,7 @@ func TestEncodeJSON_RespectsVerbosityTerse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeJSON failed: %v", err)
 	}
-	t.Logf("ROBOT_TEST: verbosity=%s size=%d", OutputVerbosity, len(output))
+	t.Logf("ROBOT_TEST: verbosity=%s size=%d", GetOutputVerbosity(), len(output))
 
 	var got map[string]any
 	if err := json.Unmarshal([]byte(output), &got); err != nil {
@@ -204,13 +204,13 @@ func TestEncodeJSON_RespectsVerbosityTerse(t *testing.T) {
 }
 
 func TestEncodeJSON_RespectsVerbosityDebug(t *testing.T) {
-	originalVerbosity := OutputVerbosity
-	originalFormat := OutputFormat
-	OutputVerbosity = VerbosityDebug
-	OutputFormat = FormatJSON
+	originalVerbosity := GetOutputVerbosity()
+	originalFormat := GetOutputFormat()
+	SetOutputVerbosity(VerbosityDebug)
+	SetOutputFormat(FormatJSON)
 	defer func() {
-		OutputVerbosity = originalVerbosity
-		OutputFormat = originalFormat
+		SetOutputVerbosity(originalVerbosity)
+		SetOutputFormat(originalFormat)
 	}()
 
 	payload := NewRobotResponse(true)
@@ -218,7 +218,7 @@ func TestEncodeJSON_RespectsVerbosityDebug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeJSON failed: %v", err)
 	}
-	t.Logf("ROBOT_TEST: verbosity=%s size=%d", OutputVerbosity, len(output))
+	t.Logf("ROBOT_TEST: verbosity=%s size=%d", GetOutputVerbosity(), len(output))
 
 	var got map[string]any
 	if err := json.Unmarshal([]byte(output), &got); err != nil {

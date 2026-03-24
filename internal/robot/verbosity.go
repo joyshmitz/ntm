@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sync"
 )
 
 // RobotVerbosity controls how much detail is included in robot outputs.
@@ -17,9 +18,26 @@ const (
 	VerbosityDebug   RobotVerbosity = "debug"
 )
 
-// OutputVerbosity controls the robot verbosity profile.
-// Set this from CLI flags, environment variables, or config before calling Print* functions.
-var OutputVerbosity RobotVerbosity = VerbosityDefault
+// outputVerbosity controls the robot verbosity profile.
+// Access via GetOutputVerbosity/SetOutputVerbosity for thread safety.
+var (
+	verbosityMu     sync.RWMutex
+	outputVerbosity RobotVerbosity = VerbosityDefault
+)
+
+// GetOutputVerbosity returns the current verbosity (thread-safe).
+func GetOutputVerbosity() RobotVerbosity {
+	verbosityMu.RLock()
+	defer verbosityMu.RUnlock()
+	return outputVerbosity
+}
+
+// SetOutputVerbosity sets the verbosity (thread-safe).
+func SetOutputVerbosity(v RobotVerbosity) {
+	verbosityMu.Lock()
+	defer verbosityMu.Unlock()
+	outputVerbosity = v
+}
 
 // ParseRobotVerbosity converts a string to RobotVerbosity.
 // Returns VerbosityDefault for empty string and error for invalid values.
@@ -62,7 +80,7 @@ func applyDebugProfile(payload any) any {
 	}
 
 	debugInfo := map[string]any{
-		"format":       OutputFormat.String(),
+		"format":       GetOutputFormat().String(),
 		"verbosity":    string(VerbosityDebug),
 		"go_version":   runtime.Version(),
 		"os":           runtime.GOOS,

@@ -536,7 +536,7 @@ func NewRobotResponse(success bool) RobotResponse {
 		Success:      success,
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 		Version:      EnvelopeVersion,
-		OutputFormat: OutputFormat.String(),
+		OutputFormat: GetOutputFormat().String(),
 	}
 }
 

@@ -629,25 +629,25 @@ func TestRendererInterfaceCompliance(t *testing.T) {
 
 func TestOutputFormatDefault(t *testing.T) {
 	// Save original and restore after test
-	original := OutputFormat
-	defer func() { OutputFormat = original }()
+	original := GetOutputFormat()
+	defer func() { SetOutputFormat(original) }()
 
 	// Default should be FormatAuto
-	if OutputFormat != FormatAuto {
-		t.Errorf("OutputFormat default = %q, want %q", OutputFormat, FormatAuto)
+	if GetOutputFormat() != FormatAuto {
+		t.Errorf("OutputFormat default = %q, want %q", GetOutputFormat(), FormatAuto)
 	}
 }
 
 func TestOutputFormatAffectsEncodeJSON(t *testing.T) {
 	// Save original and restore after test
-	original := OutputFormat
-	defer func() { OutputFormat = original }()
+	original := GetOutputFormat()
+	defer func() { SetOutputFormat(original) }()
 
 	payload := map[string]string{"key": "value"}
 
 	// Test with JSON format
-	OutputFormat = FormatJSON
-	jsonOutput, err := Render(payload, OutputFormat)
+	SetOutputFormat(FormatJSON)
+	jsonOutput, err := Render(payload, GetOutputFormat())
 	if err != nil {
 		t.Fatalf("Render with FormatJSON error: %v", err)
 	}
@@ -659,9 +659,9 @@ func TestOutputFormatAffectsEncodeJSON(t *testing.T) {
 	}
 
 	// Test with TOON format
-	OutputFormat = FormatTOON
+	SetOutputFormat(FormatTOON)
 	requireToonBinary(t)
-	toonOutput, err := Render(payload, OutputFormat)
+	toonOutput, err := Render(payload, GetOutputFormat())
 	if err != nil {
 		t.Fatalf("Render with FormatTOON error: %v", err)
 	}

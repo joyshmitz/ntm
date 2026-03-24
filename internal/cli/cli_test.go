@@ -58,6 +58,8 @@ func resetFlags() {
 	robotAssignStrategy = "balanced"
 	robotDiff = ""
 	robotDiffSince = "15m"
+	robotHistorySince = ""
+	robotHistoryType = ""
 	robotSummarySince = "30m"
 	robotTokensSince = ""
 	robotWaitTimeout = "5m"
@@ -76,10 +78,19 @@ func resetFlags() {
 	robotInterruptTimeout = "10s"
 	robotReplayDryRun = false
 	robotPipelineDryRun = false
+	robotPaletteInfo = false
+	robotPaletteSession = ""
+	robotPaletteCategory = ""
+	robotPaletteSearch = ""
+	robotDismissAlert = ""
+	robotDismissSession = ""
+	robotDismissAll = false
 	robotAgentHealthVerbose = false
 	robotSmartRestartDryRun = false
 	robotSmartRestartVerbose = false
 	robotSmartRestartForce = false
+	robotSmartRestartHardKill = false
+	robotSmartRestartHardKillOnly = false
 	robotFormat = ""
 }
 
@@ -91,8 +102,8 @@ func TestResolveRobotFormat_DefaultAuto(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatAuto {
-		t.Errorf("OutputFormat default = %q, want %q", robot.OutputFormat, robot.FormatAuto)
+	if robot.GetOutputFormat() != robot.FormatAuto {
+		t.Errorf("OutputFormat default = %q, want %q", robot.GetOutputFormat(), robot.FormatAuto)
 	}
 }
 
@@ -104,8 +115,8 @@ func TestResolveRobotFormat_EnvFallback(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatTOON {
-		t.Errorf("OutputFormat from env = %q, want %q", robot.OutputFormat, robot.FormatTOON)
+	if robot.GetOutputFormat() != robot.FormatTOON {
+		t.Errorf("OutputFormat from env = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
 	}
 }
 
@@ -1401,8 +1412,8 @@ func TestResolveRobotFormat_NtmOutputFormatFallback(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatTOON {
-		t.Errorf("OutputFormat from NTM_OUTPUT_FORMAT = %q, want %q", robot.OutputFormat, robot.FormatTOON)
+	if robot.GetOutputFormat() != robot.FormatTOON {
+		t.Errorf("OutputFormat from NTM_OUTPUT_FORMAT = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
 	}
 }
 
@@ -1414,8 +1425,8 @@ func TestResolveRobotFormat_ToonDefaultFallback(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatTOON {
-		t.Errorf("OutputFormat from TOON_DEFAULT_FORMAT = %q, want %q", robot.OutputFormat, robot.FormatTOON)
+	if robot.GetOutputFormat() != robot.FormatTOON {
+		t.Errorf("OutputFormat from TOON_DEFAULT_FORMAT = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
 	}
 }
 
@@ -1426,8 +1437,8 @@ func TestResolveRobotFormat_FlagOverridesEnv(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatJSON {
-		t.Errorf("OutputFormat from flag = %q, want %q", robot.OutputFormat, robot.FormatJSON)
+	if robot.GetOutputFormat() != robot.FormatJSON {
+		t.Errorf("OutputFormat from flag = %q, want %q", robot.GetOutputFormat(), robot.FormatJSON)
 	}
 }
 
@@ -1437,8 +1448,8 @@ func TestResolveRobotFormat_InvalidValueFallsBack(t *testing.T) {
 
 	resolveRobotFormat(nil)
 
-	if robot.OutputFormat != robot.FormatAuto {
-		t.Errorf("OutputFormat invalid = %q, want %q", robot.OutputFormat, robot.FormatAuto)
+	if robot.GetOutputFormat() != robot.FormatAuto {
+		t.Errorf("OutputFormat invalid = %q, want %q", robot.GetOutputFormat(), robot.FormatAuto)
 	}
 }
 
@@ -1484,8 +1495,8 @@ func TestResolveRobotFormat_ConfigFallback(t *testing.T) {
 
 	resolveRobotFormat(cfg)
 
-	if robot.OutputFormat != robot.FormatTOON {
-		t.Errorf("OutputFormat from config = %q, want %q", robot.OutputFormat, robot.FormatTOON)
+	if robot.GetOutputFormat() != robot.FormatTOON {
+		t.Errorf("OutputFormat from config = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
 	}
 }
 
@@ -1498,6 +1509,37 @@ func TestRobotOutputFormatFlagAliasRegistered(t *testing.T) {
 func TestRobotProxyStatusFlagRegistered(t *testing.T) {
 	if rootCmd.Flags().Lookup("robot-proxy-status") == nil {
 		t.Fatal("expected --robot-proxy-status flag to be registered")
+	}
+}
+
+func TestSmartRestartHardKillFlagsRegistered(t *testing.T) {
+	if rootCmd.Flags().Lookup("hard-kill") == nil {
+		t.Fatal("expected --hard-kill flag to be registered")
+	}
+	if rootCmd.Flags().Lookup("hard-kill-only") == nil {
+		t.Fatal("expected --hard-kill-only flag to be registered")
+	}
+}
+
+func TestSharedDryRunAndVerboseHelpMentionsCurrentCommands(t *testing.T) {
+	dryRunFlag := rootCmd.Flags().Lookup("dry-run")
+	if dryRunFlag == nil {
+		t.Fatal("expected --dry-run flag to be registered")
+	}
+	for _, want := range []string{"--robot-smart-restart", "--robot-pipeline-run", "--robot-replay"} {
+		if !strings.Contains(dryRunFlag.Usage, want) {
+			t.Fatalf("--dry-run usage missing %q: %q", want, dryRunFlag.Usage)
+		}
+	}
+
+	verboseFlag := rootCmd.Flags().Lookup("verbose")
+	if verboseFlag == nil {
+		t.Fatal("expected --verbose flag to be registered")
+	}
+	for _, want := range []string{"--robot-is-working", "--robot-agent-health", "--robot-smart-restart"} {
+		if !strings.Contains(verboseFlag.Usage, want) {
+			t.Fatalf("--verbose usage missing %q: %q", want, verboseFlag.Usage)
+		}
 	}
 }
 
@@ -3547,6 +3589,23 @@ func TestRobotDiffFlagParsing(t *testing.T) {
 
 	if robotDiffSince != "1h" {
 		t.Errorf("expected robotDiffSince='1h', got '%s'", robotDiffSince)
+	}
+}
+
+func TestRobotDismissAlertFlagParsingWithDismissAll(t *testing.T) {
+	resetFlags()
+	t.Cleanup(resetFlags)
+
+	err := rootCmd.ParseFlags([]string{"--robot-dismiss-alert", "--dismiss-all"})
+	if err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+
+	if robotDismissAlert != "__present__" {
+		t.Fatalf("expected robotDismissAlert='__present__', got %q", robotDismissAlert)
+	}
+	if !robotDismissAll {
+		t.Fatal("expected robotDismissAll=true")
 	}
 }
 

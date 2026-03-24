@@ -87,5 +87,8 @@ func LoadManifest(session string) (*SpawnManifest, error) {
 // DeleteManifest removes the manifest for a session
 func DeleteManifest(session string) error {
 	path := filepath.Join(ManifestDir(), session+".json")
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

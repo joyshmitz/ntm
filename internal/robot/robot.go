@@ -1502,10 +1502,26 @@ var (
 	BuiltBy = "unknown"
 )
 
-// OutputFormat controls the output serialization format for robot commands.
-// Set this from CLI flags, environment variables, or config before calling Print* functions.
-// Default is FormatAuto which currently resolves to JSON.
-var OutputFormat RobotFormat = FormatAuto
+// outputFormat controls the output serialization format for robot commands.
+// Access via GetOutputFormat/SetOutputFormat for thread safety.
+var (
+	outputMu     sync.RWMutex
+	outputFormat RobotFormat = FormatAuto
+)
+
+// GetOutputFormat returns the current output format (thread-safe).
+func GetOutputFormat() RobotFormat {
+	outputMu.RLock()
+	defer outputMu.RUnlock()
+	return outputFormat
+}
+
+// SetOutputFormat sets the output format (thread-safe).
+func SetOutputFormat(f RobotFormat) {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	outputFormat = f
+}
 
 // Global state tracker for delta snapshots
 var stateTracker = tracker.New()
@@ -1879,6 +1895,7 @@ var robotHelpSections = []robotHelpSection{
 			"interrupt",
 			"overlay",
 			"is-working",
+			"restart-pane",
 			"smart-restart",
 			"wait",
 		},
@@ -1911,6 +1928,7 @@ Use --all to include the user pane (index depends on tmux pane-base-index).
 			"graph",
 			"context",
 			"health",
+			"activity",
 			"agent-health",
 			"health-oauth",
 			"diagnose",
@@ -3736,7 +3754,7 @@ func detectModel(agentType, title string) string {
 // Despite the name (kept for backward compatibility), this now supports
 // multiple formats: json, toon, or auto (default).
 func encodeJSON(v interface{}) error {
-	return Output(applyVerbosity(v, OutputVerbosity), OutputFormat)
+	return Output(applyVerbosity(v, GetOutputVerbosity()), GetOutputFormat())
 }
 
 // TailOutput is the structured output for --robot-tail

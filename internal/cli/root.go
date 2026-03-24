@@ -1179,6 +1179,8 @@ Shell Integration:
 				Prompt:        robotSmartRestartPrompt,
 				LinesCaptured: robotSmartRestartLines(cmd),
 				Verbose:       resolveRobotSmartRestartVerbose(cmd),
+				HardKill:      robotSmartRestartHardKill,
+				HardKillOnly:  robotSmartRestartHardKillOnly,
 			}
 			if err := robot.PrintSmartRestart(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -2013,8 +2015,13 @@ Shell Integration:
 			return
 		}
 		if robotPaletteInfo {
+			paletteSession, err := resolveOptionalRobotSessionFilter(robotPaletteSession)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 			opts := robot.PaletteOptions{
-				Session:     robotPaletteSession,
+				Session:     paletteSession,
 				Category:    robotPaletteCategory,
 				SearchQuery: robotPaletteSearch,
 			}
@@ -2025,12 +2032,21 @@ Shell Integration:
 			return
 		}
 		if robotDismissAlert != "" {
+			dismissSession, err := resolveOptionalRobotSessionFilter(robotDismissSession)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			dismissAlertID := robotDismissAlert
+			if dismissAlertID == "__present__" {
+				dismissAlertID = ""
+			}
 			opts := robot.DismissAlertOptions{
-				AlertID:    robotDismissAlert,
-				Session:    robotDismissSession,
+				AlertID:    dismissAlertID,
+				Session:    dismissSession,
 				DismissAll: robotDismissAll,
 			}
-			if err := robot.PrintDismissAlert(opts); err != nil {
+			if err := robot.PrintDismissAlert(cfg, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -2978,11 +2994,13 @@ var (
 	robotAgentHealthVerbose bool   // include raw sample output
 
 	// Robot-smart-restart flags for safe agent restarts (bd-2c7f4)
-	robotSmartRestart        string // session name to restart
-	robotSmartRestartForce   bool   // force restart even if working
-	robotSmartRestartDryRun  bool   // show what would happen without doing it
-	robotSmartRestartPrompt  string // prompt to send after restart
-	robotSmartRestartVerbose bool   // include extra debugging info
+	robotSmartRestart             string // session name to restart
+	robotSmartRestartForce        bool   // force restart even if working
+	robotSmartRestartDryRun       bool   // show what would happen without doing it
+	robotSmartRestartPrompt       string // prompt to send after restart
+	robotSmartRestartVerbose      bool   // include extra debugging info
+	robotSmartRestartHardKill     bool   // use kill -9 fallback if soft exit fails
+	robotSmartRestartHardKillOnly bool   // skip soft exit and go straight to kill -9
 
 	// Robot-monitor flags for proactive usage limit warnings (bd-3gh5m)
 	robotMonitor            string // session name to monitor
@@ -3124,8 +3142,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotWatchBeadID, "bead", "", "Bead ID for --robot-watch-bead. Example: --bead=bd-abc123")
 	rootCmd.Flags().StringVar(&robotErrors, "robot-errors", "", "Filter pane output to show only errors. Required: SESSION. Example: ntm --robot-errors=myproject --lines=100")
 	rootCmd.Flags().StringVar(&robotErrorsSince, "errors-since", "", "Filter to errors from last duration. Optional with --robot-errors. Example: --errors-since=5m")
-	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Lines to capture per pane. Optional with --robot-tail, --robot-errors, --robot-watch-bead, --robot-is-working, --robot-agent-health, --robot-smart-restart, --robot-monitor. Example: --lines=100")
-	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter to specific pane indices. Optional with --robot-tail, --robot-watch-bead, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-wait, --robot-is-working, --robot-agent-health, --robot-smart-restart, and --robot-monitor. Example: --panes=1,2")
+	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Lines to capture per pane. Optional with --robot-tail, --robot-errors, --robot-watch-bead, --robot-is-working, --robot-agent-health, --robot-smart-restart, and --robot-monitor. Example: --lines=100")
+	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter to specific pane indices. Optional with --robot-tail, --robot-watch-bead, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-wait, --robot-is-working, --robot-agent-health, --robot-smart-restart, --robot-restart-pane, and --robot-monitor. Example: --panes=1,2")
 	rootCmd.Flags().StringVar(&robotIsWorking, "robot-is-working", "", "Check if agents are working. Returns work state with recommendations. Required: SESSION. Example: ntm --robot-is-working=myproject --panes=2,3")
 	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "is-working-verbose", false, "Include raw sample output in --robot-is-working response. Example: --is-working-verbose")
 	rootCmd.Flags().StringVar(&robotAgentHealth, "robot-agent-health", "", "Comprehensive agent health check combining local state and provider usage. Required: SESSION. Example: ntm --robot-agent-health=myproject --panes=2,3")
@@ -3136,6 +3154,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotSmartRestartDryRun, "smart-restart-dry-run", false, "Show what would happen without performing restart. Optional with --robot-smart-restart")
 	rootCmd.Flags().StringVar(&robotSmartRestartPrompt, "prompt", "", "Send this prompt to the agent after restart. Optional with --robot-smart-restart")
 	rootCmd.Flags().BoolVar(&robotSmartRestartVerbose, "smart-restart-verbose", false, "Include extra debugging info in --robot-smart-restart response")
+	rootCmd.Flags().BoolVar(&robotSmartRestartHardKill, "hard-kill", false, "Use kill -9 fallback if the agent ignores the normal exit sequence. Optional with --robot-smart-restart")
+	rootCmd.Flags().BoolVar(&robotSmartRestartHardKillOnly, "hard-kill-only", false, "Skip the normal exit sequence and go straight to kill -9. Optional with --robot-smart-restart")
 	rootCmd.Flags().StringVar(&robotMonitor, "robot-monitor", "", "Start proactive monitoring for usage limits. Emits JSONL warnings. Required: SESSION. Example: ntm --robot-monitor=myproject --interval=30s")
 	rootCmd.Flags().StringVar(&robotMonitorInterval, "interval", "", "Polling interval for --robot-monitor and status polling for --robot-watch-bead. Example: --interval=30s")
 	rootCmd.Flags().StringVar(&robotMonitorWarn, "warn-threshold", "", "Context % for WARNING level. Optional with --robot-monitor. Example: --warn-threshold=25 (default 25)")
@@ -3218,8 +3238,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotSendMsgFile, "msg-file", "", "Read message content from file (use with --robot-send)")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "enter", true, "Send Enter after pasting message (default: true). Use --enter=false to paste without submitting")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "submit", true, "Alias for --enter")
-	rootCmd.Flags().BoolVar(&robotSendAll, "all", false, "Include user pane (default: agents only). Optional with --robot-send, --robot-interrupt, and --robot-support-bundle")
-	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider. Works with --robot-history, --robot-wait, --robot-route, --robot-send, --robot-ack, --robot-interrupt, and --robot-errors")
+	rootCmd.Flags().BoolVar(&robotSendAll, "all", false, "Include user pane (default: agents only). Optional with --robot-send, --robot-interrupt, --robot-restart-pane, and --robot-support-bundle")
+	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider. Works with --robot-history, --robot-wait, --robot-route, --robot-send, --robot-ack, --robot-interrupt, --robot-errors, and --robot-restart-pane")
 	rootCmd.Flags().StringVar(&robotSendExclude, "exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-send and --robot-route. Example: --exclude=0,3")
 	rootCmd.Flags().IntVar(&robotSendDelay, "delay-ms", 0, "Delay between sends (ms). Optional with --robot-send. Example: --delay-ms=500 for 0.5s between panes")
 
@@ -3313,7 +3333,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotInterruptTimeout, "interrupt-timeout", "10s", "Max wait for ready state after interrupt (e.g., 10s, 5000ms). Ignored with --interrupt-no-wait")
 
 	// Robot-restart-pane flag
-	rootCmd.Flags().StringVar(&robotRestartPane, "robot-restart-pane", "", "Restart pane process (kill and respawn). Required: SESSION. Example: ntm --robot-restart-pane=proj --panes=1,2")
+	rootCmd.Flags().StringVar(&robotRestartPane, "robot-restart-pane", "", "Restart pane processes with tmux respawn-pane -k. Required: SESSION. Optional filters: --panes, --type, --all, --dry-run, --restart-bead, --restart-prompt. Example: ntm --robot-restart-pane=proj --type=claude")
 	rootCmd.Flags().StringVar(&robotRestartPaneBead, "restart-bead", "", "Assign bead to agent after restart. Fetches info via br show --json, sends prompt. Use with --robot-restart-pane. Example: --restart-bead=bd-abc12")
 	rootCmd.Flags().StringVar(&robotRestartPanePrompt, "restart-prompt", "", "Custom prompt to send after restart. Overrides --restart-bead template. Use with --robot-restart-pane")
 	rootCmd.Flags().StringVar(&robotProbe, "robot-probe", "", "Probe pane responsiveness. Required: SESSION. Example: ntm --robot-probe=proj --panes=1,2")
@@ -3345,7 +3365,7 @@ func init() {
 	// Robot-restore flags for session state restoration
 	rootCmd.Flags().StringVar(&robotRestore, "robot-restore", "", "Restore session from saved state. Required: path to save file. Example: ntm --robot-restore=backup.json")
 	rootCmd.Flags().BoolVar(&robotRestoreDry, "restore-dry-run", false, "Preview mode: show what would happen without executing. Use with --robot-restore")
-	rootCmd.Flags().BoolVar(&robotDryRun, "dry-run", false, "Preview mode: show what would happen without executing. Use with --robot-send, --robot-interrupt, --robot-spawn, --robot-restore, --robot-restart-pane")
+	rootCmd.Flags().BoolVar(&robotDryRun, "dry-run", false, "Preview mode: show what would happen without executing. Use with --robot-send, --robot-interrupt, --robot-spawn, --robot-restore, --robot-restart-pane, --robot-smart-restart, --robot-pipeline-run, and --robot-replay")
 
 	// Robot-cass flags for CASS (Cross-Agent Semantic Search) integration
 	rootCmd.Flags().BoolVar(&robotCassStatus, "robot-cass-status", false, "Get CASS health: index status, message counts, freshness (JSON)")
@@ -3476,8 +3496,9 @@ func init() {
 	rootCmd.Flags().StringVar(&robotPaletteSearch, "palette-search", "", "Search commands. Optional with --robot-palette. Example: --palette-search=test")
 
 	rootCmd.Flags().StringVar(&robotDismissAlert, "robot-dismiss-alert", "", "Dismiss an alert by ID. Example: ntm --robot-dismiss-alert=alert-abc123")
+	rootCmd.Flags().Lookup("robot-dismiss-alert").NoOptDefVal = "__present__"
 	rootCmd.Flags().StringVar(&robotDismissSession, "dismiss-session", "", "Scope dismissal to session. Optional with --robot-dismiss-alert")
-	rootCmd.Flags().BoolVar(&robotDismissAll, "dismiss-all", false, "Dismiss all matching alerts. Optional with --robot-dismiss-alert")
+	rootCmd.Flags().BoolVar(&robotDismissAll, "dismiss-all", false, "Dismiss all matching alerts. Use with --robot-dismiss-alert")
 
 	// Robot-diff flags for comparing agent activity (synthesis)
 	rootCmd.Flags().StringVar(&robotDiff, "robot-diff", "", "Compare agent activity and file changes. Required: SESSION. Example: ntm --robot-diff=myproject --since=10m")
@@ -3655,7 +3676,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude, openai, google")
 
 	// --verbose global flag (works with multiple commands)
-	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "verbose", false, "Include detailed/verbose output")
+	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "verbose", false, "Include detailed/verbose output for commands that support it, including --robot-is-working, --robot-agent-health, and --robot-smart-restart")
 
 	// --search for palette
 	rootCmd.Flags().StringVar(&robotPaletteSearch, "search", "", "Search query for palette commands")
@@ -4020,6 +4041,9 @@ func init() {
 
 func resolveRobotSharedFlag(cmd *cobra.Command, specificFlagName string, specificValue string, sharedFlagName string, sharedValue string) string {
 	if cmd != nil && specificFlagName != "" && cmd.Flags().Changed(specificFlagName) {
+		return specificValue
+	}
+	if strings.TrimSpace(specificValue) != "" {
 		return specificValue
 	}
 	if cmd != nil && sharedFlagName != "" && cmd.Flags().Changed(sharedFlagName) {
@@ -4764,12 +4788,12 @@ func resolveRobotFormat(cfg *config.Config) {
 		format, err := robot.ParseRobotFormat(formatStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v, using default (auto)\n", err)
-			robot.OutputFormat = robot.FormatAuto
+			robot.SetOutputFormat(robot.FormatAuto)
 			return
 		}
-		robot.OutputFormat = format
+		robot.SetOutputFormat(format)
 	} else {
-		robot.OutputFormat = robot.FormatAuto
+		robot.SetOutputFormat(robot.FormatAuto)
 	}
 }
 
@@ -4815,17 +4839,17 @@ func resolveRobotVerbosity(cfg *config.Config) {
 	}
 
 	if verbosityStr == "" {
-		robot.OutputVerbosity = robot.VerbosityDefault
+		robot.SetOutputVerbosity(robot.VerbosityDefault)
 		return
 	}
 
 	verbosity, err := robot.ParseRobotVerbosity(verbosityStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v, using default verbosity\n", err)
-		robot.OutputVerbosity = robot.VerbosityDefault
+		robot.SetOutputVerbosity(robot.VerbosityDefault)
 		return
 	}
-	robot.OutputVerbosity = verbosity
+	robot.SetOutputVerbosity(verbosity)
 }
 
 // applyRedactionFlagOverrides applies CLI flag overrides to the redaction config.
