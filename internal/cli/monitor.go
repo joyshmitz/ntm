@@ -44,6 +44,12 @@ func runMonitor(session string) error {
 		return fmt.Errorf("loading manifest: %w", err)
 	}
 
+	// Register signal handler early so signals during startup are handled
+	// gracefully instead of causing an abrupt exit.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
 	// Ensure session exists (retry a few times for transient tmux failures)
 	const startupRetries = 3
 	const startupRetryDelay = 2 * time.Second
@@ -148,11 +154,6 @@ func runMonitor(session string) error {
 		defer archiver.Close()
 	}
 
-	// Wait for termination signal or session end
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
 	// Poll for session existence periodically to exit if session is killed.
 	// Use consecutive-miss counting to tolerate transient tmux failures.
 	const maxMisses = 5 // ~25 seconds at 5s interval before giving up
@@ -172,8 +173,16 @@ func runMonitor(session string) error {
 		case <-sigChan:
 			fmt.Println("Monitor stopping...")
 			monitor.Stop()
-			// Try to generate summary on signal too
-			generateEndSessionSummary(session, lastOutputs, manifest)
+			// Try to generate summary on signal too (recover from panics
+			// to ensure graceful exit)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "Panic in session summary generation: %v\n", r)
+					}
+				}()
+				generateEndSessionSummary(session, lastOutputs, manifest)
+			}()
 			return nil
 		case <-ticker.C:
 			if !tmux.SessionExists(session) {
@@ -197,7 +206,14 @@ func runMonitor(session string) error {
 					},
 				))
 				monitor.Stop()
-				generateEndSessionSummary(session, lastOutputs, manifest)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Fprintf(os.Stderr, "Panic in session summary generation: %v\n", r)
+						}
+					}()
+					generateEndSessionSummary(session, lastOutputs, manifest)
+				}()
 				_ = resilience.DeleteManifest(session)
 				return nil
 			}
