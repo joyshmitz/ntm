@@ -1003,7 +1003,7 @@ Shell Integration:
 				Session:      session,
 				ProjectDir:   projectDir,
 				Variables:    vars,
-				DryRun:       robotPipelineDryRun,
+				DryRun:       resolveRobotPipelineDryRun(cmd),
 				Background:   robotPipelineBG,
 			}
 			exitCode := pipeline.PrintPipelineRun(opts)
@@ -1151,7 +1151,7 @@ Shell Integration:
 				Panes:         panes,
 				LinesCaptured: robotAgentHealthLines(cmd),
 				IncludeCaut:   !robotAgentHealthNoCaut,
-				Verbose:       robotAgentHealthVerbose,
+				Verbose:       resolveRobotAgentHealthVerbose(cmd),
 			}
 			if err := robot.PrintAgentHealth(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1175,10 +1175,10 @@ Shell Integration:
 				Session:       session,
 				Panes:         panes,
 				Force:         robotSmartRestartForce,
-				DryRun:        robotSmartRestartDryRun,
+				DryRun:        resolveRobotSmartRestartDryRun(cmd),
 				Prompt:        robotSmartRestartPrompt,
 				LinesCaptured: robotSmartRestartLines(cmd),
-				Verbose:       robotSmartRestartVerbose,
+				Verbose:       resolveRobotSmartRestartVerbose(cmd),
 			}
 			if err := robot.PrintSmartRestart(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -2004,7 +2004,7 @@ Shell Integration:
 			opts := robot.ReplayOptions{
 				Session:   session,
 				HistoryID: robotReplayID,
-				DryRun:    robotReplayDryRun,
+				DryRun:    resolveRobotReplayDryRun(cmd),
 			}
 			if err := robot.PrintReplay(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -4106,6 +4106,26 @@ func resolveRobotInterruptForce(cmd *cobra.Command) bool {
 
 func resolveRobotInterruptTimeout(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "interrupt-timeout", robotInterruptTimeout, "timeout", robotWaitTimeout)
+}
+
+func resolveRobotAgentHealthVerbose(cmd *cobra.Command) bool {
+	return resolveRobotSharedBool(cmd, "agent-health-verbose", robotAgentHealthVerbose, "verbose", robotIsWorkingVerbose)
+}
+
+func resolveRobotSmartRestartVerbose(cmd *cobra.Command) bool {
+	return resolveRobotSharedBool(cmd, "smart-restart-verbose", robotSmartRestartVerbose, "verbose", robotIsWorkingVerbose)
+}
+
+func resolveRobotSmartRestartDryRun(cmd *cobra.Command) bool {
+	return resolveRobotSharedBool(cmd, "smart-restart-dry-run", robotSmartRestartDryRun, "dry-run", robotDryRun)
+}
+
+func resolveRobotPipelineDryRun(cmd *cobra.Command) bool {
+	return resolveRobotSharedBool(cmd, "pipeline-dry-run", robotPipelineDryRun, "dry-run", robotDryRun)
+}
+
+func resolveRobotReplayDryRun(cmd *cobra.Command) bool {
+	return resolveRobotSharedBool(cmd, "replay-dry-run", robotReplayDryRun, "dry-run", robotDryRun)
 }
 
 func parseRobotSinceWindow(value string, defaultUnit time.Duration, flagName string) (time.Duration, error) {

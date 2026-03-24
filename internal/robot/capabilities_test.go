@@ -257,6 +257,11 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 	ackCmd := findCommand("ack")
 	interruptCmd := findCommand("interrupt")
 	spawnCmd := findCommand("spawn")
+	isWorkingCmd := findCommand("is-working")
+	agentHealthCmd := findCommand("agent-health")
+	smartRestartCmd := findCommand("smart-restart")
+	pipelineRunCmd := findCommand("pipeline-run")
+	replayCmd := findCommand("replay")
 
 	for _, tc := range []struct {
 		command RobotCommandInfo
@@ -270,6 +275,11 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 		{command: ackCmd, flags: []string{"--timeout", "--poll"}},
 		{command: interruptCmd, flags: []string{"--msg", "--all", "--force", "--no-wait", "--timeout"}},
 		{command: spawnCmd, flags: []string{"--spawn-wait", "--timeout", "--spawn-assign-work", "--strategy"}},
+		{command: isWorkingCmd, flags: []string{"--verbose"}},
+		{command: agentHealthCmd, flags: []string{"--verbose"}},
+		{command: smartRestartCmd, flags: []string{"--dry-run", "--verbose"}},
+		{command: pipelineRunCmd, flags: []string{"--dry-run"}},
+		{command: replayCmd, flags: []string{"--dry-run"}},
 	} {
 		for _, want := range tc.flags {
 			found := false
@@ -323,6 +333,31 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 	for _, example := range spawnCmd.Examples {
 		if strings.Contains(example, "--spawn-timeout") || strings.Contains(example, "--ready-timeout") || strings.Contains(example, "--spawn-assign-strategy") {
 			t.Fatalf("spawn example still uses deprecated spawn modifiers: %q", example)
+		}
+	}
+	for _, example := range isWorkingCmd.Examples {
+		if strings.Contains(example, "--is-working-verbose") {
+			t.Fatalf("is-working example still uses deprecated verbose flag: %q", example)
+		}
+	}
+	for _, example := range agentHealthCmd.Examples {
+		if strings.Contains(example, "--agent-health-verbose") {
+			t.Fatalf("agent-health example still uses deprecated verbose flag: %q", example)
+		}
+	}
+	for _, example := range smartRestartCmd.Examples {
+		if strings.Contains(example, "--smart-restart-dry-run") || strings.Contains(example, "--smart-restart-verbose") {
+			t.Fatalf("smart-restart example still uses deprecated modifiers: %q", example)
+		}
+	}
+	for _, example := range pipelineRunCmd.Examples {
+		if strings.Contains(example, "--pipeline-dry-run") {
+			t.Fatalf("pipeline-run example still uses deprecated dry-run flag: %q", example)
+		}
+	}
+	for _, example := range replayCmd.Examples {
+		if strings.Contains(example, "--replay-dry-run") {
+			t.Fatalf("replay example still uses deprecated dry-run flag: %q", example)
 		}
 	}
 }

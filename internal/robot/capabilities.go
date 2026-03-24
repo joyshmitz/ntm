@@ -246,12 +246,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-is-working", Type: "string", Required: true, Description: "Session name"},
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
-				{Name: "is-working-verbose", Flag: "--is-working-verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
+				{Name: "verbose", Flag: "--verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
 			},
 			Examples: []string{
 				"ntm --robot-is-working=myproject",
 				"ntm --robot-is-working=myproject --panes=2,3",
-				"ntm --robot-is-working=myproject --is-working-verbose",
+				"ntm --robot-is-working=myproject --verbose",
 			},
 		},
 		{
@@ -281,11 +281,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
 				{Name: "lines", Flag: "--lines", Type: "int", Required: false, Default: "20", Description: "Lines captured per pane for analysis"},
 				{Name: "no-caut", Flag: "--no-caut", Type: "bool", Required: false, Description: "Skip caut provider queries for faster local-only checks"},
-				{Name: "agent-health-verbose", Flag: "--agent-health-verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
+				{Name: "verbose", Flag: "--verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
 			},
 			Examples: []string{
 				"ntm --robot-agent-health=myproject",
-				"ntm --robot-agent-health=myproject --panes=2,3 --agent-health-verbose",
+				"ntm --robot-agent-health=myproject --panes=2,3 --verbose",
 			},
 		},
 		{
@@ -730,14 +730,14 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "session", Flag: "--robot-smart-restart", Type: "string", Required: true, Description: "Session name"},
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to restart"},
 				{Name: "force", Flag: "--force", Type: "bool", Required: false, Description: "Force restart even if an agent appears to be working"},
-				{Name: "smart-restart-dry-run", Flag: "--smart-restart-dry-run", Type: "bool", Required: false, Description: "Preview the restart plan without executing"},
+				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview the restart plan without executing"},
 				{Name: "prompt", Flag: "--prompt", Type: "string", Required: false, Description: "Prompt to send after the restart"},
 				{Name: "lines", Flag: "--lines", Type: "int", Required: false, Default: "20", Description: "Lines captured per pane for safety checks"},
-				{Name: "smart-restart-verbose", Flag: "--smart-restart-verbose", Type: "bool", Required: false, Description: "Include extra debugging details in the response"},
+				{Name: "verbose", Flag: "--verbose", Type: "bool", Required: false, Description: "Include extra debugging details in the response"},
 			},
 			Examples: []string{
 				"ntm --robot-smart-restart=myproject --panes=2,3",
-				"ntm --robot-smart-restart=myproject --smart-restart-dry-run --prompt='resume work'",
+				"ntm --robot-smart-restart=myproject --dry-run --prompt='resume work'",
 			},
 		},
 		{
@@ -1151,10 +1151,10 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "workflow", Flag: "--robot-pipeline-run", Type: "string", Required: true, Description: "Workflow file path"},
 				{Name: "pipeline-session", Flag: "--pipeline-session", Type: "string", Required: true, Description: "Tmux session for execution"},
 				{Name: "pipeline-vars", Flag: "--pipeline-vars", Type: "string", Required: false, Description: "JSON variables for pipeline"},
-				{Name: "pipeline-dry-run", Flag: "--pipeline-dry-run", Type: "bool", Required: false, Description: "Validate without executing"},
+				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Validate without executing"},
 				{Name: "pipeline-background", Flag: "--pipeline-background", Type: "bool", Required: false, Description: "Run in background"},
 			},
-			Examples: []string{"ntm --robot-pipeline-run=workflow.yaml --pipeline-session=proj"},
+			Examples: []string{"ntm --robot-pipeline-run=workflow.yaml --pipeline-session=proj --dry-run"},
 		},
 		{
 			Name:        "pipeline-status",
@@ -1739,9 +1739,9 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-replay", Type: "string", Required: true, Description: "Session name"},
 				{Name: "replay-id", Flag: "--replay-id", Type: "string", Required: true, Description: "History entry ID to replay"},
-				{Name: "replay-dry-run", Flag: "--replay-dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
+				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
 			},
-			Examples: []string{"ntm --robot-replay=myproject --replay-id=1735830245123-a1b2c3d4"},
+			Examples: []string{"ntm --robot-replay=myproject --replay-id=1735830245123-a1b2c3d4 --dry-run"},
 		},
 		{
 			Name:        "tokens",

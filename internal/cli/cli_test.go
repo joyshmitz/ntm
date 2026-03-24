@@ -74,6 +74,11 @@ func resetFlags() {
 	robotInterruptAll = false
 	robotInterruptForce = false
 	robotInterruptTimeout = "10s"
+	robotReplayDryRun = false
+	robotPipelineDryRun = false
+	robotAgentHealthVerbose = false
+	robotSmartRestartDryRun = false
+	robotSmartRestartVerbose = false
 	robotSmartRestartForce = false
 	robotFormat = ""
 }
@@ -3369,6 +3374,97 @@ func TestResolveRobotSharedFlags_PrefersCommandSpecificOverrides(t *testing.T) {
 	}
 	if got := resolveRobotInterruptTimeout(interruptCmd); got != "9s" {
 		t.Fatalf("resolveRobotInterruptTimeout() = %q, want specific value", got)
+	}
+}
+
+func TestResolveRobotSharedFlags_VerboseAndDryRunCanonicals(t *testing.T) {
+	resetFlags()
+
+	verboseCmd := &cobra.Command{Use: "verbose"}
+	verboseCmd.Flags().Bool("verbose", false, "")
+	if err := verboseCmd.Flags().Set("verbose", "true"); err != nil {
+		t.Fatalf("set verbose: %v", err)
+	}
+	robotIsWorkingVerbose = true
+	if !resolveRobotAgentHealthVerbose(verboseCmd) {
+		t.Fatal("resolveRobotAgentHealthVerbose() = false, want true from shared --verbose")
+	}
+	if !resolveRobotSmartRestartVerbose(verboseCmd) {
+		t.Fatal("resolveRobotSmartRestartVerbose() = false, want true from shared --verbose")
+	}
+
+	dryRunCmd := &cobra.Command{Use: "dry-run"}
+	dryRunCmd.Flags().Bool("dry-run", false, "")
+	if err := dryRunCmd.Flags().Set("dry-run", "true"); err != nil {
+		t.Fatalf("set dry-run: %v", err)
+	}
+	robotDryRun = true
+	if !resolveRobotSmartRestartDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotSmartRestartDryRun() = false, want true from shared --dry-run")
+	}
+	if !resolveRobotPipelineDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotPipelineDryRun() = false, want true from shared --dry-run")
+	}
+	if !resolveRobotReplayDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotReplayDryRun() = false, want true from shared --dry-run")
+	}
+}
+
+func TestResolveRobotSharedFlags_PrefersSpecificVerboseAndDryRun(t *testing.T) {
+	resetFlags()
+
+	verboseCmd := &cobra.Command{Use: "verbose"}
+	verboseCmd.Flags().Bool("verbose", false, "")
+	verboseCmd.Flags().Bool("agent-health-verbose", false, "")
+	verboseCmd.Flags().Bool("smart-restart-verbose", false, "")
+	if err := verboseCmd.Flags().Set("verbose", "false"); err != nil {
+		t.Fatalf("set verbose: %v", err)
+	}
+	if err := verboseCmd.Flags().Set("agent-health-verbose", "true"); err != nil {
+		t.Fatalf("set agent-health-verbose: %v", err)
+	}
+	if err := verboseCmd.Flags().Set("smart-restart-verbose", "true"); err != nil {
+		t.Fatalf("set smart-restart-verbose: %v", err)
+	}
+	robotIsWorkingVerbose = false
+	robotAgentHealthVerbose = true
+	robotSmartRestartVerbose = true
+	if !resolveRobotAgentHealthVerbose(verboseCmd) {
+		t.Fatal("resolveRobotAgentHealthVerbose() = false, want specific true")
+	}
+	if !resolveRobotSmartRestartVerbose(verboseCmd) {
+		t.Fatal("resolveRobotSmartRestartVerbose() = false, want specific true")
+	}
+
+	dryRunCmd := &cobra.Command{Use: "dry-run"}
+	dryRunCmd.Flags().Bool("dry-run", false, "")
+	dryRunCmd.Flags().Bool("smart-restart-dry-run", false, "")
+	dryRunCmd.Flags().Bool("pipeline-dry-run", false, "")
+	dryRunCmd.Flags().Bool("replay-dry-run", false, "")
+	if err := dryRunCmd.Flags().Set("dry-run", "false"); err != nil {
+		t.Fatalf("set dry-run: %v", err)
+	}
+	if err := dryRunCmd.Flags().Set("smart-restart-dry-run", "true"); err != nil {
+		t.Fatalf("set smart-restart-dry-run: %v", err)
+	}
+	if err := dryRunCmd.Flags().Set("pipeline-dry-run", "true"); err != nil {
+		t.Fatalf("set pipeline-dry-run: %v", err)
+	}
+	if err := dryRunCmd.Flags().Set("replay-dry-run", "true"); err != nil {
+		t.Fatalf("set replay-dry-run: %v", err)
+	}
+	robotDryRun = false
+	robotSmartRestartDryRun = true
+	robotPipelineDryRun = true
+	robotReplayDryRun = true
+	if !resolveRobotSmartRestartDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotSmartRestartDryRun() = false, want specific true")
+	}
+	if !resolveRobotPipelineDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotPipelineDryRun() = false, want specific true")
+	}
+	if !resolveRobotReplayDryRun(dryRunCmd) {
+		t.Fatal("resolveRobotReplayDryRun() = false, want specific true")
 	}
 }
 
