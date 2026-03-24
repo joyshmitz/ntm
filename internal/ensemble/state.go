@@ -135,10 +135,10 @@ func defaultSQLiteStore() (*StateStore, error) {
 		if err != nil {
 			err = fmt.Errorf("open ensemble state store: %w", err)
 		}
-		defaultStateStore.mu.Lock()
+		// sync.Once guarantees happens-before, so no mutex needed here.
+		// The outer mutex (below) guards against concurrent CloseDefaultStateStore.
 		defaultStateStore.store = s
 		defaultStateStore.err = err
-		defaultStateStore.mu.Unlock()
 	})
 	defaultStateStore.mu.Lock()
 	s, err := defaultStateStore.store, defaultStateStore.err

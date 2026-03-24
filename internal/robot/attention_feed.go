@@ -2634,13 +2634,30 @@ func NewBusAttentionEvent(event ntmevents.BusEvent) (AttentionEvent, bool) {
 		eventType := EventTypeAgentRecovered
 		actionability := ActionabilityInteresting
 		severity := SeverityInfo
-		summary := fmt.Sprintf("rotation completed from %s to %s", e.OldAgentID, e.NewAgentID)
+		oldAgentID := strings.TrimSpace(e.OldAgentID)
+		newAgentID := strings.TrimSpace(e.NewAgentID)
+		summary := "rotation completed"
+		switch {
+		case oldAgentID != "" && newAgentID != "":
+			summary = fmt.Sprintf("rotation completed from %s to %s", oldAgentID, newAgentID)
+		case oldAgentID != "":
+			summary = fmt.Sprintf("rotation completed for %s", oldAgentID)
+		case newAgentID != "":
+			summary = fmt.Sprintf("rotation completed to %s", newAgentID)
+		}
 		nextActions := []NextAction{attentionStatusNextAction("Inspect rotated agents")}
 		if !e.Success {
 			eventType = EventTypeAgentError
 			actionability = ActionabilityActionRequired
 			severity = SeverityError
-			summary = fmt.Sprintf("rotation failed for %s", e.OldAgentID)
+			failedAgentID := oldAgentID
+			if failedAgentID == "" {
+				failedAgentID = newAgentID
+			}
+			if failedAgentID == "" {
+				failedAgentID = "unknown agent"
+			}
+			summary = fmt.Sprintf("rotation failed for %s", failedAgentID)
 		}
 		return attentionFromBusStruct(e.BaseEvent, "event_bus.rotation", attentionDetailsFromStruct(e), EventCategoryAgent, eventType, actionability, severity, summary, nextActions), true
 	case ntmevents.CheckpointCreatedEvent:
@@ -3614,7 +3631,10 @@ func attentionSeverityRank(level Severity) int {
 	}
 }
 
-func attentionConflictActions(session, path, reason string) []NextAction {
+// attentionConflictActions builds NextActions for file conflict events.
+// path is currently unused (robot-diff takes only a session) but kept in the
+// signature so callers remain ready when per-file diff filtering is added.
+func attentionConflictActions(session, path, reason string) []NextAction { //nolint:unparam
 	if session == "" {
 		return []NextAction{attentionStatusNextAction(reason)}
 	}
