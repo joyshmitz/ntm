@@ -63,7 +63,10 @@ func GetDashboard() (*DashboardOutput, error) {
 			BuildDate: Date,
 			TmuxOK:    tmux.IsInstalled(),
 		},
-		Summary: StatusSummary{},
+		Summary: StatusSummary{
+			AgentsByState: map[string]int{},
+			AgentsByType:  map[string]int{},
+		},
 	}
 
 	// Sessions and agents (best-effort)
@@ -79,7 +82,10 @@ func GetDashboard() (*DashboardOutput, error) {
 				panes, err := tmux.GetPanes(sess.Name)
 				if err == nil {
 					for _, pane := range panes {
-						agentType := agentTypeString(pane.Type)
+						agentType, ok := dashboardAgentType(pane)
+						if !ok {
+							continue
+						}
 						snapSession.Agents = append(snapSession.Agents, SnapshotAgent{
 							Pane:           fmt.Sprintf("%d.%d", 0, pane.Index),
 							Type:           agentType,
@@ -104,6 +110,8 @@ func GetDashboard() (*DashboardOutput, error) {
 							output.Summary.AiderCount++
 						}
 						output.Summary.TotalAgents++
+						output.Summary.AgentsByType[agentType]++
+						output.Summary.AgentsByState["unknown"]++
 					}
 				}
 				output.Agents = append(output.Agents, snapSession)
@@ -160,6 +168,17 @@ func GetDashboard() (*DashboardOutput, error) {
 	output.Attention = buildSnapshotAttentionSummary(GetAttentionFeed())
 
 	return output, nil
+}
+
+func dashboardAgentType(pane tmux.Pane) (string, bool) {
+	agentType := agentTypeString(pane.Type)
+	if agentType == "user" {
+		return "", false
+	}
+	if agentType == "" {
+		agentType = "unknown"
+	}
+	return agentType, true
 }
 
 // PrintDashboard outputs a dashboard-oriented view for AI orchestrators.

@@ -94,10 +94,11 @@ type AgentMailUpdateMsg struct {
 
 // AgentMailInboxSummaryMsg is sent when per-agent inbox summaries are fetched.
 type AgentMailInboxSummaryMsg struct {
-	Inboxes  map[string][]agentmail.InboxMessage
-	AgentMap map[string]string
-	Err      error
-	Gen      uint64
+	ProjectKey string
+	Inboxes    map[string][]agentmail.InboxMessage
+	AgentMap   map[string]string
+	Err        error
+	Gen        uint64
 }
 
 // AgentMailInboxDetailMsg is sent when message bodies are fetched for a single agent.

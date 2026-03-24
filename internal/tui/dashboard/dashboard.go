@@ -689,7 +689,7 @@ func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 			return AgentMailInboxSummaryMsg{Err: err, Gen: gen}
 		}
 		if registry == nil {
-			return AgentMailInboxSummaryMsg{AgentMap: map[string]string{}, Gen: gen}
+			return AgentMailInboxSummaryMsg{ProjectKey: projectKey, AgentMap: map[string]string{}, Gen: gen}
 		}
 
 		agentMap := make(map[string]string)
@@ -703,7 +703,7 @@ func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 		}
 
 		if len(agentMap) == 0 {
-			return AgentMailInboxSummaryMsg{AgentMap: agentMap, Gen: gen}
+			return AgentMailInboxSummaryMsg{ProjectKey: projectKey, AgentMap: agentMap, Gen: gen}
 		}
 
 		type job struct {
@@ -768,10 +768,11 @@ func (m *Model) fetchAgentMailInboxes() tea.Cmd {
 		}
 
 		return AgentMailInboxSummaryMsg{
-			Inboxes:  inboxes,
-			AgentMap: agentMap,
-			Err:      firstErr,
-			Gen:      gen,
+			ProjectKey: projectKey,
+			Inboxes:    inboxes,
+			AgentMap:   agentMap,
+			Err:        firstErr,
+			Gen:        gen,
 		}
 	}
 }
@@ -2457,9 +2458,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							threadID = *mm.ThreadID
 						}
 						if mm.AckRequired {
-							attentionFeed.PublishMailAckRequired(mm.From, toAgent, mm.Subject, mm.ID, threadID)
+							attentionFeed.PublishMailAckRequired(msg.ProjectKey, mm.From, toAgent, mm.Subject, mm.ID, threadID)
 						} else {
-							attentionFeed.PublishMailPending(mm.From, toAgent, mm.Subject, mm.ID, threadID)
+							attentionFeed.PublishMailPending(msg.ProjectKey, mm.From, toAgent, mm.Subject, mm.ID, threadID)
 						}
 					}
 				}

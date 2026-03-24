@@ -2955,6 +2955,51 @@ func TestGetDashboardRespectsDisabledAlertsConfig(t *testing.T) {
 	if result.AlertSummary.ByType == nil {
 		t.Fatal("AlertSummary.ByType = nil, want empty map")
 	}
+	if result.Summary.AgentsByType == nil {
+		t.Fatal("Summary.AgentsByType = nil, want empty map")
+	}
+	if result.Summary.AgentsByState == nil {
+		t.Fatal("Summary.AgentsByState = nil, want empty map")
+	}
+}
+
+func TestDashboardAgentTypeSkipsUserPane(t *testing.T) {
+	tests := []struct {
+		name   string
+		pane   tmux.Pane
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "user pane skipped",
+			pane:   tmux.Pane{Type: tmux.AgentUser},
+			wantOK: false,
+		},
+		{
+			name:   "claude pane kept",
+			pane:   tmux.Pane{Type: tmux.AgentClaude},
+			want:   "claude",
+			wantOK: true,
+		},
+		{
+			name:   "unknown pane kept",
+			pane:   tmux.Pane{Type: tmux.AgentType("mystery")},
+			want:   "unknown",
+			wantOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := dashboardAgentType(tt.pane)
+			if ok != tt.wantOK {
+				t.Fatalf("dashboardAgentType(%+v) ok = %v, want %v", tt.pane, ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Fatalf("dashboardAgentType(%+v) = %q, want %q", tt.pane, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestGetAlertsDetailedRespectsDisabledAlertsConfig(t *testing.T) {
