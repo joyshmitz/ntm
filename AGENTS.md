@@ -81,6 +81,13 @@ go build -trimpath -ldflags "-s -w" -o ntm ./cmd/ntm
 make build-all
 ```
 
+### Release Checklist
+
+After creating a new release (via `dsr fallback` or manual cross-compile + `gh release create`):
+
+1. **Verify install script works**: `curl -fsSL ".../install.sh" | bash -s -- --version=vX.Y.Z --dir=/tmp/test --no-shell`
+2. **Check flywheel setup checksums**: If `install.sh` content changed, update the SHA256 in `/dp/agentic_coding_flywheel_setup/checksums.yaml` under the `ntm:` entry. If `install.sh` was not modified, no update is needed (the checksum pins the installer script, not the release binaries).
+
 ### Logging & Console Output
 
 - Use the standard `log` package or `log/slog` for structured logging.
