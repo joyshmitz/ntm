@@ -39,7 +39,6 @@ type SwitchAccountOptions struct {
 //
 //	ntm --robot-switch-account claude         # Switch to next Claude account
 //	ntm --robot-switch-account openai:acc123  # Switch to specific account
-//	ntm --robot-switch-account claude --pane agent-1  # Switch for specific pane
 func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
 	canonicalProvider := canonicalRobotProvider(opts.Provider)
 	if canonicalProvider == "" {
@@ -52,6 +51,20 @@ func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
 			Switch: SwitchAccountResult{
 				Success: false,
 				Error:   "provider required",
+			},
+		}, nil
+	}
+	if strings.TrimSpace(opts.Pane) != "" {
+		return &SwitchAccountOutput{
+			RobotResponse: NewErrorResponse(
+				nil,
+				ErrCodeInvalidFlag,
+				"Account switching is global per provider; pane targeting is not supported for --robot-switch-account",
+			),
+			Switch: SwitchAccountResult{
+				Success:  false,
+				Provider: canonicalProvider,
+				Error:    "pane targeting unsupported",
 			},
 		}, nil
 	}
@@ -130,13 +143,6 @@ func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
 		}
 		output.Switch.CooldownSeconds = cooldownSeconds(result.CooldownUntil)
 	}
-
-	// TODO: If pane filter specified, track which panes would be affected
-	// For now, leave PanesAffected empty (would need pane tracking)
-	if opts.Pane != "" {
-		output.Switch.PanesAffected = []string{opts.Pane}
-	}
-
 	return output, nil
 }
 

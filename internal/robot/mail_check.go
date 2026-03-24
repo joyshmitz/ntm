@@ -540,7 +540,7 @@ func PrintMailCheck(opts MailCheckOptions) error {
 	return outputJSON(output)
 }
 
-// truncateStringMail truncates a string to the specified rune length, adding "..." if truncated.
+// truncateStringMail truncates a string to the specified rune length, then adds "..." if truncated.
 // Respects UTF-8 rune boundaries to avoid producing invalid strings.
 // Named differently to avoid redeclaration with tui_parity.go's truncateString.
 func truncateStringMail(s string, maxLen int) string {
@@ -552,7 +552,7 @@ func truncateStringMail(s string, maxLen int) string {
 		return strings.TrimSpace(string(runes[:maxLen]))
 	}
 	// Find a good break point within the rune slice
-	truncated := string(runes[:maxLen-3])
+	truncated := string(runes[:maxLen])
 	// Try to break at last space
 	if lastSpace := strings.LastIndex(truncated, " "); lastSpace > len(truncated)/2 {
 		truncated = truncated[:lastSpace]

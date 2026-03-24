@@ -1658,14 +1658,13 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "switch-account",
 			Flag:        "--robot-switch-account",
 			Category:    "utility",
-			Description: "Switch the active CAAM account for a provider, optionally targeting one pane.",
+			Description: "Switch the active CAAM account globally for a provider.",
 			Parameters: []RobotParameter{
 				{Name: "target", Flag: "--robot-switch-account", Type: "string", Required: true, Description: "Provider or provider:account"},
-				{Name: "pane", Flag: "--pane", Type: "string", Required: false, Description: "Restrict switching to a specific pane (deprecated alias: --switch-account-pane)"},
 			},
 			Examples: []string{
 				"ntm --robot-switch-account=claude",
-				"ntm --robot-switch-account=claude:work --pane=agent-1",
+				"ntm --robot-switch-account=claude:work",
 			},
 		},
 		{

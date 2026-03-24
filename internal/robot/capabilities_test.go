@@ -330,7 +330,6 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 		{command: smartRestartCmd, flags: []string{"--dry-run", "--verbose", "--hard-kill", "--hard-kill-only"}},
 		{command: pipelineRunCmd, flags: []string{"--dry-run"}},
 		{command: replayCmd, flags: []string{"--dry-run"}},
-		{command: switchAccountCmd, flags: []string{"--pane"}},
 	} {
 		for _, want := range tc.flags {
 			found := false
@@ -422,8 +421,13 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 		}
 	}
 	for _, example := range switchAccountCmd.Examples {
-		if strings.Contains(example, "--switch-account-pane") {
-			t.Fatalf("switch-account example still uses deprecated pane flag: %q", example)
+		if strings.Contains(example, "--switch-account-pane") || strings.Contains(example, "--pane") {
+			t.Fatalf("switch-account example still implies unsupported pane targeting: %q", example)
+		}
+	}
+	for _, param := range switchAccountCmd.Parameters {
+		if param.Flag == "--pane" {
+			t.Fatalf("switch-account should not advertise --pane while switching is global: %+v", switchAccountCmd.Parameters)
 		}
 	}
 	for _, example := range inspectQuotaCmd.Examples {

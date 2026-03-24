@@ -111,6 +111,28 @@ func TestGetSwitchAccountRequiresProvider(t *testing.T) {
 	}
 }
 
+func TestGetSwitchAccountRejectsPaneTargeting(t *testing.T) {
+	output, err := GetSwitchAccount(SwitchAccountOptions{
+		Provider: "claude",
+		Pane:     "agent-1",
+	})
+	if err != nil {
+		t.Fatalf("GetSwitchAccount() error = %v", err)
+	}
+	if output.Success {
+		t.Fatalf("expected failure response, got success: %+v", output)
+	}
+	if output.ErrorCode != ErrCodeInvalidFlag {
+		t.Fatalf("ErrorCode = %q, want %q", output.ErrorCode, ErrCodeInvalidFlag)
+	}
+	if output.Switch.Provider != "claude" {
+		t.Fatalf("Switch.Provider = %q, want %q", output.Switch.Provider, "claude")
+	}
+	if output.Switch.Error == "" {
+		t.Fatalf("expected switch error text, got %+v", output.Switch)
+	}
+}
+
 // TestCooldownSeconds tests cooldown calculation from expiry time.
 func TestCooldownSeconds(t *testing.T) {
 	tests := []struct {
