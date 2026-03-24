@@ -117,3 +117,7 @@ storage.sqlite3-wal.corrupt-*
 .beads/recovery_*/
 .beads/recovery_snapshot_*/
 .beads_snapshot_*/
+
+# Ephemeral debug output files at repo root
+/*.txt
+/*.py
