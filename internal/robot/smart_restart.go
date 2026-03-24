@@ -397,7 +397,7 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 					agentType,
 					attemptedActions,
 					"",
-				).WithRecoveryHint("Try --robot-restart-pane with --hard-kill to use kill -9 fallback")
+				).WithRecoveryHint(fmt.Sprintf("Try ntm --robot-smart-restart=%s --panes=%d --hard-kill to use kill -9 fallback", session, pane))
 				return seq, structErr
 			}
 		}
@@ -436,7 +436,7 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 					agentType,
 					attemptedActions,
 					output,
-				).WithRecoveryHint("Try --robot-restart-pane with --hard-kill, or manually kill the process")
+				).WithRecoveryHint(fmt.Sprintf("Try ntm --robot-smart-restart=%s --panes=%d --hard-kill, or manually kill the process", session, pane))
 				return seq, structErr
 			}
 			if !seq.ShellConfirmed {

@@ -395,7 +395,7 @@ func runContextRotationPending(sessionFilter string) error {
 	var err error
 
 	if sessionFilter != "" {
-		sessionFilter, err = normalizeProjectScopedSessionName(sessionFilter, !IsJSONOutput())
+		sessionFilter, err = normalizeProjectScopedSessionName(sessionFilter, true)
 		if err != nil {
 			return err
 		}

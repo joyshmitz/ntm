@@ -102,7 +102,7 @@ func GenerateSupportBundle(opts SupportBundleOptions) (*SupportBundleOutput, err
 			output.RobotResponse = NewErrorResponse(
 				err,
 				ErrCodeInvalidFlag,
-				"Invalid --since duration format (use e.g., 1h, 24h)",
+				"Invalid --bundle-since duration format (use e.g., 1h, 24h)",
 			)
 			return output, nil
 		}
@@ -128,7 +128,7 @@ func GenerateSupportBundle(opts SupportBundleOptions) (*SupportBundleOutput, err
 			output.RobotResponse = NewErrorResponse(
 				nil,
 				ErrCodeInvalidFlag,
-				"Invalid --redact mode: use warn, redact, block, or off",
+				"Invalid --bundle-redact mode: use warn, redact, block, or off",
 			)
 			return output, nil
 		}
