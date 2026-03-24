@@ -2782,6 +2782,21 @@ func GetPalette(cfg *config.Config, opts PaletteOptions) (*PaletteOutput, error)
 		cfg = config.Default()
 	}
 
+	favoriteSet := make(map[string]struct{}, len(cfg.PaletteState.Favorites))
+	for _, key := range cfg.PaletteState.Favorites {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			favoriteSet[key] = struct{}{}
+		}
+	}
+	pinnedSet := make(map[string]struct{}, len(cfg.PaletteState.Pinned))
+	for _, key := range cfg.PaletteState.Pinned {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			pinnedSet[key] = struct{}{}
+		}
+	}
+
 	output := &PaletteOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
@@ -2793,6 +2808,8 @@ func GetPalette(cfg *config.Config, opts PaletteOptions) (*PaletteOutput, error)
 	}
 
 	seen := make(map[string]struct{})
+	visibleKeys := make(map[string]struct{})
+	categorySeen := make(map[string]struct{})
 	query := strings.ToLower(opts.SearchQuery)
 	matchesFilters := func(key, label, category string) bool {
 		if opts.Category != "" && category != opts.Category {
@@ -2806,24 +2823,31 @@ func GetPalette(cfg *config.Config, opts PaletteOptions) (*PaletteOutput, error)
 	}
 
 	// Get commands from config
-	categorySet := make(map[string]struct{})
 	for _, cmd := range cfg.Palette {
 		if !matchesFilters(cmd.Key, cmd.Label, cmd.Category) {
 			continue
 		}
 
 		palCmd := PaletteCmd{
-			Key:      cmd.Key,
-			Label:    cmd.Label,
-			Category: cmd.Category,
-			Prompt:   cmd.Prompt,
-			Tags:     cmd.Tags,
+			Key:        cmd.Key,
+			Label:      cmd.Label,
+			Category:   cmd.Category,
+			Prompt:     cmd.Prompt,
+			Tags:       cmd.Tags,
+			IsFavorite: hasPaletteKey(favoriteSet, cmd.Key),
+			IsPinned:   hasPaletteKey(pinnedSet, cmd.Key),
 		}
 
 		output.Commands = append(output.Commands, palCmd)
-		categorySet[cmd.Category] = struct{}{}
 		if cmd.Key != "" {
 			seen[cmd.Key] = struct{}{}
+			visibleKeys[cmd.Key] = struct{}{}
+		}
+		if category := strings.TrimSpace(cmd.Category); category != "" {
+			if _, exists := categorySeen[category]; !exists {
+				categorySeen[category] = struct{}{}
+				output.Categories = append(output.Categories, category)
+			}
 		}
 	}
 
@@ -2859,16 +2883,22 @@ func GetPalette(cfg *config.Config, opts PaletteOptions) (*PaletteOutput, error)
 		}
 
 		palCmd := PaletteCmd{
-			Key:      key,
-			Label:    label,
-			Category: category,
-			Prompt:   prompt,
-			Tags:     []string{"kernel"},
+			Key:        key,
+			Label:      label,
+			Category:   category,
+			Prompt:     prompt,
+			Tags:       []string{"kernel"},
+			IsFavorite: hasPaletteKey(favoriteSet, key),
+			IsPinned:   hasPaletteKey(pinnedSet, key),
 		}
 
 		output.Commands = append(output.Commands, palCmd)
-		categorySet[category] = struct{}{}
 		seen[key] = struct{}{}
+		visibleKeys[key] = struct{}{}
+		if _, exists := categorySeen[category]; !exists {
+			categorySeen[category] = struct{}{}
+			output.Categories = append(output.Categories, category)
+		}
 	}
 
 	// Inject built-in xf search command when xf integration is enabled
@@ -2877,20 +2907,79 @@ func GetPalette(cfg *config.Config, opts PaletteOptions) (*PaletteOutput, error)
 		if _, exists := seen[xfKey]; !exists {
 			if matchesFilters(xfKey, "XF Archive Search", "xf") {
 				output.Commands = append(output.Commands, PaletteCmd{
-					Key:      xfKey,
-					Label:    "XF Archive Search",
-					Category: "xf",
-					Prompt:   "Search X/Twitter archive (Ctrl+K)",
-					Tags:     []string{"xf", "search", "twitter"},
+					Key:        xfKey,
+					Label:      "XF Archive Search",
+					Category:   "xf",
+					Prompt:     "Search X/Twitter archive (Ctrl+K)",
+					Tags:       []string{"xf", "search", "twitter"},
+					IsFavorite: hasPaletteKey(favoriteSet, xfKey),
+					IsPinned:   hasPaletteKey(pinnedSet, xfKey),
 				})
-				categorySet["xf"] = struct{}{}
 				seen[xfKey] = struct{}{}
+				visibleKeys[xfKey] = struct{}{}
+				if _, exists := categorySeen["xf"]; !exists {
+					categorySeen["xf"] = struct{}{}
+					output.Categories = append(output.Categories, "xf")
+				}
 			}
 		}
 	}
 
-	for cat := range categorySet {
-		output.Categories = append(output.Categories, cat)
+	for _, key := range cfg.PaletteState.Favorites {
+		key = strings.TrimSpace(key)
+		if _, ok := visibleKeys[key]; ok {
+			output.Favorites = append(output.Favorites, key)
+		}
+	}
+	for _, key := range cfg.PaletteState.Pinned {
+		key = strings.TrimSpace(key)
+		if _, ok := visibleKeys[key]; ok {
+			output.Pinned = append(output.Pinned, key)
+		}
+	}
+
+	entries, err := history.ReadRecent(200)
+	if err != nil {
+		output.AgentHints = &AgentHints{
+			Summary:  fmt.Sprintf("%d commands available across %d categories", len(output.Commands), len(output.Categories)),
+			Warnings: []string{fmt.Sprintf("palette history unavailable: %v", err)},
+			Notes:    []string{"Use --robot-send with a prompt to send commands to agents"},
+		}
+		return output, nil
+	}
+
+	useCounts := make(map[string]int)
+	recentSeen := make(map[string]struct{})
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if entry.Source != history.SourcePalette {
+			continue
+		}
+		if opts.Session != "" && entry.Session != opts.Session {
+			continue
+		}
+		key := strings.TrimSpace(entry.Template)
+		if _, ok := visibleKeys[key]; !ok {
+			continue
+		}
+		useCounts[key]++
+		if _, exists := recentSeen[key]; exists {
+			continue
+		}
+		recentSeen[key] = struct{}{}
+		output.Recent = append(output.Recent, PaletteRecent{
+			Key:     key,
+			UsedAt:  FormatTimestamp(entry.Timestamp),
+			Session: entry.Session,
+			Success: entry.Success,
+		})
+		if len(output.Recent) >= 8 {
+			break
+		}
+	}
+
+	for i := range output.Commands {
+		output.Commands[i].UseCount = useCounts[output.Commands[i].Key]
 	}
 
 	output.AgentHints = &AgentHints{
@@ -3036,9 +3125,12 @@ func PrintAlertsTUI(cfg *config.Config, opts TUIAlertsOptions) error {
 // DismissAlertOutput represents the result of dismissing an alert
 type DismissAlertOutput struct {
 	RobotResponse
-	AlertID    string      `json:"alert_id"`
-	Dismissed  bool        `json:"dismissed"`
-	AgentHints *AgentHints `json:"_agent_hints,omitempty"`
+	AlertID        string      `json:"alert_id,omitempty"`
+	Session        string      `json:"session,omitempty"`
+	Dismissed      bool        `json:"dismissed"`
+	DismissedCount int         `json:"dismissed_count"`
+	DismissedIDs   []string    `json:"dismissed_ids,omitempty"`
+	AgentHints     *AgentHints `json:"_agent_hints,omitempty"`
 }
 
 // DismissAlertOptions configures alert dismissal
@@ -3048,14 +3140,14 @@ type DismissAlertOptions struct {
 	DismissAll bool   // Dismiss all alerts matching criteria
 }
 
-// GetDismissAlert dismisses an alert and returns the result.
+// GetDismissAlert dismisses one or more active alerts and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
-// Note: Alert dismissal is session-local and non-persistent in this implementation.
-// Future versions may persist dismissals.
-func GetDismissAlert(opts DismissAlertOptions) (*DismissAlertOutput, error) {
+func GetDismissAlert(cfg *config.Config, opts DismissAlertOptions) (*DismissAlertOutput, error) {
 	output := &DismissAlertOutput{
 		RobotResponse: NewRobotResponse(true),
 		AlertID:       opts.AlertID,
+		Session:       opts.Session,
+		DismissedIDs:  []string{},
 	}
 
 	if opts.AlertID == "" && !opts.DismissAll {
@@ -3069,25 +3161,107 @@ func GetDismissAlert(opts DismissAlertOptions) (*DismissAlertOutput, error) {
 		}, nil
 	}
 
-	// Note: Full alert dismissal with persistence requires tracker integration.
-	// For now, we track dismissed IDs in a session-local set.
-	// This is a best-effort implementation until alerts.Dismiss is available.
-	if opts.AlertID != "" {
-		// Record the dismissal intent (actual implementation would persist this)
-		output.Dismissed = true
-		output.AgentHints = &AgentHints{
-			Summary: fmt.Sprintf("Alert %s marked for dismissal", opts.AlertID),
-			Notes:   []string{"Alert dismissal is session-local; alert may reappear if condition persists"},
-		}
+	if cfg != nil {
+		alerts.SetGlobalTrackerConfig(alerts.Config{
+			Enabled:              cfg.Alerts.Enabled,
+			AgentStuckMinutes:    cfg.Alerts.AgentStuckMinutes,
+			DiskLowThresholdGB:   cfg.Alerts.DiskLowThresholdGB,
+			MailBacklogThreshold: cfg.Alerts.MailBacklogThreshold,
+			BeadStaleHours:       cfg.Alerts.BeadStaleHours,
+			ResolvedPruneMinutes: cfg.Alerts.ResolvedPruneMinutes,
+		})
 	}
 
+	tracker := alerts.GetGlobalTracker()
+	active := tracker.GetActive()
+	matchesSession := func(alert alerts.Alert) bool {
+		if opts.Session == "" {
+			return true
+		}
+		return alert.Session == opts.Session
+	}
+
+	if opts.AlertID != "" {
+		var found *alerts.Alert
+		for i := range active {
+			if active[i].ID != opts.AlertID {
+				continue
+			}
+			if !matchesSession(active[i]) {
+				return &DismissAlertOutput{
+					RobotResponse: NewErrorResponse(
+						fmt.Errorf("alert %q is not active in session %q", opts.AlertID, opts.Session),
+						ErrCodeNotFound,
+						"Use --robot-alerts to inspect active alerts for that session",
+					),
+					AlertID: opts.AlertID,
+					Session: opts.Session,
+				}, nil
+			}
+			found = &active[i]
+			break
+		}
+		if found == nil {
+			return &DismissAlertOutput{
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("alert %q not found", opts.AlertID),
+					ErrCodeNotFound,
+					"Use --robot-alerts to inspect active alerts",
+				),
+				AlertID: opts.AlertID,
+				Session: opts.Session,
+			}, nil
+		}
+		if !tracker.ManualResolve(found.ID) {
+			return &DismissAlertOutput{
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("failed to dismiss alert %q", found.ID),
+					ErrCodeInternalError,
+					"Refresh --robot-alerts and try again",
+				),
+				AlertID: found.ID,
+				Session: opts.Session,
+			}, nil
+		}
+		output.Dismissed = true
+		output.DismissedCount = 1
+		output.DismissedIDs = append(output.DismissedIDs, found.ID)
+		output.AgentHints = &AgentHints{
+			Summary: fmt.Sprintf("Dismissed alert %s", found.ID),
+			Notes:   []string{"The alert may reappear if the underlying condition is still present"},
+		}
+		return output, nil
+	}
+
+	for _, alert := range active {
+		if !matchesSession(alert) {
+			continue
+		}
+		if tracker.ManualResolve(alert.ID) {
+			output.DismissedIDs = append(output.DismissedIDs, alert.ID)
+		}
+	}
+	output.DismissedCount = len(output.DismissedIDs)
+	output.Dismissed = output.DismissedCount > 0
+	if output.Dismissed {
+		output.AgentHints = &AgentHints{
+			Summary: fmt.Sprintf("Dismissed %d alert(s)", output.DismissedCount),
+			Notes:   []string{"Alerts may reappear if the underlying conditions are still present"},
+		}
+		return output, nil
+	}
+
+	output.AgentHints = &AgentHints{
+		Summary: "No active alerts matched the dismissal request",
+		Notes:   []string{"Use --robot-alerts to inspect currently active alerts"},
+	}
 	return output, nil
 }
 
 // PrintDismissAlert dismisses an alert and outputs the result.
 // This is a thin wrapper around GetDismissAlert() for CLI output.
-func PrintDismissAlert(opts DismissAlertOptions) error {
-	output, err := GetDismissAlert(opts)
+func PrintDismissAlert(cfg *config.Config, opts DismissAlertOptions) error {
+	output, err := GetDismissAlert(cfg, opts)
 	if err != nil {
 		return err
 	}
@@ -3097,6 +3271,11 @@ func PrintDismissAlert(opts DismissAlertOptions) error {
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+func hasPaletteKey(set map[string]struct{}, key string) bool {
+	_, ok := set[strings.TrimSpace(key)]
+	return ok
+}
 
 // detectErrors scans output lines for error patterns
 func detectErrors(lines []string) []string {

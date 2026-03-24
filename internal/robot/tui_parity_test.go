@@ -476,7 +476,7 @@ func TestPrintDismissAlertNoID(t *testing.T) {
 	}
 
 	output, err := captureStdout(t, func() error {
-		return PrintDismissAlert(opts)
+		return PrintDismissAlert(nil, opts)
 	})
 	if err != nil {
 		t.Fatalf("PrintDismissAlert returned error: %v", err)
@@ -495,13 +495,132 @@ func TestPrintDismissAlertNoID(t *testing.T) {
 }
 
 func TestPrintDismissAlertWithID(t *testing.T) {
+	tracker := alerts.GetGlobalTracker()
+	tracker.Clear()
+	t.Cleanup(tracker.Clear)
+	tracker.AddAlert(alerts.Alert{
+		ID:       "test-alert-123",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "test alert",
+	})
+
 	opts := DismissAlertOptions{
 		AlertID: "test-alert-123",
 	}
 
-	err := PrintDismissAlert(opts)
+	err := PrintDismissAlert(nil, opts)
 	if err != nil {
 		t.Fatalf("PrintDismissAlert failed: %v", err)
+	}
+}
+
+func TestGetDismissAlertResolvesMatchingAlert(t *testing.T) {
+	tracker := alerts.GetGlobalTracker()
+	tracker.Clear()
+	t.Cleanup(tracker.Clear)
+
+	tracker.AddAlert(alerts.Alert{
+		ID:       "alert-proj",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "needs attention",
+		Session:  "proj",
+	})
+	tracker.AddAlert(alerts.Alert{
+		ID:       "alert-other",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "leave me alone",
+		Session:  "other",
+	})
+
+	result, err := GetDismissAlert(nil, DismissAlertOptions{
+		AlertID: "alert-proj",
+		Session: "proj",
+	})
+	if err != nil {
+		t.Fatalf("GetDismissAlert failed: %v", err)
+	}
+	if !result.Success || !result.Dismissed {
+		t.Fatalf("expected successful dismissal, got %+v", result)
+	}
+	if result.DismissedCount != 1 {
+		t.Fatalf("DismissedCount = %d, want 1", result.DismissedCount)
+	}
+	if len(result.DismissedIDs) != 1 || result.DismissedIDs[0] != "alert-proj" {
+		t.Fatalf("DismissedIDs = %v, want [alert-proj]", result.DismissedIDs)
+	}
+
+	active := tracker.GetActive()
+	if len(active) != 1 || active[0].ID != "alert-other" {
+		t.Fatalf("active alerts after dismissal = %+v, want only alert-other", active)
+	}
+}
+
+func TestGetDismissAlertRejectsSessionMismatch(t *testing.T) {
+	tracker := alerts.GetGlobalTracker()
+	tracker.Clear()
+	t.Cleanup(tracker.Clear)
+
+	tracker.AddAlert(alerts.Alert{
+		ID:       "alert-other",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "wrong session",
+		Session:  "other",
+	})
+
+	result, err := GetDismissAlert(nil, DismissAlertOptions{
+		AlertID: "alert-other",
+		Session: "proj",
+	})
+	if err != nil {
+		t.Fatalf("GetDismissAlert failed: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected success=false for session mismatch, got %+v", result)
+	}
+	if result.ErrorCode != ErrCodeNotFound {
+		t.Fatalf("ErrorCode = %q, want %q", result.ErrorCode, ErrCodeNotFound)
+	}
+}
+
+func TestGetDismissAlertDismissAllBySession(t *testing.T) {
+	tracker := alerts.GetGlobalTracker()
+	tracker.Clear()
+	t.Cleanup(tracker.Clear)
+
+	tracker.AddAlert(alerts.Alert{
+		ID:       "alert-proj",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "dismiss me",
+		Session:  "proj",
+	})
+	tracker.AddAlert(alerts.Alert{
+		ID:       "alert-other",
+		Type:     alerts.AlertAgentError,
+		Severity: alerts.SeverityWarning,
+		Message:  "keep me",
+		Session:  "other",
+	})
+
+	result, err := GetDismissAlert(nil, DismissAlertOptions{
+		Session:    "proj",
+		DismissAll: true,
+	})
+	if err != nil {
+		t.Fatalf("GetDismissAlert failed: %v", err)
+	}
+	if !result.Success || !result.Dismissed {
+		t.Fatalf("expected dismiss-all success, got %+v", result)
+	}
+	if result.DismissedCount != 1 {
+		t.Fatalf("DismissedCount = %d, want 1", result.DismissedCount)
+	}
+	if len(result.DismissedIDs) != 1 || result.DismissedIDs[0] != "alert-proj" {
+		t.Fatalf("DismissedIDs = %v, want [alert-proj]", result.DismissedIDs)
 	}
 }
 
@@ -561,6 +680,84 @@ func TestPrintPaletteNilConfig(t *testing.T) {
 	err := PrintPalette(nil, opts)
 	if err != nil {
 		t.Fatalf("PrintPalette with nil config failed: %v", err)
+	}
+}
+
+func TestGetPaletteIncludesStateAndRecentUsage(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldDataHome := os.Getenv("XDG_DATA_HOME")
+	if err := os.Setenv("XDG_DATA_HOME", tmpDir); err != nil {
+		t.Fatalf("Setenv: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("XDG_DATA_HOME", oldDataHome)
+	})
+	if err := history.Clear(); err != nil {
+		t.Fatalf("history.Clear: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Palette = []config.PaletteCmd{
+		{Key: "fix-bugs", Label: "Fix Bugs", Category: "dev", Prompt: "fix bugs"},
+		{Key: "write-tests", Label: "Write Tests", Category: "qa", Prompt: "write tests"},
+	}
+	cfg.PaletteState = config.PaletteState{
+		Favorites: []string{"fix-bugs", "missing"},
+		Pinned:    []string{"write-tests", "missing"},
+	}
+
+	appendEntry := func(session, template string) {
+		t.Helper()
+		entry := history.NewEntry(session, []string{"0"}, template, history.SourcePalette)
+		entry.Template = template
+		entry.SetSuccess()
+		if err := history.Append(entry); err != nil {
+			t.Fatalf("Append(%s): %v", template, err)
+		}
+	}
+	appendEntry("proj", "fix-bugs")
+	appendEntry("proj", "write-tests")
+	appendEntry("proj", "fix-bugs")
+	appendEntry("other", "write-tests")
+
+	result, err := GetPalette(cfg, PaletteOptions{Session: "proj"})
+	if err != nil {
+		t.Fatalf("GetPalette failed: %v", err)
+	}
+
+	if len(result.Favorites) != 1 || result.Favorites[0] != "fix-bugs" {
+		t.Fatalf("Favorites = %v, want [fix-bugs]", result.Favorites)
+	}
+	if len(result.Pinned) != 1 || result.Pinned[0] != "write-tests" {
+		t.Fatalf("Pinned = %v, want [write-tests]", result.Pinned)
+	}
+	if len(result.Recent) != 2 {
+		t.Fatalf("Recent length = %d, want 2", len(result.Recent))
+	}
+	if result.Recent[0].Key != "fix-bugs" || result.Recent[1].Key != "write-tests" {
+		t.Fatalf("Recent keys = %+v, want [fix-bugs write-tests]", result.Recent)
+	}
+	if len(result.Categories) < 2 || result.Categories[0] != "dev" || result.Categories[1] != "qa" {
+		t.Fatalf("Categories = %v, want dev then qa first", result.Categories)
+	}
+
+	var fixCmd, testCmd *PaletteCmd
+	for i := range result.Commands {
+		switch result.Commands[i].Key {
+		case "fix-bugs":
+			fixCmd = &result.Commands[i]
+		case "write-tests":
+			testCmd = &result.Commands[i]
+		}
+	}
+	if fixCmd == nil || testCmd == nil {
+		t.Fatalf("expected palette commands in output, got %+v", result.Commands)
+	}
+	if !fixCmd.IsFavorite || fixCmd.UseCount != 2 {
+		t.Fatalf("fix-bugs command = %+v, want favorite with use_count=2", *fixCmd)
+	}
+	if !testCmd.IsPinned || testCmd.UseCount != 1 {
+		t.Fatalf("write-tests command = %+v, want pinned with use_count=1", *testCmd)
 	}
 }
 
