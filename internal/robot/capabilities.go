@@ -411,9 +411,9 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Category:    "state",
 			Description: "Projection-backed quota drill-down keyed by provider/account.",
 			Parameters: []RobotParameter{
-				{Name: "quota_id", Flag: "--robot-inspect-quota", Type: "string", Required: true, Description: "Provider/account identity, e.g. anthropic/default"},
+				{Name: "quota_id", Flag: "--robot-inspect-quota", Type: "string", Required: true, Description: "Provider/account identity, e.g. claude/default (anthropic/default also accepted)"},
 			},
-			Examples: []string{"ntm --robot-inspect-quota=anthropic/default"},
+			Examples: []string{"ntm --robot-inspect-quota=claude/default"},
 		},
 		{
 			Name:        "inspect-incident",
@@ -1661,11 +1661,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Switch the active CAAM account for a provider, optionally targeting one pane.",
 			Parameters: []RobotParameter{
 				{Name: "target", Flag: "--robot-switch-account", Type: "string", Required: true, Description: "Provider or provider:account"},
-				{Name: "switch-account-pane", Flag: "--switch-account-pane", Type: "string", Required: false, Description: "Restrict switching to a specific pane"},
+				{Name: "pane", Flag: "--pane", Type: "string", Required: false, Description: "Restrict switching to a specific pane (deprecated alias: --switch-account-pane)"},
 			},
 			Examples: []string{
 				"ntm --robot-switch-account=claude",
-				"ntm --robot-switch-account=claude:work --switch-account-pane=agent-1",
+				"ntm --robot-switch-account=claude:work --pane=agent-1",
 			},
 		},
 		{

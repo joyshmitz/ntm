@@ -3480,7 +3480,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotInspectAgent, "robot-inspect-agent", "", "Projection-backed agent drill-down. Required: SESSION:PANE runtime agent id. Example: ntm --robot-inspect-agent=myproject:%1")
 	rootCmd.Flags().StringVar(&robotInspectWork, "robot-inspect-work", "", "Projection-backed work drill-down. Required: BEAD_ID. Example: ntm --robot-inspect-work=bd-j9jo3.6.6")
 	rootCmd.Flags().StringVar(&robotInspectCoord, "robot-inspect-coordination", "", "Projection-backed coordination drill-down. Required: AGENT_NAME. Example: ntm --robot-inspect-coordination=BlueLake")
-	rootCmd.Flags().StringVar(&robotInspectQuota, "robot-inspect-quota", "", "Projection-backed quota drill-down. Required: PROVIDER/ACCOUNT. Example: ntm --robot-inspect-quota=anthropic/default")
+	rootCmd.Flags().StringVar(&robotInspectQuota, "robot-inspect-quota", "", "Projection-backed quota drill-down. Required: PROVIDER/ACCOUNT. Canonical aliases like claude/default are accepted. Example: ntm --robot-inspect-quota=claude/default")
 	rootCmd.Flags().StringVar(&robotInspectIncident, "robot-inspect-incident", "", "Store-backed incident drill-down. Required: INCIDENT_ID. Example: ntm --robot-inspect-incident=inc_20260323_abc123")
 
 	rootCmd.Flags().StringVar(&robotMetrics, "robot-metrics", "", "Session metrics export. Optional SESSION. Example: ntm --robot-metrics=myproject --metrics-period=24h")
@@ -3673,7 +3673,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotReplayID, "id", "", "Entry ID for replay")
 
 	// --provider for CAAM/quota
-	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude, openai, google")
+	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude|anthropic, openai, gemini|google")
 
 	// --verbose global flag (works with multiple commands)
 	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "verbose", false, "Include detailed/verbose output for commands that support it, including --robot-is-working, --robot-agent-health, and --robot-smart-restart")

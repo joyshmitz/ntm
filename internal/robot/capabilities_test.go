@@ -308,6 +308,8 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 	smartRestartCmd := findCommand("smart-restart")
 	pipelineRunCmd := findCommand("pipeline-run")
 	replayCmd := findCommand("replay")
+	switchAccountCmd := findCommand("switch-account")
+	inspectQuotaCmd := findCommand("inspect-quota")
 
 	for _, tc := range []struct {
 		command RobotCommandInfo
@@ -328,6 +330,7 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 		{command: smartRestartCmd, flags: []string{"--dry-run", "--verbose", "--hard-kill", "--hard-kill-only"}},
 		{command: pipelineRunCmd, flags: []string{"--dry-run"}},
 		{command: replayCmd, flags: []string{"--dry-run"}},
+		{command: switchAccountCmd, flags: []string{"--pane"}},
 	} {
 		for _, want := range tc.flags {
 			found := false
@@ -416,6 +419,16 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 	for _, example := range replayCmd.Examples {
 		if strings.Contains(example, "--replay-dry-run") {
 			t.Fatalf("replay example still uses deprecated dry-run flag: %q", example)
+		}
+	}
+	for _, example := range switchAccountCmd.Examples {
+		if strings.Contains(example, "--switch-account-pane") {
+			t.Fatalf("switch-account example still uses deprecated pane flag: %q", example)
+		}
+	}
+	for _, example := range inspectQuotaCmd.Examples {
+		if strings.Contains(example, "anthropic/default") {
+			t.Fatalf("inspect-quota example still teaches backend provider id instead of canonical alias: %q", example)
 		}
 	}
 

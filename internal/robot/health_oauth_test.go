@@ -12,12 +12,12 @@ func TestAgentTypeToProvider(t *testing.T) {
 		agentType string
 		expected  string
 	}{
-		{"claude", "anthropic"},
-		{"cc", "anthropic"},
+		{"claude", "claude"},
+		{"cc", "claude"},
 		{"codex", "openai"},
 		{"cod", "openai"},
-		{"gemini", "google"},
-		{"gmi", "google"},
+		{"gemini", "gemini"},
+		{"gmi", "gemini"},
 		{"unknown", "unknown"},
 	}
 
@@ -468,7 +468,7 @@ func TestOAuthHealthOutputJSONStructure(t *testing.T) {
 			{
 				Pane:             1,
 				AgentType:        "cc",
-				Provider:         "anthropic",
+				Provider:         "claude",
 				OAuthStatus:      OAuthValid,
 				RateLimitStatus:  RateLimitOK,
 				LastActivitySec:  60,

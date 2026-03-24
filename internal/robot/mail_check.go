@@ -316,8 +316,15 @@ func GetMailCheck(opts MailCheckOptions) (*MailCheckOutput, error) {
 	if effectiveLimit <= 0 {
 		effectiveLimit = 20
 	}
-
-	fetchLimit := effectiveLimit + opts.Offset + 1
+	needBackfill := mailCheckNeedsBackfill(opts)
+	needCount := opts.Offset + effectiveLimit
+	if needCount < effectiveLimit {
+		needCount = effectiveLimit
+	}
+	fetchLimit := needCount
+	if !needBackfill {
+		fetchLimit++
+	}
 
 	var sinceTS *time.Time
 	if opts.Since != "" {
@@ -336,11 +343,6 @@ func GetMailCheck(opts MailCheckOptions) (*MailCheckOutput, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	needCount := opts.Offset + effectiveLimit
-	if needCount < effectiveLimit {
-		needCount = effectiveLimit
-	}
 
 	var entries []mailCheckInboxEntry
 	var filtered []mailCheckInboxEntry
@@ -368,7 +370,7 @@ func GetMailCheck(opts MailCheckOptions) (*MailCheckOutput, error) {
 			}, nil
 		}
 
-		if !mailCheckNeedsBackfill(opts) || len(filtered) > needCount || len(entries) < fetchLimit || fetchLimit >= mailCheckBackfillLimit {
+		if !needBackfill || len(filtered) > needCount || len(entries) < fetchLimit || fetchLimit >= mailCheckBackfillLimit {
 			break
 		}
 
@@ -538,16 +540,21 @@ func PrintMailCheck(opts MailCheckOptions) error {
 	return outputJSON(output)
 }
 
-// truncateStringMail truncates a string to the specified length, adding "..." if truncated
-// Named differently to avoid redeclaration with tui_parity.go's truncateString
+// truncateStringMail truncates a string to the specified rune length, adding "..." if truncated.
+// Respects UTF-8 rune boundaries to avoid producing invalid strings.
+// Named differently to avoid redeclaration with tui_parity.go's truncateString.
 func truncateStringMail(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return strings.TrimSpace(s)
 	}
-	// Find a good break point
-	truncated := s[:maxLen]
+	if maxLen <= 3 {
+		return strings.TrimSpace(string(runes[:maxLen]))
+	}
+	// Find a good break point within the rune slice
+	truncated := string(runes[:maxLen-3])
 	// Try to break at last space
-	if lastSpace := strings.LastIndex(truncated, " "); lastSpace > maxLen/2 {
+	if lastSpace := strings.LastIndex(truncated, " "); lastSpace > len(truncated)/2 {
 		truncated = truncated[:lastSpace]
 	}
 	return strings.TrimSpace(truncated) + "..."

@@ -1024,6 +1024,9 @@ func TestPrintHelp_UsesCurrentSharedModifierDescriptions(t *testing.T) {
 			t.Fatalf("help output missing %q:\n%s", want, output)
 		}
 	}
+	if strings.Contains(output, "--switch-account-pane") {
+		t.Fatalf("help output still references deprecated switch-account pane flag:\n%s", output)
+	}
 }
 
 func TestPrintHelp_CommandSectionsResolveAgainstRegistry(t *testing.T) {
@@ -3369,6 +3372,9 @@ func TestSnapshotQuotaFromRuntime(t *testing.T) {
 	}
 	if section.Accounts[0].ReasonCode != adapters.ReasonQuotaWarningTokens || section.Accounts[0].Status != "warning" {
 		t.Fatalf("First quota account = %+v, want warning/tokens", section.Accounts[0])
+	}
+	if section.Accounts[0].Provider != "claude" {
+		t.Fatalf("First quota account provider = %q, want %q", section.Accounts[0].Provider, "claude")
 	}
 	if section.Accounts[1].ReasonCode != adapters.ReasonQuotaExceededRequests || section.Accounts[1].Status != "exceeded" {
 		t.Fatalf("Second quota account = %+v, want exceeded/requests", section.Accounts[1])

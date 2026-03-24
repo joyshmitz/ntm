@@ -57,8 +57,10 @@ func GetAccountStatus(opts AccountStatusOptions) (*AccountStatusOutput, error) {
 	// Build per-provider status map
 	providerAccounts := make(map[string][]tools.CAAMAccount)
 	for _, acc := range status.Accounts {
-		providerAccounts[acc.Provider] = append(providerAccounts[acc.Provider], acc)
+		provider := canonicalRobotProvider(acc.Provider)
+		providerAccounts[provider] = append(providerAccounts[provider], acc)
 	}
+	opts.Provider = canonicalRobotProvider(opts.Provider)
 
 	// Build output
 	output := &AccountStatusOutput{

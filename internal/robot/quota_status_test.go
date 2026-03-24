@@ -1,7 +1,11 @@
 package robot
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/integrations/caut"
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
 func TestGetQuotaStatus(t *testing.T) {
@@ -172,5 +176,129 @@ func TestProviderQuota_Fields(t *testing.T) {
 
 	if pq.ResetAt == "" {
 		t.Error("Expected ResetAt to be set")
+	}
+}
+
+func TestCanonicalRobotProvider(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"claude", "claude"},
+		{"anthropic", "claude"},
+		{"openai", "openai"},
+		{"gemini", "gemini"},
+		{"google", "gemini"},
+		{"google-ai", "gemini"},
+		{"GEMINI", "gemini"},
+	}
+
+	for _, tt := range tests {
+		if got := canonicalRobotProvider(tt.input); got != tt.want {
+			t.Fatalf("canonicalRobotProvider(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestGetQuotaCheck_NormalizesProviderAlias(t *testing.T) {
+	poller := caut.GetGlobalPoller()
+	cache := poller.GetCache()
+	snapshot := cache.Snapshot()
+	t.Cleanup(func() {
+		cache.Clear()
+		if snapshot.Status != nil {
+			cache.UpdateStatus(snapshot.Status)
+		}
+		if len(snapshot.Usage) > 0 {
+			cache.UpdateAllUsage(snapshot.Usage)
+		}
+		if snapshot.HasError {
+			cache.SetError(errors.New(snapshot.ErrorMessage))
+		}
+	})
+
+	cache.Clear()
+	cache.UpdateStatus(&tools.CautStatus{
+		Running:       true,
+		Tracking:      true,
+		ProviderCount: 1,
+		Providers: []tools.CautProvider{
+			{Name: "anthropic", Enabled: true, HasQuota: true, QuotaUsed: 62.5},
+		},
+	})
+	cache.UpdateUsage("anthropic", &tools.CautUsage{
+		Provider:     "anthropic",
+		RequestCount: 12,
+		TokensIn:     100,
+		TokensOut:    50,
+		Cost:         1.25,
+		Period:       "day",
+	})
+
+	output, err := GetQuotaCheck("claude")
+	if err != nil {
+		t.Fatalf("GetQuotaCheck() error = %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetQuotaCheck() success = false, error=%q", output.Error)
+	}
+	if output.Provider != "claude" {
+		t.Fatalf("Provider = %q, want claude", output.Provider)
+	}
+	if output.Quota.RequestsUsed != 12 {
+		t.Fatalf("RequestsUsed = %d, want 12", output.Quota.RequestsUsed)
+	}
+	if output.Quota.UsagePercent != 62.5 {
+		t.Fatalf("UsagePercent = %v, want 62.5", output.Quota.UsagePercent)
+	}
+}
+
+func TestGetQuotaStatus_CanonicalizesProviderNames(t *testing.T) {
+	poller := caut.GetGlobalPoller()
+	cache := poller.GetCache()
+	snapshot := cache.Snapshot()
+	t.Cleanup(func() {
+		cache.Clear()
+		if snapshot.Status != nil {
+			cache.UpdateStatus(snapshot.Status)
+		}
+		if len(snapshot.Usage) > 0 {
+			cache.UpdateAllUsage(snapshot.Usage)
+		}
+		if snapshot.HasError {
+			cache.SetError(errors.New(snapshot.ErrorMessage))
+		}
+	})
+
+	cache.Clear()
+	cache.UpdateStatus(&tools.CautStatus{
+		Running:       true,
+		Tracking:      true,
+		ProviderCount: 2,
+		Providers: []tools.CautProvider{
+			{Name: "anthropic", Enabled: true, HasQuota: true, QuotaUsed: 45.0},
+			{Name: "gemini", Enabled: true, HasQuota: true, QuotaUsed: 12.0},
+		},
+	})
+	cache.UpdateAllUsage([]tools.CautUsage{
+		{Provider: "anthropic", RequestCount: 3, Cost: 0.75},
+		{Provider: "gemini", RequestCount: 1, Cost: 0.25},
+	})
+
+	output, err := GetQuotaStatus()
+	if err != nil {
+		t.Fatalf("GetQuotaStatus() error = %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetQuotaStatus() success = false, error=%q", output.Error)
+	}
+	if _, exists := output.Quota.Providers["anthropic"]; exists {
+		t.Fatalf("providers should expose canonical claude key, got %+v", output.Quota.Providers)
+	}
+	if _, exists := output.Quota.Providers["claude"]; !exists {
+		t.Fatalf("providers missing canonical claude key: %+v", output.Quota.Providers)
+	}
+	if _, exists := output.Quota.Providers["gemini"]; !exists {
+		t.Fatalf("providers missing gemini key: %+v", output.Quota.Providers)
 	}
 }

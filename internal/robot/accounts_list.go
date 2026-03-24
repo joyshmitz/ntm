@@ -62,15 +62,17 @@ func GetAccountsList(opts AccountsListOptions) (*AccountsListOutput, error) {
 		RobotResponse: NewRobotResponse(true),
 		Accounts:      []AccountInfo{}, // Initialize to empty array
 	}
+	opts.Provider = canonicalRobotProvider(opts.Provider)
 
 	for _, acc := range accounts {
+		provider := canonicalRobotProvider(acc.Provider)
 		// Filter by provider if specified
-		if opts.Provider != "" && acc.Provider != opts.Provider {
+		if opts.Provider != "" && provider != opts.Provider {
 			continue
 		}
 
 		info := AccountInfo{
-			Provider:    acc.Provider,
+			Provider:    provider,
 			ID:          acc.ID,
 			Email:       acc.Email,
 			Name:        acc.Name,

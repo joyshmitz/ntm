@@ -36,6 +36,18 @@ func TestParseSwitchAccountArg(t *testing.T) {
 			wantAccount:  "",
 		},
 		{
+			name:         "provider alias - anthropic canonicalized",
+			arg:          "anthropic",
+			wantProvider: "claude",
+			wantAccount:  "",
+		},
+		{
+			name:         "provider alias - google canonicalized",
+			arg:          "google",
+			wantProvider: "gemini",
+			wantAccount:  "",
+		},
+		{
 			name:         "provider:account format",
 			arg:          "claude:account-123",
 			wantProvider: "claude",
@@ -59,6 +71,12 @@ func TestParseSwitchAccountArg(t *testing.T) {
 			wantProvider: "gemini",
 			wantAccount:  "acc:with:colons",
 		},
+		{
+			name:         "trims whitespace and canonicalizes alias",
+			arg:          "  anthropic : account-123  ",
+			wantProvider: "claude",
+			wantAccount:  "account-123",
+		},
 	}
 
 	for _, tt := range tests {
@@ -71,6 +89,25 @@ func TestParseSwitchAccountArg(t *testing.T) {
 				t.Errorf("AccountID = %q, want %q", opts.AccountID, tt.wantAccount)
 			}
 		})
+	}
+}
+
+func TestGetSwitchAccountRequiresProvider(t *testing.T) {
+	output, err := GetSwitchAccount(SwitchAccountOptions{})
+	if err != nil {
+		t.Fatalf("GetSwitchAccount() error = %v", err)
+	}
+	if output.Success {
+		t.Fatalf("expected failure response, got success: %+v", output)
+	}
+	if output.ErrorCode != ErrCodeInvalidFlag {
+		t.Fatalf("ErrorCode = %q, want %q", output.ErrorCode, ErrCodeInvalidFlag)
+	}
+	if output.Switch.Provider != "" {
+		t.Fatalf("Switch.Provider = %q, want empty", output.Switch.Provider)
+	}
+	if output.Switch.Error == "" {
+		t.Fatalf("expected switch error text, got %+v", output.Switch)
 	}
 }
 

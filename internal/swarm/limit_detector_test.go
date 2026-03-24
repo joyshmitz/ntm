@@ -76,6 +76,94 @@ func TestLimitDetectorStartEmptyPlan(t *testing.T) {
 	if len(panes) != 0 {
 		t.Errorf("expected 0 monitored panes, got %d", len(panes))
 	}
+
+	detector.mu.RLock()
+	started := detector.cancel != nil
+	detector.mu.RUnlock()
+	if started {
+		t.Fatal("empty plan should not mark detector as started")
+	}
+}
+
+func TestLimitDetectorStartPlanWithoutPanesDoesNotBlockRestart(t *testing.T) {
+	detector := NewLimitDetector()
+	ctx := context.Background()
+
+	emptyPlan := &SwarmPlan{
+		Sessions: []SessionSpec{
+			{Name: "empty"},
+		},
+	}
+	if err := detector.Start(ctx, emptyPlan); err != nil {
+		t.Fatalf("Start with no-pane plan failed: %v", err)
+	}
+
+	plan := &SwarmPlan{
+		Sessions: []SessionSpec{
+			{
+				Name:      "test_session",
+				AgentType: "cc",
+				Panes: []PaneSpec{
+					{Index: 1, AgentType: "cc"},
+				},
+			},
+		},
+	}
+	if err := detector.Start(ctx, plan); err != nil {
+		t.Fatalf("restart after no-pane plan failed: %v", err)
+	}
+	detector.Stop()
+}
+
+func TestLimitDetectorParentContextCancelCleansUpAndAllowsRestart(t *testing.T) {
+	detector := NewLimitDetector()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	plan := &SwarmPlan{
+		Sessions: []SessionSpec{
+			{
+				Name:      "test_session",
+				AgentType: "cc",
+				Panes: []PaneSpec{
+					{Index: 1, AgentType: "cc"},
+				},
+			},
+		},
+	}
+
+	if err := detector.Start(ctx, plan); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	cancel()
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		detector.mu.RLock()
+		cancelCleared := detector.cancel == nil
+		paneCount := len(detector.monitoredPanes)
+		detector.mu.RUnlock()
+		if cancelCleared && paneCount == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	detector.mu.RLock()
+	cancelCleared := detector.cancel == nil
+	paneCount := len(detector.monitoredPanes)
+	detector.mu.RUnlock()
+	if !cancelCleared || paneCount != 0 {
+		t.Fatalf("detector did not clean up after parent context cancel: cancelCleared=%v paneCount=%d", cancelCleared, paneCount)
+	}
+
+	restartCtx, restartCancel := context.WithCancel(context.Background())
+	defer restartCancel()
+
+	if err := detector.Start(restartCtx, plan); err != nil {
+		t.Fatalf("restart after parent context cancel failed: %v", err)
+	}
+	detector.Stop()
 }
 
 func TestLimitDetectorStop(t *testing.T) {

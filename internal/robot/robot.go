@@ -4977,10 +4977,11 @@ func snapshotQuotaFromRuntime(rows []state.RuntimeQuota) *adapters.QuotaSection 
 	}
 
 	for _, row := range rows {
+		displayProvider := canonicalRobotProvider(row.Provider)
 		usagePercent := row.UsedPct
 		account := adapters.AccountQuota{
-			ID:         robotFirstNonEmpty(strings.TrimSpace(row.Account), strings.TrimSpace(row.Provider)),
-			Provider:   strings.TrimSpace(row.Provider),
+			ID:         robotFirstNonEmpty(strings.TrimSpace(row.Account), displayProvider),
+			Provider:   displayProvider,
 			Status:     snapshotQuotaStatus(row),
 			ReasonCode: snapshotQuotaReasonCode(row),
 			IsActive:   row.IsActive,

@@ -1518,7 +1518,7 @@ func TestInspectQuotaOutputStructure(t *testing.T) {
 		RobotResponse: NewRobotResponse(true),
 		SchemaID:      defaultRobotSchemaID("inspect-quota"),
 		SchemaVersion: inspectQuotaSchemaVersion,
-		QuotaID:       "anthropic/default",
+		QuotaID:       "claude/default",
 		Diagnostics: []InspectDiagnosticSection{
 			{
 				Kind:    "quota_state",
@@ -1527,8 +1527,8 @@ func TestInspectQuotaOutputStructure(t *testing.T) {
 			},
 		},
 		Detail: InspectQuotaDetail{
-			ID:         "anthropic/default",
-			Provider:   "anthropic",
+			ID:         "claude/default",
+			Provider:   "claude",
 			Account:    "default",
 			Status:     "warning",
 			ReasonCode: adapters.ReasonQuotaWarningTokens,
@@ -1807,11 +1807,55 @@ func TestGetInspectQuotaUsesProjectionStore(t *testing.T) {
 	if output.SchemaID != defaultRobotSchemaID("inspect-quota") {
 		t.Fatalf("SchemaID = %q, want %q", output.SchemaID, defaultRobotSchemaID("inspect-quota"))
 	}
-	if output.Detail.ID != "anthropic/default" || output.Detail.Status != "warning" {
+	if output.Detail.ID != "claude/default" || output.Detail.Provider != "claude" || output.Detail.Status != "warning" {
 		t.Fatalf("Detail = %+v", output.Detail)
 	}
 	if diagnosticSectionByKind(output.Diagnostics, "quota_state") == nil {
 		t.Fatalf("Diagnostics = %+v, want quota_state section", output.Diagnostics)
+	}
+}
+
+func TestGetInspectQuotaAcceptsCanonicalProviderAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate store: %v", err)
+	}
+
+	oldStore := currentProjectionStore()
+	SetProjectionStore(store)
+	t.Cleanup(func() {
+		SetProjectionStore(oldStore)
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC()
+	if err := store.UpsertRuntimeQuota(&state.RuntimeQuota{
+		Provider:      "anthropic",
+		Account:       "default",
+		UsedPct:       62,
+		UsedPctKnown:  true,
+		UsedPctSource: state.RuntimeQuotaUsedPctSourceProvider,
+		IsActive:      true,
+		Healthy:       true,
+		CollectedAt:   now,
+		StaleAfter:    now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeQuota: %v", err)
+	}
+
+	output, err := GetInspectQuota(InspectQuotaOptions{QuotaID: "claude/default"})
+	if err != nil {
+		t.Fatalf("GetInspectQuota: %v", err)
+	}
+	if !output.Success {
+		t.Fatalf("GetInspectQuota failed: %+v", output.RobotResponse)
+	}
+	if output.Detail.Provider != "claude" || output.Detail.ID != "claude/default" || output.Detail.Account != "default" {
+		t.Fatalf("Detail = %+v, want canonical claude/default quota", output.Detail)
 	}
 }
 

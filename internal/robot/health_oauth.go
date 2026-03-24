@@ -45,7 +45,7 @@ const RateLimitWarningThreshold = 3
 type AgentOAuthHealth struct {
 	Pane              int             `json:"pane"`
 	AgentType         string          `json:"agent_type"`
-	Provider          string          `json:"provider"` // anthropic, openai, google
+	Provider          string          `json:"provider"` // claude, openai, gemini
 	OAuthStatus       OAuthStatus     `json:"oauth_status"`
 	OAuthError        string          `json:"oauth_error,omitempty"`
 	RateLimitStatus   RateLimitStatus `json:"rate_limit_status"`
@@ -262,11 +262,11 @@ func getAgentOAuthHealth(session string, pane tmux.Pane, agentType string) Agent
 func agentTypeToProvider(agentType string) string {
 	switch agentType {
 	case "claude", "cc":
-		return "anthropic"
+		return "claude"
 	case "codex", "cod":
 		return "openai"
 	case "gemini", "gmi":
-		return "google"
+		return "gemini"
 	default:
 		return "unknown"
 	}

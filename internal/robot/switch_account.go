@@ -3,6 +3,7 @@ package robot
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -40,6 +41,21 @@ type SwitchAccountOptions struct {
 //	ntm --robot-switch-account openai:acc123  # Switch to specific account
 //	ntm --robot-switch-account claude --pane agent-1  # Switch for specific pane
 func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
+	canonicalProvider := canonicalRobotProvider(opts.Provider)
+	if canonicalProvider == "" {
+		return &SwitchAccountOutput{
+			RobotResponse: NewErrorResponse(
+				nil,
+				ErrCodeInvalidFlag,
+				"Specify a provider with --robot-switch-account=PROVIDER or --robot-switch-account=PROVIDER:ACCOUNT",
+			),
+			Switch: SwitchAccountResult{
+				Success: false,
+				Error:   "provider required",
+			},
+		}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -55,14 +71,14 @@ func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
 			),
 			Switch: SwitchAccountResult{
 				Success:  false,
-				Provider: opts.Provider,
+				Provider: canonicalProvider,
 				Error:    "caam not installed",
 			},
 		}, nil
 	}
 
 	// Get current account before switch (for comparison)
-	creds, _ := adapter.GetCurrentCredentials(ctx, opts.Provider)
+	creds, _ := adapter.GetCurrentCredentials(ctx, canonicalProvider)
 	previousAccount := ""
 	if creds != nil {
 		previousAccount = creds.AccountID
@@ -77,20 +93,20 @@ func GetSwitchAccount(opts SwitchAccountOptions) (*SwitchAccountOutput, error) {
 		if err == nil {
 			result = &tools.SwitchResult{
 				Success:         true,
-				Provider:        opts.Provider,
+				Provider:        canonicalProvider,
 				PreviousAccount: previousAccount,
 				NewAccount:      opts.AccountID,
 			}
 		}
 	} else {
 		// Switch to next available account
-		result, err = adapter.SwitchToNextAccount(ctx, opts.Provider)
+		result, err = adapter.SwitchToNextAccount(ctx, canonicalProvider)
 	}
 
 	output := &SwitchAccountOutput{
 		RobotResponse: NewRobotResponse(true),
 		Switch: SwitchAccountResult{
-			Provider:        opts.Provider,
+			Provider:        canonicalProvider,
 			PreviousAccount: previousAccount,
 		},
 	}
@@ -149,17 +165,18 @@ func cooldownSeconds(cooldownUntil time.Time) int {
 // ParseSwitchAccountArg parses the argument format "provider" or "provider:account"
 func ParseSwitchAccountArg(arg string) SwitchAccountOptions {
 	opts := SwitchAccountOptions{}
+	trimmed := strings.TrimSpace(arg)
 
 	// Handle "provider:account" format
-	for i := 0; i < len(arg); i++ {
-		if arg[i] == ':' {
-			opts.Provider = arg[:i]
-			opts.AccountID = arg[i+1:]
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] == ':' {
+			opts.Provider = canonicalRobotProvider(strings.TrimSpace(trimmed[:i]))
+			opts.AccountID = strings.TrimSpace(trimmed[i+1:])
 			return opts
 		}
 	}
 
 	// Just provider
-	opts.Provider = arg
+	opts.Provider = canonicalRobotProvider(trimmed)
 	return opts
 }

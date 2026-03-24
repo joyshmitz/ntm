@@ -1,9 +1,85 @@
 package bv
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestUnmarshalBdList(t *testing.T) {
+	t.Parallel()
+
+	type bead struct {
+		ID string `json:"id"`
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		wantIDs []string
+	}{
+		{
+			name:    "raw_array",
+			input:   `[{"id":"bd-1"},{"id":"bd-2"}]`,
+			wantIDs: []string{"bd-1", "bd-2"},
+		},
+		{
+			name:    "issues_envelope",
+			input:   `{"issues":[{"id":"bd-3"},{"id":"bd-4"}]}`,
+			wantIDs: []string{"bd-3", "bd-4"},
+		},
+		{
+			name:    "single_object",
+			input:   `{"id":"bd-5"}`,
+			wantIDs: []string{"bd-5"},
+		},
+		{
+			name:    "empty_null",
+			input:   `null`,
+			wantIDs: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := UnmarshalBdList[bead](tt.input)
+			if err != nil {
+				t.Fatalf("UnmarshalBdList() error = %v", err)
+			}
+
+			if len(got) != len(tt.wantIDs) {
+				t.Fatalf("len(got) = %d, want %d", len(got), len(tt.wantIDs))
+			}
+			for i, wantID := range tt.wantIDs {
+				if got[i].ID != wantID {
+					t.Fatalf("got[%d].ID = %q, want %q", i, got[i].ID, wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestUnmarshalBdList_RawMessagesFromEnvelope(t *testing.T) {
+	t.Parallel()
+
+	raw, err := UnmarshalBdList[json.RawMessage](`{"issues":[{"id":"bd-7"}]}`)
+	if err != nil {
+		t.Fatalf("UnmarshalBdList() error = %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("len(raw) = %d, want 1", len(raw))
+	}
+
+	var decoded map[string]string
+	if err := json.Unmarshal(raw[0], &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(raw[0]) error = %v", err)
+	}
+	if decoded["id"] != "bd-7" {
+		t.Fatalf("decoded id = %q, want %q", decoded["id"], "bd-7")
+	}
+}
 
 func TestCheckDrift_EarlyValidation(t *testing.T) {
 	t.Parallel()

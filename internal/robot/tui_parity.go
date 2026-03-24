@@ -1860,7 +1860,7 @@ func inspectCoordinationDetailFromRuntime(row *state.RuntimeCoordination, handof
 }
 
 func canonicalInspectQuotaID(provider, account string) string {
-	provider = strings.TrimSpace(provider)
+	provider = canonicalRobotProvider(provider)
 	account = strings.TrimSpace(account)
 	if provider == "" {
 		return account
@@ -1885,6 +1885,27 @@ func parseInspectQuotaID(value string) (string, string) {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	return "", ""
+}
+
+func runtimeQuotaLookupProviders(provider string) []string {
+	candidates := []string{
+		strings.TrimSpace(provider),
+		canonicalRobotProvider(provider),
+		quotaLookupProvider(provider),
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	ordered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		ordered = append(ordered, candidate)
+	}
+	return ordered
 }
 
 func inspectQuotaHealth(row state.RuntimeQuota) InspectHealth {
@@ -1912,9 +1933,10 @@ func inspectQuotaHealth(row state.RuntimeQuota) InspectHealth {
 }
 
 func inspectQuotaDetailFromRuntime(row *state.RuntimeQuota) InspectQuotaDetail {
+	displayProvider := canonicalRobotProvider(row.Provider)
 	detail := InspectQuotaDetail{
-		ID:            canonicalInspectQuotaID(row.Provider, row.Account),
-		Provider:      strings.TrimSpace(row.Provider),
+		ID:            canonicalInspectQuotaID(displayProvider, row.Account),
+		Provider:      displayProvider,
 		Account:       strings.TrimSpace(row.Account),
 		Status:        snapshotQuotaStatus(*row),
 		ReasonCode:    snapshotQuotaReasonCode(*row),
@@ -2320,10 +2342,19 @@ func GetInspectQuota(opts InspectQuotaOptions) (*InspectQuotaOutput, error) {
 		return output, nil
 	}
 
-	quota, err := store.GetRuntimeQuota(provider, account)
-	if err != nil {
-		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load quota projection")
-		return output, nil
+	var (
+		quota *state.RuntimeQuota
+		err   error
+	)
+	for _, candidate := range runtimeQuotaLookupProviders(provider) {
+		quota, err = store.GetRuntimeQuota(candidate, account)
+		if err != nil {
+			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to load quota projection")
+			return output, nil
+		}
+		if quota != nil {
+			break
+		}
 	}
 	if quota == nil {
 		output.RobotResponse = NewErrorResponse(
@@ -3552,8 +3583,19 @@ func GetBeadsList(opts BeadsListOptions) (*BeadsListOutput, error) {
 		DependencyCount int      `json:"dependency_count"`
 	}
 
-	if err := json.Unmarshal([]byte(result), &rawBeads); err != nil {
-		// Try parsing as single object (some bd versions return differently)
+	if rawBeads, err = bv.UnmarshalBdList[struct {
+		ID              string   `json:"id"`
+		Title           string   `json:"title"`
+		Status          string   `json:"status"`
+		Priority        int      `json:"priority"`
+		IssueType       string   `json:"issue_type"`
+		Assignee        string   `json:"assignee"`
+		Labels          []string `json:"labels"`
+		CreatedAt       string   `json:"created_at"`
+		UpdatedAt       string   `json:"updated_at"`
+		Description     string   `json:"description"`
+		DependencyCount int      `json:"dependency_count"`
+	}](result); err != nil {
 		return &BeadsListOutput{
 			RobotResponse: NewErrorResponse(
 				fmt.Errorf("failed to parse bead list: %w", err),

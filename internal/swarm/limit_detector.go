@@ -116,6 +116,16 @@ func (d *LimitDetector) Start(ctx context.Context, plan *SwarmPlan) error {
 	if plan == nil {
 		return nil
 	}
+	hasPanes := false
+	for _, sess := range plan.Sessions {
+		if len(sess.Panes) > 0 {
+			hasPanes = true
+			break
+		}
+	}
+	if !hasPanes {
+		return nil
+	}
 
 	d.mu.Lock()
 	if d.cancel != nil {
@@ -123,11 +133,17 @@ func (d *LimitDetector) Start(ctx context.Context, plan *SwarmPlan) error {
 		return fmt.Errorf("LimitDetector already started; call Stop() first")
 	}
 	d.ctx, d.cancel = context.WithCancel(ctx)
+	monitorCtx := d.ctx
 	// Recreate event channel if it was closed by Stop()
 	if d.eventChan == nil {
 		d.eventChan = make(chan LimitEvent, 100)
 	}
 	d.mu.Unlock()
+
+	go func(ctx context.Context) {
+		<-ctx.Done()
+		d.Stop()
+	}(monitorCtx)
 
 	d.logger().Info("[LimitDetector] Starting swarm monitoring",
 		"sessions", len(plan.Sessions),

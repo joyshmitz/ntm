@@ -238,19 +238,35 @@ func createBead(spec BeadSpec) (string, error) {
 		return "", fmt.Errorf("bd create failed: %w", err)
 	}
 
-	// Parse JSON output to get the bead ID
-	var result []struct {
+	id, err := parseCreatedBeadID(output)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func parseCreatedBeadID(output string) (string, error) {
+	// bd create returns a single object, but tolerate array output as a fallback.
+	var singleResult struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
+	if err := json.Unmarshal([]byte(output), &singleResult); err == nil {
+		if singleResult.ID == "" {
+			return "", fmt.Errorf("no bead ID returned")
+		}
+		return singleResult.ID, nil
+	}
+
+	var arrayResult []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(output), &arrayResult); err != nil {
 		return "", fmt.Errorf("parsing bd output: %w", err)
 	}
-
-	if len(result) == 0 {
+	if len(arrayResult) == 0 || arrayResult[0].ID == "" {
 		return "", fmt.Errorf("no bead ID returned")
 	}
-
-	return result[0].ID, nil
+	return arrayResult[0].ID, nil
 }
 
 // loadExistingSignatures loads signatures of existing UBS-created beads.
@@ -267,7 +283,9 @@ func loadExistingSignatures() (map[string]bool, error) {
 	if output == "" {
 		return make(map[string]bool), nil
 	}
-	if err := json.Unmarshal([]byte(output), &beads); err != nil {
+	if beads, err = bv.UnmarshalBdList[struct {
+		Description string `json:"description"`
+	}](output); err != nil {
 		// Empty list is fine
 		return nil, fmt.Errorf("parsing beads: %w", err)
 	}
@@ -373,7 +391,10 @@ func UpdateBeadsFromFindings(result *ScanResult, cfg BridgeConfig) (*BridgeResul
 	if output == "" {
 		return br, nil // No beads to update
 	}
-	if err := json.Unmarshal([]byte(output), &beads); err != nil {
+	if beads, err = bv.UnmarshalBdList[struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}](output); err != nil {
 		return nil, fmt.Errorf("parsing beads: %w", err)
 	}
 

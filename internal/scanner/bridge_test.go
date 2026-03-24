@@ -21,6 +21,58 @@ func TestDefaultBridgeConfig(t *testing.T) {
 	}
 }
 
+func TestParseCreatedBeadID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "single object",
+			input: `{"id":"bd-123"}`,
+			want:  "bd-123",
+		},
+		{
+			name:  "array fallback",
+			input: `[{"id":"bd-456"}]`,
+			want:  "bd-456",
+		},
+		{
+			name:    "empty id",
+			input:   `{"id":""}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid json",
+			input:   `not-json`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := parseCreatedBeadID(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseCreatedBeadID(%q) error = nil, want error", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCreatedBeadID(%q) error = %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseCreatedBeadID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSeverityToPriorityBridge(t *testing.T) {
 	t.Parallel()
 

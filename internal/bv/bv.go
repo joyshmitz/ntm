@@ -707,6 +707,48 @@ func RunBd(dir string, args ...string) (string, error) {
 	return "", fmt.Errorf("br %s: exceeded retry budget", strings.Join(args, " "))
 }
 
+type brListEnvelope[T any] struct {
+	Issues []T `json:"issues"`
+	Beads  []T `json:"beads"`
+	Items  []T `json:"items"`
+}
+
+// UnmarshalBdList parses list-style br JSON that may be either a raw array or
+// an envelope object such as {"issues":[...]}.
+func UnmarshalBdList[T any](output string) ([]T, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" || trimmed == "null" {
+		return []T{}, nil
+	}
+
+	var items []T
+	if err := json.Unmarshal([]byte(trimmed), &items); err == nil {
+		if items == nil {
+			return []T{}, nil
+		}
+		return items, nil
+	}
+
+	var wrapped brListEnvelope[T]
+	if err := json.Unmarshal([]byte(trimmed), &wrapped); err == nil {
+		switch {
+		case wrapped.Issues != nil:
+			return wrapped.Issues, nil
+		case wrapped.Beads != nil:
+			return wrapped.Beads, nil
+		case wrapped.Items != nil:
+			return wrapped.Items, nil
+		}
+	}
+
+	var single T
+	if err := json.Unmarshal([]byte(trimmed), &single); err == nil {
+		return []T{single}, nil
+	}
+
+	return nil, fmt.Errorf("parse br list output: %s", trimmed)
+}
+
 func isNoBeadsDBError(streams ...string) bool {
 	s := strings.ToLower(strings.Join(streams, "\n"))
 	return strings.Contains(s, "no beads database found") || strings.Contains(s, "use 'br --no-db'")
@@ -902,7 +944,11 @@ func GetReadyPreview(dir string, limit int) []BeadPreview {
 		Title    string `json:"title"`
 		Priority int    `json:"priority"`
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+	if issues, err = UnmarshalBdList[struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Priority int    `json:"priority"`
+	}](output); err != nil {
 		return previews
 	}
 
@@ -936,7 +982,12 @@ func GetInProgressList(dir string, limit int) []BeadInProgress {
 		Assignee  string    `json:"assignee"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+	if issues, err = UnmarshalBdList[struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Assignee  string    `json:"assignee"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}](output); err != nil {
 		return items
 	}
 
@@ -970,7 +1021,10 @@ func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+	if issues, err = UnmarshalBdList[struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}](output); err != nil {
 		return items
 	}
 
@@ -1001,7 +1055,10 @@ func GetBlockedList(dir string, limit int) []BeadPreview {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}
-	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+	if issues, err = UnmarshalBdList[struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}](output); err != nil {
 		return items
 	}
 

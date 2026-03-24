@@ -128,17 +128,11 @@ func (s *Server) handleListBeads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse JSON output
-	var beads []interface{}
-	if err := json.Unmarshal([]byte(output), &beads); err != nil {
-		// Try wrapping in array if single object
-		var singleBead interface{}
-		if err2 := json.Unmarshal([]byte(output), &singleBead); err2 == nil {
-			beads = []interface{}{singleBead}
-		} else {
-			writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to parse beads output", nil, reqID)
-			return
-		}
+	// Parse JSON output from br list --json.
+	beads, err := bv.UnmarshalBdList[json.RawMessage](output)
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to parse beads output", nil, reqID)
+		return
 	}
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{

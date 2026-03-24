@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 )
 
 // BeadScanner discovers projects and counts their open beads.
@@ -365,9 +367,9 @@ func (bs *BeadScanner) countBeads(ctx context.Context, projectPath string) (int,
 		return 0, nil
 	}
 
-	// Parse JSON output - should be an array of issues
-	var issues []json.RawMessage
-	if err := json.Unmarshal(output, &issues); err != nil {
+	// Parse JSON output from br list --json.
+	issues, err := bv.UnmarshalBdList[json.RawMessage](string(output))
+	if err != nil {
 		// Try to handle case where output is empty or malformed
 		if len(output) == 0 || string(output) == "null" || string(output) == "[]" {
 			return 0, nil

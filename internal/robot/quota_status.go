@@ -2,6 +2,7 @@ package robot
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/integrations/caut"
@@ -44,6 +45,26 @@ type QuotaCheckOutput struct {
 	Quota    ProviderQuota `json:"quota"`
 }
 
+func canonicalRobotProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "anthropic":
+		return "claude"
+	case "gemini", "gmi", "google", "google-ai", "google_gemini", "google-gemini":
+		return "gemini"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
+func quotaLookupProvider(provider string) string {
+	switch canonicalRobotProvider(provider) {
+	case "claude":
+		return "anthropic"
+	default:
+		return canonicalRobotProvider(provider)
+	}
+}
+
 // GetQuotaStatus returns quota status information.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetQuotaStatus() (*QuotaStatusOutput, error) {
@@ -80,13 +101,14 @@ func GetQuotaStatus() (*QuotaStatusOutput, error) {
 			if !p.Enabled {
 				continue
 			}
+			providerName := canonicalRobotProvider(p.Name)
 
 			providerQuota := ProviderQuota{
 				UsagePercent: p.QuotaUsed,
 				Status:       getQuotaStatus(p.QuotaUsed),
 			}
 
-			quotaInfo.Providers[p.Name] = providerQuota
+			quotaInfo.Providers[providerName] = providerQuota
 
 			// Track warning/critical at provider level
 			if p.QuotaUsed >= 95.0 {
@@ -100,7 +122,8 @@ func GetQuotaStatus() (*QuotaStatusOutput, error) {
 	// Add usage data from cache
 	usages := cache.GetAllUsage()
 	for _, usage := range usages {
-		providerQuota, exists := quotaInfo.Providers[usage.Provider]
+		providerName := canonicalRobotProvider(usage.Provider)
+		providerQuota, exists := quotaInfo.Providers[providerName]
 		if !exists {
 			providerQuota = ProviderQuota{
 				Status: "ok",
@@ -111,7 +134,7 @@ func GetQuotaStatus() (*QuotaStatusOutput, error) {
 		providerQuota.TokensUsed = usage.TokensIn + usage.TokensOut
 		providerQuota.CostUSD = usage.Cost
 
-		quotaInfo.Providers[usage.Provider] = providerQuota
+		quotaInfo.Providers[providerName] = providerQuota
 	}
 
 	// Check for cache errors
@@ -154,21 +177,23 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 			Provider: provider,
 		}, nil
 	}
+	canonicalProvider := canonicalRobotProvider(provider)
+	lookupProvider := quotaLookupProvider(provider)
 
 	poller := caut.GetGlobalPoller()
 	cache := poller.GetCache()
 
 	// Get provider-specific usage
-	usage := cache.GetUsage(provider)
+	usage := cache.GetUsage(lookupProvider)
 	if usage == nil {
 		// Try to get from status providers
 		status := cache.GetStatus()
 		if status != nil {
 			for _, p := range status.Providers {
-				if p.Name == provider {
+				if quotaLookupProvider(p.Name) == lookupProvider {
 					return &QuotaCheckOutput{
 						RobotResponse: NewRobotResponse(true),
-						Provider:      provider,
+						Provider:      canonicalProvider,
 						Quota: ProviderQuota{
 							UsagePercent: p.QuotaUsed,
 							Status:       getQuotaStatus(p.QuotaUsed),
@@ -182,9 +207,9 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 			RobotResponse: NewErrorResponse(
 				nil,
 				ErrCodePaneNotFound, // Reusing as "not found"
-				"Provider '"+provider+"' not found. Use --robot-quota-status to see available providers.",
+				"Provider '"+canonicalProvider+"' not found. Use --robot-quota-status to see available providers.",
 			),
-			Provider: provider,
+			Provider: canonicalProvider,
 		}, nil
 	}
 
@@ -200,7 +225,7 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 	status := cache.GetStatus()
 	if status != nil {
 		for _, p := range status.Providers {
-			if p.Name == provider {
+			if quotaLookupProvider(p.Name) == lookupProvider {
 				providerQuota.UsagePercent = p.QuotaUsed
 				providerQuota.Status = getQuotaStatus(p.QuotaUsed)
 				break
@@ -210,7 +235,7 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 
 	return &QuotaCheckOutput{
 		RobotResponse: NewRobotResponse(true),
-		Provider:      provider,
+		Provider:      canonicalProvider,
 		Quota:         providerQuota,
 	}, nil
 }

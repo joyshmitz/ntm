@@ -2,7 +2,6 @@
 package scanner
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -54,7 +53,11 @@ func (idx *DedupIndex) Refresh() error {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 	}
-	if err := json.Unmarshal([]byte(output), &beads); err != nil {
+	if beads, err = bv.UnmarshalBdList[struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}](output); err != nil {
 		return fmt.Errorf("parsing beads: %w", err)
 	}
 

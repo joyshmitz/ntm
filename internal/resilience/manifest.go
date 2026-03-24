@@ -5,9 +5,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
+
+// sanitizeSessionName ensures a session name is safe for use in file paths.
+// It rejects names containing path separators or traversal components.
+func sanitizeSessionName(session string) (string, error) {
+	if session == "" {
+		return "", fmt.Errorf("empty session name")
+	}
+	// Reject any path separator characters
+	if strings.ContainsAny(session, "/\\") {
+		return "", fmt.Errorf("session name %q contains path separators", session)
+	}
+	// Reject path traversal components
+	if session == "." || session == ".." || strings.Contains(session, "..") {
+		return "", fmt.Errorf("session name %q contains path traversal", session)
+	}
+	return session, nil
+}
 
 // SpawnManifest represents the configuration of a spawned session for monitoring
 type SpawnManifest struct {
@@ -54,12 +72,17 @@ func LogDir() string {
 
 // SaveManifest saves the spawn manifest for a session
 func SaveManifest(manifest *SpawnManifest) error {
+	safe, err := sanitizeSessionName(manifest.Session)
+	if err != nil {
+		return fmt.Errorf("invalid session for manifest: %w", err)
+	}
+
 	dir := ManifestDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating manifest directory: %w", err)
 	}
 
-	path := filepath.Join(dir, manifest.Session+".json")
+	path := filepath.Join(dir, safe+".json")
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling manifest: %w", err)
@@ -70,7 +93,12 @@ func SaveManifest(manifest *SpawnManifest) error {
 
 // LoadManifest loads the spawn manifest for a session
 func LoadManifest(session string) (*SpawnManifest, error) {
-	path := filepath.Join(ManifestDir(), session+".json")
+	safe, err := sanitizeSessionName(session)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session for manifest: %w", err)
+	}
+
+	path := filepath.Join(ManifestDir(), safe+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading manifest: %w", err)
@@ -86,7 +114,12 @@ func LoadManifest(session string) (*SpawnManifest, error) {
 
 // DeleteManifest removes the manifest for a session
 func DeleteManifest(session string) error {
-	path := filepath.Join(ManifestDir(), session+".json")
+	safe, err := sanitizeSessionName(session)
+	if err != nil {
+		return fmt.Errorf("invalid session for manifest: %w", err)
+	}
+
+	path := filepath.Join(ManifestDir(), safe+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
