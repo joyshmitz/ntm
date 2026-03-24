@@ -163,6 +163,39 @@ func TestGetValue_Integrations(t *testing.T) {
 	}
 }
 
+func TestGetValue_ConfigServiceRemainingSections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+
+	tests := []struct {
+		path string
+	}{
+		{"help_verbosity"},
+		{"palette_file"},
+		{"suggestions_enabled"},
+		{"integrations.caam.enabled"},
+		{"integrations.rch.preferred_worker"},
+		{"integrations.caut.currency"},
+		{"integrations.process_triage.on_stuck"},
+		{"recovery.max_recovery_tokens"},
+		{"cleanup.max_age_hours"},
+		{"assign.strategy"},
+		{"spawn_pacing.agent_caps.codex_rate_per_sec"},
+		{"encryption.key_format"},
+		{"send.base_prompt_file"},
+		{"prompts.gmi_default_file"},
+		{"models.default_claude"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			if _, err := GetValue(cfg, tt.path); err != nil {
+				t.Errorf("GetValue(%q) error = %v", tt.path, err)
+			}
+		})
+	}
+}
+
 func TestGetValue_Alerts(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
@@ -1688,6 +1721,9 @@ func TestValidate_WiresSectionSpecificValidators(t *testing.T) {
 	cfg.FileReservation.DefaultTTLMin = 0
 	cfg.Memory.QueryTimeoutSeconds = 0
 	cfg.Integrations.Rano.PollIntervalMs = 50
+	cfg.SessionRecovery.MaxRecoveryTokens = -1
+	cfg.Cleanup.MaxAgeHours = -1
+	cfg.Assign.Strategy = "nonsense"
 	cfg.Swarm.Enabled = true
 	cfg.Swarm.Tier1Threshold = 10
 	cfg.Swarm.Tier2Threshold = 10
@@ -1702,6 +1738,9 @@ func TestValidate_WiresSectionSpecificValidators(t *testing.T) {
 		"file_reservation",
 		"memory",
 		"integrations.rano",
+		"recovery.max_recovery_tokens",
+		"cleanup.max_age_hours",
+		"assign.strategy",
 		"swarm",
 	}
 	for _, want := range wantPaths {
@@ -1737,6 +1776,43 @@ func TestDiff_RecentConfigServiceSections(t *testing.T) {
 		"privacy.enabled",
 		"integrations.rano.history_days",
 		"swarm.default_scan_dir",
+	}
+	for _, want := range wantPaths {
+		if !hasConfigDiffPath(diffs, want) {
+			t.Errorf("Diff() missing %q in %v", want, diffs)
+		}
+	}
+}
+
+func TestDiff_ConfigServiceRemainingSections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	defaults := Default()
+	cfg.Integrations.CAAM.AlertThreshold = defaults.Integrations.CAAM.AlertThreshold + 1
+	cfg.Integrations.RCH.PreferredWorker = "worker-2"
+	cfg.Integrations.Caut.Currency = "EUR"
+	cfg.Integrations.ProcessTriage.OnStuck = "ignore"
+	cfg.SessionRecovery.MaxRecoveryTokens = defaults.SessionRecovery.MaxRecoveryTokens + 500
+	cfg.Cleanup.MaxAgeHours = defaults.Cleanup.MaxAgeHours + 1
+	cfg.Assign.Strategy = "quality"
+	cfg.SpawnPacing.MaxConcurrentSpawns = defaults.SpawnPacing.MaxConcurrentSpawns + 1
+	cfg.Encryption.KeyFormat = "base64"
+	cfg.Send.BasePromptFile = "/tmp/base-prompt.md"
+	cfg.Prompts.CCDefaultFile = "/tmp/claude-prompt.md"
+
+	diffs := Diff(cfg)
+	wantPaths := []string{
+		"integrations.caam.alert_threshold",
+		"integrations.rch.preferred_worker",
+		"integrations.caut.currency",
+		"integrations.process_triage.on_stuck",
+		"recovery.max_recovery_tokens",
+		"cleanup.max_age_hours",
+		"assign.strategy",
+		"spawn_pacing.max_concurrent_spawns",
+		"encryption.key_format",
+		"send.base_prompt_file",
+		"prompts.cc_default_file",
 	}
 	for _, want := range wantPaths {
 		if !hasConfigDiffPath(diffs, want) {

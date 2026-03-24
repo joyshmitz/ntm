@@ -1814,7 +1814,7 @@ func TestCASSContextValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			baseCfg := Default()
 			baseCfg.CASS = tt.cfg.CASS
-			
+
 			errs := Validate(baseCfg)
 			hasErr := len(errs) > 0
 			if hasErr != tt.wantErr {
@@ -1969,6 +1969,38 @@ func TestSessionRecoveryDefaults(t *testing.T) {
 	}
 	if cfg.SessionRecovery.StaleThresholdHours != 24 {
 		t.Errorf("Expected StaleThresholdHours 24, got %d", cfg.SessionRecovery.StaleThresholdHours)
+	}
+}
+
+func TestPrintIncludesRemainingLiveConfigSections(t *testing.T) {
+	cfg := Default()
+	var buf bytes.Buffer
+	if err := Print(cfg, &buf); err != nil {
+		t.Fatalf("Print failed: %v", err)
+	}
+	output := buf.String()
+
+	wantSections := []string{
+		"suggestions_enabled = ",
+		"[integrations.caam]",
+		"[integrations.rch]",
+		"[integrations.caut]",
+		"[integrations.process_triage]",
+		"[recovery]",
+		"[cleanup]",
+		"[assign]",
+		"[spawn_pacing]",
+		"[spawn_pacing.agent_caps]",
+		"[spawn_pacing.headroom]",
+		"[spawn_pacing.backoff]",
+		"[encryption]",
+		"[send]",
+		"[prompts]",
+	}
+	for _, want := range wantSections {
+		if !strings.Contains(output, want) {
+			t.Errorf("Print output missing %q", want)
+		}
 	}
 }
 

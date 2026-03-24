@@ -2425,6 +2425,10 @@ func Print(cfg *Config, w io.Writer) error {
 	}
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "# Show contextual CLI suggestions")
+	fmt.Fprintf(w, "suggestions_enabled = %t\n", cfg.SuggestionsEnabled)
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "# Path to command palette markdown file (optional)")
 	fmt.Fprintln(w, "# If set, loads palette commands from this file instead of [[palette]] entries below")
 	fmt.Fprintln(w, "# Searched automatically: ~/.config/ntm/command_palette.md, ./command_palette.md")
@@ -2548,6 +2552,67 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "allow_override = %t\n", cfg.Integrations.DCG.AllowOverride)
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "[integrations.caam]")
+	fmt.Fprintln(w, "# Coding Agent Account Manager (caam) settings")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.CAAM.Enabled)
+	if cfg.Integrations.CAAM.BinaryPath != "" {
+		fmt.Fprintf(w, "binary_path = %q\n", cfg.Integrations.CAAM.BinaryPath)
+	} else {
+		fmt.Fprintln(w, "# binary_path = \"\"  # Auto-detect from PATH")
+	}
+	fmt.Fprintf(w, "auto_rotate = %t\n", cfg.Integrations.CAAM.AutoRotate)
+	fmt.Fprintf(w, "providers = %s\n", renderTOMLStringArray(cfg.Integrations.CAAM.Providers))
+	fmt.Fprintf(w, "rate_limit_patterns = %s\n", renderTOMLStringArray(cfg.Integrations.CAAM.RateLimitPatterns))
+	fmt.Fprintf(w, "account_cooldown = %d\n", cfg.Integrations.CAAM.AccountCooldown)
+	fmt.Fprintf(w, "alert_threshold = %d\n", cfg.Integrations.CAAM.AlertThreshold)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[integrations.rch]")
+	fmt.Fprintln(w, "# Remote Compilation Helper (rch) settings")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.RCH.Enabled)
+	if cfg.Integrations.RCH.BinaryPath != "" {
+		fmt.Fprintf(w, "binary_path = %q\n", cfg.Integrations.RCH.BinaryPath)
+	} else {
+		fmt.Fprintln(w, "# binary_path = \"\"  # Auto-detect from PATH")
+	}
+	fmt.Fprintf(w, "min_build_time = %d\n", cfg.Integrations.RCH.MinBuildTime)
+	fmt.Fprintf(w, "intercept_patterns = %s\n", renderTOMLStringArray(cfg.Integrations.RCH.InterceptPatterns))
+	fmt.Fprintf(w, "fallback_local = %t\n", cfg.Integrations.RCH.FallbackLocal)
+	fmt.Fprintf(w, "show_location = %t\n", cfg.Integrations.RCH.ShowLocation)
+	fmt.Fprintf(w, "preferred_worker = %q\n", cfg.Integrations.RCH.PreferredWorker)
+	fmt.Fprintf(w, "dcg_whitelist = %t\n", cfg.Integrations.RCH.DCGWhitelist)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[integrations.caut]")
+	fmt.Fprintln(w, "# Cloud API usage tracker (caut) settings")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.Caut.Enabled)
+	if cfg.Integrations.Caut.BinaryPath != "" {
+		fmt.Fprintf(w, "binary_path = %q\n", cfg.Integrations.Caut.BinaryPath)
+	} else {
+		fmt.Fprintln(w, "# binary_path = \"\"  # Auto-detect from PATH")
+	}
+	fmt.Fprintf(w, "poll_interval = %d\n", cfg.Integrations.Caut.PollInterval)
+	fmt.Fprintf(w, "alert_threshold = %d\n", cfg.Integrations.Caut.AlertThreshold)
+	fmt.Fprintf(w, "providers = %s\n", renderTOMLStringArray(cfg.Integrations.Caut.Providers))
+	fmt.Fprintf(w, "per_agent_tracking = %t\n", cfg.Integrations.Caut.PerAgentTracking)
+	fmt.Fprintf(w, "currency = %q\n", cfg.Integrations.Caut.Currency)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[integrations.process_triage]")
+	fmt.Fprintln(w, "# Process triage (pt) Bayesian process classification settings")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.ProcessTriage.Enabled)
+	if cfg.Integrations.ProcessTriage.BinaryPath != "" {
+		fmt.Fprintf(w, "binary_path = %q\n", cfg.Integrations.ProcessTriage.BinaryPath)
+	} else {
+		fmt.Fprintln(w, "# binary_path = \"\"  # Auto-detect from PATH")
+	}
+	fmt.Fprintf(w, "check_interval = %d\n", cfg.Integrations.ProcessTriage.CheckInterval)
+	fmt.Fprintf(w, "idle_threshold = %d\n", cfg.Integrations.ProcessTriage.IdleThreshold)
+	fmt.Fprintf(w, "stuck_threshold = %d\n", cfg.Integrations.ProcessTriage.StuckThreshold)
+	fmt.Fprintf(w, "on_stuck = %q\n", cfg.Integrations.ProcessTriage.OnStuck)
+	fmt.Fprintf(w, "use_rano_data = %t\n", cfg.Integrations.ProcessTriage.UseRanoData)
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "[integrations.rano]")
 	fmt.Fprintln(w, "# rano network observer settings for per-agent API tracking")
 	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.Rano.Enabled)
@@ -2633,6 +2698,86 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "disable_checkpoints = %t\n", cfg.Privacy.DisableCheckpoints)
 	fmt.Fprintf(w, "disable_scrollback_capture = %t\n", cfg.Privacy.DisableScrollbackCapture)
 	fmt.Fprintf(w, "require_explicit_persist = %t\n", cfg.Privacy.RequireExplicitPersist)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[encryption]")
+	fmt.Fprintln(w, "# Encryption-at-rest configuration for persisted artifacts")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Encryption.Enabled)
+	fmt.Fprintf(w, "key_source = %q\n", cfg.Encryption.KeySource)
+	fmt.Fprintf(w, "key_env = %q\n", cfg.Encryption.KeyEnv)
+	if cfg.Encryption.KeyFile != "" {
+		fmt.Fprintf(w, "key_file = %q\n", cfg.Encryption.KeyFile)
+	} else {
+		fmt.Fprintln(w, "# key_file = \"\"")
+	}
+	if cfg.Encryption.KeyCommand != "" {
+		fmt.Fprintf(w, "key_command = %q\n", cfg.Encryption.KeyCommand)
+	} else {
+		fmt.Fprintln(w, "# key_command = \"\"")
+	}
+	fmt.Fprintf(w, "key_format = %q\n", cfg.Encryption.KeyFormat)
+	if cfg.Encryption.ActiveKeyID != "" {
+		fmt.Fprintf(w, "active_key_id = %q\n", cfg.Encryption.ActiveKeyID)
+	} else {
+		fmt.Fprintln(w, "# active_key_id = \"\"")
+	}
+	if len(cfg.Encryption.Keyring) > 0 {
+		fmt.Fprintln(w, "[encryption.keyring]")
+		for keyID, value := range cfg.Encryption.Keyring {
+			fmt.Fprintf(w, "%q = %q\n", keyID, value)
+		}
+	} else {
+		fmt.Fprintln(w, "# [encryption.keyring]")
+		fmt.Fprintln(w, "# current = \"<encoded-key-material>\"")
+	}
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[send]")
+	fmt.Fprintln(w, "# Defaults prepended to outbound send/broadcast prompts")
+	if cfg.Send.BasePrompt != "" {
+		fmt.Fprintf(w, "base_prompt = %q\n", cfg.Send.BasePrompt)
+	} else {
+		fmt.Fprintln(w, "# base_prompt = \"\"")
+	}
+	if cfg.Send.BasePromptFile != "" {
+		fmt.Fprintf(w, "base_prompt_file = %q\n", cfg.Send.BasePromptFile)
+	} else {
+		fmt.Fprintln(w, "# base_prompt_file = \"\"")
+	}
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[prompts]")
+	fmt.Fprintln(w, "# Per-agent-type default prompts")
+	if cfg.Prompts.CCDefault != "" {
+		fmt.Fprintf(w, "cc_default = %q\n", cfg.Prompts.CCDefault)
+	} else {
+		fmt.Fprintln(w, "# cc_default = \"\"")
+	}
+	if cfg.Prompts.CCDefaultFile != "" {
+		fmt.Fprintf(w, "cc_default_file = %q\n", cfg.Prompts.CCDefaultFile)
+	} else {
+		fmt.Fprintln(w, "# cc_default_file = \"\"")
+	}
+	if cfg.Prompts.CodDefault != "" {
+		fmt.Fprintf(w, "cod_default = %q\n", cfg.Prompts.CodDefault)
+	} else {
+		fmt.Fprintln(w, "# cod_default = \"\"")
+	}
+	if cfg.Prompts.CodDefaultFile != "" {
+		fmt.Fprintf(w, "cod_default_file = %q\n", cfg.Prompts.CodDefaultFile)
+	} else {
+		fmt.Fprintln(w, "# cod_default_file = \"\"")
+	}
+	if cfg.Prompts.GmiDefault != "" {
+		fmt.Fprintf(w, "gmi_default = %q\n", cfg.Prompts.GmiDefault)
+	} else {
+		fmt.Fprintln(w, "# gmi_default = \"\"")
+	}
+	if cfg.Prompts.GmiDefaultFile != "" {
+		fmt.Fprintf(w, "gmi_default_file = %q\n", cfg.Prompts.GmiDefaultFile)
+	} else {
+		fmt.Fprintln(w, "# gmi_default_file = \"\"")
+	}
 	fmt.Fprintln(w)
 
 	// Write models configuration
@@ -2915,6 +3060,73 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "min_session_age_sec = %d        # Don't rotate agents younger than this\n", cfg.ContextRotation.MinSessionAgeSec)
 	fmt.Fprintf(w, "try_compact_first = %t         # Try to compact before rotating\n", cfg.ContextRotation.TryCompactFirst)
 	fmt.Fprintf(w, "require_confirm = %t           # Require user confirmation before rotating\n", cfg.ContextRotation.RequireConfirm)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[recovery]")
+	fmt.Fprintln(w, "# Smart session recovery context injection defaults")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.SessionRecovery.Enabled)
+	fmt.Fprintf(w, "include_agent_mail = %t\n", cfg.SessionRecovery.IncludeAgentMail)
+	fmt.Fprintf(w, "include_cm_memories = %t\n", cfg.SessionRecovery.IncludeCMMemories)
+	fmt.Fprintf(w, "include_beads_context = %t\n", cfg.SessionRecovery.IncludeBeadsContext)
+	fmt.Fprintf(w, "max_recovery_tokens = %d\n", cfg.SessionRecovery.MaxRecoveryTokens)
+	fmt.Fprintf(w, "auto_inject_on_spawn = %t\n", cfg.SessionRecovery.AutoInjectOnSpawn)
+	fmt.Fprintf(w, "stale_threshold_hours = %d\n", cfg.SessionRecovery.StaleThresholdHours)
+	fmt.Fprintf(w, "max_cm_rules = %d\n", cfg.SessionRecovery.MaxCMRules)
+	fmt.Fprintf(w, "max_cm_snippets = %d\n", cfg.SessionRecovery.MaxCMSnippets)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[cleanup]")
+	fmt.Fprintln(w, "# Automatic temp-file cleanup defaults")
+	fmt.Fprintf(w, "auto_clean_on_startup = %t\n", cfg.Cleanup.AutoCleanOnStartup)
+	fmt.Fprintf(w, "max_age_hours = %d\n", cfg.Cleanup.MaxAgeHours)
+	fmt.Fprintf(w, "verbose = %t\n", cfg.Cleanup.Verbose)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[assign]")
+	fmt.Fprintln(w, "# Default ntm assign strategy")
+	fmt.Fprintf(w, "strategy = %q\n", cfg.Assign.Strategy)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[spawn_pacing]")
+	fmt.Fprintln(w, "# Global spawn scheduler pacing defaults")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.SpawnPacing.Enabled)
+	fmt.Fprintf(w, "max_concurrent_spawns = %d\n", cfg.SpawnPacing.MaxConcurrentSpawns)
+	fmt.Fprintf(w, "max_spawns_per_sec = %.2f\n", cfg.SpawnPacing.MaxSpawnsPerSecond)
+	fmt.Fprintf(w, "burst_size = %d\n", cfg.SpawnPacing.BurstSize)
+	fmt.Fprintf(w, "default_retries = %d\n", cfg.SpawnPacing.DefaultRetries)
+	fmt.Fprintf(w, "retry_delay_ms = %d\n", cfg.SpawnPacing.RetryDelayMs)
+	fmt.Fprintf(w, "backpressure_threshold = %d\n", cfg.SpawnPacing.BackpressureThreshold)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[spawn_pacing.agent_caps]")
+	fmt.Fprintf(w, "claude_max_concurrent = %d\n", cfg.SpawnPacing.AgentCaps.ClaudeMaxConcurrent)
+	fmt.Fprintf(w, "claude_rate_per_sec = %.2f\n", cfg.SpawnPacing.AgentCaps.ClaudeRatePerSec)
+	fmt.Fprintf(w, "claude_ramp_up_delay_ms = %d\n", cfg.SpawnPacing.AgentCaps.ClaudeRampUpDelayMs)
+	fmt.Fprintf(w, "codex_max_concurrent = %d\n", cfg.SpawnPacing.AgentCaps.CodexMaxConcurrent)
+	fmt.Fprintf(w, "codex_rate_per_sec = %.2f\n", cfg.SpawnPacing.AgentCaps.CodexRatePerSec)
+	fmt.Fprintf(w, "codex_ramp_up_delay_ms = %d\n", cfg.SpawnPacing.AgentCaps.CodexRampUpDelayMs)
+	fmt.Fprintf(w, "gemini_max_concurrent = %d\n", cfg.SpawnPacing.AgentCaps.GeminiMaxConcurrent)
+	fmt.Fprintf(w, "gemini_rate_per_sec = %.2f\n", cfg.SpawnPacing.AgentCaps.GeminiRatePerSec)
+	fmt.Fprintf(w, "gemini_ramp_up_delay_ms = %d\n", cfg.SpawnPacing.AgentCaps.GeminiRampUpDelayMs)
+	fmt.Fprintf(w, "cooldown_on_failure_ms = %d\n", cfg.SpawnPacing.AgentCaps.CooldownOnFailureMs)
+	fmt.Fprintf(w, "recovery_successes = %d\n", cfg.SpawnPacing.AgentCaps.RecoverySuccesses)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[spawn_pacing.headroom]")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.SpawnPacing.Headroom.Enabled)
+	fmt.Fprintf(w, "min_free_mb = %d\n", cfg.SpawnPacing.Headroom.MinFreeMB)
+	fmt.Fprintf(w, "min_free_disk_mb = %d\n", cfg.SpawnPacing.Headroom.MinFreeDiskMB)
+	fmt.Fprintf(w, "max_load_average = %.2f\n", cfg.SpawnPacing.Headroom.MaxLoadAverage)
+	fmt.Fprintf(w, "max_open_files = %d\n", cfg.SpawnPacing.Headroom.MaxOpenFiles)
+	fmt.Fprintf(w, "check_interval_ms = %d\n", cfg.SpawnPacing.Headroom.CheckIntervalMs)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[spawn_pacing.backoff]")
+	fmt.Fprintf(w, "initial_delay_ms = %d\n", cfg.SpawnPacing.Backoff.InitialDelayMs)
+	fmt.Fprintf(w, "max_delay_ms = %d\n", cfg.SpawnPacing.Backoff.MaxDelayMs)
+	fmt.Fprintf(w, "multiplier = %.2f\n", cfg.SpawnPacing.Backoff.Multiplier)
+	fmt.Fprintf(w, "max_consecutive_failures = %d\n", cfg.SpawnPacing.Backoff.MaxConsecutiveFailures)
+	fmt.Fprintf(w, "global_pause_duration_ms = %d\n", cfg.SpawnPacing.Backoff.GlobalPauseDurationMs)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[file_reservation]")
@@ -3216,6 +3428,12 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 		return cfg.ProjectsBase, nil
 	case "theme":
 		return cfg.Theme, nil
+	case "help_verbosity":
+		return cfg.HelpVerbosity, nil
+	case "palette_file":
+		return cfg.PaletteFile, nil
+	case "suggestions_enabled":
+		return cfg.SuggestionsEnabled, nil
 	case "agents":
 		if len(parts) < 2 {
 			return cfg.Agents, nil
@@ -3265,6 +3483,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return "[redacted]", nil
 		case "auto_register":
 			return cfg.AgentMail.AutoRegister, nil
+		case "program_name":
+			return cfg.AgentMail.ProgramName, nil
 		}
 	case "integrations":
 		if len(parts) < 2 {
@@ -3307,6 +3527,132 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			case "history_days":
 				return cfg.Integrations.Rano.HistoryDays, nil
 			}
+		case "caam":
+			if len(parts) < 3 {
+				return cfg.Integrations.CAAM, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.CAAM.Enabled, nil
+			case "binary_path":
+				return cfg.Integrations.CAAM.BinaryPath, nil
+			case "auto_rotate":
+				return cfg.Integrations.CAAM.AutoRotate, nil
+			case "providers":
+				return cfg.Integrations.CAAM.Providers, nil
+			case "rate_limit_patterns":
+				return cfg.Integrations.CAAM.RateLimitPatterns, nil
+			case "account_cooldown":
+				return cfg.Integrations.CAAM.AccountCooldown, nil
+			case "alert_threshold":
+				return cfg.Integrations.CAAM.AlertThreshold, nil
+			}
+		case "rch":
+			if len(parts) < 3 {
+				return cfg.Integrations.RCH, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.RCH.Enabled, nil
+			case "binary_path":
+				return cfg.Integrations.RCH.BinaryPath, nil
+			case "min_build_time":
+				return cfg.Integrations.RCH.MinBuildTime, nil
+			case "intercept_patterns":
+				return cfg.Integrations.RCH.InterceptPatterns, nil
+			case "fallback_local":
+				return cfg.Integrations.RCH.FallbackLocal, nil
+			case "show_location":
+				return cfg.Integrations.RCH.ShowLocation, nil
+			case "preferred_worker":
+				return cfg.Integrations.RCH.PreferredWorker, nil
+			case "dcg_whitelist":
+				return cfg.Integrations.RCH.DCGWhitelist, nil
+			}
+		case "caut":
+			if len(parts) < 3 {
+				return cfg.Integrations.Caut, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.Caut.Enabled, nil
+			case "binary_path":
+				return cfg.Integrations.Caut.BinaryPath, nil
+			case "poll_interval":
+				return cfg.Integrations.Caut.PollInterval, nil
+			case "alert_threshold":
+				return cfg.Integrations.Caut.AlertThreshold, nil
+			case "providers":
+				return cfg.Integrations.Caut.Providers, nil
+			case "per_agent_tracking":
+				return cfg.Integrations.Caut.PerAgentTracking, nil
+			case "currency":
+				return cfg.Integrations.Caut.Currency, nil
+			}
+		case "process_triage":
+			if len(parts) < 3 {
+				return cfg.Integrations.ProcessTriage, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.ProcessTriage.Enabled, nil
+			case "binary_path":
+				return cfg.Integrations.ProcessTriage.BinaryPath, nil
+			case "check_interval":
+				return cfg.Integrations.ProcessTriage.CheckInterval, nil
+			case "idle_threshold":
+				return cfg.Integrations.ProcessTriage.IdleThreshold, nil
+			case "stuck_threshold":
+				return cfg.Integrations.ProcessTriage.StuckThreshold, nil
+			case "on_stuck":
+				return cfg.Integrations.ProcessTriage.OnStuck, nil
+			case "use_rano_data":
+				return cfg.Integrations.ProcessTriage.UseRanoData, nil
+			}
+		case "proxy":
+			if len(parts) < 3 {
+				return cfg.Integrations.Proxy, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.Proxy.Enabled, nil
+			case "bin_path":
+				return cfg.Integrations.Proxy.BinPath, nil
+			case "check_interval":
+				return cfg.Integrations.Proxy.CheckInterval, nil
+			}
+		case "xf":
+			if len(parts) < 3 {
+				return cfg.Integrations.XF, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.XF.Enabled, nil
+			case "bin_path":
+				return cfg.Integrations.XF.BinPath, nil
+			case "archive_path":
+				return cfg.Integrations.XF.ArchivePath, nil
+			case "default_mode":
+				return cfg.Integrations.XF.DefaultMode, nil
+			}
+		}
+	case "models":
+		if len(parts) < 2 {
+			return cfg.Models, nil
+		}
+		switch parts[1] {
+		case "default_claude":
+			return cfg.Models.DefaultClaude, nil
+		case "default_codex":
+			return cfg.Models.DefaultCodex, nil
+		case "default_gemini":
+			return cfg.Models.DefaultGemini, nil
+		case "claude":
+			return cfg.Models.Claude, nil
+		case "codex":
+			return cfg.Models.Codex, nil
+		case "gemini":
+			return cfg.Models.Gemini, nil
 		}
 	case "alerts":
 		if len(parts) < 2 {
@@ -3370,6 +3716,50 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 		case "ms_skills":
 			return cfg.Context.MSSkills, nil
 		}
+	case "recovery":
+		if len(parts) < 2 {
+			return cfg.SessionRecovery, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.SessionRecovery.Enabled, nil
+		case "include_agent_mail":
+			return cfg.SessionRecovery.IncludeAgentMail, nil
+		case "include_cm_memories":
+			return cfg.SessionRecovery.IncludeCMMemories, nil
+		case "include_beads_context":
+			return cfg.SessionRecovery.IncludeBeadsContext, nil
+		case "max_recovery_tokens":
+			return cfg.SessionRecovery.MaxRecoveryTokens, nil
+		case "auto_inject_on_spawn":
+			return cfg.SessionRecovery.AutoInjectOnSpawn, nil
+		case "stale_threshold_hours":
+			return cfg.SessionRecovery.StaleThresholdHours, nil
+		case "max_cm_rules":
+			return cfg.SessionRecovery.MaxCMRules, nil
+		case "max_cm_snippets":
+			return cfg.SessionRecovery.MaxCMSnippets, nil
+		}
+	case "cleanup":
+		if len(parts) < 2 {
+			return cfg.Cleanup, nil
+		}
+		switch parts[1] {
+		case "auto_clean_on_startup":
+			return cfg.Cleanup.AutoCleanOnStartup, nil
+		case "max_age_hours":
+			return cfg.Cleanup.MaxAgeHours, nil
+		case "verbose":
+			return cfg.Cleanup.Verbose, nil
+		}
+	case "assign":
+		if len(parts) < 2 {
+			return cfg.Assign, nil
+		}
+		switch parts[1] {
+		case "strategy":
+			return cfg.Assign.Strategy, nil
+		}
 	case "file_reservation":
 		if len(parts) < 2 {
 			return cfg.FileReservation, nil
@@ -3429,6 +3819,170 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Privacy.DisableScrollbackCapture, nil
 		case "require_explicit_persist":
 			return cfg.Privacy.RequireExplicitPersist, nil
+		}
+	case "safety":
+		if len(parts) < 2 {
+			return cfg.Safety, nil
+		}
+		switch parts[1] {
+		case "profile":
+			return cfg.Safety.Profile, nil
+		}
+	case "preflight":
+		if len(parts) < 2 {
+			return cfg.Preflight, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.Preflight.Enabled, nil
+		case "strict":
+			return cfg.Preflight.Strict, nil
+		}
+	case "redaction":
+		if len(parts) < 2 {
+			return cfg.Redaction, nil
+		}
+		switch parts[1] {
+		case "mode":
+			return cfg.Redaction.Mode, nil
+		case "allowlist":
+			return cfg.Redaction.Allowlist, nil
+		case "extra_patterns":
+			return cfg.Redaction.ExtraPatterns, nil
+		case "disabled_categories":
+			return cfg.Redaction.DisabledCategories, nil
+		}
+	case "encryption":
+		if len(parts) < 2 {
+			return cfg.Encryption, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.Encryption.Enabled, nil
+		case "key_source":
+			return cfg.Encryption.KeySource, nil
+		case "key_env":
+			return cfg.Encryption.KeyEnv, nil
+		case "key_file":
+			return cfg.Encryption.KeyFile, nil
+		case "key_command":
+			return cfg.Encryption.KeyCommand, nil
+		case "key_format":
+			return cfg.Encryption.KeyFormat, nil
+		case "active_key_id":
+			return cfg.Encryption.ActiveKeyID, nil
+		case "keyring":
+			return cfg.Encryption.Keyring, nil
+		}
+	case "send":
+		if len(parts) < 2 {
+			return cfg.Send, nil
+		}
+		switch parts[1] {
+		case "base_prompt":
+			return cfg.Send.BasePrompt, nil
+		case "base_prompt_file":
+			return cfg.Send.BasePromptFile, nil
+		}
+	case "prompts":
+		if len(parts) < 2 {
+			return cfg.Prompts, nil
+		}
+		switch parts[1] {
+		case "cc_default":
+			return cfg.Prompts.CCDefault, nil
+		case "cc_default_file":
+			return cfg.Prompts.CCDefaultFile, nil
+		case "cod_default":
+			return cfg.Prompts.CodDefault, nil
+		case "cod_default_file":
+			return cfg.Prompts.CodDefaultFile, nil
+		case "gmi_default":
+			return cfg.Prompts.GmiDefault, nil
+		case "gmi_default_file":
+			return cfg.Prompts.GmiDefaultFile, nil
+		}
+	case "spawn_pacing":
+		if len(parts) < 2 {
+			return cfg.SpawnPacing, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.SpawnPacing.Enabled, nil
+		case "max_concurrent_spawns":
+			return cfg.SpawnPacing.MaxConcurrentSpawns, nil
+		case "max_spawns_per_sec":
+			return cfg.SpawnPacing.MaxSpawnsPerSecond, nil
+		case "burst_size":
+			return cfg.SpawnPacing.BurstSize, nil
+		case "default_retries":
+			return cfg.SpawnPacing.DefaultRetries, nil
+		case "retry_delay_ms":
+			return cfg.SpawnPacing.RetryDelayMs, nil
+		case "backpressure_threshold":
+			return cfg.SpawnPacing.BackpressureThreshold, nil
+		case "agent_caps":
+			if len(parts) < 3 {
+				return cfg.SpawnPacing.AgentCaps, nil
+			}
+			switch parts[2] {
+			case "claude_max_concurrent":
+				return cfg.SpawnPacing.AgentCaps.ClaudeMaxConcurrent, nil
+			case "claude_rate_per_sec":
+				return cfg.SpawnPacing.AgentCaps.ClaudeRatePerSec, nil
+			case "claude_ramp_up_delay_ms":
+				return cfg.SpawnPacing.AgentCaps.ClaudeRampUpDelayMs, nil
+			case "codex_max_concurrent":
+				return cfg.SpawnPacing.AgentCaps.CodexMaxConcurrent, nil
+			case "codex_rate_per_sec":
+				return cfg.SpawnPacing.AgentCaps.CodexRatePerSec, nil
+			case "codex_ramp_up_delay_ms":
+				return cfg.SpawnPacing.AgentCaps.CodexRampUpDelayMs, nil
+			case "gemini_max_concurrent":
+				return cfg.SpawnPacing.AgentCaps.GeminiMaxConcurrent, nil
+			case "gemini_rate_per_sec":
+				return cfg.SpawnPacing.AgentCaps.GeminiRatePerSec, nil
+			case "gemini_ramp_up_delay_ms":
+				return cfg.SpawnPacing.AgentCaps.GeminiRampUpDelayMs, nil
+			case "cooldown_on_failure_ms":
+				return cfg.SpawnPacing.AgentCaps.CooldownOnFailureMs, nil
+			case "recovery_successes":
+				return cfg.SpawnPacing.AgentCaps.RecoverySuccesses, nil
+			}
+		case "headroom":
+			if len(parts) < 3 {
+				return cfg.SpawnPacing.Headroom, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.SpawnPacing.Headroom.Enabled, nil
+			case "min_free_mb":
+				return cfg.SpawnPacing.Headroom.MinFreeMB, nil
+			case "min_free_disk_mb":
+				return cfg.SpawnPacing.Headroom.MinFreeDiskMB, nil
+			case "max_load_average":
+				return cfg.SpawnPacing.Headroom.MaxLoadAverage, nil
+			case "max_open_files":
+				return cfg.SpawnPacing.Headroom.MaxOpenFiles, nil
+			case "check_interval_ms":
+				return cfg.SpawnPacing.Headroom.CheckIntervalMs, nil
+			}
+		case "backoff":
+			if len(parts) < 3 {
+				return cfg.SpawnPacing.Backoff, nil
+			}
+			switch parts[2] {
+			case "initial_delay_ms":
+				return cfg.SpawnPacing.Backoff.InitialDelayMs, nil
+			case "max_delay_ms":
+				return cfg.SpawnPacing.Backoff.MaxDelayMs, nil
+			case "multiplier":
+				return cfg.SpawnPacing.Backoff.Multiplier, nil
+			case "max_consecutive_failures":
+				return cfg.SpawnPacing.Backoff.MaxConsecutiveFailures, nil
+			case "global_pause_duration_ms":
+				return cfg.SpawnPacing.Backoff.GlobalPauseDurationMs, nil
+			}
 		}
 	case "swarm":
 		if len(parts) < 2 {
@@ -3644,6 +4198,9 @@ func Diff(cfg *Config) []ConfigDiff {
 	// Top-level settings
 	addDiff("projects_base", defaults.ProjectsBase, cfg.ProjectsBase)
 	addDiff("theme", defaults.Theme, cfg.Theme)
+	addDiff("help_verbosity", defaults.HelpVerbosity, cfg.HelpVerbosity)
+	addDiff("palette_file", defaults.PaletteFile, cfg.PaletteFile)
+	addDiff("suggestions_enabled", defaults.SuggestionsEnabled, cfg.SuggestionsEnabled)
 
 	// Agents
 	addDiff("agents.claude", defaults.Agents.Claude, cfg.Agents.Claude)
@@ -3663,6 +4220,7 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("agent_mail.enabled", defaults.AgentMail.Enabled, cfg.AgentMail.Enabled)
 	addDiff("agent_mail.url", defaults.AgentMail.URL, cfg.AgentMail.URL)
 	addDiff("agent_mail.auto_register", defaults.AgentMail.AutoRegister, cfg.AgentMail.AutoRegister)
+	addDiff("agent_mail.program_name", defaults.AgentMail.ProgramName, cfg.AgentMail.ProgramName)
 
 	// Integrations (DCG)
 	addDiff("integrations.dcg.enabled", defaults.Integrations.DCG.Enabled, cfg.Integrations.DCG.Enabled)
@@ -3677,6 +4235,35 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("integrations.rano.providers", defaults.Integrations.Rano.Providers, cfg.Integrations.Rano.Providers)
 	addDiff("integrations.rano.persist_history", defaults.Integrations.Rano.PersistHistory, cfg.Integrations.Rano.PersistHistory)
 	addDiff("integrations.rano.history_days", defaults.Integrations.Rano.HistoryDays, cfg.Integrations.Rano.HistoryDays)
+	addDiff("integrations.caam.enabled", defaults.Integrations.CAAM.Enabled, cfg.Integrations.CAAM.Enabled)
+	addDiff("integrations.caam.binary_path", defaults.Integrations.CAAM.BinaryPath, cfg.Integrations.CAAM.BinaryPath)
+	addDiff("integrations.caam.auto_rotate", defaults.Integrations.CAAM.AutoRotate, cfg.Integrations.CAAM.AutoRotate)
+	addDiff("integrations.caam.providers", defaults.Integrations.CAAM.Providers, cfg.Integrations.CAAM.Providers)
+	addDiff("integrations.caam.rate_limit_patterns", defaults.Integrations.CAAM.RateLimitPatterns, cfg.Integrations.CAAM.RateLimitPatterns)
+	addDiff("integrations.caam.account_cooldown", defaults.Integrations.CAAM.AccountCooldown, cfg.Integrations.CAAM.AccountCooldown)
+	addDiff("integrations.caam.alert_threshold", defaults.Integrations.CAAM.AlertThreshold, cfg.Integrations.CAAM.AlertThreshold)
+	addDiff("integrations.rch.enabled", defaults.Integrations.RCH.Enabled, cfg.Integrations.RCH.Enabled)
+	addDiff("integrations.rch.binary_path", defaults.Integrations.RCH.BinaryPath, cfg.Integrations.RCH.BinaryPath)
+	addDiff("integrations.rch.min_build_time", defaults.Integrations.RCH.MinBuildTime, cfg.Integrations.RCH.MinBuildTime)
+	addDiff("integrations.rch.intercept_patterns", defaults.Integrations.RCH.InterceptPatterns, cfg.Integrations.RCH.InterceptPatterns)
+	addDiff("integrations.rch.fallback_local", defaults.Integrations.RCH.FallbackLocal, cfg.Integrations.RCH.FallbackLocal)
+	addDiff("integrations.rch.show_location", defaults.Integrations.RCH.ShowLocation, cfg.Integrations.RCH.ShowLocation)
+	addDiff("integrations.rch.preferred_worker", defaults.Integrations.RCH.PreferredWorker, cfg.Integrations.RCH.PreferredWorker)
+	addDiff("integrations.rch.dcg_whitelist", defaults.Integrations.RCH.DCGWhitelist, cfg.Integrations.RCH.DCGWhitelist)
+	addDiff("integrations.caut.enabled", defaults.Integrations.Caut.Enabled, cfg.Integrations.Caut.Enabled)
+	addDiff("integrations.caut.binary_path", defaults.Integrations.Caut.BinaryPath, cfg.Integrations.Caut.BinaryPath)
+	addDiff("integrations.caut.poll_interval", defaults.Integrations.Caut.PollInterval, cfg.Integrations.Caut.PollInterval)
+	addDiff("integrations.caut.alert_threshold", defaults.Integrations.Caut.AlertThreshold, cfg.Integrations.Caut.AlertThreshold)
+	addDiff("integrations.caut.providers", defaults.Integrations.Caut.Providers, cfg.Integrations.Caut.Providers)
+	addDiff("integrations.caut.per_agent_tracking", defaults.Integrations.Caut.PerAgentTracking, cfg.Integrations.Caut.PerAgentTracking)
+	addDiff("integrations.caut.currency", defaults.Integrations.Caut.Currency, cfg.Integrations.Caut.Currency)
+	addDiff("integrations.process_triage.enabled", defaults.Integrations.ProcessTriage.Enabled, cfg.Integrations.ProcessTriage.Enabled)
+	addDiff("integrations.process_triage.binary_path", defaults.Integrations.ProcessTriage.BinaryPath, cfg.Integrations.ProcessTriage.BinaryPath)
+	addDiff("integrations.process_triage.check_interval", defaults.Integrations.ProcessTriage.CheckInterval, cfg.Integrations.ProcessTriage.CheckInterval)
+	addDiff("integrations.process_triage.idle_threshold", defaults.Integrations.ProcessTriage.IdleThreshold, cfg.Integrations.ProcessTriage.IdleThreshold)
+	addDiff("integrations.process_triage.stuck_threshold", defaults.Integrations.ProcessTriage.StuckThreshold, cfg.Integrations.ProcessTriage.StuckThreshold)
+	addDiff("integrations.process_triage.on_stuck", defaults.Integrations.ProcessTriage.OnStuck, cfg.Integrations.ProcessTriage.OnStuck)
+	addDiff("integrations.process_triage.use_rano_data", defaults.Integrations.ProcessTriage.UseRanoData, cfg.Integrations.ProcessTriage.UseRanoData)
 
 	// Alerts
 	addDiff("alerts.enabled", defaults.Alerts.Enabled, cfg.Alerts.Enabled)
@@ -3698,6 +4285,25 @@ func Diff(cfg *Config) []ConfigDiff {
 
 	// Context pack options
 	addDiff("context.ms_skills", defaults.Context.MSSkills, cfg.Context.MSSkills)
+
+	// Recovery defaults
+	addDiff("recovery.enabled", defaults.SessionRecovery.Enabled, cfg.SessionRecovery.Enabled)
+	addDiff("recovery.include_agent_mail", defaults.SessionRecovery.IncludeAgentMail, cfg.SessionRecovery.IncludeAgentMail)
+	addDiff("recovery.include_cm_memories", defaults.SessionRecovery.IncludeCMMemories, cfg.SessionRecovery.IncludeCMMemories)
+	addDiff("recovery.include_beads_context", defaults.SessionRecovery.IncludeBeadsContext, cfg.SessionRecovery.IncludeBeadsContext)
+	addDiff("recovery.max_recovery_tokens", defaults.SessionRecovery.MaxRecoveryTokens, cfg.SessionRecovery.MaxRecoveryTokens)
+	addDiff("recovery.auto_inject_on_spawn", defaults.SessionRecovery.AutoInjectOnSpawn, cfg.SessionRecovery.AutoInjectOnSpawn)
+	addDiff("recovery.stale_threshold_hours", defaults.SessionRecovery.StaleThresholdHours, cfg.SessionRecovery.StaleThresholdHours)
+	addDiff("recovery.max_cm_rules", defaults.SessionRecovery.MaxCMRules, cfg.SessionRecovery.MaxCMRules)
+	addDiff("recovery.max_cm_snippets", defaults.SessionRecovery.MaxCMSnippets, cfg.SessionRecovery.MaxCMSnippets)
+
+	// Cleanup defaults
+	addDiff("cleanup.auto_clean_on_startup", defaults.Cleanup.AutoCleanOnStartup, cfg.Cleanup.AutoCleanOnStartup)
+	addDiff("cleanup.max_age_hours", defaults.Cleanup.MaxAgeHours, cfg.Cleanup.MaxAgeHours)
+	addDiff("cleanup.verbose", defaults.Cleanup.Verbose, cfg.Cleanup.Verbose)
+
+	// Assign defaults
+	addDiff("assign.strategy", defaults.Assign.Strategy, cfg.Assign.Strategy)
 
 	// File reservation
 	addDiff("file_reservation.enabled", defaults.FileReservation.Enabled, cfg.FileReservation.Enabled)
@@ -3725,6 +4331,31 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("privacy.disable_checkpoints", defaults.Privacy.DisableCheckpoints, cfg.Privacy.DisableCheckpoints)
 	addDiff("privacy.disable_scrollback_capture", defaults.Privacy.DisableScrollbackCapture, cfg.Privacy.DisableScrollbackCapture)
 	addDiff("privacy.require_explicit_persist", defaults.Privacy.RequireExplicitPersist, cfg.Privacy.RequireExplicitPersist)
+
+	// Safety, preflight, redaction, encryption
+	addDiff("safety.profile", defaults.Safety.Profile, cfg.Safety.Profile)
+	addDiff("preflight.enabled", defaults.Preflight.Enabled, cfg.Preflight.Enabled)
+	addDiff("preflight.strict", defaults.Preflight.Strict, cfg.Preflight.Strict)
+	addDiff("redaction.mode", defaults.Redaction.Mode, cfg.Redaction.Mode)
+	addDiff("redaction.allowlist", defaults.Redaction.Allowlist, cfg.Redaction.Allowlist)
+	addDiff("redaction.disabled_categories", defaults.Redaction.DisabledCategories, cfg.Redaction.DisabledCategories)
+	addDiff("encryption.enabled", defaults.Encryption.Enabled, cfg.Encryption.Enabled)
+	addDiff("encryption.key_source", defaults.Encryption.KeySource, cfg.Encryption.KeySource)
+	addDiff("encryption.key_env", defaults.Encryption.KeyEnv, cfg.Encryption.KeyEnv)
+	addDiff("encryption.key_file", defaults.Encryption.KeyFile, cfg.Encryption.KeyFile)
+	addDiff("encryption.key_command", defaults.Encryption.KeyCommand, cfg.Encryption.KeyCommand)
+	addDiff("encryption.key_format", defaults.Encryption.KeyFormat, cfg.Encryption.KeyFormat)
+	addDiff("encryption.active_key_id", defaults.Encryption.ActiveKeyID, cfg.Encryption.ActiveKeyID)
+
+	// Send/prompt defaults
+	addDiff("send.base_prompt", defaults.Send.BasePrompt, cfg.Send.BasePrompt)
+	addDiff("send.base_prompt_file", defaults.Send.BasePromptFile, cfg.Send.BasePromptFile)
+	addDiff("prompts.cc_default", defaults.Prompts.CCDefault, cfg.Prompts.CCDefault)
+	addDiff("prompts.cc_default_file", defaults.Prompts.CCDefaultFile, cfg.Prompts.CCDefaultFile)
+	addDiff("prompts.cod_default", defaults.Prompts.CodDefault, cfg.Prompts.CodDefault)
+	addDiff("prompts.cod_default_file", defaults.Prompts.CodDefaultFile, cfg.Prompts.CodDefaultFile)
+	addDiff("prompts.gmi_default", defaults.Prompts.GmiDefault, cfg.Prompts.GmiDefault)
+	addDiff("prompts.gmi_default_file", defaults.Prompts.GmiDefaultFile, cfg.Prompts.GmiDefaultFile)
 
 	// Context Rotation
 	addDiff("context_rotation.enabled", defaults.ContextRotation.Enabled, cfg.ContextRotation.Enabled)
@@ -3793,6 +4424,18 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("swarm.auto_rotate_accounts", defaults.Swarm.AutoRotateAccounts, cfg.Swarm.AutoRotateAccounts)
 	addDiff("swarm.limit_patterns", defaults.Swarm.LimitPatterns, cfg.Swarm.LimitPatterns)
 	addDiff("swarm.marching_orders", defaults.Swarm.MarchingOrders, cfg.Swarm.MarchingOrders)
+
+	// Spawn pacing
+	addDiff("spawn_pacing.enabled", defaults.SpawnPacing.Enabled, cfg.SpawnPacing.Enabled)
+	addDiff("spawn_pacing.max_concurrent_spawns", defaults.SpawnPacing.MaxConcurrentSpawns, cfg.SpawnPacing.MaxConcurrentSpawns)
+	addDiff("spawn_pacing.max_spawns_per_sec", defaults.SpawnPacing.MaxSpawnsPerSecond, cfg.SpawnPacing.MaxSpawnsPerSecond)
+	addDiff("spawn_pacing.burst_size", defaults.SpawnPacing.BurstSize, cfg.SpawnPacing.BurstSize)
+	addDiff("spawn_pacing.default_retries", defaults.SpawnPacing.DefaultRetries, cfg.SpawnPacing.DefaultRetries)
+	addDiff("spawn_pacing.retry_delay_ms", defaults.SpawnPacing.RetryDelayMs, cfg.SpawnPacing.RetryDelayMs)
+	addDiff("spawn_pacing.backpressure_threshold", defaults.SpawnPacing.BackpressureThreshold, cfg.SpawnPacing.BackpressureThreshold)
+	addDiff("spawn_pacing.agent_caps", defaults.SpawnPacing.AgentCaps, cfg.SpawnPacing.AgentCaps)
+	addDiff("spawn_pacing.headroom", defaults.SpawnPacing.Headroom, cfg.SpawnPacing.Headroom)
+	addDiff("spawn_pacing.backoff", defaults.SpawnPacing.Backoff, cfg.SpawnPacing.Backoff)
 
 	return diffs
 }
@@ -3891,6 +4534,25 @@ func Validate(cfg *Config) []error {
 	// Validate memory config
 	if err := ValidateMemoryConfig(&cfg.Memory); err != nil {
 		errs = append(errs, fmt.Errorf("memory: %w", err))
+	}
+
+	if cfg.SessionRecovery.MaxRecoveryTokens < 0 {
+		errs = append(errs, fmt.Errorf("recovery.max_recovery_tokens: must be non-negative, got %d", cfg.SessionRecovery.MaxRecoveryTokens))
+	}
+	if cfg.SessionRecovery.StaleThresholdHours < 0 {
+		errs = append(errs, fmt.Errorf("recovery.stale_threshold_hours: must be non-negative, got %d", cfg.SessionRecovery.StaleThresholdHours))
+	}
+	if cfg.SessionRecovery.MaxCMRules < 0 {
+		errs = append(errs, fmt.Errorf("recovery.max_cm_rules: must be non-negative, got %d", cfg.SessionRecovery.MaxCMRules))
+	}
+	if cfg.SessionRecovery.MaxCMSnippets < 0 {
+		errs = append(errs, fmt.Errorf("recovery.max_cm_snippets: must be non-negative, got %d", cfg.SessionRecovery.MaxCMSnippets))
+	}
+	if cfg.Cleanup.MaxAgeHours < 0 {
+		errs = append(errs, fmt.Errorf("cleanup.max_age_hours: must be non-negative, got %d", cfg.Cleanup.MaxAgeHours))
+	}
+	if cfg.Assign.Strategy != "" && !IsValidStrategy(cfg.Assign.Strategy) {
+		errs = append(errs, fmt.Errorf("assign.strategy: must be one of %s, got %q", strings.Join(ValidAssignStrategies, ", "), cfg.Assign.Strategy))
 	}
 
 	// Validate swarm config
