@@ -1232,7 +1232,7 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 	panes, err := tmux.GetPanes(m.session)
 	if err != nil {
 		m.err = err
-		m.recordHistory(nil, start, err)
+		m.recordHistory(nil, nil, start, err)
 		return *m, tea.Quit
 	}
 
@@ -1242,6 +1242,7 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 	}
 	count := 0
 	var targetPanes []int
+	var targetAgentTypes []string
 
 	for _, p := range panes {
 		var shouldSend bool
@@ -1263,27 +1264,29 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 			// Codex/Gemini multi-line quirks and reliably submits to all agent types
 			if err := tmux.SendKeysForAgentDoubleEnter(p.ID, prompt, p.Type); err != nil {
 				m.err = err
-				m.recordHistory(targetPanes, start, err)
+				m.recordHistory(targetPanes, targetAgentTypes, start, err)
 				return *m, tea.Quit
 			}
 			count++
 			targetPanes = append(targetPanes, p.Index)
+			targetAgentTypes = append(targetAgentTypes, p.Type.String())
 		}
 	}
 
-	m.recordHistory(targetPanes, start, nil)
+	m.recordHistory(targetPanes, targetAgentTypes, start, nil)
 	m.sent = true
 	m.sentCount = count
 	m.quitting = true
 	return *m, tea.Quit
 }
 
-func (m *Model) recordHistory(targetPanes []int, start time.Time, err error) {
+func (m *Model) recordHistory(targetPanes []int, targetAgentTypes []string, start time.Time, err error) {
 	sentPrompt := m.selected.Prompt
 	if m.editDraft != "" {
 		sentPrompt = m.editDraft
 	}
 	entry := history.NewEntry(m.session, intsToStrings(targetPanes), sentPrompt, history.SourcePalette)
+	entry.SetAgentTypes(targetAgentTypes)
 	entry.Template = m.selected.Key
 	entry.DurationMs = int(time.Since(start) / time.Millisecond)
 	if err == nil {

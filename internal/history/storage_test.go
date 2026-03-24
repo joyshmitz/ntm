@@ -69,6 +69,7 @@ func TestStorageRoundTrip(t *testing.T) {
 
 	// Append entries
 	entry1 := NewEntry("session1", []string{"1"}, "prompt one", SourceCLI)
+	entry1.SetAgentTypes([]string{"cc"})
 	entry1.SetSuccess()
 	if err := Append(entry1); err != nil {
 		t.Fatalf("failed to append entry1: %v", err)
@@ -92,6 +93,9 @@ func TestStorageRoundTrip(t *testing.T) {
 	// Check first entry
 	if entries[0].Session != "session1" {
 		t.Errorf("expected session 'session1', got %q", entries[0].Session)
+	}
+	if len(entries[0].AgentTypes) != 1 || entries[0].AgentTypes[0] != "cc" {
+		t.Errorf("expected agent_types [cc], got %v", entries[0].AgentTypes)
 	}
 	if !entries[0].Success {
 		t.Error("expected first entry to be successful")

@@ -77,42 +77,6 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 		}
 	}
 
-	// Stats mode
-	if opts.Stats {
-		stats, err := history.GetStats()
-		if err != nil {
-			output.RobotResponse = NewErrorResponse(
-				fmt.Errorf("failed to get stats: %w", err),
-				ErrCodeInternalError,
-				"History file may be corrupted",
-			)
-			return output, nil
-		}
-		// Filter stats for session if needed?
-		// history.GetStats() returns global stats.
-		// If we want session stats, we have to compute them.
-		// Let's compute session stats manually for accuracy.
-		entries, err := history.ReadForSession(opts.Session)
-		if err == nil {
-			sessionStats := &history.Stats{
-				TotalEntries: len(entries),
-			}
-			for _, e := range entries {
-				if e.Success {
-					sessionStats.SuccessCount++
-				} else {
-					sessionStats.FailureCount++
-				}
-			}
-			sessionStats.UniqueSessions = 1
-			output.Stats = sessionStats
-		} else {
-			output.Stats = stats // Fallback to global
-		}
-		output.AgentHints = generateHistoryHints(*output, opts)
-		return output, nil
-	}
-
 	// Get entries for the session
 	entries, err := history.ReadForSession(opts.Session)
 
@@ -130,6 +94,8 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 	// Filter entries
 	var filtered []history.HistoryEntry
 	var sinceTime time.Time
+	normalizedAgentType := normalizeAgentType(opts.AgentType)
+	livePaneTypes := make(map[string]string)
 
 	if opts.Since != "" {
 		var parseErr error
@@ -141,6 +107,14 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 				"Use duration (1h, 30m, 2d) or ISO8601 date",
 			)
 			return output, nil
+		}
+	}
+
+	if normalizedAgentType != "" && tmux.SessionExists(opts.Session) {
+		if panes, err := tmux.GetPanes(opts.Session); err == nil {
+			for _, pane := range panes {
+				livePaneTypes[fmt.Sprintf("%d", pane.Index)] = normalizeAgentType(pane.Type.String())
+			}
 		}
 	}
 
@@ -165,9 +139,9 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 			}
 		}
 
-		// Filter by AgentType (not directly stored, approximate via targets?)
-		// We skip this for now as JSONL history doesn't store AgentType directly
-		// unless we parse the targets or look up pane state.
+		if normalizedAgentType != "" && !historyEntryMatchesAgentType(e, normalizedAgentType, livePaneTypes) {
+			continue
+		}
 
 		filtered = append(filtered, e)
 	}
@@ -178,6 +152,11 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 	}
 
 	output.Filtered = len(filtered)
+	if opts.Stats {
+		output.Stats = buildHistoryStats(filtered)
+		output.AgentHints = generateHistoryHints(*output, opts)
+		return output, nil
+	}
 	if paged, page := ApplyPagination(filtered, PaginationOptions{Limit: opts.Limit, Offset: opts.Offset}); page != nil {
 		output.Entries = paged
 		output.Pagination = page
@@ -187,6 +166,37 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 	output.AgentHints = generateHistoryHints(*output, opts)
 
 	return output, nil
+}
+
+func buildHistoryStats(entries []history.HistoryEntry) *history.Stats {
+	stats := &history.Stats{
+		TotalEntries: len(entries),
+	}
+	if len(entries) > 0 {
+		stats.UniqueSessions = 1
+	}
+	for _, entry := range entries {
+		if entry.Success {
+			stats.SuccessCount++
+		} else {
+			stats.FailureCount++
+		}
+	}
+	return stats
+}
+
+func historyEntryMatchesAgentType(entry history.HistoryEntry, want string, livePaneTypes map[string]string) bool {
+	for _, agentType := range entry.AgentTypes {
+		if normalizeAgentType(agentType) == want {
+			return true
+		}
+	}
+	for _, target := range entry.Targets {
+		if livePaneTypes[target] == want {
+			return true
+		}
+	}
+	return false
 }
 
 // PrintHistory outputs command history as JSON.

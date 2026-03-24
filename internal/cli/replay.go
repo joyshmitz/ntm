@@ -175,16 +175,19 @@ Examples:
 
 			// Send to all targets
 			var targetNames []string
+			var targetAgentTypes []string
 			for _, p := range targets {
 				if err := sendPromptToPane(session, p, prompt); err != nil {
 					return fmt.Errorf("sending to pane %d: %w", p.Index, err)
 				}
 				targetNames = append(targetNames, fmt.Sprintf("%d", p.Index))
+				targetAgentTypes = append(targetAgentTypes, p.Type.String())
 			}
 
 			// Log to history (unless disabled)
 			if !noHistory {
 				newEntry := history.NewEntry(session, targetNames, prompt, history.SourceReplay)
+				newEntry.SetAgentTypes(targetAgentTypes)
 				newEntry.SetSuccess()
 				if err := history.Append(newEntry); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: failed to log replay: %v\n", err)

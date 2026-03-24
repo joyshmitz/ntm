@@ -5455,34 +5455,33 @@ func (m Model) executeReplay(entry history.HistoryEntry) tea.Cmd {
 	return func() tea.Msg {
 		// Create a new history entry for the replay
 		replayEntry := history.NewEntry(m.session, entry.Targets, entry.Prompt, history.SourceReplay)
+		replayEntry.SetAgentTypes(entry.AgentTypes)
 
 		// Set template if the original entry used one
 		if entry.Template != "" {
 			replayEntry.Template = entry.Template
 		}
 
-		// Append to history
+		// Execute the replay using tmux client
+		client := tmux.DefaultClient
+
+		// Parse targets - for now, replay to the same targets as the original entry
+		// In the future, we could show a dialog to let user choose new targets
+		for _, targetStr := range entry.Targets {
+			target := fmt.Sprintf("%s:%s", m.session, targetStr)
+			if err := client.SendKeys(target, entry.Prompt, true); err != nil {
+				log.Printf("[Replay] Failed to send to target %s: %v", targetStr, err)
+				replayEntry.SetError(fmt.Errorf("failed to send to target %s: %w", targetStr, err))
+			}
+		}
+
+		// If no errors occurred, mark as successful
+		if replayEntry.Error == "" {
+			replayEntry.SetSuccess()
+		}
+
 		if err := history.Append(replayEntry); err != nil {
 			log.Printf("[Replay] Failed to append replay entry to history: %v", err)
-			replayEntry.SetError(err)
-		} else {
-			// Execute the replay using tmux client
-			client := tmux.DefaultClient
-
-			// Parse targets - for now, replay to the same targets as the original entry
-			// In the future, we could show a dialog to let user choose new targets
-			for _, targetStr := range entry.Targets {
-				target := fmt.Sprintf("%s:%s", m.session, targetStr)
-				if err := client.SendKeys(target, entry.Prompt, true); err != nil {
-					log.Printf("[Replay] Failed to send to target %s: %v", targetStr, err)
-					replayEntry.SetError(fmt.Errorf("failed to send to target %s: %w", targetStr, err))
-				}
-			}
-
-			// If no errors occurred, mark as successful
-			if replayEntry.Error == "" {
-				replayEntry.SetSuccess()
-			}
 		}
 
 		// Return a message to update the status

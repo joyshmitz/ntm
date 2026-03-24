@@ -26,6 +26,7 @@ type HistoryEntry struct {
 	Timestamp  time.Time `json:"ts"`                    // When sent
 	Session    string    `json:"session"`               // Session name
 	Targets    []string  `json:"targets"`               // Pane indices sent to
+	AgentTypes []string  `json:"agent_types,omitempty"` // Agent types per target pane
 	Prompt     string    `json:"prompt"`                // Full prompt text
 	Source     Source    `json:"source"`                // cli, palette, replay
 	Template   string    `json:"template,omitempty"`    // Template name if used
@@ -44,6 +45,15 @@ func NewEntry(session string, targets []string, prompt string, source Source) *H
 		Prompt:    prompt,
 		Source:    source,
 	}
+}
+
+// SetAgentTypes records agent types for the target panes.
+func (e *HistoryEntry) SetAgentTypes(agentTypes []string) {
+	if len(agentTypes) == 0 {
+		e.AgentTypes = nil
+		return
+	}
+	e.AgentTypes = append([]string(nil), agentTypes...)
 }
 
 // SetSuccess marks the entry as successful.

@@ -4282,6 +4282,24 @@ func TestGenerateHistoryHints(t *testing.T) {
 	}
 }
 
+func TestGenerateHistoryHints_UsesCanonicalWorkingFlags(t *testing.T) {
+	hints := generateHistoryHints(HistoryOutput{Total: 3, Filtered: 3}, HistoryOptions{Session: "proj"})
+	if hints == nil {
+		t.Fatal("generateHistoryHints returned nil")
+	}
+
+	joined := strings.Join(hints.SuggestedCommands, "\n")
+	for _, expected := range []string{
+		"ntm --robot-history=proj --stats",
+		"ntm --robot-history=proj --last=10",
+		"ntm --robot-history=proj --since=1h",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected history hints to include %q, got %q", expected, joined)
+		}
+	}
+}
+
 func TestGenerateTokenHints(t *testing.T) {
 	tests := []struct {
 		name      string

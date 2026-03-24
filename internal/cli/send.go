@@ -1026,9 +1026,10 @@ func runSendInternal(opts SendOptions) (err error) {
 
 	// Helper for JSON error output
 	var (
-		histTargets []int
-		histErr     error
-		histSuccess bool
+		histTargets    []int
+		histAgentTypes []string
+		histErr        error
+		histSuccess    bool
 	)
 
 	// Redaction preflight for outbound prompts
@@ -1131,6 +1132,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			return
 		}
 		entry := history.NewEntry(session, intsToStrings(histTargets), prompt, history.SourceCLI)
+		entry.SetAgentTypes(histAgentTypes)
 		entry.Template = templateName
 		entry.DurationMs = int(time.Since(start) / time.Millisecond)
 		if histSuccess {
@@ -1477,10 +1479,13 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	targetPanes := make([]int, 0, len(selectedPanes))
+	targetAgentTypes := make([]string, 0, len(selectedPanes))
 	for _, p := range selectedPanes {
 		targetPanes = append(targetPanes, p.Index)
+		targetAgentTypes = append(targetAgentTypes, p.Type.String())
 	}
 	histTargets = targetPanes
+	histAgentTypes = targetAgentTypes
 
 	if opts.Randomize && len(targetPanes) > 1 && !jsonOutput {
 		fmt.Fprintf(os.Stderr, "Randomized send order (seed=%d): %v\n", seedUsed, targetPanes)

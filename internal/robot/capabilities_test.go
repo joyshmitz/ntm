@@ -200,6 +200,41 @@ func TestBuildCommandRegistry_AttentionCommandsUseLiveFlagNames(t *testing.T) {
 	}
 }
 
+func TestBuildCommandRegistry_HistoryCommandUsesCanonicalFlags(t *testing.T) {
+	t.Parallel()
+
+	var historyCmd RobotCommandInfo
+	for _, cmd := range buildCommandRegistry() {
+		if cmd.Name == "history" {
+			historyCmd = cmd
+			break
+		}
+	}
+	if historyCmd.Name == "" {
+		t.Fatal("missing history command")
+	}
+
+	wantFlags := []string{"--pane", "--type", "--last", "--since", "--stats", "--limit", "--offset"}
+	for _, want := range wantFlags {
+		found := false
+		for _, param := range historyCmd.Parameters {
+			if param.Flag == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("history parameters missing %q: %+v", want, historyCmd.Parameters)
+		}
+	}
+
+	for _, example := range historyCmd.Examples {
+		if strings.Contains(example, "--history-last") || strings.Contains(example, "--history-since") || strings.Contains(example, "--history-stats") {
+			t.Fatalf("history example still uses deprecated flag names: %q", example)
+		}
+	}
+}
+
 func TestBuildCommandRegistryParameterFields(t *testing.T) {
 	t.Parallel()
 
