@@ -55,8 +55,26 @@ func resetFlags() {
 	robotSendType = ""
 	robotSendExclude = ""
 	robotSendDelay = 0
+	robotAssignStrategy = "balanced"
 	robotDiff = ""
 	robotDiffSince = "15m"
+	robotSummarySince = "30m"
+	robotTokensSince = ""
+	robotWaitTimeout = "5m"
+	robotWaitPoll = "2s"
+	robotWaitPanes = ""
+	robotWaitType = ""
+	robotWaitAny = false
+	robotRouteStrategy = "least-loaded"
+	robotRouteType = ""
+	robotRouteExclude = ""
+	robotSpawnTimeout = "30s"
+	robotSpawnStrategy = "top-n"
+	robotInterruptMsg = ""
+	robotInterruptAll = false
+	robotInterruptForce = false
+	robotInterruptTimeout = "10s"
+	robotSmartRestartForce = false
 	robotFormat = ""
 }
 
@@ -341,6 +359,161 @@ func TestResolvePipelineProjectDirForSessionRejectsInvalidSessionName(t *testing
 	}
 	if !strings.Contains(err.Error(), "invalid session name") {
 		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveRobotSessionProjectScopeNormalizesExplicitPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	projectsBase := t.TempDir()
+	fullSession := "robotrootsession"
+	projectDir := filepath.Join(projectsBase, fullSession)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	oldJSON := jsonOutput
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	jsonOutput = false
+	t.Cleanup(func() {
+		cfg = oldCfg
+		jsonOutput = oldJSON
+	})
+
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, projectDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotSession, gotDir, err := resolveRobotSessionProjectScope("robotroot")
+	if err != nil {
+		t.Fatalf("resolveRobotSessionProjectScope() error = %v", err)
+	}
+	if gotSession != fullSession {
+		t.Fatalf("session = %q, want %q", gotSession, fullSession)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+}
+
+func TestResolveRobotSessionProjectScopeRejectsInvalidSessionName(t *testing.T) {
+	_, _, err := resolveRobotSessionProjectScope("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveRobotLiveSessionNormalizesExplicitPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	fullSession := "robotlivesession"
+	projectDir := t.TempDir()
+
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, projectDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
+
+	got, err := resolveRobotLiveSession("robotlive")
+	if err != nil {
+		t.Fatalf("resolveRobotLiveSession() error = %v", err)
+	}
+	if got != fullSession {
+		t.Fatalf("session = %q, want %q", got, fullSession)
+	}
+}
+
+func TestResolveRobotLiveSessionPreservesMissingSession(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	missing := "robotlivemissingzzzz"
+	if tmux.SessionExists(missing) {
+		t.Skipf("session %q unexpectedly exists", missing)
+	}
+
+	got, err := resolveRobotLiveSession(missing)
+	if err != nil {
+		t.Fatalf("resolveRobotLiveSession() error = %v", err)
+	}
+	if got != missing {
+		t.Fatalf("session = %q, want %q", got, missing)
+	}
+}
+
+func TestResolveRobotLiveSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolveRobotLiveSession("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolveOptionalRobotLiveSessionAllowsEmpty(t *testing.T) {
+	got, err := resolveOptionalRobotLiveSession("")
+	if err != nil {
+		t.Fatalf("resolveOptionalRobotLiveSession() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("session = %q, want empty", got)
+	}
+}
+
+func TestResolveRobotSessionFilterNormalizesExplicitPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	fullSession := "robotfiltersession"
+	projectDir := t.TempDir()
+
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, projectDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
+
+	got, err := resolveRobotSessionFilter("robotfilter")
+	if err != nil {
+		t.Fatalf("resolveRobotSessionFilter() error = %v", err)
+	}
+	if got != fullSession {
+		t.Fatalf("session = %q, want %q", got, fullSession)
+	}
+}
+
+func TestResolveOptionalRobotSessionFilterAllowsEmpty(t *testing.T) {
+	got, err := resolveOptionalRobotSessionFilter("")
+	if err != nil {
+		t.Fatalf("resolveOptionalRobotSessionFilter() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("session = %q, want empty", got)
 	}
 }
 
@@ -3048,6 +3221,154 @@ func TestResolveRobotSharedFlags_AdditionalCommands(t *testing.T) {
 	}
 	if got := resolveRobotRouteType(cmd); got != "gemini" {
 		t.Fatalf("resolveRobotRouteType() = %q, want %q", got, "gemini")
+	}
+}
+
+func TestResolveRobotSharedFlags_WaitRouteSpawnAndInterruptCanonicals(t *testing.T) {
+	resetFlags()
+
+	waitCmd := &cobra.Command{Use: "wait"}
+	waitCmd.Flags().String("panes", "", "")
+	waitCmd.Flags().Set("panes", "1,3")
+	robotPanes = "1,3"
+	if got := resolveRobotWaitPanes(waitCmd); got != "1,3" {
+		t.Fatalf("resolveRobotWaitPanes() = %q, want %q", got, "1,3")
+	}
+
+	routeCmd := &cobra.Command{Use: "route"}
+	routeCmd.Flags().String("strategy", "", "")
+	routeCmd.Flags().String("exclude", "", "")
+	routeCmd.Flags().Set("strategy", "least-loaded")
+	routeCmd.Flags().Set("exclude", "0,3")
+	robotAssignStrategy = "least-loaded"
+	robotSendExclude = "0,3"
+	if got := resolveRobotRouteStrategy(routeCmd); got != "least-loaded" {
+		t.Fatalf("resolveRobotRouteStrategy() = %q, want %q", got, "least-loaded")
+	}
+	if got := resolveRobotRouteExclude(routeCmd); got != "0,3" {
+		t.Fatalf("resolveRobotRouteExclude() = %q, want %q", got, "0,3")
+	}
+
+	spawnCmd := &cobra.Command{Use: "spawn"}
+	spawnCmd.Flags().String("timeout", "", "")
+	spawnCmd.Flags().String("strategy", "", "")
+	spawnCmd.Flags().Set("timeout", "45s")
+	spawnCmd.Flags().Set("strategy", "dependency-aware")
+	robotWaitTimeout = "45s"
+	robotAssignStrategy = "dependency-aware"
+	if got := resolveRobotSpawnTimeout(spawnCmd); got != "45s" {
+		t.Fatalf("resolveRobotSpawnTimeout() = %q, want %q", got, "45s")
+	}
+	if got := resolveRobotSpawnStrategy(spawnCmd); got != "dependency-aware" {
+		t.Fatalf("resolveRobotSpawnStrategy() = %q, want %q", got, "dependency-aware")
+	}
+
+	interruptCmd := &cobra.Command{Use: "interrupt"}
+	interruptCmd.Flags().String("msg", "", "")
+	interruptCmd.Flags().Bool("all", false, "")
+	interruptCmd.Flags().Bool("force", false, "")
+	interruptCmd.Flags().String("timeout", "", "")
+	interruptCmd.Flags().Set("msg", "retask now")
+	interruptCmd.Flags().Set("all", "true")
+	interruptCmd.Flags().Set("force", "true")
+	interruptCmd.Flags().Set("timeout", "20s")
+	robotSendMsg = "retask now"
+	robotSendAll = true
+	robotSmartRestartForce = true
+	robotWaitTimeout = "20s"
+	if got := resolveRobotInterruptMessage(interruptCmd); got != "retask now" {
+		t.Fatalf("resolveRobotInterruptMessage() = %q, want %q", got, "retask now")
+	}
+	if !resolveRobotInterruptAll(interruptCmd) {
+		t.Fatal("resolveRobotInterruptAll() = false, want true")
+	}
+	if !resolveRobotInterruptForce(interruptCmd) {
+		t.Fatal("resolveRobotInterruptForce() = false, want true")
+	}
+	if got := resolveRobotInterruptTimeout(interruptCmd); got != "20s" {
+		t.Fatalf("resolveRobotInterruptTimeout() = %q, want %q", got, "20s")
+	}
+}
+
+func TestResolveRobotSharedFlags_PrefersCommandSpecificOverrides(t *testing.T) {
+	resetFlags()
+
+	routeCmd := &cobra.Command{Use: "route"}
+	routeCmd.Flags().String("strategy", "", "")
+	routeCmd.Flags().String("exclude", "", "")
+	routeCmd.Flags().String("route-strategy", "", "")
+	routeCmd.Flags().String("route-exclude", "", "")
+	routeCmd.Flags().Set("strategy", "least-loaded")
+	routeCmd.Flags().Set("exclude", "0,3")
+	routeCmd.Flags().Set("route-strategy", "explicit")
+	routeCmd.Flags().Set("route-exclude", "2")
+	robotAssignStrategy = "least-loaded"
+	robotSendExclude = "0,3"
+	robotRouteStrategy = "explicit"
+	robotRouteExclude = "2"
+	if got := resolveRobotRouteStrategy(routeCmd); got != "explicit" {
+		t.Fatalf("resolveRobotRouteStrategy() = %q, want specific value", got)
+	}
+	if got := resolveRobotRouteExclude(routeCmd); got != "2" {
+		t.Fatalf("resolveRobotRouteExclude() = %q, want specific value", got)
+	}
+
+	spawnCmd := &cobra.Command{Use: "spawn"}
+	spawnCmd.Flags().String("timeout", "", "")
+	spawnCmd.Flags().String("spawn-timeout", "", "")
+	spawnCmd.Flags().String("strategy", "", "")
+	spawnCmd.Flags().String("spawn-assign-strategy", "", "")
+	spawnCmd.Flags().Set("timeout", "45s")
+	spawnCmd.Flags().Set("spawn-timeout", "75s")
+	spawnCmd.Flags().Set("strategy", "dependency-aware")
+	spawnCmd.Flags().Set("spawn-assign-strategy", "skill-matched")
+	robotWaitTimeout = "45s"
+	robotSpawnTimeout = "75s"
+	robotAssignStrategy = "dependency-aware"
+	robotSpawnStrategy = "skill-matched"
+	if got := resolveRobotSpawnTimeout(spawnCmd); got != "75s" {
+		t.Fatalf("resolveRobotSpawnTimeout() = %q, want specific value", got)
+	}
+	if got := resolveRobotSpawnStrategy(spawnCmd); got != "skill-matched" {
+		t.Fatalf("resolveRobotSpawnStrategy() = %q, want specific value", got)
+	}
+
+	interruptCmd := &cobra.Command{Use: "interrupt"}
+	interruptCmd.Flags().String("msg", "", "")
+	interruptCmd.Flags().String("interrupt-msg", "", "")
+	interruptCmd.Flags().Bool("all", false, "")
+	interruptCmd.Flags().Bool("interrupt-all", false, "")
+	interruptCmd.Flags().Bool("force", false, "")
+	interruptCmd.Flags().Bool("interrupt-force", false, "")
+	interruptCmd.Flags().String("timeout", "", "")
+	interruptCmd.Flags().String("interrupt-timeout", "", "")
+	interruptCmd.Flags().Set("msg", "shared")
+	interruptCmd.Flags().Set("interrupt-msg", "specific")
+	interruptCmd.Flags().Set("all", "false")
+	interruptCmd.Flags().Set("interrupt-all", "true")
+	interruptCmd.Flags().Set("force", "false")
+	interruptCmd.Flags().Set("interrupt-force", "true")
+	interruptCmd.Flags().Set("timeout", "20s")
+	interruptCmd.Flags().Set("interrupt-timeout", "9s")
+	robotSendMsg = "shared"
+	robotInterruptMsg = "specific"
+	robotSendAll = false
+	robotInterruptAll = true
+	robotSmartRestartForce = false
+	robotInterruptForce = true
+	robotWaitTimeout = "20s"
+	robotInterruptTimeout = "9s"
+	if got := resolveRobotInterruptMessage(interruptCmd); got != "specific" {
+		t.Fatalf("resolveRobotInterruptMessage() = %q, want specific value", got)
+	}
+	if !resolveRobotInterruptAll(interruptCmd) {
+		t.Fatal("resolveRobotInterruptAll() = false, want specific true")
+	}
+	if !resolveRobotInterruptForce(interruptCmd) {
+		t.Fatal("resolveRobotInterruptForce() = false, want specific true")
+	}
+	if got := resolveRobotInterruptTimeout(interruptCmd); got != "9s" {
+		t.Fatalf("resolveRobotInterruptTimeout() = %q, want specific value", got)
 	}
 }
 
