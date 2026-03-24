@@ -153,7 +153,10 @@ func (s *WSEventStore) cleanup() error {
 		return fmt.Errorf("delete old events: %w", err)
 	}
 
-	affected, _ := result.RowsAffected()
+	affected, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("retention cleanup rows affected: %w", rowsErr)
+	}
 	if affected > 0 {
 		log.Printf("ws_events: retention cleanup removed=%d cutoff=%s", affected, cutoff.Format(time.RFC3339))
 	}

@@ -278,7 +278,11 @@ func (ps *PaneStreamer) runFIFOReader() {
 	errCh := make(chan error, 1)
 
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("pane streamer: panic recovered: %v", r)
+			}
+		}()
 		reader := bufio.NewReader(fifo)
 		for {
 			line, err := reader.ReadString('\n')

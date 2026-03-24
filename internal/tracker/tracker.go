@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -862,8 +863,9 @@ func RecordFileChanges(session, root string, agents []string, before map[string]
 			<-fileRecordSem
 		}()
 		defer func() {
-			// Recover from panics - this is best-effort code that shouldn't crash the program
-			_ = recover()
+			if r := recover(); r != nil {
+				log.Printf("tracker: callback panic recovered: %v", r)
+			}
 		}()
 
 		time.Sleep(delay)

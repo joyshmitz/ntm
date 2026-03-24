@@ -598,7 +598,11 @@ func (s *Server) runPipelineWithResult(ctx context.Context, opts pipeline.Pipeli
 	progress := make(chan pipeline.ProgressEvent, 256)
 	done := make(chan struct{})
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("pipelines: panic recovered", "panic", r)
+			}
+		}()
 		for {
 			select {
 			case ev := <-progress:
@@ -657,7 +661,11 @@ func (s *Server) runPipelineWithResult(ctx context.Context, opts pipeline.Pipeli
 	// For background mode, start async and return immediately
 	if opts.Background {
 		go func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("pipelines: panic recovered", "panic", r)
+				}
+			}()
 			defer close(done)
 			_, _ = executor.Run(runCtx, workflow, opts.Variables, progress)
 		}()
@@ -710,7 +718,11 @@ func (s *Server) execPipelineInline(ctx context.Context, workflow *pipeline.Work
 	progress := make(chan pipeline.ProgressEvent, 256)
 	done := make(chan struct{})
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("pipelines: panic recovered", "panic", r)
+			}
+		}()
 		for {
 			select {
 			case ev := <-progress:
@@ -768,7 +780,11 @@ func (s *Server) execPipelineInline(ctx context.Context, workflow *pipeline.Work
 
 	if background {
 		go func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("pipelines: panic recovered", "panic", r)
+				}
+			}()
 			defer close(done)
 			_, _ = executor.Run(runCtx, workflow, variables, progress)
 		}()
@@ -828,7 +844,11 @@ func (s *Server) resumePipelineWithResult(ctx context.Context, runID, session st
 	progress := make(chan pipeline.ProgressEvent, 256)
 	done := make(chan struct{})
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("pipelines: panic recovered", "panic", r)
+			}
+		}()
 		for {
 			select {
 			case ev := <-progress:

@@ -4,6 +4,7 @@ package state
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -266,7 +267,11 @@ func (t *TimelineTracker) RecordEvent(event AgentEvent) AgentEvent {
 	// Call callbacks outside the lock; recover from panics to prevent crashes
 	for _, cb := range callbacks {
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("timeline: callback panic recovered: %v", r)
+				}
+			}()
 			cb(event)
 		}()
 	}
@@ -609,7 +614,11 @@ func (t *TimelineTracker) AddMarker(marker TimelineMarker) TimelineMarker {
 	// Call callbacks outside the lock; recover from panics to prevent crashes
 	for _, cb := range callbacks {
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("timeline: callback panic recovered: %v", r)
+				}
+			}()
 			cb(marker)
 		}()
 	}

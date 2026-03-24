@@ -384,7 +384,11 @@ func (s *AuditStore) cleanup() {
 		return
 	}
 
-	affected, _ := result.RowsAffected()
+	affected, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		log.Printf("audit cleanup: rows affected error: %v", rowsErr)
+		return
+	}
 	if affected > 0 {
 		log.Printf("audit cleanup: removed %d records older than %s", affected, s.retention)
 	}
