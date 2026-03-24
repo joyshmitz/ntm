@@ -379,8 +379,8 @@ jobs:
 
       - name: Test shell init output
         run: |
-          ./ntm init bash | head -20
-          ./ntm init zsh | head -20
+          ./ntm shell bash | head -20
+          ./ntm shell zsh | head -20
 
   # ============================================================================
   # UPGRADE-CHECK - Verify upgrade command works against current releases

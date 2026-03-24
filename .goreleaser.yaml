@@ -154,9 +154,9 @@ release:
 
     Add to your shell rc file:
     ```bash
-    eval "$(ntm init zsh)"   # for zsh
-    eval "$(ntm init bash)"  # for bash
-    eval "$(ntm init fish)"  # for fish
+    eval "$(ntm shell zsh)"   # for zsh
+    eval "$(ntm shell bash)"  # for bash
+    eval "$(ntm shell fish)"  # for fish
     ```
 
   footer: |
@@ -181,18 +181,14 @@ homebrew_casks:
       - ntm
     dependencies:
       - formula: tmux
-    completions:
-      bash: ntm completion bash
-      zsh: ntm completion zsh
-      fish: ntm completion fish
     caveats: |
       To complete installation, add the following to your shell config:
 
         # For zsh (add to ~/.zshrc):
-        eval "$(ntm init zsh)"
+        eval "$(ntm shell zsh)"
 
         # For bash (add to ~/.bashrc):
-        eval "$(ntm init bash)"
+        eval "$(ntm shell bash)"
 
       Run 'ntm tutorial' to get started!
 
