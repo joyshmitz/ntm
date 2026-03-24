@@ -849,6 +849,46 @@ func TestPrintHelp_UsesCurrentAttentionLoopFlags(t *testing.T) {
 	}
 }
 
+func TestPrintHelp_MentionsExpandedWaitConditions(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		PrintHelp()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PrintHelp capture failed: %v", err)
+	}
+
+	for _, want := range []string{
+		"mail_ack_required",
+		"reservation_conflict",
+		"pane_changed",
+		"use --attention-cursor and --profile for attention-feed waits",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("help output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestPrintHelp_UsesCurrentSharedModifierDescriptions(t *testing.T) {
+	output, err := captureStdout(t, func() error {
+		PrintHelp()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PrintHelp capture failed: %v", err)
+	}
+
+	for _, want := range []string{
+		"--since=VALUE   Time filter for commands that support it (history, diff, and summary accept duration or RFC3339; snapshot requires RFC3339)",
+		"--type=TYPE     Agent type filter for commands that support it (claude, codex, gemini, cursor, windsurf, aider)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("help output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestPrintHelp_CommandSectionsResolveAgainstRegistry(t *testing.T) {
 	registry := GetRobotRegistry()
 

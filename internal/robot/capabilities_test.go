@@ -235,6 +235,79 @@ func TestBuildCommandRegistry_HistoryCommandUsesCanonicalFlags(t *testing.T) {
 	}
 }
 
+func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *testing.T) {
+	t.Parallel()
+
+	findCommand := func(name string) RobotCommandInfo {
+		t.Helper()
+		for _, cmd := range buildCommandRegistry() {
+			if cmd.Name == name {
+				return cmd
+			}
+		}
+		t.Fatalf("missing command %q", name)
+		return RobotCommandInfo{}
+	}
+
+	diffCmd := findCommand("diff")
+	summaryCmd := findCommand("summary")
+	waitCmd := findCommand("wait")
+	routeCmd := findCommand("route")
+	sendCmd := findCommand("send")
+	ackCmd := findCommand("ack")
+
+	for _, tc := range []struct {
+		command RobotCommandInfo
+		flags   []string
+	}{
+		{command: diffCmd, flags: []string{"--since"}},
+		{command: summaryCmd, flags: []string{"--since"}},
+		{command: waitCmd, flags: []string{"--type", "--attention-cursor", "--profile"}},
+		{command: routeCmd, flags: []string{"--type"}},
+		{command: sendCmd, flags: []string{"--timeout", "--poll"}},
+		{command: ackCmd, flags: []string{"--timeout", "--poll"}},
+	} {
+		for _, want := range tc.flags {
+			found := false
+			for _, param := range tc.command.Parameters {
+				if param.Flag == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s parameters missing %q: %+v", tc.command.Name, want, tc.command.Parameters)
+			}
+		}
+	}
+
+	for _, example := range diffCmd.Examples {
+		if strings.Contains(example, "--diff-since") {
+			t.Fatalf("diff example still uses deprecated flag name: %q", example)
+		}
+	}
+	for _, example := range summaryCmd.Examples {
+		if strings.Contains(example, "--summary-since") {
+			t.Fatalf("summary example still uses deprecated flag name: %q", example)
+		}
+	}
+	for _, example := range routeCmd.Examples {
+		if strings.Contains(example, "--route-type") {
+			t.Fatalf("route example still uses deprecated type flag: %q", example)
+		}
+	}
+	for _, example := range sendCmd.Examples {
+		if strings.Contains(example, "--ack-timeout") {
+			t.Fatalf("send track example still uses deprecated ack timeout flag: %q", example)
+		}
+	}
+	for _, example := range ackCmd.Examples {
+		if strings.Contains(example, "--ack-timeout") || strings.Contains(example, "--ack-poll") {
+			t.Fatalf("ack example still uses deprecated ack modifiers: %q", example)
+		}
+	}
+}
+
 func TestBuildCommandRegistryParameterFields(t *testing.T) {
 	t.Parallel()
 

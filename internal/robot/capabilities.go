@@ -550,9 +550,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Compare agent activity and file changes over time.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-diff", Type: "string", Required: true, Description: "Session name"},
-				{Name: "diff-since", Flag: "--diff-since", Type: "string", Required: false, Default: "15m", Description: "Duration to look back"},
+				{Name: "since", Flag: "--since", Type: "string", Required: false, Default: "15m", Description: "Duration or RFC3339 timestamp to look back from"},
 			},
-			Examples: []string{"ntm --robot-diff=myproject --diff-since=10m"},
+			Examples: []string{
+				"ntm --robot-diff=myproject --since=10m",
+				"ntm --robot-diff=myproject --since=2026-03-22T03:50:00Z",
+			},
 		},
 		{
 			Name:        "summary",
@@ -561,9 +564,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Get session activity summary with agent metrics.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-summary", Type: "string", Required: true, Description: "Session name"},
-				{Name: "summary-since", Flag: "--summary-since", Type: "string", Required: false, Default: "30m", Description: "Duration to look back"},
+				{Name: "since", Flag: "--since", Type: "string", Required: false, Default: "30m", Description: "Duration or RFC3339 timestamp to look back from"},
 			},
-			Examples: []string{"ntm --robot-summary=myproject --summary-since=1h"},
+			Examples: []string{
+				"ntm --robot-summary=myproject --since=1h",
+				"ntm --robot-summary=myproject --since=2026-03-22T03:50:00Z",
+			},
 		},
 
 		// === ATTENTION FEED (Operator Loop) ===
@@ -637,19 +643,21 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "msg", Flag: "--msg", Type: "string", Required: true, Description: "Message content to send (or use --msg-file)"},
 				{Name: "msg-file", Flag: "--msg-file", Type: "string", Required: false, Description: "Read message content from file"},
 				{Name: "enter", Flag: "--enter", Type: "bool", Required: false, Description: "Send Enter after paste (default true). Alias: --submit"},
-				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type: claude|cc, codex|cod, gemini|gmi"},
+				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider"},
 				{Name: "all", Flag: "--all", Type: "bool", Required: false, Description: "Include user pane (default: agents only)"},
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
 				{Name: "exclude", Flag: "--exclude", Type: "string", Required: false, Description: "Exclude pane indices"},
 				{Name: "delay-ms", Flag: "--delay-ms", Type: "int", Required: false, Description: "Delay between sends (ms)"},
 				{Name: "track", Flag: "--track", Type: "bool", Required: false, Description: "Combined send+ack: wait for response"},
+				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait time when --track is enabled"},
+				{Name: "poll", Flag: "--poll", Type: "string", Required: false, Default: "500ms", Description: "Poll interval when --track is enabled"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
 			},
 			Examples: []string{
 				"ntm --robot-send=proj --msg='Fix auth' --type=claude",
 				"ntm --robot-send=proj --msg-file=/tmp/prompt.txt --type=codex",
 				"ntm --robot-send=proj --msg='draft' --enter=false",
-				"ntm --robot-send=proj --msg='hello' --track --ack-timeout=30s",
+				"ntm --robot-send=proj --msg='hello' --track --timeout=30s",
 			},
 		},
 		{
@@ -659,12 +667,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Watch for agent responses after sending a message.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-ack", Type: "string", Required: true, Description: "Session name"},
-				{Name: "ack-timeout", Flag: "--ack-timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait time (e.g., 30s, 5000ms, 1m)"},
-				{Name: "ack-poll", Flag: "--ack-poll", Type: "int", Required: false, Default: "500", Description: "Poll interval in ms"},
+				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait time (e.g., 30s, 500ms, 1m)"},
+				{Name: "poll", Flag: "--poll", Type: "string", Required: false, Default: "500ms", Description: "Poll interval"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
 			},
-			Examples: []string{"ntm --robot-ack=proj --ack-timeout=60s --type=claude"},
+			Examples: []string{"ntm --robot-ack=proj --timeout=60s --type=claude"},
 		},
 		{
 			Name:        "interrupt",
@@ -737,14 +745,16 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "wait-timeout", Flag: "--wait-timeout", Type: "string", Required: false, Default: "5m", Description: "Maximum wait time"},
 				{Name: "wait-poll", Flag: "--wait-poll", Type: "string", Required: false, Default: "2s", Description: "Polling interval"},
 				{Name: "wait-panes", Flag: "--wait-panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
-				{Name: "wait-type", Flag: "--wait-type", Type: "string", Required: false, Description: "Filter by agent type"},
+				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
+				{Name: "attention-cursor", Flag: "--attention-cursor", Type: "int", Required: false, Default: "0", Description: "Cursor handoff for attention-feed wait conditions"},
+				{Name: "profile", Flag: "--profile", Type: "string", Required: false, Default: "operator", Description: "Attention profile for attention-feed wait conditions"},
 				{Name: "wait-any", Flag: "--wait-any", Type: "bool", Required: false, Description: "Wait for ANY agent instead of ALL"},
 				{Name: "wait-exit-on-error", Flag: "--wait-exit-on-error", Type: "bool", Required: false, Description: "Exit immediately if ERROR state detected"},
 				{Name: "wait-transition", Flag: "--wait-transition", Type: "bool", Required: false, Description: "Require pane-state conditions to leave and re-enter the target state before returning"},
 			},
 			Examples: []string{
 				"ntm --robot-wait=proj --wait-until=idle",
-				"ntm --robot-wait=proj --wait-until=action_required",
+				"ntm --robot-wait=proj --wait-until=action_required --attention-cursor=42 --profile=operator",
 				"ntm --robot-wait=proj --wait-until=idle --wait-transition --wait-timeout=2m",
 			},
 		},
@@ -756,10 +766,10 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-route", Type: "string", Required: true, Description: "Session name"},
 				{Name: "route-strategy", Flag: "--route-strategy", Type: "string", Required: false, Default: "least-loaded", Description: "Strategy: least-loaded, first-available, round-robin, random, sticky, explicit"},
-				{Name: "route-type", Flag: "--route-type", Type: "string", Required: false, Description: "Filter by agent type"},
+				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 				{Name: "route-exclude", Flag: "--route-exclude", Type: "string", Required: false, Description: "Exclude pane indices"},
 			},
-			Examples: []string{"ntm --robot-route=proj --route-strategy=least-loaded --route-type=claude"},
+			Examples: []string{"ntm --robot-route=proj --route-strategy=least-loaded --type=claude"},
 		},
 		{
 			Name:        "assign",

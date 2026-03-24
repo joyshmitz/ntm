@@ -3051,6 +3051,33 @@ func TestResolveRobotSharedFlags_AdditionalCommands(t *testing.T) {
 	}
 }
 
+func TestParseRobotSinceWindowAcceptsRFC3339(t *testing.T) {
+	resetFlags()
+
+	sinceTS := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
+	got, err := parseRobotSinceWindow(sinceTS.Format(time.RFC3339), time.Minute, "since")
+	if err != nil {
+		t.Fatalf("parseRobotSinceWindow() error = %v", err)
+	}
+
+	if got < 89*time.Minute || got > 91*time.Minute {
+		t.Fatalf("parseRobotSinceWindow() = %v, want about 90m", got)
+	}
+}
+
+func TestParseRobotSinceWindowRejectsFutureTimestamp(t *testing.T) {
+	resetFlags()
+
+	future := time.Now().UTC().Add(10 * time.Minute).Truncate(time.Second)
+	_, err := parseRobotSinceWindow(future.Format(time.RFC3339), time.Minute, "since")
+	if err == nil {
+		t.Fatal("parseRobotSinceWindow() error = nil, want future timestamp error")
+	}
+	if !strings.Contains(err.Error(), "future") {
+		t.Fatalf("parseRobotSinceWindow() error = %q, want future timestamp message", err)
+	}
+}
+
 // TestRobotTailExecutes tests robot-tail flag executes
 func TestRobotTailExecutes(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)

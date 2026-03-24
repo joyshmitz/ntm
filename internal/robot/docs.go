@@ -290,7 +290,7 @@ func getExamplesContent() *DocsContent {
 			{
 				Name:        "send_and_track",
 				Description: "Send prompt and wait for response",
-				Command:     "ntm --robot-send=proj --msg='Quick fix' --track --ack-timeout=60s",
+				Command:     "ntm --robot-send=proj --msg='Quick fix' --track --timeout=60s",
 				Notes:       "Blocks until agents respond or timeout",
 			},
 			// Monitoring

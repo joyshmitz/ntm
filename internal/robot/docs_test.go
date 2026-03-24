@@ -2,6 +2,7 @@ package robot
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,23 @@ func TestGetDocs_Examples(t *testing.T) {
 		if ex.Description == "" {
 			t.Errorf("expected example description, got empty")
 		}
+	}
+
+	for _, ex := range output.Content.Examples {
+		if strings.Contains(ex.Command, "--ack-timeout") || strings.Contains(ex.Command, "--ack-poll") {
+			t.Fatalf("examples topic still uses deprecated ack modifiers: %q", ex.Command)
+		}
+	}
+
+	foundCanonicalTrack := false
+	for _, ex := range output.Content.Examples {
+		if ex.Name == "send_and_track" && strings.Contains(ex.Command, "--timeout=60s") {
+			foundCanonicalTrack = true
+			break
+		}
+	}
+	if !foundCanonicalTrack {
+		t.Fatal("examples topic missing canonical send_and_track timeout example")
 	}
 }
 

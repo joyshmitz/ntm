@@ -1882,7 +1882,10 @@ var robotHelpSections = []robotHelpSection{
 			"smart-restart",
 			"wait",
 		},
-		Postlude: `                        Conditions: idle, complete, generating, healthy
+		Postlude: `                        Conditions: idle, complete, generating, healthy, stalled, rate_limited
+                                    attention, action_required, mail_pending, mail_ack_required
+                                    context_hot, reservation_conflict, file_conflict, session_changed, pane_changed
+                        Note: use --attention-cursor and --profile for attention-feed waits.
                         Note: bead_orphaned is deliberately unsupported — see --robot-capabilities
 
 Note: Pane-targeting commands exclude the user pane by default.
@@ -1989,8 +1992,8 @@ Common Modifiers:
 --offset=N      Pagination offset for list commands
 --robot-limit=N  Explicit pagination alias for robot list outputs
 --robot-offset=N Explicit pagination alias for robot list outputs
---since=VALUE   Time filter for commands that support it (history accepts durations/ISO8601; snapshot requires RFC3339)
---type=TYPE     Agent type filter for commands that support it (claude, codex, gemini)
+--since=VALUE   Time filter for commands that support it (history, diff, and summary accept duration or RFC3339; snapshot requires RFC3339)
+--type=TYPE     Agent type filter for commands that support it (claude, codex, gemini, cursor, windsurf, aider)
 --panes=X,Y     Pane filter (comma-separated indices)
 --dry-run       Preview without executing
 --verbose       Detailed output

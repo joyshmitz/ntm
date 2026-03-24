@@ -216,7 +216,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 					RobotResponse: NewErrorResponse(
 						fmt.Errorf("no panes match the filter criteria"),
 						ErrCodePaneNotFound,
-						"Check --wait-panes and --wait-type filters",
+						"Check --wait-panes and --type (or deprecated --wait-type) filters",
 					),
 					Session:   opts.Session,
 					Condition: opts.Condition,
