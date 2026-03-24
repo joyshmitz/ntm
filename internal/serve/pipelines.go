@@ -162,6 +162,7 @@ func (s *Server) handleRunPipeline(w http.ResponseWriter, r *http.Request) {
 	opts := pipeline.PipelineRunOptions{
 		WorkflowFile: req.WorkflowFile,
 		Session:      req.Session,
+		ProjectDir:   s.projectDir,
 		Variables:    req.Variables,
 		DryRun:       req.DryRun,
 		Background:   req.Background,

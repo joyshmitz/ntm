@@ -213,10 +213,14 @@ type UsageInfo struct {
 func GetUsageInfo(text, model string) *UsageInfo {
 	tokens := SmartEstimate(text)
 	limit := GetContextLimit(model)
+	pct := 0.0
+	if limit > 0 {
+		pct = float64(tokens) * 100.0 / float64(limit)
+	}
 	return &UsageInfo{
 		EstimatedTokens: tokens,
 		ContextLimit:    limit,
-		UsagePercent:    float64(tokens) * 100.0 / float64(limit),
+		UsagePercent:    pct,
 		Model:           model,
 		IsEstimate:      true,
 	}

@@ -618,7 +618,13 @@ func hashContextPack(pack *ContextPack) string {
 	clone := *pack
 	clone.Hash = ""
 	clone.GeneratedAt = time.Time{}
-	data, _ := json.Marshal(clone)
+	data, err := json.Marshal(clone)
+	if err != nil {
+		// Fallback: hash the raw content to avoid collisions
+		fallback := fmt.Sprintf("%s:%d", pack.Hash, pack.TokenEstimate)
+		sum := sha256.Sum256([]byte(fallback))
+		return hex.EncodeToString(sum[:])[:16]
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])[:16]
 }

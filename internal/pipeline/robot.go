@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -101,6 +102,7 @@ type PipelineStep struct {
 type PipelineRunOptions struct {
 	WorkflowFile string                 // Path to workflow YAML/TOML file
 	Session      string                 // Tmux session name
+	ProjectDir   string                 // Optional: project root for .ntm pipeline state
 	Variables    map[string]interface{} // Runtime variables
 	DryRun       bool                   // Validate without executing
 	Background   bool                   // Run in background
@@ -270,7 +272,9 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 	// Create executor
 	execCfg := DefaultExecutorConfig(opts.Session)
 	execCfg.DryRun = opts.DryRun
-	if projectDir, err := os.Getwd(); err == nil {
+	if strings.TrimSpace(opts.ProjectDir) != "" {
+		execCfg.ProjectDir = opts.ProjectDir
+	} else if projectDir, err := os.Getwd(); err == nil {
 		execCfg.ProjectDir = projectDir
 	}
 	execCfg.WorkflowFile = workflowPath

@@ -50,7 +50,12 @@ type ModeOutputConfig struct {
 
 // Hash returns a stable hash of the config.
 func (c ModeOutputConfig) Hash() string {
-	data, _ := json.Marshal(c)
+	data, err := json.Marshal(c)
+	if err != nil {
+		fallback := fmt.Sprintf("%s:%s:%d", c.AgentType, c.SynthesisStrategy, c.TokenCap)
+		sum := sha256.Sum256([]byte(fallback))
+		return hex.EncodeToString(sum[:])[:16]
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])[:16]
 }
@@ -65,7 +70,12 @@ type ModeOutputFingerprint struct {
 
 // CacheKey returns a stable key for the fingerprint.
 func (f ModeOutputFingerprint) CacheKey() string {
-	data, _ := json.Marshal(f)
+	data, err := json.Marshal(f)
+	if err != nil {
+		fallback := fmt.Sprintf("%s:%s:%s:%s", f.ContextHash, f.ModeID, f.ModeVersion, f.ConfigHash)
+		sum := sha256.Sum256([]byte(fallback))
+		return hex.EncodeToString(sum[:])[:16]
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])[:16]
 }
@@ -470,7 +480,12 @@ func modeVersion(mode *ReasoningMode) string {
 		PreambleKey:    mode.PreambleKey,
 		SchemaVersion:  SchemaVersion,
 	}
-	data, _ := json.Marshal(version)
+	data, err := json.Marshal(version)
+	if err != nil {
+		fallback := fmt.Sprintf("%s:%s:%s", version.Name, version.Code, version.SchemaVersion)
+		sum := sha256.Sum256([]byte(fallback))
+		return hex.EncodeToString(sum[:])[:16]
+	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])[:16]
 }
