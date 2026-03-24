@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -83,20 +82,12 @@ func MergeConfig(global *Config, project *ProjectConfig, projectDir string) *Con
 
 	// Merge Palette File
 	if project.Palette.File != "" {
-		// Prevent traversal
-		cleanFile := filepath.Clean(project.Palette.File)
-		if isUnsafeProjectRelativePath(cleanFile) {
+		palettePath, err := ResolveProjectPalettePath(projectDir, project)
+		if err != nil {
 			// Don't error, just ignore unsafe path. Log to stderr so robot/json
 			// stdout streams remain machine-readable.
 			log.Printf("warning: ignoring unsafe project palette path: %s", project.Palette.File)
 		} else {
-			// Try .ntm/ first (legacy/convention)
-			palettePath := filepath.Join(projectDir, ".ntm", cleanFile)
-			if _, err := os.Stat(palettePath); os.IsNotExist(err) {
-				// Try relative to project root
-				palettePath = filepath.Join(projectDir, cleanFile)
-			}
-
 			if cmds, err := LoadPaletteFromMarkdown(palettePath); err == nil && len(cmds) > 0 {
 				// Prepend project commands so they take precedence
 				allCmds := append(cmds, global.Palette...)
@@ -120,17 +111,6 @@ func MergeConfig(global *Config, project *ProjectConfig, projectDir string) *Con
 	global.PaletteState.Favorites = mergeStringListPreferFirst(project.PaletteState.Favorites, global.PaletteState.Favorites)
 
 	return global
-}
-
-func isUnsafeProjectRelativePath(cleanPath string) bool {
-	if cleanPath == "" {
-		return false
-	}
-	if filepath.IsAbs(cleanPath) {
-		return true
-	}
-	parentPrefix := ".." + string(filepath.Separator)
-	return cleanPath == ".." || strings.HasPrefix(cleanPath, parentPrefix)
 }
 
 func mergeStringListPreferFirst(primary, secondary []string) []string {

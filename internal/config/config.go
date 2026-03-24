@@ -2471,6 +2471,14 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "default_panes = %d\n", cfg.Tmux.DefaultPanes)
 	fmt.Fprintf(w, "palette_key = %q\n", cfg.Tmux.PaletteKey)
 	fmt.Fprintf(w, "pane_init_delay_ms = %d  # Delay before send-keys to new panes\n", cfg.Tmux.PaneInitDelayMs)
+	fmt.Fprintf(w, "history_limit = %d       # Scrollback buffer lines per pane\n", cfg.Tmux.HistoryLimit)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[tmux.activity_indicators]")
+	fmt.Fprintln(w, "# Pane border activity coloring thresholds")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Tmux.ActivityIndicators.Enabled)
+	fmt.Fprintf(w, "active_seconds = %d   # Mark pane active within this many seconds\n", cfg.Tmux.ActivityIndicators.ActiveSeconds)
+	fmt.Fprintf(w, "stalled_seconds = %d  # Mark pane stalled after this many seconds\n", cfg.Tmux.ActivityIndicators.StalledSeconds)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[robot]")
@@ -2538,6 +2546,20 @@ func Print(cfg *Config, w io.Writer) error {
 		fmt.Fprintln(w, "# audit_log = \"~/.ntm/dcg_audit.log\"")
 	}
 	fmt.Fprintf(w, "allow_override = %t\n", cfg.Integrations.DCG.AllowOverride)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[integrations.rano]")
+	fmt.Fprintln(w, "# rano network observer settings for per-agent API tracking")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.Rano.Enabled)
+	if cfg.Integrations.Rano.BinaryPath != "" {
+		fmt.Fprintf(w, "binary_path = %q\n", cfg.Integrations.Rano.BinaryPath)
+	} else {
+		fmt.Fprintln(w, "# binary_path = \"rano\"  # Auto-detect from PATH")
+	}
+	fmt.Fprintf(w, "poll_interval_ms = %d\n", cfg.Integrations.Rano.PollIntervalMs)
+	fmt.Fprintf(w, "providers = %s\n", renderTOMLStringArray(cfg.Integrations.Rano.Providers))
+	fmt.Fprintf(w, "persist_history = %t\n", cfg.Integrations.Rano.PersistHistory)
+	fmt.Fprintf(w, "history_days = %d\n", cfg.Integrations.Rano.HistoryDays)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[integrations.proxy]")
@@ -2895,6 +2917,64 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "require_confirm = %t           # Require user confirmation before rotating\n", cfg.ContextRotation.RequireConfirm)
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "[file_reservation]")
+	fmt.Fprintln(w, "# Automatic Agent Mail file reservation settings")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.FileReservation.Enabled)
+	fmt.Fprintf(w, "auto_reserve = %t\n", cfg.FileReservation.AutoReserve)
+	fmt.Fprintf(w, "auto_release_idle_minutes = %d\n", cfg.FileReservation.AutoReleaseIdleMin)
+	fmt.Fprintf(w, "notify_on_conflict = %t\n", cfg.FileReservation.NotifyOnConflict)
+	fmt.Fprintf(w, "extend_on_activity = %t\n", cfg.FileReservation.ExtendOnActivity)
+	fmt.Fprintf(w, "default_ttl_minutes = %d\n", cfg.FileReservation.DefaultTTLMin)
+	fmt.Fprintf(w, "poll_interval_seconds = %d\n", cfg.FileReservation.PollIntervalSec)
+	fmt.Fprintf(w, "capture_lines = %d\n", cfg.FileReservation.CaptureLinesForDetect)
+	fmt.Fprintf(w, "debug = %t\n", cfg.FileReservation.Debug)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[memory]")
+	fmt.Fprintln(w, "# cass-memory integration defaults")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Memory.Enabled)
+	fmt.Fprintf(w, "include_in_recovery = %t\n", cfg.Memory.IncludeInRecovery)
+	fmt.Fprintf(w, "max_rules = %d\n", cfg.Memory.MaxRules)
+	fmt.Fprintf(w, "include_anti_patterns = %t\n", cfg.Memory.IncludeAntiPatterns)
+	fmt.Fprintf(w, "include_history = %t\n", cfg.Memory.IncludeHistory)
+	fmt.Fprintf(w, "query_timeout_seconds = %d\n", cfg.Memory.QueryTimeoutSeconds)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[swarm]")
+	fmt.Fprintln(w, "# Multi-project swarm allocation defaults")
+	fmt.Fprintf(w, "enabled = %t\n", cfg.Swarm.Enabled)
+	fmt.Fprintf(w, "default_scan_dir = %q\n", cfg.Swarm.DefaultScanDir)
+	fmt.Fprintf(w, "tier1_threshold = %d\n", cfg.Swarm.Tier1Threshold)
+	fmt.Fprintf(w, "tier2_threshold = %d\n", cfg.Swarm.Tier2Threshold)
+	fmt.Fprintf(w, "sessions_per_type = %d\n", cfg.Swarm.SessionsPerType)
+	fmt.Fprintf(w, "panes_per_session = %d\n", cfg.Swarm.PanesPerSession)
+	fmt.Fprintf(w, "stagger_delay_ms = %d\n", cfg.Swarm.StaggerDelayMs)
+	fmt.Fprintf(w, "auto_rotate_accounts = %t\n", cfg.Swarm.AutoRotateAccounts)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[swarm.tier1_allocation]")
+	fmt.Fprintf(w, "cc = %d\n", cfg.Swarm.Tier1Allocation.CC)
+	fmt.Fprintf(w, "cod = %d\n", cfg.Swarm.Tier1Allocation.Cod)
+	fmt.Fprintf(w, "gmi = %d\n", cfg.Swarm.Tier1Allocation.Gmi)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[swarm.tier2_allocation]")
+	fmt.Fprintf(w, "cc = %d\n", cfg.Swarm.Tier2Allocation.CC)
+	fmt.Fprintf(w, "cod = %d\n", cfg.Swarm.Tier2Allocation.Cod)
+	fmt.Fprintf(w, "gmi = %d\n", cfg.Swarm.Tier2Allocation.Gmi)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[swarm.tier3_allocation]")
+	fmt.Fprintf(w, "cc = %d\n", cfg.Swarm.Tier3Allocation.CC)
+	fmt.Fprintf(w, "cod = %d\n", cfg.Swarm.Tier3Allocation.Cod)
+	fmt.Fprintf(w, "gmi = %d\n", cfg.Swarm.Tier3Allocation.Gmi)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[swarm.marching_orders]")
+	fmt.Fprintf(w, "default = %q\n", cfg.Swarm.MarchingOrders.Default)
+	fmt.Fprintf(w, "review = %q\n", cfg.Swarm.MarchingOrders.Review)
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "[ensemble]")
 	fmt.Fprintln(w, "# Reasoning ensemble defaults (used when flags are not provided)")
 	fmt.Fprintf(w, "default_ensemble = %q\n", cfg.Ensemble.DefaultEnsemble)
@@ -3159,6 +3239,18 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Tmux.PaletteKey, nil
 		case "pane_init_delay_ms":
 			return cfg.Tmux.PaneInitDelayMs, nil
+		case "activity_indicators":
+			if len(parts) < 3 {
+				return cfg.Tmux.ActivityIndicators, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Tmux.ActivityIndicators.Enabled, nil
+			case "active_seconds":
+				return cfg.Tmux.ActivityIndicators.ActiveSeconds, nil
+			case "stalled_seconds":
+				return cfg.Tmux.ActivityIndicators.StalledSeconds, nil
+			}
 		}
 	case "agent_mail":
 		if len(parts) < 2 {
@@ -3196,6 +3288,24 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 				return cfg.Integrations.DCG.AuditLog, nil
 			case "allow_override":
 				return cfg.Integrations.DCG.AllowOverride, nil
+			}
+		case "rano":
+			if len(parts) < 3 {
+				return cfg.Integrations.Rano, nil
+			}
+			switch parts[2] {
+			case "enabled":
+				return cfg.Integrations.Rano.Enabled, nil
+			case "binary_path":
+				return cfg.Integrations.Rano.BinaryPath, nil
+			case "poll_interval_ms":
+				return cfg.Integrations.Rano.PollIntervalMs, nil
+			case "providers":
+				return cfg.Integrations.Rano.Providers, nil
+			case "persist_history":
+				return cfg.Integrations.Rano.PersistHistory, nil
+			case "history_days":
+				return cfg.Integrations.Rano.HistoryDays, nil
 			}
 		}
 	case "alerts":
@@ -3259,6 +3369,98 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 		switch parts[1] {
 		case "ms_skills":
 			return cfg.Context.MSSkills, nil
+		}
+	case "file_reservation":
+		if len(parts) < 2 {
+			return cfg.FileReservation, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.FileReservation.Enabled, nil
+		case "auto_reserve":
+			return cfg.FileReservation.AutoReserve, nil
+		case "auto_release_idle_minutes":
+			return cfg.FileReservation.AutoReleaseIdleMin, nil
+		case "notify_on_conflict":
+			return cfg.FileReservation.NotifyOnConflict, nil
+		case "extend_on_activity":
+			return cfg.FileReservation.ExtendOnActivity, nil
+		case "default_ttl_minutes":
+			return cfg.FileReservation.DefaultTTLMin, nil
+		case "poll_interval_seconds":
+			return cfg.FileReservation.PollIntervalSec, nil
+		case "capture_lines":
+			return cfg.FileReservation.CaptureLinesForDetect, nil
+		case "debug":
+			return cfg.FileReservation.Debug, nil
+		}
+	case "memory":
+		if len(parts) < 2 {
+			return cfg.Memory, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.Memory.Enabled, nil
+		case "include_in_recovery":
+			return cfg.Memory.IncludeInRecovery, nil
+		case "max_rules":
+			return cfg.Memory.MaxRules, nil
+		case "include_anti_patterns":
+			return cfg.Memory.IncludeAntiPatterns, nil
+		case "include_history":
+			return cfg.Memory.IncludeHistory, nil
+		case "query_timeout_seconds":
+			return cfg.Memory.QueryTimeoutSeconds, nil
+		}
+	case "privacy":
+		if len(parts) < 2 {
+			return cfg.Privacy, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.Privacy.Enabled, nil
+		case "disable_prompt_history":
+			return cfg.Privacy.DisablePromptHistory, nil
+		case "disable_event_logs":
+			return cfg.Privacy.DisableEventLogs, nil
+		case "disable_checkpoints":
+			return cfg.Privacy.DisableCheckpoints, nil
+		case "disable_scrollback_capture":
+			return cfg.Privacy.DisableScrollbackCapture, nil
+		case "require_explicit_persist":
+			return cfg.Privacy.RequireExplicitPersist, nil
+		}
+	case "swarm":
+		if len(parts) < 2 {
+			return cfg.Swarm, nil
+		}
+		switch parts[1] {
+		case "enabled":
+			return cfg.Swarm.Enabled, nil
+		case "default_scan_dir":
+			return cfg.Swarm.DefaultScanDir, nil
+		case "tier1_threshold":
+			return cfg.Swarm.Tier1Threshold, nil
+		case "tier2_threshold":
+			return cfg.Swarm.Tier2Threshold, nil
+		case "tier1_allocation":
+			return cfg.Swarm.Tier1Allocation, nil
+		case "tier2_allocation":
+			return cfg.Swarm.Tier2Allocation, nil
+		case "tier3_allocation":
+			return cfg.Swarm.Tier3Allocation, nil
+		case "sessions_per_type":
+			return cfg.Swarm.SessionsPerType, nil
+		case "panes_per_session":
+			return cfg.Swarm.PanesPerSession, nil
+		case "stagger_delay_ms":
+			return cfg.Swarm.StaggerDelayMs, nil
+		case "auto_rotate_accounts":
+			return cfg.Swarm.AutoRotateAccounts, nil
+		case "limit_patterns":
+			return cfg.Swarm.LimitPatterns, nil
+		case "marching_orders":
+			return cfg.Swarm.MarchingOrders, nil
 		}
 	case "ensemble":
 		if len(parts) < 2 {
@@ -3453,6 +3655,9 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("tmux.default_panes", defaults.Tmux.DefaultPanes, cfg.Tmux.DefaultPanes)
 	addDiff("tmux.palette_key", defaults.Tmux.PaletteKey, cfg.Tmux.PaletteKey)
 	addDiff("tmux.pane_init_delay_ms", defaults.Tmux.PaneInitDelayMs, cfg.Tmux.PaneInitDelayMs)
+	addDiff("tmux.activity_indicators.enabled", defaults.Tmux.ActivityIndicators.Enabled, cfg.Tmux.ActivityIndicators.Enabled)
+	addDiff("tmux.activity_indicators.active_seconds", defaults.Tmux.ActivityIndicators.ActiveSeconds, cfg.Tmux.ActivityIndicators.ActiveSeconds)
+	addDiff("tmux.activity_indicators.stalled_seconds", defaults.Tmux.ActivityIndicators.StalledSeconds, cfg.Tmux.ActivityIndicators.StalledSeconds)
 
 	// Agent Mail
 	addDiff("agent_mail.enabled", defaults.AgentMail.Enabled, cfg.AgentMail.Enabled)
@@ -3466,6 +3671,12 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("integrations.dcg.custom_whitelist", defaults.Integrations.DCG.CustomWhitelist, cfg.Integrations.DCG.CustomWhitelist)
 	addDiff("integrations.dcg.audit_log", defaults.Integrations.DCG.AuditLog, cfg.Integrations.DCG.AuditLog)
 	addDiff("integrations.dcg.allow_override", defaults.Integrations.DCG.AllowOverride, cfg.Integrations.DCG.AllowOverride)
+	addDiff("integrations.rano.enabled", defaults.Integrations.Rano.Enabled, cfg.Integrations.Rano.Enabled)
+	addDiff("integrations.rano.binary_path", defaults.Integrations.Rano.BinaryPath, cfg.Integrations.Rano.BinaryPath)
+	addDiff("integrations.rano.poll_interval_ms", defaults.Integrations.Rano.PollIntervalMs, cfg.Integrations.Rano.PollIntervalMs)
+	addDiff("integrations.rano.providers", defaults.Integrations.Rano.Providers, cfg.Integrations.Rano.Providers)
+	addDiff("integrations.rano.persist_history", defaults.Integrations.Rano.PersistHistory, cfg.Integrations.Rano.PersistHistory)
+	addDiff("integrations.rano.history_days", defaults.Integrations.Rano.HistoryDays, cfg.Integrations.Rano.HistoryDays)
 
 	// Alerts
 	addDiff("alerts.enabled", defaults.Alerts.Enabled, cfg.Alerts.Enabled)
@@ -3487,6 +3698,33 @@ func Diff(cfg *Config) []ConfigDiff {
 
 	// Context pack options
 	addDiff("context.ms_skills", defaults.Context.MSSkills, cfg.Context.MSSkills)
+
+	// File reservation
+	addDiff("file_reservation.enabled", defaults.FileReservation.Enabled, cfg.FileReservation.Enabled)
+	addDiff("file_reservation.auto_reserve", defaults.FileReservation.AutoReserve, cfg.FileReservation.AutoReserve)
+	addDiff("file_reservation.auto_release_idle_minutes", defaults.FileReservation.AutoReleaseIdleMin, cfg.FileReservation.AutoReleaseIdleMin)
+	addDiff("file_reservation.notify_on_conflict", defaults.FileReservation.NotifyOnConflict, cfg.FileReservation.NotifyOnConflict)
+	addDiff("file_reservation.extend_on_activity", defaults.FileReservation.ExtendOnActivity, cfg.FileReservation.ExtendOnActivity)
+	addDiff("file_reservation.default_ttl_minutes", defaults.FileReservation.DefaultTTLMin, cfg.FileReservation.DefaultTTLMin)
+	addDiff("file_reservation.poll_interval_seconds", defaults.FileReservation.PollIntervalSec, cfg.FileReservation.PollIntervalSec)
+	addDiff("file_reservation.capture_lines", defaults.FileReservation.CaptureLinesForDetect, cfg.FileReservation.CaptureLinesForDetect)
+	addDiff("file_reservation.debug", defaults.FileReservation.Debug, cfg.FileReservation.Debug)
+
+	// Memory
+	addDiff("memory.enabled", defaults.Memory.Enabled, cfg.Memory.Enabled)
+	addDiff("memory.include_in_recovery", defaults.Memory.IncludeInRecovery, cfg.Memory.IncludeInRecovery)
+	addDiff("memory.max_rules", defaults.Memory.MaxRules, cfg.Memory.MaxRules)
+	addDiff("memory.include_anti_patterns", defaults.Memory.IncludeAntiPatterns, cfg.Memory.IncludeAntiPatterns)
+	addDiff("memory.include_history", defaults.Memory.IncludeHistory, cfg.Memory.IncludeHistory)
+	addDiff("memory.query_timeout_seconds", defaults.Memory.QueryTimeoutSeconds, cfg.Memory.QueryTimeoutSeconds)
+
+	// Privacy
+	addDiff("privacy.enabled", defaults.Privacy.Enabled, cfg.Privacy.Enabled)
+	addDiff("privacy.disable_prompt_history", defaults.Privacy.DisablePromptHistory, cfg.Privacy.DisablePromptHistory)
+	addDiff("privacy.disable_event_logs", defaults.Privacy.DisableEventLogs, cfg.Privacy.DisableEventLogs)
+	addDiff("privacy.disable_checkpoints", defaults.Privacy.DisableCheckpoints, cfg.Privacy.DisableCheckpoints)
+	addDiff("privacy.disable_scrollback_capture", defaults.Privacy.DisableScrollbackCapture, cfg.Privacy.DisableScrollbackCapture)
+	addDiff("privacy.require_explicit_persist", defaults.Privacy.RequireExplicitPersist, cfg.Privacy.RequireExplicitPersist)
 
 	// Context Rotation
 	addDiff("context_rotation.enabled", defaults.ContextRotation.Enabled, cfg.ContextRotation.Enabled)
@@ -3541,6 +3779,21 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("health.restart_backoff_base", defaults.Health.RestartBackoffBase, cfg.Health.RestartBackoffBase)
 	addDiff("health.restart_backoff_max", defaults.Health.RestartBackoffMax, cfg.Health.RestartBackoffMax)
 
+	// Swarm
+	addDiff("swarm.enabled", defaults.Swarm.Enabled, cfg.Swarm.Enabled)
+	addDiff("swarm.default_scan_dir", defaults.Swarm.DefaultScanDir, cfg.Swarm.DefaultScanDir)
+	addDiff("swarm.tier1_threshold", defaults.Swarm.Tier1Threshold, cfg.Swarm.Tier1Threshold)
+	addDiff("swarm.tier2_threshold", defaults.Swarm.Tier2Threshold, cfg.Swarm.Tier2Threshold)
+	addDiff("swarm.tier1_allocation", defaults.Swarm.Tier1Allocation, cfg.Swarm.Tier1Allocation)
+	addDiff("swarm.tier2_allocation", defaults.Swarm.Tier2Allocation, cfg.Swarm.Tier2Allocation)
+	addDiff("swarm.tier3_allocation", defaults.Swarm.Tier3Allocation, cfg.Swarm.Tier3Allocation)
+	addDiff("swarm.sessions_per_type", defaults.Swarm.SessionsPerType, cfg.Swarm.SessionsPerType)
+	addDiff("swarm.panes_per_session", defaults.Swarm.PanesPerSession, cfg.Swarm.PanesPerSession)
+	addDiff("swarm.stagger_delay_ms", defaults.Swarm.StaggerDelayMs, cfg.Swarm.StaggerDelayMs)
+	addDiff("swarm.auto_rotate_accounts", defaults.Swarm.AutoRotateAccounts, cfg.Swarm.AutoRotateAccounts)
+	addDiff("swarm.limit_patterns", defaults.Swarm.LimitPatterns, cfg.Swarm.LimitPatterns)
+	addDiff("swarm.marching_orders", defaults.Swarm.MarchingOrders, cfg.Swarm.MarchingOrders)
+
 	return diffs
 }
 
@@ -3567,6 +3820,11 @@ func Validate(cfg *Config) []error {
 		errs = append(errs, fmt.Errorf("health: %w", err))
 	}
 
+	// Validate tmux activity indicators
+	if err := ValidateActivityIndicatorConfig(&cfg.Tmux.ActivityIndicators); err != nil {
+		errs = append(errs, fmt.Errorf("tmux.activity_indicators: %w", err))
+	}
+
 	// Validate robot output config
 	if err := ValidateRobotOutputConfig(&cfg.Robot.Output); err != nil {
 		errs = append(errs, fmt.Errorf("robot.output: %w", err))
@@ -3580,6 +3838,11 @@ func Validate(cfg *Config) []error {
 	// Validate ProcessTriage integration config
 	if err := ValidateProcessTriageConfig(&cfg.Integrations.ProcessTriage); err != nil {
 		errs = append(errs, fmt.Errorf("integrations.process_triage: %w", err))
+	}
+
+	// Validate rano integration config
+	if err := ValidateRanoConfig(&cfg.Integrations.Rano); err != nil {
+		errs = append(errs, fmt.Errorf("integrations.rano: %w", err))
 	}
 
 	// Validate rust_proxy integration config
@@ -3605,6 +3868,11 @@ func Validate(cfg *Config) []error {
 		errs = append(errs, fmt.Errorf("redaction: %w", err))
 	}
 
+	// Validate privacy configuration
+	if err := ValidatePrivacyConfig(&cfg.Privacy); err != nil {
+		errs = append(errs, fmt.Errorf("privacy: %w", err))
+	}
+
 	// Validate encryption configuration
 	if err := ValidateEncryptionConfig(&cfg.Encryption); err != nil {
 		errs = append(errs, fmt.Errorf("encryption: %w", err))
@@ -3613,6 +3881,21 @@ func Validate(cfg *Config) []error {
 	// Validate spawn pacing config
 	if err := ValidateSpawnPacingConfig(&cfg.SpawnPacing); err != nil {
 		errs = append(errs, fmt.Errorf("spawn_pacing: %w", err))
+	}
+
+	// Validate file reservation config
+	if err := ValidateFileReservationConfig(&cfg.FileReservation); err != nil {
+		errs = append(errs, fmt.Errorf("file_reservation: %w", err))
+	}
+
+	// Validate memory config
+	if err := ValidateMemoryConfig(&cfg.Memory); err != nil {
+		errs = append(errs, fmt.Errorf("memory: %w", err))
+	}
+
+	// Validate swarm config
+	if err := ValidateSwarmConfig(&cfg.Swarm); err != nil {
+		errs = append(errs, fmt.Errorf("swarm: %w", err))
 	}
 
 	// Validate projects_base if set

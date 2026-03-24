@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -109,6 +110,80 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// ResolveProjectPalettePath resolves a configured project palette file path using
+// the same rules as runtime loading: prefer .ntm/<file>, then fall back to the
+// project root. Unsafe relative paths are rejected.
+func ResolveProjectPalettePath(projectDir string, cfg *ProjectConfig) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+	paletteFile := strings.TrimSpace(cfg.Palette.File)
+	if paletteFile == "" {
+		return "", nil
+	}
+
+	cleanFile := filepath.Clean(paletteFile)
+	if isUnsafeProjectRelativePath(cleanFile) {
+		return "", fmt.Errorf("unsafe project palette path: %s", cfg.Palette.File)
+	}
+
+	ntmPath := filepath.Join(projectDir, ".ntm", cleanFile)
+	if info, err := os.Stat(ntmPath); err == nil && !info.IsDir() {
+		return ntmPath, nil
+	}
+
+	return filepath.Join(projectDir, cleanFile), nil
+}
+
+// ResolveProjectTemplatesDir resolves the project templates directory using the
+// same path safety rules as runtime loading. If the configured path is unsafe,
+// the default .ntm/templates directory is returned alongside an error.
+func ResolveProjectTemplatesDir(projectDir string, cfg *ProjectConfig) (string, error) {
+	defaultDir := filepath.Join(projectDir, ".ntm", "templates")
+	if cfg == nil {
+		return defaultDir, nil
+	}
+
+	templatesDir := strings.TrimSpace(cfg.Templates.Dir)
+	if templatesDir == "" {
+		return defaultDir, nil
+	}
+	if filepath.IsAbs(templatesDir) {
+		return defaultDir, fmt.Errorf("unsafe project templates path: %s", cfg.Templates.Dir)
+	}
+
+	baseDir := filepath.Join(projectDir, ".ntm")
+	candidate := filepath.Join(baseDir, filepath.Clean(templatesDir))
+
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return defaultDir, err
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return defaultDir, err
+	}
+	rel, err := filepath.Rel(absBase, absCandidate)
+	if err != nil {
+		return defaultDir, err
+	}
+	if strings.HasPrefix(rel, "..") || strings.HasPrefix(rel, string(filepath.Separator)) {
+		return defaultDir, fmt.Errorf("unsafe project templates path: %s", cfg.Templates.Dir)
+	}
+	return candidate, nil
+}
+
+func isUnsafeProjectRelativePath(cleanPath string) bool {
+	if cleanPath == "" {
+		return false
+	}
+	if filepath.IsAbs(cleanPath) {
+		return true
+	}
+	parentPrefix := ".." + string(filepath.Separator)
+	return cleanPath == ".." || strings.HasPrefix(cleanPath, parentPrefix)
 }
 
 // InitProjectConfig initializes .ntm configuration for the current directory.

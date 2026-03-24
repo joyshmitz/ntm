@@ -190,6 +190,112 @@ func TestGetValue_Alerts(t *testing.T) {
 	}
 }
 
+func TestGetValue_TmuxActivityIndicators(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+
+	tests := []struct {
+		path string
+	}{
+		{"tmux.activity_indicators"},
+		{"tmux.activity_indicators.enabled"},
+		{"tmux.activity_indicators.active_seconds"},
+		{"tmux.activity_indicators.stalled_seconds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			_, err := GetValue(cfg, tt.path)
+			if err != nil {
+				t.Errorf("GetValue(%q) error = %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func TestGetValue_FileReservation(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+
+	tests := []struct {
+		path string
+	}{
+		{"file_reservation"},
+		{"file_reservation.enabled"},
+		{"file_reservation.auto_reserve"},
+		{"file_reservation.auto_release_idle_minutes"},
+		{"file_reservation.notify_on_conflict"},
+		{"file_reservation.extend_on_activity"},
+		{"file_reservation.default_ttl_minutes"},
+		{"file_reservation.poll_interval_seconds"},
+		{"file_reservation.capture_lines"},
+		{"file_reservation.debug"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			_, err := GetValue(cfg, tt.path)
+			if err != nil {
+				t.Errorf("GetValue(%q) error = %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func TestGetValue_MemoryPrivacySwarmAndRano(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+
+	tests := []struct {
+		path string
+	}{
+		{"memory"},
+		{"memory.enabled"},
+		{"memory.include_in_recovery"},
+		{"memory.max_rules"},
+		{"memory.include_anti_patterns"},
+		{"memory.include_history"},
+		{"memory.query_timeout_seconds"},
+		{"privacy"},
+		{"privacy.enabled"},
+		{"privacy.disable_prompt_history"},
+		{"privacy.disable_event_logs"},
+		{"privacy.disable_checkpoints"},
+		{"privacy.disable_scrollback_capture"},
+		{"privacy.require_explicit_persist"},
+		{"swarm"},
+		{"swarm.enabled"},
+		{"swarm.default_scan_dir"},
+		{"swarm.tier1_threshold"},
+		{"swarm.tier2_threshold"},
+		{"swarm.tier1_allocation"},
+		{"swarm.tier2_allocation"},
+		{"swarm.tier3_allocation"},
+		{"swarm.sessions_per_type"},
+		{"swarm.panes_per_session"},
+		{"swarm.stagger_delay_ms"},
+		{"swarm.auto_rotate_accounts"},
+		{"swarm.limit_patterns"},
+		{"swarm.marching_orders"},
+		{"integrations.rano"},
+		{"integrations.rano.enabled"},
+		{"integrations.rano.binary_path"},
+		{"integrations.rano.poll_interval_ms"},
+		{"integrations.rano.providers"},
+		{"integrations.rano.persist_history"},
+		{"integrations.rano.history_days"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			_, err := GetValue(cfg, tt.path)
+			if err != nil {
+				t.Errorf("GetValue(%q) error = %v", tt.path, err)
+			}
+		})
+	}
+}
+
 func TestGetValue_Checkpoints(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
@@ -1573,6 +1679,79 @@ func TestMergeStringListPreferFirst_AllEmpty(t *testing.T) {
 	if got != nil {
 		t.Errorf("all empty/whitespace should return nil, got %v", got)
 	}
+}
+
+func TestValidate_WiresSectionSpecificValidators(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Tmux.ActivityIndicators.ActiveSeconds = 0
+	cfg.FileReservation.DefaultTTLMin = 0
+	cfg.Memory.QueryTimeoutSeconds = 0
+	cfg.Integrations.Rano.PollIntervalMs = 50
+	cfg.Swarm.Enabled = true
+	cfg.Swarm.Tier1Threshold = 10
+	cfg.Swarm.Tier2Threshold = 10
+
+	errs := Validate(cfg)
+	if len(errs) == 0 {
+		t.Fatal("Validate() returned no errors for invalid section configs")
+	}
+
+	wantPaths := []string{
+		"tmux.activity_indicators",
+		"file_reservation",
+		"memory",
+		"integrations.rano",
+		"swarm",
+	}
+	for _, want := range wantPaths {
+		found := false
+		for _, err := range errs {
+			if errContains(err.Error(), want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Validate() errors = %v, want path %q", errs, want)
+		}
+	}
+}
+
+func TestDiff_RecentConfigServiceSections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	defaults := Default()
+	cfg.Tmux.ActivityIndicators.StalledSeconds = defaults.Tmux.ActivityIndicators.StalledSeconds + 1
+	cfg.FileReservation.Debug = !defaults.FileReservation.Debug
+	cfg.Memory.MaxRules = defaults.Memory.MaxRules + 1
+	cfg.Privacy.Enabled = !defaults.Privacy.Enabled
+	cfg.Integrations.Rano.HistoryDays = defaults.Integrations.Rano.HistoryDays + 1
+	cfg.Swarm.DefaultScanDir = "/tmp/swarm-scan"
+
+	diffs := Diff(cfg)
+	wantPaths := []string{
+		"tmux.activity_indicators.stalled_seconds",
+		"file_reservation.debug",
+		"memory.max_rules",
+		"privacy.enabled",
+		"integrations.rano.history_days",
+		"swarm.default_scan_dir",
+	}
+	for _, want := range wantPaths {
+		if !hasConfigDiffPath(diffs, want) {
+			t.Errorf("Diff() missing %q in %v", want, diffs)
+		}
+	}
+}
+
+func hasConfigDiffPath(diffs []ConfigDiff, path string) bool {
+	for _, diff := range diffs {
+		if diff.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // helper for string contains check (prefixed to avoid conflict with swarm_test.go)

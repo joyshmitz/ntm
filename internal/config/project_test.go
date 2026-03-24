@@ -192,6 +192,47 @@ func TestInitProjectConfigAt_CreatesAllStructure(t *testing.T) {
 		len(expectedDirs), len(expectedFiles))
 }
 
+func TestResolveProjectPalettePath_FallsBackToProjectRoot(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	rootPalette := filepath.Join(projectDir, "palette.md")
+	if err := os.WriteFile(rootPalette, []byte("# palette"), 0644); err != nil {
+		t.Fatalf("write root palette: %v", err)
+	}
+
+	cfg := &ProjectConfig{
+		Palette: ProjectPalette{File: "palette.md"},
+	}
+
+	got, err := ResolveProjectPalettePath(projectDir, cfg)
+	if err != nil {
+		t.Fatalf("ResolveProjectPalettePath() error = %v", err)
+	}
+	if got != rootPalette {
+		t.Fatalf("ResolveProjectPalettePath() = %q, want %q", got, rootPalette)
+	}
+}
+
+func TestResolveProjectTemplatesDir_UnsafeFallsBack(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	cfg := &ProjectConfig{
+		Templates: ProjectTemplates{Dir: "../outside"},
+	}
+
+	got, err := ResolveProjectTemplatesDir(projectDir, cfg)
+	if err == nil {
+		t.Fatal("ResolveProjectTemplatesDir() expected error for unsafe path")
+	}
+
+	want := filepath.Join(projectDir, ".ntm", "templates")
+	if got != want {
+		t.Fatalf("ResolveProjectTemplatesDir() = %q, want %q", got, want)
+	}
+}
+
 // TestLoadProjectConfig_Valid verifies loading a valid config file
 func TestLoadProjectConfig_Valid(t *testing.T) {
 	t.Parallel()

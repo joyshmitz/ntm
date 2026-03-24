@@ -1812,7 +1812,10 @@ func TestCASSContextValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := Validate(&tt.cfg)
+			baseCfg := Default()
+			baseCfg.CASS = tt.cfg.CASS
+			
+			errs := Validate(baseCfg)
 			hasErr := len(errs) > 0
 			if hasErr != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", errs, tt.wantErr)
