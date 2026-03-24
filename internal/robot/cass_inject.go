@@ -1139,9 +1139,10 @@ func extractSessionName(path string) string {
 	filename = strings.TrimSuffix(filename, ".jsonl")
 	filename = strings.TrimSuffix(filename, ".json")
 
-	// Truncate if too long
-	if len(filename) > 40 {
-		filename = filename[:37] + "..."
+	// Truncate if too long (UTF-8 aware)
+	r := []rune(filename)
+	if len(r) > 40 {
+		filename = string(r[:37]) + "..."
 	}
 
 	return filename
@@ -1186,8 +1187,9 @@ func cleanContentForMarkdown(content string) string {
 	// Limit line length for readability
 	var lines []string
 	for _, line := range strings.Split(content, "\n") {
-		if len(line) > 120 {
-			line = line[:117] + "..."
+		r := []rune(line)
+		if len(r) > 120 {
+			line = string(r[:117]) + "..."
 		}
 		lines = append(lines, line)
 	}
@@ -1220,8 +1222,9 @@ func extractCodeSnippets(content string) string {
 
 	// If no code blocks, return cleaned content (might be inline code)
 	content = strings.TrimSpace(content)
-	if len(content) > 200 {
-		content = content[:197] + "..."
+	r := []rune(content)
+	if len(r) > 200 {
+		content = string(r[:197]) + "..."
 	}
 	return content
 }
@@ -1230,12 +1233,13 @@ func extractCodeSnippets(content string) string {
 // Uses ~4 chars per token as a rough estimate.
 func truncateToTokens(content string, maxTokens int) string {
 	maxChars := maxTokens * 4
-	if len(content) <= maxChars {
+	r := []rune(content)
+	if len(r) <= maxChars {
 		return content
 	}
 
 	// Try to truncate at a line boundary
-	truncated := content[:maxChars]
+	truncated := string(r[:maxChars])
 	lastNewline := strings.LastIndex(truncated, "\n")
 	if lastNewline > maxChars/2 {
 		truncated = truncated[:lastNewline]

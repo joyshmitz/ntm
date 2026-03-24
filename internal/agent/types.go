@@ -75,7 +75,8 @@ func (t AgentType) ProfileName() string {
 		// Capitalize first letter for unknown types
 		s := string(t)
 		if len(s) > 0 {
-			return strings.ToUpper(s[:1]) + s[1:]
+			r := []rune(s)
+			return strings.ToUpper(string(r[0])) + string(r[1:])
 		}
 		return s
 	}

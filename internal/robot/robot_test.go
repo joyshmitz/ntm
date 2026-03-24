@@ -2949,6 +2949,12 @@ func TestGetDashboardRespectsDisabledAlertsConfig(t *testing.T) {
 	if result.AlertSummary.TotalActive != 0 {
 		t.Fatalf("AlertSummary.TotalActive = %d, want 0 when alerts are disabled", result.AlertSummary.TotalActive)
 	}
+	if result.AlertSummary.BySeverity == nil {
+		t.Fatal("AlertSummary.BySeverity = nil, want empty map")
+	}
+	if result.AlertSummary.ByType == nil {
+		t.Fatal("AlertSummary.ByType = nil, want empty map")
+	}
 }
 
 func TestGetAlertsDetailedRespectsDisabledAlertsConfig(t *testing.T) {

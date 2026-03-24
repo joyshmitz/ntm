@@ -151,7 +151,10 @@ func (t *ContributionTracker) RecordUniqueFinding(modeID, findingText string) {
 	if t.Config.MaxHighlights > 0 && len(score.HighlightFindings) < t.Config.MaxHighlights {
 		highlight := findingText
 		if len(highlight) > 80 {
-			highlight = highlight[:77] + "..."
+			r := []rune(highlight)
+			if len(r) > 80 {
+				highlight = string(r[:77]) + "..."
+			}
 		}
 		score.HighlightFindings = append(score.HighlightFindings, highlight)
 	}

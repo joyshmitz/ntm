@@ -7,18 +7,21 @@ import (
 	"time"
 )
 
-func TestSessionStore_SaveLoad_DefaultPath(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	if defaultStateStore.store != nil {
-		_ = defaultStateStore.store.Close()
-	}
+func resetDefaultStateStoreForTest() {
+	CloseDefaultStateStore()
 	defaultStateStore = struct {
+		mu    sync.Mutex
 		once  sync.Once
 		store *StateStore
 		err   error
 	}{}
+}
+
+func TestSessionStore_SaveLoad_DefaultPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	resetDefaultStateStoreForTest()
 
 	session := &EnsembleSession{
 		SessionName:       "default-session",
@@ -42,14 +45,7 @@ func TestSessionStore_SaveLoad_DefaultPath(t *testing.T) {
 		t.Fatalf("Question = %q, want %q", loaded.Question, session.Question)
 	}
 
-	if defaultStateStore.store != nil {
-		_ = defaultStateStore.store.Close()
-		defaultStateStore = struct {
-			once  sync.Once
-			store *StateStore
-			err   error
-		}{}
-	}
+	resetDefaultStateStoreForTest()
 
 	// ensure no accidental writes to real home
 	if _, err := os.Stat(tmpHome); err != nil {

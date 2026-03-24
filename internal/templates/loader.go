@@ -48,33 +48,11 @@ func resolveProjectTemplateDir(startDir, fallbackProjectRoot string) string {
 }
 
 func projectTemplateDirFromConfig(projectDir string, cfg *config.ProjectConfig) string {
-	baseDir := filepath.Join(projectDir, ".ntm")
-	templatesDir := strings.TrimSpace(cfg.Templates.Dir)
-	if templatesDir == "" {
-		templatesDir = "templates"
-	}
-	if filepath.IsAbs(templatesDir) {
-		templatesDir = "templates"
-	}
-
-	candidate := filepath.Join(baseDir, templatesDir)
-
-	absBase, err := filepath.Abs(baseDir)
+	templatesDir, err := config.ResolveProjectTemplatesDir(projectDir, cfg)
 	if err != nil {
 		return filepath.Join(projectDir, ".ntm", "templates")
 	}
-	absCandidate, err := filepath.Abs(candidate)
-	if err != nil {
-		return filepath.Join(projectDir, ".ntm", "templates")
-	}
-	rel, err := filepath.Rel(absBase, absCandidate)
-	if err != nil {
-		return filepath.Join(projectDir, ".ntm", "templates")
-	}
-	if strings.HasPrefix(rel, "..") || strings.HasPrefix(rel, string(filepath.Separator)) {
-		return filepath.Join(projectDir, ".ntm", "templates")
-	}
-	return candidate
+	return templatesDir
 }
 
 // getDefaultUserTemplateDir returns the default user templates directory.

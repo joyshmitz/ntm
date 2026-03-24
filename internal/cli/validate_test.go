@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 func TestDiscoverConfigs(t *testing.T) {
@@ -278,5 +280,80 @@ func TestFileAndDirExists(t *testing.T) {
 	}
 	if dirExists(filepath.Join(tmpDir, "nonexistent")) {
 		t.Error("dirExists should return false for non-existent path")
+	}
+}
+
+func TestValidateProjectConfig_AllowsRootPaletteFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	ntmDir := filepath.Join(tmpDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("mkdir .ntm: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "palette.md"), []byte("# palette"), 0644); err != nil {
+		t.Fatalf("write root palette: %v", err)
+	}
+	configPath := filepath.Join(ntmDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[palette]\nfile = \"palette.md\"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	result := &ValidationResult{Valid: true, Errors: []ValidationIssue{}, Warnings: []ValidationIssue{}}
+	validateProjectConfig(configPath, result, false)
+
+	for _, warning := range result.Warnings {
+		if warning.Field == "palette.file" {
+			t.Fatalf("unexpected palette.file warning: %+v", warning)
+		}
+	}
+}
+
+func TestValidateProjectConfig_DoesNotCreateUnsafeTemplatesDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	ntmDir := filepath.Join(tmpDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("mkdir .ntm: %v", err)
+	}
+	configPath := filepath.Join(ntmDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[templates]\ndir = \"../outside\"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	result := &ValidationResult{Valid: true, Errors: []ValidationIssue{}, Warnings: []ValidationIssue{}}
+	validateProjectConfig(configPath, result, true)
+
+	outsidePath := filepath.Join(tmpDir, "outside")
+	if _, err := os.Stat(outsidePath); err == nil {
+		t.Fatalf("validateProjectConfig created unsafe directory: %s", outsidePath)
+	}
+
+	foundWarning := false
+	for _, warning := range result.Warnings {
+		if warning.Field == "templates.dir" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatal("expected templates.dir warning for unsafe path")
+	}
+}
+
+func TestValidateMainConfigReferences_WarnsWhenPaletteFileIsDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.PaletteFile = tmpDir
+
+	result := &ValidationResult{Valid: true, Errors: []ValidationIssue{}, Warnings: []ValidationIssue{}}
+	validateMainConfigReferences(cfg, result, false)
+
+	foundWarning := false
+	for _, warning := range result.Warnings {
+		if warning.Field == "palette_file" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatal("expected palette_file warning when configured path is a directory")
 	}
 }

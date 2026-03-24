@@ -434,7 +434,8 @@ func generateDescription(name string) string {
 	// Join and lowercase
 	desc := strings.Join(words, " ")
 	if len(desc) > 0 {
-		desc = strings.ToUpper(desc[:1]) + strings.ToLower(desc[1:])
+		r := []rune(desc)
+		desc = strings.ToUpper(string(r[0])) + strings.ToLower(string(r[1:]))
 	}
 
 	return desc

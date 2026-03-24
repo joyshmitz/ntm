@@ -145,20 +145,17 @@ func detectAgentFromCommand(command string) AgentType {
 	cmd := strings.ToLower(command)
 
 	// Claude Code variants
-	if cmd == "claude" || strings.HasPrefix(cmd, "claude ") || strings.Contains(cmd, "/claude") ||
-		cmd == "cc" || strings.HasPrefix(cmd, "cc ") {
+	if cmd == "claude" || strings.HasPrefix(cmd, "claude ") || strings.Contains(cmd, "/claude") {
 		return AgentClaude
 	}
 
 	// Codex CLI
-	if cmd == "codex" || strings.HasPrefix(cmd, "codex ") || strings.Contains(cmd, "/codex") ||
-		cmd == "cod" || strings.HasPrefix(cmd, "cod ") {
+	if cmd == "codex" || strings.HasPrefix(cmd, "codex ") || strings.Contains(cmd, "/codex") {
 		return AgentCodex
 	}
 
 	// Gemini CLI
-	if cmd == "gemini" || strings.HasPrefix(cmd, "gemini ") || strings.Contains(cmd, "/gemini") ||
-		cmd == "gmi" || strings.HasPrefix(cmd, "gmi ") {
+	if cmd == "gemini" || strings.HasPrefix(cmd, "gemini ") || strings.Contains(cmd, "/gemini") {
 		return AgentGemini
 	}
 
@@ -1400,6 +1397,7 @@ func (c *Client) GetPanesWithActivityContext(ctx context.Context, session string
 		}
 
 		// Parse pane title using regex to extract type, index, variant, and tags
+		// Format: {session}__{type}_{index} or {session}__{type}_{index}_{variant}
 		pane.Type, pane.NTMIndex, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
 
 		// Fallback: if title didn't match NTM format, try detecting from process command

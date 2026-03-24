@@ -1510,12 +1510,14 @@ func cleanActionLine(line string) string {
 	}
 
 	// Truncate if too long
-	if len(line) > 80 {
+	r := []rune(line)
+	if len(r) > 80 {
 		// Find a good break point
-		if idx := strings.LastIndex(line[:80], " "); idx > 40 {
-			line = line[:idx] + "..."
+		line80 := string(r[:80])
+		if idx := strings.LastIndex(line80, " "); idx > 40 {
+			line = line80[:idx] + "..."
 		} else {
-			line = line[:77] + "..."
+			line = string(r[:77]) + "..."
 		}
 	}
 

@@ -600,7 +600,8 @@ func humanizeRobotRegistryName(name string) string {
 			words[i] = initialism
 			continue
 		}
-		words[i] = strings.ToUpper(word[:1]) + word[1:]
+		r := []rune(word)
+		words[i] = strings.ToUpper(string(r[0])) + string(r[1:])
 	}
 	return strings.Join(words, " ")
 }

@@ -124,6 +124,7 @@ func GetDashboard() (*DashboardOutput, error) {
 	// Alerts (best-effort)
 	alertCfg := alertConfigForProject(cfg, wd)
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
+	alertSummary := alerts.GetGlobalTracker().Summary()
 	for _, a := range activeAlerts {
 		output.Alerts = append(output.Alerts, AlertInfo{
 			ID:         a.ID,
@@ -140,7 +141,9 @@ func GetDashboard() (*DashboardOutput, error) {
 		})
 	}
 	output.AlertSummary = &AlertSummaryInfo{
-		TotalActive: len(activeAlerts),
+		TotalActive: alertSummary.TotalActive,
+		BySeverity:  alertSummary.BySeverity,
+		ByType:      alertSummary.ByType,
 	}
 
 	// Conflicts and file changes (best-effort)

@@ -1117,22 +1117,22 @@ func TestDetectAgentFromCommandEdgeCases(t *testing.T) {
 		{"claude bare", "claude", AgentClaude},
 		{"claude with args", "claude --model opus", AgentClaude},
 		{"claude path", "/usr/bin/claude", AgentClaude},
-		{"cc alias", "cc", AgentClaude},
-		{"cc with args", "cc --resume", AgentClaude},
+		{"cc alias", "cc", AgentUser},
+		{"cc with args", "cc --resume", AgentUser},
 
 		// Codex variants
 		{"codex bare", "codex", AgentCodex},
 		{"codex with args", "codex --model gpt4o", AgentCodex},
 		{"codex path", "/opt/codex", AgentCodex},
-		{"cod alias", "cod", AgentCodex},
-		{"cod with args", "cod --dangerously-bypass", AgentCodex},
+		{"cod alias", "cod", AgentUser},
+		{"cod with args", "cod --dangerously-bypass", AgentUser},
 
 		// Gemini variants
 		{"gemini bare", "gemini", AgentGemini},
 		{"gemini with args", "gemini --model flash", AgentGemini},
 		{"gemini path", "/bin/gemini", AgentGemini},
-		{"gmi alias", "gmi", AgentGemini},
-		{"gmi with args", "gmi start", AgentGemini},
+		{"gmi alias", "gmi", AgentUser},
+		{"gmi with args", "gmi start", AgentUser},
 
 		// Cursor
 		{"cursor bare", "cursor", AgentCursor},

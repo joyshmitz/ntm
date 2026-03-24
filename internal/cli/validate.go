@@ -275,7 +275,7 @@ func validateMainConfigReferences(cfg *config.Config, result *ValidationResult, 
 	// Check palette file if specified
 	if cfg.PaletteFile != "" {
 		expanded := config.ExpandHome(cfg.PaletteFile)
-		if !fileExists(expanded) {
+		if !regularFileExists(expanded) {
 			result.Warnings = append(result.Warnings, ValidationIssue{
 				Field:   "palette_file",
 				Message: fmt.Sprintf("file does not exist: %s", expanded),
@@ -346,11 +346,17 @@ func validateProjectConfig(path string, result *ValidationResult, fix bool) {
 	}
 
 	ntmDir := filepath.Dir(path)
+	projectDir := filepath.Dir(ntmDir)
 
 	// Check palette file reference
 	if cfg.Palette.File != "" {
-		palettePath := filepath.Join(ntmDir, cfg.Palette.File)
-		if !fileExists(palettePath) {
+		palettePath, err := config.ResolveProjectPalettePath(projectDir, cfg)
+		if err != nil {
+			result.Warnings = append(result.Warnings, ValidationIssue{
+				Field:   "palette.file",
+				Message: err.Error(),
+			})
+		} else if !regularFileExists(palettePath) {
 			result.Warnings = append(result.Warnings, ValidationIssue{
 				Field:   "palette.file",
 				Message: fmt.Sprintf("file does not exist: %s", palettePath),
@@ -360,7 +366,14 @@ func validateProjectConfig(path string, result *ValidationResult, fix bool) {
 
 	// Check templates directory
 	if cfg.Templates.Dir != "" {
-		templatesPath := filepath.Join(ntmDir, cfg.Templates.Dir)
+		templatesPath, err := config.ResolveProjectTemplatesDir(projectDir, cfg)
+		if err != nil {
+			result.Warnings = append(result.Warnings, ValidationIssue{
+				Field:   "templates.dir",
+				Message: err.Error(),
+			})
+			return
+		}
 		if !dirExists(templatesPath) {
 			result.Warnings = append(result.Warnings, ValidationIssue{
 				Field:   "templates.dir",
@@ -374,6 +387,11 @@ func validateProjectConfig(path string, result *ValidationResult, fix bool) {
 			}
 		}
 	}
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // validateRecipesFile validates a recipes.toml file.

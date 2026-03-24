@@ -3621,6 +3621,41 @@ func TestConflictEvents_FeedToJournal(t *testing.T) {
 	}
 }
 
+func TestNewBusAttentionEvent_RotationStarted(t *testing.T) {
+	t.Parallel()
+
+	att := mustBusAttentionEvent(t, ntmevents.NewRotationStartedEvent("proj", "cod-1", 91.0, "architect"))
+
+	if att.Type != EventTypeAgentCompacted {
+		t.Fatalf("Type = %q, want %q", att.Type, EventTypeAgentCompacted)
+	}
+	if att.Severity != SeverityInfo {
+		t.Fatalf("Severity = %q, want %q", att.Severity, SeverityInfo)
+	}
+	if !strings.Contains(att.Summary, "rotation started for cod-1") {
+		t.Fatalf("Summary = %q, want started agent id", att.Summary)
+	}
+}
+
+func TestNewBusAttentionEvent_RotationFailedFallsBackToNewAgent(t *testing.T) {
+	t.Parallel()
+
+	att := mustBusAttentionEvent(t, ntmevents.NewRotationCompletedEvent("proj", "", "cod-2", 0, false, "handoff timeout"))
+
+	if att.Type != EventTypeAgentError {
+		t.Fatalf("Type = %q, want %q", att.Type, EventTypeAgentError)
+	}
+	if att.Actionability != ActionabilityActionRequired {
+		t.Fatalf("Actionability = %q, want %q", att.Actionability, ActionabilityActionRequired)
+	}
+	if att.Severity != SeverityError {
+		t.Fatalf("Severity = %q, want %q", att.Severity, SeverityError)
+	}
+	if !strings.Contains(att.Summary, "rotation failed for cod-2") {
+		t.Fatalf("Summary = %q, want fallback agent id", att.Summary)
+	}
+}
+
 func TestConflictEvents_PartialObservability(t *testing.T) {
 	t.Parallel()
 
