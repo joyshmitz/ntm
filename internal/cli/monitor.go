@@ -44,10 +44,24 @@ func runMonitor(session string) error {
 		return fmt.Errorf("loading manifest: %w", err)
 	}
 
-	// Ensure session exists
-	if !tmux.SessionExists(session) {
-		// If session is gone, clean up and exit
-		fmt.Fprintf(os.Stderr, "Session '%s' missing on monitor start (%s)\n", session, detectSessionTerminationCause(session))
+	// Ensure session exists (retry a few times for transient tmux failures)
+	const startupRetries = 3
+	const startupRetryDelay = 2 * time.Second
+	sessionFound := false
+	for i := 0; i < startupRetries; i++ {
+		if tmux.SessionExists(session) {
+			sessionFound = true
+			break
+		}
+		if i < startupRetries-1 {
+			fmt.Fprintf(os.Stderr, "Session '%s' not found on startup attempt %d/%d, retrying in %v...\n",
+				session, i+1, startupRetries, startupRetryDelay)
+			time.Sleep(startupRetryDelay)
+		}
+	}
+	if !sessionFound {
+		fmt.Fprintf(os.Stderr, "Session '%s' missing after %d startup checks (%s)\n",
+			session, startupRetries, detectSessionTerminationCause(session))
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookSessionEnded,
 			session,
@@ -58,7 +72,7 @@ func runMonitor(session string) error {
 				"project_dir": manifest.ProjectDir,
 			},
 		))
-		_ = resilience.DeleteManifest(session)
+		// Don't delete manifest on startup failure — session may be transiently unavailable
 		return nil
 	}
 
@@ -139,7 +153,9 @@ func runMonitor(session string) error {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	// Poll for session existence periodically to exit if session is killed
+	// Poll for session existence periodically to exit if session is killed.
+	// Use consecutive-miss counting to tolerate transient tmux failures.
+	const maxMisses = 5 // ~25 seconds at 5s interval before giving up
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -150,6 +166,7 @@ func runMonitor(session string) error {
 
 	fmt.Printf("Monitoring session '%s' for resilience...\n", session)
 
+	missCount := 0
 	for {
 		select {
 		case <-sigChan:
@@ -160,7 +177,15 @@ func runMonitor(session string) error {
 			return nil
 		case <-ticker.C:
 			if !tmux.SessionExists(session) {
-				fmt.Printf("Session ended unexpectedly, stopping monitor (%s)\n", detectSessionTerminationCause(session))
+				missCount++
+				cause := detectSessionTerminationCause(session)
+				if missCount < maxMisses {
+					fmt.Fprintf(os.Stderr, "Session '%s' not found (%d/%d consecutive misses, cause: %s)\n",
+						session, missCount, maxMisses, cause)
+					continue
+				}
+				// Confirmed permanently gone after maxMisses consecutive failures
+				fmt.Printf("Session ended (%d consecutive misses), stopping monitor (%s)\n", missCount, cause)
 				events.DefaultEmitter().Emit(events.NewWebhookEvent(
 					events.WebhookSessionEnded,
 					session,
@@ -175,6 +200,11 @@ func runMonitor(session string) error {
 				generateEndSessionSummary(session, lastOutputs, manifest)
 				_ = resilience.DeleteManifest(session)
 				return nil
+			}
+			// Session found — reset miss counter
+			if missCount > 0 {
+				fmt.Printf("Session '%s' recovered after %d miss(es)\n", session, missCount)
+				missCount = 0
 			}
 		case <-snapshotTicker.C:
 			captureSessionOutputs(session, lastOutputs)

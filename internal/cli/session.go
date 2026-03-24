@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -1142,6 +1143,15 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	// Directory info
 	fmt.Fprintf(w, "  %s%s%s Directory:%s %s%s\n", subtext, ic.Folder, reset, text, dir, reset)
 	fmt.Fprintf(w, "  %s%s%s Panes:%s    %d%s\n", subtext, ic.Pane, reset, text, len(panes), reset)
+
+	// Monitor status (best-effort check via pgrep)
+	monitorLabel := "not running"
+	monitorColor := subtext
+	if isMonitorAlive(session) {
+		monitorLabel = "running"
+		monitorColor = success
+	}
+	fmt.Fprintf(w, "  %s Monitor:%s %s%s%s\n", subtext, reset, monitorColor, monitorLabel, reset)
 	fmt.Fprintln(w)
 
 	maxTextWidth := maxInt(width-12, 20)
@@ -1756,4 +1766,12 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// isMonitorAlive checks whether the resilience monitor process is running
+// for the given session by looking for the "internal-monitor <session>" process.
+func isMonitorAlive(session string) bool {
+	// pgrep -f searches the full command line
+	err := exec.Command("pgrep", "-f", "ntm internal-monitor "+session).Run()
+	return err == nil
 }
