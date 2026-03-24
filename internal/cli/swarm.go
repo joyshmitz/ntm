@@ -478,9 +478,11 @@ func writePlanToFile(plan *swarm.SwarmPlan, path string) error {
 
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath) // best-effort cleanup
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath) // best-effort cleanup
 		return err
 	}
 	return nil

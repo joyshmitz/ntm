@@ -138,11 +138,17 @@ func (s *Server) handleSafetyBlockedV1(w http.ResponseWriter, r *http.Request) {
 	if h := r.URL.Query().Get("hours"); h != "" {
 		if v, err := strconv.Atoi(h); err == nil && v > 0 {
 			hours = v
+			if hours > 720 { // Cap at 30 days
+				hours = 720
+			}
 		}
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if v, err := strconv.Atoi(l); err == nil && v > 0 {
 			limit = v
+			if limit > 10000 {
+				limit = 10000
+			}
 		}
 	}
 
@@ -1270,13 +1276,21 @@ func (s *Server) handleApprovalRequestV1(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Check if this action requires SLB approval
-	p, _ := policy.LoadOrDefault()
+	p, policyErr := policy.LoadOrDefault()
+	if policyErr != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"failed to load safety policy", nil, reqID)
+		return
+	}
 	slbRequired := p.NeedsSLBApproval(req.Action)
 
-	// Default TTL
+	// Default TTL (capped at 24 hours to prevent unbounded memory growth)
 	ttl := 3600
 	if req.TTLSeconds > 0 {
 		ttl = req.TTLSeconds
+		if ttl > 86400 {
+			ttl = 86400
+		}
 	}
 
 	approvalsLock.Lock()
