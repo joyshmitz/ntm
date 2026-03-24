@@ -732,11 +732,11 @@ func UnmarshalBdList[T any](output string) ([]T, error) {
 	var wrapped brListEnvelope[T]
 	if err := json.Unmarshal([]byte(trimmed), &wrapped); err == nil {
 		switch {
-		case wrapped.Issues != nil:
+		case len(wrapped.Issues) > 0:
 			return wrapped.Issues, nil
-		case wrapped.Beads != nil:
+		case len(wrapped.Beads) > 0:
 			return wrapped.Beads, nil
-		case wrapped.Items != nil:
+		case len(wrapped.Items) > 0:
 			return wrapped.Items, nil
 		}
 	}
