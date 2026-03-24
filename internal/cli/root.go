@@ -627,11 +627,12 @@ Shell Integration:
 			}
 
 			if sessionName != "" {
-				resolvedProjectKey, err := resolveAgentMailProjectKeyWithPreference(sessionName, sessionExplicit)
+				resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(sessionName, sessionExplicit)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
+				sessionName = resolvedSession
 				projectKey = resolvedProjectKey
 			}
 
@@ -943,6 +944,7 @@ Shell Integration:
 			opts := pipeline.PipelineRunOptions{
 				WorkflowFile: robotPipelineRun,
 				Session:      robotPipelineSession,
+				ProjectDir:   resolveProjectDirForSession(robotPipelineSession, true),
 				Variables:    vars,
 				DryRun:       robotPipelineDryRun,
 				Background:   robotPipelineBG,
@@ -1046,7 +1048,7 @@ Shell Integration:
 			opts := robot.IsWorkingOptions{
 				Session:       robotIsWorking,
 				Panes:         panes,
-				LinesCaptured: robotLines,
+				LinesCaptured: robotIsWorkingLines(cmd),
 				Verbose:       robotIsWorkingVerbose,
 			}
 			if err := robot.PrintIsWorking(opts); err != nil {
@@ -1062,14 +1064,10 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
 				os.Exit(3)
 			}
-			lines := robotLines
-			if !cmd.Flags().Changed("lines") {
-				lines = 50 // Default to 50 lines for health check
-			}
 			opts := robot.AgentHealthOptions{
 				Session:       robotAgentHealth,
 				Panes:         panes,
-				LinesCaptured: lines,
+				LinesCaptured: robotAgentHealthLines(cmd),
 				IncludeCaut:   !robotAgentHealthNoCaut,
 				Verbose:       robotAgentHealthVerbose,
 			}
@@ -1092,7 +1090,7 @@ Shell Integration:
 				Force:         robotSmartRestartForce,
 				DryRun:        robotSmartRestartDryRun,
 				Prompt:        robotSmartRestartPrompt,
-				LinesCaptured: robotLines,
+				LinesCaptured: robotSmartRestartLines(cmd),
 				Verbose:       robotSmartRestartVerbose,
 			}
 			if err := robot.PrintSmartRestart(opts); err != nil {
@@ -1135,10 +1133,6 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-			lines := robotLines
-			if !cmd.Flags().Changed("lines") {
-				lines = 1000 // Default to 1000 lines for monitoring
-			}
 			config := robot.MonitorConfig{
 				Session:        robotMonitor,
 				Panes:          panes,
@@ -1149,7 +1143,7 @@ Shell Integration:
 				AlertThreshold: alertThresh,
 				IncludeCaut:    robotMonitorIncludeCaut,
 				OutputFile:     robotMonitorOutput,
-				LinesCaptured:  lines,
+				LinesCaptured:  robotMonitorLines(cmd),
 			}
 			if err := robot.PrintMonitor(config); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -2845,7 +2839,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&profileStartup, "profile-startup", false, "Enable startup profiling (outputs timing data)")
 
 	// Robot flags for AI agents - state inspection commands
-	rootCmd.Flags().BoolVar(&robotHelp, "robot-help", false, "Show comprehensive AI agent integration guide with examples (JSON)")
+	rootCmd.Flags().BoolVar(&robotHelp, "robot-help", false, "Show comprehensive human-readable AI agent integration guide with examples")
 	rootCmd.Flags().BoolVar(&robotStatus, "robot-status", false, "Get tmux sessions, panes, agent states. Start here. Example: ntm --robot-status")
 	rootCmd.Flags().BoolVar(&robotVersion, "robot-version", false, "Get ntm version, commit, build info (JSON). Example: ntm --robot-version")
 	rootCmd.Flags().BoolVar(&robotCapabilities, "robot-capabilities", false, "Get all available robot commands with parameters and descriptions (JSON). Machine-discoverable API")
@@ -2853,7 +2847,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotPlan, "robot-plan", false, "Get bv execution plan with parallelizable tracks (JSON). Example: ntm --robot-plan")
 	rootCmd.Flags().BoolVar(&robotSnapshot, "robot-snapshot", false, "Unified state: sessions + beads + alerts + mail. Use --since for delta. Example: ntm --robot-snapshot")
 	rootCmd.Flags().StringVar(&robotSince, "since", "", "RFC3339 timestamp for delta snapshot. Optional with --robot-snapshot. Example: --since=2025-12-15T10:00:00Z")
-	rootCmd.Flags().BoolVar(&robotEvents, "robot-events", false, "Stream attention events since cursor. Use for raw replay/feed. Example: ntm --robot-events --since-cursor=42 --limit=50")
+	rootCmd.Flags().BoolVar(&robotEvents, "robot-events", false, "Stream attention events since cursor. Use for raw replay/feed. Example: ntm --robot-events --since-cursor=42 --events-limit=50")
 	rootCmd.Flags().Int64Var(&robotEventsSinceCursor, "since-cursor", 0, "Cursor position to replay from. Optional with --robot-events. Example: --since-cursor=42")
 	rootCmd.Flags().IntVar(&robotEventsLimit, "events-limit", 100, "Max events to return. Optional with --robot-events. Example: --events-limit=50")
 	rootCmd.Flags().StringVar(&robotEventsIncident, "events-incident", "", "Durable incident ID for bounded historical replay. Optional with --robot-events. Example: --events-incident=inc-20260322-abc")
@@ -2864,7 +2858,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotEventsSession, "events-session", "", "Filter by session name. Optional with --robot-events. Example: --events-session=myproject")
 	rootCmd.Flags().StringVar(&robotEventsActionability, "events-actionability", "", "Filter by actionability level. Optional with --robot-events. Values: action_required, interesting, background")
 	rootCmd.Flags().StringVar(&robotProfile, "profile", "", "Attention-feed filter profile. Applies to --robot-events, --robot-attention, --robot-digest, --robot-wait. Values: operator, debug, minimal, alerts")
-	rootCmd.Flags().BoolVar(&robotAttention, "robot-attention", false, "The one obvious tending primitive: wait for attention, then return digest. Example: ntm --robot-attention --since-cursor=42")
+	rootCmd.Flags().BoolVar(&robotAttention, "robot-attention", false, "The one obvious tending primitive: wait for attention, then return digest. Example: ntm --robot-attention --attention-cursor=42")
 	rootCmd.Flags().BoolVar(&robotDigest, "robot-digest", false, "Non-blocking attention digest. Returns counts and top items without waiting. Example: ntm --robot-digest --profile=minimal")
 	rootCmd.Flags().Int64Var(&robotAttentionSinceCursor, "attention-cursor", 0, "Cursor position to wait/digest from. Optional with --robot-attention. Example: --attention-cursor=42")
 	rootCmd.Flags().StringVar(&robotAttentionSession, "attention-session", "", "Filter to specific session. Optional with --robot-attention. Example: --attention-session=myproject")
@@ -2876,8 +2870,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotWatchBeadID, "bead", "", "Bead ID for --robot-watch-bead. Example: --bead=bd-abc123")
 	rootCmd.Flags().StringVar(&robotErrors, "robot-errors", "", "Filter pane output to show only errors. Required: SESSION. Example: ntm --robot-errors=myproject --lines=100")
 	rootCmd.Flags().StringVar(&robotErrorsSince, "errors-since", "", "Filter to errors from last duration. Optional with --robot-errors. Example: --errors-since=5m")
-	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Lines to capture per pane. Optional with --robot-tail, --robot-errors. Example: --lines=100")
-	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter to specific pane indices. Optional with --robot-tail, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-is-working. Example: --panes=1,2")
+	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Lines to capture per pane. Optional with --robot-tail, --robot-errors, --robot-watch-bead, --robot-is-working, --robot-agent-health, --robot-smart-restart, --robot-monitor. Example: --lines=100")
+	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter to specific pane indices. Optional with --robot-tail, --robot-watch-bead, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-is-working, --robot-agent-health, --robot-smart-restart, and --robot-monitor. Example: --panes=1,2")
 	rootCmd.Flags().StringVar(&robotIsWorking, "robot-is-working", "", "Check if agents are working. Returns work state with recommendations. Required: SESSION. Example: ntm --robot-is-working=myproject --panes=2,3")
 	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "is-working-verbose", false, "Include raw sample output in --robot-is-working response. Example: --is-working-verbose")
 	rootCmd.Flags().StringVar(&robotAgentHealth, "robot-agent-health", "", "Comprehensive agent health check combining local state and provider usage. Required: SESSION. Example: ntm --robot-agent-health=myproject --panes=2,3")
@@ -2970,8 +2964,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotSendMsgFile, "msg-file", "", "Read message content from file (use with --robot-send)")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "enter", true, "Send Enter after pasting message (default: true). Use --enter=false to paste without submitting")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "submit", true, "Alias for --enter")
-	rootCmd.Flags().BoolVar(&robotSendAll, "all", false, "Include user pane (default: agents only). Optional with --robot-send, --robot-interrupt")
-	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider. Works with --robot-send, --robot-ack, --robot-interrupt")
+	rootCmd.Flags().BoolVar(&robotSendAll, "all", false, "Include user pane (default: agents only). Optional with --robot-send, --robot-interrupt, and --robot-support-bundle")
+	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider. Works with --robot-send, --robot-ack, --robot-interrupt, and --robot-errors")
 	rootCmd.Flags().StringVar(&robotSendExclude, "exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-send. Example: --exclude=0,3")
 	rootCmd.Flags().IntVar(&robotSendDelay, "delay-ms", 0, "Delay between sends (ms). Optional with --robot-send. Example: --delay-ms=500 for 0.5s between panes")
 
@@ -3011,8 +3005,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotRecipes, "robot-recipes", false, "List available spawn recipes/presets (JSON). Use with --robot-spawn --spawn-preset")
 
 	// Robot-schema flag for JSON Schema generation
-	rootCmd.Flags().StringVar(&robotSchema, "robot-schema", "", "Generate JSON Schema for response types. Required: TYPE (status, send, spawn, interrupt, tail, watch_bead, ack, snapshot, ensemble, ensemble_spawn, proxy_status, all)")
-	rootCmd.Flags().StringVar(&robotSchema, "schema", "", "Alias for --robot-schema. Generate JSON Schema for response types")
+	rootCmd.Flags().StringVar(&robotSchema, "robot-schema", "", "Generate JSON Schema for a robot response type. Required: TYPE. Use TYPE=all for every available schema.")
+	rootCmd.Flags().StringVar(&robotSchema, "schema", "", "Alias for --robot-schema. Generate JSON Schema for a robot response type")
 
 	// Robot-mail flag for Agent Mail state
 	rootCmd.Flags().BoolVar(&robotMail, "robot-mail", false, "Get Agent Mail inbox/outbox state (JSON). Shows pending messages and coordination status")
@@ -4396,6 +4390,32 @@ func resolveRobotFormat(cfg *config.Config) {
 	} else {
 		robot.OutputFormat = robot.FormatAuto
 	}
+}
+
+func robotLinesOrDefault(cmd *cobra.Command, fallback int) int {
+	if cmd == nil {
+		return fallback
+	}
+	if !cmd.Flags().Changed("lines") {
+		return fallback
+	}
+	return robotLines
+}
+
+func robotIsWorkingLines(cmd *cobra.Command) int {
+	return robotLinesOrDefault(cmd, robot.DefaultIsWorkingOptions().LinesCaptured)
+}
+
+func robotAgentHealthLines(cmd *cobra.Command) int {
+	return robotLinesOrDefault(cmd, robot.DefaultAgentHealthOptions().LinesCaptured)
+}
+
+func robotSmartRestartLines(cmd *cobra.Command) int {
+	return robotLinesOrDefault(cmd, robot.DefaultSmartRestartOptions().LinesCaptured)
+}
+
+func robotMonitorLines(cmd *cobra.Command) int {
+	return robotLinesOrDefault(cmd, robot.DefaultMonitorConfig().LinesCaptured)
 }
 
 // resolveRobotVerbosity determines the robot verbosity profile from CLI flag, env var, or config.

@@ -183,14 +183,34 @@ func resolveAgentMailProjectKey(session string) (string, error) {
 }
 
 func resolveAgentMailProjectKeyWithPreference(session string, preferSession bool) (string, error) {
+	_, projectKey, err := resolveAgentMailScopeWithPreference(session, preferSession)
+	return projectKey, err
+}
+
+func resolveAgentMailScope(session string) (string, string, error) {
+	return resolveAgentMailScopeWithPreference(session, true)
+}
+
+func resolveAgentMailScopeWithPreference(session string, preferSession bool) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
-		if err := tmux.ValidateSessionName(session); err != nil {
-			return "", fmt.Errorf("invalid session name: %w", err)
+		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+		if err != nil {
+			return "", "", err
 		}
-		return resolveProjectDirForSession(session, preferSession), nil
+		session = resolved
+		projectKey := resolveProjectDirForSession(session, preferSession)
+		if projectKey == "" {
+			return "", "", fmt.Errorf("getting project root failed")
+		}
+		return session, projectKey, nil
 	}
-	return GetProjectRoot(), nil
+
+	projectKey := GetProjectRoot()
+	if projectKey == "" {
+		return "", "", fmt.Errorf("getting project root failed")
+	}
+	return "", projectKey, nil
 }
 
 // runMailInbox aggregates messages across agents and writes to cmd output.
@@ -214,12 +234,9 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 		}
 	}
 
-	projectKey, err := resolveAgentMailProjectKeyWithPreference(session, preferSession)
+	session, projectKey, err := resolveAgentMailScopeWithPreference(session, preferSession)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	if client == nil {
@@ -432,12 +449,9 @@ type markSummary struct {
 }
 
 func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, ids []int, urgent bool, fromAgent string, all bool, limit int) error {
-	projectKey, err := resolveAgentMailProjectKey(session)
+	_, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	client := newAgentMailClient(projectKey)
@@ -538,6 +552,12 @@ func runMailMark(cmd *cobra.Command, session, agent string, action mailAction, i
 
 // runMailSendOverseer sends a Human Overseer message via the Agent Mail HTTP API.
 func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subject, body, threadID string, all bool) error {
+	resolvedSession, projectKey, err := resolveAgentMailScope(session)
+	if err != nil {
+		return err
+	}
+	session = resolvedSession
+
 	// Session check is optional - we primarily care about the project
 	// But it's useful to verify the user is in the right context
 	if session != "" {
@@ -546,14 +566,6 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 				fmt.Fprintf(os.Stderr, "Warning: tmux session '%s' not found (continuing anyway)\n", session)
 			}
 		}
-	}
-
-	projectKey, err := resolveAgentMailProjectKey(session)
-	if err != nil {
-		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	// Create Agent Mail client

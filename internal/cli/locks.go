@@ -80,12 +80,9 @@ type LocksResult struct {
 }
 
 func runLocks(session string, allAgents bool) error {
-	projectKey, err := resolveAgentMailProjectKey(session)
+	session, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
@@ -274,12 +271,9 @@ type ForceReleaseResult struct {
 }
 
 func runForceRelease(session string, reservationID int, note string, notify, skipConfirm bool) error {
-	projectKey, err := resolveAgentMailProjectKey(session)
+	session, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
@@ -432,12 +426,9 @@ func runRenewLocks(session string, extendMinutes int) error {
 		return fmt.Errorf("extend time must be at least 1 minute")
 	}
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	session, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)

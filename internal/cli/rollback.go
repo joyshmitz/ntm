@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -57,15 +58,22 @@ Examples:
 				return fmt.Errorf("checkpoint reference required (use --last or provide checkpoint ID)")
 			}
 
-			// Get working directory
-			workDir, err := getSessionWorkDir(session)
-			if err != nil && !noGit {
-				return fmt.Errorf("getting session working directory: %w", err)
+			storageSession, liveSession, err := resolveRollbackSessions(session, cmd.OutOrStdout(), !noGit)
+			if err != nil {
+				return err
+			}
+
+			workDir := ""
+			if !noGit {
+				workDir, err = getSessionWorkDir(liveSession)
+				if err != nil {
+					return fmt.Errorf("getting session working directory: %w", err)
+				}
 			}
 
 			// Load checkpoint
 			capturer := checkpoint.NewCapturer()
-			cp, err := capturer.ParseCheckpointRef(session, checkpointRef)
+			cp, err := capturer.ParseCheckpointRef(storageSession, checkpointRef)
 			if err != nil {
 				return fmt.Errorf("finding checkpoint: %w", err)
 			}
@@ -104,6 +112,21 @@ Examples:
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation prompt")
 
 	return cmd
+}
+
+func resolveRollbackSessions(session string, w io.Writer, requireLive bool) (string, string, error) {
+	storageSession, err := resolveCheckpointStorageSessionArg(session)
+	if err != nil {
+		return "", "", err
+	}
+	if !requireLive {
+		return storageSession, "", nil
+	}
+	liveSession, err := resolveCheckpointLiveSessionArg(session, w)
+	if err != nil {
+		return "", "", err
+	}
+	return storageSession, liveSession, nil
 }
 
 func showRollbackPreview(cp *checkpoint.Checkpoint, workDir string, noStash, noGit bool) error {

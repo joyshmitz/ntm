@@ -71,12 +71,9 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 		return fmt.Errorf("TTL must be at least 1 minute")
 	}
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	session, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)

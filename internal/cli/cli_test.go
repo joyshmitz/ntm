@@ -15,6 +15,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
@@ -80,6 +81,50 @@ func TestResolveRobotFormat_EnvFallback(t *testing.T) {
 
 	if robot.OutputFormat != robot.FormatTOON {
 		t.Errorf("OutputFormat from env = %q, want %q", robot.OutputFormat, robot.FormatTOON)
+	}
+}
+
+func TestRobotLineDefaultsUseCommandContracts(t *testing.T) {
+	resetFlags()
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Int("lines", 20, "")
+
+	if got := robotIsWorkingLines(cmd); got != robot.DefaultIsWorkingOptions().LinesCaptured {
+		t.Fatalf("robotIsWorkingLines() = %d, want %d", got, robot.DefaultIsWorkingOptions().LinesCaptured)
+	}
+	if got := robotAgentHealthLines(cmd); got != robot.DefaultAgentHealthOptions().LinesCaptured {
+		t.Fatalf("robotAgentHealthLines() = %d, want %d", got, robot.DefaultAgentHealthOptions().LinesCaptured)
+	}
+	if got := robotSmartRestartLines(cmd); got != robot.DefaultSmartRestartOptions().LinesCaptured {
+		t.Fatalf("robotSmartRestartLines() = %d, want %d", got, robot.DefaultSmartRestartOptions().LinesCaptured)
+	}
+	if got := robotMonitorLines(cmd); got != robot.DefaultMonitorConfig().LinesCaptured {
+		t.Fatalf("robotMonitorLines() = %d, want %d", got, robot.DefaultMonitorConfig().LinesCaptured)
+	}
+}
+
+func TestRobotLineDefaultsRespectExplicitOverride(t *testing.T) {
+	resetFlags()
+	robotLines = 37
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Int("lines", 20, "")
+	if err := cmd.Flags().Set("lines", "37"); err != nil {
+		t.Fatalf("set lines flag: %v", err)
+	}
+
+	if got := robotIsWorkingLines(cmd); got != 37 {
+		t.Fatalf("robotIsWorkingLines() = %d, want 37", got)
+	}
+	if got := robotAgentHealthLines(cmd); got != 37 {
+		t.Fatalf("robotAgentHealthLines() = %d, want 37", got)
+	}
+	if got := robotSmartRestartLines(cmd); got != 37 {
+		t.Fatalf("robotSmartRestartLines() = %d, want 37", got)
+	}
+	if got := robotMonitorLines(cmd); got != 37 {
+		t.Fatalf("robotMonitorLines() = %d, want 37", got)
 	}
 }
 
@@ -165,6 +210,61 @@ func TestResolveMessageScopeFallsBackToProjectRoot(t *testing.T) {
 
 func TestResolveMessageScopeRejectsInvalidSessionName(t *testing.T) {
 	_, _, err := resolveMessageScope("../escape")
+	if err == nil {
+		t.Fatal("expected invalid session error")
+	}
+	if !strings.Contains(err.Error(), "invalid session name") {
+		t.Fatalf("expected invalid session error, got %v", err)
+	}
+}
+
+func TestResolvePipelineProjectDirForSessionUsesSessionProjectDir(t *testing.T) {
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, err := resolvePipelineProjectDirForSession("mysession")
+	if err != nil {
+		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+}
+
+func TestResolvePipelineProjectDirForSessionFallsBackToProjectRoot(t *testing.T) {
+	projectDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, err := resolvePipelineProjectDirForSession("")
+	if err != nil {
+		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+}
+
+func TestResolvePipelineProjectDirForSessionRejectsInvalidSessionName(t *testing.T) {
+	_, err := resolvePipelineProjectDirForSession("../escape")
 	if err == nil {
 		t.Fatal("expected invalid session error")
 	}
@@ -420,7 +520,7 @@ func TestResolveEnsembleSessionRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
-func TestResolvePipelineProjectDirFallsBackToProjectRoot(t *testing.T) {
+func TestResolvePipelineProjectDirForSessionFallsBackToProjectRootFromNestedDir(t *testing.T) {
 	projectDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
 		t.Fatalf("mkdir ntm root: %v", err)
@@ -439,9 +539,9 @@ func TestResolvePipelineProjectDirFallsBackToProjectRoot(t *testing.T) {
 	}
 	defer os.Chdir(oldWd)
 
-	got, err := resolvePipelineProjectDir()
+	got, err := resolvePipelineProjectDirForSession("")
 	if err != nil {
-		t.Fatalf("resolvePipelineProjectDir() error = %v", err)
+		t.Fatalf("resolvePipelineProjectDirForSession() error = %v", err)
 	}
 	if got != projectDir {
 		t.Fatalf("project dir = %q, want %q", got, projectDir)
@@ -675,6 +775,30 @@ func TestResolveCheckpointStorageSessionArgResolvesOfflinePrefixMatch(t *testing
 	}
 	if got != "mysession" {
 		t.Fatalf("session = %q, want %q", got, "mysession")
+	}
+}
+
+func TestResolveRollbackSessionsNormalizesExplicitPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	fullSession := "rollbackprefixsession"
+	prefix := "rollbackprefix"
+	workDir := t.TempDir()
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, workDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
+
+	storageSession, liveSession, err := resolveRollbackSessions(prefix, nil, true)
+	if err != nil {
+		t.Fatalf("resolveRollbackSessions() error = %v", err)
+	}
+	if storageSession != fullSession {
+		t.Fatalf("storage session = %q, want %q", storageSession, fullSession)
+	}
+	if liveSession != fullSession {
+		t.Fatalf("live session = %q, want %q", liveSession, fullSession)
 	}
 }
 

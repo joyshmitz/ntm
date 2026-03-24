@@ -18,6 +18,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/startup"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 type mailStub struct {
@@ -908,6 +910,47 @@ func TestResolveAgentMailProjectKeyWithPreferenceUsesCWDForInferredSession(t *te
 	}
 	if projectKey != cwdRepo {
 		t.Fatalf("resolveAgentMailProjectKeyWithPreference() = %q, want cwd repo %q", projectKey, cwdRepo)
+	}
+}
+
+func TestResolveAgentMailScopeWithPreferenceNormalizesExplicitPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	fullSession := "mailscopeprefixsession"
+	prefix := "mailscopeprefix"
+	workDir := t.TempDir()
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, workDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
+
+	projectsBase := t.TempDir()
+	projectKey := filepath.Join(projectsBase, fullSession)
+	if err := os.MkdirAll(projectKey, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(prefix, true)
+	if err != nil {
+		t.Fatalf("resolveAgentMailScopeWithPreference() error = %v", err)
+	}
+	if resolvedSession != fullSession {
+		t.Fatalf("resolved session = %q, want %q", resolvedSession, fullSession)
+	}
+	if resolvedProjectKey != projectKey {
+		t.Fatalf("resolved project key = %q, want %q", resolvedProjectKey, projectKey)
 	}
 }
 

@@ -117,11 +117,6 @@ Examples:
 				return fmt.Errorf("--session is required")
 			}
 
-			projectDir, err := resolvePipelineProjectDir()
-			if err != nil {
-				return err
-			}
-
 			if err := tmux.EnsureInstalled(); err != nil {
 				return err
 			}
@@ -131,6 +126,11 @@ Examples:
 				return err
 			}
 			session = res.Session
+
+			projectDir, err := resolvePipelineProjectDirForSession(session)
+			if err != nil {
+				return err
+			}
 
 			// Parse variables
 			vars := make(map[string]interface{})
@@ -160,6 +160,7 @@ Examples:
 				opts := pipeline.PipelineRunOptions{
 					WorkflowFile: workflowPath,
 					Session:      session,
+					ProjectDir:   projectDir,
 					Variables:    vars,
 					DryRun:       dryRun,
 					Background:   background,
@@ -406,7 +407,19 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runID := args[0]
 
-			projectDir, err := resolvePipelineProjectDir()
+			resolvedSession := strings.TrimSpace(session)
+			if resolvedSession != "" {
+				if err := tmux.EnsureInstalled(); err != nil {
+					return err
+				}
+				res, err := resolvePipelineSession(resolvedSession, cmd.OutOrStdout())
+				if err != nil {
+					return err
+				}
+				resolvedSession = res.Session
+			}
+
+			projectDir, err := resolvePipelineProjectDirForSession(resolvedSession)
 			if err != nil {
 				return err
 			}
@@ -425,10 +438,10 @@ Examples:
 				return fmt.Errorf("failed to load pipeline state: %w", err)
 			}
 
-			if session == "" {
-				session = state.Session
+			if resolvedSession == "" {
+				resolvedSession = state.Session
 			}
-			if session == "" {
+			if resolvedSession == "" {
 				return fmt.Errorf("--session is required (or state must contain session)")
 			}
 
@@ -436,7 +449,7 @@ Examples:
 				return err
 			}
 
-			res, err := resolvePipelineSession(session, cmd.OutOrStdout())
+			res, err := resolvePipelineSession(resolvedSession, cmd.OutOrStdout())
 			if err != nil {
 				return err
 			}
@@ -629,7 +642,7 @@ Examples:
 			}
 
 			// Get project directory
-			projectDir, err := resolvePipelineProjectDir()
+			projectDir, err := resolvePipelineProjectDirForSession("")
 			if err != nil {
 				return err
 			}
@@ -797,7 +810,19 @@ Examples:
 	return cmd
 }
 
-func resolvePipelineProjectDir() (string, error) {
+func resolvePipelineProjectDirForSession(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session != "" {
+		if err := tmux.ValidateSessionName(session); err != nil {
+			return "", fmt.Errorf("invalid session name: %w", err)
+		}
+		projectDir := resolveProjectDirForSession(session, true)
+		if projectDir == "" {
+			return "", fmt.Errorf("getting project root failed")
+		}
+		return projectDir, nil
+	}
+
 	projectDir := GetProjectRoot()
 	if projectDir == "" {
 		return "", fmt.Errorf("getting project root failed")

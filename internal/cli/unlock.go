@@ -54,12 +54,9 @@ func runUnlock(session string, patterns []string, all bool) error {
 		return fmt.Errorf("specify patterns to release or use --all")
 	}
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	session, projectKey, err := resolveAgentMailScope(session)
 	if err != nil {
 		return err
-	}
-	if projectKey == "" {
-		return fmt.Errorf("getting project root failed")
 	}
 
 	sessionAgent, err := agentmail.LoadSessionAgent(session, projectKey)
