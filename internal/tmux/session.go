@@ -10,11 +10,17 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
+
+// bufferSeq is a monotonic counter that ensures unique tmux buffer names
+// even when multiple goroutines call SendBufferWithDelay concurrently
+// within the same nanosecond.
+var bufferSeq atomic.Uint64
 
 // paneNameRegex matches the NTM pane naming convention:
 // session__type_index or session__type_index_variant, optionally with tags [tag1,tag2]
@@ -912,9 +918,10 @@ func (c *Client) SendBuffer(target, content string, enter bool) error {
 
 // SendBufferWithDelay sends content using the buffer mechanism with a configurable Enter delay.
 func (c *Client) SendBufferWithDelay(target, content string, enter bool, enterDelay time.Duration) error {
-	// Use a unique buffer name to avoid conflicts with concurrent operations
-	// Include timestamp to prevent race conditions when multiple agents send simultaneously
-	bufferName := fmt.Sprintf("ntm-%d", time.Now().UnixNano())
+	// Use a unique buffer name to avoid conflicts with concurrent operations.
+	// Combine timestamp with an atomic counter to prevent collisions when
+	// multiple goroutines call this within the same nanosecond.
+	bufferName := fmt.Sprintf("ntm-%d-%d", time.Now().UnixNano(), bufferSeq.Add(1))
 
 	// Load content into a tmux buffer
 	// We use 'load-buffer' with stdin to handle arbitrary content including special characters
@@ -948,8 +955,11 @@ func (c *Client) SendBufferWithDelay(target, content string, enter bool, enterDe
 // loadBufferLocal loads content into a tmux buffer using stdin (for local operations).
 func (c *Client) loadBufferLocal(bufferName, content string) error {
 	binary := BinaryPath()
-	cmd := exec.Command(binary, "load-buffer", "-b", bufferName, "-")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "load-buffer", "-b", bufferName, "-")
 	cmd.Stdin = strings.NewReader(content)
+	cmd.WaitDelay = 2 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -967,7 +977,10 @@ func (c *Client) loadBufferRemote(bufferName, content string) error {
 	remoteCmd := fmt.Sprintf("printf %%s %s | tmux load-buffer -b %s -", quotedContent, ShellQuote(bufferName))
 	sshArgs := []string{"--", c.Remote, "/bin/sh", "-c", ShellQuote(remoteCmd)}
 
-	cmd := exec.Command("ssh", sshArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	cmd.WaitDelay = 2 * time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -1090,9 +1103,10 @@ func SendEOF(target string) error {
 	return DefaultClient.SendEOF(target)
 }
 
-// DisplayMessage shows a message in the tmux status line
+// DisplayMessage shows a message in the tmux status line.
+// The "--" prevents msg from being interpreted as a tmux flag.
 func (c *Client) DisplayMessage(session, msg string, durationMs int) error {
-	return c.RunSilent("display-message", "-t", session, "-d", fmt.Sprintf("%d", durationMs), msg)
+	return c.RunSilent("display-message", "-t", session, "-d", fmt.Sprintf("%d", durationMs), "--", msg)
 }
 
 // DisplayMessage shows a message in the tmux status line (default client)
