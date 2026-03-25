@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,6 +106,33 @@ func TestGenerateConflictID(t *testing.T) {
 	// IDs should be different due to timestamp
 	if id1 == id2 {
 		t.Log("Warning: consecutive IDs may match if called very quickly")
+	}
+}
+
+func TestGenerateConflictID_ConcurrentUnique(t *testing.T) {
+	t.Parallel()
+
+	const count = 128
+	results := make(chan string, count)
+	var wg sync.WaitGroup
+
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- generateConflictID("internal/cli/*.go")
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]struct{}, count)
+	for id := range results {
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate conflict ID generated: %s", id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 

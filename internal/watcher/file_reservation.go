@@ -50,6 +50,7 @@ type FileReservationWatcher struct {
 	idleTimeout        time.Duration
 	reservationTTL     time.Duration
 	captureLines       int
+	paneOutputs        map[string]string           // paneID -> last captured output
 	activeReservations map[string]*PaneReservation // paneID -> reservation
 	mu                 sync.Mutex
 	stopCh             chan struct{}
@@ -139,6 +140,7 @@ func NewFileReservationWatcher(opts ...FileReservationWatcherOption) *FileReserv
 		idleTimeout:        DefaultIdleTimeout,
 		reservationTTL:     DefaultReservationTTL,
 		captureLines:       DefaultCaptureLinesReservation,
+		paneOutputs:        make(map[string]string),
 		activeReservations: make(map[string]*PaneReservation),
 	}
 
@@ -166,9 +168,9 @@ func (w *FileReservationWatcher) Start(ctx context.Context) {
 
 	stopCh := make(chan struct{})
 	w.stopCh = stopCh
+	w.wg.Add(1) // Must be inside the lock to prevent race with Stop()+wg.Wait()
 	w.mu.Unlock()
 
-	w.wg.Add(1)
 	go w.run(ctx, stopCh)
 
 	if w.debug {
@@ -250,12 +252,17 @@ func (w *FileReservationWatcher) checkPaneForFileEdits(ctx context.Context, sess
 		return
 	}
 
+	now := time.Now()
+	if !w.recordPaneOutput(pane.ID, output, now) {
+		return
+	}
+
 	// Detect file edits using local extraction (avoiding import cycle with robot package)
 	agentType := mapAgentTypeToPatternAgent(pane.Type)
 	files := extractEditedFiles(output, agentType)
 
 	if len(files) > 0 {
-		w.OnFileEdit(ctx, sessionName, pane, files)
+		w.onFileEdit(ctx, sessionName, pane, output, files, now)
 	}
 }
 
@@ -275,12 +282,22 @@ func mapAgentTypeToPatternAgent(agentType tmux.AgentType) string {
 
 // OnFileEdit handles detected file edits by reserving files.
 func (w *FileReservationWatcher) OnFileEdit(ctx context.Context, sessionName string, pane tmux.Pane, files []string) {
+	w.onFileEdit(ctx, sessionName, pane, "", files, time.Now())
+}
+
+func (w *FileReservationWatcher) onFileEdit(
+	ctx context.Context,
+	sessionName string,
+	pane tmux.Pane,
+	output string,
+	files []string,
+	now time.Time,
+) {
 	if w.client == nil || w.projectDir == "" {
 		return
 	}
 
-	now := time.Now()
-	agentName, newFiles := w.prepareReservationAttempt(pane.ID, sessionName, files, now)
+	agentName, newFiles := w.prepareReservationAttempt(pane.ID, sessionName, output, files, now)
 	if len(newFiles) == 0 {
 		return
 	}
@@ -322,6 +339,23 @@ func (w *FileReservationWatcher) OnFileEdit(ctx context.Context, sessionName str
 			}
 		}
 	}
+}
+
+func (w *FileReservationWatcher) recordPaneOutput(paneID string, output string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if lastOutput, exists := w.paneOutputs[paneID]; exists && lastOutput == output {
+		return false
+	}
+	w.paneOutputs[paneID] = output
+
+	if reservation, exists := w.activeReservations[paneID]; exists {
+		reservation.LastOutput = output
+		reservation.LastActivity = now
+	}
+
+	return true
 }
 
 // releaseIdleReservations releases reservations for panes that have been idle.
@@ -493,6 +527,7 @@ func (w *FileReservationWatcher) RenewReservations(ctx context.Context) error {
 func (w *FileReservationWatcher) prepareReservationAttempt(
 	paneID string,
 	sessionName string,
+	output string,
 	files []string,
 	now time.Time,
 ) (string, []string) {
@@ -509,6 +544,7 @@ func (w *FileReservationWatcher) prepareReservationAttempt(
 			PaneID:       paneID,
 			AgentName:    agentName,
 			LastActivity: now,
+			LastOutput:   output,
 		}
 		w.activeReservations[paneID] = reservation
 	}
@@ -527,6 +563,9 @@ func (w *FileReservationWatcher) prepareReservationAttempt(
 	}
 
 	reservation.LastActivity = now
+	if output != "" {
+		reservation.LastOutput = output
+	}
 	return reservation.AgentName, newFiles
 }
 

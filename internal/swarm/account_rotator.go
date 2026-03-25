@@ -723,18 +723,23 @@ func (r *AccountRotator) RotationCount() int {
 func (r *AccountRotator) OnLimitHit(event LimitHitEvent) (*RotationRecord, error) {
 	r.mu.Lock()
 	state := r.getOrCreateState(event.SessionPane)
+	// Snapshot fields under lock to avoid reading while another goroutine writes
+	currentAccount := state.CurrentAccount
+	rotationCount := state.RotationCount
+	lastRotation := state.LastRotation
 	r.mu.Unlock()
 
 	r.logger().Info("[AccountRotator] limit_hit_received",
 		"session_pane", event.SessionPane,
 		"agent_type", event.AgentType,
 		"pattern", event.Pattern,
-		"current_account", state.CurrentAccount,
-		"rotation_count", state.RotationCount)
+		"current_account", currentAccount,
+		"rotation_count", rotationCount)
 
-	// Check cooldown
-	if r.isCooldownActive(state) {
-		elapsed := time.Since(state.LastRotation)
+	// Check cooldown using snapshotted values (already read under lock)
+	cooldownActive := rotationCount > 0 && time.Since(lastRotation) < r.CooldownDuration
+	if cooldownActive {
+		elapsed := time.Since(lastRotation)
 		r.logger().Warn("[AccountRotator] cooldown_active",
 			"session_pane", event.SessionPane,
 			"last_rotation", state.LastRotation,

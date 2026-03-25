@@ -1,6 +1,8 @@
 package context
 
 import (
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ type MockPaneSpawner struct {
 	killedPanes  []string
 	sentKeys     map[string][]string
 	sentBuffers  map[string][]string
+	getPanesFor  []string
 	panes        []tmux.Pane
 	spawnError   error
 	killError    error
@@ -64,6 +67,7 @@ func (m *MockPaneSpawner) SendBuffer(paneID, text string, enter bool) error {
 }
 
 func (m *MockPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
+	m.getPanesFor = append(m.getPanesFor, session)
 	if m.panesError != nil {
 		return nil, m.panesError
 	}
@@ -680,6 +684,154 @@ func TestFromPendingRotation(t *testing.T) {
 	}
 	if stored.DefaultAction != pending.DefaultAction {
 		t.Errorf("DefaultAction = %q, want %q", stored.DefaultAction, pending.DefaultAction)
+	}
+}
+
+func TestCheckAndRotate_RequireConfirmCreatesPendingRotation(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	spawner := NewMockPaneSpawner()
+	spawner.panes = []tmux.Pane{{ID: "%0", Title: "test__cc_1"}}
+
+	monitor.RegisterAgent("test__cc_1", "%0", "claude-opus-4")
+	for i := 0; i < 200; i++ {
+		monitor.RecordMessage("test__cc_1", 1000, 1000)
+	}
+
+	cfg := config.DefaultContextRotationConfig()
+	cfg.RotateThreshold = 0.50
+	cfg.RequireConfirm = true
+
+	r := NewRotator(RotatorConfig{
+		Monitor: monitor,
+		Spawner: spawner,
+		Config:  cfg,
+	})
+
+	results, err := r.CheckAndRotate("test-session", "/tmp/project")
+	if err != nil {
+		t.Fatalf("CheckAndRotate() error = %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("CheckAndRotate() returned %d results, want 1", len(results))
+	}
+	if results[0].State != RotationStatePending {
+		t.Fatalf("rotation state = %s, want %s", results[0].State, RotationStatePending)
+	}
+	if !r.HasPendingRotation("test__cc_1") {
+		t.Fatal("expected pending rotation to be tracked in memory")
+	}
+
+	pending := r.GetPendingRotation("test__cc_1")
+	if pending == nil {
+		t.Fatal("expected pending rotation to be retrievable")
+	}
+	if pending.SessionName != "test-session" {
+		t.Fatalf("pending session = %q, want %q", pending.SessionName, "test-session")
+	}
+	if pending.WorkDir != "/tmp/project" {
+		t.Fatalf("pending workdir = %q, want %q", pending.WorkDir, "/tmp/project")
+	}
+}
+
+func TestProcessExpiredPending_UsesStoredSession(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("test__cc_1", "%0", "claude-opus-4")
+
+	spawner := NewMockPaneSpawner()
+	spawner.panesError = errors.New("boom")
+
+	r := NewRotator(RotatorConfig{
+		Monitor: monitor,
+		Spawner: spawner,
+		Config:  config.DefaultContextRotationConfig(),
+	})
+
+	pending := &PendingRotation{
+		AgentID:       "test__cc_1",
+		SessionName:   "stored-session",
+		PaneID:        "%0",
+		TimeoutAt:     time.Now().Add(-time.Minute),
+		DefaultAction: ConfirmRotate,
+		WorkDir:       "/stored/workdir",
+	}
+	r.pending[pending.AgentID] = pending
+
+	r.processExpiredPending("caller-session", "/caller/workdir")
+
+	if len(spawner.getPanesFor) != 1 {
+		t.Fatalf("GetPanes called %d times, want 1", len(spawner.getPanesFor))
+	}
+	if spawner.getPanesFor[0] != "stored-session" {
+		t.Fatalf("GetPanes session = %q, want %q", spawner.getPanesFor[0], "stored-session")
+	}
+	if r.HasPendingRotation(pending.AgentID) {
+		t.Fatal("expected expired pending rotation to be removed")
+	}
+}
+
+func TestConfirmRotation_PostponeUpdatesTimeout(t *testing.T) {
+	oldStore := DefaultPendingRotationStore
+	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
+	t.Cleanup(func() {
+		DefaultPendingRotationStore = oldStore
+	})
+
+	r := NewRotator(RotatorConfig{})
+	originalTimeout := time.Now().Add(2 * time.Minute)
+	r.pending["agent-1"] = &PendingRotation{
+		AgentID:       "agent-1",
+		SessionName:   "test-session",
+		TimeoutAt:     originalTimeout,
+		DefaultAction: ConfirmRotate,
+	}
+
+	result := r.ConfirmRotation("agent-1", ConfirmPostpone, 10)
+	if !result.Success {
+		t.Fatalf("ConfirmRotation(postpone) success = false, error = %q", result.Error)
+	}
+	if result.State != RotationStatePending {
+		t.Fatalf("ConfirmRotation(postpone) state = %s, want %s", result.State, RotationStatePending)
+	}
+
+	pending := r.GetPendingRotation("agent-1")
+	if pending == nil {
+		t.Fatal("expected pending rotation to remain after postpone")
+	}
+	if !pending.TimeoutAt.After(originalTimeout) {
+		t.Fatalf("postponed timeout = %s, want after %s", pending.TimeoutAt, originalTimeout)
+	}
+}
+
+func TestConfirmRotation_CompactWithoutPaneKeepsPending(t *testing.T) {
+	t.Parallel()
+
+	r := NewRotator(RotatorConfig{})
+	r.pending["agent-1"] = &PendingRotation{
+		AgentID:     "agent-1",
+		SessionName: "test-session",
+	}
+
+	result := r.ConfirmRotation("agent-1", ConfirmCompact, 0)
+	if result.State != RotationStateFailed {
+		t.Fatalf("ConfirmRotation(compact) state = %s, want %s", result.State, RotationStateFailed)
+	}
+	if !strings.Contains(result.Error, "pane ID unknown") {
+		t.Fatalf("ConfirmRotation(compact) error = %q", result.Error)
+	}
+	if !r.HasPendingRotation("agent-1") {
+		t.Fatal("expected pending rotation to remain when compaction cannot run")
 	}
 }
 

@@ -138,6 +138,14 @@ func (p *PendingRotation) IsExpired() bool {
 	return time.Now().After(p.TimeoutAt)
 }
 
+func clonePendingRotation(p *PendingRotation) *PendingRotation {
+	if p == nil {
+		return nil
+	}
+	cloned := *p
+	return &cloned
+}
+
 // PaneSpawner abstracts pane creation for testing.
 type PaneSpawner interface {
 	// SpawnAgent creates a new agent pane and returns its ID.
@@ -401,7 +409,7 @@ func (r *Rotator) CheckAndRotate(sessionName, workDir string) ([]RotationResult,
 	// Process agents one at a time
 	for _, agentInfo := range agentsToRotate {
 		// Skip if already pending
-		if _, exists := r.pending[agentInfo.AgentID]; exists {
+		if r.HasPendingRotation(agentInfo.AgentID) {
 			continue
 		}
 
@@ -465,7 +473,9 @@ func (r *Rotator) createPendingRotation(session, agentID string, contextPercent 
 		WorkDir:        workDir,
 	}
 
+	r.mu.Lock()
 	r.pending[agentID] = pending
+	r.mu.Unlock()
 
 	// Also persist to the pending rotation store for CLI access
 	if err := AddPendingRotation(pending); err != nil {
@@ -476,37 +486,60 @@ func (r *Rotator) createPendingRotation(session, agentID string, contextPercent 
 }
 
 // processExpiredPending handles pending rotations that have timed out.
-func (r *Rotator) processExpiredPending(session, workDir string) {
+func (r *Rotator) processExpiredPending(_, _ string) {
+	type expiredPendingAction struct {
+		pending *PendingRotation
+		action  ConfirmAction
+	}
+
+	now := time.Now()
+	postponed := make([]*PendingRotation, 0)
+	actions := make([]expiredPendingAction, 0)
+
+	r.mu.Lock()
 	for agentID, pending := range r.pending {
 		if !pending.IsExpired() {
 			continue
 		}
 
-		// Execute the default action
 		switch pending.DefaultAction {
+		case ConfirmPostpone:
+			pending.TimeoutAt = now.Add(30 * time.Minute)
+			postponed = append(postponed, clonePendingRotation(pending))
+		default:
+			actions = append(actions, expiredPendingAction{
+				pending: clonePendingRotation(pending),
+				action:  pending.DefaultAction,
+			})
+			delete(r.pending, agentID)
+		}
+	}
+	r.mu.Unlock()
+
+	for _, pending := range postponed {
+		if err := AddPendingRotation(pending); err != nil {
+			slog.Warn("failed to persist postponed rotation", "agent", pending.AgentID, "error", err)
+		}
+	}
+
+	for _, action := range actions {
+		pending := action.pending
+		switch action.action {
 		case ConfirmRotate:
-			result := r.rotateAgent(session, agentID, workDir)
+			result := r.rotateAgent(pending.SessionName, pending.AgentID, pending.WorkDir)
 			if !result.Success {
-				slog.Warn("auto-rotation from expired pending failed", "agent", agentID, "error", result.Error)
+				slog.Warn("auto-rotation from expired pending failed", "agent", pending.AgentID, "error", result.Error)
 			}
 		case ConfirmCompact:
 			if paneID := pending.PaneID; paneID != "" {
-				r.tryCompaction(agentID, paneID)
+				r.tryCompaction(pending.AgentID, paneID)
 			}
 		case ConfirmIgnore:
 			// Do nothing, just remove from pending
-		case ConfirmPostpone:
-			// Re-add with new timeout
-			pending.TimeoutAt = time.Now().Add(30 * time.Minute)
-			if err := AddPendingRotation(pending); err != nil {
-				slog.Warn("failed to persist postponed rotation", "agent", agentID, "error", err)
-			}
-			continue // Don't remove from pending
 		}
 
-		delete(r.pending, agentID)
-		if err := RemovePendingRotation(agentID); err != nil {
-			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		if err := RemovePendingRotation(pending.AgentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", pending.AgentID, "error", err)
 		}
 	}
 }
@@ -959,8 +992,10 @@ func (r *Rotator) HasPendingRotation(agentID string) bool {
 // ConfirmRotation handles user confirmation of a pending rotation.
 // Returns the result of the action taken.
 func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postponeMinutes int) RotationResult {
+	r.mu.Lock()
 	pending := r.pending[agentID]
 	if pending == nil {
+		r.mu.Unlock()
 		return RotationResult{
 			OldAgentID: agentID,
 			State:      RotationStateFailed,
@@ -968,6 +1003,7 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 			Timestamp:  time.Now(),
 		}
 	}
+	pendingCopy := clonePendingRotation(pending)
 
 	result := RotationResult{
 		OldAgentID: agentID,
@@ -978,23 +1014,26 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 	case ConfirmRotate:
 		// Remove from pending and perform the rotation
 		delete(r.pending, agentID)
+		r.mu.Unlock()
 		if err := RemovePendingRotation(agentID); err != nil {
 			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
 		}
-		return r.rotateAgent(pending.SessionName, agentID, pending.WorkDir)
+		return r.rotateAgent(pendingCopy.SessionName, agentID, pendingCopy.WorkDir)
 
 	case ConfirmCompact:
 		// Try compaction first
-		if pending.PaneID == "" {
+		if pendingCopy.PaneID == "" {
+			r.mu.Unlock()
 			result.State = RotationStateFailed
 			result.Error = "cannot compact: pane ID unknown"
 			return result
 		}
 		delete(r.pending, agentID)
+		r.mu.Unlock()
 		if err := RemovePendingRotation(agentID); err != nil {
 			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
 		}
-		compactResult := r.tryCompaction(agentID, pending.PaneID)
+		compactResult := r.tryCompaction(agentID, pendingCopy.PaneID)
 		if compactResult != nil && compactResult.Success {
 			result.Success = true
 			result.State = RotationStateAborted
@@ -1011,6 +1050,7 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 	case ConfirmIgnore:
 		// Cancel the rotation
 		delete(r.pending, agentID)
+		r.mu.Unlock()
 		if err := RemovePendingRotation(agentID); err != nil {
 			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
 		}
@@ -1026,8 +1066,10 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 			minutes = 30 // Default postpone duration
 		}
 		pending.TimeoutAt = time.Now().Add(time.Duration(minutes) * time.Minute)
+		pendingCopy = clonePendingRotation(pending)
+		r.mu.Unlock()
 		// Update persistent store with new timeout
-		if err := AddPendingRotation(pending); err != nil {
+		if err := AddPendingRotation(pendingCopy); err != nil {
 			slog.Warn("failed to persist postponed rotation", "agent", agentID, "error", err)
 		}
 		result.Success = true
@@ -1036,6 +1078,7 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 		return result
 
 	default:
+		r.mu.Unlock()
 		result.State = RotationStateFailed
 		result.Error = fmt.Sprintf("unknown action: %s", action)
 		return result

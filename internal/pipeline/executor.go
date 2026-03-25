@@ -343,8 +343,10 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 				continue
 			}
 
+			e.stateMu.Lock()
 			e.state.CurrentStep = stepID
 			e.state.UpdatedAt = time.Now()
+			e.stateMu.Unlock()
 
 			// Execute the step
 			result := e.executeStep(ctx, step, workflow)
@@ -646,6 +648,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		parsed, err := e.parseOutput(result.Output, step.OutputParse)
 		if err != nil {
 			// Non-fatal - just warn
+			e.stateMu.Lock()
 			e.state.Errors = append(e.state.Errors, ExecutionError{
 				StepID:    step.ID,
 				Type:      "parse",
@@ -653,6 +656,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 				Timestamp: time.Now(),
 				Fatal:     false,
 			})
+			e.stateMu.Unlock()
 		} else {
 			result.ParsedData = parsed
 		}

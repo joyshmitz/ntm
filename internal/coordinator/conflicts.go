@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
@@ -392,8 +393,8 @@ var conflictIDCounter uint64
 
 // generateConflictID generates a unique ID for a conflict.
 func generateConflictID(pattern string) string {
-	conflictIDCounter++
-	return fmt.Sprintf("conflict-%d-%d-%s", time.Now().UnixNano(), conflictIDCounter, sanitizeForID(pattern))
+	seq := atomic.AddUint64(&conflictIDCounter, 1)
+	return fmt.Sprintf("conflict-%d-%d-%s", time.Now().UnixNano(), seq, sanitizeForID(pattern))
 }
 
 // sanitizeForID creates a safe ID component from a string.
