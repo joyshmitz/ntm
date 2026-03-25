@@ -37,9 +37,13 @@ func TestConfigGenerateAgentCommand(t *testing.T) {
 
 func TestIsPersonaName(t *testing.T) {
 	cfg := &Config{}
-	// Currently always returns false
-	if cfg.IsPersonaName("architect") {
-		t.Error("IsPersonaName should return false (not implemented)")
+	// Built-in personas should be recognized
+	if !cfg.IsPersonaName("architect") {
+		t.Error("IsPersonaName should return true for built-in persona 'architect'")
+	}
+	// Unknown names should return false
+	if cfg.IsPersonaName("nonexistent-persona-xyz") {
+		t.Error("IsPersonaName should return false for unknown persona")
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/notify"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
@@ -97,9 +99,102 @@ type Config struct {
 	Encryption         EncryptionConfig      `toml:"encryption"`       // Encryption at rest for artifacts
 	Send               SendConfig            `toml:"send"`             // Send command defaults
 	Prompts            PromptsConfig         `toml:"prompts"`          // Per-agent-type default prompts
+	Retry              RetryConfig           `toml:"retry"`            // Unified retry policy configuration
+	Routing            RoutingConfig         `toml:"routing"`          // Agent routing/scoring weights
 
 	// Runtime-only fields (populated by project config merging)
 	ProjectDefaults map[string]int `toml:"-"`
+}
+
+// RetryConfig provides unified retry policy settings. Individual subsystems
+// can override the global defaults via subsystem-specific sections.
+type RetryConfig struct {
+	MaxAttempts   int `toml:"max_attempts"`    // Global default max retry attempts (default: 3)
+	InitialDelayMs int `toml:"initial_delay_ms"` // Initial delay between retries in ms (default: 1000)
+	MaxDelayMs    int `toml:"max_delay_ms"`     // Maximum delay cap in ms (default: 30000)
+	BackoffFactor float64 `toml:"backoff_factor"` // Exponential backoff multiplier (default: 2.0)
+	Jitter        bool    `toml:"jitter"`          // Add random jitter to delays (default: true)
+
+	// Subsystem-specific overrides (inherit global values if zero/empty)
+	Webhook    RetryOverride `toml:"webhook"`
+	Alerts     RetryOverride `toml:"alerts"`
+	Scheduler  RetryOverride `toml:"scheduler"`
+	Completion RetryOverride `toml:"completion"`
+	DB         RetryOverride `toml:"db"`
+	Assign     RetryOverride `toml:"assign"`
+}
+
+// RetryOverride allows per-subsystem overrides of the global retry policy.
+// Zero values inherit from the global RetryConfig.
+type RetryOverride struct {
+	MaxAttempts    int `toml:"max_attempts"`
+	InitialDelayMs int `toml:"initial_delay_ms"`
+}
+
+// DefaultRetryConfig returns sensible retry defaults that match current
+// behavior across the codebase.
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxAttempts:    3,
+		InitialDelayMs: 1000,
+		MaxDelayMs:     30000,
+		BackoffFactor:  2.0,
+		Jitter:         true,
+		Webhook:    RetryOverride{MaxAttempts: 5},
+		Scheduler:  RetryOverride{MaxAttempts: 5},
+		DB:         RetryOverride{MaxAttempts: 6},
+	}
+}
+
+// RetryPolicyFor returns the effective retry settings for a named subsystem.
+// Subsystem overrides take precedence; missing values inherit from global defaults.
+func (c *RetryConfig) RetryPolicyFor(subsystem string) (maxAttempts int, initialDelayMs int) {
+	maxAttempts = c.MaxAttempts
+	initialDelayMs = c.InitialDelayMs
+	if maxAttempts == 0 {
+		maxAttempts = 3
+	}
+	if initialDelayMs == 0 {
+		initialDelayMs = 1000
+	}
+
+	var override RetryOverride
+	switch subsystem {
+	case "webhook":
+		override = c.Webhook
+	case "alerts":
+		override = c.Alerts
+	case "scheduler":
+		override = c.Scheduler
+	case "completion":
+		override = c.Completion
+	case "db":
+		override = c.DB
+	case "assign":
+		override = c.Assign
+	}
+
+	if override.MaxAttempts > 0 {
+		maxAttempts = override.MaxAttempts
+	}
+	if override.InitialDelayMs > 0 {
+		initialDelayMs = override.InitialDelayMs
+	}
+	return
+}
+
+// RoutingConfig holds agent routing/scoring configuration.
+// Mirrors internal/robot.RoutingConfig for TOML deserialization without import cycles.
+type RoutingConfig struct {
+	ContextWeight       float64 `toml:"context_weight"`
+	StateWeight         float64 `toml:"state_weight"`
+	RecencyWeight       float64 `toml:"recency_weight"`
+	AffinityEnabled     bool    `toml:"affinity_enabled"`
+	AffinityBonus       float64 `toml:"affinity_bonus"`
+	ExcludeContextAbove float64 `toml:"exclude_context_above"`
+	ExcludeIfGenerating bool    `toml:"exclude_if_generating"`
+	ExcludeIfRateLimited bool   `toml:"exclude_if_rate_limited"`
+	ExcludeIfErrorState bool    `toml:"exclude_if_error"`
 }
 
 // RobotConfig holds defaults for robot output behavior.
@@ -1420,6 +1515,10 @@ type ModelsConfig struct {
 	Claude        map[string]string `toml:"claude"`         // Claude model aliases
 	Codex         map[string]string `toml:"codex"`          // Codex model aliases
 	Gemini        map[string]string `toml:"gemini"`         // Gemini model aliases
+	// ContextLimits allows overriding built-in context window sizes for models.
+	// Keys are model names (e.g., "claude-opus-4-6"), values are token counts.
+	// These override the built-in defaults in internal/models/registry.go.
+	ContextLimits map[string]int `toml:"context_limits"`
 }
 
 // DefaultModels returns the default model configuration with sensible aliases.
@@ -1489,16 +1588,26 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 	return alias
 }
 
-// IsPersonaName checks if the given name is a known persona.
-// Currently returns false as personas are not yet fully implemented.
-// TODO: Implement persona configuration and checking
+// IsPersonaName checks if the given name is a known persona by searching
+// built-in personas, user personas (~/.config/ntm/personas.toml), and
+// project personas (.ntm/personas.toml).
+//
+// Note: loads the persona registry from disk on each call. Avoid calling
+// in tight loops; cache the result if checking multiple names.
 func (c *Config) IsPersonaName(name string) bool {
-	// Personas are not yet implemented - return false for now
-	// When personas are implemented, this will check against:
-	// 1. Project personas (.ntm/personas.toml)
-	// 2. User personas (~/.config/ntm/personas.toml)
-	// 3. Built-in personas
-	return false
+	if name == "" {
+		return false
+	}
+	projectDir := ""
+	if c != nil {
+		projectDir = c.GetProjectDir("")
+	}
+	registry, err := persona.LoadRegistry(projectDir)
+	if err != nil || registry == nil {
+		return false
+	}
+	p, ok := registry.Get(name)
+	return ok && p != nil
 }
 
 // DefaultPath returns the default config file path
@@ -2343,6 +2452,11 @@ func Load(path string) (*Config, error) {
 		if mdCmds, err := LoadPaletteFromMarkdown(mdPath); err == nil && len(mdCmds) > 0 {
 			cfg.Palette = mdCmds
 		}
+	}
+
+	// Apply user-specified context limit overrides to the canonical registry.
+	if len(cfg.Models.ContextLimits) > 0 {
+		models.ApplyOverrides(cfg.Models.ContextLimits)
 	}
 
 	return cfg, nil
