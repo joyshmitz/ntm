@@ -201,18 +201,9 @@ func TestExtractFields_Map(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractFields error: %v", err)
 	}
-	if len(fields) != 3 {
-		t.Fatalf("expected 3 fields, got %d", len(fields))
-	}
-	// Fields come in map iteration order (unspecified)
-	found := map[string]bool{}
-	for _, f := range fields {
-		found[f] = true
-	}
-	for _, expected := range []string{"alpha", "beta", "gamma"} {
-		if !found[expected] {
-			t.Errorf("missing field %q", expected)
-		}
+	want := []string{"alpha", "beta", "gamma"}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("extractFields(map) = %v, want %v", fields, want)
 	}
 }
 
@@ -233,23 +224,9 @@ func TestExtractFields_Struct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractFields error: %v", err)
 	}
-
-	found := map[string]bool{}
-	for _, f := range fields {
-		found[f] = true
-	}
-
-	// Should include: id, name, omit_tag, NoTag
-	for _, expected := range []string{"id", "name", "omit_tag", "NoTag"} {
-		if !found[expected] {
-			t.Errorf("missing field %q in %v", expected, fields)
-		}
-	}
-	// Should NOT include: internal (unexported), Ignored (json:"-")
-	for _, excluded := range []string{"internal", "Ignored", "-"} {
-		if found[excluded] {
-			t.Errorf("should not include field %q", excluded)
-		}
+	want := []string{"id", "name", "omit_tag", "NoTag"}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("extractFields(struct) = %v, want %v", fields, want)
 	}
 }
 
@@ -675,20 +652,20 @@ func TestRenderTabular_UniformStructs(t *testing.T) {
 		t.Fatalf("renderTabular error: %v", err)
 	}
 
-	// Fields sorted: pane, ready, type
-	if !strings.HasPrefix(got, "[2]{pane,ready,type}:\n") {
-		t.Errorf("expected sorted header, got %q", got)
+	// Structs preserve declaration/json field order.
+	if !strings.HasPrefix(got, "[2]{type,pane,ready}:\n") {
+		t.Errorf("expected declaration-order header, got %q", got)
 	}
 
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("expected 3 lines, got %d", len(lines))
 	}
-	if lines[1] != " 1,true,claude" {
-		t.Errorf("row 1 = %q, want %q", lines[1], " 1,true,claude")
+	if lines[1] != " claude,1,true" {
+		t.Errorf("row 1 = %q, want %q", lines[1], " claude,1,true")
 	}
-	if lines[2] != " 2,false,codex" {
-		t.Errorf("row 2 = %q, want %q", lines[2], " 2,false,codex")
+	if lines[2] != " codex,2,false" {
+		t.Errorf("row 2 = %q, want %q", lines[2], " codex,2,false")
 	}
 }
 
@@ -796,15 +773,44 @@ func TestRenderObject_SimpleStruct(t *testing.T) {
 		t.Fatalf("renderObject error: %v", err)
 	}
 
-	// Fields sorted: enabled, host, port
-	if !strings.Contains(got, "enabled: true\n") {
-		t.Errorf("expected 'enabled: true', got %q", got)
+	hostIdx := strings.Index(got, "host: localhost\n")
+	portIdx := strings.Index(got, "port: 8080\n")
+	enabledIdx := strings.Index(got, "enabled: true\n")
+	if hostIdx == -1 || portIdx == -1 || enabledIdx == -1 {
+		t.Fatalf("missing expected fields in %q", got)
 	}
-	if !strings.Contains(got, "host: localhost\n") {
-		t.Errorf("expected 'host: localhost', got %q", got)
+	if !(hostIdx < portIdx && portIdx < enabledIdx) {
+		t.Errorf("expected struct field order host->port->enabled, got %q", got)
 	}
-	if !strings.Contains(got, "port: 8080\n") {
-		t.Errorf("expected 'port: 8080', got %q", got)
+}
+
+func TestRenderObject_PreservesProjectionSectionOrder(t *testing.T) {
+	t.Parallel()
+	enc := &toonEncoder{delimiter: ","}
+
+	type Projection struct {
+		Summary  string `json:"summary"`
+		Sessions string `json:"sessions"`
+		Alerts   string `json:"alerts"`
+	}
+
+	got, err := enc.renderObject(reflect.ValueOf(Projection{
+		Summary:  "summary",
+		Sessions: "sessions",
+		Alerts:   "alerts",
+	}), 0)
+	if err != nil {
+		t.Fatalf("renderObject error: %v", err)
+	}
+
+	summaryIdx := strings.Index(got, "summary: summary\n")
+	sessionsIdx := strings.Index(got, "sessions: sessions\n")
+	alertsIdx := strings.Index(got, "alerts: alerts\n")
+	if summaryIdx == -1 || sessionsIdx == -1 || alertsIdx == -1 {
+		t.Fatalf("missing expected fields in %q", got)
+	}
+	if !(summaryIdx < sessionsIdx && sessionsIdx < alertsIdx) {
+		t.Fatalf("expected projection order summary->sessions->alerts, got %q", got)
 	}
 }
 

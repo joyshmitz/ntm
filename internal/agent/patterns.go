@@ -71,7 +71,7 @@ var (
 		regexp.MustCompile(`(?m)^>\s*$`), // Prompt line (empty prompt waiting for input)
 		regexp.MustCompile(`Human:\s*$`), // Conversation mode prompt
 		regexp.MustCompile(`waiting for input`),
-		regexp.MustCompile(`\?\s*$`), // Question prompt
+		regexp.MustCompile(`(?m)^.{0,40}\?\s*$`), // Short question prompt (max 40 chars to avoid matching reasoning output)
 		// Claude Code TUI patterns (welcome screen)
 		regexp.MustCompile(`(?i)claude\s+code\s+v[\d.]+`), // Version banner
 		regexp.MustCompile(`(?i)welcome\s+back`),          // Welcome message
@@ -149,7 +149,7 @@ var (
 		regexp.MustCompile(`>\s*$`),                // Standard prompt
 		regexp.MustCompile(`\?\s*for\s*shortcuts`), // Codex prompt line
 		regexp.MustCompile(`codex>\s*$`),           // Codex prompt
-		regexp.MustCompile(`(?m)^\s*›\s*.*$`),      // Codex chevron prompt
+		regexp.MustCompile(`(?m)^\s*›\s*$`),         // Codex chevron prompt (empty, waiting for input)
 	}
 
 	// codErrorPatterns indicates error conditions.

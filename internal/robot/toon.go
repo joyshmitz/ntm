@@ -251,9 +251,6 @@ func (enc *toonEncoder) renderTabular(v reflect.Value) (string, error) {
 		return "", fmt.Errorf("TOON: empty object in array")
 	}
 
-	// Sort fields for deterministic output
-	sort.Strings(fields)
-
 	// Check if tab delimiter is safe (no tabs/newlines in values)
 	safeDelim := enc.delimiter
 	if enc.delimiter == "\t" && !enc.isTabSafe(v, fields) {
@@ -305,9 +302,6 @@ func (enc *toonEncoder) renderObject(v reflect.Value, indent int) (string, error
 	if len(fields) == 0 {
 		return "{}\n", nil
 	}
-
-	// Sort fields for deterministic output
-	sort.Strings(fields)
 
 	var buf strings.Builder
 	indentStr := strings.Repeat("  ", indent)
@@ -382,6 +376,7 @@ func (enc *toonEncoder) extractFields(v reflect.Value) ([]string, error) {
 			}
 			fields[i] = key.String()
 		}
+		sort.Strings(fields)
 		return fields, nil
 	case reflect.Struct:
 		t := v.Type()
