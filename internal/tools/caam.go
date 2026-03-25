@@ -754,17 +754,18 @@ func (d *RateLimitDetector) matchPatterns(output string, patterns []*rateLimitPa
 	return matched
 }
 
+// waitTimePatterns compiled once at package level (called from hot path).
+var waitTimePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*s`),
+	regexp.MustCompile(`(?i)wait\s+(\d+)\s*(?:second|sec|s)`),
+	regexp.MustCompile(`(?i)retry\s+(?:after|in)\s+(\d+)\s*(?:s|sec)`),
+	regexp.MustCompile(`(?i)(\d+)\s*(?:second|sec)s?\s+(?:cooldown|delay|wait)`),
+	regexp.MustCompile(`(?i)rate.?limit.*?(\d+)\s*s`),
+}
+
 // parseWaitTimeFromOutput extracts wait time from rate limit messages
 func parseWaitTimeFromOutput(output string) int {
-	waitPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*s`),
-		regexp.MustCompile(`(?i)wait\s+(\d+)\s*(?:second|sec|s)`),
-		regexp.MustCompile(`(?i)retry\s+(?:after|in)\s+(\d+)\s*(?:s|sec)`),
-		regexp.MustCompile(`(?i)(\d+)\s*(?:second|sec)s?\s+(?:cooldown|delay|wait)`),
-		regexp.MustCompile(`(?i)rate.?limit.*?(\d+)\s*s`),
-	}
-
-	for _, pattern := range waitPatterns {
+	for _, pattern := range waitTimePatterns {
 		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
 			var seconds int
 			if _, err := fmt.Sscanf(matches[1], "%d", &seconds); err == nil && seconds > 0 {

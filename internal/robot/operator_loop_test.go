@@ -113,8 +113,6 @@ func TestBuildAttentionHintFromSummary_LargeCounts(t *testing.T) {
 // =============================================================================
 
 func TestBuildAttentionHint_WithFeed(t *testing.T) {
-	t.Parallel()
-
 	feed := newTestAttentionFeed(t)
 	oldFeed := GetAttentionFeed()
 	SetAttentionFeed(feed)
@@ -156,8 +154,6 @@ func TestBuildAttentionHint_WithFeed(t *testing.T) {
 }
 
 func TestBuildAttentionHint_NilFeed(t *testing.T) {
-	t.Parallel()
-
 	oldFeed := GetAttentionFeed()
 	SetAttentionFeed(nil)
 	defer SetAttentionFeed(oldFeed)

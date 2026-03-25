@@ -24,7 +24,7 @@ func newQuickCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:     "quick <project-name>",
-		Aliases: []string{"new", "setup"},
+		Aliases: []string{"new"},
 		Short:   "Quick project setup with git, VSCode, and Claude config",
 		Long: `Create a new project directory with sensible defaults:
 

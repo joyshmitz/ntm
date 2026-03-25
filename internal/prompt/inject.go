@@ -4,6 +4,7 @@ package prompt
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -196,9 +197,9 @@ func readFileRange(spec FileSpec) (string, error) {
 	}
 	defer f.Close()
 
-	// If no line range, read entire file (size already checked in InjectFiles)
+	// If no line range, read entire file from the already-opened handle
 	if spec.StartLine == 0 && spec.EndLine == 0 {
-		content, err := os.ReadFile(spec.Path)
+		content, err := io.ReadAll(f)
 		if err != nil {
 			return "", err
 		}

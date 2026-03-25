@@ -30,6 +30,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
+	"github.com/Dicklesworthstone/ntm/internal/pipeline"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
@@ -4442,6 +4443,181 @@ func TestPipelineEventTypeFromProgressType(t *testing.T) {
 				t.Fatalf("eventType=%q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunPipelineWithResult_InvalidWorkflowDoesNotPanic(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	tmpDir := t.TempDir()
+	workflowPath := filepath.Join(tmpDir, "invalid.yaml")
+	content := `
+name: invalid-workflow
+steps:
+  - id: step1
+    prompt: test
+`
+	if err := os.WriteFile(workflowPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	result := srv.runPipelineWithResult(context.Background(), pipeline.PipelineRunOptions{
+		WorkflowFile: workflowPath,
+		Session:      "test-session",
+	})
+	if result.Success {
+		t.Fatal("expected invalid workflow to fail")
+	}
+	if result.ErrorCode != ErrCodeInvalidWorkflow {
+		t.Fatalf("error_code = %q, want %q", result.ErrorCode, ErrCodeInvalidWorkflow)
+	}
+	if !strings.Contains(strings.ToLower(result.Error), "schema") {
+		t.Fatalf("error = %q, want schema validation message", result.Error)
+	}
+}
+
+func TestExecPipelineInline_UsesServerProjectDir(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	projectDir := t.TempDir()
+	srv.projectDir = projectDir
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cwd := t.TempDir()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir temp cwd: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	output := srv.execPipelineInline(context.Background(), &pipeline.Workflow{
+		SchemaVersion: pipeline.SchemaVersion,
+		Name:          "inline-project-dir",
+		Steps:         nil,
+	}, "inline-session", nil, false)
+
+	if !output.Success {
+		t.Fatalf("execPipelineInline failed: %s", output.Error)
+	}
+	if output.RunID == "" {
+		t.Fatal("expected run id")
+	}
+	if _, err := pipeline.LoadState(projectDir, output.RunID); err != nil {
+		t.Fatalf("expected state in server project dir: %v", err)
+	}
+	if _, err := pipeline.LoadState(cwd, output.RunID); err == nil {
+		t.Fatal("expected no state file in process cwd")
+	}
+}
+
+func TestHandleResumePipeline_UsesServerProjectDir(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	projectDir := t.TempDir()
+	srv.projectDir = projectDir
+
+	workflowPath := filepath.Join(projectDir, "resume.yaml")
+	content := `
+schema_version: "2.0"
+name: resume-workflow
+steps:
+  - id: step1
+    agent: claude
+    prompt: done
+`
+	if err := os.WriteFile(workflowPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+
+	finishedAt := time.Now().UTC()
+	state := &pipeline.ExecutionState{
+		RunID:        "resume-project-dir",
+		WorkflowID:   "resume-workflow",
+		WorkflowFile: workflowPath,
+		Session:      "resume-session",
+		Status:       pipeline.StatusFailed,
+		StartedAt:    finishedAt.Add(-time.Minute),
+		FinishedAt:   finishedAt,
+		UpdatedAt:    finishedAt,
+		Steps: map[string]pipeline.StepResult{
+			"step1": {
+				StepID:     "step1",
+				Status:     pipeline.StatusCompleted,
+				StartedAt:  finishedAt.Add(-2 * time.Minute),
+				FinishedAt: finishedAt.Add(-time.Minute),
+			},
+		},
+		Variables: map[string]interface{}{},
+	}
+	if err := pipeline.SaveState(projectDir, state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cwd := t.TempDir()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir temp cwd: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/resume-project-dir/resume", strings.NewReader(`{}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "resume-project-dir")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleResumePipeline(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleCleanupPipelines_UsesServerProjectDir(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	projectDir := t.TempDir()
+	srv.projectDir = projectDir
+
+	state := &pipeline.ExecutionState{
+		RunID:      "cleanup-project-dir",
+		WorkflowID: "cleanup-workflow",
+		Session:    "cleanup-session",
+		Status:     pipeline.StatusCompleted,
+		StartedAt:  time.Now().Add(-4 * time.Hour),
+		UpdatedAt:  time.Now().Add(-4 * time.Hour),
+	}
+	if err := pipeline.SaveState(projectDir, state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	statePath := filepath.Join(projectDir, ".ntm", "pipelines", "cleanup-project-dir.json")
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(statePath, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cwd := t.TempDir()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir temp cwd: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pipelines/cleanup", strings.NewReader(`{"older_than_hours":1}`))
+	rec := httptest.NewRecorder()
+
+	srv.handleCleanupPipelines(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("expected cleanup to remove %s, err=%v", statePath, err)
 	}
 }
 

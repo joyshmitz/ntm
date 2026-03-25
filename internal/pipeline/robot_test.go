@@ -105,6 +105,15 @@ func TestNewErrorResponse(t *testing.T) {
 			wantCode: ErrCodeSessionNotFound,
 			wantHint: "create session first",
 		},
+		{
+			name:     "nil error",
+			err:      nil,
+			code:     ErrCodeInternalError,
+			hint:     "inspect logs",
+			wantErr:  "unknown error",
+			wantCode: ErrCodeInternalError,
+			wantHint: "inspect logs",
+		},
 	}
 
 	for _, tt := range tests {

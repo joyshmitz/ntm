@@ -47,10 +47,14 @@ func NewRobotResponse(success bool) RobotResponse {
 
 // NewErrorResponse creates an error robot response
 func NewErrorResponse(err error, code string, hint string) RobotResponse {
+	message := "unknown error"
+	if err != nil {
+		message = err.Error()
+	}
 	return RobotResponse{
 		Success:   false,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Error:     err.Error(),
+		Error:     message,
 		ErrorCode: code,
 		Hint:      hint,
 	}

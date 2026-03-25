@@ -5,6 +5,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -337,8 +338,7 @@ func (s *Server) handleResumePipeline(w http.ResponseWriter, r *http.Request) {
 	slog.Info("pipeline resume", "request_id", reqID, "run_id", runID)
 
 	// Try to load state from disk
-	projectDir, _ := os.Getwd()
-	state, err := pipeline.LoadState(projectDir, runID)
+	state, err := pipeline.LoadState(s.pipelineProjectDir(), runID)
 	if err != nil {
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeNoResumableState, "no resumable state found", map[string]interface{}{
 			"run_id": runID,
@@ -481,8 +481,7 @@ func (s *Server) handleCleanupPipelines(w http.ResponseWriter, r *http.Request) 
 
 	slog.Info("pipeline cleanup", "request_id", reqID, "older_than_hours", hours)
 
-	projectDir, _ := os.Getwd()
-	deleted, err := pipeline.CleanupStates(projectDir, time.Duration(hours)*time.Hour)
+	deleted, err := pipeline.CleanupStates(s.pipelineProjectDir(), time.Duration(hours)*time.Hour)
 	if err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "cleanup failed", map[string]interface{}{
 			"error": err.Error(),
@@ -544,13 +543,17 @@ func (s *Server) runPipelineWithResult(ctx context.Context, opts pipeline.Pipeli
 
 	if !validationResult.Valid {
 		errMsg := "workflow validation failed"
+		hint := "fix workflow validation errors"
 		if len(validationResult.Errors) > 0 {
 			errMsg = validationResult.Errors[0].Message
+			if validationResult.Errors[0].Hint != "" {
+				hint = validationResult.Errors[0].Hint
+			}
 		}
 		output.RobotResponse = pipeline.NewErrorResponse(
-			err,
+			errors.New(errMsg),
 			ErrCodeInvalidWorkflow,
-			errMsg,
+			hint,
 		)
 		return output
 	}
@@ -558,8 +561,10 @@ func (s *Server) runPipelineWithResult(ctx context.Context, opts pipeline.Pipeli
 	// Create executor config
 	config := pipeline.DefaultExecutorConfig(opts.Session)
 	config.DryRun = opts.DryRun
-	projectDir, _ := os.Getwd()
-	config.ProjectDir = projectDir
+	config.ProjectDir = opts.ProjectDir
+	if strings.TrimSpace(config.ProjectDir) == "" {
+		config.ProjectDir = s.pipelineProjectDir()
+	}
 	config.WorkflowFile = workflowPath
 	config.RunID = pipeline.GenerateRunID()
 
@@ -691,8 +696,7 @@ func (s *Server) execPipelineInline(ctx context.Context, workflow *pipeline.Work
 	output := pipeline.PipelineRunOutput{}
 
 	config := pipeline.DefaultExecutorConfig(session)
-	projectDir, _ := os.Getwd()
-	config.ProjectDir = projectDir
+	config.ProjectDir = s.pipelineProjectDir()
 	config.RunID = pipeline.GenerateRunID()
 
 	executor := pipeline.NewExecutor(config)
@@ -810,7 +814,11 @@ func (s *Server) resumePipelineWithResult(ctx context.Context, runID, session st
 
 	// Load workflow from state
 	if state.WorkflowFile == "" {
-		output.RobotResponse = pipeline.NewErrorResponse(nil, ErrCodeNoResumableState, "workflow file not recorded in state")
+		output.RobotResponse = pipeline.NewErrorResponse(
+			errors.New("workflow file not recorded in state"),
+			ErrCodeNoResumableState,
+			"re-run the pipeline from a workflow file before attempting resume",
+		)
 		return output
 	}
 
@@ -821,8 +829,7 @@ func (s *Server) resumePipelineWithResult(ctx context.Context, runID, session st
 	}
 
 	config := pipeline.DefaultExecutorConfig(session)
-	projectDir, _ := os.Getwd()
-	config.ProjectDir = projectDir
+	config.ProjectDir = s.pipelineProjectDir()
 	config.WorkflowFile = state.WorkflowFile
 	config.RunID = runID
 
@@ -919,6 +926,17 @@ func (s *Server) resumePipelineWithResult(ctx context.Context, runID, session st
 	output.Status = string(newState.Status)
 
 	return output
+}
+
+func (s *Server) pipelineProjectDir() string {
+	if strings.TrimSpace(s.projectDir) != "" {
+		return s.projectDir
+	}
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return projectDir
 }
 
 // PipelineTemplate represents an available workflow template

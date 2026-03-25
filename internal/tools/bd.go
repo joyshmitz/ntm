@@ -101,7 +101,8 @@ func (a *BDAdapter) Detect() (string, bool) {
 		return path, true
 	}
 
-	return candidates[0], true
+	// No candidate responded to --version; report as not working.
+	return candidates[0], false
 }
 
 // Version returns the installed bd version
