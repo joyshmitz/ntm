@@ -25,8 +25,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/git"
-	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
@@ -8790,6 +8790,14 @@ type TerseOutput struct {
 
 // GetTerse retrieves ultra-compact single-line state for token-constrained scenarios.
 func GetTerse(cfg *config.Config) (*TerseOutput, error) {
+	snapshot, err := GetSnapshot(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return buildTerseOutputFromSnapshot(snapshot), nil
+}
+
+func buildTerseOutputFromSnapshot(snapshot *SnapshotOutput) *TerseOutput {
 	output := &TerseOutput{
 		RobotResponse: RobotResponse{
 			Success:   true,
@@ -8798,46 +8806,31 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 		States:     []TerseState{},
 		TerseLines: []string{},
 	}
-
-	// Get alert breakdown (critical vs warning)
-	var criticalAlerts, warningAlerts int
-	if cfg != nil {
-		alertCfg := alertConfigForProject(cfg, "")
-		activeAlerts := alerts.GetActiveAlerts(alertCfg)
-		for _, a := range activeAlerts {
-			switch a.Severity {
-			case alerts.SeverityCritical:
-				criticalAlerts++
-			case alerts.SeverityWarning:
-				warningAlerts++
-			}
-		}
-	}
-
-	// Get beads summary (same for all sessions in same project)
-	var beadsSummary *bv.BeadsSummary
-	if bv.IsInstalled() {
-		beadsSummary = bv.GetBeadsSummary("", 0)
-	}
-
-	// Get mail count (best-effort)
-	mailCount := getTerseMailCount()
-
-	// Get attention summary (global for all sessions)
-	var attnAction, attnInterest int
-	feed := PeekAttentionFeed()
-	if feed == nil {
+	if snapshot == nil {
+		state := TerseState{Session: "-"}
+		output.States = append(output.States, state)
+		output.TerseLines = append(output.TerseLines, formatTerseLine(state, "feed:unavail"))
 		output.AttentionHint = "feed:unavail"
-	} else if attnSummary := buildSnapshotAttentionSummary(feed); attnSummary != nil {
-		attnAction = attnSummary.ActionRequiredCount
-		attnInterest = attnSummary.InterestingCount
-		output.AttentionHint = buildAttentionHintFromSummary(attnSummary)
+		return output
 	}
 
-	// Get all sessions
-	sessions, err := tmux.ListSessions()
-	if err != nil {
-		// No sessions - output minimal state with just beads info
+	criticalAlerts, warningAlerts := terseAlertCounts(snapshot)
+	readyBeads, inProgressBeads, blockedBeads := terseWorkCounts(snapshot)
+	mailCount := snapshot.MailUnread
+	if mailCount == 0 {
+		mailCount = snapshot.Summary.MailUnread
+	}
+
+	var attnAction, attnInterest int
+	if snapshot.AttentionSummary == nil {
+		output.AttentionHint = "feed:unavail"
+	} else {
+		attnAction = snapshot.AttentionSummary.ActionRequiredCount
+		attnInterest = snapshot.AttentionSummary.InterestingCount
+		output.AttentionHint = buildAttentionHintFromSummary(snapshot.AttentionSummary)
+	}
+
+	if len(snapshot.Sessions) == 0 {
 		state := TerseState{
 			Session:           "-",
 			CriticalAlerts:    criticalAlerts,
@@ -8845,19 +8838,16 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 			UnreadMail:        mailCount,
 			AttentionAction:   attnAction,
 			AttentionInterest: attnInterest,
+			ReadyBeads:        readyBeads,
+			BlockedBeads:      blockedBeads,
+			InProgressBead:    inProgressBeads,
 		}
-		if beadsSummary != nil {
-			state.ReadyBeads = beadsSummary.Ready
-			state.BlockedBeads = beadsSummary.Blocked
-			state.InProgressBead = beadsSummary.InProgress
-		}
-
 		output.States = append(output.States, state)
 		output.TerseLines = append(output.TerseLines, formatTerseLine(state, output.AttentionHint))
-		return output, nil
+		return output
 	}
 
-	for _, sess := range sessions {
+	for _, sess := range snapshot.Sessions {
 		state := TerseState{
 			Session:           sess.Name,
 			CriticalAlerts:    criticalAlerts,
@@ -8865,60 +8855,63 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 			UnreadMail:        mailCount,
 			AttentionAction:   attnAction,
 			AttentionInterest: attnInterest,
+			ReadyBeads:        readyBeads,
+			BlockedBeads:      blockedBeads,
+			InProgressBead:    inProgressBeads,
 		}
 
-		// Get panes for this session
-		panes, err := tmux.GetPanes(sess.Name)
-		if err == nil {
-			state.TotalAgents = len(panes)
-			// Count agents by state: working (active), idle, error
-			for _, pane := range panes {
-				agentType := agentTypeString(pane.Type)
-				if agentType != "user" && agentType != "unknown" {
-					// Capture output to detect state
-					captured, captureErr := tmux.CapturePaneOutput(pane.ID, 20)
-					if captureErr == nil {
-						_ = splitLines(status.StripANSI(captured)) // Just for consistency, unused here
-						paneState := determineState(captured, agentType)
-						switch paneState {
-						case "active":
-							state.WorkingAgents++
-							state.ActiveAgents++
-						case "idle":
-							state.IdleAgents++
-							state.ActiveAgents++
-						case "error":
-							state.ErrorAgents++
-							state.ActiveAgents++
-						default:
-							// Unknown state counts as active
-							state.ActiveAgents++
-						}
-					} else {
-						// Assume active/working if we can't capture
-						state.WorkingAgents++
-						state.ActiveAgents++
-					}
-				}
+		state.TotalAgents = len(sess.Agents)
+		for _, agent := range sess.Agents {
+			if strings.EqualFold(agent.Type, "user") {
+				continue
+			}
+			state.ActiveAgents++
+			switch strings.ToLower(strings.TrimSpace(agent.State)) {
+			case "idle":
+				state.IdleAgents++
+			case "error":
+				state.ErrorAgents++
+			default:
+				state.WorkingAgents++
 			}
 		}
-
-		// Add beads summary (same for all sessions in same project)
-		if beadsSummary != nil {
-			state.ReadyBeads = beadsSummary.Ready
-			state.BlockedBeads = beadsSummary.Blocked
-			state.InProgressBead = beadsSummary.InProgress
-		}
-
-		// Context percentage is not available at session level yet
-		// Would require aggregating from individual agent outputs
-		state.ContextPct = 0
 
 		output.States = append(output.States, state)
 		output.TerseLines = append(output.TerseLines, formatTerseLine(state, output.AttentionHint))
 	}
 
-	return output, nil
+	return output
+}
+
+func terseAlertCounts(snapshot *SnapshotOutput) (critical, warning int) {
+	if snapshot == nil {
+		return 0, 0
+	}
+	if snapshot.AlertSummary != nil {
+		return snapshot.AlertSummary.BySeverity["critical"], snapshot.AlertSummary.BySeverity["warning"]
+	}
+	for _, alert := range snapshot.AlertsDetailed {
+		switch strings.ToLower(strings.TrimSpace(alert.Severity)) {
+		case "critical":
+			critical++
+		case "warning":
+			warning++
+		}
+	}
+	return critical, warning
+}
+
+func terseWorkCounts(snapshot *SnapshotOutput) (ready, inProgress, blocked int) {
+	if snapshot == nil {
+		return 0, 0, 0
+	}
+	if snapshot.Work != nil && snapshot.Work.Summary != nil {
+		return snapshot.Work.Summary.Ready, snapshot.Work.Summary.InProgress, snapshot.Work.Summary.Blocked
+	}
+	if snapshot.BeadsSummary != nil {
+		return snapshot.BeadsSummary.Ready, snapshot.BeadsSummary.InProgress, snapshot.BeadsSummary.Blocked
+	}
+	return snapshot.Summary.ReadyWork, snapshot.Summary.InProgress, 0
 }
 
 // buildAttentionHint creates a compact attention summary for terse output.

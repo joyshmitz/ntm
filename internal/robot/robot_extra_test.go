@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -153,4 +155,159 @@ func stripNewline(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+func TestBuildTerseOutputFromSnapshotUsesSharedProjection(t *testing.T) {
+	snapshot := &SnapshotOutput{
+		Summary: StatusSummary{
+			MailUnread: 2,
+			ReadyWork:  3,
+			InProgress: 1,
+		},
+		Sessions: []SnapshotSession{
+			{
+				Name: "proj",
+				Agents: []SnapshotAgent{
+					{Type: "claude", State: "active"},
+					{Type: "codex", State: "idle"},
+					{Type: "gemini", State: "error"},
+					{Type: "user", State: "active"},
+				},
+			},
+		},
+		BeadsSummary: &bv.BeadsSummary{
+			Ready:      3,
+			InProgress: 1,
+			Blocked:    2,
+		},
+		AlertSummary: &AlertSummaryInfo{
+			BySeverity: map[string]int{
+				"critical": 1,
+				"warning":  2,
+			},
+		},
+		AttentionSummary: &SnapshotAttentionSummary{
+			TotalEvents:         4,
+			ActionRequiredCount: 2,
+			InterestingCount:    1,
+		},
+		MailUnread: 2,
+	}
+
+	output := buildTerseOutputFromSnapshot(snapshot)
+	if output.AttentionHint != "2!action 1?interest" {
+		t.Fatalf("attention hint = %q, want compact summary", output.AttentionHint)
+	}
+	if len(output.States) != 1 {
+		t.Fatalf("states len = %d, want 1", len(output.States))
+	}
+
+	state := output.States[0]
+	if state.Session != "proj" {
+		t.Fatalf("session = %q, want proj", state.Session)
+	}
+	if state.TotalAgents != 4 || state.ActiveAgents != 3 {
+		t.Fatalf("agent counts = %+v, want total=4 active=3", state)
+	}
+	if state.WorkingAgents != 1 || state.IdleAgents != 1 || state.ErrorAgents != 1 {
+		t.Fatalf("state counts = %+v, want 1 working/idle/error", state)
+	}
+	if state.ReadyBeads != 3 || state.InProgressBead != 1 || state.BlockedBeads != 2 {
+		t.Fatalf("work counts = %+v, want ready=3 in_progress=1 blocked=2", state)
+	}
+	if state.UnreadMail != 2 || state.CriticalAlerts != 1 || state.WarningAlerts != 2 {
+		t.Fatalf("coordination counts = %+v", state)
+	}
+	if got := output.TerseLines[0]; !strings.Contains(got, "S:proj|A:3/4|W:1|I:1|E:1") {
+		t.Fatalf("terse line = %q, want shared session counts", got)
+	}
+}
+
+func TestRenderMarkdownFromSnapshotUsesRegistrySections(t *testing.T) {
+	snapshot := &SnapshotOutput{
+		Timestamp: "2026-03-25T03:00:00Z",
+		Summary: StatusSummary{
+			TotalSessions: 1,
+			TotalAgents:   2,
+			ReadyWork:     2,
+			InProgress:    1,
+			AlertsActive:  1,
+			MailUnread:    4,
+			HealthStatus:  "healthy",
+		},
+		Sessions: []SnapshotSession{
+			{
+				Name:     "proj",
+				Attached: true,
+				Agents: []SnapshotAgent{
+					{Type: "claude", State: "active"},
+					{Type: "codex", State: "idle"},
+				},
+			},
+		},
+		Work: &adapters.WorkSection{
+			Available: true,
+			Summary: &adapters.WorkSummary{
+				Total:      4,
+				Ready:      2,
+				InProgress: 1,
+				Blocked:    1,
+			},
+			Ready: []adapters.WorkItem{
+				{ID: "bd-1", Title: "Ready work"},
+			},
+			InProgress: []adapters.WorkItem{
+				{ID: "bd-2", Title: "Active work", Assignee: "codex"},
+			},
+		},
+		AlertsDetailed: []AlertInfo{
+			{Type: "quota", Severity: "critical", Message: "quota exhausted"},
+		},
+		AlertSummary: &AlertSummaryInfo{
+			TotalActive: 1,
+			BySeverity: map[string]int{
+				"critical": 1,
+			},
+		},
+		AttentionSummary: &SnapshotAttentionSummary{
+			TotalEvents:         1,
+			ActionRequiredCount: 1,
+			TopItems: []SnapshotAttentionItem{
+				{Cursor: 9, Category: "quota", Severity: "critical", Summary: "Investigate quota"},
+			},
+		},
+	}
+
+	rendered, err := renderMarkdownFromSnapshot(snapshot, MarkdownOptions{
+		IncludeSections: []string{"summary", "sessions", "work", "alerts", "attention"},
+	})
+	if err != nil {
+		t.Fatalf("renderMarkdownFromSnapshot error: %v", err)
+	}
+
+	for _, want := range []string{
+		"### Summary",
+		"### Sessions (1)",
+		"### Work (R:2 I:1 B:1 = 4)",
+		"### Alerts (1, 1 critical)",
+		"### Attention",
+		"`bd-1`",
+		"Investigate quota",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("markdown missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestRenderMarkdownFromSnapshotRejectsUnknownSections(t *testing.T) {
+	_, err := renderMarkdownFromSnapshot(&SnapshotOutput{}, MarkdownOptions{
+		IncludeSections: []string{"mail"},
+	})
+	if err == nil {
+		t.Fatal("expected invalid section error")
+	}
+	if !strings.Contains(err.Error(), "supported: summary, sessions, work, alerts, attention") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }

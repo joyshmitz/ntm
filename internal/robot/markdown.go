@@ -1,36 +1,36 @@
 package robot
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // MarkdownOptions configures markdown output generation.
 type MarkdownOptions struct {
 	// IncludeSections specifies which sections to include.
-	// Empty means all sections. Valid: "sessions", "beads", "alerts", "mail"
+	// Empty means the registry-backed markdown defaults.
+	// Valid: "summary", "sessions", "work", "alerts", "attention"
 	IncludeSections []string
 
-	// MaxBeads limits the number of beads shown per category.
+	// MaxBeads limits the number of work items shown per category.
 	MaxBeads int
 
-	// MaxAlerts limits the number of alerts shown.
+	// MaxAlerts limits the number of alert items shown.
 	MaxAlerts int
 
-	// Compact uses even more abbreviated output.
+	// Compact uses an abbreviated section projection.
 	Compact bool
 
-	// Session filters output to a specific session (empty = all).
+	// Session filters the sessions section to a specific session (empty = all).
+	// Project-wide sections such as work and alerts remain unfiltered.
 	Session string
 }
 
@@ -51,41 +51,62 @@ func PrintMarkdown(cfg *config.Config, opts MarkdownOptions) error {
 	if cfg == nil {
 		cfg = config.Default()
 	}
+	snapshot, err := GetSnapshot(cfg)
+	if err != nil {
+		return err
+	}
+	rendered, err := renderMarkdownFromSnapshot(snapshot, opts)
+	if err != nil {
+		return err
+	}
+	fmt.Print(rendered)
+	return nil
+}
+
+func renderMarkdownFromSnapshot(snapshot *SnapshotOutput, opts MarkdownOptions) (string, error) {
+	if snapshot == nil {
+		snapshot = &SnapshotOutput{}
+	}
+
+	sections, err := resolveMarkdownSections(opts.IncludeSections)
+	if err != nil {
+		return "", err
+	}
+
+	generatedAt := strings.TrimSpace(snapshot.Timestamp)
+	if generatedAt == "" {
+		generatedAt = strings.TrimSpace(snapshot.RobotResponse.Timestamp)
+	}
+	if generatedAt == "" {
+		generatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	filteredSessions, sessionFound := filterMarkdownSessions(snapshot.Sessions, opts.Session)
 
 	var sb strings.Builder
-
-	// Header with timestamp
 	sb.WriteString("## NTM Status\n")
-	fmt.Fprintf(&sb, "_Generated: %s_\n\n", time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	fmt.Fprintf(&sb, "_Generated: %s_\n", generatedAt)
+	if opts.Session != "" {
+		fmt.Fprintf(&sb, "_Session Filter: %s (sessions section only; project-wide sections remain unfiltered)_\n", opts.Session)
+	}
+	sb.WriteString("\n")
 
-	includeAll := len(opts.IncludeSections) == 0
-	sectionSet := make(map[string]bool)
-	for _, s := range opts.IncludeSections {
-		sectionSet[strings.ToLower(s)] = true
+	for _, section := range sections {
+		switch section {
+		case "summary":
+			writeMarkdownSummarySection(&sb, snapshot, opts)
+		case "sessions":
+			writeSnapshotSessionsMarkdown(&sb, filteredSessions, opts, sessionFound)
+		case "work":
+			writeSnapshotWorkMarkdown(&sb, snapshot, opts)
+		case "alerts":
+			writeSnapshotAlertsMarkdown(&sb, snapshot, opts)
+		case "attention":
+			writeSnapshotAttentionMarkdown(&sb, snapshot.AttentionSummary, opts)
+		}
 	}
 
-	// Sessions section
-	if includeAll || sectionSet["sessions"] {
-		writeSessionsMarkdown(&sb, opts)
-	}
-
-	// Beads section
-	if includeAll || sectionSet["beads"] {
-		writeBeadsMarkdown(&sb, opts)
-	}
-
-	// Alerts section
-	if includeAll || sectionSet["alerts"] {
-		writeAlertsSection(&sb, cfg, opts)
-	}
-
-	// Mail section
-	if includeAll || sectionSet["mail"] {
-		writeMailSection(&sb, opts)
-	}
-
-	fmt.Print(sb.String())
-	return nil
+	return sb.String(), nil
 }
 
 // PrintMarkdownCompact outputs ultra-compact markdown suitable for system prompts.
@@ -98,10 +119,108 @@ func PrintMarkdownCompact(cfg *config.Config) error {
 	return PrintMarkdown(cfg, opts)
 }
 
-// writeSessionsMarkdown writes the sessions section.
-func writeSessionsMarkdown(sb *strings.Builder, opts MarkdownOptions) {
-	sessions, err := tmux.ListSessions()
-	if err != nil || len(sessions) == 0 {
+func resolveMarkdownSections(requested []string) ([]string, error) {
+	supported := markdownSurfaceSections()
+	if len(requested) == 0 {
+		return append([]string(nil), supported...), nil
+	}
+
+	supportedSet := make(map[string]struct{}, len(supported))
+	for _, section := range supported {
+		supportedSet[section] = struct{}{}
+	}
+
+	selected := make(map[string]struct{}, len(requested))
+	for _, raw := range requested {
+		section := strings.ToLower(strings.TrimSpace(raw))
+		if section == "" {
+			continue
+		}
+		if _, ok := supportedSet[section]; !ok {
+			return nil, fmt.Errorf("invalid markdown section %q (supported: %s)", raw, strings.Join(supported, ", "))
+		}
+		selected[section] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(selected))
+	for _, section := range supported {
+		if _, ok := selected[section]; ok {
+			ordered = append(ordered, section)
+		}
+	}
+	return ordered, nil
+}
+
+func markdownSurfaceSections() []string {
+	registry := GetRobotRegistry()
+	if registry != nil {
+		if surface, ok := registry.Surface("markdown"); ok && len(surface.Sections) > 0 {
+			return surface.Sections
+		}
+	}
+	return []string{"summary", "sessions", "work", "alerts", "attention"}
+}
+
+func filterMarkdownSessions(sessions []SnapshotSession, session string) ([]SnapshotSession, bool) {
+	if session == "" {
+		return sessions, true
+	}
+
+	filtered := make([]SnapshotSession, 0, 1)
+	for _, sess := range sessions {
+		if sess.Name == session {
+			filtered = append(filtered, sess)
+		}
+	}
+	return filtered, len(filtered) > 0
+}
+
+func writeMarkdownSummarySection(sb *strings.Builder, snapshot *SnapshotOutput, opts MarkdownOptions) {
+	sb.WriteString("### Summary\n")
+
+	attentionHeadline := "feed unavailable"
+	if snapshot.AttentionSummary != nil {
+		attentionHeadline = dashboardAttentionHeadline(snapshot.AttentionSummary)
+	}
+
+	if opts.Compact {
+		fmt.Fprintf(
+			sb,
+			"- sessions:%d agents:%d ready:%d in_progress:%d alerts:%d mail:%d attention:%s health:%s\n\n",
+			snapshot.Summary.TotalSessions,
+			snapshot.Summary.TotalAgents,
+			snapshot.Summary.ReadyWork,
+			snapshot.Summary.InProgress,
+			snapshot.Summary.AlertsActive,
+			snapshot.Summary.MailUnread,
+			attentionHeadline,
+			firstNonEmptyString(snapshot.Summary.HealthStatus, "unknown"),
+		)
+		return
+	}
+
+	sb.WriteString("| Key | Value |\n")
+	sb.WriteString("|---|---|\n")
+	fmt.Fprintf(sb, "| Sessions | %d |\n", snapshot.Summary.TotalSessions)
+	fmt.Fprintf(sb, "| Agents | %d |\n", snapshot.Summary.TotalAgents)
+	fmt.Fprintf(sb, "| Ready Work | %d |\n", snapshot.Summary.ReadyWork)
+	fmt.Fprintf(sb, "| In Progress | %d |\n", snapshot.Summary.InProgress)
+	fmt.Fprintf(sb, "| Active Alerts | %d |\n", snapshot.Summary.AlertsActive)
+	fmt.Fprintf(sb, "| Unread Mail | %d |\n", snapshot.Summary.MailUnread)
+	fmt.Fprintf(sb, "| Attention | %s |\n", escapeMarkdownCell(attentionHeadline, 120))
+	if status := firstNonEmptyString(snapshot.Summary.HealthStatus); status != "" {
+		fmt.Fprintf(sb, "| Health | %s |\n", escapeMarkdownCell(status, 80))
+	}
+	sb.WriteString("\n")
+}
+
+// writeSnapshotSessionsMarkdown writes the sessions section from the shared snapshot projection.
+func writeSnapshotSessionsMarkdown(sb *strings.Builder, sessions []SnapshotSession, opts MarkdownOptions, sessionFound bool) {
+	if opts.Session != "" && !sessionFound {
+		fmt.Fprintf(sb, "### Sessions\nSession `%s` not found.\n\n", opts.Session)
+		return
+	}
+	if len(sessions) == 0 {
 		if opts.Compact {
 			sb.WriteString("### Sessions: none\n\n")
 		} else {
@@ -110,45 +229,35 @@ func writeSessionsMarkdown(sb *strings.Builder, opts MarkdownOptions) {
 		return
 	}
 
-	// Filter by session if specified
-	if opts.Session != "" {
-		filtered := make([]tmux.Session, 0)
-		for _, s := range sessions {
-			if s.Name == opts.Session {
-				filtered = append(filtered, s)
-			}
-		}
-		sessions = filtered
-	}
-
-	if len(sessions) == 0 {
-		fmt.Fprintf(sb, "### Sessions\nSession '%s' not found.\n\n", opts.Session)
-		return
-	}
-
 	fmt.Fprintf(sb, "### Sessions (%d)\n", len(sessions))
 
 	if opts.Compact {
-		// Ultra-compact: one line per session
 		for _, sess := range sessions {
-			panes, _ := tmux.GetPanes(sess.Name)
-			counts := countAgentsByType(panes)
+			typeCounts, stateCounts := snapshotSessionCounts(sess.Agents)
 			attached := ""
 			if sess.Attached {
 				attached = "*"
 			}
-			fmt.Fprintf(sb, "- %s%s: %d agents (cc:%d cod:%d gmi:%d)\n",
-				sess.Name, attached, len(panes), counts["claude"], counts["codex"], counts["gemini"])
+			fmt.Fprintf(
+				sb,
+				"- %s%s: %d agents (cc:%d cod:%d gmi:%d) w:%d i:%d e:%d\n",
+				sess.Name,
+				attached,
+				len(sess.Agents),
+				typeCounts["claude"],
+				typeCounts["codex"],
+				typeCounts["gemini"],
+				stateCounts["active"],
+				stateCounts["idle"],
+				stateCounts["error"],
+			)
 		}
 	} else {
-		// Table format
 		sb.WriteString("| Session | Attached | Agents | Claude | Codex | Gemini | Working | Idle | Error |\n")
 		sb.WriteString("|---------|----------|--------|--------|-------|--------|---------|------|-------|\n")
 
 		for _, sess := range sessions {
-			panes, _ := tmux.GetPanes(sess.Name)
-			counts := countAgentsByType(panes)
-			states := countAgentsByState(panes)
+			typeCounts, stateCounts := snapshotSessionCounts(sess.Agents)
 
 			attached := "no"
 			if sess.Attached {
@@ -156,15 +265,57 @@ func writeSessionsMarkdown(sb *strings.Builder, opts MarkdownOptions) {
 			}
 
 			fmt.Fprintf(sb, "| %s | %s | %d | %d | %d | %d | %d | %d | %d |\n",
-				sess.Name, attached, len(panes),
-				counts["claude"], counts["codex"], counts["gemini"],
-				states["working"], states["idle"], states["error"])
+				sess.Name, attached, len(sess.Agents),
+				typeCounts["claude"], typeCounts["codex"], typeCounts["gemini"],
+				stateCounts["active"], stateCounts["idle"], stateCounts["error"])
 		}
 	}
 	sb.WriteString("\n")
 }
 
-// countAgentsByType counts agents by type from panes.
+func snapshotSessionCounts(agents []SnapshotAgent) (map[string]int, map[string]int) {
+	counts := map[string]int{
+		"claude": 0,
+		"codex":  0,
+		"gemini": 0,
+		"user":   0,
+		"other":  0,
+	}
+	states := map[string]int{
+		"active": 0,
+		"idle":   0,
+		"error":  0,
+	}
+
+	for _, agent := range agents {
+		switch strings.ToLower(strings.TrimSpace(agent.Type)) {
+		case "claude":
+			counts["claude"]++
+		case "codex":
+			counts["codex"]++
+		case "gemini":
+			counts["gemini"]++
+		case "user":
+			counts["user"]++
+		default:
+			counts["other"]++
+		}
+
+		if strings.EqualFold(agent.Type, "user") {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(agent.State)) {
+		case "idle":
+			states["idle"]++
+		case "error":
+			states["error"]++
+		default:
+			states["active"]++
+		}
+	}
+	return counts, states
+}
+
 func countAgentsByType(panes []tmux.Pane) map[string]int {
 	counts := map[string]int{
 		"claude": 0,
@@ -188,121 +339,118 @@ func countAgentsByType(panes []tmux.Pane) map[string]int {
 			counts["other"]++
 		}
 	}
+
 	return counts
 }
 
-// countAgentsByState counts agents by state (working/idle/error).
-func countAgentsByState(panes []tmux.Pane) map[string]int {
-	counts := map[string]int{
-		"working": 0,
-		"idle":    0,
-		"error":   0,
-		"unknown": 0,
+// writeSnapshotWorkMarkdown writes the work section from the shared snapshot projection.
+func writeSnapshotWorkMarkdown(sb *strings.Builder, snapshot *SnapshotOutput, opts MarkdownOptions) {
+	work := snapshot.Work
+	if work == nil {
+		writeFallbackWorkMarkdown(sb, snapshot.BeadsSummary, opts)
+		return
 	}
-
-	for _, pane := range panes {
-		// Skip user panes
-		if pane.Type == tmux.AgentUser {
-			continue
-		}
-
-		// Capture output to detect state
-		captured, err := tmux.CapturePaneOutput(pane.ID, 20)
-		if err != nil {
-			counts["unknown"]++
-			continue
-		}
-
-		lines := splitLines(stripANSI(captured))
-		state := detectState(lines, pane.Title)
-
-		switch state {
-		case "active":
-			counts["working"]++
-		case "idle":
-			counts["idle"]++
-		case "error":
-			counts["error"]++
-		default:
-			counts["unknown"]++
-		}
-	}
-	return counts
-}
-
-// writeBeadsMarkdown writes the beads section.
-func writeBeadsMarkdown(sb *strings.Builder, opts MarkdownOptions) {
-	summary := bv.GetBeadsSummary("", opts.MaxBeads)
-	if summary == nil || !summary.Available {
+	if !work.Available {
 		if opts.Compact {
-			sb.WriteString("### Beads: unavailable\n\n")
+			sb.WriteString("### Work: unavailable\n\n")
 		} else {
-			reason := "bv not installed"
-			if summary != nil && summary.Reason != "" {
-				reason = summary.Reason
+			reason := "projection unavailable"
+			if work.Reason != "" {
+				reason = work.Reason
 			}
-			fmt.Fprintf(sb, "### Beads\n_%s_\n\n", reason)
+			fmt.Fprintf(sb, "### Work\n_%s_\n\n", reason)
 		}
 		return
 	}
 
-	total := summary.Ready + summary.InProgress + summary.Blocked
-	fmt.Fprintf(sb, "### Beads (R:%d I:%d B:%d = %d)\n",
-		summary.Ready, summary.InProgress, summary.Blocked, total)
+	summary := work.Summary
+	if summary == nil {
+		summary = &adapters.WorkSummary{
+			Ready:      len(work.Ready),
+			InProgress: len(work.InProgress),
+			Blocked:    len(work.Blocked),
+			Open:       len(work.Ready) + len(work.InProgress) + len(work.Blocked),
+			Total:      len(work.Ready) + len(work.InProgress) + len(work.Blocked),
+		}
+	}
+
+	fmt.Fprintf(sb, "### Work (R:%d I:%d B:%d = %d)\n",
+		summary.Ready, summary.InProgress, summary.Blocked, summary.Total)
 
 	if opts.Compact {
-		// Ultra-compact: comma-separated lists
-		if len(summary.ReadyPreview) > 0 {
-			ids := make([]string, 0, len(summary.ReadyPreview))
-			for _, b := range summary.ReadyPreview {
-				ids = append(ids, fmt.Sprintf("%s(%s)", b.ID, b.Priority))
+		if len(work.Ready) > 0 {
+			ids := make([]string, 0, minInt(len(work.Ready), maxItemLimit(opts.MaxBeads)))
+			for _, item := range limitWorkItems(work.Ready, opts.MaxBeads) {
+				ids = append(ids, formatWorkItemCompact(item))
 			}
 			fmt.Fprintf(sb, "- **Ready**: %s\n", strings.Join(ids, ", "))
 		}
-		if len(summary.InProgressList) > 0 {
-			ids := make([]string, 0, len(summary.InProgressList))
-			for _, b := range summary.InProgressList {
-				if b.Assignee != "" {
-					ids = append(ids, fmt.Sprintf("%s→%s", b.ID, b.Assignee))
-				} else {
-					ids = append(ids, b.ID)
-				}
+		if len(work.InProgress) > 0 {
+			ids := make([]string, 0, minInt(len(work.InProgress), maxItemLimit(opts.MaxBeads)))
+			for _, item := range limitWorkItems(work.InProgress, opts.MaxBeads) {
+				ids = append(ids, formatWorkItemCompact(item))
 			}
 			fmt.Fprintf(sb, "- **In Progress**: %s\n", strings.Join(ids, ", "))
 		}
+		if len(work.Blocked) > 0 {
+			fmt.Fprintf(sb, "- **Blocked**: %d\n", summary.Blocked)
+		}
 	} else {
-		// Detailed format with titles - NO truncation, agents need full context
-		if len(summary.ReadyPreview) > 0 {
+		if len(work.Ready) > 0 {
 			sb.WriteString("\n**Ready to work on:**\n")
-			for _, b := range summary.ReadyPreview {
-				fmt.Fprintf(sb, "- `%s` (%s): %s\n", b.ID, b.Priority, b.Title)
-			}
+			writeWorkItemsMarkdown(sb, limitWorkItems(work.Ready, opts.MaxBeads))
+			writeWorkTruncationNotice(sb, len(work.Ready), opts.MaxBeads)
 		}
 
-		if len(summary.InProgressList) > 0 {
+		if len(work.InProgress) > 0 {
 			sb.WriteString("\n**In Progress:**\n")
-			for _, b := range summary.InProgressList {
-				assignee := ""
-				if b.Assignee != "" {
-					assignee = fmt.Sprintf(" → %s", b.Assignee)
-				}
-				fmt.Fprintf(sb, "- `%s`%s: %s\n", b.ID, assignee, b.Title)
-			}
+			writeWorkItemsMarkdown(sb, limitWorkItems(work.InProgress, opts.MaxBeads))
+			writeWorkTruncationNotice(sb, len(work.InProgress), opts.MaxBeads)
 		}
 
-		if summary.Blocked > 0 && len(summary.ReadyPreview) == 0 {
-			fmt.Fprintf(sb, "\n_Note: %d beads blocked, waiting on dependencies_\n", summary.Blocked)
+		if len(work.Blocked) > 0 {
+			sb.WriteString("\n**Blocked:**\n")
+			writeWorkItemsMarkdown(sb, limitWorkItems(work.Blocked, opts.MaxBeads))
+			writeWorkTruncationNotice(sb, len(work.Blocked), opts.MaxBeads)
+		}
+
+		if work.Triage != nil && work.Triage.TopRecommendation != nil {
+			rec := work.Triage.TopRecommendation
+			fmt.Fprintf(
+				sb,
+				"\n**Top Recommendation:** `%s` (P%d, score %.3f) %s\n",
+				rec.ID,
+				rec.Priority,
+				rec.Score,
+				rec.Title,
+			)
 		}
 	}
 	sb.WriteString("\n")
 }
 
-// writeAlertsSection writes the alerts section.
-func writeAlertsSection(sb *strings.Builder, cfg *config.Config, opts MarkdownOptions) {
-	alertCfg := alertConfigForProject(cfg, "")
-	activeAlerts := alerts.GetActiveAlerts(alertCfg)
+func writeFallbackWorkMarkdown(sb *strings.Builder, summary *bv.BeadsSummary, opts MarkdownOptions) {
+	if summary == nil || !summary.Available {
+		if opts.Compact {
+			sb.WriteString("### Work: unavailable\n\n")
+		} else {
+			sb.WriteString("### Work\n_Beads summary unavailable._\n\n")
+		}
+		return
+	}
 
-	if len(activeAlerts) == 0 {
+	total := summary.Ready + summary.InProgress + summary.Blocked
+	fmt.Fprintf(sb, "### Work (R:%d I:%d B:%d = %d)\n", summary.Ready, summary.InProgress, summary.Blocked, total)
+	if opts.Compact {
+		sb.WriteString("- detailed work projection unavailable; showing shared counts only\n\n")
+		return
+	}
+	sb.WriteString("_Detailed work items unavailable in snapshot; showing shared summary counts only._\n\n")
+}
+
+func writeSnapshotAlertsMarkdown(sb *strings.Builder, snapshot *SnapshotOutput, opts MarkdownOptions) {
+	totalActive, critical, warning := alertSummaryCounts(snapshot)
+	if totalActive == 0 {
 		if opts.Compact {
 			sb.WriteString("### Alerts: none\n\n")
 		} else {
@@ -311,18 +459,7 @@ func writeAlertsSection(sb *strings.Builder, cfg *config.Config, opts MarkdownOp
 		return
 	}
 
-	// Count by severity
-	critical, warning := 0, 0
-	for _, a := range activeAlerts {
-		switch a.Severity {
-		case alerts.SeverityCritical:
-			critical++
-		case alerts.SeverityWarning:
-			warning++
-		}
-	}
-
-	fmt.Fprintf(sb, "### Alerts (%d", len(activeAlerts))
+	fmt.Fprintf(sb, "### Alerts (%d", totalActive)
 	if critical > 0 {
 		fmt.Fprintf(sb, ", %d critical", critical)
 	}
@@ -331,34 +468,45 @@ func writeAlertsSection(sb *strings.Builder, cfg *config.Config, opts MarkdownOp
 	}
 	sb.WriteString(")\n")
 
-	// Sort by severity (critical first)
-	sort.Slice(activeAlerts, func(i, j int) bool {
-		return alertSeverityOrder(activeAlerts[i].Severity) < alertSeverityOrder(activeAlerts[j].Severity)
-	})
+	if opts.Compact {
+		fmt.Fprintf(sb, "- critical:%d warning:%d total:%d\n\n", critical, warning, totalActive)
+		return
+	}
 
-	// Limit output
-	shown := activeAlerts
+	shown := snapshot.AlertsDetailed
 	if opts.MaxAlerts > 0 && len(shown) > opts.MaxAlerts {
 		shown = shown[:opts.MaxAlerts]
 	}
-
-	for _, a := range shown {
-		icon := alertSeverityIcon(a.Severity)
-		msg := a.Message
-		if a.Session != "" {
-			msg = fmt.Sprintf("[%s] %s", a.Session, msg)
-		}
-		// No truncation - agents need full alert messages to understand issues
-		fmt.Fprintf(sb, "- %s %s\n", icon, msg)
+	if rendered := RenderAlertsList(shown); rendered != "" {
+		sb.WriteString(rendered)
+		sb.WriteString("\n")
 	}
-
-	if len(activeAlerts) > opts.MaxAlerts && opts.MaxAlerts > 0 {
-		fmt.Fprintf(sb, "_...and %d more_\n", len(activeAlerts)-opts.MaxAlerts)
+	if opts.MaxAlerts > 0 && len(snapshot.AlertsDetailed) > opts.MaxAlerts {
+		fmt.Fprintf(sb, "\n_Truncated: showing %d of %d alerts._\n", len(shown), len(snapshot.AlertsDetailed))
 	}
 	sb.WriteString("\n")
 }
 
-// alertSeverityOrder returns sort order for severity (lower = more severe).
+func alertSummaryCounts(snapshot *SnapshotOutput) (totalActive, critical, warning int) {
+	if snapshot.AlertSummary != nil {
+		totalActive = snapshot.AlertSummary.TotalActive
+		critical = snapshot.AlertSummary.BySeverity["critical"]
+		warning = snapshot.AlertSummary.BySeverity["warning"]
+		return totalActive, critical, warning
+	}
+
+	totalActive = len(snapshot.AlertsDetailed)
+	for _, alert := range snapshot.AlertsDetailed {
+		switch strings.ToLower(strings.TrimSpace(alert.Severity)) {
+		case "critical":
+			critical++
+		case "warning":
+			warning++
+		}
+	}
+	return totalActive, critical, warning
+}
+
 func alertSeverityOrder(s alerts.Severity) int {
 	switch s {
 	case alerts.SeverityCritical:
@@ -370,7 +518,6 @@ func alertSeverityOrder(s alerts.Severity) int {
 	}
 }
 
-// alertSeverityIcon returns an icon for the severity.
 func alertSeverityIcon(s alerts.Severity) string {
 	switch s {
 	case alerts.SeverityCritical:
@@ -382,103 +529,55 @@ func alertSeverityIcon(s alerts.Severity) string {
 	}
 }
 
-// writeMailSection writes the mail section.
-func writeMailSection(sb *strings.Builder, opts MarkdownOptions) {
-	projectKey, err := os.Getwd()
-	if err != nil {
-		sb.WriteString("### Mail: unavailable\n\n")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
-	if !client.IsAvailable() {
-		if opts.Compact {
-			sb.WriteString("### Mail: offline\n\n")
-		} else {
-			sb.WriteString("### Mail\nAgent Mail server not available.\n\n")
-		}
-		return
-	}
-
-	// Ensure project exists
-	if _, err := client.EnsureProject(ctx, projectKey); err != nil {
-		sb.WriteString("### Mail: error\n\n")
-		return
-	}
-
-	agents, err := client.ListProjectAgents(ctx, projectKey)
-	if err != nil {
-		sb.WriteString("### Mail: error\n\n")
-		return
-	}
-
-	if len(agents) == 0 {
-		if opts.Compact {
-			sb.WriteString("### Mail: no agents\n\n")
-		} else {
-			sb.WriteString("### Mail\nNo registered agents.\n\n")
-		}
-		return
-	}
-
-	// Gather unread counts
-	type agentMailInfo struct {
-		name   string
-		unread int
-		urgent int
-	}
-	var mailStats []agentMailInfo
-	totalUnread := 0
-
-	for _, a := range agents {
-		unread := countInbox(ctx, client, projectKey, a.Name, false)
-		urgent := countInbox(ctx, client, projectKey, a.Name, true)
-		if unread > 0 || !opts.Compact {
-			mailStats = append(mailStats, agentMailInfo{name: a.Name, unread: unread, urgent: urgent})
-		}
-		totalUnread += unread
-	}
-
-	if totalUnread == 0 {
-		if opts.Compact {
-			sb.WriteString("### Mail: 0 unread\n\n")
-		} else {
-			sb.WriteString("### Mail\nNo unread messages.\n\n")
-		}
-		return
-	}
-
-	fmt.Fprintf(sb, "### Mail (%d unread)\n", totalUnread)
-
+func writeSnapshotAttentionMarkdown(sb *strings.Builder, attention *SnapshotAttentionSummary, opts MarkdownOptions) {
+	sb.WriteString("### Attention\n")
 	if opts.Compact {
-		// One-liner
-		parts := make([]string, 0, len(mailStats))
-		for _, m := range mailStats {
-			if m.unread > 0 {
-				if m.urgent > 0 {
-					parts = append(parts, fmt.Sprintf("%s:%d(%d!)", m.name, m.unread, m.urgent))
-				} else {
-					parts = append(parts, fmt.Sprintf("%s:%d", m.name, m.unread))
-				}
-			}
+		headline := "feed unavailable"
+		if attention != nil {
+			headline = dashboardAttentionHeadline(attention)
 		}
-		sb.WriteString(strings.Join(parts, ", "))
-		sb.WriteString("\n")
-	} else {
-		for _, m := range mailStats {
-			if m.unread > 0 {
-				urgentNote := ""
-				if m.urgent > 0 {
-					urgentNote = fmt.Sprintf(" (%d urgent)", m.urgent)
-				}
-				fmt.Fprintf(sb, "- **%s**: %d unread%s\n", m.name, m.unread, urgentNote)
-			}
-		}
+		fmt.Fprintf(sb, "- %s\n\n", headline)
+		return
 	}
+	writeAttentionSection(sb, attention)
 	sb.WriteString("\n")
+}
+
+func limitWorkItems(items []adapters.WorkItem, max int) []adapters.WorkItem {
+	if max <= 0 || len(items) <= max {
+		return items
+	}
+	return items[:max]
+}
+
+func writeWorkItemsMarkdown(sb *strings.Builder, items []adapters.WorkItem) {
+	for _, item := range items {
+		label := ""
+		if item.Assignee != "" {
+			label = fmt.Sprintf(" → %s", item.Assignee)
+		}
+		fmt.Fprintf(sb, "- `%s`%s: %s\n", item.ID, label, item.Title)
+	}
+}
+
+func writeWorkTruncationNotice(sb *strings.Builder, total, max int) {
+	if max > 0 && total > max {
+		fmt.Fprintf(sb, "_Truncated: showing %d of %d items._\n", max, total)
+	}
+}
+
+func formatWorkItemCompact(item adapters.WorkItem) string {
+	if item.Assignee != "" {
+		return fmt.Sprintf("%s→%s", item.ID, item.Assignee)
+	}
+	return item.ID
+}
+
+func maxItemLimit(max int) int {
+	if max > 0 {
+		return max
+	}
+	return 0
 }
 
 // truncateStr truncates a string to maxLen with ellipsis, respecting UTF-8 boundaries.
@@ -489,9 +588,7 @@ func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	// When maxLen too small for content + ellipsis, just return first maxLen chars
 	if maxLen <= 3 {
-		// Find last rune boundary at or before maxLen bytes
 		lastValid := 0
 		for i := range s {
 			if i > maxLen {
@@ -504,7 +601,6 @@ func truncateStr(s string, maxLen int) string {
 		}
 		return s[:lastValid]
 	}
-	// Find the last rune boundary that allows for "..." suffix within maxLen bytes.
 	targetLen := maxLen - 3
 	prevI := 0
 	for i := range s {
@@ -513,7 +609,6 @@ func truncateStr(s string, maxLen int) string {
 		}
 		prevI = i
 	}
-	// All rune starts are <= targetLen, but string is > maxLen bytes.
 	return s[:prevI] + "..."
 }
 
