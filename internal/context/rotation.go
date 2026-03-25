@@ -468,7 +468,9 @@ func (r *Rotator) createPendingRotation(session, agentID string, contextPercent 
 	r.pending[agentID] = pending
 
 	// Also persist to the pending rotation store for CLI access
-	_ = AddPendingRotation(pending)
+	if err := AddPendingRotation(pending); err != nil {
+		slog.Warn("failed to persist pending rotation", "agent", agentID, "error", err)
+	}
 
 	return pending
 }
@@ -483,7 +485,10 @@ func (r *Rotator) processExpiredPending(session, workDir string) {
 		// Execute the default action
 		switch pending.DefaultAction {
 		case ConfirmRotate:
-			r.rotateAgent(session, agentID, workDir)
+			result := r.rotateAgent(session, agentID, workDir)
+			if !result.Success {
+				slog.Warn("auto-rotation from expired pending failed", "agent", agentID, "error", result.Error)
+			}
 		case ConfirmCompact:
 			if paneID := pending.PaneID; paneID != "" {
 				r.tryCompaction(agentID, paneID)
@@ -493,21 +498,30 @@ func (r *Rotator) processExpiredPending(session, workDir string) {
 		case ConfirmPostpone:
 			// Re-add with new timeout
 			pending.TimeoutAt = time.Now().Add(30 * time.Minute)
-			_ = AddPendingRotation(pending) // Update persistent store
-			continue                        // Don't remove from pending
+			if err := AddPendingRotation(pending); err != nil {
+				slog.Warn("failed to persist postponed rotation", "agent", agentID, "error", err)
+			}
+			continue // Don't remove from pending
 		}
 
 		delete(r.pending, agentID)
-		_ = RemovePendingRotation(agentID) // Also remove from persistent store
+		if err := RemovePendingRotation(agentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		}
 	}
 }
 
 // rotateAgent performs the full rotation flow for a single agent.
-func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
+// method specifies why the rotation was triggered (threshold, manual, etc.).
+func (r *Rotator) rotateAgent(session, agentID, workDir string, method ...RotationMethod) RotationResult {
 	startTime := time.Now()
+	m := RotationThresholdExceeded
+	if len(method) > 0 {
+		m = method[0]
+	}
 	result := RotationResult{
 		OldAgentID: agentID,
-		Method:     RotationThresholdExceeded,
+		Method:     m,
 		State:      RotationStateInProgress,
 		Timestamp:  startTime,
 	}
@@ -595,36 +609,33 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
 		return result
 	}
 
-	// Wait for agent to respond (with timeout)
-	time.Sleep(5 * time.Second) // Give agent time to start responding
+	// Wait for agent to respond
+	time.Sleep(5 * time.Second)
 
 	// Capture the summary response
-	summaryText, err := tmux.CapturePaneOutput(oldPane.ID, 100)
-	if err != nil {
-		// Proceed with fallback summary
+	summaryText, captureErr := tmux.CapturePaneOutput(oldPane.ID, 100)
+	if captureErr != nil {
+		slog.Warn("failed to capture summary from agent", "agent", agentID, "error", captureErr)
 		summaryText = ""
 	}
 
 	// Parse the summary
+	agentTypeName := agentTypeLong(string(oldPane.Type))
 	var handoffSummary *HandoffSummary
 	if summaryText != "" {
-		handoffSummary = r.summary.ParseAgentResponse(
-			agentID,
-			agentTypeLong(string(oldPane.Type)),
-			session,
-			summaryText,
-		)
-	} else {
-		// Generate fallback summary from recent output
-		recentOutput, _ := tmux.CapturePaneOutput(oldPane.ID, 50)
-		handoffSummary = r.summary.GenerateFallbackSummary(
-			agentID,
-			agentTypeLong(string(oldPane.Type)),
-			session,
-			[]string{recentOutput},
-		)
+		handoffSummary = r.summary.ParseAgentResponse(agentID, agentTypeName, session, summaryText)
 	}
-	result.SummaryTokens = handoffSummary.TokenEstimate
+	if handoffSummary == nil {
+		// Generate fallback summary from recent output (reuse captured text if available)
+		fallbackText := summaryText
+		if fallbackText == "" {
+			fallbackText, _ = tmux.CapturePaneOutput(oldPane.ID, 50)
+		}
+		handoffSummary = r.summary.GenerateFallbackSummary(agentID, agentTypeName, session, []string{fallbackText})
+	}
+	if handoffSummary != nil {
+		result.SummaryTokens = handoffSummary.TokenEstimate
+	}
 
 	// Spawn replacement agent with same type
 	agentType := agentTypeLong(string(oldPane.Type))
@@ -649,10 +660,12 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
 	time.Sleep(3 * time.Second)
 
 	// Send handoff context to new agent
-	handoffContext := handoffSummary.FormatForNewAgent()
-	if err := sendRotationPrompt(r.spawner, newPaneID, handoffContext); err != nil {
-		// Non-fatal: agent is spawned but may not have context
-		result.Error = fmt.Sprintf("warning: failed to send handoff context: %v", err)
+	if handoffSummary != nil {
+		handoffContext := handoffSummary.FormatForNewAgent()
+		if err := sendRotationPrompt(r.spawner, newPaneID, handoffContext); err != nil {
+			// Non-fatal: agent is spawned but may not have context
+			result.Error = fmt.Sprintf("warning: failed to send handoff context: %v", err)
+		}
 	}
 
 	// Kill the old pane
@@ -681,7 +694,9 @@ func (r *Rotator) rotateAgent(session, agentID, workDir string) RotationResult {
 		Duration:      time.Since(startTime),
 		Timestamp:     startTime,
 	}
+	r.mu.Lock()
 	r.history = append(r.history, event)
+	r.mu.Unlock()
 
 	result.Success = true
 	result.State = RotationStateCompleted
@@ -714,7 +729,9 @@ func recordRotationToHistory(result RotationResult, session, agentType string, c
 		historyRecord.FailureReason = result.Error
 	}
 	// Best-effort persist - don't fail rotation if history write fails
-	_ = RecordRotation(historyRecord)
+	if err := RecordRotation(historyRecord); err != nil {
+		slog.Warn("failed to persist rotation history", "agent", result.OldAgentID, "error", err)
+	}
 }
 
 // tryCompaction attempts to compact the agent's context.
@@ -796,11 +813,17 @@ func deriveAgentTypeFromID(agentID string) string {
 
 // GetHistory returns the rotation history.
 func (r *Rotator) GetHistory() []RotationEvent {
-	return r.history
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RotationEvent, len(r.history))
+	copy(out, r.history)
+	return out
 }
 
 // ClearHistory clears the rotation history.
 func (r *Rotator) ClearHistory() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.history = make([]RotationEvent, 0)
 }
 
@@ -876,9 +899,7 @@ func (r *Rotator) ManualRotate(session, agentID, workDir string) RotationResult 
 		}
 	}
 
-	result := r.rotateAgent(session, agentID, workDir)
-	result.Method = RotationManual
-	return result
+	return r.rotateAgent(session, agentID, workDir, RotationManual)
 }
 
 // FormatRotationResult formats a rotation result for display.
@@ -911,6 +932,8 @@ func (r *RotationResult) FormatForDisplay() string {
 
 // GetPendingRotations returns all pending rotations awaiting confirmation.
 func (r *Rotator) GetPendingRotations() []*PendingRotation {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	result := make([]*PendingRotation, 0, len(r.pending))
 	for _, p := range r.pending {
 		result = append(result, p)
@@ -920,11 +943,15 @@ func (r *Rotator) GetPendingRotations() []*PendingRotation {
 
 // GetPendingRotation returns a specific pending rotation by agent ID.
 func (r *Rotator) GetPendingRotation(agentID string) *PendingRotation {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.pending[agentID]
 }
 
 // HasPendingRotation returns true if there is a pending rotation for the agent.
 func (r *Rotator) HasPendingRotation(agentID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	_, exists := r.pending[agentID]
 	return exists
 }
@@ -951,7 +978,9 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 	case ConfirmRotate:
 		// Remove from pending and perform the rotation
 		delete(r.pending, agentID)
-		_ = RemovePendingRotation(agentID) // Also remove from persistent store
+		if err := RemovePendingRotation(agentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		}
 		return r.rotateAgent(pending.SessionName, agentID, pending.WorkDir)
 
 	case ConfirmCompact:
@@ -962,7 +991,9 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 			return result
 		}
 		delete(r.pending, agentID)
-		_ = RemovePendingRotation(agentID) // Also remove from persistent store
+		if err := RemovePendingRotation(agentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		}
 		compactResult := r.tryCompaction(agentID, pending.PaneID)
 		if compactResult != nil && compactResult.Success {
 			result.Success = true
@@ -980,7 +1011,9 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 	case ConfirmIgnore:
 		// Cancel the rotation
 		delete(r.pending, agentID)
-		_ = RemovePendingRotation(agentID) // Also remove from persistent store
+		if err := RemovePendingRotation(agentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		}
 		result.Success = true
 		result.State = RotationStateAborted
 		result.Error = "rotation cancelled by user"
@@ -994,7 +1027,9 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 		}
 		pending.TimeoutAt = time.Now().Add(time.Duration(minutes) * time.Minute)
 		// Update persistent store with new timeout
-		_ = AddPendingRotation(pending)
+		if err := AddPendingRotation(pending); err != nil {
+			slog.Warn("failed to persist postponed rotation", "agent", agentID, "error", err)
+		}
 		result.Success = true
 		result.State = RotationStatePending
 		result.Error = fmt.Sprintf("rotation postponed for %d minutes", minutes)
@@ -1009,9 +1044,13 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 
 // CancelPendingRotation removes a pending rotation without taking any action.
 func (r *Rotator) CancelPendingRotation(agentID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, exists := r.pending[agentID]; exists {
 		delete(r.pending, agentID)
-		_ = RemovePendingRotation(agentID) // Also remove from persistent store
+		if err := RemovePendingRotation(agentID); err != nil {
+			slog.Warn("failed to remove pending rotation from store", "agent", agentID, "error", err)
+		}
 		return true
 	}
 	return false
@@ -1019,6 +1058,10 @@ func (r *Rotator) CancelPendingRotation(agentID string) bool {
 
 // ClearPending removes all pending rotations.
 func (r *Rotator) ClearPending() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.pending = make(map[string]*PendingRotation)
-	_ = DefaultPendingRotationStore.Clear() // Also clear persistent store
+	if err := DefaultPendingRotationStore.Clear(); err != nil {
+		slog.Warn("failed to clear pending rotation store", "error", err)
+	}
 }
