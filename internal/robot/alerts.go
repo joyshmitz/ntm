@@ -409,7 +409,7 @@ type WebhookChannel struct {
 // NewWebhookChannel creates a webhook notification channel
 func NewWebhookChannel(config WebhookConfig) *WebhookChannel {
 	if config.MaxRetries <= 0 {
-		config.MaxRetries = 3
+		config.MaxRetries = 3 // Canonical default: config.RetryConfig.Alerts.MaxAttempts
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 10 * time.Second

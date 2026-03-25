@@ -62,7 +62,7 @@ func DefaultConfig() DetectionConfig {
 		IdleThreshold:     120 * time.Second,
 		RetryOnError:      true,
 		RetryInterval:     10 * time.Second,
-		MaxRetries:        3,
+		MaxRetries:        3, // Canonical default: config.RetryConfig.Completion.MaxAttempts
 		DedupWindow:       5 * time.Second,
 		GracefulDegrading: true,
 		CaptureLines:      50,

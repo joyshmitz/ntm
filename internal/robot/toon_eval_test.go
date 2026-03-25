@@ -213,7 +213,7 @@ func createSamplePlanActions() []map[string]any {
 		},
 		{
 			"priority":    3,
-			"command":     "bd update bd-xyz --status in_progress",
+			"command":     "br update bd-xyz --status in_progress",
 			"description": "Claim next available bead",
 			"args":        []string{"--status", "in_progress"},
 		},

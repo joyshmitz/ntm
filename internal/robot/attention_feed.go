@@ -966,7 +966,17 @@ func (f *AttentionFeed) ReplayForIncident(incidentID string, windowBefore, windo
 		windowAfter = 0
 	}
 
-	limit := minInt(maxInt(incident.EventCount+64, 128), 2048)
+	// incidentEventPadding provides extra events beyond the incident count to capture
+	// surrounding context (~30s at typical event rates).
+	// minIncidentQueryLimit ensures enough events for meaningful analysis even for
+	// small incidents.
+	// maxIncidentQueryLimit caps memory usage for very large incidents.
+	const (
+		incidentEventPadding  = 64
+		minIncidentQueryLimit = 128
+		maxIncidentQueryLimit = 2048
+	)
+	limit := minInt(maxInt(incident.EventCount+incidentEventPadding, minIncidentQueryLimit), maxIncidentQueryLimit)
 	linkedEvents, err := f.store.GetEventsForIncident(incidentID, limit)
 	if err != nil {
 		return nil, 0, fmt.Errorf("load linked incident events: %w", err)
@@ -1014,7 +1024,13 @@ func (f *AttentionFeed) ReconstructAsOf(timestamp time.Time, limit int) ([]Atten
 	if lookback <= 0 {
 		lookback = time.Hour
 	}
-	queryLimit := minInt(maxInt(limit*4, limit), 4096)
+	// queryOverfetchFactor accounts for filtering that reduces the result set post-query.
+	// absoluteMaxQueryLimit is the hard ceiling on any single time-range query.
+	const (
+		queryOverfetchFactor  = 4
+		absoluteMaxQueryLimit = 4096
+	)
+	queryLimit := minInt(maxInt(limit*queryOverfetchFactor, limit), absoluteMaxQueryLimit)
 
 	storedEvents, err := f.store.GetAttentionEventsInTimeRange(requestedAt.Add(-lookback), requestedAt, queryLimit)
 	if err != nil {

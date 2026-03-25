@@ -191,11 +191,15 @@ func (a *WorkCoordinationAdapter) NormalizeWorkSection(summary *bv.BeadsSummary)
 			if i >= a.config.ReadyQueueLimit {
 				break
 			}
+			beadType := preview.Type
+			if beadType == "" {
+				beadType = "task"
+			}
 			work.ReadyQueue = append(work.ReadyQueue, BeadRef{
 				ID:       preview.ID,
 				Title:    truncateForDisplay(preview.Title, 80),
 				Priority: parsePriorityString(preview.Priority),
-				Type:     "task", // Default, would need bead metadata
+				Type:     beadType,
 			})
 		}
 

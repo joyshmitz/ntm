@@ -227,7 +227,7 @@ func DefaultBackoffConfig() BackoffConfig {
 		MaxDelay:                     30 * time.Second,
 		Multiplier:                   2.0,
 		JitterFactor:                 0.3,
-		MaxRetries:                   5,
+		MaxRetries:                   5, // Canonical default: config.RetryConfig.Scheduler.MaxAttempts
 		PauseQueueOnBackoff:          true,
 		ConsecutiveFailuresThreshold: 3,
 	}

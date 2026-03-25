@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -375,11 +377,37 @@ func NewAgentScorerWithReservations(cfg RoutingConfig, client *agentmail.Client,
 }
 
 // NewAgentScorerFromConfig creates a scorer using config file settings.
+// Falls back to DefaultRoutingConfig() for any zero-value fields.
 func NewAgentScorerFromConfig(cfg *config.Config) *AgentScorer {
 	routingCfg := DefaultRoutingConfig()
 
-	// TODO: Load from config.Config when routing section is added
-	// For now, use defaults
+	if cfg != nil {
+		r := cfg.Routing
+		if r.ContextWeight > 0 {
+			routingCfg.ContextWeight = r.ContextWeight
+		}
+		if r.StateWeight > 0 {
+			routingCfg.StateWeight = r.StateWeight
+		}
+		if r.RecencyWeight > 0 {
+			routingCfg.RecencyWeight = r.RecencyWeight
+		}
+		if r.AffinityBonus > 0 {
+			routingCfg.AffinityBonus = r.AffinityBonus
+		}
+		if r.ExcludeContextAbove > 0 {
+			routingCfg.ExcludeContextAbove = r.ExcludeContextAbove
+		}
+		// Bool fields: only override from config if the [routing] section is
+		// explicitly present (indicated by any non-zero weight). Otherwise TOML
+		// zero-values would silently disable features like ExcludeIfGenerating.
+		if r.ContextWeight > 0 || r.StateWeight > 0 || r.RecencyWeight > 0 {
+			routingCfg.AffinityEnabled = r.AffinityEnabled
+			routingCfg.ExcludeIfGenerating = r.ExcludeIfGenerating
+			routingCfg.ExcludeIfRateLimited = r.ExcludeIfRateLimited
+			routingCfg.ExcludeIfErrorState = r.ExcludeIfErrorState
+		}
+	}
 
 	return NewAgentScorer(routingCfg)
 }
@@ -503,8 +531,7 @@ func (s *AgentScorer) ScoreAgentsWithContext(ctx context.Context, session string
 	// Refresh reservation cache if needed
 	if s.reservationCache != nil {
 		if err := s.reservationCache.EnsureFresh(ctx); err != nil {
-			// Log error but continue - reservations are advisory
-			// TODO: Add proper logging
+			slog.Warn("reservation cache refresh failed", "error", err, "session", session)
 		}
 	}
 
@@ -540,6 +567,13 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 			continue
 		}
 
+		// Detect rate limiting by checking recent pane output
+		rateLimited := false
+		if output, err := tmux.CapturePaneOutput(pane.ID, 20); err == nil && output != "" {
+			detection := ratelimit.DetectRateLimit(output)
+			rateLimited = detection.RateLimited
+		}
+
 		// Build scored agent
 		agent := ScoredAgent{
 			PaneID:       pane.ID,
@@ -551,7 +585,7 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 			ContextUsage: contextUsageForPane(contextUsage, pane.Index),
 			LastActivity: activity.LastOutput,
 			HealthState:  deriveHealthState(activity.State),
-			RateLimited:  false, // TODO: Detect from patterns
+			RateLimited:  rateLimited,
 		}
 
 		// Calculate score components

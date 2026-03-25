@@ -23,11 +23,12 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
-// Default configuration values
+// Default configuration values.
+// Retry defaults align with config.DefaultRetryConfig().Webhook.
 const (
 	DefaultQueueSize       = 1000
 	DefaultWorkerCount     = 10
-	DefaultMaxRetries      = 5
+	DefaultMaxRetries      = 5 // Canonical default: config.RetryConfig.Webhook.MaxAttempts
 	DefaultTimeout         = 10 * time.Second
 	DefaultBaseBackoff     = 1 * time.Second
 	DefaultMaxBackoff      = 30 * time.Second

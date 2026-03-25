@@ -18,7 +18,10 @@ import (
 
 const (
 	// DefaultBaseURL is the default Agent Mail server URL.
+	// Canonical source: config.DefaultAgentMailURL
 	DefaultBaseURL = "http://127.0.0.1:8765/mcp/"
+	// NOTE: This duplicates config.DefaultAgentMailURL to avoid an import cycle
+	// (agentmail ← config ← agentmail). If you change this, update config.go too.
 
 	// DefaultTimeout is the default HTTP request timeout.
 	DefaultTimeout = 10 * time.Second
