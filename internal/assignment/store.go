@@ -50,6 +50,45 @@ type Assignment struct {
 	PromptSent    string           `json:"prompt_sent,omitempty"`    // The actual prompt sent
 }
 
+// AssignmentUpdate describes mutable assignment metadata that can be updated
+// after the initial assignment record is created.
+type AssignmentUpdate struct {
+	PromptSent *string
+	RetryCount *int
+}
+
+func normalizeFailureReason(a *Assignment) {
+	if a == nil {
+		return
+	}
+	if strings.TrimSpace(a.FailReason) == "" && strings.TrimSpace(a.FailureReason) != "" {
+		a.FailReason = a.FailureReason
+	}
+	if strings.TrimSpace(a.FailReason) != "" {
+		a.FailureReason = ""
+	}
+}
+
+func cloneTimePtr(ts *time.Time) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	cloned := *ts
+	return &cloned
+}
+
+func cloneAssignment(a *Assignment) *Assignment {
+	if a == nil {
+		return nil
+	}
+	cloned := *a
+	cloned.StartedAt = cloneTimePtr(a.StartedAt)
+	cloned.CompletedAt = cloneTimePtr(a.CompletedAt)
+	cloned.FailedAt = cloneTimePtr(a.FailedAt)
+	normalizeFailureReason(&cloned)
+	return &cloned
+}
+
 // AssignmentStore manages bead-to-agent assignments for a session
 type AssignmentStore struct {
 	SessionName string                 `json:"session_name"`
@@ -172,6 +211,9 @@ func (s *AssignmentStore) Load() error {
 	if s.Assignments == nil {
 		s.Assignments = make(map[string]*Assignment)
 	}
+	for _, assignment := range s.Assignments {
+		normalizeFailureReason(assignment)
+	}
 
 	return nil
 }
@@ -260,7 +302,7 @@ func (s *AssignmentStore) Assign(beadID, beadTitle string, pane int, agentType, 
 		},
 	))
 
-	return assignment, nil
+	return cloneAssignment(assignment), nil
 }
 
 // Get retrieves an assignment by bead ID
@@ -268,7 +310,7 @@ func (s *AssignmentStore) Get(beadID string) *Assignment {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	return s.Assignments[beadID]
+	return cloneAssignment(s.Assignments[beadID])
 }
 
 // GetAll returns all assignments as values
@@ -278,7 +320,7 @@ func (s *AssignmentStore) GetAll() []Assignment {
 
 	var result []Assignment
 	for _, a := range s.Assignments {
-		result = append(result, *a)
+		result = append(result, *cloneAssignment(a))
 	}
 	return result
 }
@@ -290,7 +332,7 @@ func (s *AssignmentStore) List() []*Assignment {
 
 	result := make([]*Assignment, 0, len(s.Assignments))
 	for _, a := range s.Assignments {
-		result = append(result, a)
+		result = append(result, cloneAssignment(a))
 	}
 	return result
 }
@@ -303,7 +345,7 @@ func (s *AssignmentStore) ListByPane(pane int) []*Assignment {
 	var result []*Assignment
 	for _, a := range s.Assignments {
 		if a.Pane == pane {
-			result = append(result, a)
+			result = append(result, cloneAssignment(a))
 		}
 	}
 	return result
@@ -317,7 +359,7 @@ func (s *AssignmentStore) ListByStatus(status AssignmentStatus) []*Assignment {
 	var result []*Assignment
 	for _, a := range s.Assignments {
 		if a.Status == status {
-			result = append(result, a)
+			result = append(result, cloneAssignment(a))
 		}
 	}
 	return result
@@ -331,10 +373,41 @@ func (s *AssignmentStore) ListActive() []*Assignment {
 	var result []*Assignment
 	for _, a := range s.Assignments {
 		if a.Status == StatusAssigned || a.Status == StatusWorking {
-			result = append(result, a)
+			result = append(result, cloneAssignment(a))
 		}
 	}
 	return result
+}
+
+// Update updates mutable assignment metadata while preserving snapshot semantics
+// for store callers.
+func (s *AssignmentStore) Update(beadID string, update AssignmentUpdate) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	assignment, ok := s.Assignments[beadID]
+	if !ok {
+		return fmt.Errorf("[ASSIGN] Assignment not found: %s", beadID)
+	}
+
+	changed := false
+	if update.PromptSent != nil && assignment.PromptSent != *update.PromptSent {
+		assignment.PromptSent = *update.PromptSent
+		changed = true
+	}
+	if update.RetryCount != nil && assignment.RetryCount != *update.RetryCount {
+		assignment.RetryCount = *update.RetryCount
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+
+	if err := s.saveLocked(); err != nil {
+		slog.Warn("failed to persist assignment store", "error", err)
+	}
+
+	return nil
 }
 
 // ValidTransitions defines valid state transitions
@@ -385,6 +458,12 @@ func (s *AssignmentStore) UpdateStatus(beadID string, newStatus AssignmentStatus
 	// Update status and timestamps
 	assignment.Status = newStatus
 	switch newStatus {
+	case StatusAssigned:
+		assignment.StartedAt = nil
+		assignment.CompletedAt = nil
+		assignment.FailedAt = nil
+		assignment.FailReason = ""
+		assignment.FailureReason = ""
 	case StatusWorking:
 		assignment.StartedAt = &now
 	case StatusCompleted:
@@ -438,6 +517,7 @@ func (s *AssignmentStore) MarkFailed(beadID, reason string) error {
 	assignment.Status = StatusFailed
 	assignment.FailedAt = &now
 	assignment.FailReason = reason
+	assignment.FailureReason = ""
 
 	if err := s.saveLocked(); err != nil {
 		slog.Warn("failed to persist assignment store", "error", err)
@@ -480,7 +560,7 @@ func (s *AssignmentStore) Reassign(beadID string, newPane int, newAgentType, new
 		AgentName:  newAgentName,
 		Status:     StatusAssigned,
 		AssignedAt: now,
-		PromptSent: oldAssignment.PromptSent,
+		RetryCount: oldAssignment.RetryCount,
 	}
 
 	s.Assignments[beadID] = newAssignment
@@ -489,7 +569,7 @@ func (s *AssignmentStore) Reassign(beadID string, newPane int, newAgentType, new
 		slog.Warn("failed to persist assignment store", "error", err)
 	}
 
-	return newAssignment, nil
+	return cloneAssignment(newAssignment), nil
 }
 
 // Remove removes an assignment from the store

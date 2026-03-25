@@ -18,12 +18,15 @@ type assignGlobalsSnapshot struct {
 	cfg                *config.Config
 	jsonOutput         bool
 	assignReassign     string
+	assignRetry        string
+	assignRetryFailed  bool
 	assignToPane       int
 	assignToType       string
 	assignForce        bool
 	assignPrompt       string
 	assignTemplate     string
 	assignTemplateFile string
+	assignTimeout      time.Duration
 	assignQuiet        bool
 	assignVerbose      bool
 }
@@ -33,12 +36,15 @@ func captureAssignGlobals() assignGlobalsSnapshot {
 		cfg:                cfg,
 		jsonOutput:         jsonOutput,
 		assignReassign:     assignReassign,
+		assignRetry:        assignRetry,
+		assignRetryFailed:  assignRetryFailed,
 		assignToPane:       assignToPane,
 		assignToType:       assignToType,
 		assignForce:        assignForce,
 		assignPrompt:       assignPrompt,
 		assignTemplate:     assignTemplate,
 		assignTemplateFile: assignTemplateFile,
+		assignTimeout:      assignTimeout,
 		assignQuiet:        assignQuiet,
 		assignVerbose:      assignVerbose,
 	}
@@ -48,12 +54,15 @@ func (s assignGlobalsSnapshot) restore() {
 	cfg = s.cfg
 	jsonOutput = s.jsonOutput
 	assignReassign = s.assignReassign
+	assignRetry = s.assignRetry
+	assignRetryFailed = s.assignRetryFailed
 	assignToPane = s.assignToPane
 	assignToType = s.assignToType
 	assignForce = s.assignForce
 	assignPrompt = s.assignPrompt
 	assignTemplate = s.assignTemplate
 	assignTemplateFile = s.assignTemplateFile
+	assignTimeout = s.assignTimeout
 	assignQuiet = s.assignQuiet
 	assignVerbose = s.assignVerbose
 }
@@ -199,6 +208,9 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	if !envelope.Data.PromptSent {
 		t.Fatalf("expected prompt to be sent")
 	}
+	if envelope.Data.PreviousStatus != string(assignment.StatusWorking) {
+		t.Fatalf("expected previous status %q, got %q", assignment.StatusWorking, envelope.Data.PreviousStatus)
+	}
 
 	storeAfter, _ := assignment.LoadStore(sessionName)
 	assignmentAfter := storeAfter.Get("bd-123")
@@ -211,6 +223,9 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	if assignmentAfter.AgentType != agentTypeLabel(codexPane) {
 		t.Fatalf("expected reassigned agent type %q, got %q", agentTypeLabel(codexPane), assignmentAfter.AgentType)
 	}
+	if assignmentAfter.PromptSent != assignPrompt {
+		t.Fatalf("expected persisted prompt %q, got %q", assignPrompt, assignmentAfter.PromptSent)
+	}
 
 	time.Sleep(400 * time.Millisecond)
 	promptOutput, err := tmux.CapturePaneOutput(codexPane.ID, 20)
@@ -219,6 +234,88 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	}
 	if !strings.Contains(promptOutput, assignPrompt) {
 		t.Fatalf("expected prompt to be delivered, output:\n%s", promptOutput)
+	}
+}
+
+func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Agents.Claude = testAgentCatCommandTemplate
+	cfg.Agents.Codex = testAgentCatCommandTemplate
+	cfg.Agents.Gemini = testAgentCatCommandTemplate
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-131", "Test bead 131", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+		t.Fatalf("Assign failed: %v", err)
+	}
+	if err := store.MarkWorking("bd-131"); err != nil {
+		t.Fatalf("MarkWorking failed: %v", err)
+	}
+	if err := store.MarkFailed("bd-131", "Agent crashed"); err != nil {
+		t.Fatalf("MarkFailed failed: %v", err)
+	}
+
+	assignRetry = "bd-131"
+	assignRetryFailed = false
+	assignToPane = codexPane.Index
+	assignToType = ""
+	assignTemplate = "impl"
+	assignTemplateFile = ""
+	assignQuiet = true
+	assignVerbose = false
+
+	output, err := captureStdout(t, func() error { return runRetryAssignments(nil, sessionName) })
+	if err != nil {
+		t.Fatalf("runRetryAssignments failed: %v", err)
+	}
+
+	var envelope AssignEnvelope[RetryData]
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
+	}
+	if !envelope.Success || envelope.Data == nil {
+		t.Fatalf("expected success envelope, got: %+v", envelope)
+	}
+	if len(envelope.Data.Retried) != 1 {
+		t.Fatalf("expected exactly 1 retried item, got %d", len(envelope.Data.Retried))
+	}
+
+	item := envelope.Data.Retried[0]
+	if item.PreviousFailReason != "Agent crashed" {
+		t.Fatalf("expected previous fail reason %q, got %q", "Agent crashed", item.PreviousFailReason)
+	}
+	if item.RetryCount != 1 {
+		t.Fatalf("expected retry count 1, got %d", item.RetryCount)
+	}
+	if !item.PromptSent {
+		t.Fatalf("expected prompt to be sent")
+	}
+
+	expectedPrompt := expandPromptTemplate("bd-131", "Test bead 131", assignTemplate, assignTemplateFile)
+	storeAfter, _ := assignment.LoadStore(sessionName)
+	assignmentAfter := storeAfter.Get("bd-131")
+	if assignmentAfter == nil {
+		t.Fatalf("expected assignment to exist after retry")
+	}
+	if assignmentAfter.Pane != codexPane.Index {
+		t.Fatalf("expected retried pane %d, got %d", codexPane.Index, assignmentAfter.Pane)
+	}
+	if assignmentAfter.RetryCount != 1 {
+		t.Fatalf("expected persisted retry count 1, got %d", assignmentAfter.RetryCount)
+	}
+	if assignmentAfter.PromptSent != expectedPrompt {
+		t.Fatalf("expected persisted prompt %q, got %q", expectedPrompt, assignmentAfter.PromptSent)
 	}
 }
 
@@ -508,12 +605,12 @@ func TestRunReassignment_CompletedBead(t *testing.T) {
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
 
-	t.Logf("TEST: %s - assertion: expect error envelope with NOT_ASSIGNED and status detail", t.Name())
+	t.Logf("TEST: %s - assertion: expect error envelope with INVALID_STATE and status detail", t.Name())
 	if envelope.Success || envelope.Error == nil {
 		t.Fatalf("expected error envelope, got: %+v", envelope)
 	}
-	if envelope.Error.Code != "NOT_ASSIGNED" {
-		t.Fatalf("expected error code NOT_ASSIGNED, got %q", envelope.Error.Code)
+	if envelope.Error.Code != "INVALID_STATE" {
+		t.Fatalf("expected error code INVALID_STATE, got %q", envelope.Error.Code)
 	}
 	// Verify the details include current_status
 	if envelope.Error.Details == nil {
@@ -572,29 +669,19 @@ func TestRunReassignment_FailedBead(t *testing.T) {
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
 
-	// Note: Currently, reassigning a failed bead is not supported because
-	// StatusFailed can only transition to StatusAssigned (retry), not StatusReassigned.
-	// The implementation allows the CLI to proceed (doesn't check for StatusFailed),
-	// but store.Reassign() will fail with InvalidTransitionError.
-	// This test documents current behavior; update if behavior changes.
-	t.Logf("TEST: %s - assertion: expect error due to invalid state transition", t.Name())
+	t.Logf("TEST: %s - assertion: expect early invalid-state rejection", t.Name())
 	if envelope.Success {
-		t.Logf("TEST: %s - behavior changed: failed beads can now be reassigned", t.Name())
-		// If this succeeds in the future, verify the reassignment worked correctly
-		if envelope.Data == nil {
-			t.Fatalf("expected data in success envelope")
-		}
-		if envelope.Data.Pane != codexPane.Index {
-			t.Fatalf("expected pane %d, got %d", codexPane.Index, envelope.Data.Pane)
-		}
-	} else {
-		// Current expected behavior: fails with REASSIGN_ERROR
-		if envelope.Error == nil {
-			t.Fatalf("expected error envelope, got: %+v", envelope)
-		}
-		if envelope.Error.Code != "REASSIGN_ERROR" {
-			t.Fatalf("expected error code REASSIGN_ERROR, got %q", envelope.Error.Code)
-		}
+		t.Fatalf("expected error envelope, got success: %+v", envelope)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("expected error envelope, got: %+v", envelope)
+	}
+	if envelope.Error.Code != "INVALID_STATE" {
+		t.Fatalf("expected error code INVALID_STATE, got %q", envelope.Error.Code)
+	}
+	status, ok := envelope.Error.Details["current_status"].(string)
+	if !ok || status != string(assignment.StatusFailed) {
+		t.Fatalf("expected current_status=%q, got %v", assignment.StatusFailed, envelope.Error.Details["current_status"])
 	}
 }
 

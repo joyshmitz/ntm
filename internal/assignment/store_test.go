@@ -83,6 +83,48 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestGetReturnsSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	store := NewStore("test-session")
+	assigned, _ := store.Assign("bd-123", "Test bead", 1, "claude", "", "prompt")
+	assigned.Pane = 99
+
+	if err := store.MarkWorking("bd-123"); err != nil {
+		t.Fatalf("MarkWorking: %v", err)
+	}
+
+	got := store.Get("bd-123")
+	if got == nil {
+		t.Fatal("expected assignment, got nil")
+	}
+	if got.Pane != 1 {
+		t.Fatalf("expected pane 1, got %d", got.Pane)
+	}
+	if got.StartedAt == nil {
+		t.Fatal("expected StartedAt to be set")
+	}
+
+	mutated := got.StartedAt.Add(5 * time.Minute)
+	*got.StartedAt = mutated
+	got.PromptSent = "mutated"
+
+	fresh := store.Get("bd-123")
+	if fresh == nil {
+		t.Fatal("expected assignment on second read, got nil")
+	}
+	if fresh.PromptSent != "prompt" {
+		t.Fatalf("expected stored prompt to remain %q, got %q", "prompt", fresh.PromptSent)
+	}
+	if fresh.StartedAt == nil {
+		t.Fatal("expected StartedAt on second read")
+	}
+	if fresh.StartedAt.Equal(mutated) {
+		t.Fatalf("expected StartedAt snapshot to be isolated from caller mutation")
+	}
+}
+
 func TestList(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -274,12 +316,53 @@ func TestMarkFailed(t *testing.T) {
 	}
 }
 
+func TestRetryTransitionClearsFailureMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	store := NewStore("test-session")
+	_, _ = store.Assign("bd-123", "Test bead", 1, "claude", "", "")
+	if err := store.MarkWorking("bd-123"); err != nil {
+		t.Fatalf("MarkWorking: %v", err)
+	}
+	if err := store.MarkFailed("bd-123", "Agent crashed"); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	if err := store.UpdateStatus("bd-123", StatusAssigned); err != nil {
+		t.Fatalf("UpdateStatus retry: %v", err)
+	}
+
+	got := store.Get("bd-123")
+	if got == nil {
+		t.Fatal("expected assignment, got nil")
+	}
+	if got.Status != StatusAssigned {
+		t.Fatalf("expected status assigned, got %s", got.Status)
+	}
+	if got.FailedAt != nil {
+		t.Fatalf("expected FailedAt to be cleared on retry")
+	}
+	if got.StartedAt != nil {
+		t.Fatalf("expected StartedAt to be cleared on retry")
+	}
+	if got.FailReason != "" {
+		t.Fatalf("expected FailReason to be cleared on retry, got %q", got.FailReason)
+	}
+	if got.FailureReason != "" {
+		t.Fatalf("expected FailureReason to be cleared on retry, got %q", got.FailureReason)
+	}
+}
+
 func TestReassign(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
 	store := NewStore("test-session")
 	_, _ = store.Assign("bd-123", "Test bead", 1, "claude", "Agent1", "Do the thing")
+	retryCount := 2
+	if err := store.Update("bd-123", AssignmentUpdate{RetryCount: &retryCount}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 
 	// Must be working to reassign
 	_ = store.MarkWorking("bd-123")
@@ -301,8 +384,39 @@ func TestReassign(t *testing.T) {
 	if newAssignment.Status != StatusAssigned {
 		t.Errorf("expected status assigned, got %s", newAssignment.Status)
 	}
-	if newAssignment.PromptSent != "Do the thing" {
-		t.Errorf("expected prompt to be preserved, got '%s'", newAssignment.PromptSent)
+	if newAssignment.PromptSent != "" {
+		t.Errorf("expected prompt to be empty until resent, got '%s'", newAssignment.PromptSent)
+	}
+	if newAssignment.RetryCount != retryCount {
+		t.Errorf("expected retry count %d to be preserved, got %d", retryCount, newAssignment.RetryCount)
+	}
+}
+
+func TestUpdateAssignmentMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	store := NewStore("test-session")
+	_, _ = store.Assign("bd-123", "Test bead", 1, "claude", "", "")
+
+	prompt := "Actual delivered prompt"
+	retryCount := 3
+	if err := store.Update("bd-123", AssignmentUpdate{
+		PromptSent: &prompt,
+		RetryCount: &retryCount,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got := store.Get("bd-123")
+	if got == nil {
+		t.Fatal("expected assignment, got nil")
+	}
+	if got.PromptSent != prompt {
+		t.Fatalf("expected prompt %q, got %q", prompt, got.PromptSent)
+	}
+	if got.RetryCount != retryCount {
+		t.Fatalf("expected retry count %d, got %d", retryCount, got.RetryCount)
 	}
 }
 
@@ -452,6 +566,54 @@ func TestPersistenceBackupRecovery(t *testing.T) {
 	}
 	if a.BeadID != "bd-backup" {
 		t.Errorf("expected bead ID 'bd-backup', got '%s'", a.BeadID)
+	}
+}
+
+func TestLoadNormalizesLegacyFailureReason(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	dir := filepath.Join(tmpDir, ".ntm", "sessions", "legacy-failure-test")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+
+	raw := []byte(`{
+  "session_name": "legacy-failure-test",
+  "assignments": {
+    "bd-legacy": {
+      "bead_id": "bd-legacy",
+      "bead_title": "Legacy failure bead",
+      "pane": 1,
+      "agent_type": "claude",
+      "status": "failed",
+      "assigned_at": "2026-01-01T00:00:00Z",
+      "failed_at": "2026-01-01T00:05:00Z",
+      "failure_reason": "legacy reason"
+    }
+  },
+  "updated_at": "2026-01-01T00:05:00Z",
+  "version": 1
+}`)
+	mainPath := filepath.Join(dir, "assignments.json")
+	if err := os.WriteFile(mainPath, raw, 0644); err != nil {
+		t.Fatalf("failed to write legacy file: %v", err)
+	}
+
+	store, err := LoadStore("legacy-failure-test")
+	if err != nil {
+		t.Fatalf("LoadStore: %v", err)
+	}
+
+	got := store.Get("bd-legacy")
+	if got == nil {
+		t.Fatal("expected legacy assignment, got nil")
+	}
+	if got.FailReason != "legacy reason" {
+		t.Fatalf("expected FailReason to be normalized, got %q", got.FailReason)
+	}
+	if got.FailureReason != "" {
+		t.Fatalf("expected FailureReason to be cleared after normalization, got %q", got.FailureReason)
 	}
 }
 

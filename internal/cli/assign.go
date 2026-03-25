@@ -2359,7 +2359,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 		// Create new assignment (remove old one first)
 		store.Remove(failed.BeadID)
 		prompt := expandPromptTemplate(failed.BeadID, beadTitle, assignTemplate, assignTemplateFile)
-		newAssignment, assignErr := store.Assign(failed.BeadID, beadTitle, targetPane.Index, targetAgentType, newAgentName, prompt)
+		_, assignErr := store.Assign(failed.BeadID, beadTitle, targetPane.Index, targetAgentType, newAgentName, "")
 		if assignErr != nil {
 			skippedItems = append(skippedItems, RetrySkippedItem{
 				BeadID: failed.BeadID,
@@ -2376,10 +2376,15 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 				targetPane.Index, failed.BeadID, err))
 		}
 
-		// Update assignment with prompt
+		retryCount := failed.RetryCount + 1
+		update := assignment.AssignmentUpdate{
+			RetryCount: &retryCount,
+		}
 		if promptSent {
-			newAssignment.PromptSent = prompt
-			_ = store.Save()
+			update.PromptSent = &prompt
+		}
+		if err := store.Update(failed.BeadID, update); err != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to update assignment metadata for %s: %v", failed.BeadID, err))
 		}
 
 		now := time.Now().UTC()
@@ -2394,7 +2399,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			AssignedAt:         now.Format(time.RFC3339),
 			PreviousPane:       failed.Pane,
 			PreviousAgent:      failed.AgentName,
-			PreviousFailReason: failed.FailureReason,
+			PreviousFailReason: failed.FailReason,
 			RetryCount:         failed.RetryCount + 1,
 		})
 	}
@@ -2803,10 +2808,10 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	}
 
 	// Verify the assignment is in an active state (not completed)
-	if currentAssignment.Status == assignment.StatusCompleted {
-		err = fmt.Errorf("bead %s assignment is already completed", beadID)
+	if currentAssignment.Status != assignment.StatusWorking {
+		err = fmt.Errorf("bead %s assignment is not reassignable from status %s", beadID, currentAssignment.Status)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "NOT_ASSIGNED", err.Error(), map[string]interface{}{
+			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "INVALID_STATE", err.Error(), map[string]interface{}{
 				"current_status": string(currentAssignment.Status),
 			}))
 		}
@@ -2924,7 +2929,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	reservationResult := reserveFilesForBead(session, beadID, beadTitle, targetAgentType, assignVerbose, assignTimeout)
 
 	// Update assignment store using Reassign method
-	newAssignment, err := store.Reassign(beadID, targetPane.Index, targetAgentType, newAgentName)
+	_, err = store.Reassign(beadID, targetPane.Index, targetAgentType, newAgentName)
 	if err != nil {
 		if IsJSONOutput() {
 			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "REASSIGN_ERROR", err.Error(), nil))
@@ -2947,10 +2952,10 @@ func runReassignment(cmd *cobra.Command, session string) error {
 		warnings = append(warnings, fmt.Sprintf("failed to send prompt: %v", err))
 	}
 
-	// Update the assignment with the new prompt if different
-	if prompt != currentAssignment.PromptSent {
-		newAssignment.PromptSent = prompt
-		_ = store.Save()
+	if promptSent {
+		if err := store.Update(beadID, assignment.AssignmentUpdate{PromptSent: &prompt}); err != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to update assignment metadata: %v", err))
+		}
 	}
 
 	// Build result
