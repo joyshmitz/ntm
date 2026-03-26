@@ -1646,11 +1646,3 @@ func TestOperatorLoopDuplicateRequestSuppression(t *testing.T) {
 		"deduplicated": deduplicated,
 	})
 }
-
-// min returns the smaller of a or b.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
