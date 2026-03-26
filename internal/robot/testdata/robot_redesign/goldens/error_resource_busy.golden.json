@@ -1,0 +1,16 @@
+{
+  "_golden_metadata": {
+    "description": "Resource is locked or busy",
+    "error_code": "RESOURCE_BUSY",
+    "is_retryable": true
+  },
+  "response": {
+    "error": "example error for RESOURCE_BUSY",
+    "error_code": "RESOURCE_BUSY",
+    "hint": "Wait for the current operation to complete, then retry.",
+    "output_format": "auto",
+    "success": false,
+    "timestamp": "GOLDEN_TIMESTAMP",
+    "version": "1.0.0"
+  }
+}

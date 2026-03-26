@@ -1,0 +1,16 @@
+{
+  "_golden_metadata": {
+    "description": "Unexpected internal error",
+    "error_code": "INTERNAL_ERROR",
+    "is_retryable": true
+  },
+  "response": {
+    "error": "example error for INTERNAL_ERROR",
+    "error_code": "INTERNAL_ERROR",
+    "hint": "Report this issue with full context via 'ntm support-bundle'.",
+    "output_format": "auto",
+    "success": false,
+    "timestamp": "GOLDEN_TIMESTAMP",
+    "version": "1.0.0"
+  }
+}

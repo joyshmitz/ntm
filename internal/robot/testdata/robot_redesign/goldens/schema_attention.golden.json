@@ -1,0 +1,269 @@
+{
+  "_golden_metadata": {
+    "description": "Prioritized action queue for operator response",
+    "schema_type": "attention"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AttentionEvent": {
+        "properties": {
+          "actionability": {
+            "description": "Actionability",
+            "type": "string"
+          },
+          "category": {
+            "description": "Category",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Cursor",
+            "type": "integer"
+          },
+          "details": {
+            "additionalProperties": {},
+            "description": "Details",
+            "type": "object"
+          },
+          "next_actions": {
+            "description": "Next actions",
+            "items": {
+              "$ref": "#/definitions/NextAction"
+            },
+            "type": "array"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "description": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          },
+          "ts": {
+            "description": "Ts",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "ts",
+          "category",
+          "type",
+          "actionability",
+          "severity",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ErrorDetails": {
+        "properties": {
+          "actual_output": {
+            "description": "Actual output",
+            "type": "string"
+          },
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "attempted_actions": {
+            "description": "Attempted actions",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "child_pid": {
+            "description": "Child p i d",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_method": {
+            "description": "Exit method",
+            "type": "string"
+          },
+          "expected_output": {
+            "description": "Expected output",
+            "type": "string"
+          },
+          "extra": {
+            "additionalProperties": {},
+            "description": "Extra",
+            "type": "object"
+          },
+          "last_output": {
+            "description": "Last output",
+            "type": "string"
+          },
+          "process_state": {
+            "description": "Process state",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NextAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "args": {
+            "description": "Args",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "args"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "properties": {
+          "command": {
+            "description": "Command",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "Exit code",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "StructuredError": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/definitions/ErrorDetails",
+            "description": "Details"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Phase",
+            "type": "string"
+          },
+          "recovery_hint": {
+            "description": "Recovery hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "The canonical tending primitive: wait until attention is needed, then return a digest with wake reason and next cursor. This is the one obvious way to implement an operator loop. Combines wait + digest semantics with cursor handoff for mechanical replay.",
+    "properties": {
+      "_meta": {
+        "$ref": "#/definitions/ResponseMeta",
+        "description": "Meta"
+      },
+      "counts": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "description": "Counts",
+        "type": "object"
+      },
+      "error": {
+        "description": "Error",
+        "type": "string"
+      },
+      "error_code": {
+        "description": "Error code",
+        "type": "string"
+      },
+      "hint": {
+        "description": "Hint",
+        "type": "string"
+      },
+      "items": {
+        "description": "Items",
+        "items": {
+          "$ref": "#/definitions/AttentionEvent"
+        },
+        "type": "array"
+      },
+      "output_format": {
+        "description": "Output format",
+        "type": "string"
+      },
+      "structured_error": {
+        "$ref": "#/definitions/StructuredError",
+        "description": "Structured error"
+      },
+      "success": {
+        "description": "Success",
+        "type": "boolean"
+      },
+      "suggested_actions": {
+        "description": "Suggested actions",
+        "items": {
+          "$ref": "#/definitions/NextAction"
+        },
+        "type": "array"
+      },
+      "timestamp": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "version": {
+        "description": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "success",
+      "timestamp",
+      "items",
+      "counts"
+    ],
+    "title": "NTM Attention Output",
+    "type": "object"
+  }
+}

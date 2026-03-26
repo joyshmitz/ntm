@@ -1,0 +1,1258 @@
+{
+  "_golden_metadata": {
+    "description": "Cheap summary surface for frequent polling",
+    "schema_type": "status"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AgentCapsStatus": {
+        "properties": {
+          "claude_current": {
+            "description": "Claude current",
+            "type": "integer"
+          },
+          "claude_max": {
+            "description": "Claude max",
+            "type": "integer"
+          },
+          "codex_current": {
+            "description": "Codex current",
+            "type": "integer"
+          },
+          "codex_max": {
+            "description": "Codex max",
+            "type": "integer"
+          },
+          "gemini_current": {
+            "description": "Gemini current",
+            "type": "integer"
+          },
+          "gemini_max": {
+            "description": "Gemini max",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "claude_current",
+          "claude_max",
+          "codex_current",
+          "codex_max",
+          "gemini_current",
+          "gemini_max"
+        ],
+        "type": "object"
+      },
+      "AgentHints": {
+        "properties": {
+          "next_offset": {
+            "description": "Next offset",
+            "type": "integer"
+          },
+          "notes": {
+            "description": "Notes",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pages_remaining": {
+            "description": "Pages remaining",
+            "type": "integer"
+          },
+          "suggested_actions": {
+            "description": "Suggested actions",
+            "items": {
+              "$ref": "#/definitions/RobotAction"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          },
+          "warnings": {
+            "description": "Warnings",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AgentMailSummary": {
+        "properties": {
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "error": {
+            "description": "Error",
+            "type": "string"
+          },
+          "server_url": {
+            "description": "Server u r l",
+            "type": "string"
+          },
+          "sessions_registered": {
+            "description": "Sessions registered",
+            "type": "integer"
+          },
+          "total_locks": {
+            "description": "Total locks",
+            "type": "integer"
+          },
+          "total_unread": {
+            "description": "Total unread",
+            "type": "integer"
+          },
+          "urgent_messages": {
+            "description": "Urgent messages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
+      "BeadInProgress": {
+        "properties": {
+          "assignee": {
+            "description": "Assignee",
+            "type": "string"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "BeadPreview": {
+        "properties": {
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "priority"
+        ],
+        "type": "object"
+      },
+      "BeadsSummary": {
+        "properties": {
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "blocked": {
+            "description": "Blocked",
+            "type": "integer"
+          },
+          "closed": {
+            "description": "Closed",
+            "type": "integer"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "type": "integer"
+          },
+          "in_progress_list": {
+            "description": "In progress list",
+            "items": {
+              "$ref": "#/definitions/BeadInProgress"
+            },
+            "type": "array"
+          },
+          "open": {
+            "description": "Open",
+            "type": "integer"
+          },
+          "project": {
+            "description": "Project",
+            "type": "string"
+          },
+          "ready": {
+            "description": "Ready",
+            "type": "integer"
+          },
+          "ready_preview": {
+            "description": "Ready preview",
+            "items": {
+              "$ref": "#/definitions/BeadPreview"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
+      "BottleneckInfo": {
+        "properties": {
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "score": {
+            "description": "Score",
+            "type": "number"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "score"
+        ],
+        "type": "object"
+      },
+      "Conflict": {
+        "properties": {
+          "agents": {
+            "description": "Agents",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "Changes",
+            "items": {
+              "$ref": "#/definitions/RecordedFileChange"
+            },
+            "type": "array"
+          },
+          "last_at": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "DisclosureMetadata": {
+        "properties": {
+          "disclosure_state": {
+            "description": "Disclosure state",
+            "type": "string"
+          },
+          "findings": {
+            "description": "Findings",
+            "type": "integer"
+          },
+          "preview": {
+            "description": "Preview",
+            "type": "string"
+          },
+          "redaction_mode": {
+            "description": "Redaction mode",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorDetails": {
+        "properties": {
+          "actual_output": {
+            "description": "Actual output",
+            "type": "string"
+          },
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "attempted_actions": {
+            "description": "Attempted actions",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "child_pid": {
+            "description": "Child p i d",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_method": {
+            "description": "Exit method",
+            "type": "string"
+          },
+          "expected_output": {
+            "description": "Expected output",
+            "type": "string"
+          },
+          "extra": {
+            "additionalProperties": {},
+            "description": "Extra",
+            "type": "object"
+          },
+          "last_output": {
+            "description": "Last output",
+            "type": "string"
+          },
+          "process_state": {
+            "description": "Process state",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FileChange": {
+        "properties": {
+          "after": {
+            "$ref": "#/definitions/FileState",
+            "description": "After"
+          },
+          "before": {
+            "$ref": "#/definitions/FileState",
+            "description": "Before"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "type"
+        ],
+        "type": "object"
+      },
+      "FileChangeInfo": {
+        "properties": {
+          "agents": {
+            "description": "Agents",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "at": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "path",
+          "type",
+          "at"
+        ],
+        "type": "object"
+      },
+      "FileState": {
+        "properties": {
+          "git_status": {
+            "description": "Git status",
+            "type": "string"
+          },
+          "mod_time": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "size": {
+            "description": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mod_time",
+          "size"
+        ],
+        "type": "object"
+      },
+      "GraphMetrics": {
+        "properties": {
+          "drift_message": {
+            "description": "Drift message",
+            "type": "string"
+          },
+          "health_status": {
+            "description": "Health status",
+            "type": "string"
+          },
+          "keystones_count": {
+            "description": "Keystones",
+            "type": "integer"
+          },
+          "top_bottlenecks": {
+            "description": "Top bottlenecks",
+            "items": {
+              "$ref": "#/definitions/BottleneckInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "keystones_count",
+          "health_status"
+        ],
+        "type": "object"
+      },
+      "HandoffSummary": {
+        "properties": {
+          "active_beads": {
+            "description": "Active beads",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "age_seconds": {
+            "description": "Age seconds",
+            "type": "integer"
+          },
+          "agent_mail_threads": {
+            "description": "Agent mail threads",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "blocker_disclosures": {
+            "description": "Blocker disclosures",
+            "items": {
+              "$ref": "#/definitions/DisclosureMetadata"
+            },
+            "type": "array"
+          },
+          "blockers": {
+            "description": "Blockers",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "description": "Files",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "goal": {
+            "description": "Goal",
+            "type": "string"
+          },
+          "goal_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Goal disclosure"
+          },
+          "now": {
+            "description": "Now",
+            "type": "string"
+          },
+          "now_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Now disclosure"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "type": "object"
+      },
+      "PaginationInfo": {
+        "properties": {
+          "count": {
+            "description": "Count",
+            "type": "integer"
+          },
+          "has_more": {
+            "description": "Has more",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "description": "Next cursor",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "offset",
+          "count",
+          "total",
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "ProgressSummary": {
+        "properties": {
+          "assigned": {
+            "description": "Assigned",
+            "type": "integer"
+          },
+          "completed": {
+            "description": "Completed",
+            "type": "integer"
+          },
+          "completion_ratio": {
+            "description": "Completion ratio",
+            "type": "number"
+          },
+          "remaining": {
+            "description": "Remaining",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "assigned",
+          "completed",
+          "remaining",
+          "total",
+          "completion_ratio"
+        ],
+        "type": "object"
+      },
+      "RecordedFileChange": {
+        "properties": {
+          "agents": {
+            "description": "Agents",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "change": {
+            "$ref": "#/definitions/FileChange",
+            "description": "Change"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "session",
+          "change"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "properties": {
+          "command": {
+            "description": "Command",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "Exit code",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RobotAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "details": {
+            "description": "Details",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "SchedulerStatsSummary": {
+        "properties": {
+          "agent_caps": {
+            "$ref": "#/definitions/AgentCapsStatus",
+            "description": "Agent caps"
+          },
+          "backoff_remaining_ms": {
+            "description": "Backoff remaining ms",
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "Enabled",
+            "type": "boolean"
+          },
+          "headroom_ok": {
+            "description": "Headroom o k",
+            "type": "boolean"
+          },
+          "headroom_reason": {
+            "description": "Headroom reason",
+            "type": "string"
+          },
+          "in_backoff": {
+            "description": "In backoff",
+            "type": "boolean"
+          },
+          "is_paused": {
+            "description": "Is paused",
+            "type": "boolean"
+          },
+          "queue_depth": {
+            "description": "Queue depth",
+            "type": "integer"
+          },
+          "rate_limit_tokens": {
+            "description": "Rate limit tokens",
+            "type": "number"
+          },
+          "running_count": {
+            "description": "Running count",
+            "type": "integer"
+          },
+          "total_completed": {
+            "description": "Total completed",
+            "type": "integer"
+          },
+          "total_failed": {
+            "description": "Total failed",
+            "type": "integer"
+          },
+          "total_submitted": {
+            "description": "Total submitted",
+            "type": "integer"
+          },
+          "uptime_seconds": {
+            "description": "Uptime seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "queue_depth",
+          "running_count",
+          "total_submitted",
+          "total_completed",
+          "total_failed",
+          "is_paused",
+          "in_backoff",
+          "headroom_ok",
+          "rate_limit_tokens"
+        ],
+        "type": "object"
+      },
+      "SourceHealthSection": {
+        "properties": {
+          "all_fresh": {
+            "description": "All fresh",
+            "type": "boolean"
+          },
+          "degraded": {
+            "description": "Degraded",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sources": {
+            "additionalProperties": {
+              "$ref": "#/definitions/SourceInfo"
+            },
+            "description": "Sources",
+            "type": "object"
+          }
+        },
+        "required": [
+          "sources",
+          "all_fresh"
+        ],
+        "type": "object"
+      },
+      "SourceInfo": {
+        "properties": {
+          "age_ms": {
+            "description": "Age ms",
+            "type": "integer"
+          },
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "description": "Degraded",
+            "type": "boolean"
+          },
+          "degraded_reason": {
+            "description": "Degraded reason",
+            "type": "string"
+          },
+          "degraded_since": {
+            "description": "Degraded since",
+            "type": "string"
+          },
+          "fresh": {
+            "description": "Fresh",
+            "type": "boolean"
+          },
+          "last_error": {
+            "description": "Last error",
+            "type": "string"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "retrying_at": {
+            "description": "Retrying at",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "available",
+          "fresh",
+          "reason_code"
+        ],
+        "type": "object"
+      },
+      "StatusAlert": {
+        "properties": {
+          "context_model": {
+            "description": "Context model",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "string"
+          },
+          "pane_idx": {
+            "description": "Pane idx",
+            "type": "integer"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          },
+          "usage_percent": {
+            "description": "Usage percent",
+            "type": "number"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "StatusSessionHeader": {
+        "properties": {
+          "agent_count": {
+            "description": "Agent count",
+            "type": "integer"
+          },
+          "attached": {
+            "description": "Attached",
+            "type": "boolean"
+          },
+          "health": {
+            "$ref": "#/definitions/StatusSessionHealth",
+            "description": "Health"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "agent_count",
+          "health"
+        ],
+        "type": "object"
+      },
+      "StatusSessionHealth": {
+        "properties": {
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "StatusSummary": {
+        "properties": {
+          "agents_by_state": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Agents by state",
+            "type": "object"
+          },
+          "agents_by_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Agents by type",
+            "type": "object"
+          },
+          "aider_count": {
+            "description": "Aider count",
+            "type": "integer"
+          },
+          "alerts_active": {
+            "description": "Alerts active",
+            "type": "integer"
+          },
+          "attached_count": {
+            "description": "Attached count",
+            "type": "integer"
+          },
+          "claude_count": {
+            "description": "Claude count",
+            "type": "integer"
+          },
+          "codex_count": {
+            "description": "Codex count",
+            "type": "integer"
+          },
+          "cursor_count": {
+            "description": "Cursor count",
+            "type": "integer"
+          },
+          "gemini_count": {
+            "description": "Gemini count",
+            "type": "integer"
+          },
+          "health_score": {
+            "description": "Health score",
+            "type": "number"
+          },
+          "health_status": {
+            "description": "Health status",
+            "type": "string"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "type": "integer"
+          },
+          "mail_unread": {
+            "description": "Mail unread",
+            "type": "integer"
+          },
+          "mail_urgent": {
+            "description": "Mail urgent",
+            "type": "integer"
+          },
+          "ready_work": {
+            "description": "Ready work",
+            "type": "integer"
+          },
+          "total_agents": {
+            "description": "Total agents",
+            "type": "integer"
+          },
+          "total_sessions": {
+            "description": "Total sessions",
+            "type": "integer"
+          },
+          "windsurf_count": {
+            "description": "Windsurf count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_sessions",
+          "total_agents",
+          "attached_count",
+          "claude_count",
+          "codex_count",
+          "gemini_count",
+          "cursor_count",
+          "windsurf_count",
+          "aider_count",
+          "agents_by_state",
+          "agents_by_type",
+          "ready_work",
+          "in_progress",
+          "health_score",
+          "alerts_active",
+          "mail_unread",
+          "mail_urgent"
+        ],
+        "type": "object"
+      },
+      "StructuredError": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/definitions/ErrorDetails",
+            "description": "Details"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Phase",
+            "type": "string"
+          },
+          "recovery_hint": {
+            "description": "Recovery hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "SystemInfo": {
+        "properties": {
+          "arch": {
+            "description": "Arch",
+            "type": "string"
+          },
+          "build_date": {
+            "description": "Build date",
+            "type": "string"
+          },
+          "commit": {
+            "description": "Commit",
+            "type": "string"
+          },
+          "go_version": {
+            "description": "Go version",
+            "type": "string"
+          },
+          "os": {
+            "description": "O s",
+            "type": "string"
+          },
+          "tmux_available": {
+            "description": "Tmux o k",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "commit",
+          "build_date",
+          "go_version",
+          "os",
+          "arch",
+          "tmux_available"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "Get tmux sessions, panes, and agent states. The primary entry point for understanding current system state.",
+    "properties": {
+      "_agent_hints": {
+        "$ref": "#/definitions/AgentHints",
+        "description": "Agent hints"
+      },
+      "_meta": {
+        "$ref": "#/definitions/ResponseMeta",
+        "description": "Meta"
+      },
+      "agent_mail": {
+        "$ref": "#/definitions/AgentMailSummary",
+        "description": "Agent mail"
+      },
+      "alert_counts": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "description": "Alert counts",
+        "type": "object"
+      },
+      "alerts": {
+        "description": "Alerts",
+        "items": {
+          "$ref": "#/definitions/StatusAlert"
+        },
+        "type": "array"
+      },
+      "beads": {
+        "$ref": "#/definitions/BeadsSummary",
+        "description": "Beads"
+      },
+      "conflicts": {
+        "description": "Conflicts",
+        "items": {
+          "$ref": "#/definitions/Conflict"
+        },
+        "type": "array"
+      },
+      "degraded_sources": {
+        "description": "Degraded sources",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "error": {
+        "description": "Error",
+        "type": "string"
+      },
+      "error_code": {
+        "description": "Error code",
+        "type": "string"
+      },
+      "file_changes": {
+        "description": "File changes",
+        "items": {
+          "$ref": "#/definitions/FileChangeInfo"
+        },
+        "type": "array"
+      },
+      "generated_at": {
+        "description": "RFC3339 timestamp",
+        "format": "date-time",
+        "type": "string"
+      },
+      "graph_metrics": {
+        "$ref": "#/definitions/GraphMetrics",
+        "description": "Graph metrics"
+      },
+      "handoff": {
+        "$ref": "#/definitions/HandoffSummary",
+        "description": "Handoff"
+      },
+      "hint": {
+        "description": "Hint",
+        "type": "string"
+      },
+      "output_format": {
+        "description": "Output format",
+        "type": "string"
+      },
+      "overall_status": {
+        "description": "Overall status",
+        "type": "string"
+      },
+      "pagination": {
+        "$ref": "#/definitions/PaginationInfo",
+        "description": "Pagination"
+      },
+      "progress": {
+        "$ref": "#/definitions/ProgressSummary",
+        "description": "Progress"
+      },
+      "safety_profile": {
+        "description": "Safety profile",
+        "type": "string"
+      },
+      "scheduler_stats": {
+        "$ref": "#/definitions/SchedulerStatsSummary",
+        "description": "Scheduler stats"
+      },
+      "schema_id": {
+        "description": "Schema i d",
+        "type": "string"
+      },
+      "schema_version": {
+        "description": "Schema version",
+        "type": "string"
+      },
+      "sessions": {
+        "description": "Sessions",
+        "items": {
+          "$ref": "#/definitions/StatusSessionHeader"
+        },
+        "type": "array"
+      },
+      "sources": {
+        "$ref": "#/definitions/SourceHealthSection",
+        "description": "Sources"
+      },
+      "structured_error": {
+        "$ref": "#/definitions/StructuredError",
+        "description": "Structured error"
+      },
+      "success": {
+        "description": "Success",
+        "type": "boolean"
+      },
+      "summary": {
+        "$ref": "#/definitions/StatusSummary",
+        "description": "Summary"
+      },
+      "system": {
+        "$ref": "#/definitions/SystemInfo",
+        "description": "System"
+      },
+      "timestamp": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "version": {
+        "description": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "success",
+      "timestamp",
+      "schema_id",
+      "schema_version",
+      "generated_at",
+      "system",
+      "sessions",
+      "summary"
+    ],
+    "title": "NTM Status Output",
+    "type": "object"
+  }
+}

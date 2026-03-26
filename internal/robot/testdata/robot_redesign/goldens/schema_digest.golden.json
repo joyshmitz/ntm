@@ -1,0 +1,294 @@
+{
+  "_golden_metadata": {
+    "description": "Aggregated event summary with highlights",
+    "schema_type": "digest"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AttentionEvent": {
+        "properties": {
+          "actionability": {
+            "description": "Actionability",
+            "type": "string"
+          },
+          "category": {
+            "description": "Category",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Cursor",
+            "type": "integer"
+          },
+          "details": {
+            "additionalProperties": {},
+            "description": "Details",
+            "type": "object"
+          },
+          "next_actions": {
+            "description": "Next actions",
+            "items": {
+              "$ref": "#/definitions/NextAction"
+            },
+            "type": "array"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "description": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          },
+          "ts": {
+            "description": "Ts",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "ts",
+          "category",
+          "type",
+          "actionability",
+          "severity",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ErrorDetails": {
+        "properties": {
+          "actual_output": {
+            "description": "Actual output",
+            "type": "string"
+          },
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "attempted_actions": {
+            "description": "Attempted actions",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "child_pid": {
+            "description": "Child p i d",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_method": {
+            "description": "Exit method",
+            "type": "string"
+          },
+          "expected_output": {
+            "description": "Expected output",
+            "type": "string"
+          },
+          "extra": {
+            "additionalProperties": {},
+            "description": "Extra",
+            "type": "object"
+          },
+          "last_output": {
+            "description": "Last output",
+            "type": "string"
+          },
+          "process_state": {
+            "description": "Process state",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NextAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "args": {
+            "description": "Args",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "args"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "properties": {
+          "command": {
+            "description": "Command",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "Exit code",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "StructuredError": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/definitions/ErrorDetails",
+            "description": "Details"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Phase",
+            "type": "string"
+          },
+          "recovery_hint": {
+            "description": "Recovery hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "Aggregated summary of recent attention events. Returns counts, top items, and category breakdown without waiting. Use for quick status checks; prefer --robot-attention for blocking operator loops.",
+    "properties": {
+      "_meta": {
+        "$ref": "#/definitions/ResponseMeta",
+        "description": "Meta"
+      },
+      "active_beads": {
+        "description": "Active beads",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "agent_states": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Agent states",
+        "type": "object"
+      },
+      "attention_items": {
+        "description": "Attention items",
+        "items": {
+          "$ref": "#/definitions/AttentionEvent"
+        },
+        "type": "array"
+      },
+      "counts": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "description": "Counts",
+        "type": "object"
+      },
+      "error": {
+        "description": "Error",
+        "type": "string"
+      },
+      "error_code": {
+        "description": "Error code",
+        "type": "string"
+      },
+      "highlights": {
+        "description": "Highlights",
+        "items": {
+          "$ref": "#/definitions/AttentionEvent"
+        },
+        "type": "array"
+      },
+      "hint": {
+        "description": "Hint",
+        "type": "string"
+      },
+      "output_format": {
+        "description": "Output format",
+        "type": "string"
+      },
+      "profile": {
+        "description": "Profile",
+        "type": "string"
+      },
+      "structured_error": {
+        "$ref": "#/definitions/StructuredError",
+        "description": "Structured error"
+      },
+      "success": {
+        "description": "Success",
+        "type": "boolean"
+      },
+      "timestamp": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "version": {
+        "description": "Version",
+        "type": "string"
+      },
+      "window": {
+        "description": "Window",
+        "type": "string"
+      }
+    },
+    "required": [
+      "success",
+      "timestamp",
+      "window",
+      "counts",
+      "highlights",
+      "attention_items",
+      "agent_states"
+    ],
+    "title": "NTM Digest Output",
+    "type": "object"
+  }
+}

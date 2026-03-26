@@ -1,0 +1,16 @@
+{
+  "_golden_metadata": {
+    "description": "Session does not exist or has been terminated",
+    "error_code": "SESSION_NOT_FOUND",
+    "is_retryable": false
+  },
+  "response": {
+    "error": "example error for SESSION_NOT_FOUND",
+    "error_code": "SESSION_NOT_FOUND",
+    "hint": "Use 'ntm list' to see available sessions, or spawn a new session with 'ntm spawn'.",
+    "output_format": "auto",
+    "success": false,
+    "timestamp": "GOLDEN_TIMESTAMP",
+    "version": "1.0.0"
+  }
+}

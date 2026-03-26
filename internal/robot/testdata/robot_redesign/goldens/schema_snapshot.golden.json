@@ -1,0 +1,1945 @@
+{
+  "_golden_metadata": {
+    "description": "Canonical bootstrap surface for orientation",
+    "schema_type": "snapshot"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AccountQuota": {
+        "properties": {
+          "cost_usd": {
+            "description": "Cost u s d",
+            "type": "number"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "is_active": {
+            "description": "Is active",
+            "type": "boolean"
+          },
+          "is_primary": {
+            "description": "Is primary",
+            "type": "boolean"
+          },
+          "model": {
+            "description": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "requests_limit": {
+            "description": "Requests limit",
+            "type": "integer"
+          },
+          "requests_used": {
+            "description": "Requests used",
+            "type": "integer"
+          },
+          "reset_at": {
+            "description": "Reset at",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          },
+          "tokens_limit": {
+            "description": "Tokens limit",
+            "type": "integer"
+          },
+          "tokens_used": {
+            "description": "Tokens used",
+            "type": "integer"
+          },
+          "usage_percent": {
+            "description": "Usage percent",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "tokens_used",
+          "requests_used",
+          "status",
+          "reason_code",
+          "is_active"
+        ],
+        "type": "object"
+      },
+      "AgentHints": {
+        "properties": {
+          "next_offset": {
+            "description": "Next offset",
+            "type": "integer"
+          },
+          "notes": {
+            "description": "Notes",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pages_remaining": {
+            "description": "Pages remaining",
+            "type": "integer"
+          },
+          "suggested_actions": {
+            "description": "Suggested actions",
+            "items": {
+              "$ref": "#/definitions/RobotAction"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          },
+          "warnings": {
+            "description": "Warnings",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AlertInfo": {
+        "properties": {
+          "bead_id": {
+            "description": "Bead i d",
+            "type": "string"
+          },
+          "context": {
+            "additionalProperties": {},
+            "description": "Context",
+            "type": "object"
+          },
+          "count": {
+            "description": "Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "Created at",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "severity",
+          "message",
+          "created_at",
+          "duration_ms",
+          "count"
+        ],
+        "type": "object"
+      },
+      "AlertSummaryInfo": {
+        "properties": {
+          "by_severity": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "By severity",
+            "type": "object"
+          },
+          "by_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "By type",
+            "type": "object"
+          },
+          "total_active": {
+            "description": "Total active",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_active",
+          "by_severity",
+          "by_type"
+        ],
+        "type": "object"
+      },
+      "BeadInProgress": {
+        "properties": {
+          "assignee": {
+            "description": "Assignee",
+            "type": "string"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "RFC3339 timestamp",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "BeadPreview": {
+        "properties": {
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "priority"
+        ],
+        "type": "object"
+      },
+      "BeadsSummary": {
+        "properties": {
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "blocked": {
+            "description": "Blocked",
+            "type": "integer"
+          },
+          "closed": {
+            "description": "Closed",
+            "type": "integer"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "type": "integer"
+          },
+          "in_progress_list": {
+            "description": "In progress list",
+            "items": {
+              "$ref": "#/definitions/BeadInProgress"
+            },
+            "type": "array"
+          },
+          "open": {
+            "description": "Open",
+            "type": "integer"
+          },
+          "project": {
+            "description": "Project",
+            "type": "string"
+          },
+          "ready": {
+            "description": "Ready",
+            "type": "integer"
+          },
+          "ready_preview": {
+            "description": "Ready preview",
+            "items": {
+              "$ref": "#/definitions/BeadPreview"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
+      "DisclosureMetadata": {
+        "properties": {
+          "disclosure_state": {
+            "description": "Disclosure state",
+            "type": "string"
+          },
+          "findings": {
+            "description": "Findings",
+            "type": "integer"
+          },
+          "preview": {
+            "description": "Preview",
+            "type": "string"
+          },
+          "redaction_mode": {
+            "description": "Redaction mode",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorDetails": {
+        "properties": {
+          "actual_output": {
+            "description": "Actual output",
+            "type": "string"
+          },
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "attempted_actions": {
+            "description": "Attempted actions",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "child_pid": {
+            "description": "Child p i d",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_method": {
+            "description": "Exit method",
+            "type": "string"
+          },
+          "expected_output": {
+            "description": "Expected output",
+            "type": "string"
+          },
+          "extra": {
+            "additionalProperties": {},
+            "description": "Extra",
+            "type": "object"
+          },
+          "last_output": {
+            "description": "Last output",
+            "type": "string"
+          },
+          "process_state": {
+            "description": "Process state",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "HandoffSummary": {
+        "properties": {
+          "active_beads": {
+            "description": "Active beads",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "age_seconds": {
+            "description": "Age seconds",
+            "type": "integer"
+          },
+          "agent_mail_threads": {
+            "description": "Agent mail threads",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "blocker_disclosures": {
+            "description": "Blocker disclosures",
+            "items": {
+              "$ref": "#/definitions/DisclosureMetadata"
+            },
+            "type": "array"
+          },
+          "blockers": {
+            "description": "Blockers",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "description": "Files",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "goal": {
+            "description": "Goal",
+            "type": "string"
+          },
+          "goal_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Goal disclosure"
+          },
+          "now": {
+            "description": "Now",
+            "type": "string"
+          },
+          "now_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Now disclosure"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "session": {
+            "description": "Session",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "type": "object"
+      },
+      "NextAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "args": {
+            "description": "Args",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "args"
+        ],
+        "type": "object"
+      },
+      "PaginationInfo": {
+        "properties": {
+          "count": {
+            "description": "Count",
+            "type": "integer"
+          },
+          "has_more": {
+            "description": "Has more",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "description": "Next cursor",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "offset",
+          "count",
+          "total",
+          "has_more"
+        ],
+        "type": "object"
+      },
+      "QuotaSection": {
+        "properties": {
+          "accounts": {
+            "description": "Accounts",
+            "items": {
+              "$ref": "#/definitions/AccountQuota"
+            },
+            "type": "array"
+          },
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/definitions/QuotaSummary",
+            "description": "Summary"
+          }
+        },
+        "required": [
+          "accounts",
+          "available"
+        ],
+        "type": "object"
+      },
+      "QuotaSummary": {
+        "properties": {
+          "exceeded_accounts": {
+            "description": "Exceeded accounts",
+            "type": "integer"
+          },
+          "healthy_accounts": {
+            "description": "Healthy accounts",
+            "type": "integer"
+          },
+          "lowest_tokens_remaining": {
+            "description": "Lowest tokens remaining",
+            "type": "integer"
+          },
+          "next_reset": {
+            "description": "Next reset",
+            "type": "string"
+          },
+          "total_accounts": {
+            "description": "Total accounts",
+            "type": "integer"
+          },
+          "warning_accounts": {
+            "description": "Warning accounts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_accounts",
+          "healthy_accounts",
+          "warning_accounts",
+          "exceeded_accounts"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "properties": {
+          "command": {
+            "description": "Command",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "Exit code",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RobotAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "details": {
+            "description": "Details",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "SnapshotAgent": {
+        "properties": {
+          "current_bead": {
+            "description": "Current bead",
+            "type": "string"
+          },
+          "last_output_age_sec": {
+            "description": "Last output age sec",
+            "type": "integer"
+          },
+          "output_tail_lines": {
+            "description": "Output tail lines",
+            "type": "integer"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "string"
+          },
+          "pending_mail": {
+            "description": "Pending mail",
+            "type": "integer"
+          },
+          "state": {
+            "description": "State",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          },
+          "type_confidence": {
+            "description": "Type confidence",
+            "type": "number"
+          },
+          "type_method": {
+            "description": "Type method",
+            "type": "string"
+          },
+          "variant": {
+            "description": "Variant",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pane",
+          "type",
+          "type_confidence",
+          "type_method",
+          "state",
+          "last_output_age_sec",
+          "output_tail_lines",
+          "pending_mail"
+        ],
+        "type": "object"
+      },
+      "SnapshotAgentMail": {
+        "properties": {
+          "agents": {
+            "additionalProperties": {
+              "$ref": "#/definitions/SnapshotAgentMailStats"
+            },
+            "description": "Agents",
+            "type": "object"
+          },
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "project": {
+            "description": "Project",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "threads_known": {
+            "description": "Threads known",
+            "type": "integer"
+          },
+          "total_unread": {
+            "description": "Total unread",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
+      "SnapshotAgentMailStats": {
+        "properties": {
+          "pane": {
+            "description": "Pane",
+            "type": "string"
+          },
+          "pending_ack": {
+            "description": "Pending ack",
+            "type": "integer"
+          },
+          "unread": {
+            "description": "Unread",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unread",
+          "pending_ack"
+        ],
+        "type": "object"
+      },
+      "SnapshotAttentionItem": {
+        "properties": {
+          "actionability": {
+            "description": "Actionability",
+            "type": "string"
+          },
+          "category": {
+            "description": "Category",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Cursor",
+            "type": "integer"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor",
+          "category",
+          "actionability",
+          "severity",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "SnapshotAttentionSummary": {
+        "properties": {
+          "action_required_count": {
+            "description": "Action required count",
+            "type": "integer"
+          },
+          "by_category": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "By category count",
+            "type": "object"
+          },
+          "interesting_count": {
+            "description": "Interesting count",
+            "type": "integer"
+          },
+          "next_steps": {
+            "description": "Next steps",
+            "items": {
+              "$ref": "#/definitions/NextAction"
+            },
+            "type": "array"
+          },
+          "top_items": {
+            "description": "Top items",
+            "items": {
+              "$ref": "#/definitions/SnapshotAttentionItem"
+            },
+            "type": "array"
+          },
+          "total_events": {
+            "description": "Total events",
+            "type": "integer"
+          },
+          "unsupported_signals": {
+            "description": "Unsupported signals",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "total_events",
+          "action_required_count",
+          "interesting_count"
+        ],
+        "type": "object"
+      },
+      "SnapshotCoordinationSummary": {
+        "properties": {
+          "agents_with_mail": {
+            "description": "Agents with mail",
+            "type": "integer"
+          },
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "handoff_session": {
+            "description": "Handoff session",
+            "type": "string"
+          },
+          "handoff_status": {
+            "description": "Handoff status",
+            "type": "string"
+          },
+          "has_handoff": {
+            "description": "Has handoff",
+            "type": "boolean"
+          },
+          "mail_unread": {
+            "description": "Mail unread",
+            "type": "integer"
+          },
+          "mail_urgent": {
+            "description": "Mail urgent",
+            "type": "integer"
+          },
+          "pending_ack": {
+            "description": "Pending ack",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "available",
+          "mail_unread",
+          "mail_urgent",
+          "pending_ack",
+          "has_handoff"
+        ],
+        "type": "object"
+      },
+      "SnapshotIncident": {
+        "properties": {
+          "acknowledged_at": {
+            "description": "Acknowledged at",
+            "type": "string"
+          },
+          "agent_ids": {
+            "description": "Agent i ds",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "alert_count": {
+            "description": "Alert count",
+            "type": "integer"
+          },
+          "category": {
+            "description": "Category",
+            "type": "string"
+          },
+          "event_count": {
+            "description": "Event count",
+            "type": "integer"
+          },
+          "family": {
+            "description": "Family",
+            "type": "string"
+          },
+          "first_event_cursor": {
+            "description": "First event cursor",
+            "type": "integer"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "last_event_at": {
+            "description": "Last event at",
+            "type": "string"
+          },
+          "last_event_cursor": {
+            "description": "Last event cursor",
+            "type": "integer"
+          },
+          "muted_at": {
+            "description": "Muted at",
+            "type": "string"
+          },
+          "notes": {
+            "description": "Notes",
+            "type": "string"
+          },
+          "resolution": {
+            "description": "Resolution",
+            "type": "string"
+          },
+          "resolved_at": {
+            "description": "Resolved at",
+            "type": "string"
+          },
+          "root_cause": {
+            "description": "Root cause",
+            "type": "string"
+          },
+          "session_names": {
+            "description": "Session names",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "Started at",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "severity",
+          "session_names",
+          "agent_ids",
+          "alert_count",
+          "event_count",
+          "started_at",
+          "last_event_at"
+        ],
+        "type": "object"
+      },
+      "SnapshotReplayWindowInfo": {
+        "properties": {
+          "event_count": {
+            "description": "Event count",
+            "type": "integer"
+          },
+          "latest_cursor": {
+            "description": "Latest cursor",
+            "type": "integer"
+          },
+          "latest_timestamp": {
+            "description": "Latest timestamp",
+            "type": "string"
+          },
+          "oldest_cursor": {
+            "description": "Oldest cursor",
+            "type": "integer"
+          },
+          "oldest_timestamp": {
+            "description": "Oldest timestamp",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "resync_command": {
+            "description": "Resync command",
+            "type": "string"
+          },
+          "retention_period": {
+            "description": "Retention period",
+            "type": "string"
+          },
+          "supported": {
+            "description": "Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "supported",
+          "oldest_cursor",
+          "latest_cursor",
+          "event_count"
+        ],
+        "type": "object"
+      },
+      "SnapshotSession": {
+        "properties": {
+          "agents": {
+            "description": "Agents",
+            "items": {
+              "$ref": "#/definitions/SnapshotAgent"
+            },
+            "type": "array"
+          },
+          "attached": {
+            "description": "Attached",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "attached",
+          "agents"
+        ],
+        "type": "object"
+      },
+      "SourceHealthSection": {
+        "properties": {
+          "all_fresh": {
+            "description": "All fresh",
+            "type": "boolean"
+          },
+          "degraded": {
+            "description": "Degraded",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sources": {
+            "additionalProperties": {
+              "$ref": "#/definitions/SourceInfo"
+            },
+            "description": "Sources",
+            "type": "object"
+          }
+        },
+        "required": [
+          "sources",
+          "all_fresh"
+        ],
+        "type": "object"
+      },
+      "SourceInfo": {
+        "properties": {
+          "age_ms": {
+            "description": "Age ms",
+            "type": "integer"
+          },
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "degraded": {
+            "description": "Degraded",
+            "type": "boolean"
+          },
+          "degraded_reason": {
+            "description": "Degraded reason",
+            "type": "string"
+          },
+          "degraded_since": {
+            "description": "Degraded since",
+            "type": "string"
+          },
+          "fresh": {
+            "description": "Fresh",
+            "type": "boolean"
+          },
+          "last_error": {
+            "description": "Last error",
+            "type": "string"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "retrying_at": {
+            "description": "Retrying at",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "available",
+          "fresh",
+          "reason_code"
+        ],
+        "type": "object"
+      },
+      "StatusSummary": {
+        "properties": {
+          "agents_by_state": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Agents by state",
+            "type": "object"
+          },
+          "agents_by_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Agents by type",
+            "type": "object"
+          },
+          "aider_count": {
+            "description": "Aider count",
+            "type": "integer"
+          },
+          "alerts_active": {
+            "description": "Alerts active",
+            "type": "integer"
+          },
+          "attached_count": {
+            "description": "Attached count",
+            "type": "integer"
+          },
+          "claude_count": {
+            "description": "Claude count",
+            "type": "integer"
+          },
+          "codex_count": {
+            "description": "Codex count",
+            "type": "integer"
+          },
+          "cursor_count": {
+            "description": "Cursor count",
+            "type": "integer"
+          },
+          "gemini_count": {
+            "description": "Gemini count",
+            "type": "integer"
+          },
+          "health_score": {
+            "description": "Health score",
+            "type": "number"
+          },
+          "health_status": {
+            "description": "Health status",
+            "type": "string"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "type": "integer"
+          },
+          "mail_unread": {
+            "description": "Mail unread",
+            "type": "integer"
+          },
+          "mail_urgent": {
+            "description": "Mail urgent",
+            "type": "integer"
+          },
+          "ready_work": {
+            "description": "Ready work",
+            "type": "integer"
+          },
+          "total_agents": {
+            "description": "Total agents",
+            "type": "integer"
+          },
+          "total_sessions": {
+            "description": "Total sessions",
+            "type": "integer"
+          },
+          "windsurf_count": {
+            "description": "Windsurf count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_sessions",
+          "total_agents",
+          "attached_count",
+          "claude_count",
+          "codex_count",
+          "gemini_count",
+          "cursor_count",
+          "windsurf_count",
+          "aider_count",
+          "agents_by_state",
+          "agents_by_type",
+          "ready_work",
+          "in_progress",
+          "health_score",
+          "alerts_active",
+          "mail_unread",
+          "mail_urgent"
+        ],
+        "type": "object"
+      },
+      "StructuredError": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/definitions/ErrorDetails",
+            "description": "Details"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Phase",
+            "type": "string"
+          },
+          "recovery_hint": {
+            "description": "Recovery hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "SwarmHealthSummary": {
+        "properties": {
+          "healthy": {
+            "description": "Healthy",
+            "type": "integer"
+          },
+          "limit_hit": {
+            "description": "Limit hit",
+            "type": "integer"
+          },
+          "respawning": {
+            "description": "Respawning",
+            "type": "integer"
+          },
+          "total_agents": {
+            "description": "Total agents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_agents",
+          "healthy",
+          "limit_hit",
+          "respawning"
+        ],
+        "type": "object"
+      },
+      "SwarmPlanAllocation": {
+        "properties": {
+          "cc_agents": {
+            "description": "C c agents",
+            "type": "integer"
+          },
+          "cod_agents": {
+            "description": "Cod agents",
+            "type": "integer"
+          },
+          "gmi_agents": {
+            "description": "Gmi agents",
+            "type": "integer"
+          },
+          "open_beads": {
+            "description": "Open beads",
+            "type": "integer"
+          },
+          "project": {
+            "description": "Project",
+            "type": "string"
+          },
+          "tier": {
+            "description": "Tier",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "tier",
+          "open_beads",
+          "cc_agents",
+          "cod_agents",
+          "gmi_agents"
+        ],
+        "type": "object"
+      },
+      "SwarmRecentEvent": {
+        "properties": {
+          "pane": {
+            "description": "Pane",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "Timestamp",
+            "type": "string"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "pane",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "SwarmSessionInfo": {
+        "properties": {
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "healthy": {
+            "description": "Healthy",
+            "type": "integer"
+          },
+          "limit_hit": {
+            "description": "Limit hit",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          },
+          "pane_count": {
+            "description": "Pane count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "agent_type",
+          "pane_count",
+          "healthy",
+          "limit_hit"
+        ],
+        "type": "object"
+      },
+      "SwarmSnapshot": {
+        "properties": {
+          "active": {
+            "description": "Active",
+            "type": "boolean"
+          },
+          "health": {
+            "$ref": "#/definitions/SwarmHealthSummary",
+            "description": "Health"
+          },
+          "plan": {
+            "$ref": "#/definitions/SwarmSnapshotPlan",
+            "description": "Plan"
+          },
+          "recent_events": {
+            "description": "Recent events",
+            "items": {
+              "$ref": "#/definitions/SwarmRecentEvent"
+            },
+            "type": "array"
+          },
+          "sessions": {
+            "description": "Sessions",
+            "items": {
+              "$ref": "#/definitions/SwarmSessionInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "active",
+          "plan",
+          "sessions",
+          "health",
+          "recent_events"
+        ],
+        "type": "object"
+      },
+      "SwarmSnapshotPlan": {
+        "properties": {
+          "allocations": {
+            "description": "Allocations",
+            "items": {
+              "$ref": "#/definitions/SwarmPlanAllocation"
+            },
+            "type": "array"
+          },
+          "created_at": {
+            "description": "Created at",
+            "type": "string"
+          },
+          "scan_dir": {
+            "description": "Scan dir",
+            "type": "string"
+          },
+          "total_agents": {
+            "description": "Total agents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "created_at",
+          "scan_dir",
+          "total_agents",
+          "allocations"
+        ],
+        "type": "object"
+      },
+      "ToolHealthOutput": {
+        "properties": {
+          "error": {
+            "description": "Error",
+            "type": "string"
+          },
+          "healthy": {
+            "description": "Healthy",
+            "type": "boolean"
+          },
+          "last_checked": {
+            "description": "Last checked",
+            "type": "string"
+          },
+          "latency_ms": {
+            "description": "Latency ms",
+            "type": "integer"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "healthy",
+          "last_checked"
+        ],
+        "type": "object"
+      },
+      "ToolInfoOutput": {
+        "properties": {
+          "capabilities": {
+            "description": "Capabilities",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "health": {
+            "$ref": "#/definitions/ToolHealthOutput",
+            "description": "Health"
+          },
+          "installed": {
+            "description": "Installed",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Name",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path",
+            "type": "string"
+          },
+          "required": {
+            "description": "Required",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "installed",
+          "capabilities",
+          "health"
+        ],
+        "type": "object"
+      },
+      "WorkGraph": {
+        "properties": {
+          "cycle_count": {
+            "description": "Cycle count",
+            "type": "integer"
+          },
+          "density": {
+            "description": "Density",
+            "type": "number"
+          },
+          "max_depth": {
+            "description": "Max depth",
+            "type": "integer"
+          },
+          "total_edges": {
+            "description": "Total edges",
+            "type": "integer"
+          },
+          "total_nodes": {
+            "description": "Total nodes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_nodes",
+          "total_edges",
+          "cycle_count",
+          "max_depth"
+        ],
+        "type": "object"
+      },
+      "WorkItem": {
+        "properties": {
+          "assignee": {
+            "description": "Assignee",
+            "type": "string"
+          },
+          "blocked_by": {
+            "description": "Blocked by",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Labels",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "integer"
+          },
+          "score": {
+            "description": "Score",
+            "type": "number"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "title_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Title disclosure"
+          },
+          "type": {
+            "description": "Type",
+            "type": "string"
+          },
+          "unblocks": {
+            "description": "Unblocks",
+            "type": "integer"
+          },
+          "updated_at": {
+            "description": "Updated at",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "WorkRecommendation": {
+        "properties": {
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "integer"
+          },
+          "reasons": {
+            "description": "Reasons",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "score": {
+            "description": "Score",
+            "type": "number"
+          },
+          "title": {
+            "description": "Title",
+            "type": "string"
+          },
+          "title_disclosure": {
+            "$ref": "#/definitions/DisclosureMetadata",
+            "description": "Title disclosure"
+          },
+          "unblocks": {
+            "description": "Unblocks",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "priority",
+          "score",
+          "unblocks"
+        ],
+        "type": "object"
+      },
+      "WorkSection": {
+        "properties": {
+          "available": {
+            "description": "Available",
+            "type": "boolean"
+          },
+          "blocked": {
+            "description": "Blocked",
+            "items": {
+              "$ref": "#/definitions/WorkItem"
+            },
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/definitions/WorkGraph",
+            "description": "Graph"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "items": {
+              "$ref": "#/definitions/WorkItem"
+            },
+            "type": "array"
+          },
+          "ready": {
+            "description": "Ready",
+            "items": {
+              "$ref": "#/definitions/WorkItem"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/definitions/WorkSummary",
+            "description": "Summary"
+          },
+          "triage": {
+            "$ref": "#/definitions/WorkTriage",
+            "description": "Triage"
+          }
+        },
+        "required": [
+          "ready",
+          "blocked",
+          "in_progress",
+          "available"
+        ],
+        "type": "object"
+      },
+      "WorkSummary": {
+        "properties": {
+          "blocked": {
+            "description": "Blocked",
+            "type": "integer"
+          },
+          "closed": {
+            "description": "Closed",
+            "type": "integer"
+          },
+          "in_progress": {
+            "description": "In progress",
+            "type": "integer"
+          },
+          "open": {
+            "description": "Open",
+            "type": "integer"
+          },
+          "ready": {
+            "description": "Ready",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "open",
+          "in_progress",
+          "closed",
+          "ready",
+          "blocked"
+        ],
+        "type": "object"
+      },
+      "WorkTriage": {
+        "properties": {
+          "blockers_count": {
+            "description": "Blockers count",
+            "type": "integer"
+          },
+          "quick_wins_count": {
+            "description": "Quick wins count",
+            "type": "integer"
+          },
+          "ready_count": {
+            "description": "Ready count",
+            "type": "integer"
+          },
+          "top_recommendation": {
+            "$ref": "#/definitions/WorkRecommendation",
+            "description": "Top recommendation"
+          }
+        },
+        "required": [
+          "ready_count",
+          "quick_wins_count",
+          "blockers_count"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "Unified state query: sessions + beads + alerts + mail. Use --since for delta snapshots.",
+    "properties": {
+      "_agent_hints": {
+        "$ref": "#/definitions/AgentHints",
+        "description": "Agent hints"
+      },
+      "_meta": {
+        "$ref": "#/definitions/ResponseMeta",
+        "description": "Meta"
+      },
+      "active_incidents": {
+        "description": "Active incidents",
+        "items": {
+          "$ref": "#/definitions/SnapshotIncident"
+        },
+        "type": "array"
+      },
+      "agent_mail": {
+        "$ref": "#/definitions/SnapshotAgentMail",
+        "description": "Agent mail"
+      },
+      "alert_summary": {
+        "$ref": "#/definitions/AlertSummaryInfo",
+        "description": "Alert summary"
+      },
+      "alerts": {
+        "description": "Alerts",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "alerts_detailed": {
+        "description": "Alerts detailed",
+        "items": {
+          "$ref": "#/definitions/AlertInfo"
+        },
+        "type": "array"
+      },
+      "attention_contract_version": {
+        "description": "Attention contract version",
+        "type": "string"
+      },
+      "attention_summary": {
+        "$ref": "#/definitions/SnapshotAttentionSummary",
+        "description": "Attention summary"
+      },
+      "beads_summary": {
+        "$ref": "#/definitions/BeadsSummary",
+        "description": "Beads summary"
+      },
+      "coordination": {
+        "$ref": "#/definitions/SnapshotCoordinationSummary",
+        "description": "Coordination"
+      },
+      "degraded_sources": {
+        "description": "Degraded sources",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "error": {
+        "description": "Error",
+        "type": "string"
+      },
+      "error_code": {
+        "description": "Error code",
+        "type": "string"
+      },
+      "handoff": {
+        "$ref": "#/definitions/HandoffSummary",
+        "description": "Handoff"
+      },
+      "hint": {
+        "description": "Hint",
+        "type": "string"
+      },
+      "latest_cursor": {
+        "description": "Latest cursor",
+        "type": "integer"
+      },
+      "mail_unread": {
+        "description": "Mail unread",
+        "type": "integer"
+      },
+      "output_format": {
+        "description": "Output format",
+        "type": "string"
+      },
+      "pagination": {
+        "$ref": "#/definitions/PaginationInfo",
+        "description": "Pagination"
+      },
+      "quota": {
+        "$ref": "#/definitions/QuotaSection",
+        "description": "Quota"
+      },
+      "replay_window": {
+        "$ref": "#/definitions/SnapshotReplayWindowInfo",
+        "description": "Replay window"
+      },
+      "safety_profile": {
+        "description": "Safety profile",
+        "type": "string"
+      },
+      "schema_id": {
+        "description": "Schema i d",
+        "type": "string"
+      },
+      "schema_version": {
+        "description": "Schema version",
+        "type": "string"
+      },
+      "sessions": {
+        "description": "Sessions",
+        "items": {
+          "$ref": "#/definitions/SnapshotSession"
+        },
+        "type": "array"
+      },
+      "sources": {
+        "$ref": "#/definitions/SourceHealthSection",
+        "description": "Sources"
+      },
+      "structured_error": {
+        "$ref": "#/definitions/StructuredError",
+        "description": "Structured error"
+      },
+      "success": {
+        "description": "Success",
+        "type": "boolean"
+      },
+      "summary": {
+        "$ref": "#/definitions/StatusSummary",
+        "description": "Summary"
+      },
+      "swarm": {
+        "$ref": "#/definitions/SwarmSnapshot",
+        "description": "Swarm"
+      },
+      "timestamp": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "tools": {
+        "description": "Tools",
+        "items": {
+          "$ref": "#/definitions/ToolInfoOutput"
+        },
+        "type": "array"
+      },
+      "ts": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "version": {
+        "description": "Version",
+        "type": "string"
+      },
+      "work": {
+        "$ref": "#/definitions/WorkSection",
+        "description": "Work"
+      }
+    },
+    "required": [
+      "success",
+      "timestamp",
+      "schema_id",
+      "schema_version",
+      "ts",
+      "attention_contract_version",
+      "latest_cursor",
+      "replay_window",
+      "sessions",
+      "active_incidents",
+      "summary",
+      "alerts"
+    ],
+    "title": "NTM Snapshot Output",
+    "type": "object"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_golden_metadata": {
+    "description": "Operation timed out waiting for response",
+    "error_code": "TIMEOUT",
+    "is_retryable": true
+  },
+  "response": {
+    "error": "example error for TIMEOUT",
+    "error_code": "TIMEOUT",
+    "hint": "Retry with increased timeout, or check if the agent is responsive.",
+    "output_format": "auto",
+    "success": false,
+    "timestamp": "GOLDEN_TIMESTAMP",
+    "version": "1.0.0"
+  }
+}

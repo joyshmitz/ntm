@@ -1,0 +1,431 @@
+{
+  "_golden_metadata": {
+    "description": "Quota drill-down inspection surface",
+    "schema_type": "inspect_quota"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AgentHints": {
+        "properties": {
+          "next_offset": {
+            "description": "Next offset",
+            "type": "integer"
+          },
+          "notes": {
+            "description": "Notes",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pages_remaining": {
+            "description": "Pages remaining",
+            "type": "integer"
+          },
+          "suggested_actions": {
+            "description": "Suggested actions",
+            "items": {
+              "$ref": "#/definitions/RobotAction"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          },
+          "warnings": {
+            "description": "Warnings",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorDetails": {
+        "properties": {
+          "actual_output": {
+            "description": "Actual output",
+            "type": "string"
+          },
+          "agent_type": {
+            "description": "Agent type",
+            "type": "string"
+          },
+          "attempted_actions": {
+            "description": "Attempted actions",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "child_pid": {
+            "description": "Child p i d",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_method": {
+            "description": "Exit method",
+            "type": "string"
+          },
+          "expected_output": {
+            "description": "Expected output",
+            "type": "string"
+          },
+          "extra": {
+            "additionalProperties": {},
+            "description": "Extra",
+            "type": "object"
+          },
+          "last_output": {
+            "description": "Last output",
+            "type": "string"
+          },
+          "process_state": {
+            "description": "Process state",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InspectDiagnosticEntry": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "evidence": {
+            "description": "Evidence",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "severity": {
+            "description": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "description": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "InspectDiagnosticSection": {
+        "properties": {
+          "entries": {
+            "description": "Entries",
+            "items": {
+              "$ref": "#/definitions/InspectDiagnosticEntry"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "description": "Kind",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "summary",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "InspectHealth": {
+        "properties": {
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "InspectProjectionInfo": {
+        "properties": {
+          "collected_at": {
+            "description": "Collected at",
+            "type": "string"
+          },
+          "fresh": {
+            "description": "Fresh",
+            "type": "boolean"
+          },
+          "stale_after": {
+            "description": "Stale after",
+            "type": "string"
+          },
+          "stale_reasons": {
+            "description": "Stale reasons",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fresh"
+        ],
+        "type": "object"
+      },
+      "InspectQuotaDetail": {
+        "properties": {
+          "account": {
+            "description": "Account",
+            "type": "string"
+          },
+          "health": {
+            "$ref": "#/definitions/InspectHealth",
+            "description": "Health"
+          },
+          "health_reason": {
+            "description": "Health reason",
+            "type": "string"
+          },
+          "healthy": {
+            "description": "Healthy",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "is_active": {
+            "description": "Is active",
+            "type": "boolean"
+          },
+          "limit_hit": {
+            "description": "Limit hit",
+            "type": "boolean"
+          },
+          "projection": {
+            "$ref": "#/definitions/InspectProjectionInfo",
+            "description": "Projection"
+          },
+          "provider": {
+            "description": "Provider",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "reset_at": {
+            "description": "Reset at",
+            "type": "string"
+          },
+          "status": {
+            "description": "Status",
+            "type": "string"
+          },
+          "usage_percent": {
+            "description": "Usage percent",
+            "type": "number"
+          },
+          "used_pct_known": {
+            "description": "Used pct known",
+            "type": "boolean"
+          },
+          "used_pct_source": {
+            "description": "Used pct source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "account",
+          "status",
+          "reason_code",
+          "used_pct_known",
+          "limit_hit",
+          "is_active",
+          "healthy",
+          "health",
+          "projection"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "properties": {
+          "command": {
+            "description": "Command",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "Duration ms",
+            "type": "integer"
+          },
+          "exit_code": {
+            "description": "Exit code",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RobotAction": {
+        "properties": {
+          "action": {
+            "description": "Action",
+            "type": "string"
+          },
+          "details": {
+            "description": "Details",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Priority",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "target": {
+            "description": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "StructuredError": {
+        "properties": {
+          "code": {
+            "description": "Code",
+            "type": "string"
+          },
+          "details": {
+            "$ref": "#/definitions/ErrorDetails",
+            "description": "Details"
+          },
+          "message": {
+            "description": "Message",
+            "type": "string"
+          },
+          "pane": {
+            "description": "Pane",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Phase",
+            "type": "string"
+          },
+          "recovery_hint": {
+            "description": "Recovery hint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "Projection-backed quota drill-down keyed by provider/account.",
+    "properties": {
+      "_agent_hints": {
+        "$ref": "#/definitions/AgentHints",
+        "description": "Agent hints"
+      },
+      "_meta": {
+        "$ref": "#/definitions/ResponseMeta",
+        "description": "Meta"
+      },
+      "detail": {
+        "$ref": "#/definitions/InspectQuotaDetail",
+        "description": "Detail"
+      },
+      "diagnostics": {
+        "description": "Diagnostics",
+        "items": {
+          "$ref": "#/definitions/InspectDiagnosticSection"
+        },
+        "type": "array"
+      },
+      "error": {
+        "description": "Error",
+        "type": "string"
+      },
+      "error_code": {
+        "description": "Error code",
+        "type": "string"
+      },
+      "hint": {
+        "description": "Hint",
+        "type": "string"
+      },
+      "output_format": {
+        "description": "Output format",
+        "type": "string"
+      },
+      "quota_id": {
+        "description": "Quota i d",
+        "type": "string"
+      },
+      "schema_id": {
+        "description": "Schema i d",
+        "type": "string"
+      },
+      "schema_version": {
+        "description": "Schema version",
+        "type": "string"
+      },
+      "structured_error": {
+        "$ref": "#/definitions/StructuredError",
+        "description": "Structured error"
+      },
+      "success": {
+        "description": "Success",
+        "type": "boolean"
+      },
+      "timestamp": {
+        "description": "Timestamp",
+        "type": "string"
+      },
+      "version": {
+        "description": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "success",
+      "timestamp",
+      "schema_id",
+      "schema_version",
+      "quota_id",
+      "detail",
+      "diagnostics"
+    ],
+    "title": "NTM Inspect Quota Output",
+    "type": "object"
+  }
+}

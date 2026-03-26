@@ -1,0 +1,16 @@
+{
+  "_golden_metadata": {
+    "description": "Required external dependency is not available",
+    "error_code": "DEPENDENCY_MISSING",
+    "is_retryable": false
+  },
+  "response": {
+    "error": "example error for DEPENDENCY_MISSING",
+    "error_code": "DEPENDENCY_MISSING",
+    "hint": "Install the required dependency and ensure it is on PATH.",
+    "output_format": "auto",
+    "success": false,
+    "timestamp": "GOLDEN_TIMESTAMP",
+    "version": "1.0.0"
+  }
+}
