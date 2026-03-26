@@ -63,6 +63,14 @@ func PrintMarkdown(cfg *config.Config, opts MarkdownOptions) error {
 	return nil
 }
 
+// renderMarkdownFromSnapshot renders markdown using the legacy section-specific approach.
+// For new code, prefer using ProjectSections + RenderMarkdownFromProjection which
+// provides explicit truncation semantics and stable ordering.
+//
+// Migration path (bd-j9jo3.6.5):
+// 1. New consumers should use RenderMarkdownFromProjection
+// 2. Existing callers continue using this function for backward compatibility
+// 3. Once all consumers migrate, this function can be deprecated
 func renderMarkdownFromSnapshot(snapshot *SnapshotOutput, opts MarkdownOptions) (string, error) {
 	if snapshot == nil {
 		snapshot = &SnapshotOutput{}
