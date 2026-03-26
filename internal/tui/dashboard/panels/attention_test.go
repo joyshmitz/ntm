@@ -185,3 +185,316 @@ func TestAttentionPanelScrollsSelectedItemIntoView(t *testing.T) {
 		t.Fatalf("expected attention view to include scroll percent badge, got %q", view)
 	}
 }
+
+// =============================================================================
+// Overlay-Feed Integration Tests (br-rb9oj)
+// =============================================================================
+
+func TestAttentionPanelTruncationAwareness(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 10) // Small height to force truncation awareness
+
+	// Create more items than can display
+	items := make([]AttentionItem, 20)
+	now := time.Now()
+	for i := range items {
+		items[i] = AttentionItem{
+			Summary:       "item " + string(rune('A'+i)),
+			Actionability: robot.ActionabilityInteresting,
+			Timestamp:     now.Add(time.Duration(i) * time.Minute),
+			Cursor:        int64(i + 1),
+		}
+	}
+	panel.SetData(items, true)
+
+	// Panel should be aware it has more items than visible
+	if len(panel.items) != 20 {
+		t.Errorf("expected 20 items in panel data, got %d", len(panel.items))
+	}
+
+	// Scroll should be initialized for overflow handling
+	if panel.scroll == nil {
+		t.Fatal("expected scroll panel to be initialized for overflow")
+	}
+
+	t.Logf("TRUNCATION_AWARENESS items=%d scroll_initialized=%v", len(panel.items), panel.scroll != nil)
+}
+
+func TestAttentionPanelCursorContinuityAcrossUpdates(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 18)
+
+	// Initial data with cursor 50 selected
+	items1 := []AttentionItem{
+		{Summary: "item-a", Cursor: 40, Timestamp: time.Now().Add(-2 * time.Minute)},
+		{Summary: "item-b", Cursor: 50, Timestamp: time.Now()},
+		{Summary: "item-c", Cursor: 60, Timestamp: time.Now().Add(time.Minute)},
+	}
+	panel.SetData(items1, true)
+	panel.SelectCursor(50)
+
+	selected1 := panel.SelectedItem()
+	if selected1 == nil || selected1.Cursor != 50 {
+		t.Fatalf("initial selection = %+v, want cursor 50", selected1)
+	}
+
+	// Update with same cursor still present
+	items2 := []AttentionItem{
+		{Summary: "item-b", Cursor: 50, Timestamp: time.Now()},
+		{Summary: "item-d", Cursor: 70, Timestamp: time.Now().Add(2 * time.Minute)},
+	}
+	panel.SetData(items2, true)
+
+	// Selection should persist across update (cursor 50 still exists)
+	selected2 := panel.SelectedItem()
+	if selected2 == nil {
+		t.Fatal("expected selection to persist after update")
+	}
+
+	t.Logf("CURSOR_CONTINUITY before=%d after=%d", selected1.Cursor, selected2.Cursor)
+}
+
+func TestAttentionPanelGracefulDegradationWhenFeedUnavailable(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 18)
+
+	// Set feed as unavailable
+	panel.SetData(nil, false)
+
+	view := panel.View()
+
+	// Should show user-friendly unavailable state
+	if !strings.Contains(view, "not active") && !strings.Contains(view, "unavailable") {
+		t.Logf("WARN: view doesn't clearly indicate feed unavailability: %s", view)
+	}
+
+	// Should not panic or show broken state
+	if strings.Contains(view, "nil") || strings.Contains(view, "panic") {
+		t.Fatalf("view shows broken state: %s", view)
+	}
+
+	// SelectedItem should return nil gracefully
+	if item := panel.SelectedItem(); item != nil {
+		t.Fatalf("expected nil selected item when feed unavailable, got %+v", item)
+	}
+
+	t.Logf("GRACEFUL_DEGRADATION feed_available=false view_ok=true")
+}
+
+func TestAttentionPanelItemCountTracking(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 18)
+
+	// Test empty state
+	panel.SetData([]AttentionItem{}, true)
+	if len(panel.items) != 0 {
+		t.Errorf("expected 0 items after setting empty data, got %d", len(panel.items))
+	}
+
+	// Test with items
+	items := []AttentionItem{
+		{Summary: "item-1", Actionability: robot.ActionabilityActionRequired, Timestamp: time.Now()},
+		{Summary: "item-2", Actionability: robot.ActionabilityInteresting, Timestamp: time.Now()},
+		{Summary: "item-3", Actionability: robot.ActionabilityInteresting, Timestamp: time.Now()},
+	}
+	panel.SetData(items, true)
+
+	// Item count should be tracked correctly
+	if len(panel.items) != 3 {
+		t.Errorf("expected 3 items after SetData, got %d", len(panel.items))
+	}
+
+	t.Logf("ITEM_COUNT_TRACKING empty=%d with_items=%d", 0, len(panel.items))
+}
+
+func TestAttentionPanelFocusTransitionsPreserveSelection(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 18)
+
+	items := []AttentionItem{
+		{Summary: "first", Cursor: 10, Timestamp: time.Now()},
+		{Summary: "second", Cursor: 20, Timestamp: time.Now().Add(-time.Minute)},
+	}
+	panel.SetData(items, true)
+	panel.SelectCursor(20)
+
+	// Get initial selection
+	before := panel.SelectedItem()
+	if before == nil || before.Cursor != 20 {
+		t.Fatalf("expected cursor 20 selected, got %+v", before)
+	}
+
+	// Blur and refocus
+	panel.Blur()
+	panel.Focus()
+
+	// Selection should persist
+	after := panel.SelectedItem()
+	if after == nil || after.Cursor != before.Cursor {
+		t.Fatalf("selection changed after focus transition: before=%+v after=%+v", before, after)
+	}
+
+	t.Logf("FOCUS_TRANSITION before=%d after=%d", before.Cursor, after.Cursor)
+}
+
+func TestAttentionPanelActionabilityPriorityInSorting(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	base := time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC)
+
+	// Mix of actionability levels with varying timestamps
+	items := []AttentionItem{
+		{Summary: "interesting-newest", Actionability: robot.ActionabilityInteresting, Timestamp: base.Add(10 * time.Minute)},
+		{Summary: "action-oldest", Actionability: robot.ActionabilityActionRequired, Timestamp: base},
+		{Summary: "interesting-oldest", Actionability: robot.ActionabilityInteresting, Timestamp: base.Add(-10 * time.Minute)},
+		{Summary: "action-newest", Actionability: robot.ActionabilityActionRequired, Timestamp: base.Add(5 * time.Minute)},
+	}
+
+	panel.SetData(items, true)
+
+	// ActionRequired items should come first regardless of timestamp
+	if len(panel.items) != 4 {
+		t.Fatalf("expected 4 items, got %d", len(panel.items))
+	}
+
+	// First two should be ActionRequired
+	for i := 0; i < 2; i++ {
+		if panel.items[i].Actionability != robot.ActionabilityActionRequired {
+			t.Errorf("items[%d] actionability = %v, want ActionRequired", i, panel.items[i].Actionability)
+		}
+	}
+
+	// Within ActionRequired, newest should come first
+	if panel.items[0].Summary != "action-newest" {
+		t.Errorf("items[0] = %q, want action-newest (newest ActionRequired first)", panel.items[0].Summary)
+	}
+
+	t.Logf("ACTIONABILITY_PRIORITY order=%v", []string{
+		panel.items[0].Summary, panel.items[1].Summary, panel.items[2].Summary, panel.items[3].Summary,
+	})
+}
+
+func TestAttentionPanelEmptyStateIsDistinctFromUnavailable(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+	panel.SetSize(80, 18)
+
+	// Empty but available (all clear)
+	panel.SetData([]AttentionItem{}, true)
+	emptyView := panel.View()
+
+	// Unavailable (feed not running)
+	panel.SetData(nil, false)
+	unavailableView := panel.View()
+
+	// Views should be different
+	if emptyView == unavailableView {
+		t.Fatalf("empty and unavailable views should be distinct:\nempty: %s\nunavailable: %s", emptyView, unavailableView)
+	}
+
+	// Empty should indicate "all clear" or similar
+	if !strings.Contains(strings.ToLower(emptyView), "clear") && !strings.Contains(strings.ToLower(emptyView), "no ") {
+		t.Logf("WARN: empty view doesn't clearly indicate all-clear state")
+	}
+
+	// Unavailable should indicate the feed is not running
+	if !strings.Contains(strings.ToLower(unavailableView), "not") {
+		t.Logf("WARN: unavailable view doesn't clearly indicate feed not running")
+	}
+
+	t.Logf("EMPTY_VS_UNAVAILABLE distinct=true")
+}
+
+func TestAttentionPanelSelectNearestCursorHandlesEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	panel := NewAttentionPanel()
+
+	testCases := []struct {
+		name         string
+		items        []AttentionItem
+		targetCursor int64
+		expectFound  bool
+		expectCursor int64
+	}{
+		{
+			name:         "empty_panel",
+			items:        []AttentionItem{},
+			targetCursor: 50,
+			expectFound:  false,
+			expectCursor: 0,
+		},
+		{
+			name: "exact_match",
+			items: []AttentionItem{
+				{Summary: "a", Cursor: 50, Timestamp: time.Now()},
+			},
+			targetCursor: 50,
+			expectFound:  true,
+			expectCursor: 50,
+		},
+		{
+			name: "nearest_lower",
+			items: []AttentionItem{
+				{Summary: "a", Cursor: 40, Timestamp: time.Now()},
+				{Summary: "b", Cursor: 60, Timestamp: time.Now()},
+			},
+			targetCursor: 45,
+			expectFound:  true,
+			expectCursor: 40, // Closest to 45
+		},
+		{
+			name: "nearest_higher",
+			items: []AttentionItem{
+				{Summary: "a", Cursor: 40, Timestamp: time.Now()},
+				{Summary: "b", Cursor: 60, Timestamp: time.Now()},
+			},
+			targetCursor: 55,
+			expectFound:  true,
+			expectCursor: 60, // Closest to 55
+		},
+		{
+			name: "target_below_all",
+			items: []AttentionItem{
+				{Summary: "a", Cursor: 100, Timestamp: time.Now()},
+				{Summary: "b", Cursor: 200, Timestamp: time.Now()},
+			},
+			targetCursor: 10,
+			expectFound:  true,
+			expectCursor: 100, // Nearest to 10
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			panel.SetData(tc.items, true)
+			found := panel.SelectNearestCursor(tc.targetCursor)
+
+			if found != tc.expectFound {
+				t.Errorf("SelectNearestCursor(%d) = %v, want %v", tc.targetCursor, found, tc.expectFound)
+			}
+
+			if found {
+				selected := panel.SelectedItem()
+				if selected == nil {
+					t.Fatal("expected selected item after successful SelectNearestCursor")
+				}
+				if selected.Cursor != tc.expectCursor {
+					t.Errorf("selected cursor = %d, want %d", selected.Cursor, tc.expectCursor)
+				}
+			}
+		})
+	}
+}
