@@ -945,7 +945,7 @@ func renderMarkdownSessions(sb *strings.Builder, section ProjectedSection, headi
 				typeCounts["claude"],
 				typeCounts["codex"],
 				typeCounts["gemini"],
-				stateCounts["working"],
+				stateCounts["active"],
 				stateCounts["idle"],
 				stateCounts["error"],
 			)
@@ -962,7 +962,7 @@ func renderMarkdownSessions(sb *strings.Builder, section ProjectedSection, headi
 		types := fmt.Sprintf("cc:%d cod:%d gmi:%d",
 			typeCounts["claude"], typeCounts["codex"], typeCounts["gemini"])
 		states := fmt.Sprintf("w:%d i:%d e:%d",
-			stateCounts["working"], stateCounts["idle"], stateCounts["error"])
+			stateCounts["active"], stateCounts["idle"], stateCounts["error"])
 		attached := "no"
 		if sess.Attached {
 			attached = "yes"

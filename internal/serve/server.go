@@ -1605,6 +1605,9 @@ func toJSONMap(v any) (map[string]interface{}, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
+	if m == nil {
+		m = make(map[string]interface{})
+	}
 	return m, nil
 }
 
