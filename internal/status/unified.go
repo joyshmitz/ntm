@@ -95,10 +95,6 @@ func (d *UnifiedDetector) determineState(output, agentType string, lastActivity 
 		return StateError, errType
 	}
 
-	// If at prompt but with recent activity, trust the activity signal —
-	// agents often print prompt-like characters (>, ❯) as part of active
-	// output (code examples, progress indicators, partial lines). Only
-	// classify as idle when velocity is genuinely low (handled above).
 	// Heuristic: for user panes with empty output, treat as idle
 	if agentType == "" || agentType == "user" {
 		if strings.TrimSpace(output) == "" {
@@ -106,14 +102,15 @@ func (d *UnifiedDetector) determineState(output, agentType string, lastActivity 
 		}
 	}
 
-	// Check recent activity (reuse isLowVelocity computed earlier)
+	// Recent activity means the agent is producing output — trust that
+	// signal over prompt-like patterns, since agents often print >, ❯,
+	// etc. as part of active work (code examples, progress lines).
 	if !isLowVelocity {
 		return StateWorking, ErrorNone
 	}
 
-	// At prompt with no recent activity but didn't pass the isLowVelocity
-	// check above — this means activity threshold was borderline. Trust
-	// the prompt detection in this case since velocity has settled.
+	// Defensive: prompt + low velocity should have been caught at line 88,
+	// but keep this as a safety net in case the checks above are reordered.
 	if isAtPrompt {
 		return StateIdle, ErrorNone
 	}
