@@ -1528,9 +1528,14 @@ type ModelsConfig struct {
 	DefaultClaude string            `toml:"default_claude"` // Default model for Claude
 	DefaultCodex  string            `toml:"default_codex"`  // Default model for Codex
 	DefaultGemini string            `toml:"default_gemini"` // Default model for Gemini
+	DefaultOllama string            `toml:"default_ollama"` // Default model for Ollama
 	Claude        map[string]string `toml:"claude"`         // Claude model aliases
 	Codex         map[string]string `toml:"codex"`          // Codex model aliases
 	Gemini        map[string]string `toml:"gemini"`         // Gemini model aliases
+	Ollama        map[string]string `toml:"ollama"`         // Ollama model aliases
+	Cursor        map[string]string `toml:"cursor"`         // Cursor model aliases
+	Windsurf      map[string]string `toml:"windsurf"`       // Windsurf model aliases
+	Aider         map[string]string `toml:"aider"`          // Aider model aliases
 	// ContextLimits allows overriding built-in context window sizes for models.
 	// Keys are model names (e.g., "claude-opus-4-6"), values are token counts.
 	// These override the built-in defaults in internal/models/registry.go.
@@ -1544,6 +1549,7 @@ func DefaultModels() ModelsConfig {
 		DefaultClaude: "claude-opus-4-6",
 		DefaultCodex:  "gpt-5.3-codex",
 		DefaultGemini: "gemini-3-pro-preview",
+		DefaultOllama: "llama3",
 		Claude: map[string]string{
 			"opus":      "claude-opus-4-6",
 			"sonnet":    "claude-sonnet-4-6",
@@ -1564,6 +1570,10 @@ func DefaultModels() ModelsConfig {
 			"flash":  "gemini-3-flash",
 			"flash2": "gemini-2.0-flash",
 		},
+		Ollama: map[string]string{
+			"llama3": "llama3",
+			"phi3":   "phi3",
+		},
 	}
 }
 
@@ -1579,6 +1589,8 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 			return m.DefaultCodex
 		case "gemini", "gmi":
 			return m.DefaultGemini
+		case "ollama":
+			return m.DefaultOllama
 		}
 		return ""
 	}
@@ -1592,6 +1604,14 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 		aliases = m.Codex
 	case "gemini", "gmi":
 		aliases = m.Gemini
+	case "ollama":
+		aliases = m.Ollama
+	case "cursor":
+		aliases = m.Cursor
+	case "windsurf":
+		aliases = m.Windsurf
+	case "aider":
+		aliases = m.Aider
 	}
 
 	if aliases != nil {

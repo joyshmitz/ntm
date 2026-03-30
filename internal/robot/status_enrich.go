@@ -35,7 +35,7 @@ var rateLimitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`resets \d+[ap]m`),
 }
 
-func enrichAgentStatus(agent *Agent, sessionName, modelName string) {
+func enrichAgentStatus(agent *Agent, sessionName, modelName string, content string) {
 	// 1. PID is already populated from tmux
 	if agent.PID == 0 {
 		return // Cannot do much without PID
@@ -66,15 +66,8 @@ func enrichAgentStatus(agent *Agent, sessionName, modelName string) {
 	}
 
 	// 5. Output analysis
-	// Capture output for rate limit detection, activity, and context usage
-	// We use agent.Pane which is the pane ID (e.g. %3)
-	captureFn := tmux.CaptureForStatusDetection
-	if modelName != "" {
-		captureFn = tmux.CaptureForFullContext
-		agent.ContextModel = modelName
-	}
-	content, err := captureFn(agent.Pane)
-	if err == nil {
+	// We use the content passed in from the caller (already captured once)
+	if content != "" {
 		// Rate limit
 		detected, match := detectRateLimit(content)
 		agent.RateLimitDetected = detected
@@ -90,6 +83,7 @@ func enrichAgentStatus(agent *Agent, sessionName, modelName string) {
 		}
 
 		if modelName != "" {
+			agent.ContextModel = modelName
 			usage := tokens.GetUsageInfo(content, modelName)
 			if usage != nil {
 				agent.ContextTokens = usage.EstimatedTokens
@@ -102,22 +96,33 @@ func enrichAgentStatus(agent *Agent, sessionName, modelName string) {
 }
 
 func getProcessMemoryMB(pid int) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return 0, err
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "VmRSS:") {
-			// Format: "VmRSS:    123456 kB"
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				kb, _ := strconv.Atoi(parts[1])
-				return kb / 1024, nil
+	// Try /proc first (Linux)
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "VmRSS:") {
+				// Format: "VmRSS:    123456 kB"
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					kb, _ := strconv.Atoi(parts[1])
+					return kb / 1024, nil
+				}
 			}
 		}
 	}
-	return 0, nil
+
+	// Fallback to ps (macOS and Linux)
+	// 'rss' is resident set size in kilobytes
+	cmd := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid))
+	out, err := cmd.Output()
+	if err == nil {
+		kbStr := strings.TrimSpace(string(out))
+		if kbStr != "" {
+			kb, _ := strconv.Atoi(kbStr)
+			return kb / 1024, nil
+		}
+	}
+
+	return 0, fmt.Errorf("failed to get memory for pid %d", pid)
 }
 
 func detectRateLimit(content string) (bool, string) {

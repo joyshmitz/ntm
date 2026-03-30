@@ -102,7 +102,8 @@ var processStateNames = map[string]string{
 	"I": "idle",
 }
 
-// GetProcessState reads the process state from /proc/<pid>/status.
+// GetProcessState reads the process state.
+// It tries /proc/<pid>/status on Linux and falls back to ps on macOS/Linux.
 // Returns the single-character state code (R, S, D, Z, T, etc.),
 // a human-readable name, and any error.
 func GetProcessState(pid int) (string, string, error) {
@@ -110,24 +111,47 @@ func GetProcessState(pid int) (string, string, error) {
 		return "", "", fmt.Errorf("invalid pid: %d", pid)
 	}
 
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return "", "", fmt.Errorf("read /proc/%d/status: %w", pid, err)
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "State:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				state := fields[1]
-				name := processStateNames[state]
-				if name == "" {
-					name = "unknown"
+	// Try /proc first (Linux)
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "State:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					state := fields[1]
+					name := processStateNames[state]
+					if name == "" {
+						name = "unknown"
+					}
+					return state, name, nil
 				}
-				return state, name, nil
 			}
 		}
 	}
 
-	return "", "", fmt.Errorf("no State line in /proc/%d/status", pid)
+	// Fallback to ps (macOS and Linux)
+	// 'state' column provides the process state
+	cmd := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid))
+	out, err := cmd.Output()
+	if err == nil {
+		state := strings.TrimSpace(string(out))
+		if state != "" {
+			// ps state can have multiple chars (e.g., S+ on macOS), we take the first
+			shortState := string(state[0])
+			name := processStateNames[shortState]
+			if name == "" {
+				// macOS specific states
+				switch shortState {
+				case "I":
+					name = "idle"
+				case "U":
+					name = "uninterruptible"
+				default:
+					name = "unknown"
+				}
+			}
+			return shortState, name, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("failed to get process state for pid %d", pid)
 }

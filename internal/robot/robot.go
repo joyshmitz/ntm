@@ -6761,6 +6761,13 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 		}, nil
 	}
 
+	// Optimization: Get all panes across all sessions in one tmux call
+	allPanes, err := tmux.GetAllPanes()
+	if err != nil {
+		// Fallback: create empty map if failed
+		allPanes = make(map[string][]tmux.Pane)
+	}
+
 	adapterConfig := DefaultTmuxAdapterConfig()
 	if staleAfter > 0 {
 		adapterConfig.SessionStaleness = staleAfter
@@ -6771,11 +6778,81 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 	agentsBySession := make(map[string][]Agent, len(sessions))
 	outputTailsBySession := make(map[string]map[string]string, len(sessions))
 
-	for i := range sessions {
-		panes, err := tmux.GetPanes(sessions[i].Name)
-		if err != nil {
-			panes = append([]tmux.Pane(nil), sessions[i].Panes...)
+	// Parallel capture worker pool
+	type captureJob struct {
+		paneID    string
+		modelName string
+	}
+	type captureResult struct {
+		paneID  string
+		content string
+	}
+
+	// Pre-calculate job count to size channels correctly
+	totalPaneCount := 0
+	for _, panes := range allPanes {
+		totalPaneCount += len(panes)
+	}
+
+	jobs := make(chan captureJob, totalPaneCount+1)
+	resultsChan := make(chan captureResult, totalPaneCount+1)
+	var wg sync.WaitGroup
+
+	// Start workers (capped at 10 to avoid overwhelming tmux server)
+	workerCount := 10
+	if totalPaneCount < workerCount {
+		workerCount = totalPaneCount
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				captureFn := tmux.CaptureForStatusDetection
+				if job.modelName != "" {
+					captureFn = tmux.CaptureForFullContext
+				}
+				if captured, err := captureFn(job.paneID); err == nil {
+					resultsChan <- captureResult{job.paneID, captured}
+				} else {
+					resultsChan <- captureResult{job.paneID, ""}
+				}
+			}
+		}()
+	}
+
+	// Dispatch jobs
+	allCapturedContent := make(map[string]string)
+	for _, sess := range sessions {
+		panes := allPanes[sess.Name]
+		for _, pane := range panes {
+			jobs <- captureJob{
+				paneID:    pane.ID,
+				modelName: modelNameForPane(pane, cfg),
+			}
 		}
+	}
+	close(jobs)
+
+	// Collect results in background
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	for res := range resultsChan {
+		if res.content != "" {
+			allCapturedContent[res.paneID] = res.content
+		}
+	}
+
+	for i := range sessions {
+		panes := allPanes[sessions[i].Name]
+		// Ensure panes are associated with the session for the adapter
 		sessions[i].Panes = append([]tmux.Pane(nil), panes...)
 
 		agentMapping := resolveAgentsForSession(panes, mailAgents)
@@ -6803,9 +6880,10 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 				agent.Name = mappedName
 			}
 
-			enrichAgentStatus(&agent, sessions[i].Name, modelNameForPane(pane, cfg))
-			if captured, captureErr := tmux.CaptureForStatusDetection(pane.ID); captureErr == nil {
-				outputTails[pane.ID] = captured
+			content := allCapturedContent[pane.ID]
+			enrichAgentStatus(&agent, sessions[i].Name, modelNameForPane(pane, cfg), content)
+			if content != "" {
+				outputTails[pane.ID] = content
 			}
 
 			agents = append(agents, agent)

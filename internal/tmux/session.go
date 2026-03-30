@@ -150,34 +150,48 @@ func FormatTags(tags []string) string {
 func detectAgentFromCommand(command string) AgentType {
 	cmd := strings.ToLower(command)
 
+	// Helper to check if a command matches an agent
+	isAgent := func(name string) bool {
+		return cmd == name ||
+			strings.HasPrefix(cmd, name+" ") ||
+			strings.Contains(cmd, "/"+name+" ") ||
+			strings.Contains(cmd, "/"+name+"-") ||
+			strings.HasSuffix(cmd, "/"+name)
+	}
+
 	// Claude Code variants
-	if cmd == "claude" || strings.HasPrefix(cmd, "claude ") || strings.Contains(cmd, "/claude") {
+	if isAgent("claude") || strings.Contains(cmd, "claude-code") {
 		return AgentClaude
 	}
 
 	// Codex CLI
-	if cmd == "codex" || strings.HasPrefix(cmd, "codex ") || strings.Contains(cmd, "/codex") {
+	if isAgent("codex") {
 		return AgentCodex
 	}
 
 	// Gemini CLI
-	if cmd == "gemini" || strings.HasPrefix(cmd, "gemini ") || strings.Contains(cmd, "/gemini") {
+	if isAgent("gemini") {
 		return AgentGemini
 	}
 
 	// Cursor
-	if cmd == "cursor" || strings.HasPrefix(cmd, "cursor ") || strings.Contains(cmd, "/cursor") {
+	if isAgent("cursor") {
 		return AgentCursor
 	}
 
 	// Windsurf
-	if cmd == "windsurf" || strings.HasPrefix(cmd, "windsurf ") || strings.Contains(cmd, "/windsurf") {
+	if isAgent("windsurf") {
 		return AgentWindsurf
 	}
 
 	// Aider
-	if cmd == "aider" || strings.HasPrefix(cmd, "aider ") || strings.Contains(cmd, "/aider") {
+	if isAgent("aider") {
 		return AgentAider
+	}
+
+	// Ollama
+	if isAgent("ollama") {
+		return AgentOllama
 	}
 
 	return AgentUser

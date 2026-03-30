@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -152,39 +153,7 @@ func ResolveModel(agentType AgentType, modelSpec string) string {
 	if cfg == nil {
 		return modelSpec
 	}
-
-	// If no model specified, use default
-	if modelSpec == "" {
-		switch agentType {
-		case AgentTypeClaude:
-			return cfg.Models.DefaultClaude
-		case AgentTypeCodex:
-			return cfg.Models.DefaultCodex
-		case AgentTypeGemini:
-			return cfg.Models.DefaultGemini
-		}
-		return ""
-	}
-
-	// Try to resolve alias
-	var aliases map[string]string
-	switch agentType {
-	case AgentTypeClaude:
-		aliases = cfg.Models.Claude
-	case AgentTypeCodex:
-		aliases = cfg.Models.Codex
-	case AgentTypeGemini:
-		aliases = cfg.Models.Gemini
-	}
-
-	if aliases != nil {
-		if fullName, ok := aliases[modelSpec]; ok {
-			return fullName
-		}
-	}
-
-	// Assume it's already a full model name
-	return modelSpec
+	return cfg.Models.GetModelName(string(agentType), modelSpec)
 }
 
 // ValidateModelAlias checks if a model alias exists in config
@@ -201,6 +170,14 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 		aliases = cfg.Models.Codex
 	case AgentTypeGemini:
 		aliases = cfg.Models.Gemini
+	case AgentTypeOllama:
+		aliases = cfg.Models.Ollama
+	case AgentTypeCursor:
+		aliases = cfg.Models.Cursor
+	case AgentTypeWindsurf:
+		aliases = cfg.Models.Windsurf
+	case AgentTypeAider:
+		aliases = cfg.Models.Aider
 	}
 
 	if aliases == nil {
@@ -208,7 +185,7 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 	}
 
 	// Check if it's a known alias
-	if _, ok := aliases[alias]; ok {
+	if _, ok := aliases[strings.ToLower(alias)]; ok {
 		return nil
 	}
 
@@ -217,6 +194,7 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 	for k := range aliases {
 		available = append(available, k)
 	}
+	sort.Strings(available)
 
 	return fmt.Errorf("unknown model alias %q for %s (available: %s)",
 		alias, agentType, strings.Join(available, ", "))

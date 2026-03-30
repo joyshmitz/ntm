@@ -545,10 +545,20 @@ func agentTypeToString(t tmux.AgentType) string {
 		return "codex"
 	case tmux.AgentGemini:
 		return "gemini"
+	case tmux.AgentCursor:
+		return "cursor"
+	case tmux.AgentWindsurf:
+		return "windsurf"
+	case tmux.AgentAider:
+		return "aider"
+	case tmux.AgentOllama:
+		return "ollama"
+	case tmux.AgentUser:
+		return "user"
 	default:
 		if s := string(t); s != "" {
 			return s
 		}
-		return "user"
+		return "unknown"
 	}
 }

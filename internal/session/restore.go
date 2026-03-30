@@ -303,20 +303,20 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 
 // getAgentCommand returns the command for an agent type.
 func getAgentCommand(agentType string, cmds AgentCommands) string {
-	switch agentType {
-	case "cc", "claude":
+	switch tmux.AgentType(agentType) {
+	case tmux.AgentClaude:
 		return cmds.Claude
-	case "cod", "codex":
+	case tmux.AgentCodex:
 		return cmds.Codex
-	case "gmi", "gemini":
+	case tmux.AgentGemini:
 		return cmds.Gemini
-	case "cursor":
+	case tmux.AgentCursor:
 		return cmds.Cursor
-	case "windsurf":
+	case tmux.AgentWindsurf:
 		return cmds.Windsurf
-	case "aider":
+	case tmux.AgentAider:
 		return cmds.Aider
-	case "ollama":
+	case tmux.AgentOllama:
 		return cmds.Ollama
 	default:
 		return ""
