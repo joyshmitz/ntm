@@ -149,6 +149,73 @@ func TestHandoffTrigger_GetStatus(t *testing.T) {
 	// Only agents with lastHandoff are tracked
 }
 
+func TestHandoffTrigger_CanRestartAfterStop(t *testing.T) {
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	predictor := NewContextPredictor(DefaultPredictorConfig())
+
+	config := DefaultHandoffTriggerConfig()
+	config.PollInterval = 10 * time.Millisecond
+	trigger := NewHandoffTrigger(config, monitor, predictor)
+
+	trigger.Start()
+
+	trigger.mu.RLock()
+	firstStopCh := trigger.stopCh
+	firstDoneCh := trigger.doneCh
+	firstRunning := trigger.running
+	trigger.mu.RUnlock()
+
+	if !firstRunning {
+		t.Fatal("trigger should be running after Start")
+	}
+	if firstStopCh == nil || firstDoneCh == nil {
+		t.Fatal("trigger should initialize stop and done channels on Start")
+	}
+
+	trigger.Stop()
+
+	select {
+	case <-firstDoneCh:
+	default:
+		t.Fatal("first run did not close done channel on Stop")
+	}
+
+	trigger.Start()
+
+	trigger.mu.RLock()
+	secondStopCh := trigger.stopCh
+	secondDoneCh := trigger.doneCh
+	secondRunning := trigger.running
+	trigger.mu.RUnlock()
+
+	if !secondRunning {
+		t.Fatal("trigger should be running after restart")
+	}
+	if secondStopCh == nil || secondDoneCh == nil {
+		t.Fatal("trigger should initialize fresh channels on restart")
+	}
+	if firstStopCh == secondStopCh {
+		t.Fatal("restart reused the original stop channel")
+	}
+	if firstDoneCh == secondDoneCh {
+		t.Fatal("restart reused the original done channel")
+	}
+
+	select {
+	case <-secondStopCh:
+		t.Fatal("restart reused a closed stop channel")
+	default:
+	}
+
+	trigger.Stop()
+
+	select {
+	case <-secondDoneCh:
+	default:
+		t.Fatal("second run did not close done channel on Stop")
+	}
+}
+
 func TestShouldTriggerHandoff_NoEstimate(t *testing.T) {
 	t.Parallel()
 

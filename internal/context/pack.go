@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -56,7 +57,7 @@ type ContextPackFull struct {
 // BuildOptions configures how a context pack is built
 type BuildOptions struct {
 	BeadID          string
-	AgentType       string // cc, cod, gmi
+	AgentType       string // Canonical short code or alias (cc/cod/gmi/cursor/windsurf/aider, etc.)
 	RepoRev         string
 	Task            string   // Task description for CM context
 	Files           []string // Files for S2P context
@@ -112,7 +113,7 @@ func cacheKey(opts BuildOptions, alloc BudgetAllocation) string {
 
 	writePart(opts.RepoRev)
 	writePart(opts.BeadID)
-	writePart(opts.AgentType)
+	writePart(canonicalContextPackAgentType(opts.AgentType))
 	writePart(opts.Task)
 	writePart(opts.CorrelationID)
 	writePart(opts.ProjectDir)
@@ -131,6 +132,8 @@ func cacheKey(opts BuildOptions, alloc BudgetAllocation) string {
 
 // Build constructs a context pack for a task
 func (b *ContextPackBuilder) Build(ctx context.Context, opts BuildOptions) (*ContextPackFull, error) {
+	opts.AgentType = canonicalContextPackAgentType(opts.AgentType)
+
 	// Check cache
 	key := cacheKey(opts, b.allocation)
 	globalCacheMu.RLock()
@@ -505,15 +508,31 @@ func (b *ContextPackBuilder) buildS2PComponent(ctx context.Context, dir string, 
 
 // render creates the final prompt in agent-appropriate format
 func (b *ContextPackBuilder) render(pack *ContextPackFull) string {
-	switch pack.AgentType {
-	case state.AgentTypeClaude:
+	if usesXMLContextPackFormat(pack.AgentType) {
 		return b.renderXML(pack)
+	}
+	return b.renderMarkdown(pack)
+}
+
+func canonicalContextPackAgentType(agentType string) string {
+	canonical := strings.TrimSpace(string(agent.AgentType(agentType).Canonical()))
+	if canonical != "" {
+		return canonical
+	}
+	return strings.TrimSpace(agentType)
+}
+
+func usesXMLContextPackFormat(agentType state.AgentType) bool {
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeWindsurf, agent.AgentTypeAider:
+		return true
 	default:
-		return b.renderMarkdown(pack)
+		return false
 	}
 }
 
-// renderXML creates XML-formatted output for Claude
+// renderXML creates XML-formatted output for XML-oriented agents such as
+// Claude, Cursor, Windsurf, and Aider.
 func (b *ContextPackBuilder) renderXML(pack *ContextPackFull) string {
 	var sb strings.Builder
 

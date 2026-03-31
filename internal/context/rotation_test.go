@@ -375,10 +375,15 @@ func TestAgentTypeShort(t *testing.T) {
 		{"claude", "cc"},
 		{"Claude", "cc"},
 		{"cc", "cc"},
+		{"claude_code", "cc"},
 		{"codex", "cod"},
 		{"cod", "cod"},
+		{"openai-codex", "cod"},
 		{"gemini", "gmi"},
 		{"gmi", "gmi"},
+		{"google-gemini", "gmi"},
+		{"ws", "windsurf"},
+		{"ollama", "ollama"},
 		{"unknown", "unknown"},
 	}
 
@@ -401,8 +406,13 @@ func TestAgentTypeLong(t *testing.T) {
 		want      string
 	}{
 		{"cc", "claude"},
+		{"claude_code", "claude"},
 		{"cod", "codex"},
+		{"openai-codex", "codex"},
 		{"gmi", "gemini"},
+		{"google-gemini", "gemini"},
+		{"ws", "windsurf"},
+		{"ollama", "ollama"},
 		{"unknown", "unknown"},
 	}
 
@@ -508,8 +518,13 @@ func TestDefaultPaneSpawnerGetAgentCommand(t *testing.T) {
 		want      string
 	}{
 		{"claude", "claude"},
+		{"claude_code", "claude"},
 		{"codex", "codex"},
+		{"openai-codex", "codex"},
 		{"gemini", "gemini"},
+		{"google-gemini", "gemini"},
+		{"ws", "windsurf"},
+		{"ollama", "ollama"},
 	}
 
 	for _, tt := range tests {
@@ -526,6 +541,10 @@ func TestDefaultPaneSpawnerGetAgentCommand(t *testing.T) {
 	cfg.Agents.Claude = "custom-claude"
 	cfg.Agents.Codex = "custom-codex"
 	cfg.Agents.Gemini = "custom-gemini"
+	cfg.Agents.Cursor = "custom-cursor"
+	cfg.Agents.Windsurf = "custom-windsurf"
+	cfg.Agents.Aider = "custom-aider"
+	cfg.Agents.Ollama = "custom-ollama"
 
 	spawner2 := NewDefaultPaneSpawner(cfg)
 
@@ -537,6 +556,18 @@ func TestDefaultPaneSpawnerGetAgentCommand(t *testing.T) {
 	}
 	if got := spawner2.getAgentCommand("gemini"); got != "custom-gemini" {
 		t.Errorf("expected custom-gemini, got %q", got)
+	}
+	if got := spawner2.getAgentCommand("cursor"); got != "custom-cursor" {
+		t.Errorf("expected custom-cursor, got %q", got)
+	}
+	if got := spawner2.getAgentCommand("ws"); got != "custom-windsurf" {
+		t.Errorf("expected custom-windsurf, got %q", got)
+	}
+	if got := spawner2.getAgentCommand("aider"); got != "custom-aider" {
+		t.Errorf("expected custom-aider, got %q", got)
+	}
+	if got := spawner2.getAgentCommand("ollama"); got != "custom-ollama" {
+		t.Errorf("expected custom-ollama, got %q", got)
 	}
 }
 
@@ -604,6 +635,50 @@ func TestSendRotationPrompt_UsesBuffer(t *testing.T) {
 		t.Fatalf("key sends = %d, want 0", got)
 	}
 	if got := spawner.sentBuffers["%3"][0]; got != prompt {
+		t.Fatalf("buffer payload mismatch: got %q", got)
+	}
+}
+
+func TestTryCompaction_ExhaustsFallbackCommandsViaSpawner(t *testing.T) {
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("test__cc_1", "%0", "claude-opus-4")
+	monitor.RecordMessage("test__cc_1", 500, 500)
+
+	spawner := NewMockPaneSpawner()
+	compactor := NewCompactor(monitor, CompactorConfig{
+		MinReduction:     0.10,
+		BuiltinTimeout:   time.Millisecond,
+		SummarizeTimeout: time.Millisecond,
+	})
+
+	r := NewRotator(RotatorConfig{
+		Monitor:   monitor,
+		Spawner:   spawner,
+		Compactor: compactor,
+		Config:    config.DefaultContextRotationConfig(),
+	})
+
+	result := r.tryCompaction("test__cc_1", "%0")
+	if result == nil {
+		t.Fatal("expected compaction result, got nil")
+	}
+	if result.Success {
+		t.Fatal("expected compaction to fail without any context reduction")
+	}
+	if result.Method != CompactionFailed {
+		t.Fatalf("Method = %s, want %s", result.Method, CompactionFailed)
+	}
+	if !strings.Contains(result.Error, "exhausted") {
+		t.Fatalf("Error = %q, want exhausted message", result.Error)
+	}
+
+	if got := spawner.sentKeys["%0"]; len(got) != 2 || got[0] != "/compact" || got[1] != "/clear" {
+		t.Fatalf("sentKeys = %#v, want [/compact /clear]", got)
+	}
+	if got := len(spawner.sentBuffers["%0"]); got != 1 {
+		t.Fatalf("buffer sends = %d, want 1", got)
+	}
+	if got := spawner.sentBuffers["%0"][0]; got != CompactionPromptTemplate {
 		t.Fatalf("buffer payload mismatch: got %q", got)
 	}
 }

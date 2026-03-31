@@ -51,6 +51,14 @@ func TestGetAgentCapabilities_OpenAI(t *testing.T) {
 	if caps.SupportsHistoryClear {
 		t.Error("openai should not support history clear")
 	}
+
+	caps = GetAgentCapabilities("openai-codex")
+	if caps.SupportsBuiltinCompact {
+		t.Error("openai-codex should not support builtin compact")
+	}
+	if caps.SupportsHistoryClear {
+		t.Error("openai-codex should not support history clear")
+	}
 }
 
 func TestGetAgentCapabilities_Google(t *testing.T) {
@@ -62,6 +70,14 @@ func TestGetAgentCapabilities_Google(t *testing.T) {
 	}
 	if !caps.SupportsHistoryClear {
 		t.Error("google should support history clear")
+	}
+
+	caps = GetAgentCapabilities("google-gemini")
+	if caps.SupportsBuiltinCompact {
+		t.Error("google-gemini should not support builtin compact")
+	}
+	if !caps.SupportsHistoryClear {
+		t.Error("google-gemini should support history clear")
 	}
 }
 

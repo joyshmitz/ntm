@@ -46,6 +46,12 @@ func TestCacheKey(t *testing.T) {
 		t.Errorf("cacheKey length = %d, want 16", len(key))
 	}
 
+	aliasOpts := opts
+	aliasOpts.AgentType = "claude"
+	if aliasKey := cacheKey(aliasOpts, DefaultBudgetAllocation()); aliasKey != key {
+		t.Fatalf("cacheKey should canonicalize equivalent agent aliases: %q != %q", aliasKey, key)
+	}
+
 	// Same options should produce the same key
 	key2 := cacheKey(opts, DefaultBudgetAllocation())
 	if key != key2 {
@@ -669,23 +675,34 @@ func TestRender_RoutesToCorrectFormat(t *testing.T) {
 
 	b := &ContextPackBuilder{allocation: DefaultBudgetAllocation()}
 
-	claudePack := &ContextPackFull{
-		ContextPack: state.ContextPack{AgentType: state.AgentTypeClaude},
-		Components:  map[string]*PackComponent{},
-	}
-	codexPack := &ContextPackFull{
-		ContextPack: state.ContextPack{AgentType: state.AgentTypeCodex},
-		Components:  map[string]*PackComponent{},
+	tests := []struct {
+		name      string
+		agentType state.AgentType
+		wantXML   bool
+	}{
+		{name: "claude canonical", agentType: state.AgentTypeClaude, wantXML: true},
+		{name: "claude alias", agentType: state.AgentType("claude"), wantXML: true},
+		{name: "cursor", agentType: state.AgentType("cursor"), wantXML: true},
+		{name: "windsurf", agentType: state.AgentType("windsurf"), wantXML: true},
+		{name: "aider", agentType: state.AgentType("aider"), wantXML: true},
+		{name: "codex", agentType: state.AgentTypeCodex, wantXML: false},
+		{name: "gemini alias", agentType: state.AgentType("google-gemini"), wantXML: false},
+		{name: "ollama", agentType: state.AgentType("ollama"), wantXML: false},
 	}
 
-	xmlResult := b.render(claudePack)
-	if !strings.Contains(xmlResult, "<context_pack>") {
-		t.Error("Claude agent should get XML format")
-	}
-
-	mdResult := b.render(codexPack)
-	if !strings.Contains(mdResult, "# Context Pack") {
-		t.Error("Codex agent should get Markdown format")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := b.render(&ContextPackFull{
+				ContextPack: state.ContextPack{AgentType: tt.agentType},
+				Components:  map[string]*PackComponent{},
+			})
+			if tt.wantXML && !strings.Contains(result, "<context_pack>") {
+				t.Fatalf("render(%q) should use XML", tt.agentType)
+			}
+			if !tt.wantXML && !strings.Contains(result, "# Context Pack") {
+				t.Fatalf("render(%q) should use Markdown", tt.agentType)
+			}
+		})
 	}
 }
 
@@ -1112,5 +1129,44 @@ func TestRenderXML_IncludesMSComponent(t *testing.T) {
 	}
 	if !strings.Contains(result, `"source":"ms"`) {
 		t.Error("XML ms component should contain the data payload")
+	}
+}
+
+func TestBuild_CanonicalizesAgentTypeForStorageFormatAndCache(t *testing.T) {
+	// Not parallel since it mutates global cache and PATH.
+	t.Setenv("PATH", t.TempDir())
+
+	b := NewContextPackBuilder(nil)
+	b.ClearCache()
+	defer b.ClearCache()
+
+	opts := BuildOptions{
+		RepoRev:    "abc123",
+		BeadID:     "bd-test",
+		AgentType:  "claude",
+		Task:       "same task",
+		ProjectDir: t.TempDir(),
+		SessionID:  "session-1",
+	}
+
+	aliasPack, err := b.Build(stdcontext.Background(), opts)
+	if err != nil {
+		t.Fatalf("Build(alias) failed: %v", err)
+	}
+	if aliasPack.AgentType != state.AgentTypeClaude {
+		t.Fatalf("AgentType = %q, want %q", aliasPack.AgentType, state.AgentTypeClaude)
+	}
+	if !strings.Contains(aliasPack.RenderedPrompt, "<context_pack>") {
+		t.Fatal("claude alias should render XML context pack")
+	}
+
+	canonicalOpts := opts
+	canonicalOpts.AgentType = "cc"
+	canonicalPack, err := b.Build(stdcontext.Background(), canonicalOpts)
+	if err != nil {
+		t.Fatalf("Build(canonical) failed: %v", err)
+	}
+	if canonicalPack != aliasPack {
+		t.Fatal("Build should reuse cache for canonical-equivalent agent aliases")
 	}
 }

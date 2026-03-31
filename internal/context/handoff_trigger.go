@@ -72,9 +72,9 @@ type HandoffTrigger struct {
 	onTriggered func(HandoffTriggerEvent)
 
 	// Control
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	running bool
 
 	logger *slog.Logger
 }
@@ -107,7 +107,6 @@ func NewHandoffTrigger(
 		lastHandoff:  make(map[string]time.Time),
 		lastWarning:  make(map[string]time.Time),
 		activeAgents: make(map[string]bool),
-		stopCh:       make(chan struct{}),
 		logger:       slog.Default().With("component", "context.handoff_trigger"),
 	}
 }
@@ -127,36 +126,58 @@ func (t *HandoffTrigger) SetTriggeredHandler(handler func(HandoffTriggerEvent)) 
 }
 
 // Start begins the background monitoring loop.
+// It is a no-op while the trigger is already running.
 func (t *HandoffTrigger) Start() {
+	t.mu.Lock()
+	if t.running {
+		t.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	t.stopCh = stopCh
+	t.doneCh = doneCh
+	t.running = true
+	t.mu.Unlock()
+
 	t.logger.Info("starting handoff trigger",
 		"poll_interval", t.config.PollInterval,
 		"warn_threshold", t.config.WarnThreshold,
 		"trigger_threshold", t.config.TriggerThreshold,
 	)
 
-	t.wg.Add(1)
-	go t.monitorLoop()
+	go t.monitorLoop(stopCh, doneCh)
 }
 
 // Stop halts the background monitoring loop. Safe to call multiple times.
 func (t *HandoffTrigger) Stop() {
-	t.stopOnce.Do(func() {
-		t.logger.Info("stopping handoff trigger")
-		close(t.stopCh)
-	})
-	t.wg.Wait()
+	t.mu.Lock()
+	if !t.running {
+		t.mu.Unlock()
+		return
+	}
+	stopCh := t.stopCh
+	doneCh := t.doneCh
+	t.stopCh = nil
+	t.doneCh = nil
+	t.running = false
+	t.mu.Unlock()
+
+	t.logger.Info("stopping handoff trigger")
+	close(stopCh)
+	<-doneCh
 }
 
 // monitorLoop runs the periodic check for handoff triggers.
-func (t *HandoffTrigger) monitorLoop() {
-	defer t.wg.Done()
+func (t *HandoffTrigger) monitorLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer close(doneCh)
 
 	ticker := time.NewTicker(t.config.PollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-t.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			paths, err := t.Check()

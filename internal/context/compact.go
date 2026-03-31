@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // CompactionMethod identifies the compaction strategy used.
@@ -88,31 +90,29 @@ type AgentCapabilities struct {
 
 // GetAgentCapabilities returns the compaction capabilities for an agent type.
 func GetAgentCapabilities(agentType string) AgentCapabilities {
-	agentType = strings.ToLower(agentType)
-
-	switch agentType {
-	case "claude", "claude-code", "cc":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return AgentCapabilities{
 			SupportsBuiltinCompact: true,
 			SupportsHistoryClear:   true,
 			BuiltinCompactCommand:  "/compact",
 			HistoryClearCommand:    "/clear",
 		}
-	case "codex", "cod", "openai":
+	case agent.AgentTypeCodex:
 		return AgentCapabilities{
 			SupportsBuiltinCompact: false, // Codex doesn't have /compact
 			SupportsHistoryClear:   false,
 			BuiltinCompactCommand:  "",
 			HistoryClearCommand:    "",
 		}
-	case "gemini", "gmi", "google":
+	case agent.AgentTypeGemini:
 		return AgentCapabilities{
 			SupportsBuiltinCompact: false, // Gemini CLI doesn't have /compact
 			SupportsHistoryClear:   true,
 			BuiltinCompactCommand:  "",
 			HistoryClearCommand:    "/clear",
 		}
-	case "cursor", "windsurf", "aider":
+	case agent.AgentTypeCursor, agent.AgentTypeWindsurf, agent.AgentTypeAider, agent.AgentTypeOllama:
 		// These IDE-based agents typically manage their own context or don't support explicit compaction commands yet
 		return AgentCapabilities{
 			SupportsBuiltinCompact: false,
@@ -146,9 +146,20 @@ func (c *Compactor) GenerateCompactionPrompt() string {
 // CompactionCommand represents a command to send to an agent for compaction.
 type CompactionCommand struct {
 	Command     string // The command/text to send
-	IsPrompt    bool   // True if this is a prompt, false if a slash command
+	Method      CompactionMethod
+	IsPrompt    bool // True if this is a prompt, false if a slash command
 	WaitTime    time.Duration
 	Description string
+}
+
+func compactionMethodForCommand(cmd CompactionCommand) CompactionMethod {
+	if cmd.Method != "" {
+		return cmd.Method
+	}
+	if cmd.IsPrompt {
+		return CompactionSummarize
+	}
+	return CompactionBuiltin
 }
 
 // GetCompactionCommands returns the sequence of commands to try for compaction.
@@ -156,19 +167,34 @@ func (c *Compactor) GetCompactionCommands(agentType string) []CompactionCommand 
 	caps := GetAgentCapabilities(agentType)
 	var commands []CompactionCommand
 
-	// Try builtin compaction first if available
+	// Try builtin compaction first if available.
 	if caps.SupportsBuiltinCompact && caps.BuiltinCompactCommand != "" {
 		commands = append(commands, CompactionCommand{
 			Command:     caps.BuiltinCompactCommand,
+			Method:      CompactionBuiltin,
 			IsPrompt:    false,
 			WaitTime:    c.builtinTimeout,
 			Description: "builtin compaction command",
 		})
 	}
 
-	// Fallback to summarization request
+	// If the agent supports clearing non-essential history, try that before asking
+	// for a manual summary. This gives agents with native history pruning a cheaper
+	// fallback than a full summarization round-trip.
+	if caps.SupportsHistoryClear && caps.HistoryClearCommand != "" {
+		commands = append(commands, CompactionCommand{
+			Command:     caps.HistoryClearCommand,
+			Method:      CompactionClearHistory,
+			IsPrompt:    false,
+			WaitTime:    c.builtinTimeout,
+			Description: "history clear command",
+		})
+	}
+
+	// Fallback to summarization request.
 	commands = append(commands, CompactionCommand{
 		Command:     c.GenerateCompactionPrompt(),
+		Method:      CompactionSummarize,
 		IsPrompt:    true,
 		WaitTime:    c.summarizeTimeout,
 		Description: "summarization request",

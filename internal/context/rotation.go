@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -237,39 +238,60 @@ func (s *DefaultPaneSpawner) GetPanes(session string) ([]tmux.Pane, error) {
 }
 
 func (s *DefaultPaneSpawner) getAgentCommand(agentType string) string {
-	defaults := map[string]string{
-		"claude":   "claude",
-		"codex":    "codex",
-		"gemini":   "gemini",
-		"cursor":   "cursor",
-		"windsurf": "windsurf",
-		"aider":    "aider",
-	}
+	canonical := agent.AgentType(agentType).Canonical()
 
 	if s.config != nil {
-		switch agentType {
-		case "claude":
+		switch canonical {
+		case agent.AgentTypeClaudeCode:
 			if s.config.Agents.Claude != "" {
 				return s.config.Agents.Claude
 			}
-		case "codex":
+		case agent.AgentTypeCodex:
 			if s.config.Agents.Codex != "" {
 				return s.config.Agents.Codex
 			}
-		case "gemini":
+		case agent.AgentTypeGemini:
 			if s.config.Agents.Gemini != "" {
 				return s.config.Agents.Gemini
 			}
-			// Future: add config support for other agents if needed
+		case agent.AgentTypeCursor:
+			if s.config.Agents.Cursor != "" {
+				return s.config.Agents.Cursor
+			}
+		case agent.AgentTypeWindsurf:
+			if s.config.Agents.Windsurf != "" {
+				return s.config.Agents.Windsurf
+			}
+		case agent.AgentTypeAider:
+			if s.config.Agents.Aider != "" {
+				return s.config.Agents.Aider
+			}
+		case agent.AgentTypeOllama:
+			if s.config.Agents.Ollama != "" {
+				return s.config.Agents.Ollama
+			}
 		}
 	}
 
-	if cmd, ok := defaults[agentType]; ok {
-		return cmd
+	switch canonical {
+	case agent.AgentTypeClaudeCode:
+		return "claude"
+	case agent.AgentTypeCodex:
+		return "codex"
+	case agent.AgentTypeGemini:
+		return "gemini"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
 	}
 	// Fall back to using the agent type name as the command.
 	// This handles unknown/future agent types that match their CLI name.
-	return agentType
+	return strings.TrimSpace(agentType)
 }
 
 func (tmuxPaneInputSender) SendKeys(paneID, text string, enter bool) error {
@@ -293,41 +315,49 @@ func sendRotationPrompt(spawner PaneSpawner, paneID, prompt string) error {
 
 // agentTypeShort returns the short form for pane naming.
 func agentTypeShort(agentType string) string {
-	switch strings.ToLower(agentType) {
-	case "claude", "cc":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "cc"
-	case "codex", "cod":
+	case agent.AgentTypeCodex:
 		return "cod"
-	case "gemini", "gmi":
+	case agent.AgentTypeGemini:
 		return "gmi"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return "cursor"
-	case "windsurf":
+	case agent.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	case agent.AgentTypeUser:
+		return "user"
 	default:
-		return agentType
+		return strings.TrimSpace(agentType)
 	}
 }
 
 // agentTypeLong returns the long form from short form.
 func agentTypeLong(shortType string) string {
-	switch strings.ToLower(shortType) {
-	case "cc":
+	switch agent.AgentType(shortType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "claude"
-	case "cod":
+	case agent.AgentTypeCodex:
 		return "codex"
-	case "gmi":
+	case agent.AgentTypeGemini:
 		return "gemini"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return "cursor"
-	case "windsurf":
+	case agent.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	case agent.AgentTypeUser:
+		return "user"
 	default:
-		return shortType
+		return strings.TrimSpace(shortType)
 	}
 }
 
@@ -772,11 +802,14 @@ func (r *Rotator) tryCompaction(agentID, paneID string) *CompactionResult {
 	if r.compactor == nil {
 		return nil
 	}
+	if r.spawner == nil {
+		return &CompactionResult{Success: false, Method: CompactionFailed, Error: "no spawner available"}
+	}
 
 	// Start compaction state
 	state, err := r.compactor.NewCompactionState(agentID)
 	if err != nil {
-		return &CompactionResult{Success: false, Error: err.Error()}
+		return &CompactionResult{Success: false, Method: CompactionFailed, Error: err.Error()}
 	}
 
 	// Derive agent type from the agent ID (format: session__type_index)
@@ -784,32 +817,38 @@ func (r *Rotator) tryCompaction(agentID, paneID string) *CompactionResult {
 
 	cmds := r.compactor.GetCompactionCommands(agentType)
 	if len(cmds) == 0 {
-		return &CompactionResult{Success: false, Error: "no compaction commands available"}
+		return &CompactionResult{Success: false, Method: CompactionFailed, Error: "no compaction commands available"}
 	}
 
-	// Try the first compaction command (builtin if available)
-	cmd := cmds[0]
-	// Both slash commands and prompts need enter=true to be submitted
-	if err := sendCompactionCommandToPane(tmuxPaneInputSender{}, paneID, cmd); err != nil {
-		return &CompactionResult{Success: false, Error: fmt.Sprintf("failed to send compaction command: %v", err)}
+	for _, cmd := range cmds {
+		// Both slash commands and prompts need enter=true to be submitted.
+		if err := sendCompactionCommandToPane(r.spawner, paneID, cmd); err != nil {
+			slog.Error("failed to send compaction command", "pane_id", paneID, "error", err)
+			continue
+		}
+
+		state.UpdateState(cmd, compactionMethodForCommand(cmd))
+
+		// Wait for compaction to complete.
+		time.Sleep(cmd.WaitTime)
+
+		// Finish and evaluate.
+		result, err := r.compactor.FinishCompaction(state)
+		if err != nil {
+			slog.Warn("compaction finish failed", "error", err)
+			continue
+		}
+		if result.Success {
+			return result
+		}
+
+		slog.Info("compaction method did not achieve target reduction, trying next",
+			"method", result.Method,
+			"error", result.Error,
+		)
 	}
 
-	// Set method based on whether this is a builtin command or summarization prompt
-	method := CompactionBuiltin
-	if cmd.IsPrompt {
-		method = CompactionSummarize
-	}
-	state.UpdateState(cmd, method)
-
-	// Wait for compaction to complete
-	time.Sleep(cmd.WaitTime)
-
-	// Finish and evaluate
-	result, err := r.compactor.FinishCompaction(state)
-	if err != nil {
-		slog.Warn("compaction finish failed", "error", err)
-	}
-	return result
+	return &CompactionResult{Success: false, Method: CompactionFailed, Error: "all compaction methods exhausted"}
 }
 
 // extractAgentIndex extracts the numeric index from an agent ID.

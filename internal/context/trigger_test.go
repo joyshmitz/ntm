@@ -272,6 +272,76 @@ func TestStartStop(t *testing.T) {
 	// Should complete without hanging
 }
 
+func TestCompactionTrigger_CanRestartAfterStop(t *testing.T) {
+	config := DefaultCompactionTriggerConfig()
+	config.PollInterval = 10 * time.Millisecond
+	config.AutoCompact = false
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	compactor := NewCompactor(monitor, DefaultCompactorConfig())
+	predictor := NewContextPredictor(DefaultPredictorConfig())
+
+	trigger := NewCompactionTrigger(config, monitor, compactor, predictor)
+
+	trigger.Start()
+
+	trigger.mu.RLock()
+	firstStopCh := trigger.stopCh
+	firstDoneCh := trigger.doneCh
+	firstRunning := trigger.running
+	trigger.mu.RUnlock()
+
+	if !firstRunning {
+		t.Fatal("trigger should be running after Start")
+	}
+	if firstStopCh == nil || firstDoneCh == nil {
+		t.Fatal("trigger should initialize stop and done channels on Start")
+	}
+
+	trigger.Stop()
+
+	select {
+	case <-firstDoneCh:
+	default:
+		t.Fatal("first run did not close done channel on Stop")
+	}
+
+	trigger.Start()
+
+	trigger.mu.RLock()
+	secondStopCh := trigger.stopCh
+	secondDoneCh := trigger.doneCh
+	secondRunning := trigger.running
+	trigger.mu.RUnlock()
+
+	if !secondRunning {
+		t.Fatal("trigger should be running after restart")
+	}
+	if secondStopCh == nil || secondDoneCh == nil {
+		t.Fatal("trigger should initialize fresh channels on restart")
+	}
+	if firstStopCh == secondStopCh {
+		t.Fatal("restart reused the original stop channel")
+	}
+	if firstDoneCh == secondDoneCh {
+		t.Fatal("restart reused the original done channel")
+	}
+
+	select {
+	case <-secondStopCh:
+		t.Fatal("restart reused a closed stop channel")
+	default:
+	}
+
+	trigger.Stop()
+
+	select {
+	case <-secondDoneCh:
+	default:
+		t.Fatal("second run did not close done channel on Stop")
+	}
+}
+
 func TestCompactionTriggerEvent(t *testing.T) {
 	event := CompactionTriggerEvent{
 		AgentID:     "agent1",

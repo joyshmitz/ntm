@@ -64,9 +64,9 @@ type CompactionTrigger struct {
 	onCompactionComplete  func(CompactionTriggerEvent)
 
 	// Control
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	running bool
 }
 
 // NewCompactionTrigger creates a new proactive compaction trigger.
@@ -83,7 +83,6 @@ func NewCompactionTrigger(
 		predictor:         predictor,
 		lastCompaction:    make(map[string]time.Time),
 		activeCompactions: make(map[string]bool),
-		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -102,22 +101,44 @@ func (t *CompactionTrigger) SetCompactionCompleteHandler(handler func(Compaction
 }
 
 // Start begins the background monitoring loop.
+// It is a no-op while the trigger is already running.
 func (t *CompactionTrigger) Start() {
-	t.wg.Add(1)
-	go t.monitorLoop()
+	t.mu.Lock()
+	if t.running {
+		t.mu.Unlock()
+		return
+	}
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	t.stopCh = stopCh
+	t.doneCh = doneCh
+	t.running = true
+	t.mu.Unlock()
+
+	go t.monitorLoop(stopCh, doneCh)
 }
 
 // Stop halts the background monitoring loop. Safe to call multiple times.
 func (t *CompactionTrigger) Stop() {
-	t.stopOnce.Do(func() {
-		close(t.stopCh)
-	})
-	t.wg.Wait()
+	t.mu.Lock()
+	if !t.running {
+		t.mu.Unlock()
+		return
+	}
+	stopCh := t.stopCh
+	doneCh := t.doneCh
+	t.stopCh = nil
+	t.doneCh = nil
+	t.running = false
+	t.mu.Unlock()
+
+	close(stopCh)
+	<-doneCh
 }
 
 // monitorLoop runs the periodic check for compaction triggers.
-func (t *CompactionTrigger) monitorLoop() {
-	defer t.wg.Done()
+func (t *CompactionTrigger) monitorLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer close(doneCh)
 
 	// ubs:ignore - ticker stopped via defer below
 	ticker := time.NewTicker(t.config.PollInterval)
@@ -125,7 +146,7 @@ func (t *CompactionTrigger) monitorLoop() {
 
 	for {
 		select {
-		case <-t.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			t.checkAllAgents()
@@ -327,14 +348,7 @@ func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType 
 			"is_prompt", cmd.IsPrompt,
 		)
 
-		// Determine the method based on command type
-		method := CompactionBuiltin
-		if cmd.IsPrompt {
-			method = CompactionSummarize
-		}
-		compState.UpdateState(cmd, method)
-
-		// Send the command
+		// Send the command.
 		err := t.sendCompactionCommand(paneID, cmd)
 		if err != nil {
 			slog.Error("Failed to send compaction command",
@@ -343,6 +357,8 @@ func (t *CompactionTrigger) executeCompaction(agentID, paneID string, agentType 
 			)
 			continue
 		}
+
+		compState.UpdateState(cmd, compactionMethodForCommand(cmd))
 
 		// Wait for compaction to complete
 		time.Sleep(cmd.WaitTime)

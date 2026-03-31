@@ -13,7 +13,9 @@ func TestDeriveAgentTypeFromID_NewAgents(t *testing.T) {
 	}{
 		{"myproject__cursor_1", "cursor"},
 		{"myproject__windsurf_2", "windsurf"},
+		{"myproject__ws_2", "windsurf"},
 		{"myproject__aider_3", "aider"},
+		{"myproject__ollama_4", "ollama"},
 		{"myproject__cursor_1_variant", "cursor"},
 	}
 
@@ -36,7 +38,9 @@ func TestAgentTypeShort_NewAgents(t *testing.T) {
 	}{
 		{"cursor", "cursor"},
 		{"windsurf", "windsurf"},
+		{"ws", "windsurf"},
 		{"aider", "aider"},
+		{"ollama", "ollama"},
 	}
 
 	for _, tt := range tests {
@@ -58,7 +62,9 @@ func TestAgentTypeLong_NewAgents(t *testing.T) {
 	}{
 		{"cursor", "cursor"},
 		{"windsurf", "windsurf"},
+		{"ws", "windsurf"},
 		{"aider", "aider"},
+		{"ollama", "ollama"},
 	}
 
 	for _, tt := range tests {
@@ -83,7 +89,9 @@ func TestDefaultPaneSpawnerGetAgentCommand_NewAgents(t *testing.T) {
 	}{
 		{"cursor", "cursor"},
 		{"windsurf", "windsurf"},
+		{"ws", "windsurf"},
 		{"aider", "aider"},
+		{"ollama", "ollama"},
 	}
 
 	for _, tt := range tests {

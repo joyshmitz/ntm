@@ -61,10 +61,15 @@ func TestGetAgentCapabilities(t *testing.T) {
 		{"claude", true, true, "/compact"},
 		{"cc", true, true, "/compact"},
 		{"claude-code", true, true, "/compact"},
+		{"claude_code", true, true, "/compact"},
 		{"codex", false, false, ""},
 		{"cod", false, false, ""},
+		{"openai-codex", false, false, ""},
 		{"gemini", false, true, ""},
 		{"gmi", false, true, ""},
+		{"google-gemini", false, true, ""},
+		{"ws", false, false, ""},
+		{"ollama", false, false, ""},
 		{"unknown", false, false, ""},
 	}
 
@@ -114,31 +119,41 @@ func TestGetCompactionCommands(t *testing.T) {
 	c := NewCompactor(monitor, DefaultCompactorConfig())
 
 	tests := []struct {
-		agentType   string
-		wantMinCmds int
-		wantBuiltin bool
+		agentType    string
+		wantCommands []string
+		wantMethods  []CompactionMethod
 	}{
-		{"claude", 2, true},  // /compact + summarize
-		{"codex", 1, false},  // just summarize
-		{"gemini", 1, false}, // just summarize
+		{
+			agentType:    "claude",
+			wantCommands: []string{"/compact", "/clear", CompactionPromptTemplate},
+			wantMethods:  []CompactionMethod{CompactionBuiltin, CompactionClearHistory, CompactionSummarize},
+		},
+		{
+			agentType:    "codex",
+			wantCommands: []string{CompactionPromptTemplate},
+			wantMethods:  []CompactionMethod{CompactionSummarize},
+		},
+		{
+			agentType:    "gemini",
+			wantCommands: []string{"/clear", CompactionPromptTemplate},
+			wantMethods:  []CompactionMethod{CompactionClearHistory, CompactionSummarize},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.agentType, func(t *testing.T) {
 			t.Parallel()
 			cmds := c.GetCompactionCommands(tt.agentType)
-			if len(cmds) < tt.wantMinCmds {
-				t.Errorf("got %d commands, want at least %d", len(cmds), tt.wantMinCmds)
+			if len(cmds) != len(tt.wantCommands) {
+				t.Fatalf("got %d commands, want %d", len(cmds), len(tt.wantCommands))
 			}
-
-			hasBuiltin := false
-			for _, cmd := range cmds {
-				if cmd.Command == "/compact" {
-					hasBuiltin = true
+			for i, cmd := range cmds {
+				if cmd.Command != tt.wantCommands[i] {
+					t.Fatalf("command[%d] = %q, want %q", i, cmd.Command, tt.wantCommands[i])
 				}
-			}
-			if hasBuiltin != tt.wantBuiltin {
-				t.Errorf("hasBuiltin = %v, want %v", hasBuiltin, tt.wantBuiltin)
+				if cmd.Method != tt.wantMethods[i] {
+					t.Fatalf("method[%d] = %s, want %s", i, cmd.Method, tt.wantMethods[i])
+				}
 			}
 		})
 	}
