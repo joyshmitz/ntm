@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // TmuxClient defines the interface for tmux operations needed by probe.
@@ -241,7 +242,7 @@ func CapturePaneBaseline(target string) (*PaneBaseline, error) {
 	return &PaneBaseline{
 		Content:     content,
 		ContentHash: hashContent(content),
-		LineCount:   countNonEmptyLines(content),
+		LineCount:   util.CountNonEmptyLines(content),
 		CapturedAt:  time.Now(),
 	}, nil
 }
@@ -257,7 +258,7 @@ func CapturePaneBaselineWithLines(target string, lines int) (*PaneBaseline, erro
 	return &PaneBaseline{
 		Content:     content,
 		ContentHash: hashContent(content),
-		LineCount:   countNonEmptyLines(content),
+		LineCount:   util.CountNonEmptyLines(content),
 		CapturedAt:  time.Now(),
 	}, nil
 }
@@ -272,7 +273,7 @@ func ComparePaneState(baseline, current *PaneBaseline) PaneChange {
 	latency := current.CapturedAt.Sub(baseline.CapturedAt).Milliseconds()
 
 	// Quick hash comparison for unchanged case
-	if baseline.ContentHash == current.ContentHash {
+	if baseline.ContentHash == current.ContentHash && baseline.LineCount == current.LineCount {
 		return PaneChange{
 			Changed:   false,
 			LatencyMs: latency,
@@ -313,35 +314,6 @@ func hashContent(content string) string {
 		hash *= prime64
 	}
 	return fmt.Sprintf("%016x", hash)
-}
-
-// countNonEmptyLines counts lines that have non-whitespace content.
-func countNonEmptyLines(content string) int {
-	count := 0
-	inLine := false
-	hasContent := false
-
-	for _, r := range content {
-		if r == '\n' {
-			if hasContent {
-				count++
-			}
-			inLine = false
-			hasContent = false
-		} else {
-			inLine = true
-			if r != ' ' && r != '\t' && r != '\r' {
-				hasContent = true
-			}
-		}
-	}
-
-	// Count last line if it has content and no trailing newline
-	if inLine && hasContent {
-		count++
-	}
-
-	return count
 }
 
 // =============================================================================

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -22,21 +23,26 @@ type SessionOrchestrator struct {
 
 	// StaggerDelay is the delay between pane creations to avoid rate limits.
 	StaggerDelay time.Duration
+
+	targetingMu    sync.RWMutex
+	targetingCache map[string]swarmSessionTargeting
 }
 
 // NewSessionOrchestrator creates a new SessionOrchestrator with default settings.
 func NewSessionOrchestrator() *SessionOrchestrator {
 	return &SessionOrchestrator{
-		TmuxClient:   nil, // Use default client
-		StaggerDelay: 300 * time.Millisecond,
+		TmuxClient:     nil, // Use default client
+		StaggerDelay:   300 * time.Millisecond,
+		targetingCache: make(map[string]swarmSessionTargeting),
 	}
 }
 
 // NewSessionOrchestratorWithClient creates a SessionOrchestrator with a custom tmux client.
 func NewSessionOrchestratorWithClient(client *tmux.Client) *SessionOrchestrator {
 	return &SessionOrchestrator{
-		TmuxClient:   client,
-		StaggerDelay: 300 * time.Millisecond,
+		TmuxClient:     client,
+		StaggerDelay:   300 * time.Millisecond,
+		targetingCache: make(map[string]swarmSessionTargeting),
 	}
 }
 
@@ -45,8 +51,9 @@ func NewSessionOrchestratorWithClient(client *tmux.Client) *SessionOrchestrator 
 // All tmux operations will be executed on the remote host via SSH.
 func NewRemoteSessionOrchestrator(host string) *SessionOrchestrator {
 	return &SessionOrchestrator{
-		TmuxClient:   tmux.NewClient(host),
-		StaggerDelay: 300 * time.Millisecond,
+		TmuxClient:     tmux.NewClient(host),
+		StaggerDelay:   300 * time.Millisecond,
+		targetingCache: make(map[string]swarmSessionTargeting),
 	}
 }
 
@@ -55,8 +62,9 @@ func NewRemoteSessionOrchestrator(host string) *SessionOrchestrator {
 // The staggerDelay parameter controls the delay between pane creations.
 func NewRemoteSessionOrchestratorWithDelay(host string, staggerDelay time.Duration) *SessionOrchestrator {
 	return &SessionOrchestrator{
-		TmuxClient:   tmux.NewClient(host),
-		StaggerDelay: staggerDelay,
+		TmuxClient:     tmux.NewClient(host),
+		StaggerDelay:   staggerDelay,
+		targetingCache: make(map[string]swarmSessionTargeting),
 	}
 }
 
@@ -392,6 +400,31 @@ func (o *SessionOrchestrator) GetAverageGeometry(sessionName string) (*PaneGeome
 		Width:  totalWidth / len(panes),
 		Height: totalHeight / len(panes),
 	}, nil
+}
+
+func (o *SessionOrchestrator) resolveTargeting(ctx context.Context, sessionName string) (swarmSessionTargeting, error) {
+	o.targetingMu.RLock()
+	if targeting, ok := o.targetingCache[sessionName]; ok {
+		o.targetingMu.RUnlock()
+		return targeting, nil
+	}
+	o.targetingMu.RUnlock()
+
+	o.targetingMu.Lock()
+	defer o.targetingMu.Unlock()
+
+	// Double check
+	if targeting, ok := o.targetingCache[sessionName]; ok {
+		return targeting, nil
+	}
+
+	targeting, err := resolveSwarmSessionTargeting(ctx, o.tmuxClient(), sessionName)
+	if err != nil {
+		return swarmSessionTargeting{}, err
+	}
+
+	o.targetingCache[sessionName] = targeting
+	return targeting, nil
 }
 
 // TmuxBinaryPath returns the resolved path to the tmux binary being used.

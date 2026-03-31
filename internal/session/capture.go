@@ -56,7 +56,7 @@ func Capture(sessionName string) (state *SessionState, err error) {
 	// Map pane states
 	paneStates := mapPaneStates(panes)
 
-	// Detect working directory from first pane or session
+	// Detect working directory from active pane, first pane, or process
 	cwd := detectWorkDir(sessionName, panes)
 
 	// Get git info if in a repo
@@ -147,9 +147,22 @@ func mapPaneStates(panes []tmux.Pane) []PaneState {
 
 // detectWorkDir attempts to detect the working directory for the session.
 func detectWorkDir(sessionName string, panes []tmux.Pane) string {
-	// Try to get the pane's current path via tmux
+	// Try to get the active pane's current path via tmux
+	for _, p := range panes {
+		if p.Active {
+			output, err := tmux.DefaultClient.Run("display-message", "-t", p.ID, "-p", "#{pane_current_path}")
+			if err == nil && len(output) > 0 {
+				path := strings.TrimSpace(output)
+				if path != "" {
+					return path
+				}
+			}
+			break
+		}
+	}
+
+	// Fallback: try the first pane if no active pane or it failed
 	if len(panes) > 0 {
-		// Use tmux display-message to get the pane path
 		output, err := tmux.DefaultClient.Run("display-message", "-t", panes[0].ID, "-p", "#{pane_current_path}")
 		if err == nil && len(output) > 0 {
 			path := strings.TrimSpace(output)
@@ -160,7 +173,6 @@ func detectWorkDir(sessionName string, panes []tmux.Pane) string {
 	}
 
 	// Fallback: try to determine from current process working directory
-	// This is often correct if ntm is run from the project root
 	if cwd, err := os.Getwd(); err == nil {
 		return cwd
 	}
@@ -205,25 +217,9 @@ func runGitInfoCommand(dir string, timeout time.Duration, args ...string) string
 func getLayout(sessionName string) string {
 	output, err := tmux.DefaultClient.Run("display-message", "-t", sessionName, "-p", "#{window_layout}")
 	if err != nil {
-		return "tiled" // Default
+		return "tiled" // Default fallback
 	}
-	// tmux layouts can be complex strings, but we'll use simplified versions
-	layout := strings.TrimSpace(output)
-
-	// Map to simple layout names if possible
-	switch {
-	case strings.HasPrefix(layout, "even-horizontal"):
-		return "even-horizontal"
-	case strings.HasPrefix(layout, "even-vertical"):
-		return "even-vertical"
-	case strings.HasPrefix(layout, "main-horizontal"):
-		return "main-horizontal"
-	case strings.HasPrefix(layout, "main-vertical"):
-		return "main-vertical"
-	case strings.HasPrefix(layout, "tiled"):
-		return "tiled"
-	default:
-		// Return as-is for custom layouts
-		return layout
-	}
+	// Return the layout string as-is. tmux select-layout accepts both
+	// named layouts (tiled, even-horizontal) and serialized geometry strings.
+	return strings.TrimSpace(output)
 }

@@ -68,6 +68,9 @@ type PromptInjector struct {
 	// If nil, the default tmux client is used.
 	TmuxClient *tmux.Client
 
+	// SessionOrchestrator for cached session targeting.
+	SessionOrchestrator *SessionOrchestrator
+
 	// StaggerDelay is the delay between sends to avoid rate limits.
 	// Default: 300ms
 	// Only used when UseAdaptiveDelay is false.
@@ -101,8 +104,9 @@ type PromptInjector struct {
 // NewPromptInjector creates a new PromptInjector with default settings.
 func NewPromptInjector() *PromptInjector {
 	return &PromptInjector{
-		TmuxClient:       nil,
-		StaggerDelay:     300 * time.Millisecond,
+		TmuxClient:          nil,
+		SessionOrchestrator: NewSessionOrchestrator(),
+		StaggerDelay:        300 * time.Millisecond,
 		EnterDelay:       100 * time.Millisecond,
 		DoubleEnterDelay: 500 * time.Millisecond,
 		Logger:           slog.Default(),
@@ -245,7 +249,7 @@ func (p *PromptInjector) InjectPromptWithResult(sessionPane, agentType, prompt s
 }
 
 // sendToPane sends a prompt to a specific pane, handling agent-specific quirks.
-func (p *PromptInjector) sendToPane(sessionPane, agentType, prompt string) error {
+func (p *PromptInjector) sendToPane(sessionPane, agentType string, prompt string) error {
 	client := p.tmuxClient()
 
 	// Wait for agent to be ready (at idle prompt)
@@ -262,7 +266,8 @@ func (p *PromptInjector) sendToPane(sessionPane, agentType, prompt string) error
 	// Use agent-aware send method for reliable multi-line prompt delivery
 	// For Gemini, this uses buffer-based paste to avoid newline interpretation issues
 	// Send without Enter first
-	if err := client.SendKeysForAgent(sessionPane, prompt, false, tmux.AgentType(agentType)); err != nil {
+	aType := tmux.AgentType(agentType)
+	if err := client.SendKeysForAgent(sessionPane, prompt, false, aType); err != nil {
 		return fmt.Errorf("send prompt text: %w", err)
 	}
 
@@ -276,7 +281,7 @@ func (p *PromptInjector) sendToPane(sessionPane, agentType, prompt string) error
 
 	// AGENT QUIRK: Codex and some other agents need double-Enter
 	// The first Enter may not be recognized immediately
-	if needsDoubleEnter(agentType) {
+	if aType.NeedsDoubleEnter() {
 		time.Sleep(p.DoubleEnterDelay)
 		if err := client.SendKeys(sessionPane, "", true); err != nil {
 			return fmt.Errorf("send second enter: %w", err)
@@ -308,18 +313,7 @@ func (p *PromptInjector) WaitForReady(ctx context.Context, target, agentType str
 	}
 }
 
-// needsDoubleEnter returns true if the agent type requires double-Enter.
-func needsDoubleEnter(agentType string) bool {
-	switch agentType {
-	case "cod", "codex":
-		return true
-	case "gmi", "gemini":
-		// Gemini may also benefit from double-Enter in some cases
-		return true
-	default:
-		return false
-	}
-}
+// needsDoubleEnter is removed, now uses tmux.AgentType.NeedsDoubleEnter()
 
 // InjectBatch sends prompts to multiple panes with staggering.
 // All targets receive the same prompt.
@@ -409,6 +403,13 @@ func (p *PromptInjector) InjectSwarm(plan *SwarmPlan, prompt string) (*BatchInje
 	return p.InjectSwarmWithContext(context.Background(), plan, prompt)
 }
 
+func (p *PromptInjector) sessionOrchestrator() *SessionOrchestrator {
+	if p.SessionOrchestrator != nil {
+		return p.SessionOrchestrator
+	}
+	return NewSessionOrchestrator()
+}
+
 // InjectSwarmWithContext sends marching orders to all panes in a SwarmPlan with context support.
 // Each pane receives the same prompt. The operation can be cancelled via context.
 func (p *PromptInjector) InjectSwarmWithContext(ctx context.Context, plan *SwarmPlan, prompt string) (*BatchInjectionResult, error) {
@@ -420,22 +421,15 @@ func (p *PromptInjector) InjectSwarmWithContext(ctx context.Context, plan *Swarm
 	}
 
 	// Build targets from plan
-	client := p.tmuxClient()
-	targetingCache := make(map[string]swarmSessionTargeting, len(plan.Sessions))
+	orch := p.sessionOrchestrator()
 	var targets []InjectionTarget
 	for _, sessionSpec := range plan.Sessions {
-		targeting, targetingOK := targetingCache[sessionSpec.Name]
-		if !targetingOK && ctx.Err() == nil {
-			resolved, err := resolveSwarmSessionTargeting(ctx, client, sessionSpec.Name)
-			if err != nil {
-				p.logger().Warn("[PromptInjector] session_targeting_resolve_failed",
-					"session", sessionSpec.Name,
-					"error", err)
-			} else {
-				targeting = resolved
-				targetingCache[sessionSpec.Name] = resolved
-				targetingOK = true
-			}
+		targeting, err := orch.resolveTargeting(ctx, sessionSpec.Name)
+		targetingOK := err == nil
+		if err != nil {
+			p.logger().Warn("[PromptInjector] session_targeting_resolve_failed",
+				"session", sessionSpec.Name,
+				"error", err)
 		}
 
 		for _, paneSpec := range sessionSpec.Panes {

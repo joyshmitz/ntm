@@ -3,6 +3,7 @@ package robot
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,8 +11,8 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/process"
-	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tokens"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // Output tracking state
@@ -138,7 +139,7 @@ func updateActivity(paneID, content string) (time.Time, int) {
 	outputStateMu.Lock()
 	defer outputStateMu.Unlock()
 
-	currentLines := countNonEmptyLines(content)
+	currentLines := util.CountNonEmptyLines(content)
 	state, ok := paneStates[paneID]
 	if !ok {
 		state = &paneState{

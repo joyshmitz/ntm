@@ -459,7 +459,7 @@ func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, comman
 
 	title := fmt.Sprintf("%s__%s_%d", session, agentTypeShort(agentType), num)
 	agent := SpawnedAgent{
-		Pane:  fmt.Sprintf("0.%d", pane.Index),
+		Pane:  fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
 		Type:  agentType,
 		Title: title,
 		Ready: false,
@@ -487,7 +487,8 @@ func launchAgent(pane tmux.Pane, session, agentType string, num int, dir, comman
 		return agent
 	}
 
-	if err := tmux.SendKeys(pane.ID, cmd, true); err != nil {
+	// Use SendKeysForAgent to handle different submission methods (buffer vs send-keys)
+	if err := tmux.SendKeysForAgent(pane.ID, cmd, true, tmux.AgentType(agentTypeShort(agentType))); err != nil {
 		agent.Error = fmt.Sprintf("launching: %v", err)
 		agent.StartupMs = time.Since(startTime).Milliseconds()
 		return agent
@@ -732,7 +733,7 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string) 
 		// Send work prompt to the agent (only if claimed or best effort)
 		if assignment.Claimed {
 			prompt := generateWorkPrompt(item)
-			if err := sendWorkPrompt(session, agent.Pane, prompt); err != nil {
+			if err := sendWorkPrompt(session, agent.Pane, agent.Type, prompt); err != nil {
 				assignment.PromptError = err.Error()
 			} else {
 				assignment.PromptSent = true
@@ -932,13 +933,13 @@ func generateWorkPrompt(item workItem) string {
 }
 
 // sendWorkPrompt sends a work prompt to an agent via tmux.
-func sendWorkPrompt(session, paneRef, prompt string) error {
+func sendWorkPrompt(session, paneRef, agentTypeStr, prompt string) error {
 	// Build the full pane target
 	target := fmt.Sprintf("%s:%s", session, paneRef)
 
-	// Send the prompt directly.
-	// tmux.SendKeys uses 'send-keys -l' which treats input literally.
-	// Newlines in the prompt string are interpreted by the shell as Enter presses.
-	// The final 'true' argument ensures a trailing Enter is sent to execute the last line.
-	return tmux.SendKeys(target, prompt, true)
+	// Use SendKeysForAgent to handle multi-line prompts via buffer mechanism
+	// for agents like Gemini and Claude Code that need it.
+	agentType := tmux.AgentType(agentTypeShort(agentTypeStr))
+
+	return tmux.SendKeysForAgent(target, prompt, true, agentType)
 }

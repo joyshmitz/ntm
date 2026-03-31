@@ -12,6 +12,7 @@ import (
 
 	ntmcontext "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // AccountRotatorI provides account rotation for limit recovery (optional).
@@ -305,17 +306,19 @@ func (r *AutoRespawner) Start(ctx context.Context) (err error) {
 // Stop halts the auto-respawner.
 func (r *AutoRespawner) Stop() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	cancel := r.cancel
+	eventChan := r.eventChan
+	r.cancel = nil
+	r.eventChan = nil
+	r.mu.Unlock()
 
-	if r.cancel != nil {
-		r.cancel()
-		r.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
 
 	// Close the event channel to unblock readers
-	if r.eventChan != nil {
-		close(r.eventChan)
-		r.eventChan = nil
+	if eventChan != nil {
+		close(eventChan)
 	}
 
 	r.logger().Info("[AutoRespawner] stopped")
@@ -709,9 +712,9 @@ func (r *AutoRespawner) isShellPrompt(output string) bool {
 	prompts := []string{"$", "%", ">", "#", "➜", "❯"}
 
 	// Check if the last non-whitespace line ends with a prompt
-	lines := splitLines(output)
+	lines := strings.Split(util.GetLastNLines(output, 5), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := trimWhitespace(lines[i])
+		line := strings.TrimSpace(lines[i])
 		if line == "" {
 			continue
 		}
@@ -722,54 +725,13 @@ func (r *AutoRespawner) isShellPrompt(output string) bool {
 			}
 		}
 		// Also check for common prompt patterns anywhere in line
-		if containsAny(line, prompts) {
-			return true
-		}
-		// Only check the last non-empty line
-		break
-	}
-	return false
-}
-
-// splitLines splits output into lines without importing strings.
-func splitLines(s string) []string {
-	var lines []string
-	var current []byte
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, string(current))
-			current = current[:0]
-		} else if s[i] != '\r' {
-			current = append(current, s[i])
-		}
-	}
-	if len(current) > 0 {
-		lines = append(lines, string(current))
-	}
-	return lines
-}
-
-// trimWhitespace trims leading/trailing whitespace without importing strings.
-func trimWhitespace(s string) string {
-	start := 0
-	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
-		start++
-	}
-	end := len(s)
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
-		end--
-	}
-	return s[start:end]
-}
-
-// containsAny checks if s contains any of the substrings.
-func containsAny(s string, subs []string) bool {
-	for _, sub := range subs {
-		for i := 0; i <= len(s)-len(sub); i++ {
-			if s[i:i+len(sub)] == sub {
+		for _, prompt := range prompts {
+			if strings.Contains(line, prompt) {
 				return true
 			}
 		}
+		// Only check the last non-empty line
+		break
 	}
 	return false
 }

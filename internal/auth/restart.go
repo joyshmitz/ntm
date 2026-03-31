@@ -19,6 +19,7 @@ type Orchestrator struct {
 	authFlows           map[string]AuthFlow
 	captureOutput       func(string, int) (string, error)
 	sendKeys            func(string, string, bool) error
+	sendKeysForAgent    func(string, string, bool, tmux.AgentType) error
 	sendInterrupt       func(string) error
 	buildPaneCommand    func(string, string) (string, error)
 	sanitizePaneCommand func(string) (string, error)
@@ -38,6 +39,7 @@ func NewOrchestrator(cfg *config.Config) *Orchestrator {
 		authFlows:           make(map[string]AuthFlow),
 		captureOutput:       tmux.CapturePaneOutput,
 		sendKeys:            tmux.SendKeys,
+		sendKeysForAgent:    tmux.SendKeysForAgent,
 		sendInterrupt:       tmux.SendInterrupt,
 		buildPaneCommand:    tmux.BuildPaneCommand,
 		sanitizePaneCommand: tmux.SanitizePaneCommand,
@@ -194,6 +196,7 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 		return fmt.Errorf("building pane command: %w", err)
 	}
 
-	// For now, just run the agent command
-	return o.sendKeys(ctx.PaneID, cmd, true)
+	// Launch agent command using the specialized robust sender
+	agentTypeEnum := tmux.AgentType(agentType)
+	return o.sendKeysForAgent(ctx.PaneID, cmd, true, agentTypeEnum)
 }

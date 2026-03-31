@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 func TestValidProbeMethods(t *testing.T) {
@@ -213,7 +214,7 @@ func TestProbeConstants(t *testing.T) {
 	if ProbeMaxTimeoutMs < ProbeMinTimeoutMs {
 		t.Errorf("ProbeMaxTimeoutMs (%d) < ProbeMinTimeoutMs (%d)", ProbeMaxTimeoutMs, ProbeMinTimeoutMs)
 	}
-	if ProbeMaxTimeoutMs > 600000 { // 10 minutes max seems reasonable
+	if ProbeMaxTimeoutMs > 60000 { // 10 minutes max seems reasonable
 		t.Errorf("ProbeMaxTimeoutMs = %d, seems too high", ProbeMaxTimeoutMs)
 	}
 }
@@ -305,58 +306,74 @@ func TestCountNonEmptyLines(t *testing.T) {
 		content string
 		want    int
 	}{
-		{
-			name:    "empty string",
-			content: "",
-			want:    0,
-		},
-		{
-			name:    "single line no newline",
-			content: "hello",
-			want:    1,
-		},
-		{
-			name:    "single line with newline",
-			content: "hello\n",
-			want:    1,
-		},
-		{
-			name:    "multiple lines",
-			content: "line1\nline2\nline3\n",
-			want:    3,
-		},
-		{
-			name:    "with empty lines",
-			content: "line1\n\nline2\n\n\nline3\n",
-			want:    3,
-		},
-		{
-			name:    "whitespace only lines",
-			content: "  \t  \n\t\t\n   \n",
-			want:    0,
-		},
-		{
-			name:    "mixed content and whitespace lines",
-			content: "content\n   \ncontent2\n\t\ncontent3",
-			want:    3,
-		},
-		{
-			name:    "trailing whitespace on content lines",
-			content: "hello   \nworld\t\t\n",
-			want:    2,
-		},
-		{
-			name:    "leading whitespace on content lines",
-			content: "   hello\n\tworld\n",
-			want:    2,
-		},
+		{"empty", "", 0},
+		{"single_empty_line", "\n", 0},
+		{"single_content_line", "hello", 1},
+		{"content_with_newline", "hello\n", 1},
+		{"two_lines", "hello\nworld", 2},
+		{"trailing_empty_lines", "hello\n\n\n", 1},
+		{"leading_empty_lines", "\n\nhello", 1},
+		{"mixed_empty_lines", "\nhello\n\nworld\n", 2},
+		{"whitespace_only_lines", "  \n\t\n \r \n", 0},
+		{"lines_with_whitespace", "  hello  \n  world  ", 2},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countNonEmptyLines(tt.content)
+			got := util.CountNonEmptyLines(tt.content)
 			if got != tt.want {
-				t.Errorf("countNonEmptyLines(%q) = %d, want %d", tt.content, got, tt.want)
+				t.Errorf("CountNonEmptyLines(%q) = %d, want %d", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func mockCapture(content string) PaneBaseline {
+	return PaneBaseline{
+		CapturedAt:  time.Now(),
+		ContentHash: hashContent(content),
+		LineCount:   util.CountNonEmptyLines(content),
+	}
+}
+
+func TestAnalyzeChange(t *testing.T) {
+	cases := []struct {
+		name     string
+		baseline PaneBaseline
+		current  PaneBaseline
+		want     bool
+	}{
+		{
+			"no_change",
+			PaneBaseline{ContentHash: "h1", LineCount: 10},
+			PaneBaseline{ContentHash: "h1", LineCount: 10},
+			false,
+		},
+		{
+			"content_changed",
+			PaneBaseline{ContentHash: "h1", LineCount: 10},
+			PaneBaseline{ContentHash: "h2", LineCount: 10},
+			true,
+		},
+		{
+			"line_count_changed",
+			PaneBaseline{ContentHash: "h1", LineCount: 10},
+			PaneBaseline{ContentHash: "h1", LineCount: 11},
+			true,
+		},
+		{
+			"hash_and_line_count_changed",
+			PaneBaseline{ContentHash: "h1", LineCount: 10},
+			PaneBaseline{ContentHash: "h2", LineCount: 11},
+			true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			change := ComparePaneState(&tc.baseline, &tc.current)
+			if change.Changed != tc.want {
+				t.Errorf("ComparePaneState() changed = %v, want %v", change.Changed, tc.want)
 			}
 		})
 	}
@@ -368,7 +385,7 @@ func TestPaneBaselineStruct(t *testing.T) {
 	baseline := &PaneBaseline{
 		Content:     content,
 		ContentHash: hashContent(content),
-		LineCount:   countNonEmptyLines(content),
+		LineCount:   util.CountNonEmptyLines(content),
 	}
 
 	if baseline.Content != content {
@@ -387,12 +404,12 @@ func TestComparePaneState_NoChange(t *testing.T) {
 	baseline := &PaneBaseline{
 		Content:     content,
 		ContentHash: hashContent(content),
-		LineCount:   countNonEmptyLines(content),
+		LineCount:   util.CountNonEmptyLines(content),
 	}
 	current := &PaneBaseline{
 		Content:     content,
 		ContentHash: hashContent(content),
-		LineCount:   countNonEmptyLines(content),
+		LineCount:   util.CountNonEmptyLines(content),
 	}
 
 	change := ComparePaneState(baseline, current)
@@ -541,7 +558,7 @@ func TestProbeResultStruct(t *testing.T) {
 	}
 
 	if !result.Responsive {
-		t.Errorf("Responsive = false, want true")
+		t.Errorf("Responsive = true, want false")
 	}
 	if result.Details.InputSent != "Space+Backspace" {
 		t.Errorf("Details.InputSent = %q, want %q", result.Details.InputSent, "Space+Backspace")
@@ -715,7 +732,7 @@ func TestInterruptTestProbeResultStructure(t *testing.T) {
 	}
 
 	if !result.Responsive {
-		t.Errorf("Responsive = false, want true")
+		t.Errorf("Responsive = true, want false")
 	}
 	if result.Details.InputSent != "Ctrl-C" {
 		t.Errorf("Details.InputSent = %q, want %q", result.Details.InputSent, "Ctrl-C")

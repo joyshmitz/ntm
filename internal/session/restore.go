@@ -275,7 +275,7 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 			continue
 		}
 
-		if err := tmux.SendKeys(panes[i].ID, cmd, true); err != nil {
+		if err := tmux.SendKeysForAgent(panes[i].ID, cmd, true, tmux.AgentType(paneState.AgentType)); err != nil {
 			_ = audit.LogEvent(sessionName, audit.EventTypeError, audit.ActorSystem, "agent.restore", map[string]interface{}{
 				"agent_type":     paneState.AgentType,
 				"pane_index":     paneState.Index,
@@ -303,20 +303,20 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 
 // getAgentCommand returns the command for an agent type.
 func getAgentCommand(agentType string, cmds AgentCommands) string {
-	switch tmux.AgentType(agentType) {
-	case tmux.AgentClaude:
+	switch strings.ToLower(agentType) {
+	case string(tmux.AgentClaude), "claude":
 		return cmds.Claude
-	case tmux.AgentCodex:
+	case string(tmux.AgentCodex), "codex":
 		return cmds.Codex
-	case tmux.AgentGemini:
+	case string(tmux.AgentGemini), "gemini":
 		return cmds.Gemini
-	case tmux.AgentCursor:
+	case string(tmux.AgentCursor):
 		return cmds.Cursor
-	case tmux.AgentWindsurf:
+	case string(tmux.AgentWindsurf):
 		return cmds.Windsurf
-	case tmux.AgentAider:
+	case string(tmux.AgentAider):
 		return cmds.Aider
-	case tmux.AgentOllama:
+	case string(tmux.AgentOllama):
 		return cmds.Ollama
 	default:
 		return ""
