@@ -1420,6 +1420,18 @@ func TestNeedsBufferSend(t *testing.T) {
 			content:   strings.Repeat("a", 513),
 			want:      true,
 		},
+		{
+			name:      "codex cli alias with newline",
+			agentType: AgentType("codex-cli"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "openai codex alias long content no newline",
+			agentType: AgentType("openai-codex"),
+			content:   strings.Repeat("a", 513),
+			want:      true,
+		},
 		// Claude cases - uses buffer for multi-line content
 		{
 			name:      "claude single line",
@@ -1446,8 +1458,26 @@ func TestNeedsBufferSend(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "claude underscore alias with newline",
+			agentType: AgentType("claude_code"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
 			name:      "gemini alias with newline",
 			agentType: AgentType("gemini"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "gemini cli alias with newline",
+			agentType: AgentType("gemini-cli"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "google gemini alias with newline",
+			agentType: AgentType("google-gemini"),
 			content:   "line1\nline2",
 			want:      true,
 		},

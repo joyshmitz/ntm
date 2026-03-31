@@ -948,26 +948,7 @@ func (c *Client) SendKeysForAgentWithDelay(target, keys string, enter bool, ente
 // canonicalAgentType folds user-facing aliases into the canonical short codes used
 // throughout pane metadata and agent-specific send behavior.
 func canonicalAgentType(agentType AgentType) AgentType {
-	switch strings.ToLower(strings.TrimSpace(string(agentType))) {
-	case "cc", "claude", "claude-code":
-		return AgentClaude
-	case "cod", "codex":
-		return AgentCodex
-	case "gmi", "gemini":
-		return AgentGemini
-	case "cursor":
-		return AgentCursor
-	case "windsurf", "ws":
-		return AgentWindsurf
-	case "aider":
-		return AgentAider
-	case "ollama":
-		return AgentOllama
-	case "user":
-		return AgentUser
-	default:
-		return agentType
-	}
+	return AgentType(agent.AgentType(agentType).Canonical())
 }
 
 // needsBufferSend returns true if the content should be sent via buffer mechanism
