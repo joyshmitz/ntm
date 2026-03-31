@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
@@ -422,21 +423,23 @@ func TestGetAgentType(t *testing.T) {
 	exporter := NewTimelineExporter(DefaultExportOptions())
 
 	tests := []struct {
+		name     string
 		agentID  string
+		events   []state.AgentEvent
 		expected string
 	}{
-		{"cc_1", "claude"},
-		{"cc_2", "claude"},
-		{"cod_1", "codex"},
-		{"cod_3", "codex"},
-		{"gmi_1", "gemini"},
-		{"gmi_2", "gemini"},
-		{"unknown_1", "unknown"},
+		{name: "legacy claude prefix", agentID: "cc_1", expected: "claude"},
+		{name: "legacy codex prefix", agentID: "cod_3", expected: "codex"},
+		{name: "legacy gemini prefix", agentID: "gmi_2", expected: "gemini"},
+		{name: "modern windsurf prefix", agentID: "ws_2", expected: "windsurf"},
+		{name: "modern cursor prefix", agentID: "cursor_1", expected: "cursor"},
+		{name: "event agent type wins", agentID: "agent_17", events: []state.AgentEvent{{AgentType: agent.AgentTypeOllama}}, expected: "ollama"},
+		{name: "unknown fallback", agentID: "unknown_1", expected: "unknown"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.agentID, func(t *testing.T) {
-			result := exporter.getAgentType(tt.agentID)
+		t.Run(tt.name, func(t *testing.T) {
+			result := exporter.getAgentType(tt.agentID, tt.events)
 			t.Logf("getAgentType(%s) = %s", tt.agentID, result)
 
 			if result != tt.expected {
@@ -481,20 +484,25 @@ func TestGetAgentColor(t *testing.T) {
 	exporter := NewTimelineExporter(ExportOptions{Theme: theme})
 
 	tests := []struct {
-		agentID  string
-		expected string
+		agentType string
+		expected  string
 	}{
-		{"cc_1", theme.ClaudeColor},
-		{"cod_1", theme.CodexColor},
-		{"gmi_1", theme.GeminiColor},
-		{"other_1", theme.TextColor}, // default branch
+		{"claude", theme.ClaudeColor},
+		{"codex", theme.CodexColor},
+		{"gemini", theme.GeminiColor},
+		{"cursor", theme.CursorColor},
+		{"windsurf", theme.WindsurfColor},
+		{"aider", theme.AiderColor},
+		{"ollama", theme.OllamaColor},
+		{"user", theme.UserColor},
+		{"unknown", theme.TextColor}, // default branch
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.agentID, func(t *testing.T) {
-			result := exporter.getAgentColor(tt.agentID)
+		t.Run(tt.agentType, func(t *testing.T) {
+			result := exporter.getAgentColor(tt.agentType)
 			if result != tt.expected {
-				t.Errorf("getAgentColor(%s) = %s, want %s", tt.agentID, result, tt.expected)
+				t.Errorf("getAgentColor(%s) = %s, want %s", tt.agentType, result, tt.expected)
 			}
 		})
 	}

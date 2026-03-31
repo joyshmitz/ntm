@@ -60,6 +60,22 @@ func TestDetectErrors(t *testing.T) {
 	}
 }
 
+func TestDetectRateLimitWithAgentContext(t *testing.T) {
+	t.Parallel()
+
+	const output = "Error: insufficient_quota"
+
+	detection := detectRateLimit(output, "openai-codex")
+	if !detection.RateLimited {
+		t.Fatalf("expected Codex alias to detect rate limit for %q", output)
+	}
+
+	nonCodex := detectRateLimit(output, "cc")
+	if nonCodex.RateLimited {
+		t.Fatalf("did not expect Claude agent to match Codex-specific rate limit pattern for %q", output)
+	}
+}
+
 func TestDetectProgress(t *testing.T) {
 	tests := []struct {
 		output   string

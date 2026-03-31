@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -1790,11 +1791,12 @@ func (m Model) renderPreview(width int) string {
 		badges = append(badges, styles.TextBadge("key: "+cmd.Key, t.Surface0, t.Text))
 	}
 	if cmd.Category != "" {
-		// Only use agent badge for known agent types, otherwise create a generic category badge.
-		catLower := strings.ToLower(cmd.Category)
+		// Use the shared agent canonicalizer so newer agent categories keep their
+		// dedicated badge styling instead of falling back to the generic category badge.
+		canonicalCategory := agent.AgentType(cmd.Category).Canonical()
 		var badge string
-		if catLower == "claude" || catLower == "cc" || catLower == "codex" || catLower == "cod" || catLower == "gemini" || catLower == "gmi" {
-			badge = components.RenderAgentBadge(catLower)
+		if isKnownPaletteAgentCategory(canonicalCategory) {
+			badge = components.RenderAgentBadge(string(canonicalCategory))
 		} else {
 			badge = lipgloss.NewStyle().
 				Background(t.Mauve).
@@ -1845,6 +1847,22 @@ func (m Model) renderPreview(width int) string {
 	}
 
 	return b.String()
+}
+
+func isKnownPaletteAgentCategory(category agent.AgentType) bool {
+	switch category {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama,
+		agent.AgentTypeUser:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) renderTargetSummaryBadges() string {

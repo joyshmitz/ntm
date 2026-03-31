@@ -242,6 +242,36 @@ func TestGetAgentUsage(t *testing.T) {
 	}
 }
 
+func TestGetAgentUsageAlias(t *testing.T) {
+	mockResponse := `{
+		"schema_version": "caut.v1",
+		"command": "usage",
+		"timestamp": "2026-01-20T15:30:00Z",
+		"data": {
+			"payloads": [{
+				"provider": "codex",
+				"source": "cli",
+				"usage": {
+					"primary_rate_window": {
+						"used_percent": 10.0
+					}
+				}
+			}]
+		},
+		"errors": []
+	}`
+
+	c := NewClient(WithExecutor(&MockExecutor{response: []byte(mockResponse)}))
+
+	payload, err := c.GetAgentUsage(context.Background(), "openai-codex")
+	if err != nil {
+		t.Fatalf("GetAgentUsage alias failed: %v", err)
+	}
+	if payload.Provider != "codex" {
+		t.Errorf("expected provider 'codex', got %s", payload.Provider)
+	}
+}
+
 func TestGetAgentUsageUnknownType(t *testing.T) {
 	c := NewClient(WithExecutor(&MockExecutor{}))
 
@@ -257,8 +287,12 @@ func TestAgentTypeToProvider(t *testing.T) {
 		expected  string
 	}{
 		{"cc", "claude"},
+		{"claude-code", "claude"},
 		{"cod", "codex"},
+		{"openai-codex", "codex"},
 		{"gmi", "gemini"},
+		{"google-gemini", "gemini"},
+		{"ws", "windsurf"},
 		{"unknown", ""},
 		{"", ""},
 	}
@@ -279,8 +313,12 @@ func TestProviderToAgentType(t *testing.T) {
 		expected string
 	}{
 		{"claude", "cc"},
+		{"anthropic", "cc"},
 		{"codex", "cod"},
+		{"openai", "cod"},
 		{"gemini", "gmi"},
+		{"google", "gmi"},
+		{"ws", "windsurf"},
 		{"unknown", ""},
 		{"", ""},
 	}

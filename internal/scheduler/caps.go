@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -95,6 +96,36 @@ func DefaultAgentCapsConfig() AgentCapsConfig {
 	}
 }
 
+func normalizeAgentCapsConfig(cfg AgentCapsConfig) AgentCapsConfig {
+	if len(cfg.PerAgent) == 0 {
+		return cfg
+	}
+
+	normalized := make(map[string]AgentCapConfig, len(cfg.PerAgent))
+	keys := make([]string, 0, len(cfg.PerAgent))
+	for key := range cfg.PerAgent {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Prefer explicitly canonical keys when both an alias and canonical form exist.
+	for _, key := range keys {
+		canonical := canonicalSchedulerAgentTypeKey(key)
+		if canonical == key {
+			normalized[canonical] = cfg.PerAgent[key]
+		}
+	}
+	for _, key := range keys {
+		canonical := canonicalSchedulerAgentTypeKey(key)
+		if _, exists := normalized[canonical]; !exists {
+			normalized[canonical] = cfg.PerAgent[key]
+		}
+	}
+
+	cfg.PerAgent = normalized
+	return cfg
+}
+
 // AgentCaps manages per-agent concurrency caps with ramp-up and cooldown.
 type AgentCaps struct {
 	mu sync.Mutex
@@ -152,6 +183,7 @@ type AgentCapStats struct {
 
 // NewAgentCaps creates a new agent caps manager.
 func NewAgentCaps(cfg AgentCapsConfig) *AgentCaps {
+	cfg = normalizeAgentCapsConfig(cfg)
 	ac := &AgentCaps{
 		config:  cfg,
 		running: make(map[string]int),
@@ -188,6 +220,7 @@ func (ac *AgentCaps) initialCap(cfg AgentCapConfig) int {
 
 // getCapState returns or creates cap state for an agent type.
 func (ac *AgentCaps) getCapState(agentType string) *agentCapState {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	state, ok := ac.caps[agentType]
 	if ok {
 		return state
@@ -212,6 +245,7 @@ func (ac *AgentCaps) getCapState(agentType string) *agentCapState {
 // For "cod" agents, the Codex throttle is checked first; if throttled,
 // the acquire is rejected without affecting other agent types.
 func (ac *AgentCaps) TryAcquire(agentType string) bool {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -265,6 +299,7 @@ func (ac *AgentCaps) TryAcquire(agentType string) bool {
 
 // Acquire blocks until a slot is available or context is cancelled.
 func (ac *AgentCaps) Acquire(ctx context.Context, agentType string) error {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	// First try without blocking
 	if ac.TryAcquire(agentType) {
 		return nil
@@ -328,6 +363,7 @@ func (ac *AgentCaps) globalCapExceeded() bool {
 
 // removeWaiter removes a waiter channel from the list.
 func (ac *AgentCaps) removeWaiter(agentType string, ch chan struct{}) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	waiters := ac.waiters[agentType]
 	for i, w := range waiters {
 		if w == ch {
@@ -339,6 +375,7 @@ func (ac *AgentCaps) removeWaiter(agentType string, ch chan struct{}) {
 
 // Release releases a slot for an agent type.
 func (ac *AgentCaps) Release(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -358,6 +395,7 @@ func (ac *AgentCaps) Release(agentType string) {
 
 // notifyWaiter notifies one waiting goroutine that a slot is available.
 func (ac *AgentCaps) notifyWaiter(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	// First try the specific agent type
 	if len(ac.waiters[agentType]) > 0 {
 		waiter := ac.waiters[agentType][0]
@@ -399,6 +437,7 @@ func (ac *AgentCaps) notifyWaiter(agentType string) {
 
 // RecordFailure records a failure for an agent type, potentially triggering cooldown.
 func (ac *AgentCaps) RecordFailure(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -433,6 +472,7 @@ func (ac *AgentCaps) RecordFailure(agentType string) {
 
 // recoverFromCooldown restores cap after cooldown period.
 func (ac *AgentCaps) recoverFromCooldown(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -464,6 +504,7 @@ func (ac *AgentCaps) recoverFromCooldown(agentType string) {
 
 // RecordSuccess records a successful spawn for an agent type.
 func (ac *AgentCaps) RecordSuccess(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -518,6 +559,7 @@ func (ac *AgentCaps) updateRampUp(agentType string, state *agentCapState) {
 
 // GetRunning returns the current running count for an agent type.
 func (ac *AgentCaps) GetRunning(agentType string) int {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return ac.running[agentType]
@@ -525,6 +567,7 @@ func (ac *AgentCaps) GetRunning(agentType string) int {
 
 // GetCurrentCap returns the current effective cap for an agent type.
 func (ac *AgentCaps) GetCurrentCap(agentType string) int {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -535,6 +578,7 @@ func (ac *AgentCaps) GetCurrentCap(agentType string) int {
 
 // GetAvailable returns available slots for an agent type.
 func (ac *AgentCaps) GetAvailable(agentType string) int {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -588,6 +632,7 @@ func (ac *AgentCaps) Stats() CapsStats {
 
 // SetCap dynamically updates the cap for an agent type.
 func (ac *AgentCaps) SetCap(agentType string, cap int) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 
@@ -620,6 +665,7 @@ func (ac *AgentCaps) SetCap(agentType string, cap int) {
 
 // ForceRampUp immediately increases cap to max for an agent type.
 func (ac *AgentCaps) ForceRampUp(agentType string) {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 

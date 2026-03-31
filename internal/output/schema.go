@@ -86,6 +86,7 @@ type AgentCountsResponse struct {
 	Claude   int `json:"claude"`
 	Codex    int `json:"codex"`
 	Gemini   int `json:"gemini"`
+	Ollama   int `json:"ollama"`
 	Cursor   int `json:"cursor"`
 	Windsurf int `json:"windsurf"`
 	Aider    int `json:"aider"`

@@ -386,6 +386,9 @@ func TestIsCodexProvider(t *testing.T) {
 	}{
 		{"cod", "cod", true},
 		{"codex", "codex", true},
+		{"codex alias", "codex-cli", true},
+		{"openai codex alias", "openai-codex", true},
+		{"upper alias", " COD ", true},
 		{"openai", "openai", true},
 		{"gpt", "gpt", true},
 		{"claude", "claude", false},

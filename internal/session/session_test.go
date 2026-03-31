@@ -605,9 +605,13 @@ func TestGetAgentCommand(t *testing.T) {
 	t.Parallel()
 
 	cmds := AgentCommands{
-		Claude: "claude --flag",
-		Codex:  "codex-cli run",
-		Gemini: "gemini start",
+		Claude:   "claude --flag",
+		Codex:    "codex-cli run",
+		Gemini:   "gemini start",
+		Cursor:   "cursor agent",
+		Windsurf: "windsurf start",
+		Aider:    "aider --watch",
+		Ollama:   "ollama serve",
 	}
 
 	tests := []struct {
@@ -616,10 +620,18 @@ func TestGetAgentCommand(t *testing.T) {
 	}{
 		{"cc", "claude --flag"},
 		{"claude", "claude --flag"},
+		{"claude_code", "claude --flag"},
 		{"cod", "codex-cli run"},
 		{"codex", "codex-cli run"},
+		{"openai-codex", "codex-cli run"},
 		{"gmi", "gemini start"},
 		{"gemini", "gemini start"},
+		{"google-gemini", "gemini start"},
+		{"cursor", "cursor agent"},
+		{"windsurf", "windsurf start"},
+		{"ws", "windsurf start"},
+		{"aider", "aider --watch"},
+		{"ollama", "ollama serve"},
 		{"unknown", ""},
 		{"", ""},
 	}

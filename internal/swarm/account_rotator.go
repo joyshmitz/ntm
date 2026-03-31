@@ -9,22 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
-
-// agentToProvider maps agent type aliases to caam provider names.
-var agentToProvider = map[string]string{
-	"cc":          "claude",
-	"claude":      "claude",
-	"claude-code": "claude",
-	"cod":         "openai",
-	"codex":       "openai",
-	"gmi":         "google",
-	"gemini":      "google",
-}
 
 // AccountInfo describes a caam account.
 type AccountInfo struct {
@@ -385,11 +376,20 @@ func (r *AccountRotator) logger() *slog.Logger {
 
 // normalizeProvider converts agent type to caam provider name.
 func normalizeProvider(agentType string) string {
-	if provider, ok := agentToProvider[agentType]; ok {
-		return provider
+	trimmed := strings.TrimSpace(agentType)
+	switch agent.AgentType(trimmed).Canonical() {
+	case agent.AgentTypeClaudeCode:
+		return "claude"
+	case agent.AgentTypeCodex:
+		return "openai"
+	case agent.AgentTypeGemini:
+		return "google"
+	default:
+		if strings.EqualFold(trimmed, "anthropic") {
+			return "claude"
+		}
+		return trimmed
 	}
-	// Return as-is if not in map (might already be provider name)
-	return agentType
 }
 
 // IsAvailable checks if caam CLI is installed and working.

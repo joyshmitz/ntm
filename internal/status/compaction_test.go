@@ -110,6 +110,27 @@ func TestDetectCompaction_AllAgentTypes(t *testing.T) {
 	}
 }
 
+func TestDetectCompaction_NormalizesAliases(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		agentType string
+	}{
+		{"claude dash code", "Conversation compacted", "claude-code"},
+		{"codex cli", "context limit reached", "codex-cli"},
+		{"openai codex alias", "conversation truncated", " openai-codex "},
+		{"google gemini alias", "context window exceeded", "Google-Gemini"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if event := DetectCompaction(tt.output, tt.agentType); event == nil {
+				t.Fatalf("expected compaction for agent type %q", tt.agentType)
+			}
+		})
+	}
+}
+
 func TestDetectCompaction_NoFalsePositives(t *testing.T) {
 	// Common output that should NOT trigger compaction detection
 	normalOutputs := []string{

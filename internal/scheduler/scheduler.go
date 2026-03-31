@@ -69,6 +69,42 @@ type Scheduler struct {
 	paused atomic.Bool
 }
 
+type schedulerContext struct {
+	done     chan struct{}
+	canceled atomic.Bool
+	once     sync.Once
+}
+
+func newSchedulerContext() (*schedulerContext, context.CancelFunc) {
+	ctx := &schedulerContext{done: make(chan struct{})}
+	cancel := func() {
+		ctx.once.Do(func() {
+			ctx.canceled.Store(true)
+			close(ctx.done)
+		})
+	}
+	return ctx, cancel
+}
+
+func (c *schedulerContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (c *schedulerContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *schedulerContext) Err() error {
+	if c.canceled.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (c *schedulerContext) Value(any) any {
+	return nil
+}
+
 // SpawnExecutor is a function that executes a spawn job.
 type SpawnExecutor func(ctx context.Context, job *SpawnJob) error
 
@@ -208,8 +244,6 @@ type Stats struct {
 
 // New creates a new scheduler with the given configuration.
 func New(cfg Config) *Scheduler {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	s := &Scheduler{
 		config:        cfg,
 		queue:         NewFairScheduler(cfg.FairScheduler),
@@ -217,44 +251,53 @@ func New(cfg Config) *Scheduler {
 		agentLimiters: NewPerAgentLimiter(cfg.AgentRateLimits),
 		agentCaps:     NewAgentCaps(cfg.AgentCaps),
 		backoff:       NewBackoffController(cfg.Backoff),
-		headroom:      NewHeadroomGuard(cfg.Headroom),
 		running:       make(map[string]*SpawnJob),
 		completed:     make([]*SpawnJob, 0, cfg.MaxCompleted),
 		maxCompleted:  cfg.MaxCompleted,
 		workers:       cfg.MaxConcurrent,
-		ctx:           ctx,
-		cancel:        cancel,
 		jobNotify:     make(chan struct{}, 1),
 	}
+
+	s.resetRuntimeState()
 
 	// Set scheduler reference for global backoff pause/resume
 	s.backoff.SetScheduler(s)
 
-	// Set up headroom guard callbacks
+	return s
+}
+
+func (s *Scheduler) resetRuntimeState() {
+	s.ctx, s.cancel = newSchedulerContext()
+	s.paused.Store(false)
+	s.rebuildHeadroomGuard()
+}
+
+func (s *Scheduler) rebuildHeadroomGuard() {
 	if s.headroom != nil {
-		s.headroom.SetCallbacks(
-			// onBlocked
-			func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
-				if s.hooks.OnGuardrailTriggered != nil {
-					// Create a dummy job for the callback (guardrail affects all jobs)
-					s.hooks.OnGuardrailTriggered(nil, reason)
-				}
-			},
-			// onUnblocked - resume job processing
-			func() {
-				select {
-				case s.jobNotify <- struct{}{}:
-				default:
-				}
-			},
-			// onWarning
-			func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
-				// Warning is logged by the guard, no additional action needed
-			},
-		)
+		s.headroom.Stop()
 	}
 
-	return s
+	s.headroom = NewHeadroomGuard(s.config.Headroom)
+	s.headroom.SetCallbacks(
+		// onBlocked
+		func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
+			if s.hooks.OnGuardrailTriggered != nil {
+				// Create a dummy job for the callback (guardrail affects all jobs)
+				s.hooks.OnGuardrailTriggered(nil, reason)
+			}
+		},
+		// onUnblocked - resume job processing
+		func() {
+			select {
+			case s.jobNotify <- struct{}{}:
+			default:
+			}
+		},
+		// onWarning
+		func(reason string, limits *ResourceLimits, usage *ResourceUsage) {
+			// Warning is logged by the guard, no additional action needed
+		},
+	)
 }
 
 // SetExecutor sets the function that executes spawn jobs.
@@ -282,6 +325,7 @@ func (s *Scheduler) Start() error {
 		s.mu.Unlock()
 		return fmt.Errorf("executor not set")
 	}
+	s.resetRuntimeState()
 	s.stats.StartedAt = time.Now()
 	s.mu.Unlock()
 

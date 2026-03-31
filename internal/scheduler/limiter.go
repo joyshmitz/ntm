@@ -2,8 +2,12 @@ package scheduler
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // RateLimiter implements a token bucket rate limiter for spawn operations.
@@ -131,87 +135,93 @@ func (r *RateLimiter) refill() {
 // Wait blocks until a token is available or context is cancelled.
 // Returns nil if a token was acquired, or an error if cancelled/timed out.
 func (r *RateLimiter) Wait(ctx context.Context) error {
+	startTime := time.Now()
 	r.mu.Lock()
 	r.stats.TotalRequests++
 	r.waiting++
+	r.mu.Unlock()
 
-	startTime := time.Now()
+	defer r.finishWait()
 
 	for {
-		r.refill()
-
-		// Check minimum interval
-		if r.minInterval > 0 && !r.lastOp.IsZero() {
-			elapsed := time.Since(r.lastOp)
-			if elapsed < r.minInterval {
-				waitTime := r.minInterval - elapsed
-				r.mu.Unlock()
-
-				timer := time.NewTimer(waitTime)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					r.mu.Lock()
-					r.waiting--
-					r.stats.DeniedRequests++
-					r.mu.Unlock()
-					return ctx.Err()
-				case <-timer.C:
-				}
-
-				r.mu.Lock()
-				r.refill()
-			}
-		}
-
-		// Try to acquire a token
-		if r.tokens >= 1 {
-			r.tokens--
-			r.lastOp = time.Now()
-			r.stats.CurrentTokens = r.tokens
-			r.waiting--
-
-			waitDuration := time.Since(startTime)
-			if waitDuration > 10*time.Millisecond {
-				r.stats.WaitedRequests++
-				r.stats.TotalWaitTime += waitDuration
-				if waitDuration > r.stats.MaxWaitTime {
-					r.stats.MaxWaitTime = waitDuration
-				}
-				if r.stats.WaitedRequests > 0 {
-					r.stats.AvgWaitTime = r.stats.TotalWaitTime / time.Duration(r.stats.WaitedRequests)
-				}
-			} else {
-				r.stats.AllowedRequests++
-			}
-
-			r.mu.Unlock()
+		acquired, waitDuration := r.tryAcquireOrNextWait(startTime)
+		if acquired {
 			return nil
 		}
 
-		// Calculate wait time for next token
-		tokensNeeded := 1 - r.tokens
-		waitDuration := time.Duration(tokensNeeded/r.rate*1000) * time.Millisecond
-		if waitDuration < time.Millisecond {
-			waitDuration = time.Millisecond
-		}
-
-		r.mu.Unlock()
-
-		timer := time.NewTimer(waitDuration)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			r.mu.Lock()
-			r.waiting--
-			r.stats.DeniedRequests++
-			r.mu.Unlock()
+		if err := waitForRateLimiter(ctx, waitDuration); err != nil {
+			r.recordDeniedRequest()
 			return ctx.Err()
-		case <-timer.C:
 		}
-
-		r.mu.Lock()
 	}
+}
+
+func (r *RateLimiter) finishWait() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.waiting > 0 {
+		r.waiting--
+	}
+}
+
+func (r *RateLimiter) recordDeniedRequest() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stats.DeniedRequests++
+}
+
+func waitForRateLimiter(ctx context.Context, waitDuration time.Duration) error {
+	timer := time.NewTimer(waitDuration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (r *RateLimiter) tryAcquireOrNextWait(startTime time.Time) (bool, time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.refill()
+
+	if r.minInterval > 0 && !r.lastOp.IsZero() {
+		elapsed := time.Since(r.lastOp)
+		if elapsed < r.minInterval {
+			return false, r.minInterval - elapsed
+		}
+	}
+
+	if r.tokens >= 1 {
+		r.tokens--
+		r.lastOp = time.Now()
+		r.stats.CurrentTokens = r.tokens
+
+		waitDuration := time.Since(startTime)
+		if waitDuration > 10*time.Millisecond {
+			r.stats.WaitedRequests++
+			r.stats.TotalWaitTime += waitDuration
+			if waitDuration > r.stats.MaxWaitTime {
+				r.stats.MaxWaitTime = waitDuration
+			}
+			if r.stats.WaitedRequests > 0 {
+				r.stats.AvgWaitTime = r.stats.TotalWaitTime / time.Duration(r.stats.WaitedRequests)
+			}
+		} else {
+			r.stats.AllowedRequests++
+		}
+		return true, 0
+	}
+
+	tokensNeeded := 1 - r.tokens
+	waitDuration := time.Duration(tokensNeeded/r.rate*1000) * time.Millisecond
+	if waitDuration < time.Millisecond {
+		waitDuration = time.Millisecond
+	}
+	return false, waitDuration
 }
 
 // TryAcquire tries to acquire a token without blocking.
@@ -341,6 +351,57 @@ func (r *RateLimiter) Waiting() int {
 	return r.waiting
 }
 
+func canonicalSchedulerAgentTypeKey(agentType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(agentType))
+	if normalized == "" {
+		return ""
+	}
+
+	switch canonical := agent.AgentType(normalized).Canonical(); canonical {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama,
+		agent.AgentTypeUser:
+		return string(canonical)
+	default:
+		return normalized
+	}
+}
+
+func normalizeAgentLimiterConfig(cfg AgentLimiterConfig) AgentLimiterConfig {
+	if len(cfg.PerAgent) == 0 {
+		return cfg
+	}
+
+	normalized := make(map[string]LimiterConfig, len(cfg.PerAgent))
+	keys := make([]string, 0, len(cfg.PerAgent))
+	for key := range cfg.PerAgent {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Prefer explicitly canonical keys when both an alias and canonical form exist.
+	for _, key := range keys {
+		canonical := canonicalSchedulerAgentTypeKey(key)
+		if canonical == key {
+			normalized[canonical] = cfg.PerAgent[key]
+		}
+	}
+	for _, key := range keys {
+		canonical := canonicalSchedulerAgentTypeKey(key)
+		if _, exists := normalized[canonical]; !exists {
+			normalized[canonical] = cfg.PerAgent[key]
+		}
+	}
+
+	cfg.PerAgent = normalized
+	return cfg
+}
+
 // PerAgentLimiter provides per-agent-type rate limiting.
 type PerAgentLimiter struct {
 	mu       sync.RWMutex
@@ -386,6 +447,7 @@ func DefaultAgentLimiterConfig() AgentLimiterConfig {
 
 // NewPerAgentLimiter creates a new per-agent rate limiter.
 func NewPerAgentLimiter(cfg AgentLimiterConfig) *PerAgentLimiter {
+	cfg = normalizeAgentLimiterConfig(cfg)
 	pal := &PerAgentLimiter{
 		limiters: make(map[string]*RateLimiter),
 		defaults: cfg.Default,
@@ -401,6 +463,7 @@ func NewPerAgentLimiter(cfg AgentLimiterConfig) *PerAgentLimiter {
 
 // GetLimiter returns the rate limiter for an agent type.
 func (p *PerAgentLimiter) GetLimiter(agentType string) *RateLimiter {
+	agentType = canonicalSchedulerAgentTypeKey(agentType)
 	p.mu.RLock()
 	limiter, ok := p.limiters[agentType]
 	p.mu.RUnlock()
@@ -425,7 +488,7 @@ func (p *PerAgentLimiter) GetLimiter(agentType string) *RateLimiter {
 
 // Wait waits for a token from the agent-specific limiter.
 func (p *PerAgentLimiter) Wait(ctx context.Context, agentType string) error {
-	return p.GetLimiter(agentType).Wait(ctx)
+	return p.GetLimiter(canonicalSchedulerAgentTypeKey(agentType)).Wait(ctx)
 }
 
 // AllStats returns statistics for all agent limiters.

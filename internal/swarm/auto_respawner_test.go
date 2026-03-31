@@ -300,6 +300,14 @@ func TestAutoRespawnerKillAgentSequences(t *testing.T) {
 			},
 		},
 		{
+			name:      "claude_shared_alias_double_ctrl_c",
+			agentType: "claude_code",
+			expectCalls: []sendKeysCall{
+				{paneID: "test:1.1", text: "\x03", enter: false},
+				{paneID: "test:1.1", text: "\x03", enter: false},
+			},
+		},
+		{
 			name:      "cod_exit_command",
 			agentType: "cod",
 			expectCalls: []sendKeysCall{
@@ -307,8 +315,38 @@ func TestAutoRespawnerKillAgentSequences(t *testing.T) {
 			},
 		},
 		{
+			name:      "codex_cli_exit_command",
+			agentType: "codex-cli",
+			expectCalls: []sendKeysCall{
+				{paneID: "test:1.1", text: "/exit", enter: true},
+			},
+		},
+		{
+			name:      "openai_codex_exit_command",
+			agentType: "openai-codex",
+			expectCalls: []sendKeysCall{
+				{paneID: "test:1.1", text: "/exit", enter: true},
+			},
+		},
+		{
 			name:      "gmi_escape_ctrl_c",
 			agentType: "gmi",
+			expectCalls: []sendKeysCall{
+				{paneID: "test:1.1", text: "\x1b", enter: false},
+				{paneID: "test:1.1", text: "\x03", enter: false},
+			},
+		},
+		{
+			name:      "gemini_cli_escape_ctrl_c",
+			agentType: "gemini-cli",
+			expectCalls: []sendKeysCall{
+				{paneID: "test:1.1", text: "\x1b", enter: false},
+				{paneID: "test:1.1", text: "\x03", enter: false},
+			},
+		},
+		{
+			name:      "google_gemini_escape_ctrl_c",
+			agentType: "google-gemini",
 			expectCalls: []sendKeysCall{
 				{paneID: "test:1.1", text: "\x1b", enter: false},
 				{paneID: "test:1.1", text: "\x03", enter: false},
@@ -1351,6 +1389,29 @@ func TestNormalizeAgentType(t *testing.T) {
 			result := r.normalizeAgentType(tt.input)
 			if result != tt.expected {
 				t.Errorf("normalizeAgentType(%q) = %q, expected %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGracefulExitMethodForAgent(t *testing.T) {
+	tests := []struct {
+		agentType string
+		want      gracefulExitMethod
+	}{
+		{"claude-code", gracefulExitDoubleInterrupt},
+		{"codex-cli", gracefulExitSlashExit},
+		{"openai-codex", gracefulExitSlashExit},
+		{"gemini-cli", gracefulExitEscapeInterrupt},
+		{"google-gemini", gracefulExitEscapeInterrupt},
+		{"cursor", gracefulExitSingleInterrupt},
+		{"unknown", gracefulExitDoubleInterrupt},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.agentType, func(t *testing.T) {
+			if got := gracefulExitMethodForAgent(tt.agentType); got != tt.want {
+				t.Fatalf("gracefulExitMethodForAgent(%q) = %v, want %v", tt.agentType, got, tt.want)
 			}
 		})
 	}

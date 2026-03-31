@@ -99,10 +99,15 @@ func TestGetTokenBudget(t *testing.T) {
 		wantMin   int
 		wantMax   int
 	}{
-		{"cc", 170000, 190000},   // 90% of 200K = 180K
-		{"cod", 220000, 260000},  // 94% of 256K ≈ 240K
-		{"gmi", 90000, 110000},   // 10% of 1M = 100K
-		{"unknown", 90000, 110000}, // Default
+		{"cc", 170000, 190000},           // 90% of 200K = 180K
+		{"claude", 170000, 190000},       // Alias should canonicalize to cc
+		{"cod", 220000, 260000},          // 94% of 256K ≈ 240K
+		{"codex", 220000, 260000},        // Alias should canonicalize to cod
+		{"openai-codex", 220000, 260000}, // Long-form alias should canonicalize to cod
+		{"gmi", 90000, 110000},           // 10% of 1M = 100K
+		{"gemini", 90000, 110000},        // Alias should canonicalize to gmi
+		{"google-gemini", 90000, 110000}, // Long-form alias should canonicalize to gmi
+		{"unknown", 90000, 110000},       // Default
 	}
 	for _, tt := range tests {
 		got := GetTokenBudget(tt.agentType)

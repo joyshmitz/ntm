@@ -1,7 +1,10 @@
 package caut
 
 import (
+	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // Response is the top-level caut JSON structure
@@ -152,18 +155,18 @@ func (r *UsageResult) HasErrors() bool {
 
 // AgentTypeToProvider maps NTM agent type to caut provider
 func AgentTypeToProvider(agentType string) string {
-	switch agentType {
-	case "cc":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "claude"
-	case "cod":
+	case agent.AgentTypeCodex:
 		return "codex"
-	case "gmi":
+	case agent.AgentTypeGemini:
 		return "gemini"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return "cursor"
-	case "windsurf":
+	case agent.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		return "aider"
 	default:
 		return ""
@@ -172,12 +175,27 @@ func AgentTypeToProvider(agentType string) string {
 
 // ProviderToAgentType maps caut provider to NTM agent type
 func ProviderToAgentType(provider string) string {
-	switch provider {
-	case "claude":
+	switch agent.AgentType(provider).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "cc"
-	case "codex":
+	case agent.AgentTypeCodex:
 		return "cod"
-	case "gemini":
+	case agent.AgentTypeGemini:
+		return "gmi"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "anthropic", "claude":
+		return "cc"
+	case "openai", "codex":
+		return "cod"
+	case "google", "gemini":
 		return "gmi"
 	case "cursor":
 		return "cursor"

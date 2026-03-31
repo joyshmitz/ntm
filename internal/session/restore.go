@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -303,20 +304,20 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 
 // getAgentCommand returns the command for an agent type.
 func getAgentCommand(agentType string, cmds AgentCommands) string {
-	switch strings.ToLower(agentType) {
-	case string(tmux.AgentClaude), "claude":
+	switch agent.AgentType(agentType).Canonical() {
+	case tmux.AgentClaude:
 		return cmds.Claude
-	case string(tmux.AgentCodex), "codex":
+	case tmux.AgentCodex:
 		return cmds.Codex
-	case string(tmux.AgentGemini), "gemini":
+	case tmux.AgentGemini:
 		return cmds.Gemini
-	case string(tmux.AgentCursor):
+	case tmux.AgentCursor:
 		return cmds.Cursor
-	case string(tmux.AgentWindsurf):
+	case tmux.AgentWindsurf:
 		return cmds.Windsurf
-	case string(tmux.AgentAider):
+	case tmux.AgentAider:
 		return cmds.Aider
-	case string(tmux.AgentOllama):
+	case tmux.AgentOllama:
 		return cmds.Ollama
 	default:
 		return ""

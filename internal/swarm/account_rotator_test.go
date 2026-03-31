@@ -124,12 +124,18 @@ func TestNormalizeProvider(t *testing.T) {
 		{"cc", "claude"},
 		{"claude", "claude"},
 		{"claude-code", "claude"},
+		{"claude_code", "claude"},
+		{"anthropic", "claude"},
 		{"cod", "openai"},
 		{"codex", "openai"},
+		{"codex-cli", "openai"},
+		{"openai-codex", "openai"},
 		{"gmi", "google"},
 		{"gemini", "google"},
+		{"gemini-cli", "google"},
+		{"google-gemini", "google"},
+		{"google-ai", "google"},
 		{"unknown", "unknown"},
-		{"claude", "claude"},
 		{"openai", "openai"},
 		{"google", "google"},
 	}
@@ -356,23 +362,27 @@ func TestRotationRecordFields(t *testing.T) {
 	}
 }
 
-func TestAgentToProviderMap(t *testing.T) {
-	// Verify the map contains expected entries
+func TestNormalizeProviderSharedAliases(t *testing.T) {
 	expectedMappings := map[string]string{
-		"cc":          "claude",
-		"claude":      "claude",
-		"claude-code": "claude",
-		"cod":         "openai",
-		"codex":       "openai",
-		"gmi":         "google",
-		"gemini":      "google",
+		"cc":            "claude",
+		"claude":        "claude",
+		"claude-code":   "claude",
+		"claude_code":   "claude",
+		"anthropic":     "claude",
+		"cod":           "openai",
+		"codex":         "openai",
+		"codex-cli":     "openai",
+		"openai-codex":  "openai",
+		"gmi":           "google",
+		"gemini":        "google",
+		"gemini-cli":    "google",
+		"google-gemini": "google",
+		"google-ai":     "google",
 	}
 
 	for agent, expected := range expectedMappings {
-		if provider, ok := agentToProvider[agent]; !ok {
-			t.Errorf("agentToProvider missing entry for %q", agent)
-		} else if provider != expected {
-			t.Errorf("agentToProvider[%q] = %q, want %q", agent, provider, expected)
+		if provider := normalizeProvider(agent); provider != expected {
+			t.Errorf("normalizeProvider(%q) = %q, want %q", agent, provider, expected)
 		}
 	}
 }

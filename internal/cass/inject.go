@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // CASSConfig holds configuration for CASS queries.
@@ -211,7 +213,7 @@ func tokenize(text string) []string {
 
 // Compiled once at package level to avoid repeated compilation in hot paths.
 var (
-	codeBlockFenceRe = regexp.MustCompile("(?s)```.*?```")
+	codeBlockFenceRe  = regexp.MustCompile("(?s)```.*?```")
 	codeBlockInlineRe = regexp.MustCompile("`[^`]+`")
 )
 
@@ -749,13 +751,36 @@ func InjectContextFromQuery(prompt string, queryConfig CASSConfig, filterConfig 
 }
 
 func FormatForAgent(agentType string) InjectionFormat {
-	switch strings.ToLower(agentType) {
-	case "codex", "cod":
+	switch agentCanonicalLongName(agentType) {
+	case "codex":
 		return FormatMinimal
-	case "gemini", "gmi":
+	case "gemini":
 		return FormatStructured
 	default:
 		return FormatMarkdown
+	}
+}
+
+func agentCanonicalLongName(agentType string) string {
+	switch agentpkg.AgentType(agentType).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return "claude"
+	case agentpkg.AgentTypeCodex:
+		return "codex"
+	case agentpkg.AgentTypeGemini:
+		return "gemini"
+	case agentpkg.AgentTypeCursor:
+		return "cursor"
+	case agentpkg.AgentTypeWindsurf:
+		return "windsurf"
+	case agentpkg.AgentTypeAider:
+		return "aider"
+	case agentpkg.AgentTypeOllama:
+		return "ollama"
+	case agentpkg.AgentTypeUser:
+		return "user"
+	default:
+		return strings.ToLower(strings.TrimSpace(agentType))
 	}
 }
 

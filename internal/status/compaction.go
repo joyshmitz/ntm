@@ -2,8 +2,11 @@ package status
 
 import (
 	"regexp"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // CompactionPattern defines patterns for detecting compaction events
@@ -107,32 +110,47 @@ func compilePatterns(patterns []string) []*regexp.Regexp {
 	return result
 }
 
+func normalizedCompactionAgentType(agentType string) string {
+	switch canonical := agent.AgentType(agentType).Canonical(); canonical {
+	case agent.AgentTypeClaudeCode:
+		return "cc"
+	case agent.AgentTypeCodex:
+		return "cod"
+	case agent.AgentTypeGemini:
+		return "gmi"
+	default:
+		return strings.ToLower(strings.TrimSpace(agentType))
+	}
+}
+
 // DetectCompaction checks output for compaction patterns.
 // Returns nil if no compaction is detected.
-// The agentType parameter should be one of: "claude", "cc", "codex", "cod", "gemini", "gmi", or "" for unknown.
+// The agentType parameter may be any supported alias; matching is normalized
+// through the shared agent type resolver before dispatch.
 func DetectCompaction(output string, agentType string) *CompactionEvent {
 	initPatterns()
+	normalizedAgentType := normalizedCompactionAgentType(agentType)
 
 	// Check agent-specific patterns and generic patterns (cp.Agent == "*")
 	// The condition includes patterns where cp.Agent matches agentType OR is "*"
 	for _, cp := range compactionPatterns {
-		if cp.Agent != "*" && cp.Agent != agentType {
+		if cp.Agent != "*" && normalizedCompactionAgentType(cp.Agent) != normalizedAgentType {
 			continue
 		}
 		for i, pattern := range cp.Patterns {
 			if match := pattern.FindString(output); match != "" {
 				// Get the pattern string for debugging
 				var patternStr string
-				switch cp.Agent {
-				case "claude", "cc":
+				switch normalizedCompactionAgentType(cp.Agent) {
+				case "cc":
 					if i < len(claudePatterns) {
 						patternStr = claudePatterns[i]
 					}
-				case "codex", "cod":
+				case "cod":
 					if i < len(codexPatterns) {
 						patternStr = codexPatterns[i]
 					}
-				case "gemini", "gmi":
+				case "gmi":
 					if i < len(geminiPatterns) {
 						patternStr = geminiPatterns[i]
 					}

@@ -1,6 +1,10 @@
 package coordinator
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
+)
 
 // detectAgentType extracts the canonical agent type from a pane title.
 // Pane titles follow the pattern: <session>__<type>_<index>
@@ -14,18 +18,26 @@ func detectAgentType(title string) string {
 		return ""
 	}
 
-	agent := typePart
+	agentName := typePart
 	if idx := strings.IndexRune(typePart, '_'); idx != -1 {
-		agent = typePart[:idx]
+		agentName = typePart[:idx]
 	}
 
-	switch strings.ToLower(agent) {
-	case "cc", "claude":
+	switch agent.AgentType(agentName).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "cc"
-	case "cod", "codex":
+	case agent.AgentTypeCodex:
 		return "cod"
-	case "gmi", "gemini":
+	case agent.AgentTypeGemini:
 		return "gmi"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
 	default:
 		return ""
 	}

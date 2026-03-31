@@ -215,7 +215,7 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 	}
 
 	// Check for rate limit and parse wait time (preferred authoritative source)
-	detection := ratelimit.DetectRateLimit(output)
+	detection := detectRateLimit(output, string(pa.Pane.Type))
 	if detection.RateLimited {
 		agent.Issues = append(agent.Issues, Issue{Type: "rate_limit", Message: "Rate limit detected"})
 		agent.RateLimited = true
@@ -243,6 +243,10 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 	agent.Status = calculateStatus(agent)
 
 	return agent
+}
+
+func detectRateLimit(output string, agentType string) ratelimit.RateLimitDetection {
+	return ratelimit.DetectRateLimitForAgent(output, agentType)
 }
 
 // detectErrors scans output for error patterns

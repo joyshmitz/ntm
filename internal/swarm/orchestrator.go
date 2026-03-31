@@ -973,8 +973,8 @@ func (o *SwarmOrchestrator) GracefulShutdown(ctx context.Context, sessionNames [
 func sendGracefulExit(client *tmux.Client, pane tmux.Pane) error {
 	agentType := string(pane.Type)
 
-	switch agentType {
-	case "cc", "claude", "claude-code":
+	switch gracefulExitMethodForAgent(agentType) {
+	case gracefulExitDoubleInterrupt:
 		// Claude: Double Ctrl+C with 100ms gap
 		if err := client.SendKeys(pane.ID, "\x03", false); err != nil {
 			return err
@@ -982,11 +982,11 @@ func sendGracefulExit(client *tmux.Client, pane tmux.Pane) error {
 		time.Sleep(100 * time.Millisecond)
 		return client.SendKeys(pane.ID, "\x03", false)
 
-	case "cod", "codex":
+	case gracefulExitSlashExit:
 		// Codex: /exit command
 		return client.SendKeys(pane.ID, "/exit", true)
 
-	case "gmi", "gemini":
+	case gracefulExitEscapeInterrupt:
 		// Gemini: Escape then Ctrl+C
 		if err := client.SendKeys(pane.ID, "\x1b", false); err != nil {
 			return err
@@ -994,7 +994,7 @@ func sendGracefulExit(client *tmux.Client, pane tmux.Pane) error {
 		time.Sleep(50 * time.Millisecond)
 		return client.SendKeys(pane.ID, "\x03", false)
 
-	case "cursor", "windsurf", "aider", "ollama":
+	case gracefulExitSingleInterrupt:
 		// Just send Ctrl+C as a best effort graceful exit for these
 		return client.SendKeys(pane.ID, "\x03", false)
 

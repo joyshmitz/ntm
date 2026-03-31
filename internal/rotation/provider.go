@@ -1,5 +1,11 @@
 package rotation
 
+import (
+	"strings"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
+)
+
 // Provider defines the interface for an AI agent authentication provider
 type Provider interface {
 	Name() string
@@ -12,14 +18,17 @@ type Provider interface {
 
 // GetProvider returns the provider implementation for the given agent type
 func GetProvider(agentType string) Provider {
-	switch agentType {
-	case "cc", "claude":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return &ClaudeProvider{}
-	case "cod", "codex":
+	case agent.AgentTypeCodex:
 		return &CodexProvider{}
-	case "gmi", "gemini":
+	case agent.AgentTypeGemini:
 		return &GeminiProvider{}
 	default:
+		if strings.EqualFold(strings.TrimSpace(agentType), "anthropic") {
+			return &ClaudeProvider{}
+		}
 		return nil
 	}
 }

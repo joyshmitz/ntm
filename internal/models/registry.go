@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // DefaultContextLimit is the fallback when a model is not recognized.
@@ -66,20 +68,20 @@ var ContextLimits = map[string]int{
 // Aliases maps short names and common variants to canonical model names.
 var Aliases = map[string]string{
 	// Claude aliases
-	"opus":        "claude-opus-4",
-	"opus-4":      "claude-opus-4",
-	"opus-4.5":    "claude-opus-4-5",
-	"opus-4.6":    "claude-opus-4-6",
+	"opus":          "claude-opus-4",
+	"opus-4":        "claude-opus-4",
+	"opus-4.5":      "claude-opus-4-5",
+	"opus-4.6":      "claude-opus-4-6",
 	"claude-opus":   "claude-opus-4",
 	"claude-sonnet": "claude-sonnet-4",
-	"sonnet":      "claude-sonnet-4",
-	"sonnet-4":    "claude-sonnet-4",
-	"sonnet-3.5":  "claude-3.5-sonnet",
-	"sonnet-4.5":  "claude-sonnet-4-5",
-	"sonnet-4.6":  "claude-sonnet-4-6",
-	"haiku":       "claude-haiku",
-	"haiku-3":     "claude-haiku",
-	"haiku-4.5":   "claude-haiku-4-5",
+	"sonnet":        "claude-sonnet-4",
+	"sonnet-4":      "claude-sonnet-4",
+	"sonnet-3.5":    "claude-3.5-sonnet",
+	"sonnet-4.5":    "claude-sonnet-4-5",
+	"sonnet-4.6":    "claude-sonnet-4-6",
+	"haiku":         "claude-haiku",
+	"haiku-3":       "claude-haiku",
+	"haiku-4.5":     "claude-haiku-4-5",
 
 	// OpenAI aliases
 	"gpt4":       "gpt-4",
@@ -125,11 +127,11 @@ func ApplyOverrides(overrides map[string]int) {
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	
+
 	for model, limit := range overrides {
 		ContextLimits[strings.ToLower(model)] = limit
 	}
-	
+
 	// Force rebuild of sorted keys cache
 	rebuildSortedKeysLocked()
 }
@@ -216,6 +218,7 @@ var agentTypeDefaultModels = map[string]string{
 // This is derived from the model's context limit and a per-agent-type
 // overhead percentage.
 func GetTokenBudget(agentType string) int {
+	agentType = string(agent.AgentType(agentType).Canonical())
 	model, ok := agentTypeDefaultModels[agentType]
 	if !ok {
 		return 100000 // Safe default

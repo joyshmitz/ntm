@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
@@ -496,22 +497,22 @@ func scoreAssignment(
 func computeAgentTypeBonus(agentType string, rec *bv.TriageRecommendation) float64 {
 	taskComplexity := estimateTaskComplexity(rec)
 
-	switch agentType {
-	case "cc", "claude":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		// Claude excels at complex, multi-step work
 		if taskComplexity >= 0.7 {
 			return 0.15 // 15% bonus for complex tasks
 		} else if taskComplexity <= 0.3 {
 			return -0.05 // Small penalty for simple tasks (overkill)
 		}
-	case "cod", "codex":
+	case agent.AgentTypeCodex:
 		// Codex is great for quick, focused fixes
 		if taskComplexity <= 0.3 {
 			return 0.15 // 15% bonus for simple tasks
 		} else if taskComplexity >= 0.7 {
 			return -0.1 // Penalty for complex tasks
 		}
-	case "gmi", "gemini":
+	case agent.AgentTypeGemini:
 		// Gemini is balanced
 		if taskComplexity >= 0.4 && taskComplexity <= 0.6 {
 			return 0.05 // Small bonus for medium complexity

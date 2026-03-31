@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -236,6 +237,34 @@ func TestLimitDetectorStartPaneNilContext(t *testing.T) {
 	}
 }
 
+func TestLimitDetectorStartPaneParentContextCancelCleansUpAndAllowsRestart(t *testing.T) {
+	detector := NewLimitDetector()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := detector.StartPane(ctx, "test:1.1", "openai-codex"); err != nil {
+		t.Fatalf("StartPane failed: %v", err)
+	}
+
+	cancel()
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !detector.IsMonitoring("test:1.1") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if detector.IsMonitoring("test:1.1") {
+		t.Fatal("pane monitor entry was not cleared after parent context cancellation")
+	}
+
+	if err := detector.StartPane(context.Background(), "test:1.1", "openai-codex"); err != nil {
+		t.Fatalf("restart after parent context cancellation failed: %v", err)
+	}
+	detector.StopPane("test:1.1")
+}
+
 func TestLimitEvent(t *testing.T) {
 	event := LimitEvent{
 		SessionPane: "test:1.5",
@@ -259,25 +288,49 @@ func TestLimitEvent(t *testing.T) {
 func TestGetPatternsForAgent(t *testing.T) {
 	detector := NewLimitDetector()
 
+	claudePatterns := agent.GetPatternSet(agent.AgentTypeClaudeCode).RateLimitPatterns
+	codexPatterns := agent.GetPatternSet(agent.AgentTypeCodex).RateLimitPatterns
+	geminiPatterns := agent.GetPatternSet(agent.AgentTypeGemini).RateLimitPatterns
+	cursorPatterns := agent.GetPatternSet(agent.AgentTypeCursor).RateLimitPatterns
+	windsurfPatterns := agent.GetPatternSet(agent.AgentTypeWindsurf).RateLimitPatterns
+	aiderPatterns := agent.GetPatternSet(agent.AgentTypeAider).RateLimitPatterns
+	ollamaPatterns := agent.GetPatternSet(agent.AgentTypeOllama).RateLimitPatterns
+
 	tests := []struct {
-		agentType     string
-		expectDefault bool
+		agentType string
+		expected  []string
 	}{
-		{"cc", false},
-		{"cod", false},
-		{"gmi", false},
-		{"claude", false},
-		{"codex", false},
-		{"gemini", false},
-		{"unknown", true},
-		{"", true},
+		{"cc", claudePatterns},
+		{"claude", claudePatterns},
+		{"claude-code", claudePatterns},
+		{"claude_code", claudePatterns},
+		{"cod", codexPatterns},
+		{"codex", codexPatterns},
+		{"codex-cli", codexPatterns},
+		{"openai", codexPatterns},
+		{"openai-codex", codexPatterns},
+		{"openai_codex", codexPatterns},
+		{"gmi", geminiPatterns},
+		{"gemini", geminiPatterns},
+		{"gemini-cli", geminiPatterns},
+		{"gemini_cli", geminiPatterns},
+		{"google", geminiPatterns},
+		{"google-gemini", geminiPatterns},
+		{"google_gemini", geminiPatterns},
+		{"cursor", cursorPatterns},
+		{"ws", windsurfPatterns},
+		{"windsurf", windsurfPatterns},
+		{"aider", aiderPatterns},
+		{"ollama", ollamaPatterns},
+		{"unknown", defaultLimitPatterns},
+		{"", defaultLimitPatterns},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.agentType, func(t *testing.T) {
 			patterns := detector.getPatternsForAgent(tt.agentType)
-			if len(patterns) == 0 {
-				t.Error("expected non-empty patterns")
+			if !slices.Equal(patterns, tt.expected) {
+				t.Fatalf("patterns for %q = %v, want %v", tt.agentType, patterns, tt.expected)
 			}
 		})
 	}
@@ -355,6 +408,13 @@ func TestCheckOutputPatternsByAgent(t *testing.T) {
 			wantPattern: "too many requests",
 		},
 		{
+			name:        "cc_alias_claude_code",
+			agentType:   "claude_code",
+			output:      "You've hit your limit for now.",
+			wantMatch:   true,
+			wantPattern: "you've hit your limit",
+		},
+		{
 			name:        "cod_usage_limit",
 			agentType:   "cod",
 			output:      "You've reached your usage limit for this period.",
@@ -369,6 +429,13 @@ func TestCheckOutputPatternsByAgent(t *testing.T) {
 			wantPattern: "quota exceeded",
 		},
 		{
+			name:        "cod_alias_openai_codex",
+			agentType:   "openai-codex",
+			output:      "OpenAI error: you've reached your usage limit for this period.",
+			wantMatch:   true,
+			wantPattern: "you've reached your usage limit",
+		},
+		{
 			name:        "gmi_resource_exhausted",
 			agentType:   "gmi",
 			output:      "google.api_core.exceptions.ResourceExhausted: 429 Resource exhausted",
@@ -381,6 +448,13 @@ func TestCheckOutputPatternsByAgent(t *testing.T) {
 			output:      "Limit reached for this model. Please try again.",
 			wantMatch:   true,
 			wantPattern: "limit reached",
+		},
+		{
+			name:        "gmi_alias_google_gemini",
+			agentType:   "google_gemini",
+			output:      "google.api_core.exceptions.ResourceExhausted: 429 Resource exhausted",
+			wantMatch:   true,
+			wantPattern: "resource exhausted",
 		},
 		{
 			name:        "unknown_agent_default_patterns",

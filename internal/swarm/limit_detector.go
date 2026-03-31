@@ -47,13 +47,19 @@ type LimitDetector struct {
 	mu sync.RWMutex
 
 	// monitoredPanes tracks which panes are being monitored.
-	monitoredPanes map[string]context.CancelFunc
+	monitoredPanes map[string]monitoredPane
+	nextMonitorID  uint64
 
 	// cancel stops all monitoring goroutines.
 	cancel context.CancelFunc
 
 	// ctx is the context for all monitoring goroutines.
 	ctx context.Context
+}
+
+type monitoredPane struct {
+	id     uint64
+	cancel context.CancelFunc
 }
 
 type paneCapturer interface {
@@ -69,7 +75,7 @@ func NewLimitDetector() *LimitDetector {
 		CaptureLines:   50,
 		Logger:         slog.Default(),
 		eventChan:      make(chan LimitEvent, 100),
-		monitoredPanes: make(map[string]context.CancelFunc),
+		monitoredPanes: make(map[string]monitoredPane),
 	}
 }
 
@@ -213,14 +219,19 @@ func (d *LimitDetector) StartPane(ctx context.Context, sessionPane string, agent
 
 	// Create cancellable context for this pane
 	paneCtx, paneCancel := context.WithCancel(ctx)
-	d.monitoredPanes[sessionPane] = paneCancel
+	d.nextMonitorID++
+	monitorID := d.nextMonitorID
+	d.monitoredPanes[sessionPane] = monitoredPane{
+		id:     monitorID,
+		cancel: paneCancel,
+	}
 
 	d.logger().Info("[LimitDetector] monitoring_start",
 		"session_pane", sessionPane,
 		"agent_type", agentType)
 
 	// Start monitoring goroutine
-	go d.monitorPane(paneCtx, sessionPane, agentType)
+	go d.monitorPane(paneCtx, sessionPane, agentType, monitorID)
 
 	return nil
 }
@@ -230,8 +241,8 @@ func (d *LimitDetector) StopPane(sessionPane string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if cancel, exists := d.monitoredPanes[sessionPane]; exists {
-		cancel()
+	if monitor, exists := d.monitoredPanes[sessionPane]; exists {
+		monitor.cancel()
 		delete(d.monitoredPanes, sessionPane)
 		d.logger().Info("[LimitDetector] monitoring_stop",
 			"session_pane", sessionPane)
@@ -249,12 +260,12 @@ func (d *LimitDetector) Stop() {
 	}
 
 	// Clear all monitored panes
-	for sessionPane, cancel := range d.monitoredPanes {
-		cancel()
+	for sessionPane, monitor := range d.monitoredPanes {
+		monitor.cancel()
 		d.logger().Debug("[LimitDetector] stopped monitoring",
 			"session_pane", sessionPane)
 	}
-	d.monitoredPanes = make(map[string]context.CancelFunc)
+	d.monitoredPanes = make(map[string]monitoredPane)
 
 	// Close the event channel to unblock readers
 	if d.eventChan != nil {
@@ -279,7 +290,9 @@ func (d *LimitDetector) CheckPane(sessionPane string, agentType string) (*LimitE
 }
 
 // monitorPane runs the monitoring loop for a single pane.
-func (d *LimitDetector) monitorPane(ctx context.Context, sessionPane string, agentType string) {
+func (d *LimitDetector) monitorPane(ctx context.Context, sessionPane string, agentType string, monitorID uint64) {
+	defer d.clearPaneMonitor(sessionPane, monitorID)
+
 	interval := d.CheckInterval
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -306,6 +319,17 @@ func (d *LimitDetector) monitorPane(ctx context.Context, sessionPane string, age
 			}
 		}
 	}
+}
+
+func (d *LimitDetector) clearPaneMonitor(sessionPane string, monitorID uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	monitor, exists := d.monitoredPanes[sessionPane]
+	if !exists || monitor.id != monitorID {
+		return
+	}
+	delete(d.monitoredPanes, sessionPane)
 }
 
 // checkOutput checks captured output for limit patterns.
@@ -343,29 +367,12 @@ func (d *LimitDetector) checkOutput(sessionPane string, agentType string, output
 
 // getPatternsForAgent returns rate limit patterns for the given agent type.
 func (d *LimitDetector) getPatternsForAgent(agentType string) []string {
-	// Map agent type aliases to canonical types
-	var at agent.AgentType
-	switch agentType {
-	case "cc", "claude", "claude-code":
-		at = agent.AgentTypeClaudeCode
-	case "cod", "codex", "openai":
-		at = agent.AgentTypeCodex
-	case "gmi", "gemini", "google":
-		at = agent.AgentTypeGemini
-	case "cursor":
-		at = agent.AgentTypeCursor
-	case "windsurf", "ws":
-		at = agent.AgentTypeWindsurf
-	case "aider":
-		at = agent.AgentTypeAider
-	case "ollama":
-		at = agent.AgentTypeOllama
-	default:
-		// Return default patterns for unknown agent types
+	canonical := agent.AgentType(agentType).Canonical()
+	if canonical == "" || canonical == agent.AgentTypeUnknown {
 		return defaultLimitPatterns
 	}
 
-	patternSet := agent.GetPatternSet(at)
+	patternSet := agent.GetPatternSet(canonical)
 	if patternSet == nil || len(patternSet.RateLimitPatterns) == 0 {
 		return defaultLimitPatterns
 	}

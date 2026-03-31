@@ -184,6 +184,24 @@ func TestReloadMsgRefreshesSelectedCommandPrompt(t *testing.T) {
 	}
 }
 
+func TestRenderPreviewUsesAgentBadgeForNewerAgentCategories(t *testing.T) {
+	m := New("test-session", []config.PaletteCmd{
+		{Key: "cursor", Label: "Cursor Task", Category: "cursor", Prompt: "Do the thing"},
+		{Key: "ops", Label: "Ops Task", Category: "Quick Actions", Prompt: "Do the other thing"},
+	})
+	m.width = 80
+	m.filtered = append([]config.PaletteCmd(nil), m.commands...)
+	m.cursor = 0
+
+	preview := stripANSI(m.renderPreview(80))
+	if !strings.Contains(preview, "CURSOR") {
+		t.Fatalf("expected newer agent category to render an agent badge label, got:\n%s", preview)
+	}
+	if strings.Contains(preview, "Quick Actions") {
+		t.Fatalf("preview should be showing the selected cursor command, got:\n%s", preview)
+	}
+}
+
 func TestUpdateAnimationTick(t *testing.T) {
 	t.Setenv("NTM_ANIMATIONS", "1")
 	t.Setenv("TMUX", "")

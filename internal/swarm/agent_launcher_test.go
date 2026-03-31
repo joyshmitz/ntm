@@ -299,9 +299,16 @@ func TestValidateAgentType(t *testing.T) {
 		{AgentCC, false},
 		{AgentCOD, false},
 		{AgentGMI, false},
+		{"claude", false},
+		{"claude_code", false},
+		{"openai-codex", false},
+		{"google-gemini", false},
+		{"CC", false},
+		{"cursor", false},
+		{"ws", false},
+		{"ollama", false},
 		{"invalid", true},
 		{"", true},
-		{"CC", true}, // Case sensitive
 	}
 
 	for _, tt := range tests {
@@ -424,6 +431,30 @@ func TestLaunchAllInSession(t *testing.T) {
 
 	if len(mock.SendKeysCalls) != 4 {
 		t.Fatalf("expected 4 SendKeys calls (2 panes x 2 calls), got %d", len(mock.SendKeysCalls))
+	}
+}
+
+func TestLaunchAllInSessionNormalizesAliases(t *testing.T) {
+	mock := &MockTmuxClient{
+		t: t,
+		Panes: []tmux.Pane{
+			{Index: 0},
+			{Index: 1},
+		},
+	}
+	launcher := NewAgentLauncherWithClient(mock)
+	launcher.LaunchDelay = 0
+	launcher.PostLaunchDelay = 0
+
+	if err := launcher.LaunchAllInSession("test_session", "claude"); err != nil {
+		t.Fatalf("LaunchAllInSession failed: %v", err)
+	}
+
+	if len(mock.SendKeysCalls) < 1 {
+		t.Fatalf("expected SendKeys calls, got none")
+	}
+	if got := mock.SendKeysCalls[0].Keys; got != AgentCC {
+		t.Fatalf("first launch command = %q, want %q", got, AgentCC)
 	}
 }
 
@@ -772,6 +803,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 		agentType      string
 		useFullPaths   bool
 		expectedBinary string
+		expectedType   string
 		expectedArgs   []string
 	}{
 		{
@@ -779,6 +811,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "cc",
 			useFullPaths:   false,
 			expectedBinary: "cc",
+			expectedType:   "cc",
 			expectedArgs:   []string{},
 		},
 		{
@@ -786,6 +819,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "cc",
 			useFullPaths:   true,
 			expectedBinary: "claude",
+			expectedType:   "cc",
 			expectedArgs:   []string{},
 		},
 		{
@@ -793,6 +827,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "cod",
 			useFullPaths:   false,
 			expectedBinary: "cod",
+			expectedType:   "cod",
 			expectedArgs:   []string{},
 		},
 		{
@@ -800,6 +835,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "cod",
 			useFullPaths:   true,
 			expectedBinary: "codex",
+			expectedType:   "cod",
 			expectedArgs:   []string{},
 		},
 		{
@@ -807,6 +843,7 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "gmi",
 			useFullPaths:   false,
 			expectedBinary: "gmi",
+			expectedType:   "gmi",
 			expectedArgs:   []string{},
 		},
 		{
@@ -814,6 +851,23 @@ func TestBuildLaunchCommand(t *testing.T) {
 			agentType:      "gmi",
 			useFullPaths:   true,
 			expectedBinary: "gemini",
+			expectedType:   "gmi",
+			expectedArgs:   []string{},
+		},
+		{
+			name:           "claude alias normalizes to cc",
+			agentType:      "claude_code",
+			useFullPaths:   false,
+			expectedBinary: "cc",
+			expectedType:   "cc",
+			expectedArgs:   []string{},
+		},
+		{
+			name:           "codex alias normalizes to cod for full path",
+			agentType:      "openai-codex",
+			useFullPaths:   true,
+			expectedBinary: "codex",
+			expectedType:   "cod",
 			expectedArgs:   []string{},
 		},
 	}
@@ -832,8 +886,8 @@ func TestBuildLaunchCommand(t *testing.T) {
 				t.Errorf("BuildLaunchCommand().Binary = %q, want %q", cmd.Binary, tt.expectedBinary)
 			}
 
-			if cmd.AgentType != tt.agentType {
-				t.Errorf("BuildLaunchCommand().AgentType = %q, want %q", cmd.AgentType, tt.agentType)
+			if cmd.AgentType != tt.expectedType {
+				t.Errorf("BuildLaunchCommand().AgentType = %q, want %q", cmd.AgentType, tt.expectedType)
 			}
 
 			if cmd.WorkDir != "/tmp" {
@@ -922,6 +976,33 @@ func TestBuildLaunchCommandWithEnvVars(t *testing.T) {
 	}
 	if !envMap["DEBUG=true"] {
 		t.Error("expected DEBUG=true in Env")
+	}
+}
+
+func TestBuildLaunchCommandCustomOverridesApplyToAliases(t *testing.T) {
+	builder := NewLaunchCommandBuilder().
+		WithFullPaths(true).
+		WithAgentPath("cod", "/custom/codex").
+		WithAgentArgs("cod", []string{"--fast"}).
+		WithEnvVars("cod", map[string]string{"OPENAI_PROFILE": "prod"})
+
+	spec := PaneSpec{
+		Index:     1,
+		AgentType: "openai-codex",
+	}
+
+	cmd := builder.BuildLaunchCommand(spec, "/tmp")
+	if cmd.Binary != "/custom/codex" {
+		t.Fatalf("BuildLaunchCommand().Binary = %q, want %q", cmd.Binary, "/custom/codex")
+	}
+	if cmd.AgentType != "cod" {
+		t.Fatalf("BuildLaunchCommand().AgentType = %q, want %q", cmd.AgentType, "cod")
+	}
+	if len(cmd.Args) != 1 || cmd.Args[0] != "--fast" {
+		t.Fatalf("BuildLaunchCommand().Args = %v, want [--fast]", cmd.Args)
+	}
+	if len(cmd.Env) != 1 || cmd.Env[0] != "OPENAI_PROFILE=prod" {
+		t.Fatalf("BuildLaunchCommand().Env = %v, want [OPENAI_PROFILE=prod]", cmd.Env)
 	}
 }
 

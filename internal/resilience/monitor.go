@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/health"
@@ -90,7 +91,6 @@ func NewMonitor(session, projectDir string, cfg *config.Config, autoRestart bool
 		rateLimitTracker: tracker,
 		autoRestart:      autoRestart,
 		agents:           make(map[string]*AgentState),
-		done:             make(chan struct{}),
 	}
 }
 
@@ -214,17 +214,21 @@ func (m *Monitor) Start(ctx context.Context) {
 		ctx = context.Background()
 	}
 
+	childCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
 	m.mu.Lock()
 	if m.cancel != nil {
 		m.mu.Unlock()
+		cancel()
 		return
 	}
 
-	childCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
+	m.done = done
 	m.mu.Unlock()
 
-	go m.monitorLoop(childCtx)
+	go m.monitorLoop(childCtx, done)
 }
 
 // Stop stops the monitor gracefully.
@@ -232,6 +236,7 @@ func (m *Monitor) Start(ctx context.Context) {
 func (m *Monitor) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
+	done := m.done
 	m.mu.Unlock()
 
 	if cancel == nil {
@@ -239,8 +244,15 @@ func (m *Monitor) Stop() {
 	}
 
 	cancel()
-	<-m.done
+	<-done
 	m.wg.Wait()
+
+	m.mu.Lock()
+	if m.done == done {
+		m.done = nil
+	}
+	m.cancel = nil
+	m.mu.Unlock()
 }
 
 // GetRestartCount returns the number of restarts for an agent
@@ -267,8 +279,8 @@ func (m *Monitor) GetAgentStates() map[string]AgentState {
 }
 
 // monitorLoop is the main health check loop
-func (m *Monitor) monitorLoop(ctx context.Context) {
-	defer close(m.done)
+func (m *Monitor) monitorLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
 
 	m.mu.RLock()
 	healthCheckSeconds := m.cfg.Resilience.HealthCheckSeconds
@@ -346,7 +358,7 @@ func (m *Monitor) checkHealth(ctx context.Context) {
 			agentState.WaitSeconds = 0
 			log.Printf("[resilience] Agent %s rate limit cleared", agentState.PaneID)
 			// Notify Codex throttle of success (bd-3qoly)
-			if agentState.AgentType == "cod" && m.codexThrottle != nil {
+			if agent.AgentType(agentState.AgentType).Canonical() == agent.AgentTypeCodex && m.codexThrottle != nil {
 				m.codexThrottle.RecordSuccess()
 			}
 		}
@@ -424,17 +436,17 @@ func (m *Monitor) checkHealth(ctx context.Context) {
 }
 
 // handleRateLimit processes a detected rate limit event
-func (m *Monitor) handleRateLimit(agent *AgentState, waitSeconds int) {
-	agent.RateLimited = true
-	agent.LastRateLimitTime = time.Now()
-	agent.WaitSeconds = waitSeconds
+func (m *Monitor) handleRateLimit(agentState *AgentState, waitSeconds int) {
+	agentState.RateLimited = true
+	agentState.LastRateLimitTime = time.Now()
+	agentState.WaitSeconds = waitSeconds
 
 	log.Printf("[resilience] Agent %s (pane %d, type %s) hit rate limit (wait %ds)",
-		agent.PaneID, agent.PaneIndex, agent.AgentType, waitSeconds)
+		agentState.PaneID, agentState.PaneIndex, agentState.AgentType, waitSeconds)
 
 	// Propagate to Codex throttle for cod agents (bd-3qoly)
-	if agent.AgentType == "cod" && m.codexThrottle != nil {
-		m.codexThrottle.RecordRateLimit(agent.PaneID, waitSeconds)
+	if agent.AgentType(agentState.AgentType).Canonical() == agent.AgentTypeCodex && m.codexThrottle != nil {
+		m.codexThrottle.RecordRateLimit(agentState.PaneID, waitSeconds)
 		status := m.codexThrottle.Status()
 		log.Printf("[resilience] Codex throttle engaged: phase=%s, allowed=%d/%d, cooldown=%s",
 			status.Phase, status.AllowedConcurrent, status.MaxConcurrent,
@@ -444,23 +456,23 @@ func (m *Monitor) handleRateLimit(agent *AgentState, waitSeconds int) {
 	events.DefaultEmitter().Emit(events.NewWebhookEvent(
 		events.WebhookAgentRateLimit,
 		m.session,
-		agent.PaneID,
-		agent.AgentType,
-		fmt.Sprintf("Agent %s hit rate limit (wait %ds)", agent.AgentType, waitSeconds),
+		agentState.PaneID,
+		agentState.AgentType,
+		fmt.Sprintf("Agent %s hit rate limit (wait %ds)", agentState.AgentType, waitSeconds),
 		map[string]string{
 			"project_dir":  m.projectDir,
-			"pane_index":   fmt.Sprintf("%d", agent.PaneIndex),
+			"pane_index":   fmt.Sprintf("%d", agentState.PaneIndex),
 			"wait_seconds": fmt.Sprintf("%d", waitSeconds),
 		},
 	))
 
-	m.recordRateLimitHit(agent.AgentType, waitSeconds)
+	m.recordRateLimitHit(agentState.AgentType, waitSeconds)
 
 	// Snapshot values for async operations
 	session := m.session
-	paneID := agent.PaneID
-	paneIndex := agent.PaneIndex
-	agentType := agent.AgentType
+	paneID := agentState.PaneID
+	paneIndex := agentState.PaneIndex
+	agentType := agentState.AgentType
 	notifyEnabled := m.cfg.Resilience.RateLimit.Notify
 	rotateConfig := m.cfg.Rotation
 

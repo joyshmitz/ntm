@@ -370,9 +370,13 @@ func TestNormalizeProvider(t *testing.T) {
 		{"chatgpt", "openai"},
 		{"codex", "openai"},
 		{"cod", "openai"},
+		{"openai-codex", "openai"},
+		{" OpenAI-Codex ", "openai"},
 		{"google", "google"},
 		{"gemini", "google"},
 		{"gmi", "google"},
+		{"google-gemini", "google"},
+		{" CLAUDE_CODE ", "anthropic"},
 		{"unknown", "unknown"},
 	}
 
@@ -686,6 +690,22 @@ func TestDetectRateLimitForAgent_PreservesAgentType(t *testing.T) {
 	}
 	if !detection.RateLimited {
 		t.Error("Expected rate limit to be detected")
+	}
+}
+
+func TestDetectRateLimitForAgent_CodexAliases(t *testing.T) {
+	t.Parallel()
+
+	output := "OpenAI rate limit triggered for codex"
+
+	for _, agentType := range []string{"codex", "openai-codex", " codex "} {
+		detection := DetectRateLimitForAgent(output, agentType)
+		if !detection.RateLimited {
+			t.Fatalf("expected rate limit to be detected for alias %q", agentType)
+		}
+		if detection.Source != detectionSourceOutput {
+			t.Fatalf("expected output detection source for alias %q, got %q", agentType, detection.Source)
+		}
 	}
 }
 

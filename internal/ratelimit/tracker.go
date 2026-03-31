@@ -9,9 +9,11 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 
 	"github.com/Dicklesworthstone/ntm/internal/status"
@@ -452,17 +454,30 @@ func FormatDelay(d time.Duration) string {
 
 // NormalizeProvider normalizes provider names to canonical forms.
 func NormalizeProvider(provider string) string {
-	switch provider {
-	case "anthropic", "claude", "claude-code", "cc":
+	normalized := strings.ToLower(strings.TrimSpace(provider))
+
+	switch agent.AgentType(normalized).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "anthropic"
-	case "openai", "gpt", "chatgpt", "codex", "cod":
+	case agent.AgentTypeCodex:
 		return "openai"
-	case "google", "gemini", "gmi":
+	case agent.AgentTypeGemini:
+		return "google"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	}
+
+	switch normalized {
+	case "anthropic":
+		return "anthropic"
+	case "openai", "gpt", "chatgpt":
+		return "openai"
+	case "google":
 		return "google"
 	case "ollama":
 		return "ollama"
 	default:
-		return provider
+		return normalized
 	}
 }
 
@@ -568,7 +583,7 @@ func DetectRateLimit(output string) RateLimitDetection {
 // When agentType is "cod", additional Codex-specific patterns are checked.
 func DetectRateLimitForAgent(output string, agentType string) RateLimitDetection {
 	detection := DetectRateLimit(output)
-	detection.AgentType = agentType
+	detection.AgentType = strings.TrimSpace(agentType)
 
 	// Already detected by generic logic
 	if detection.RateLimited {
@@ -576,7 +591,7 @@ func DetectRateLimitForAgent(output string, agentType string) RateLimitDetection
 	}
 
 	// Codex-specific patterns (only check for cod agents)
-	if agentType == "cod" && DetectCodexRateLimit(output) {
+	if agent.AgentType(agentType).Canonical() == agent.AgentTypeCodex && DetectCodexRateLimit(output) {
 		detection.RateLimited = true
 		detection.Source = detectionSourceOutput
 		return detection

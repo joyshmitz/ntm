@@ -492,6 +492,67 @@ func TestScheduler_Pause_Resume(t *testing.T) {
 	}
 }
 
+func TestScheduler_CanRestartAfterStop(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxConcurrent = 1
+	cfg.GlobalRateLimit.Rate = 100
+	cfg.GlobalRateLimit.MinInterval = 0
+	cfg.Headroom.Enabled = false
+
+	scheduler := New(cfg)
+
+	var executed int64
+	scheduler.SetExecutor(func(ctx context.Context, job *SpawnJob) error {
+		atomic.AddInt64(&executed, 1)
+		return nil
+	})
+
+	if err := scheduler.Start(); err != nil {
+		t.Fatalf("first Start() failed: %v", err)
+	}
+
+	first := NewSpawnJob("", JobTypeSession, "test")
+	if err := scheduler.Submit(first); err != nil {
+		t.Fatalf("first Submit() failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&executed) < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := atomic.LoadInt64(&executed); got != 1 {
+		t.Fatalf("expected first execution before restart, got %d", got)
+	}
+
+	oldHeadroom := scheduler.headroom
+	scheduler.Stop()
+
+	if err := scheduler.Start(); err != nil {
+		t.Fatalf("second Start() failed: %v", err)
+	}
+	defer scheduler.Stop()
+
+	if scheduler.ctx.Err() != nil {
+		t.Fatal("expected a fresh scheduler context after restart")
+	}
+	if scheduler.headroom == oldHeadroom {
+		t.Fatal("expected headroom guard to be rebuilt after restart")
+	}
+
+	second := NewSpawnJob("", JobTypeSession, "test")
+	if err := scheduler.Submit(second); err != nil {
+		t.Fatalf("second Submit() failed: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&executed) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := atomic.LoadInt64(&executed); got != 2 {
+		t.Fatalf("expected second execution after restart, got %d", got)
+	}
+}
+
 func TestScheduler_Progress(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxConcurrent = 1

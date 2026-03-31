@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -439,10 +441,14 @@ func ValidateProjectPath(path string) error {
 }
 
 func isCodexProvider(agentType string) bool {
-	switch agentType {
-	case "cod", "codex", "openai", "gpt":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeCodex:
 		return true
 	default:
+		switch strings.ToLower(strings.TrimSpace(agentType)) {
+		case "openai", "gpt":
+			return true
+		}
 		return false
 	}
 }

@@ -51,6 +51,58 @@ func TestAgentCaps_TryAcquire(t *testing.T) {
 	}
 }
 
+func TestAgentCaps_TryAcquire_AliasSharesCanonicalBucket(t *testing.T) {
+	cfg := AgentCapsConfig{
+		Default: AgentCapConfig{
+			MaxConcurrent: 2,
+		},
+		PerAgent: map[string]AgentCapConfig{
+			"cod": {
+				MaxConcurrent: 1,
+			},
+		},
+	}
+
+	caps := NewAgentCaps(cfg)
+
+	if !caps.TryAcquire("codex") {
+		t.Fatal("expected first codex alias acquire to succeed")
+	}
+	if caps.TryAcquire("openai-codex") {
+		t.Fatal("expected second codex alias acquire to hit the same canonical cap")
+	}
+
+	caps.Release("codex")
+	if !caps.TryAcquire("cod") {
+		t.Fatal("expected release via alias to free the canonical cod bucket")
+	}
+}
+
+func TestAgentCaps_ConfigAliasNormalizesToCodexProfile(t *testing.T) {
+	cfg := AgentCapsConfig{
+		Default: AgentCapConfig{
+			MaxConcurrent: 4,
+		},
+		PerAgent: map[string]AgentCapConfig{
+			"codex": {
+				MaxConcurrent: 1,
+			},
+		},
+	}
+
+	caps := NewAgentCaps(cfg)
+
+	if cap := caps.GetCurrentCap("cod"); cap != 1 {
+		t.Fatalf("expected cod canonical cap 1 from alias config, got %d", cap)
+	}
+	if !caps.TryAcquire("cod") {
+		t.Fatal("expected canonical cod acquire to succeed")
+	}
+	if caps.TryAcquire("codex") {
+		t.Fatal("expected alias acquire to share the configured canonical codex cap")
+	}
+}
+
 func TestAgentCaps_Acquire_Blocking(t *testing.T) {
 	cfg := AgentCapsConfig{
 		Default: AgentCapConfig{

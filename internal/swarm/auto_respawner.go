@@ -49,6 +49,15 @@ type RespawnResult struct {
 	RespawnedAt     time.Time     `json:"respawned_at"`
 }
 
+type gracefulExitMethod int
+
+const (
+	gracefulExitDoubleInterrupt gracefulExitMethod = iota
+	gracefulExitSlashExit
+	gracefulExitEscapeInterrupt
+	gracefulExitSingleInterrupt
+)
+
 // AutoRespawnerConfig holds configuration for the AutoRespawner.
 type AutoRespawnerConfig struct {
 	// GracefulExitDelay is how long to wait for the agent to exit gracefully.
@@ -592,8 +601,8 @@ func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType st
 
 	client := r.tmuxClient()
 
-	switch agentType {
-	case "cc", "claude", "claude-code":
+	switch gracefulExitMethodForAgent(agentType) {
+	case gracefulExitDoubleInterrupt:
 		// Claude: Double Ctrl+C with 100ms gap (CRITICAL timing)
 		if err := ctx.Err(); err != nil {
 			return err
@@ -611,7 +620,7 @@ func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType st
 			return fmt.Errorf("send second ctrl-c: %w", err)
 		}
 
-	case "cod", "codex":
+	case gracefulExitSlashExit:
 		// Codex: /exit command
 		if err := ctx.Err(); err != nil {
 			return err
@@ -620,7 +629,7 @@ func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType st
 			return fmt.Errorf("send /exit: %w", err)
 		}
 
-	case "gmi", "gemini":
+	case gracefulExitEscapeInterrupt:
 		// Gemini: Escape then Ctrl+C
 		if err := ctx.Err(); err != nil {
 			return err
@@ -638,22 +647,13 @@ func (r *AutoRespawner) killAgent(ctx context.Context, sessionPane, agentType st
 			return fmt.Errorf("send ctrl-c: %w", err)
 		}
 
-	default:
-		// Default: Double Ctrl+C (safe fallback)
+	case gracefulExitSingleInterrupt:
+		// Best-effort graceful exit for agents that respond to a single interrupt.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := client.SendKeys(sessionPane, "\x03", false); err != nil {
-			return fmt.Errorf("send first ctrl-c: %w", err)
-		}
-		if !sleepWithContext(ctx, 100*time.Millisecond) {
-			return ctx.Err()
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := client.SendKeys(sessionPane, "\x03", false); err != nil {
-			return fmt.Errorf("send second ctrl-c: %w", err)
+			return fmt.Errorf("send ctrl-c: %w", err)
 		}
 	}
 
@@ -1023,6 +1023,19 @@ func normalizeAutoRespawnerAgentType(agentType string) string {
 		return ""
 	}
 	return string(agent.AgentType(normalized).Canonical())
+}
+
+func gracefulExitMethodForAgent(agentType string) gracefulExitMethod {
+	switch normalizeAutoRespawnerAgentType(agentType) {
+	case "cod":
+		return gracefulExitSlashExit
+	case "gmi":
+		return gracefulExitEscapeInterrupt
+	case "cursor", "windsurf", "aider", "ollama":
+		return gracefulExitSingleInterrupt
+	default:
+		return gracefulExitDoubleInterrupt
+	}
 }
 
 // waitForAgentReady waits for agent startup indicators in pane output.

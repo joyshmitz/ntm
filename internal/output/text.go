@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
@@ -345,18 +346,45 @@ func StatusBadge(status string) string {
 func AgentBadge(agentType string) string {
 	th := theme.Current()
 
-	var color lipgloss.Color
-	switch strings.ToLower(agentType) {
-	case "claude", "cc":
-		color = th.Mauve // Purple for Claude
-	case "codex", "cod":
-		color = th.Green // Green for Codex
-	case "gemini", "gmi":
-		color = th.Blue // Blue for Gemini
+	color := outputAgentBadgeColor(agentType, th)
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	return style.Render(outputAgentBadgeLabel(agentType))
+}
+
+func outputAgentBadgeColor(agentType string, th theme.Theme) lipgloss.Color {
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
+		return th.Claude
+	case agent.AgentTypeCodex:
+		return th.Codex
+	case agent.AgentTypeGemini:
+		return th.Gemini
+	case agent.AgentTypeCursor:
+		return th.Cursor
+	case agent.AgentTypeWindsurf:
+		return th.Windsurf
+	case agent.AgentTypeAider:
+		return th.Aider
+	case agent.AgentTypeOllama:
+		return th.Ollama
+	case agent.AgentTypeUser:
+		return th.User
 	default:
-		color = th.Overlay
+		return th.Overlay
+	}
+}
+
+func outputAgentBadgeLabel(agentType string) string {
+	canonical := agent.AgentType(agentType).Canonical()
+	if canonical.IsValid() || canonical == agent.AgentTypeUnknown {
+		if label := strings.TrimSpace(canonical.ProfileName()); label != "" {
+			return label
+		}
 	}
 
-	style := lipgloss.NewStyle().Foreground(color).Bold(true)
-	return style.Render(agentType)
+	label := strings.TrimSpace(agentType)
+	if label == "" {
+		return "unknown"
+	}
+	return label
 }

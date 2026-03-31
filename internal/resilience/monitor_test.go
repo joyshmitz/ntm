@@ -796,13 +796,14 @@ func TestMonitorLoopRespectsMinCheckInterval(t *testing.T) {
 	m := NewMonitor("test-session", "/tmp/project", cfg, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 
-	go m.monitorLoop(ctx)
+	go m.monitorLoop(ctx, done)
 
 	// Wait less than minimum interval
 	time.Sleep(100 * time.Millisecond)
 	cancel()
-	<-m.done
+	<-done
 
 	mu.Lock()
 	count := checkCount
@@ -1019,6 +1020,24 @@ func TestRecordRateLimitHit_Direct(t *testing.T) {
 	}
 }
 
+func TestRecordRateLimitHit_DirectAlias(t *testing.T) {
+	cfg := config.Default()
+	cfg.Resilience.RateLimit.Detect = true
+	projectDir := t.TempDir()
+	m := NewMonitor("test-session", projectDir, cfg, true)
+
+	m.recordRateLimitHit("openai-codex", 30)
+	m.wg.Wait()
+
+	state := m.rateLimitTracker.GetProviderState("openai")
+	if state == nil {
+		t.Fatal("expected rate limit state for openai")
+	}
+	if state.TotalRateLimits != 1 {
+		t.Errorf("TotalRateLimits = %d, want 1", state.TotalRateLimits)
+	}
+}
+
 func TestRecordRateLimitHit_DisabledIsNoOp(t *testing.T) {
 	cfg := config.Default()
 	cfg.Resilience.RateLimit.Detect = false
@@ -1035,6 +1054,24 @@ func TestRecordRateLimitSuccess_Direct(t *testing.T) {
 	m := NewMonitor("test-session", projectDir, cfg, true)
 
 	m.recordRateLimitSuccess("cod")
+	m.wg.Wait()
+
+	state := m.rateLimitTracker.GetProviderState("openai")
+	if state == nil {
+		t.Fatal("expected rate limit state for openai")
+	}
+	if state.TotalSuccesses != 1 {
+		t.Errorf("TotalSuccesses = %d, want 1", state.TotalSuccesses)
+	}
+}
+
+func TestRecordRateLimitSuccess_DirectAlias(t *testing.T) {
+	cfg := config.Default()
+	cfg.Resilience.RateLimit.Detect = true
+	projectDir := t.TempDir()
+	m := NewMonitor("test-session", projectDir, cfg, true)
+
+	m.recordRateLimitSuccess("codex")
 	m.wg.Wait()
 
 	state := m.rateLimitTracker.GetProviderState("openai")
@@ -1064,7 +1101,7 @@ func TestMonitorStart_NilContextAndDoubleStartAreSafe(t *testing.T) {
 	// Should not panic on nil context.
 	m.Start(nil)
 
-	// Calling Start twice should be a no-op (monitor is single-use due to done channel).
+	// Calling Start twice while already running should be a no-op.
 	m.Start(context.Background())
 
 	done := make(chan struct{})
@@ -1077,6 +1114,29 @@ func TestMonitorStart_NilContextAndDoubleStartAreSafe(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() hung after Start(nil) + Start()")
+	}
+}
+
+func TestMonitorStart_CanRestartAfterStop(t *testing.T) {
+	cfg := config.Default()
+	cfg.Resilience.AutoRestart = false
+
+	m := NewMonitor("test-session", t.TempDir(), cfg, false)
+
+	m.Start(context.Background())
+	m.Stop()
+
+	restarted := make(chan struct{})
+	go func() {
+		m.Start(context.Background())
+		m.Stop()
+		close(restarted)
+	}()
+
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor failed to restart cleanly after Stop()")
 	}
 }
 

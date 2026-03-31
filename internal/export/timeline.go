@@ -13,6 +13,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
@@ -89,6 +90,11 @@ type ExportTheme struct {
 	ClaudeColor     string
 	CodexColor      string
 	GeminiColor     string
+	CursorColor     string
+	WindsurfColor   string
+	AiderColor      string
+	OllamaColor     string
+	UserColor       string
 }
 
 // DefaultTheme returns the default color theme matching the TUI.
@@ -105,6 +111,11 @@ func DefaultTheme() ExportTheme {
 		ClaudeColor:     "#cba6f7", // Mauve (Claude purple)
 		CodexColor:      "#89dceb", // Sky (Codex blue)
 		GeminiColor:     "#94e2d5", // Teal (Gemini)
+		CursorColor:     "#94e2d5", // Teal
+		WindsurfColor:   "#f2cdcd", // Flamingo
+		AiderColor:      "#fab387", // Peach
+		OllamaColor:     "#a6e3a1", // Green
+		UserColor:       "#a6e3a1", // Green
 	}
 }
 
@@ -122,6 +133,11 @@ func LightTheme() ExportTheme {
 		ClaudeColor:     "#8839ef",
 		CodexColor:      "#04a5e5",
 		GeminiColor:     "#179299",
+		CursorColor:     "#8bd5ca",
+		WindsurfColor:   "#f0c6c6",
+		AiderColor:      "#f5a97f",
+		OllamaColor:     "#a6da95",
+		UserColor:       "#40a02b",
 	}
 }
 
@@ -292,10 +308,11 @@ func (e *TimelineExporter) prepareData(events []state.AgentEvent) *timelineData 
 	tracks := make([]agentTrack, 0, len(agentIDs))
 	for i, agentID := range agentIDs {
 		evs := agentEvents[agentID]
+		agentType := e.getAgentType(agentID, evs)
 		track := agentTrack{
 			AgentID:   agentID,
-			AgentType: e.getAgentType(agentID),
-			Color:     e.getAgentColor(agentID),
+			AgentType: agentType,
+			Color:     e.getAgentColor(agentType),
 			YOffset:   topMargin + (i * (barHeight + barGap)),
 		}
 
@@ -376,31 +393,91 @@ func (e *TimelineExporter) createSegment(st state.TimelineState, start, end time
 	}
 }
 
-func (e *TimelineExporter) getAgentType(agentID string) string {
-	if strings.HasPrefix(agentID, "cc") {
-		return "claude"
+func (e *TimelineExporter) getAgentType(agentID string, events []state.AgentEvent) string {
+	for _, ev := range events {
+		if agentType := exportAgentTypeString(string(ev.AgentType)); agentType != "unknown" {
+			return agentType
+		}
 	}
-	if strings.HasPrefix(agentID, "cod") {
-		return "codex"
-	}
-	if strings.HasPrefix(agentID, "gmi") {
-		return "gemini"
-	}
-	return "unknown"
+	return exportAgentTypeFromID(agentID)
 }
 
-func (e *TimelineExporter) getAgentColor(agentID string) string {
+func exportAgentTypeString(agentType string) string {
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
+		return "claude"
+	case agent.AgentTypeCodex:
+		return "codex"
+	case agent.AgentTypeGemini:
+		return "gemini"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	case agent.AgentTypeUser:
+		return "user"
+	default:
+		return "unknown"
+	}
+}
+
+func exportAgentTypeFromID(agentID string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(agentID))
+	switch {
+	case strings.HasPrefix(trimmed, "cc"), strings.HasPrefix(trimmed, "claude"):
+		return "claude"
+	case strings.HasPrefix(trimmed, "cod"), strings.HasPrefix(trimmed, "codex"), strings.HasPrefix(trimmed, "openai"):
+		return "codex"
+	case strings.HasPrefix(trimmed, "gmi"), strings.HasPrefix(trimmed, "gemini"), strings.HasPrefix(trimmed, "google"):
+		return "gemini"
+	case strings.HasPrefix(trimmed, "cursor"):
+		return "cursor"
+	case strings.HasPrefix(trimmed, "ws"), strings.HasPrefix(trimmed, "windsurf"):
+		return "windsurf"
+	case strings.HasPrefix(trimmed, "aider"):
+		return "aider"
+	case strings.HasPrefix(trimmed, "ollama"):
+		return "ollama"
+	case strings.HasPrefix(trimmed, "usr"), strings.HasPrefix(trimmed, "user"):
+		return "user"
+	default:
+		return "unknown"
+	}
+}
+
+func (e *TimelineExporter) getAgentColor(agentType string) string {
 	t := e.options.Theme
-	switch e.getAgentType(agentID) {
+	switch agentType {
 	case "claude":
-		return t.ClaudeColor
+		return firstNonEmptyExportColor(t.ClaudeColor, t.TextColor)
 	case "codex":
-		return t.CodexColor
+		return firstNonEmptyExportColor(t.CodexColor, t.TextColor)
 	case "gemini":
-		return t.GeminiColor
+		return firstNonEmptyExportColor(t.GeminiColor, t.TextColor)
+	case "cursor":
+		return firstNonEmptyExportColor(t.CursorColor, t.TextColor)
+	case "windsurf":
+		return firstNonEmptyExportColor(t.WindsurfColor, t.TextColor)
+	case "aider":
+		return firstNonEmptyExportColor(t.AiderColor, t.TextColor)
+	case "ollama":
+		return firstNonEmptyExportColor(t.OllamaColor, t.TextColor)
+	case "user":
+		return firstNonEmptyExportColor(t.UserColor, t.TextColor)
 	default:
 		return t.TextColor
 	}
+}
+
+func firstNonEmptyExportColor(color string, fallback string) string {
+	if strings.TrimSpace(color) != "" {
+		return color
+	}
+	return fallback
 }
 
 func (e *TimelineExporter) getStateColor(st state.TimelineState) string {

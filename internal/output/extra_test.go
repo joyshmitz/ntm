@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 // Helper to capture stdout/stderr
@@ -834,27 +836,35 @@ func TestAgentBadge(t *testing.T) {
 	tests := []struct {
 		name      string
 		agentType string
+		wantLabel string
 	}{
 		// Claude variants
-		{"claude", "claude"},
-		{"cc", "cc"},
+		{"claude", "claude", "Claude"},
+		{"cc", "cc", "Claude"},
 		// Codex variants
-		{"codex", "codex"},
-		{"cod", "cod"},
+		{"codex", "codex", "Codex"},
+		{"codex alias", "openai-codex", "Codex"},
+		{"cod", "cod", "Codex"},
 		// Gemini variants
-		{"gemini", "gemini"},
-		{"gmi", "gmi"},
+		{"gemini", "gemini", "Gemini"},
+		{"gmi", "gmi", "Gemini"},
+		{"gemini alias", "google-gemini", "Gemini"},
+		{"cursor", "cursor", "Cursor"},
+		{"windsurf", "windsurf", "Windsurf"},
+		{"aider", "aider", "Aider"},
+		{"ollama", "ollama", "Ollama"},
+		{"user", "user", "User"},
 		// Default/unknown
-		{"unknown agent", "other"},
-		{"empty string", ""},
+		{"unknown agent", "other", "other"},
+		{"empty string", "", "unknown"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			result := AgentBadge(tc.agentType)
-			if !strings.Contains(result, tc.agentType) {
-				t.Errorf("AgentBadge(%q) = %q, does not contain input", tc.agentType, result)
+			if !strings.Contains(result, tc.wantLabel) {
+				t.Errorf("AgentBadge(%q) = %q, does not contain label %q", tc.agentType, result, tc.wantLabel)
 			}
 		})
 	}
@@ -869,8 +879,38 @@ func TestAgentBadge_CaseInsensitive(t *testing.T) {
 	}
 
 	result = AgentBadge("CODEX")
-	if !strings.Contains(result, "CODEX") {
-		t.Errorf("AgentBadge(\"CODEX\") should contain 'CODEX', got %q", result)
+	if !strings.Contains(result, "Codex") {
+		t.Errorf("AgentBadge(\"CODEX\") should contain canonical 'Codex', got %q", result)
+	}
+}
+
+func TestOutputAgentBadgeColor(t *testing.T) {
+	t.Parallel()
+
+	current := theme.Current()
+	tests := []struct {
+		name      string
+		agentType string
+		want      string
+	}{
+		{"claude", "claude", string(current.Claude)},
+		{"codex alias", "openai-codex", string(current.Codex)},
+		{"gemini alias", "google-gemini", string(current.Gemini)},
+		{"cursor", "cursor", string(current.Cursor)},
+		{"windsurf alias", "ws", string(current.Windsurf)},
+		{"aider", "aider", string(current.Aider)},
+		{"ollama", "ollama", string(current.Ollama)},
+		{"user", "user", string(current.User)},
+		{"unknown", "other", string(current.Overlay)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := string(outputAgentBadgeColor(tc.agentType, current)); got != tc.want {
+				t.Fatalf("outputAgentBadgeColor(%q) = %q, want %q", tc.agentType, got, tc.want)
+			}
+		})
 	}
 }
 

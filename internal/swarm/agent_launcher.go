@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -283,6 +284,10 @@ func (l *AgentLauncher) LaunchAgent(session string, pane int, agentType string) 
 // It gets the list of panes from tmux and sends the agent command to each.
 func (l *AgentLauncher) LaunchAllInSession(session string, agentType string) error {
 	client := l.tmuxClient()
+	normalizedAgentType := normalizedSwarmLaunchableAgentType(agentType)
+	if normalizedAgentType != "" {
+		agentType = normalizedAgentType
+	}
 
 	panes, err := client.GetPanes(session)
 	if err != nil {
@@ -363,7 +368,7 @@ func (l *AgentLauncher) LaunchSwarm(plan *SwarmPlan) (*AgentLauncherResult, erro
 			// Determine the launch command
 			launchCmd := paneSpec.LaunchCmd
 			if launchCmd == "" {
-				launchCmd = paneSpec.AgentType
+				launchCmd = defaultSwarmLaunchCommand(paneSpec.AgentType)
 			}
 
 			if err := l.LaunchAgent(sessionSpec.Name, paneSpec.Index, launchCmd); err != nil {
@@ -405,20 +410,24 @@ func (l *AgentLauncher) LaunchAgentWithContext(session string, pane int, agentTy
 
 // ValidateAgentType checks if the given agent type is valid.
 func ValidateAgentType(agentType string) error {
-	switch agentType {
-	case AgentCC, AgentCOD, AgentGMI:
+	switch normalizedSwarmLaunchableAgentType(agentType) {
+	case AgentCC, AgentCOD, AgentGMI, "cursor", "windsurf", "aider", "ollama":
 		return nil
 	default:
-		return fmt.Errorf("invalid agent type %q: must be one of %s, %s, %s",
+		return fmt.Errorf("invalid agent type %q: must resolve to one of %s, %s, %s, cursor, windsurf, aider, ollama",
 			agentType, AgentCC, AgentCOD, AgentGMI)
 	}
 }
 
 // DefaultAgentCommands maps agent types to their default binary names.
 var DefaultAgentCommands = map[string]string{
-	"cc":  "claude", // Claude Code CLI
-	"cod": "codex",  // OpenAI Codex CLI
-	"gmi": "gemini", // Google Gemini CLI
+	"cc":       "claude",   // Claude Code CLI
+	"cod":      "codex",    // OpenAI Codex CLI
+	"gmi":      "gemini",   // Google Gemini CLI
+	"cursor":   "cursor",   // Cursor CLI
+	"windsurf": "windsurf", // Windsurf CLI
+	"aider":    "aider",    // Aider CLI
+	"ollama":   "ollama",   // Ollama CLI
 }
 
 // DefaultAgentArgs provides default arguments per agent type.
@@ -428,9 +437,13 @@ var DefaultAgentCommands = map[string]string{
 // is used directly and the caller should supply arguments via
 // WithAgentArgs or a custom LaunchCommandBuilder.
 var DefaultAgentArgs = map[string][]string{
-	"cc":  {},
-	"cod": {},
-	"gmi": {},
+	"cc":       {},
+	"cod":      {},
+	"gmi":      {},
+	"cursor":   {},
+	"windsurf": {},
+	"aider":    {},
+	"ollama":   {},
 }
 
 // LaunchCommand represents a complete agent launch specification.
@@ -533,37 +546,61 @@ func (b *LaunchCommandBuilder) loggerB() *slog.Logger {
 
 // BuildLaunchCommand creates the launch command for an agent.
 func (b *LaunchCommandBuilder) BuildLaunchCommand(spec PaneSpec, workDir string) LaunchCommand {
-	agentType := spec.AgentType
+	rawAgentType := strings.TrimSpace(spec.AgentType)
+	agentType := defaultSwarmLaunchCommand(rawAgentType)
+	keys := launchLookupKeys(rawAgentType)
 
 	// Determine binary
 	var binary string
 	if b.UseFullPaths {
 		// Use custom path or default command
-		if customPath, ok := b.AgentPaths[agentType]; ok {
-			binary = customPath
-		} else if defaultCmd, ok := DefaultAgentCommands[agentType]; ok {
-			binary = defaultCmd
-		} else {
-			binary = agentType // Fallback to agent type as command
+		for _, key := range keys {
+			if customPath, ok := b.AgentPaths[key]; ok {
+				binary = customPath
+				break
+			}
+		}
+		if binary == "" {
+			for _, key := range keys {
+				if defaultCmd, ok := DefaultAgentCommands[key]; ok {
+					binary = defaultCmd
+					break
+				}
+			}
+		}
+		if binary == "" {
+			binary = agentType // Fallback to normalized or raw command name
 		}
 	} else {
-		// Use shell alias (cc, cod, gmi)
+		// Use shell alias or canonical agent command token.
 		binary = agentType
 	}
 
 	// Determine arguments
 	var args []string
-	if customArgs, ok := b.AgentArgs[agentType]; ok {
-		args = customArgs
-	} else if defaultArgs, ok := DefaultAgentArgs[agentType]; ok {
-		args = defaultArgs
+	for _, key := range keys {
+		if customArgs, ok := b.AgentArgs[key]; ok {
+			args = customArgs
+			break
+		}
+	}
+	if args == nil {
+		for _, key := range keys {
+			if defaultArgs, ok := DefaultAgentArgs[key]; ok {
+				args = defaultArgs
+				break
+			}
+		}
 	}
 
 	// Build environment variables
 	var env []string
-	if agentEnv, ok := b.EnvVars[agentType]; ok {
-		for k, v := range agentEnv {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
+	for _, key := range keys {
+		if agentEnv, ok := b.EnvVars[key]; ok {
+			for k, v := range agentEnv {
+				env = append(env, fmt.Sprintf("%s=%s", k, v))
+			}
+			break
 		}
 	}
 
@@ -655,4 +692,40 @@ func (l *AgentLauncher) LaunchAgentWithCommand(session string, pane int, cmd Lau
 		"command", shellCmd)
 
 	return nil
+}
+
+func normalizedSwarmLaunchableAgentType(agentType string) string {
+	switch canonical := agent.AgentType(agentType).Canonical(); canonical {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama:
+		return string(canonical)
+	default:
+		return ""
+	}
+}
+
+func defaultSwarmLaunchCommand(agentType string) string {
+	if normalized := normalizedSwarmLaunchableAgentType(agentType); normalized != "" {
+		return normalized
+	}
+	return strings.TrimSpace(agentType)
+}
+
+func launchLookupKeys(agentType string) []string {
+	raw := strings.TrimSpace(agentType)
+	normalized := normalizedSwarmLaunchableAgentType(raw)
+
+	keys := make([]string, 0, 2)
+	if normalized != "" {
+		keys = append(keys, normalized)
+	}
+	if raw != "" && raw != normalized {
+		keys = append(keys, raw)
+	}
+	return keys
 }

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -742,6 +743,30 @@ func TestRateLimiter_Waiting(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_Wait_CanceledRequestUpdatesStatsAndWaiting(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(LimiterConfig{Rate: 1, Capacity: 1, MinInterval: 0})
+	if !rl.TryAcquire() {
+		t.Fatal("expected initial token acquisition to succeed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	if err := rl.Wait(ctx); err == nil {
+		t.Fatal("expected Wait to fail after context cancellation")
+	}
+
+	stats := rl.Stats()
+	if stats.DeniedRequests != 1 {
+		t.Fatalf("DeniedRequests = %d, want 1", stats.DeniedRequests)
+	}
+	if stats.Waiting != 0 {
+		t.Fatalf("Waiting = %d, want 0 after canceled Wait", stats.Waiting)
+	}
+}
+
 func TestRateLimiter_Stats(t *testing.T) {
 	t.Parallel()
 	rl := NewRateLimiter(LimiterConfig{Rate: 100, Capacity: 3, MinInterval: 0})
@@ -1108,6 +1133,46 @@ func TestPerAgentLimiter_GetLimiter_DefaultForUnknown(t *testing.T) {
 	limiter2 := pal.GetLimiter("unknown-agent")
 	if limiter != limiter2 {
 		t.Error("GetLimiter should return the same instance for repeated calls")
+	}
+}
+
+func TestPerAgentLimiter_GetLimiter_AliasSharesCanonicalLimiter(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultAgentLimiterConfig()
+	pal := NewPerAgentLimiter(cfg)
+
+	canonical := pal.GetLimiter("cod")
+	alias := pal.GetLimiter("codex")
+	providerAlias := pal.GetLimiter("openai-codex")
+
+	if canonical != alias {
+		t.Fatal("expected cod and codex to share the same limiter instance")
+	}
+	if canonical != providerAlias {
+		t.Fatal("expected provider alias to share the canonical cod limiter instance")
+	}
+}
+
+func TestPerAgentLimiter_ConfigAliasNormalizesToCanonicalKey(t *testing.T) {
+	t.Parallel()
+	cfg := AgentLimiterConfig{
+		Default: LimiterConfig{Rate: 5, Capacity: 5},
+		PerAgent: map[string]LimiterConfig{
+			"codex": {Rate: 1, Capacity: 1},
+		},
+	}
+	pal := NewPerAgentLimiter(cfg)
+
+	stats := pal.AllStats()
+	if _, ok := stats["cod"]; !ok {
+		t.Fatal("expected canonical cod limiter stats from alias config")
+	}
+	if _, ok := stats["codex"]; ok {
+		t.Fatal("did not expect separate raw codex limiter stats entry")
+	}
+
+	if pal.GetLimiter("cod") != pal.GetLimiter("codex") {
+		t.Fatal("expected canonical and alias codex keys to share a limiter")
 	}
 }
 

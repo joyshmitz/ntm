@@ -766,9 +766,12 @@ func TestFormatForAgent(t *testing.T) {
 	}{
 		{"codex", "codex", FormatMinimal},
 		{"cod", "cod", FormatMinimal},
+		{"openai codex alias", "openai-codex", FormatMinimal},
 		{"gemini", "gemini", FormatStructured},
 		{"gmi", "gmi", FormatStructured},
+		{"google gemini alias", "google-gemini", FormatStructured},
 		{"claude defaults to markdown", "claude", FormatMarkdown},
+		{"claude code alias defaults to markdown", "claude_code", FormatMarkdown},
 		{"empty defaults to markdown", "", FormatMarkdown},
 		{"unknown defaults to markdown", "aider", FormatMarkdown},
 		{"case insensitive CODEX", "CODEX", FormatMinimal},

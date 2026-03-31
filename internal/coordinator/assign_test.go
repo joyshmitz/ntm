@@ -338,6 +338,12 @@ func TestComputeAgentTypeBonus(t *testing.T) {
 			wantSign:  "negative",
 		},
 		{
+			name:      "claude alias on epic gets bonus",
+			agentType: "claude_code",
+			rec:       &bv.TriageRecommendation{Type: "epic", Priority: 2},
+			wantSign:  "positive",
+		},
+		{
 			name:      "codex on chore gets bonus",
 			agentType: "cod",
 			rec:       &bv.TriageRecommendation{Type: "chore", Priority: 2},
@@ -350,10 +356,22 @@ func TestComputeAgentTypeBonus(t *testing.T) {
 			wantSign:  "negative",
 		},
 		{
+			name:      "codex alias on chore gets bonus",
+			agentType: "openai-codex",
+			rec:       &bv.TriageRecommendation{Type: "chore", Priority: 2},
+			wantSign:  "positive",
+		},
+		{
 			name:      "gemini on medium task neutral or small bonus",
 			agentType: "gmi",
 			rec:       &bv.TriageRecommendation{Type: "task", Priority: 2},
 			wantSign:  "zero", // task is medium complexity
+		},
+		{
+			name:      "gemini alias on medium task neutral or small bonus",
+			agentType: "google-gemini",
+			rec:       &bv.TriageRecommendation{Type: "task", Priority: 2},
+			wantSign:  "zero",
 		},
 	}
 
