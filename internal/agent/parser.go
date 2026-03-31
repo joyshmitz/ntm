@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // parserImpl implements the Parser interface.
@@ -57,11 +59,7 @@ func (p *parserImpl) ParseWithHint(output string, hint AgentType) (*AgentState, 
 	state.Confidence = p.calculateConfidence(state)
 
 	// Step 5: Keep sample for debugging (last N chars)
-	if len(cleanOutput) > p.config.SampleLength {
-		state.RawSample = cleanOutput[len(cleanOutput)-p.config.SampleLength:]
-	} else {
-		state.RawSample = cleanOutput
-	}
+	state.RawSample = util.SafeSliceFromEnd(cleanOutput, p.config.SampleLength)
 
 	return state, nil
 }
@@ -117,13 +115,13 @@ func (p *parserImpl) detectByPatternFrequency(output string) AgentType {
 
 	// Check working patterns (they're the most frequent indicators)
 	// We count the number of matching patterns for better granularity
-	scores[AgentTypeClaudeCode] = len(collectMatches(output, ccWorkingPatterns))
-	scores[AgentTypeCodex] = len(collectMatches(output, codWorkingPatterns))
-	scores[AgentTypeGemini] = len(collectMatches(output, gmiWorkingPatterns))
-	scores[AgentTypeCursor] = len(collectMatches(output, cursorWorkingPatterns))
-	scores[AgentTypeWindsurf] = len(collectMatches(output, windsurfWorkingPatterns))
-	scores[AgentTypeAider] = len(collectMatches(output, aiderWorkingPatterns))
-	scores[AgentTypeOllama] = len(collectMatches(output, ollamaWorkingPatterns))
+	scores[AgentTypeClaudeCode] = p.countMatches(output, ccWorkingPatterns)
+	scores[AgentTypeCodex] = p.countMatches(output, codWorkingPatterns)
+	scores[AgentTypeGemini] = p.countMatches(output, gmiWorkingPatterns)
+	scores[AgentTypeCursor] = p.countMatches(output, cursorWorkingPatterns)
+	scores[AgentTypeWindsurf] = p.countMatches(output, windsurfWorkingPatterns)
+	scores[AgentTypeAider] = p.countMatches(output, aiderWorkingPatterns)
+	scores[AgentTypeOllama] = p.countMatches(output, ollamaWorkingPatterns)
 
 	// Find highest scoring type with deterministic tie-breaking
 	// Priority: Claude > Codex > Gemini > Cursor > Windsurf > Aider > Ollama
@@ -149,6 +147,20 @@ func (p *parserImpl) detectByPatternFrequency(output string) AgentType {
 	}
 
 	return maxType
+}
+
+// countMatches returns the total number of pattern occurrences in the text.
+func (p *parserImpl) countMatches(text string, patterns []string) int {
+	count := 0
+	textLower := strings.ToLower(text)
+	for _, p := range patterns {
+		// We count unique patterns found rather than all occurrences to avoid
+		// being biased by repetitive output (like log lines).
+		if strings.Contains(textLower, strings.ToLower(p)) {
+			count++
+		}
+	}
+	return count
 }
 
 // extractMetrics pulls quantitative data from output based on agent type.
@@ -231,7 +243,7 @@ func (p *parserImpl) detectStateFlags(output string, state *AgentState) {
 // detectRateLimit checks if the agent hit an API usage limit.
 // We scan recent output (last 50 lines) to avoid stale errors triggering state.
 func (p *parserImpl) detectRateLimit(output string, agentType AgentType) bool {
-	recentOutput := getLastNLines(output, 50)
+	recentOutput := util.GetLastNLines(output, 50)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -264,7 +276,7 @@ func (p *parserImpl) detectRateLimit(output string, agentType AgentType) bool {
 // This focuses on recent output (last 20 lines) for accuracy.
 func (p *parserImpl) detectWorking(output string, agentType AgentType) bool {
 	// Check recent output - recent activity is more relevant
-	recentOutput := getLastNLines(output, 20)
+	recentOutput := util.GetLastNLines(output, 20)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -297,13 +309,12 @@ func (p *parserImpl) detectWorking(output string, agentType AgentType) bool {
 // This examines the last few lines for prompt patterns.
 func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 	// Check last lines for prompt indicators.
-	// Claude Code's TUI has a status bar (project path, bypass status, context %)
-	// that can be 5-8 lines below the prompt. Use a larger window for CC.
+	// Claude Code's TUI has a status bar (project path, bypass status, context %) that can be 5-8 lines below the prompt. Use a larger window for CC.
 	lineCount := 5
 	if agentType == AgentTypeClaudeCode {
 		lineCount = 12
 	}
-	lastLines := getLastNLines(output, lineCount)
+	lastLines := util.GetLastNLines(output, lineCount)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -312,9 +323,7 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 			return true
 		}
 		idleMatch := matchAnyRegex(lastLines, ccIdlePatterns)
-		// Active spinner overrides idle: if we see a spinner pattern in the
-		// last few lines, the agent is working even if an idle pattern also matches
-		// (e.g. from the permanent status bar or a stale prompt above the spinner).
+		// Active spinner overrides idle: if we see a spinner pattern in the last few lines, the agent is working even if an idle pattern also matches (e.g. from the permanent status bar or a stale prompt above the spinner).
 		if idleMatch && matchAnyRegex(lastLines, ccSpinnerActivePatterns) {
 			return false
 		}
@@ -347,7 +356,7 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 // detectError checks if the agent is in an error state.
 func (p *parserImpl) detectError(output string, agentType AgentType) bool {
 	// Check recent output for error patterns
-	recentOutput := getLastNLines(output, 10)
+	recentOutput := util.GetLastNLines(output, 10)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -379,7 +388,7 @@ func (p *parserImpl) detectError(output string, agentType AgentType) bool {
 // collectLimitIndicators returns the specific patterns that matched for rate limiting.
 func (p *parserImpl) collectLimitIndicators(output string, agentType AgentType) []string {
 	// Focus on recent output to match detection logic
-	recentOutput := getLastNLines(output, 50)
+	recentOutput := util.GetLastNLines(output, 50)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -412,7 +421,7 @@ func (p *parserImpl) collectLimitIndicators(output string, agentType AgentType) 
 // collectWorkIndicators returns the specific patterns that matched for working state.
 func (p *parserImpl) collectWorkIndicators(output string, agentType AgentType) []string {
 	// Focus on recent output
-	recentOutput := getLastNLines(output, 20)
+	recentOutput := util.GetLastNLines(output, 20)
 
 	switch agentType {
 	case AgentTypeClaudeCode:
@@ -486,3 +495,4 @@ func (p *parserImpl) calculateConfidence(state *AgentState) float64 {
 
 	return confidence
 }
+

@@ -92,6 +92,20 @@ func (t AgentType) IsValid() bool {
 	}
 }
 
+// NeedsDoubleEnter returns true if the agent type typically requires a double-Enter
+// sequence to recognize input (often due to internal buffering or TUI quirks).
+func (t AgentType) NeedsDoubleEnter() bool {
+	switch t {
+	case AgentTypeCodex:
+		return true
+	case AgentTypeGemini:
+		// Gemini may also benefit from double-Enter in some cases
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentState represents the parsed state from agent terminal output.
 // This is used to determine whether an agent is working, rate-limited,
 // running low on context, or idle and ready for new work.

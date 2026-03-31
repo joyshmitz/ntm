@@ -28,7 +28,8 @@ var (
 
 	// ccContextWarnings indicates the agent is running low on context.
 	// Claude Code doesn't give explicit percentages, so we rely on warning messages.
-	ccContextWarnings = []string{
+
+ccContextWarnings = []string{
 		"this conversation is getting long",
 		"context limit",
 		"context is at its limit",
@@ -350,9 +351,13 @@ var (
 
 // matchAny returns true if text contains any of the patterns (case-insensitive).
 func matchAny(text string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
 	textLower := strings.ToLower(text)
 	for _, p := range patterns {
-		if strings.Contains(textLower, strings.ToLower(p)) {
+		// Optimization: patterns are already lowercase in ntm.
+		if strings.Contains(textLower, p) {
 			return true
 		}
 	}
@@ -372,9 +377,13 @@ func matchAnyRegex(text string, patterns []*regexp.Regexp) bool {
 // collectMatches returns all patterns that matched in the text.
 func collectMatches(text string, patterns []string) []string {
 	var matches []string
+	if len(patterns) == 0 {
+		return matches
+	}
 	textLower := strings.ToLower(text)
 	for _, p := range patterns {
-		if strings.Contains(textLower, strings.ToLower(p)) {
+		// Optimization: patterns are already lowercase in ntm.
+		if strings.Contains(textLower, p) {
 			matches = append(matches, p)
 		}
 	}
@@ -421,26 +430,49 @@ func extractInt(pattern *regexp.Regexp, text string) *int64 {
 	return nil
 }
 
-// getLastNLines returns the last n lines of text.
-// If the text has fewer than n lines, returns the entire text.
-func getLastNLines(text string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) <= n {
-		return text
-	}
-	return strings.Join(lines[len(lines)-n:], "\n")
-}
-
-// stripANSICodes removes ANSI escape sequences from text.
-// This ensures pattern matching works correctly on terminal output.
+// ansiPattern matches ANSI escape sequences.
 // Matches CSI sequences (with private mode ?) and OSC sequences (title setting etc)
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\a\x1b]*(\a|\x1b\\)`)
 
+// stripANSICodes removes ANSI escape sequences and other problematic control characters.
+// This ensures pattern matching works correctly on terminal output.
 func stripANSICodes(text string) string {
-	return ansiPattern.ReplaceAllString(text, "")
+	// First, remove common ANSI escape sequences
+	clean := ansiPattern.ReplaceAllString(text, "")
+
+	// Second, handle carriage returns by keeping only the text after the last CR in each line.
+	// This simulates the terminal's behavior of overwriting lines.
+	if !strings.Contains(clean, "\r") {
+		return clean
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(clean))
+
+	start := 0
+	for {
+		newlineIdx := strings.Index(clean[start:], "\n")
+		var line string
+		if newlineIdx == -1 {
+			line = clean[start:]
+		} else {
+			line = clean[start : start+newlineIdx]
+		}
+
+		if lastCR := strings.LastIndex(line, "\r"); lastCR != -1 {
+			sb.WriteString(line[lastCR+1:])
+		} else {
+			sb.WriteString(line)
+		}
+
+		if newlineIdx == -1 {
+			break
+		}
+		sb.WriteByte('\n')
+		start += newlineIdx + 1
+	}
+
+	return sb.String()
 }
 
 // PatternSet groups all patterns for a specific agent type.
