@@ -49,17 +49,20 @@ func TestWorktreeInfo(t *testing.T) {
 
 func TestCreateForAgent_ExistingWorktreeSkipsGit(t *testing.T) {
 	t.Parallel()
-	projectDir := t.TempDir()
+	projectDir := setupWorktreeGitRepo(t)
 	manager := NewManager(projectDir, "test-session")
 
-	worktreePath := manager.worktreePath("agent-1")
-	if err := os.MkdirAll(worktreePath, 0755); err != nil {
-		t.Fatalf("failed to create worktree dir: %v", err)
+	created, err := manager.CreateForAgent("agent-1")
+	if err != nil {
+		t.Fatalf("failed to create initial worktree: %v", err)
+	}
+	if !created.Created {
+		t.Fatal("expected initial worktree creation to report Created=true")
 	}
 
 	info, err := manager.CreateForAgent("agent-1")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error for existing valid worktree: %v", err)
 	}
 	if info.Created {
 		t.Error("expected Created=false when worktree already exists")
@@ -76,6 +79,26 @@ func TestCreateForAgent_ExistingWorktreeSkipsGit(t *testing.T) {
 	expectedBranch := "ntm/test-session/agent-1"
 	if info.BranchName != expectedBranch {
 		t.Errorf("expected branch %s, got %s", expectedBranch, info.BranchName)
+	}
+}
+
+func TestCreateForAgent_ExistingInvalidDirectoryReturnsError(t *testing.T) {
+	t.Parallel()
+
+	projectDir := setupWorktreeGitRepo(t)
+	manager := NewManager(projectDir, "test-session")
+
+	worktreePath := manager.worktreePath("agent-1")
+	if err := os.MkdirAll(worktreePath, 0755); err != nil {
+		t.Fatalf("failed to create stale worktree dir: %v", err)
+	}
+
+	info, err := manager.CreateForAgent("agent-1")
+	if err == nil {
+		t.Fatal("expected error for stale pre-existing directory")
+	}
+	if info == nil || info.Error != "invalid or stale worktree" {
+		t.Fatalf("expected stale worktree error, got info=%+v err=%v", info, err)
 	}
 }
 
@@ -99,6 +122,25 @@ func TestCreateForAgent_MkdirAllFailure(t *testing.T) {
 	}
 	if info.Error == "" {
 		t.Fatal("expected error message on worktree creation failure")
+	}
+}
+
+func TestCreateForAgent_RejectsUnsafeAgentName(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	manager := NewManager(projectDir, "test-session")
+	escapedPath := filepath.Join(projectDir, ".ntm", "escaped")
+
+	info, err := manager.CreateForAgent("../escaped")
+	if err == nil {
+		t.Fatal("expected error for unsafe agent name")
+	}
+	if info == nil || !strings.Contains(info.Error, "path separators") {
+		t.Fatalf("expected path separator error, got info=%+v err=%v", info, err)
+	}
+	if _, statErr := os.Stat(escapedPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected escaped path to remain absent, stat err: %v", statErr)
 	}
 }
 
@@ -369,15 +411,9 @@ func TestCreateForAgent_BranchNameFormat(t *testing.T) {
 	projectDir := t.TempDir()
 	manager := NewManager(projectDir, "my-session")
 
-	// Pre-create the directory so it returns early without calling git
-	worktreePath := manager.worktreePath("my-agent")
-	if err := os.MkdirAll(worktreePath, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	info, err := manager.CreateForAgent("my-agent")
+	info, err := manager.buildWorktreeInfo("my-agent")
 	if err != nil {
-		t.Fatalf("CreateForAgent: %v", err)
+		t.Fatalf("buildWorktreeInfo: %v", err)
 	}
 
 	if info.BranchName != "ntm/my-session/my-agent" {
@@ -391,15 +427,9 @@ func TestCreateForAgent_PathFormat(t *testing.T) {
 	projectDir := t.TempDir()
 	manager := NewManager(projectDir, "sess")
 
-	// Pre-create to avoid git call
-	worktreePath := manager.worktreePath("agent-cc")
-	if err := os.MkdirAll(worktreePath, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	info, err := manager.CreateForAgent("agent-cc")
+	info, err := manager.buildWorktreeInfo("agent-cc")
 	if err != nil {
-		t.Fatalf("CreateForAgent: %v", err)
+		t.Fatalf("buildWorktreeInfo: %v", err)
 	}
 
 	expectedPath := manager.worktreePath("agent-cc")
@@ -582,6 +612,25 @@ func TestRemoveWorktree_NonExistent(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktree_RejectsUnsafeAgentNameWithoutDeletingSiblingPath(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	manager := NewManager(projectDir, "test-session")
+	siblingPath := filepath.Join(projectDir, ".ntm", "keep")
+	if err := os.MkdirAll(siblingPath, 0755); err != nil {
+		t.Fatalf("mkdir sibling path: %v", err)
+	}
+
+	err := manager.RemoveWorktree("../keep")
+	if err == nil {
+		t.Fatal("expected error for unsafe agent name")
+	}
+	if _, statErr := os.Stat(siblingPath); statErr != nil {
+		t.Fatalf("expected sibling path to remain after rejection, got %v", statErr)
+	}
+}
+
 func TestIsValidWorktree_NoGitFile(t *testing.T) {
 	t.Parallel()
 
@@ -630,4 +679,31 @@ func TestIsValidWorktree_WithGitFile(t *testing.T) {
 		t.Error("expected Created=true for existing valid worktree")
 	}
 	_ = info // suppress unused
+}
+
+func TestGetWorktreeForAgent_DoesNotTreatPrefixMatchedWorktreeAsValid(t *testing.T) {
+	t.Parallel()
+
+	tmp := setupWorktreeGitRepo(t)
+	manager := NewManager(tmp, "test-sess")
+
+	if _, err := manager.CreateForAgent("agent-10"); err != nil {
+		t.Fatalf("CreateForAgent agent-10: %v", err)
+	}
+
+	fakePath := manager.worktreePath("agent-1")
+	if err := os.MkdirAll(fakePath, 0755); err != nil {
+		t.Fatalf("mkdir fake worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakePath, ".git"), []byte("gitdir: fake\n"), 0644); err != nil {
+		t.Fatalf("write fake .git: %v", err)
+	}
+
+	info, err := manager.GetWorktreeForAgent("agent-1")
+	if err != nil {
+		t.Fatalf("GetWorktreeForAgent: %v", err)
+	}
+	if info.Error == "" {
+		t.Fatalf("expected prefix-matched fake worktree to be reported invalid, got %+v", info)
+	}
 }
