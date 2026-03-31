@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
@@ -3037,7 +3038,7 @@ func getInboxTally(ctx context.Context, client *agentmail.Client, projectKey, ag
 		if msg.AckRequired {
 			tally.PendingAck++
 		}
-		if msg.ReadAt != nil {
+		if !isUnreadInboxMessage(msg) {
 			continue
 		}
 		tally.Unread++
@@ -3693,29 +3694,29 @@ func containsShortForm(title, short string) bool {
 // ResolveAgentType maps agent type aliases to canonical names.
 // For example: "cc" -> "claude", "cod" -> "codex"
 func ResolveAgentType(t string) string {
-	// Trim whitespace
 	trimmed := strings.TrimSpace(t)
 
-	lower := strings.ToLower(trimmed)
-	switch lower {
-	case "cc", "claude-code", "claude_code", "claude":
+	switch agent.AgentType(trimmed).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "claude"
-	case "cod", "codex-cli", "codex_cli", "codex":
+	case agent.AgentTypeCodex:
 		return "codex"
-	case "gmi", "gemini-cli", "gemini_cli", "gemini":
+	case agent.AgentTypeGemini:
 		return "gemini"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return "cursor"
-	case "windsurf", "ws":
+	case agent.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		return "aider"
-	case "ollama":
+	case agent.AgentTypeOllama:
 		return "ollama"
-	case "user":
+	case agent.AgentTypeUser:
 		return "user"
+	case agent.AgentTypeUnknown:
+		return "unknown"
 	default:
-		return lower
+		return strings.ToLower(trimmed)
 	}
 }
 
@@ -3994,17 +3995,11 @@ func detectState(lines []string, title string) string {
 // translateAgentTypeForStatus converts long agent type names to short forms
 // expected by the status package patterns.
 func translateAgentTypeForStatus(agentType string) string {
-	switch agentType {
-	case "claude":
-		return "cc"
-	case "codex":
-		return "cod"
-	case "gemini":
-		return "gmi"
-	case "unknown":
+	switch canonical := agent.AgentType(agentType).Canonical(); canonical {
+	case "", agent.AgentTypeUnknown:
 		return ""
 	default:
-		return agentType
+		return string(canonical)
 	}
 }
 
@@ -4110,18 +4105,17 @@ func fetchAgentMailData(projectKey string) (*SnapshotAgentMail, []agentmail.Agen
 		if err != nil {
 			continue
 		}
-		unread := len(inbox)
+		unread := 0
 		pendingAck := 0
 		for _, msg := range inbox {
 			if msg.AckRequired {
 				pendingAck++
 			}
-			threadKey := ""
-			if msg.ThreadID != nil && *msg.ThreadID != "" {
-				threadKey = *msg.ThreadID
-			} else {
-				threadKey = fmt.Sprintf("%d", msg.ID)
+			if !isUnreadInboxMessage(msg) {
+				continue
 			}
+			unread++
+			threadKey := inboxThreadKey(msg)
 			threadSet[threadKey] = struct{}{}
 		}
 		summary.TotalUnread += unread
@@ -8391,7 +8385,9 @@ func buildCorrelationGraph() *GraphCorrelation {
 				if msg.CreatedTS.After(thread.LastActivity) {
 					thread.LastActivity = msg.CreatedTS.Time
 				}
-				thread.Unread++
+				if isUnreadInboxMessage(msg) {
+					thread.Unread++
+				}
 				corr.MailSummary[tid] = thread
 
 				assign := assignmentByAgent[a.Name]
@@ -9283,11 +9279,24 @@ func countInbox(ctx context.Context, client *agentmail.Client, projectKey, agent
 	}
 	count := 0
 	for _, msg := range msgs {
-		if msg.ReadAt == nil {
+		if isUnreadInboxMessage(msg) {
 			count++
 		}
 	}
 	return count
+}
+
+func isUnreadInboxMessage(msg agentmail.InboxMessage) bool {
+	return msg.ReadAt == nil
+}
+
+func inboxThreadKey(msg agentmail.InboxMessage) string {
+	if msg.ThreadID != nil {
+		if threadID := strings.TrimSpace(*msg.ThreadID); threadID != "" {
+			return threadID
+		}
+	}
+	return fmt.Sprintf("%d", msg.ID)
 }
 
 // ContextOutput is the structured output for --robot-context
@@ -9752,18 +9761,9 @@ func generateActivityHints(available, busy, problem []string, summary ActivitySu
 	return hints
 }
 
-// normalizeAgentType normalizes agent type aliases.
+// normalizeAgentType normalizes agent type aliases via the shared resolver.
 func normalizeAgentType(t string) string {
-	switch strings.ToLower(t) {
-	case "cc", "claude-code", "claude":
-		return "claude"
-	case "cod", "codex-cli", "codex":
-		return "codex"
-	case "gmi", "gemini-cli", "gemini":
-		return "gemini"
-	default:
-		return strings.ToLower(t)
-	}
+	return ResolveAgentType(t)
 }
 
 // ============================================================================

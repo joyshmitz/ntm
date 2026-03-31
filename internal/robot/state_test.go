@@ -195,13 +195,20 @@ func TestTranslateAgentTypeForStatus(t *testing.T) {
 		expected string
 	}{
 		{"claude", "cc"},
+		{" Claude ", "cc"},
+		{"claude_code", "cc"},
 		{"codex", "cod"},
+		{"CODEX", "cod"},
+		{"codex-cli", "cod"},
 		{"gemini", "gmi"},
+		{" GemInI ", "gmi"},
+		{"gemini_cli", "gmi"},
 		{"unknown", ""},
 		{"", ""},
 		{"user", "user"},
 		{"cursor", "cursor"},
 		{"windsurf", "windsurf"},
+		{"ws", "windsurf"},
 		{"aider", "aider"},
 	}
 

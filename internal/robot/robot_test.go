@@ -1910,6 +1910,7 @@ func TestResolveAgentType(t *testing.T) {
 		// Codex aliases
 		{"codex", "codex"},
 		{"cod", "codex"},
+		{"openai-codex", "codex"},
 		{"codex_cli", "codex"},
 		{"codex-cli", "codex"},
 		{"CODEX", "codex"},
@@ -1918,6 +1919,7 @@ func TestResolveAgentType(t *testing.T) {
 		// Gemini aliases
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
+		{"google-gemini", "gemini"},
 		{"gemini_cli", "gemini"},
 		{"gemini-cli", "gemini"},
 		{"GEMINI", "gemini"},
@@ -5487,25 +5489,27 @@ func TestGenerateTailHints_DeterministicOutput(t *testing.T) {
 
 func TestTranslateAgentTypeForStatus_Coverage(t *testing.T) {
 	// Test that the translation function handles various inputs
-	// Note: The function is case-sensitive and only handles lowercase canonical forms
+	// Aliases, casing drift, and surrounding whitespace should all normalize cleanly.
 	tests := []struct {
 		input    string
 		expected string
 	}{
-		// Canonical lowercase forms get translated
+		// Canonical and long-form aliases get translated
 		{"claude", "cc"},
+		{" Claude ", "cc"},
+		{"claude_code", "cc"},
 		{"codex", "cod"},
+		{"CODEX", "cod"},
+		{"codex-cli", "cod"},
 		{"gemini", "gmi"}, // Note: "gmi" not "gem"
+		{" GemInI ", "gmi"},
+		{"gemini_cli", "gmi"},
+		{"ws", "windsurf"},
 		// "unknown" is special-cased to return empty string
 		{"unknown", ""},
-		// Everything else returns input unchanged (default case)
-		{"Claude", "Claude"},
-		{"CLAUDE", "CLAUDE"},
-		{"Codex", "Codex"},
-		{"CODEX", "CODEX"},
-		{"Gemini", "Gemini"},
+		// Unrecognized values return unchanged (after the agent Canonical helper trims input)
 		{"gpt", "gpt"},       // Passthrough
-		{"GPT", "GPT"},       // Passthrough
+		{" GPT ", "GPT"},     // Passthrough with trim
 		{"user", "user"},     // Passthrough
 		{"shell", "shell"},   // Passthrough
 		{"", ""},             // Empty returns empty
@@ -5667,13 +5671,21 @@ func TestGetInboxTallyAndCountInboxIgnoreReadMessages(t *testing.T) {
 
 	readAt := &agentmail.FlexTime{Time: time.Now()}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req agentmail.JSONRPCRequest
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      interface{}     `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 
-		params, _ := req.Params.(map[string]interface{})
-		urgentOnly, _ := params["urgent_only"].(bool)
+		var params agentmail.ToolCallParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode tool params: %v", err)
+		}
+		urgentOnly, _ := params.Arguments["urgent_only"].(bool)
 
 		var messages []agentmail.InboxMessage
 		if urgentOnly {
@@ -5716,6 +5728,236 @@ func TestGetInboxTallyAndCountInboxIgnoreReadMessages(t *testing.T) {
 	}
 	if got := countInbox(ctx, client, "/data/projects/ntm", "BlueLake", true); got != 1 {
 		t.Fatalf("countInbox(urgent) = %d, want 1", got)
+	}
+}
+
+func TestFetchAgentMailDataIgnoresReadMessagesForUnreadCounts(t *testing.T) {
+	projectKey := t.TempDir()
+	threadRead := "bd-read"
+	threadUnread := "bd-unread"
+	readAt := &agentmail.FlexTime{Time: time.Now()}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      interface{}     `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		switch req.Method {
+		case "tools/call":
+			var params struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			}
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatalf("decode tool params: %v", err)
+			}
+			switch params.Name {
+			case "health_check":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"status": "ok",
+					},
+				})
+			case "ensure_project":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"id":        1,
+						"slug":      "ntm",
+						"human_key": projectKey,
+					},
+				})
+			case "fetch_inbox":
+				result, err := json.Marshal([]agentmail.InboxMessage{
+					{ID: 1, Subject: "read message", ThreadID: &threadRead, ReadAt: readAt},
+					{ID: 2, Subject: "unread message", ThreadID: &threadUnread},
+				})
+				if err != nil {
+					t.Fatalf("marshal inbox: %v", err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  json.RawMessage(result),
+				})
+			default:
+				t.Fatalf("unexpected tool call: %s", params.Name)
+			}
+		case "resources/read":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"contents": []map[string]interface{}{
+						{
+							"text": `[{"name":"BlueLake","program":"codex","model":"gpt-5"}]`,
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	summary, agents, statsMap := fetchAgentMailData(projectKey)
+	if summary == nil {
+		t.Fatal("expected summary")
+	}
+	if summary.TotalUnread != 1 {
+		t.Fatalf("TotalUnread = %d, want 1", summary.TotalUnread)
+	}
+	if summary.ThreadsKnown != 1 {
+		t.Fatalf("ThreadsKnown = %d, want 1", summary.ThreadsKnown)
+	}
+	if got := summary.Agents["BlueLake"].Unread; got != 1 {
+		t.Fatalf("summary.Agents[BlueLake].Unread = %d, want 1", got)
+	}
+	if len(agents) != 1 || agents[0].Name != "BlueLake" {
+		t.Fatalf("unexpected agents: %+v", agents)
+	}
+	if got := statsMap["BlueLake"].Unread; got != 1 {
+		t.Fatalf("statsMap[BlueLake].Unread = %d, want 1", got)
+	}
+}
+
+func TestBuildCorrelationGraphMailSummaryIgnoresReadMessagesForUnreadCounts(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectKey := t.TempDir()
+	if err := os.Chdir(projectKey); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	t.Setenv("PATH", "")
+
+	threadRead := "bd-read"
+	threadUnread := "bd-unread"
+	readAt := &agentmail.FlexTime{Time: time.Now()}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      interface{}     `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		switch req.Method {
+		case "tools/call":
+			var params struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			}
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatalf("decode tool params: %v", err)
+			}
+			switch params.Name {
+			case "health_check":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"status": "ok",
+					},
+				})
+			case "ensure_project":
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"id":        1,
+						"slug":      "ntm",
+						"human_key": projectKey,
+					},
+				})
+			case "fetch_inbox":
+				result, err := json.Marshal([]agentmail.InboxMessage{
+					{ID: 1, Subject: "read thread", ThreadID: &threadRead, ReadAt: readAt, CreatedTS: agentmail.FlexTime{Time: time.Now().Add(-1 * time.Minute)}},
+					{ID: 2, Subject: "unread thread", ThreadID: &threadUnread, CreatedTS: agentmail.FlexTime{Time: time.Now()}},
+				})
+				if err != nil {
+					t.Fatalf("marshal inbox: %v", err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result":  json.RawMessage(result),
+				})
+			case "summarize_thread":
+				var threadID string
+				if raw, ok := params.Arguments["thread_id"].(string); ok {
+					threadID = raw
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"thread_id": threadID,
+						"summary": map[string]interface{}{
+							"thread_id":    threadID,
+							"participants": []string{"BlueLake"},
+							"key_points":   []string{},
+							"action_items": []string{},
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected tool call: %s", params.Name)
+			}
+		case "resources/read":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"contents": []map[string]interface{}{
+						{
+							"text": `[{"name":"BlueLake","program":"codex","model":"gpt-5"}]`,
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	corr := buildCorrelationGraph()
+	if corr == nil {
+		t.Fatal("expected correlation graph")
+	}
+	if got := corr.MailSummary[threadRead].Unread; got != 0 {
+		t.Fatalf("MailSummary[%s].Unread = %d, want 0", threadRead, got)
+	}
+	if got := corr.MailSummary[threadUnread].Unread; got != 1 {
+		t.Fatalf("MailSummary[%s].Unread = %d, want 1", threadUnread, got)
 	}
 }
 

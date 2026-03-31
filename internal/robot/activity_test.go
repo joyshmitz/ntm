@@ -1060,15 +1060,19 @@ func TestNormalizeAgentType(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"Claude", "claude"},
+		{" Claude ", "claude"},
 		{"cc", "claude"},
 		{"claude-code", "claude"},
 		{"codex", "codex"},
+		{" CODEX ", "codex"},
 		{"cod", "codex"},
 		{"codex-cli", "codex"},
 		{"gemini", "gemini"},
+		{" Gemini ", "gemini"},
 		{"gmi", "gemini"},
 		{"gemini-cli", "gemini"},
 		{"cursor", "cursor"},
+		{" ws ", "windsurf"},
 		{"Unknown", "unknown"},
 	}
 
@@ -1693,7 +1697,11 @@ func TestNormalizeAgentTypeEdgeCases(t *testing.T) {
 		{"CC", "claude"},
 		{"COD", "codex"},
 		{"GMI", "gemini"},
-		{"  claude  ", "  claude  "}, // Whitespace not trimmed - passthrough
+		{"  claude  ", "claude"},
+		{"  Codex  ", "codex"},
+		{"  gemini  ", "gemini"},
+		{"  ws  ", "windsurf"},
+		{"  Unknown  ", "unknown"},
 		{"user", "user"},
 	}
 
