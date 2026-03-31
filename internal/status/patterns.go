@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // ansiEscapeRegex matches ANSI escape sequences for stripping
@@ -85,6 +87,8 @@ func StripANSI(s string) string {
 // IsPromptLine checks if a line looks like a prompt.
 // agentType can be empty to match any agent type.
 func IsPromptLine(line string, agentType string) bool {
+	agentType = string(agent.AgentType(agentType).Canonical())
+
 	// Strip ANSI codes first
 	line = StripANSI(line)
 	line = strings.TrimSpace(line)
@@ -150,6 +154,8 @@ var knownAgentPromptPrefixes = regexp.MustCompile(`(?i)^(claude|codex|gemini|cur
 // It checks up to 3 non-empty lines from the end for prompt patterns.
 // This window allows detecting idle state even when there's trailing output.
 func DetectIdleFromOutput(output string, agentType string) bool {
+	agentType = string(agent.AgentType(agentType).Canonical())
+
 	// Strip ANSI first for cleaner processing
 	clean := StripANSI(output)
 
@@ -207,7 +213,7 @@ func AddPromptPattern(agentType string, pattern string, description string) erro
 	defer promptPatternsMu.Unlock()
 
 	promptPatterns = append(promptPatterns, PromptPattern{
-		AgentType:   agentType,
+		AgentType:   string(agent.AgentType(agentType).Canonical()),
 		Regex:       regex,
 		Description: description,
 	})

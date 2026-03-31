@@ -37,24 +37,25 @@ func (d *UnifiedDetector) Config() DetectorConfig {
 // Analyze determines status from provided output and metadata without calling tmux.
 // This allows reusing output captured for other purposes (e.g. live view).
 func (d *UnifiedDetector) Analyze(paneID, paneName, agentType string, output string, lastActivity time.Time) AgentStatus {
+	normalizedAgentType := string(agent.AgentType(agentType).Canonical())
 	status := AgentStatus{
 		PaneID:     paneID,
 		PaneName:   paneName,
-		AgentType:  agentType,
+		AgentType:  normalizedAgentType,
 		LastActive: lastActivity,
 		UpdatedAt:  time.Now(),
 		State:      StateUnknown,
 		LastOutput: truncateOutput(output, d.config.OutputPreviewLength),
 	}
 
-	state, errType := d.determineState(output, agentType, lastActivity)
+	state, errType := d.determineState(output, normalizedAgentType, lastActivity)
 	status.State = state
 	status.ErrorType = errType
 
 	// Extract metrics using agent parser
-	if isKnownAgentType(agentType) {
+	if isKnownAgentType(normalizedAgentType) {
 		parser := agent.NewParser()
-		if parsed, err := parser.ParseWithHint(output, agent.AgentType(agentType)); err == nil {
+		if parsed, err := parser.ParseWithHint(output, agent.AgentType(normalizedAgentType)); err == nil {
 			if parsed.ContextRemaining != nil {
 				status.ContextUsage = 100.0 - *parsed.ContextRemaining
 			}
@@ -135,11 +136,14 @@ func (d *UnifiedDetector) determineState(output, agentType string, lastActivity 
 // isKnownAgentType returns true for AI agent types that have predictable
 // working/idle behavior (cc=Claude Code, cod=Codex, gmi=Gemini).
 func isKnownAgentType(agentType string) bool {
-	switch agentType {
-	case string(agent.AgentTypeClaudeCode),
-		string(agent.AgentTypeCodex),
-		string(agent.AgentTypeGemini),
-		"cursor", "windsurf", "aider":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama:
 		return true
 	default:
 		return false
@@ -414,9 +418,10 @@ func FilterByState(statuses []AgentStatus, state AgentState) []AgentStatus {
 
 // FilterByAgentType returns only statuses for the given agent type
 func FilterByAgentType(statuses []AgentStatus, agentType string) []AgentStatus {
+	normalizedAgentType := string(agent.AgentType(agentType).Canonical())
 	var filtered []AgentStatus
 	for _, s := range statuses {
-		if s.AgentType == agentType {
+		if string(agent.AgentType(s.AgentType).Canonical()) == normalizedAgentType {
 			filtered = append(filtered, s)
 		}
 	}

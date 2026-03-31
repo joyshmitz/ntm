@@ -51,17 +51,21 @@ func TestIsPromptLine(t *testing.T) {
 	}{
 		// Claude prompts
 		{name: "claude prompt lowercase", line: "claude>", agentType: "cc", expected: true},
+		{name: "claude long-form alias", line: "claude>", agentType: "claude", expected: true},
 		{name: "claude prompt with space", line: "claude> ", agentType: "cc", expected: true},
 		{name: "Claude prompt uppercase", line: "Claude>", agentType: "cc", expected: true},
 
 		// Codex prompts
 		{name: "codex prompt", line: "codex>", agentType: "cod", expected: true},
+		{name: "codex long-form alias", line: "codex>", agentType: " CodEx ", expected: true},
 		{name: "codex chevron prompt", line: "› Write tests for @filename", agentType: "cod", expected: true},
 		// Shell prompts should NOT match for known agent types - a shell $ in cod/cc/gmi means agent exited
 		{name: "shell prompt for codex means exited", line: "user@host:~$", agentType: "cod", expected: false},
+		{name: "shell prompt for codex alias means exited", line: "user@host:~$", agentType: "codex", expected: false},
 
 		// Gemini prompts
 		{name: "gemini prompt", line: "gemini>", agentType: "gmi", expected: true},
+		{name: "gemini long-form alias", line: "gemini>", agentType: "gemini", expected: true},
 		{name: "Gemini prompt", line: "Gemini>", agentType: "gmi", expected: true},
 
 		// User shell prompts
@@ -124,10 +128,22 @@ func TestDetectIdleFromOutput(t *testing.T) {
 			expected:  false, // shell prompt in cod pane means agent exited, not idle at codex> prompt
 		},
 		{
+			name:      "codex alias at shell prompt still means exited not idle",
+			output:    "Command completed\nuser@host:~$",
+			agentType: "codex",
+			expected:  false,
+		},
+		{
 			name:      "codex at codex prompt",
 			output:    "Command completed\ncodex>",
 			agentType: "cod",
 			expected:  true, // actual codex prompt means idle
+		},
+		{
+			name:      "codex alias at codex prompt",
+			output:    "Command completed\ncodex>",
+			agentType: " CodEx ",
+			expected:  true,
 		},
 		{
 			name:      "codex at chevron prompt",

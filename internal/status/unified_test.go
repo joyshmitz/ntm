@@ -191,6 +191,16 @@ func TestFilterByAgentType(t *testing.T) {
 	if len(gemini) != 0 {
 		t.Errorf("Expected 0 gemini agents, got %d", len(gemini))
 	}
+
+	claudeAlias := FilterByAgentType(statuses, "claude")
+	if len(claudeAlias) != 2 {
+		t.Errorf("Expected 2 claude alias matches, got %d", len(claudeAlias))
+	}
+
+	codexAlias := FilterByAgentType(statuses, "codex")
+	if len(codexAlias) != 1 {
+		t.Errorf("Expected 1 codex alias match, got %d", len(codexAlias))
+	}
 }
 
 func TestHasErrors(t *testing.T) {
@@ -416,6 +426,14 @@ func TestAddPromptPattern(t *testing.T) {
 	// Verify the pattern works
 	if !IsPromptLine("custom> ", "custom") {
 		t.Error("Custom prompt pattern should match 'custom> '")
+	}
+
+	err = AddPromptPattern("claude", `claude-long>\s*$`, "Claude alias prompt")
+	if err != nil {
+		t.Fatalf("AddPromptPattern long-form alias failed: %v", err)
+	}
+	if !IsPromptLine("claude-long> ", "cc") {
+		t.Error("Claude alias prompt should match canonical short form agent type")
 	}
 
 	// Test invalid regex
@@ -927,11 +945,15 @@ func TestIsKnownAgentType(t *testing.T) {
 	}{
 		// Known AI agent types
 		{"cc", true},
+		{"claude", true},
 		{"cod", true},
+		{" CodEx ", true},
 		{"gmi", true},
+		{"gemini", true},
 		{"cursor", true},
 		{"windsurf", true},
 		{"aider", true},
+		{"ollama", true},
 		// Unknown/shell types
 		{"user", false},
 		{"", false},
@@ -947,5 +969,28 @@ func TestIsKnownAgentType(t *testing.T) {
 				t.Errorf("isKnownAgentType(%q) = %v, want %v", tt.agentType, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestAnalyze_NormalizesAliasAgentTypeForMetrics(t *testing.T) {
+	d := NewDetector()
+	output := `Processing your request...
+Token usage: total=150,000 input=140,000 output=10,000
+47% context left · ? for shortcuts
+codex> `
+
+	status := d.Analyze("pane-1", "pane title", " CodEx ", output, time.Now().Add(-10*time.Second))
+
+	if status.AgentType != "cod" {
+		t.Fatalf("AgentType = %q, want %q", status.AgentType, "cod")
+	}
+	if status.State != StateIdle {
+		t.Fatalf("State = %v, want %v", status.State, StateIdle)
+	}
+	if status.ContextUsage != 53.0 {
+		t.Fatalf("ContextUsage = %.1f, want 53.0", status.ContextUsage)
+	}
+	if status.TokensUsed != 150000 {
+		t.Fatalf("TokensUsed = %d, want 150000", status.TokensUsed)
 	}
 }
