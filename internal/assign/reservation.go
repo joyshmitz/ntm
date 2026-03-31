@@ -67,7 +67,7 @@ func ExtractFilePaths(title, description string) []string {
 	var paths []string
 	seen := make(map[string]bool)
 
-	// Extract file paths
+	// Extract file paths first
 	for _, match := range filePathRegex.FindAllStringSubmatch(combined, -1) {
 		if len(match) > 1 && isValidPath(match[1]) && !seen[match[1]] {
 			paths = append(paths, match[1])
@@ -85,10 +85,18 @@ func ExtractFilePaths(title, description string) []string {
 
 	// Extract directory paths
 	for _, match := range dirPathRegex.FindAllStringSubmatch(combined, -1) {
-		if len(match) > 1 && isValidPath(match[1]) && !seen[match[1]] {
-			// Convert directory to glob for all files
-			paths = append(paths, match[1]+"/**/*")
-			seen[match[1]+"/**/*"] = true
+		if len(match) > 1 {
+			dir := match[1]
+			// Trim trailing slash if present
+			dir = strings.TrimSuffix(dir, "/")
+			if isValidPath(dir) && !seen[dir] {
+				glob := dir + "/**/*"
+				if !seen[glob] {
+					paths = append(paths, glob)
+					seen[glob] = true
+				}
+				seen[dir] = true
+			}
 		}
 	}
 
@@ -105,23 +113,31 @@ func ExtractFilePaths(title, description string) []string {
 
 // isValidPath checks if a path looks valid (not a URL, version, etc.)
 func isValidPath(path string) bool {
-	// Exclude URLs
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+	// Exclude URLs and domain names
+	if strings.Contains(path, "://") || strings.HasPrefix(path, "www.") {
 		return false
 	}
 
-	// Exclude version-like strings (e.g., 1.2.3)
-	if versionLikeRegex.MatchString(path) {
+	// Exclude version-like strings (e.g., 1.2.3, v1.2.3)
+	if versionLikeRegex.MatchString(path) || strings.HasPrefix(strings.ToLower(path), "v") && versionLikeRegex.MatchString(path[1:]) {
 		return false
 	}
 
-	// Exclude common non-path patterns
+	// Exclude common non-path patterns and domain-like patterns
 	excludePatterns := []string{
-		"e.g.", "i.e.", "etc.", "fig.", "ref.",
+		"e.g.", "i.e.", "etc.", "fig.", "ref.", "http", "https", ".com", ".net", ".org", ".io", ".gov", ".edu",
 	}
 	lowerPath := strings.ToLower(path)
 	for _, pattern := range excludePatterns {
-		if lowerPath == pattern || strings.HasSuffix(lowerPath, pattern) {
+		if lowerPath == pattern || strings.HasSuffix(lowerPath, pattern) || strings.HasPrefix(lowerPath, pattern) && strings.Contains(pattern, "http") {
+			return false
+		}
+	}
+
+	// Exclude obvious non-paths (e.g. sentences ending in dot)
+	if strings.HasSuffix(path, ".") || strings.HasPrefix(path, ".") && !strings.Contains(path, "/") && len(path) < 3 {
+		// Matches "." or ".." but allows ".github"
+		if path == "." || path == ".." {
 			return false
 		}
 	}
@@ -136,14 +152,25 @@ func isValidPath(path string) bool {
 			if validExtRegex.MatchString(ext) {
 				// First part should have content or be a dotfile
 				if len(parts[0]) > 0 || strings.Contains(path, "/") {
-					return true
+					// Additional check: exclude common top-level domains that look like extensions
+					tlds := []string{"com", "net", "org", "io", "gov", "edu", "me", "ai", "app", "dev"}
+					isTLD := false
+					for _, tld := range tlds {
+						if ext == tld && !strings.Contains(path, "/") {
+							isTLD = true
+							break
+						}
+					}
+					if !isTLD {
+						return true
+					}
 				}
 			}
 		}
 	}
 
 	// Paths with slashes are valid
-	return strings.Contains(path, "/")
+	return strings.Contains(path, "/") && !strings.Contains(path, " ")
 }
 
 // ReserveForBead reserves file paths mentioned in a bead for an agent.

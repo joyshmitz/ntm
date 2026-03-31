@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // ErrorPattern defines a pattern for error detection in agent output
@@ -92,12 +94,7 @@ func DetectErrorInOutput(output string) ErrorType {
 	output = StripANSI(output)
 
 	// Check recent output only (last 50 lines) for performance
-	lines := strings.Split(output, "\n")
-	start := len(lines) - 50
-	if start < 0 {
-		start = 0
-	}
-	recent := strings.Join(lines[start:], "\n")
+	recent := util.GetLastNLines(output, 50)
 
 	// Patterns are ordered by priority, so first match wins
 	errorPatternsMu.RLock()
@@ -120,12 +117,7 @@ func DetectErrorInOutput(output string) ErrorType {
 func DetectAllErrorsInOutput(output string) []ErrorType {
 	output = StripANSI(output)
 
-	lines := strings.Split(output, "\n")
-	start := len(lines) - 50
-	if start < 0 {
-		start = 0
-	}
-	recent := strings.Join(lines[start:], "\n")
+	recent := util.GetLastNLines(output, 50)
 
 	seen := make(map[ErrorType]bool)
 	var errors []ErrorType

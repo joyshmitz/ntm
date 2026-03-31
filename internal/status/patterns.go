@@ -60,6 +60,9 @@ var promptPatterns = []PromptPattern{
 	{AgentType: "aider", Regex: regexp.MustCompile(`(?i)aider>?\s*$`), Description: "Aider prompt"},
 	{AgentType: "aider", Regex: regexp.MustCompile(`>\s*$`), Description: "Aider simple prompt"},
 
+	// Ollama patterns
+	{AgentType: "ollama", Regex: regexp.MustCompile(`(?i)ollama>?\s*$`), Description: "Ollama prompt"},
+
 	// Generic shell prompts (for user panes and fallback)
 	// Match simple prompts like "$" or "user@host:~$ "
 	// Avoid matching sentences like "cost is $" by disallowing spaces in the prefix
@@ -136,11 +139,12 @@ var knownAgentTypes = map[string]bool{
 	"cursor":   true,
 	"windsurf": true,
 	"aider":    true,
+	"ollama":   true,
 }
 
 // knownAgentPromptPrefixes matches prompts that belong to specific agent types.
 // When agentType is empty, the generic ">" pattern should not match these.
-var knownAgentPromptPrefixes = regexp.MustCompile(`(?i)^(claude|codex|gemini|cursor|windsurf|aider)>\s*$`)
+var knownAgentPromptPrefixes = regexp.MustCompile(`(?i)^(claude|codex|gemini|cursor|windsurf|aider|ollama)>\s*$`)
 
 // DetectIdleFromOutput analyzes output to determine if agent is idle.
 // It checks up to 3 non-empty lines from the end for prompt patterns.

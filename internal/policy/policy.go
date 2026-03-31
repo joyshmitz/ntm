@@ -109,28 +109,23 @@ func DefaultPolicy() *Policy {
 		},
 		// Allowed patterns checked FIRST - explicitly safe commands
 		Allowed: []Rule{
-			{Pattern: `git\s+push\s+.*--force-with-lease`, Reason: "Force with lease is safer than force push"},
+			{Pattern: `git\s+push\s+.*--force-with-lease`, Reason: "Safe force push (prevents overwriting others' work)"},
 			{Pattern: `git\s+reset\s+--soft`, Reason: "Soft reset preserves changes"},
 			{Pattern: `git\s+reset\s+HEAD~?\d*$`, Reason: "Mixed reset preserves working directory"},
 		},
 		// Blocked patterns - dangerous commands (checked after allowed)
 		Blocked: []Rule{
 			{Pattern: `git\s+reset\s+--hard`, Reason: "Hard reset loses uncommitted changes"},
-			{Pattern: `git\s+clean\s+-fd`, Reason: "Removes untracked files permanently"},
-			// Match --force followed by space or end-of-string (not --force-with-lease)
-			// The allowed pattern for --force-with-lease takes precedence
-			{Pattern: `git\s+push\s+.*--force(\s|$)`, Reason: "Force push can overwrite remote history"},
-			{Pattern: `git\s+push\s+(.*\s)?-f(\s|$)`, Reason: "Force push can overwrite remote history"},
-			{Pattern: `rm\s+-rf\s+/$`, Reason: "Recursive delete of root is catastrophic"},
-			{Pattern: `rm\s+-rf\s+~`, Reason: "Recursive delete of home directory"},
-			{Pattern: `rm\s+-rf\s+\*`, Reason: "Recursive delete of everything in current directory"},
+			{Pattern: `git\s+clean(\s+.*?)?\s(-[\w]*f[\w]*|--force)(\s|$)`, Reason: "Removes untracked files permanently"},
+			{Pattern: `git\s+push(\s+.*?)?\s(-[\w]*f[\w]*|--force)(\s|$)`, Reason: "Force push can overwrite remote history"},
+			{Pattern: `git\s+push(\s+.*?)?\s(\+|:\+)`, Reason: "Force push via +refspec can overwrite remote history"},
+			{Pattern: `rm\s+-rf\s+(/|~|\*|\.|\.\.)(/|\s|$)`, Reason: "Critical recursive deletion"},
 			{Pattern: `git\s+branch\s+-D`, Reason: "Force delete branch loses unmerged work"},
-			{Pattern: `git\s+stash\s+drop`, Reason: "Dropping stash loses saved work"},
-			{Pattern: `git\s+stash\s+clear`, Reason: "Clearing all stashes loses saved work"},
+			{Pattern: `git\s+stash\s+(drop|clear)`, Reason: "Losing stashed work"},
 		},
 		// Approval required - potentially dangerous commands
 		ApprovalRequired: []Rule{
-			{Pattern: `git\s+rebase\s+-i`, Reason: "Interactive rebase rewrites history"},
+			{Pattern: `git\s+rebase(\s+.*?)?\s(-i|--interactive)`, Reason: "Interactive rebase rewrites history"},
 			{Pattern: `git\s+commit\s+--amend`, Reason: "Amending rewrites history"},
 			{Pattern: `rm\s+-rf\s+\S`, Reason: "Recursive force delete"},
 			{Pattern: `force_release`, Reason: "Force release another agent's reservation", SLB: true},
@@ -140,6 +135,15 @@ func DefaultPolicy() *Policy {
 	// and should always be valid. Any patterns that fail will just not match.
 	_ = p.compile()
 	return p
+}
+
+// ToYAML returns the policy serialized as YAML.
+func (p *Policy) ToYAML() (string, error) {
+	data, err := yaml.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // compile compiles all regex patterns in the policy.

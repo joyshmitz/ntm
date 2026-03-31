@@ -99,23 +99,21 @@ var Aliases = map[string]string{
 }
 
 var (
-	registryMu     sync.RWMutex
-	sortedKeys     []string
-	sortedKeysOnce sync.Once
+	registryMu sync.RWMutex
+	sortedKeys []string
 )
 
-// getSortedKeys returns context limit keys sorted by length descending
-// for longest-prefix matching. Caller must hold registryMu.RLock or Lock.
-func getSortedKeys() []string {
-	sortedKeysOnce.Do(func() {
-		for k := range ContextLimits {
-			sortedKeys = append(sortedKeys, k)
-		}
-		sort.Slice(sortedKeys, func(i, j int) bool {
-			return len(sortedKeys[i]) > len(sortedKeys[j])
-		})
+// rebuildSortedKeysLocked rebuilds the sortedKeys slice.
+// Must be called with registryMu.Lock() held.
+func rebuildSortedKeysLocked() {
+	keys := make([]string, 0, len(ContextLimits))
+	for k := range ContextLimits {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
 	})
-	return sortedKeys
+	sortedKeys = keys
 }
 
 // ApplyOverrides merges user-provided context limit overrides into the
@@ -127,12 +125,13 @@ func ApplyOverrides(overrides map[string]int) {
 	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
+	
 	for model, limit := range overrides {
 		ContextLimits[strings.ToLower(model)] = limit
 	}
-	// Reset sorted keys cache so new keys are included in prefix matching
-	sortedKeysOnce = sync.Once{}
-	sortedKeys = nil
+	
+	// Force rebuild of sorted keys cache
+	rebuildSortedKeysLocked()
 }
 
 // GetContextLimit returns the context window limit for a model identifier.
@@ -148,6 +147,16 @@ func GetContextLimit(model string) int {
 	}
 
 	registryMu.RLock()
+	// Check if sortedKeys needs initialization
+	if sortedKeys == nil {
+		registryMu.RUnlock()
+		registryMu.Lock()
+		if sortedKeys == nil {
+			rebuildSortedKeysLocked()
+		}
+		registryMu.Unlock()
+		registryMu.RLock()
+	}
 	defer registryMu.RUnlock()
 
 	lower := strings.ToLower(model)
@@ -178,7 +187,7 @@ func GetContextLimit(model string) int {
 	}
 
 	// 4. Longest-prefix match
-	for _, key := range getSortedKeys() {
+	for _, key := range sortedKeys {
 		if strings.HasPrefix(lower, key) || strings.HasPrefix(stripped, key) {
 			return ContextLimits[key]
 		}

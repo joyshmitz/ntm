@@ -63,6 +63,54 @@ var DefaultCapabilities = map[tmux.AgentType]map[TaskType]float64{
 		TaskChore:         0.75,
 		TaskEpic:          0.75,
 	},
+	tmux.AgentCursor: {
+		TaskRefactor:      0.85,
+		TaskAnalysis:      0.85,
+		TaskDocs:          0.80,
+		TaskDocumentation: 0.80,
+		TaskBug:           0.85,
+		TaskFeature:       0.90,
+		TaskTesting:       0.85,
+		TaskTask:          0.85,
+		TaskChore:         0.80,
+		TaskEpic:          0.70,
+	},
+	tmux.AgentWindsurf: {
+		TaskRefactor:      0.85,
+		TaskAnalysis:      0.85,
+		TaskDocs:          0.80,
+		TaskDocumentation: 0.80,
+		TaskBug:           0.85,
+		TaskFeature:       0.90,
+		TaskTesting:       0.85,
+		TaskTask:          0.85,
+		TaskChore:         0.80,
+		TaskEpic:          0.70,
+	},
+	tmux.AgentAider: {
+		TaskRefactor:      0.80,
+		TaskAnalysis:      0.75,
+		TaskDocs:          0.70,
+		TaskDocumentation: 0.70,
+		TaskBug:           0.95, // Excellent at editing/fixing
+		TaskFeature:       0.95,
+		TaskTesting:       0.90,
+		TaskTask:          0.90,
+		TaskChore:         0.85,
+		TaskEpic:          0.60,
+	},
+	tmux.AgentOllama: {
+		TaskRefactor:      0.70,
+		TaskAnalysis:      0.75,
+		TaskDocs:          0.75,
+		TaskDocumentation: 0.75,
+		TaskBug:           0.70,
+		TaskFeature:       0.70,
+		TaskTesting:       0.70,
+		TaskTask:          0.75,
+		TaskChore:         0.70,
+		TaskEpic:          0.50,
+	},
 }
 
 // CapabilityMatrix manages agent capability scores with support for
@@ -196,6 +244,14 @@ func ParseAgentType(s string) tmux.AgentType {
 		return tmux.AgentCodex
 	case "gmi", "gemini":
 		return tmux.AgentGemini
+	case "cursor":
+		return tmux.AgentCursor
+	case "windsurf":
+		return tmux.AgentWindsurf
+	case "aider":
+		return tmux.AgentAider
+	case "ollama":
+		return tmux.AgentOllama
 	default:
 		return tmux.AgentType(s)
 	}
