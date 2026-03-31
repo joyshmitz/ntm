@@ -3,10 +3,15 @@ package handoff
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
 
 func TestNewGenerator(t *testing.T) {
@@ -976,6 +981,78 @@ func TestGenerateHandoffOptionsDefault(t *testing.T) {
 	// Should default to partial status when no goal
 	if h.Status != StatusPartial {
 		t.Errorf("Status = %q, want %q", h.Status, StatusPartial)
+	}
+}
+
+func TestFetchAgentMailThreadsPrefersNewestUniqueThreadEntry(t *testing.T) {
+	g := NewGenerator(t.TempDir())
+	threadID := "thread-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      interface{}     `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		result, err := json.Marshal(map[string]interface{}{
+			"result": []agentmail.InboxMessage{
+				{
+					ID:         1,
+					Subject:    "Old status",
+					From:       "BlueLake",
+					ThreadID:   &threadID,
+					CreatedTS:  agentmail.FlexTime{Time: time.Date(2026, 3, 31, 17, 0, 0, 0, time.UTC)},
+					Importance: "normal",
+				},
+				{
+					ID:         2,
+					Subject:    "Second thread",
+					From:       "GreenStone",
+					CreatedTS:  agentmail.FlexTime{Time: time.Date(2026, 3, 31, 18, 0, 0, 0, time.UTC)},
+					Importance: "normal",
+				},
+				{
+					ID:         3,
+					Subject:    "Latest status",
+					From:       "BlueLake",
+					ThreadID:   &threadID,
+					CreatedTS:  agentmail.FlexTime{Time: time.Date(2026, 3, 31, 19, 0, 0, 0, time.UTC)},
+					Importance: "URGENT",
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  result,
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	threads, err := g.fetchAgentMailThreads(context.Background(), client, "/data/projects/ntm", "BlueLake")
+	if err != nil {
+		t.Fatalf("fetchAgentMailThreads: %v", err)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("len(threads) = %d, want 2 (%v)", len(threads), threads)
+	}
+	if got := threads[0]; got != "⚠️ [thread-1] Latest status (from: BlueLake)" {
+		t.Fatalf("threads[0] = %q, want newest urgent thread entry", got)
+	}
+	if got := threads[1]; got != "Second thread (from: GreenStone)" {
+		t.Fatalf("threads[1] = %q, want second newest distinct thread", got)
 	}
 }
 

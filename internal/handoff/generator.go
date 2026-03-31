@@ -843,25 +843,29 @@ func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail
 		return nil, err
 	}
 
+	sort.SliceStable(messages, func(i, j int) bool {
+		return messages[i].CreatedTS.After(messages[j].CreatedTS.Time)
+	})
+
 	var threads []string
 	seenThreads := make(map[string]bool)
 
 	for _, msg := range messages {
 		// Format thread/message info
 		var entry string
-		if msg.ThreadID != nil && *msg.ThreadID != "" {
+		if threadID := normalizeThreadID(msg.ThreadID); threadID != "" {
 			// Skip duplicate threads
-			if seenThreads[*msg.ThreadID] {
+			if seenThreads[threadID] {
 				continue
 			}
-			seenThreads[*msg.ThreadID] = true
-			entry = fmt.Sprintf("[%s] %s (from: %s)", *msg.ThreadID, truncateGen(msg.Subject, 40), msg.From)
+			seenThreads[threadID] = true
+			entry = fmt.Sprintf("[%s] %s (from: %s)", threadID, truncateGen(msg.Subject, 40), msg.From)
 		} else {
 			entry = fmt.Sprintf("%s (from: %s)", truncateGen(msg.Subject, 40), msg.From)
 		}
 
 		// Add importance marker if urgent
-		if msg.Importance == "urgent" {
+		if strings.EqualFold(msg.Importance, "urgent") {
 			entry = "⚠️ " + entry
 		}
 
@@ -869,6 +873,13 @@ func (g *Generator) fetchAgentMailThreads(ctx context.Context, client *agentmail
 	}
 
 	return threads, nil
+}
+
+func normalizeThreadID(threadID *string) string {
+	if threadID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*threadID)
 }
 
 // fetchFileReservations retrieves active file reservations.
