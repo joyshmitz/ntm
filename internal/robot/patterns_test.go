@@ -433,6 +433,15 @@ func TestHasIdlePattern(t *testing.T) {
 	if !HasIdlePattern("claude>", "claude") {
 		t.Error("should detect claude idle prompt")
 	}
+	if HasIdlePattern("$ ", "claude") {
+		t.Error("shell prompt should not look idle for claude panes")
+	}
+	if HasIdlePattern("$ ", "codex") {
+		t.Error("shell prompt should not look idle for codex panes")
+	}
+	if !HasIdlePattern("$ ", "user") {
+		t.Error("shell prompt should still look idle for user panes")
+	}
 }
 
 func TestHasThinkingPattern(t *testing.T) {
@@ -683,12 +692,12 @@ func TestPatternLibraryIdlePromptVariants(t *testing.T) {
 		"╰─>":          "claude",
 		"codex>":       "codex",
 		"Codex> ":      "codex",
-		"$":            "codex",
-		"$ ":           "codex",
 		"gemini>":      "gemini",
 		"Gemini> ":     "gemini",
 		">>>":          "gemini",
 		">>> ":         "gemini",
+		"$":            "*",
+		"$ ":           "user",
 		">":            "*",
 		"#":            "*",
 		"%":            "*",
@@ -697,6 +706,18 @@ func TestPatternLibraryIdlePromptVariants(t *testing.T) {
 	for prompt, agent := range idlePrompts {
 		if !lib.HasIdlePrompt(prompt, agent) {
 			t.Errorf("expected idle prompt detection for %q (agent: %s)", prompt, agent)
+		}
+	}
+
+	notIdleForKnownAgents := map[string]string{
+		"$":  "codex",
+		"$ ": "claude",
+		"#":  "gemini",
+	}
+
+	for prompt, agent := range notIdleForKnownAgents {
+		if lib.HasIdlePrompt(prompt, agent) {
+			t.Errorf("did not expect generic shell prompt %q to look idle for %s", prompt, agent)
 		}
 	}
 }

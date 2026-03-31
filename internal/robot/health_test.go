@@ -3,6 +3,8 @@ package robot
 import (
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // =============================================================================
@@ -34,6 +36,26 @@ func TestCalculateOutputRate(t *testing.T) {
 			got := calculateOutputRate(tt.lastActivitySec)
 			if got != tt.expected {
 				t.Errorf("calculateOutputRate(%d) = %q, want %q", tt.lastActivitySec, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDetectAgentTypeFromPane(t *testing.T) {
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want string
+	}{
+		{name: "claude", pane: tmux.Pane{Type: tmux.AgentClaude}, want: "claude"},
+		{name: "ollama", pane: tmux.Pane{Type: tmux.AgentOllama}, want: "ollama"},
+		{name: "unknown", pane: tmux.Pane{Type: tmux.AgentType("mystery")}, want: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectAgentTypeFromPane(tt.pane); got != tt.want {
+				t.Fatalf("detectAgentTypeFromPane(%+v) = %q, want %q", tt.pane, got, tt.want)
 			}
 		})
 	}
@@ -327,18 +349,21 @@ func TestIsAgentIdlePrompt(t *testing.T) {
 		// Claude agent
 		{"claude with > prompt", "Some output\n>", "claude", true},
 		{"claude cc alias with > prompt", "Some output\n>", "cc", true},
+		{"claude cli alias with > prompt", "Some output\n>", "claude_code", true},
 		{"claude with question prompt", "What would you like to do?", "claude", true},
 		{"claude no prompt", "Some output\nProcessing...", "claude", false},
 
 		// Codex agent
 		{"codex with > prompt", "Codex running\n>", "codex", true},
 		{"codex cod alias with > prompt", "Codex running\n>", "cod", true},
+		{"codex cli alias with > prompt", "Codex running\n>", "openai-codex", true},
 		{"codex with $ prompt", "Codex running\n$", "codex", true},
 		{"codex no prompt", "Codex running\nProcessing...", "codex", false},
 
 		// Gemini agent
 		{"gemini with > prompt", "Gemini output\n>", "gemini", true},
 		{"gemini gmi alias with > prompt", "Gemini output\n>", "gmi", true},
+		{"gemini cli alias with > prompt", "Gemini output\n>", "google-gemini", true},
 		{"gemini no prompt", "Gemini output\nWorking...", "gemini", false},
 
 		// Unknown/default agent
@@ -425,6 +450,7 @@ func TestIsAgentRunning(t *testing.T) {
 		// Claude
 		{"claude mentioned", "Claude Code v1.0\nStarting...", "claude", true},
 		{"claude cc alias", "claude running", "cc", true},
+		{"claude cli alias", "What would you like to do?", "claude_code", true},
 		{"claude with prompt", "What would you like to do?", "claude", true},
 		{"claude short prompt", "Output\n>", "claude", true},
 		{"claude long last line no prompt", "Output\n" + string(make([]byte, 60)), "claude", false},
@@ -432,12 +458,20 @@ func TestIsAgentRunning(t *testing.T) {
 		// Codex
 		{"codex mentioned", "codex agent starting", "codex", true},
 		{"codex cod alias", "codex v2", "cod", true},
+		{"codex cli alias", "codex v2", "openai-codex", true},
 		{"codex short prompt", "Some output\n>", "codex", true},
 
 		// Gemini
 		{"gemini mentioned", "GEMINI AI Ready", "gemini", true},
 		{"gemini gmi alias", "Gemini starting", "gmi", true},
+		{"gemini cli alias", "Gemini starting", "google-gemini", true},
 		{"gemini short prompt", "Output\n>", "gemini", true},
+
+		// Newer agent types
+		{"cursor mentioned", "Cursor agent starting", "cursor", true},
+		{"windsurf alias", "windsurf ready", "ws", true},
+		{"aider mentioned", "Aider watching repo", "aider", true},
+		{"ollama mentioned", "ollama serving model", "ollama", true},
 
 		// Unknown type
 		{"unknown with > prompt", "Output\n>", "unknown", true},
@@ -468,10 +502,17 @@ func TestGetAgentCommand(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"cc", "claude"},
+		{"claude_code", "claude"},
 		{"codex", "codex"},
 		{"cod", "codex"},
+		{"openai-codex", "codex"},
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
+		{"google-gemini", "gemini"},
+		{"cursor", "cursor"},
+		{"ws", "windsurf"},
+		{"aider", "aider"},
+		{"ollama", "ollama"},
 		{"unknown", ""},
 		{"", ""},
 		{"other", ""},

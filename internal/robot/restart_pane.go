@@ -45,6 +45,12 @@ type RestartPaneOptions struct {
 	Prompt  string   // Custom prompt to send after restart (overrides --bead template)
 }
 
+type restartPromptTarget struct {
+	Pane      string
+	Target    string
+	AgentType tmux.AgentType
+}
+
 // GetRestartPane restarts panes (respawn-pane -k) and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
@@ -109,42 +115,7 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	for _, p := range opts.Panes {
 		paneFilterMap[p] = true
 	}
-	hasPaneFilter := len(paneFilterMap) > 0
-
-	// Determine which panes to restart
-	var targetPanes []tmux.Pane
-	for _, pane := range panes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		// Check specific pane filter
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-
-		// Filter by type if specified
-		if opts.Type != "" {
-			agentType := detectAgentType(pane.Title)
-			// Normalize type for comparison (handle aliases like cc vs claude)
-			targetType := translateAgentTypeForStatus(opts.Type)
-			currentType := translateAgentTypeForStatus(agentType)
-			if targetType != currentType {
-				continue
-			}
-		}
-
-		// Skip user panes by default unless --all or specific pane filter
-		if !opts.All && !hasPaneFilter && opts.Type == "" {
-			agentType := detectAgentType(pane.Title)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-	}
+	targetPanes := selectRestartPaneTargets(panes, paneFilterMap, opts.Type, opts.All)
 
 	if len(targetPanes) == 0 {
 		return output, nil
@@ -164,7 +135,7 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	}
 
 	// Restart targets — track pane IDs for post-restart liveness check
-	restartedPaneIDs := make(map[string]string) // paneKey -> pane.ID
+	restartedPaneInfo := make(map[string]restartPromptTarget) // paneKey -> prompt target info
 	for _, pane := range targetPanes {
 		paneKey := fmt.Sprintf("%d", pane.Index)
 
@@ -177,7 +148,11 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 			})
 		} else {
 			output.Restarted = append(output.Restarted, paneKey)
-			restartedPaneIDs[paneKey] = pane.ID
+			restartedPaneInfo[paneKey] = restartPromptTarget{
+				Pane:      paneKey,
+				Target:    pane.ID,
+				AgentType: pane.Type,
+			}
 		}
 	}
 
@@ -186,7 +161,7 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		time.Sleep(750 * time.Millisecond)
 		output.ProcessAlive = make(map[string]bool, len(output.Restarted))
 		for _, paneKey := range output.Restarted {
-			paneID := restartedPaneIDs[paneKey]
+			paneID := restartedPaneInfo[paneKey].Target
 			alive := false
 			// Query the fresh pane_pid from tmux (respawn assigns a new shell PID)
 			pidStr, err := tmux.DefaultClient.Run("display-message", "-t", paneID, "-p", "#{pane_pid}")
@@ -213,13 +188,11 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 		// Wait for panes to initialize after respawn
 		time.Sleep(500 * time.Millisecond)
 
-		var promptErrors []string
+		promptTargets := make([]restartPromptTarget, 0, len(output.Restarted))
 		for _, paneKey := range output.Restarted {
-			target := fmt.Sprintf("%s:%s", opts.Session, paneKey)
-			if err := tmux.SendKeys(target, promptToSend+"\n", false); err != nil {
-				promptErrors = append(promptErrors, fmt.Sprintf("pane %s: %v", paneKey, err))
-			}
+			promptTargets = append(promptTargets, restartedPaneInfo[paneKey])
 		}
+		promptErrors := sendRestartPrompts(promptTargets, promptToSend, tmux.SendKeysForAgentDoubleEnter)
 
 		if len(promptErrors) > 0 {
 			output.PromptSent = false
@@ -230,6 +203,57 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	}
 
 	return output, nil
+}
+
+func selectRestartPaneTargets(panes []tmux.Pane, paneFilterMap map[string]bool, filterType string, all bool) []tmux.Pane {
+	hasPaneFilter := len(paneFilterMap) > 0
+	targetType := translateAgentTypeForStatus(filterType)
+
+	var targetPanes []tmux.Pane
+	for _, pane := range panes {
+		paneKey := fmt.Sprintf("%d", pane.Index)
+
+		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
+			continue
+		}
+
+		currentType := translateAgentTypeForStatus(restartPaneAgentType(pane))
+		if targetType != "" && targetType != currentType {
+			continue
+		}
+
+		// By default only restart agent panes. Explicit pane filters and --all opt out.
+		if !all && !hasPaneFilter && targetType == "" {
+			agentType := restartPaneAgentType(pane)
+			if pane.Index == 0 && agentType == "unknown" {
+				continue
+			}
+			if agentType == "user" {
+				continue
+			}
+		}
+
+		targetPanes = append(targetPanes, pane)
+	}
+
+	return targetPanes
+}
+
+func restartPaneAgentType(pane tmux.Pane) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
+}
+
+func sendRestartPrompts(targets []restartPromptTarget, prompt string, send func(target, keys string, agentType tmux.AgentType) error) []string {
+	var promptErrors []string
+	for _, target := range targets {
+		if err := send(target.Target, prompt, target.AgentType); err != nil {
+			promptErrors = append(promptErrors, fmt.Sprintf("pane %s: %v", target.Pane, err))
+		}
+	}
+	return promptErrors
 }
 
 // restartPaneBeadPromptTemplate is the default prompt template for --bead assignment.

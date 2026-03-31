@@ -2,9 +2,12 @@ package robot
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestRestartPaneBeadPromptTemplate(t *testing.T) {
@@ -136,6 +139,65 @@ func TestRestartPaneDryRunShowsBead(t *testing.T) {
 	}
 	if !output.DryRun {
 		t.Error("DryRun should be true")
+	}
+}
+
+func TestRestartPaneAgentTypePrefersParsedPaneType(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{
+		Title:   "custom title",
+		Type:    tmux.AgentCodex,
+		Command: "codex --model o3",
+	}
+
+	if got := restartPaneAgentType(pane); got != "codex" {
+		t.Fatalf("restartPaneAgentType() = %q, want %q", got, "codex")
+	}
+}
+
+func TestSelectRestartPaneTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
+		{ID: "%1", Index: 1, Title: "notes", Type: tmux.AgentClaude, Command: "claude"},
+		{ID: "%2", Index: 2, Title: "build monitor", Type: tmux.AgentCodex, Command: "codex"},
+	}
+
+	targets := selectRestartPaneTargets(panes, nil, "codex", false)
+	if len(targets) != 1 {
+		t.Fatalf("selectRestartPaneTargets() returned %d panes, want 1", len(targets))
+	}
+	if targets[0].ID != "%2" {
+		t.Fatalf("selectRestartPaneTargets() picked %s, want %%2", targets[0].ID)
+	}
+}
+
+func TestSendRestartPromptsUsesAgentAwareSender(t *testing.T) {
+	t.Parallel()
+
+	targets := []restartPromptTarget{
+		{Pane: "1", Target: "%1", AgentType: tmux.AgentCodex},
+		{Pane: "2", Target: "%2", AgentType: tmux.AgentClaude},
+	}
+
+	var calls []string
+	errs := sendRestartPrompts(targets, "resume work", func(target, keys string, agentType tmux.AgentType) error {
+		calls = append(calls, fmt.Sprintf("%s|%s|%s", target, keys, agentType))
+		return nil
+	})
+	if len(errs) != 0 {
+		t.Fatalf("sendRestartPrompts() returned errors: %v", errs)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("sendRestartPrompts() made %d calls, want 2", len(calls))
+	}
+	if calls[0] != "%1|resume work|cod" {
+		t.Fatalf("first call = %q, want %q", calls[0], "%1|resume work|cod")
+	}
+	if calls[1] != "%2|resume work|cc" {
+		t.Fatalf("second call = %q, want %q", calls[1], "%2|resume work|cc")
 	}
 }
 

@@ -333,6 +333,7 @@ func TestAgentTypeFromPaneType(t *testing.T) {
 		{tmux.AgentCursor, "cursor"},
 		{tmux.AgentWindsurf, "windsurf"},
 		{tmux.AgentAider, "aider"},
+		{tmux.AgentOllama, "ollama"},
 		{tmux.AgentUser, "user"},
 		{tmux.AgentUnknown, "unknown"},
 		// Types not in the switch should return "unknown"
@@ -346,6 +347,36 @@ func TestAgentTypeFromPaneType(t *testing.T) {
 				t.Errorf("agentTypeFromPaneType(%q) = %q, want %q", tc.input, result, tc.expected)
 			}
 		})
+	}
+}
+
+func TestDetectErrorsPaneAgentTypeUsesEnhancedDetection(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{ID: "%1", Type: tmux.AgentUser, Title: "notes", Command: ""}
+	got := detectErrorsPaneAgentType(pane, "Claude Code > working on task")
+	if got != "claude" {
+		t.Fatalf("detectErrorsPaneAgentType() = %q, want %q", got, "claude")
+	}
+}
+
+func TestDetectErrorsPaneAgentTypePrefersPaneMetadata(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{ID: "%2", Type: tmux.AgentCodex, Title: "notes", Command: ""}
+	got := detectErrorsPaneAgentType(pane, "Claude Code > working on task")
+	if got != "codex" {
+		t.Fatalf("detectErrorsPaneAgentType() = %q, want %q", got, "codex")
+	}
+}
+
+func TestDetectErrorsPaneAgentTypeLeavesShellUnknown(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{ID: "%3", Type: tmux.AgentUser, Title: "shell", Command: "bash"}
+	got := detectErrorsPaneAgentType(pane, "$ ")
+	if got != "unknown" {
+		t.Fatalf("detectErrorsPaneAgentType() = %q, want %q", got, "unknown")
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestParseExcludePanes(t *testing.T) {
@@ -93,6 +95,34 @@ func TestRouteOptions(t *testing.T) {
 	}
 	if len(opts.ExcludePanes) != 2 {
 		t.Errorf("ExcludePanes len = %d, want 2", len(opts.ExcludePanes))
+	}
+}
+
+func TestRoutePaneAgentTypePrefersParsedPaneType(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{
+		Title:   "custom title",
+		Type:    tmux.AgentClaude,
+		Command: "claude --print",
+	}
+
+	if got := routePaneAgentType(pane); got != "claude" {
+		t.Fatalf("routePaneAgentType() = %q, want %q", got, "claude")
+	}
+}
+
+func TestRoutePaneAgentTypeFallsBackToTitle(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{
+		Title:   "myproj__cod_2",
+		Type:    tmux.AgentUnknown,
+		Command: "zsh",
+	}
+
+	if got := routePaneAgentType(pane); got != "codex" {
+		t.Fatalf("routePaneAgentType() = %q, want %q", got, "codex")
 	}
 }
 

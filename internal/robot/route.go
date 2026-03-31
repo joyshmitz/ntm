@@ -134,15 +134,13 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 	var agents []ScoredAgent
 
 	for _, pane := range panes {
-		// Skip user pane
-		// Use detectAgentType which maps short forms (cc->claude, cod->codex, gmi->gemini)
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" || agentType == "unknown" {
+		agentType := routePaneAgentType(pane)
+		if agentType == "" || agentType == "unknown" || agentType == "user" {
 			continue
 		}
 
 		// Filter by agent type if specified
-		if opts.AgentType != "" && !strings.EqualFold(agentType, normalizeAgentType(opts.AgentType)) {
+		if !matchesAgentTypeFilter(agentType, opts.AgentType) {
 			continue
 		}
 
@@ -259,6 +257,13 @@ func PrintRoute(opts RouteOptions) int {
 	return exitCode
 }
 
+func routePaneAgentType(pane tmux.Pane) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
+}
+
 // generateRouteHints creates helpful hints for AI agents.
 func generateRouteHints(opts RouteOptions, output RouteOutput) *RouteAgentHints {
 	hints := &RouteAgentHints{}
@@ -353,15 +358,13 @@ func GetRouteRecommendation(opts RouteOptions) (*RouteRecommendation, error) {
 	var agents []ScoredAgent
 
 	for _, pane := range panes {
-		// Skip user pane
-		// Use detectAgentType which maps short forms (cc->claude, cod->codex, gmi->gemini)
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" || agentType == "unknown" {
+		agentType := routePaneAgentType(pane)
+		if agentType == "" || agentType == "unknown" || agentType == "user" {
 			continue
 		}
 
 		// Filter by agent type if specified
-		if opts.AgentType != "" && !strings.EqualFold(agentType, normalizeAgentType(opts.AgentType)) {
+		if !matchesAgentTypeFilter(agentType, opts.AgentType) {
 			continue
 		}
 

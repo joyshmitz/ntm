@@ -120,7 +120,7 @@ func GetAssignRecommendations(opts AssignOptions) ([]DistributeRecommendation, e
 	var idleAgentPanes []string
 
 	for _, pane := range panes {
-		agentType := detectAgentType(pane.Title)
+		agentType := routePaneAgentType(pane)
 		if agentType == "user" || agentType == "unknown" {
 			continue
 		}
@@ -251,7 +251,7 @@ func GetAssign(opts AssignOptions) (*AssignOutput, error) {
 	var idleAgentPanes []string
 
 	for _, pane := range panes {
-		agentType := detectAgentType(pane.Title)
+		agentType := routePaneAgentType(pane)
 		if agentType == "user" || agentType == "unknown" {
 			continue // Skip non-agent panes
 		}

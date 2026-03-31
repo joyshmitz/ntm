@@ -24,8 +24,11 @@ func TestShortAgentType(t *testing.T) {
 		expected string
 	}{
 		{"claude", "cc"},
+		{"claude_code", "cc"},
 		{"codex", "cod"},
+		{"openai-codex", "cod"},
 		{"gemini", "gmi"},
+		{"google-gemini", "gmi"},
 		{"unknown", "unk"},
 		{"ab", "ab"},
 	}

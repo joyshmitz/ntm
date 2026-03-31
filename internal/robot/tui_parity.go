@@ -693,7 +693,7 @@ func GetInspectPane(opts InspectPaneOptions) (*InspectPaneOutput, error) {
 	// Detect state from output
 	if captureErr == nil {
 		lines := splitLines(stripANSI(captured))
-		output.Agent.State = detectState(lines, targetPane.Title)
+		output.Agent.State = determinePaneState(*targetPane, captured, detection.Type)
 
 		output.Output.Lines = len(lines)
 		output.Output.Characters = len(captured)
@@ -2566,8 +2566,8 @@ func GetMetrics(opts MetricsOptions) (*MetricsOutput, error) {
 			output.SessionStats.TotalAgents = len(panes)
 
 			for _, pane := range panes {
-				agentType := string(pane.Type)
-				if agentType == "" || agentType == "unknown" {
+				agentType := paneAgentType(pane)
+				if agentType == "" || agentType == "unknown" || agentType == "user" {
 					continue
 				}
 

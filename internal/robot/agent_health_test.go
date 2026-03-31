@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/caut"
+	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 )
 
 func TestCalculateHealthScore(t *testing.T) {
@@ -526,6 +527,47 @@ func TestUpdateProviderSummary(t *testing.T) {
 	updateProviderSummary(summary, "claude", payload1, 2)
 	if len(summary["claude"].PanesUsing) != 2 {
 		t.Errorf("Duplicate pane should not be added, got %v", summary["claude"].PanesUsing)
+	}
+}
+
+func TestFindPTState_NormalizesAgentAliases(t *testing.T) {
+	t.Parallel()
+
+	claudeState := &pt.AgentState{Classification: pt.ClassUseful}
+	codexState := &pt.AgentState{Classification: pt.ClassStuck}
+	geminiState := &pt.AgentState{Classification: pt.ClassUseful}
+	windsurfState := &pt.AgentState{Classification: pt.ClassUnknown}
+	ollamaState := &pt.AgentState{Classification: pt.ClassUseful}
+
+	states := map[string]*pt.AgentState{
+		"proj__cc_1":       claudeState,
+		"proj__cod_2":      codexState,
+		"proj__gmi_3":      geminiState,
+		"proj__windsurf_4": windsurfState,
+		"proj__ollama_5":   ollamaState,
+	}
+
+	tests := []struct {
+		name      string
+		pane      string
+		agentType string
+		want      *pt.AgentState
+	}{
+		{"claude alias", "1", "claude_code", claudeState},
+		{"codex alias", "2", " openai-codex ", codexState},
+		{"gemini alias", "3", "google-gemini", geminiState},
+		{"windsurf alias", "4", "ws", windsurfState},
+		{"ollama canonical", "5", "ollama", ollamaState},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := findPTState(states, "proj", tc.pane, tc.agentType)
+			if got != tc.want {
+				t.Fatalf("findPTState(..., %q) = %#v, want %#v", tc.agentType, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -549,10 +549,8 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 	var scored []ScoredAgent
 
 	for _, pane := range panes {
-		// Skip user pane
-		// Use detectAgentType which maps short forms (cc->claude, cod->codex, gmi->gemini)
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" || agentType == "unknown" {
+		agentType := routePaneAgentType(pane)
+		if agentType == "" || agentType == "unknown" || agentType == "user" {
 			continue
 		}
 
@@ -568,8 +566,7 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 		// Detect rate limiting by checking recent pane output
 		rateLimited := false
 		if output, err := tmux.CapturePaneOutput(pane.ID, 20); err == nil && output != "" {
-			detection := ratelimit.DetectRateLimit(output)
-			rateLimited = detection.RateLimited
+			rateLimited = detectRoutingRateLimit(output, agentType)
 		}
 
 		// Build scored agent
@@ -604,6 +601,10 @@ func (s *AgentScorer) ScoreAgents(session string, prompt string) ([]ScoredAgent,
 	}
 
 	return scored, nil
+}
+
+func detectRoutingRateLimit(output string, agentType string) bool {
+	return ratelimit.DetectRateLimitForAgent(output, agentType).RateLimited
 }
 
 // calculateScoreComponents computes individual score components.

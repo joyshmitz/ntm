@@ -795,6 +795,44 @@ func TestFilterWaitPanes(t *testing.T) {
 		}
 	})
 
+	t.Run("alias_agent_type_matches", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			agentType string
+			wantCount int
+		}{
+			{name: "claude short alias", agentType: "cc", wantCount: 3},
+			{name: "claude cli alias", agentType: "claude_code", wantCount: 3},
+			{name: "codex alias", agentType: "openai-codex", wantCount: 1},
+			{name: "gemini alias", agentType: "google-gemini", wantCount: 1},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				opts := WaitOptions{AgentType: tc.agentType}
+				result := filterWaitPanes(testPanes, opts)
+				if len(result) != tc.wantCount {
+					t.Errorf("filterWaitPanes(AgentType=%q) returned %d panes, want %d", tc.agentType, len(result), tc.wantCount)
+				}
+			})
+		}
+	})
+
+	t.Run("prefers_parsed_pane_type_over_title", func(t *testing.T) {
+		panes := []tmux.Pane{
+			{Index: 1, Title: "custom scratchpad", Type: tmux.AgentClaude},
+			{Index: 2, Title: "claude_notes", Type: tmux.AgentUser},
+		}
+
+		result := filterWaitPanes(panes, WaitOptions{})
+		if len(result) != 1 {
+			t.Fatalf("filterWaitPanes() returned %d panes, want 1", len(result))
+		}
+		if result[0].Index != 1 {
+			t.Fatalf("filterWaitPanes() selected pane %d, want 1", result[0].Index)
+		}
+	})
+
 	t.Run("user_pane_always_filtered", func(t *testing.T) {
 		// Even if explicitly requested by index, user pane should be excluded
 		opts := WaitOptions{
@@ -806,4 +844,15 @@ func TestFilterWaitPanes(t *testing.T) {
 			t.Errorf("User pane should be filtered out, got %d panes", len(result))
 		}
 	})
+}
+
+func TestWaitPaneAgentTypePrefersParsedPaneType(t *testing.T) {
+	pane := tmux.Pane{
+		Title: "operator-notes",
+		Type:  tmux.AgentGemini,
+	}
+
+	if got := waitPaneAgentType(pane); got != "gemini" {
+		t.Fatalf("waitPaneAgentType() = %q, want gemini", got)
+	}
 }

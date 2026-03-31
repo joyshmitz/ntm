@@ -3,6 +3,8 @@ package robot
 import (
 	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // TestDetermineState tests the determineState function for all possible agent states
@@ -278,6 +280,8 @@ func TestDetermineStateIdleConditions(t *testing.T) {
 
 		// Should NOT be idle (active instead)
 		{"$ ls\nfile1.txt\nfile2.txt", "", false}, // Command with output
+		{"$ ", "claude", false},                   // Agent shell prompt means exited, not idle
+		{"$ ", "codex", false},                    // Same for codex panes
 		{"Processing...", "claude", false},        // Claude working
 		{"function test() {", "codex", false},     // Codex generating code
 		{"Hello world", "gemini", false},          // Gemini output
@@ -292,6 +296,46 @@ func TestDetermineStateIdleConditions(t *testing.T) {
 			}
 			if result != expectedState {
 				t.Errorf("determineState(%q, %q) = %q, want %q", tt.output, tt.agentType, result, expectedState)
+			}
+		})
+	}
+}
+
+func TestDeterminePaneStatePrefersPaneTypeOverTitleFallbacks(t *testing.T) {
+	tests := []struct {
+		name         string
+		pane         tmux.Pane
+		output       string
+		detectedType string
+		want         string
+	}{
+		{
+			name:         "agent shell prompt is not idle just because title is generic",
+			pane:         tmux.Pane{Type: tmux.AgentClaude, Title: "notes"},
+			output:       "$ ",
+			detectedType: "unknown",
+			want:         "active",
+		},
+		{
+			name:         "enhanced detection type feeds state classification",
+			pane:         tmux.Pane{Type: tmux.AgentUnknown, Title: "terminal"},
+			output:       "codex> ",
+			detectedType: "codex",
+			want:         "idle",
+		},
+		{
+			name:         "user pane remains idle at shell prompt",
+			pane:         tmux.Pane{Type: tmux.AgentUser, Title: "shell"},
+			output:       "$ ",
+			detectedType: "unknown",
+			want:         "idle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := determinePaneState(tt.pane, tt.output, tt.detectedType); got != tt.want {
+				t.Fatalf("determinePaneState(%+v, %q, %q) = %q, want %q", tt.pane, tt.output, tt.detectedType, got, tt.want)
 			}
 		})
 	}

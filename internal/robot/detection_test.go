@@ -20,6 +20,7 @@ func TestDetectFromProcess(t *testing.T) {
 		{"aider process", "aider-chat", "aider", 0.95},
 		{"cursor process", "cursor", "cursor", 0.95},
 		{"windsurf process", "windsurf", "windsurf", 0.95},
+		{"ollama process", "ollama serve", "ollama", 0.95},
 		{"unknown process", "vim", "unknown", 0.0},
 		{"bash shell", "bash", "unknown", 0.0},
 		{"zsh shell", "zsh", "unknown", 0.0},
@@ -56,6 +57,7 @@ func TestDetectFromContent(t *testing.T) {
 		{"aider prompt", "aider> fix bug", "aider"},
 		{"cursor ai", "Cursor AI ready", "cursor"},
 		{"windsurf codeium", "Powered by Codeium", "windsurf"},
+		{"ollama serve", "ollama serve llama3.2", "ollama"},
 		{"plain shell", "$ ls -la\nREADME.md", "unknown"},
 	}
 
@@ -82,6 +84,7 @@ func TestDetectFromTitle(t *testing.T) {
 		{"codex in title", "Codex CLI Session", "codex"},
 		{"gemini in title", "Gemini AI", "gemini"},
 		{"aider in title", "Aider Chat", "aider"},
+		{"ollama in title", "Ollama REPL", "ollama"},
 		{"plain title", "Terminal", "unknown"},
 		{"mixed case", "CLAUDE Agent", "claude"},
 	}
@@ -106,6 +109,11 @@ func TestDetectFromNTMTitle(t *testing.T) {
 		{"NTM claude pane", "myproject__cc_1", "claude", 0.9},
 		{"NTM codex pane", "myproject__cod_2", "codex", 0.9},
 		{"NTM gemini pane", "session__gmi_1", "gemini", 0.9},
+		{"NTM cursor pane", "session__cursor_1", "cursor", 0.9},
+		{"NTM windsurf pane", "session__windsurf_2", "windsurf", 0.9},
+		{"NTM ws pane", "session__ws_2", "windsurf", 0.9},
+		{"NTM aider pane", "session__aider_3", "aider", 0.9},
+		{"NTM ollama pane", "session__ollama_4", "ollama", 0.9},
 		{"non-NTM title", "Terminal", "unknown", 0.0},
 		{"partial match", "code_cc", "unknown", 0.0},
 	}
@@ -132,6 +140,13 @@ func TestDetectAgentTypeEnhanced(t *testing.T) {
 		wantMethod DetectionMethod
 	}{
 		{
+			name:       "tmux pane type overrides weaker heuristics",
+			pane:       tmux.Pane{Type: tmux.AgentClaude, Command: "bash", Title: "Terminal"},
+			content:    "codex> misleading prompt",
+			wantType:   "claude",
+			wantMethod: MethodTmuxPane,
+		},
+		{
 			name:       "process detection highest priority",
 			pane:       tmux.Pane{Command: "claude-code", Title: "Terminal"},
 			content:    "random output",
@@ -146,10 +161,31 @@ func TestDetectAgentTypeEnhanced(t *testing.T) {
 			wantMethod: MethodContent,
 		},
 		{
-			name:       "NTM title detection",
+			name:       "title detection for ollama fallback",
+			pane:       tmux.Pane{Command: "bash", Title: "Ollama REPL"},
+			content:    "",
+			wantType:   "ollama",
+			wantMethod: MethodTitle,
+		},
+		{
+			name:       "NTM short title detection",
 			pane:       tmux.Pane{Command: "bash", Title: "project__cc_1"},
 			content:    "",
 			wantType:   "claude",
+			wantMethod: MethodTitle,
+		},
+		{
+			name:       "NTM full title detection for new agents",
+			pane:       tmux.Pane{Command: "bash", Title: "project__ollama_4"},
+			content:    "",
+			wantType:   "ollama",
+			wantMethod: MethodTitle,
+		},
+		{
+			name:       "NTM alias title detection for windsurf",
+			pane:       tmux.Pane{Command: "bash", Title: "project__ws_2"},
+			content:    "",
+			wantType:   "windsurf",
 			wantMethod: MethodTitle,
 		},
 		{

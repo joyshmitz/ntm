@@ -318,11 +318,7 @@ func getAgentHealth(session string, pane tmux.Pane) AgentHealthInfo {
 	defer cancel()
 	captured, err := tmux.CapturePaneOutputContext(ctx, pane.ID, 20)
 	if err == nil {
-		// Get agent type from pane info
-		agentType := agentTypeString(pane.Type)
-		if agentType == "unknown" {
-			agentType = detectAgentType(pane.Title)
-		}
+		agentType := paneAgentType(pane)
 		shortAgentType := translateAgentTypeForStatus(agentType)
 		state := determineState(captured, shortAgentType)
 
@@ -887,24 +883,7 @@ func PrintSessionHealth(session string) error {
 
 // detectAgentTypeFromPane determines the agent type from pane information
 func detectAgentTypeFromPane(pane tmux.Pane) string {
-	switch pane.Type {
-	case tmux.AgentClaude:
-		return "claude"
-	case tmux.AgentCodex:
-		return "codex"
-	case tmux.AgentGemini:
-		return "gemini"
-	case tmux.AgentCursor:
-		return "cursor"
-	case tmux.AgentWindsurf:
-		return "windsurf"
-	case tmux.AgentAider:
-		return "aider"
-	case tmux.AgentUser:
-		return "user"
-	default:
-		return "unknown"
-	}
+	return agentTypeString(pane.Type)
 }
 
 // =============================================================================
@@ -1953,6 +1932,7 @@ func (rm *RestartManager) tryHardRestart(ctx context.Context, paneID, agentType 
 // isAgentIdlePrompt checks if the output indicates an idle agent prompt
 func isAgentIdlePrompt(output, agentType string) bool {
 	output = strings.TrimSpace(output)
+	agentType = normalizeAgentType(agentType)
 	lines := splitLines(output)
 	if len(lines) == 0 {
 		return false
@@ -1994,6 +1974,7 @@ func isShellPrompt(output string) bool {
 // isAgentRunning checks if the agent appears to be running
 func isAgentRunning(output, agentType string) bool {
 	output = strings.TrimSpace(output)
+	agentType = normalizeAgentType(agentType)
 	if len(output) == 0 {
 		return false
 	}
@@ -2020,6 +2001,18 @@ func isAgentRunning(output, agentType string) bool {
 		// Gemini shows "gemini" in startup or prompt
 		return strings.Contains(outputLower, "gemini") ||
 			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
+	case "cursor":
+		return strings.Contains(outputLower, "cursor") ||
+			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
+	case "windsurf":
+		return strings.Contains(outputLower, "windsurf") ||
+			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
+	case "aider":
+		return strings.Contains(outputLower, "aider") ||
+			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
+	case "ollama":
+		return strings.Contains(outputLower, "ollama") ||
+			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
 	default:
 		// For unknown types, require a short prompt-like line
 		return len(lastLine) < 50 && (strings.HasSuffix(lastLine, ">") ||
@@ -2030,13 +2023,21 @@ func isAgentRunning(output, agentType string) bool {
 
 // getAgentCommand returns the command to launch an agent
 func getAgentCommand(agentType string) string {
-	switch agentType {
-	case "claude", "cc":
+	switch normalizeAgentType(agentType) {
+	case "claude":
 		return "claude"
-	case "codex", "cod":
+	case "codex":
 		return "codex"
-	case "gemini", "gmi":
+	case "gemini":
 		return "gemini"
+	case "cursor":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "aider":
+		return "aider"
+	case "ollama":
+		return "ollama"
 	default:
 		return ""
 	}

@@ -225,8 +225,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 
 			for _, pane := range filteredPanes {
 				classifier := monitor.GetOrCreate(pane.ID)
-				// Use detectAgentType which maps short forms (cc->claude, cod->codex, gmi->gemini)
-				if at := detectAgentType(pane.Title); at != "" && at != "unknown" {
+				if at := waitPaneAgentType(pane); at != "" && at != "unknown" && at != "user" {
 					classifier.SetAgentType(at)
 				}
 				activity, err := classifier.Classify()
@@ -430,10 +429,8 @@ func filterWaitPanes(panes []tmux.Pane, opts WaitOptions) []tmux.Pane {
 	}
 
 	for _, pane := range panes {
-		// Skip panes without a recognized agent type (user pane, unknown)
-		// Use detectAgentType which maps short forms (cc->claude, cod->codex, gmi->gemini)
-		agentType := detectAgentType(pane.Title)
-		if agentType == "" || agentType == "unknown" {
+		agentType := waitPaneAgentType(pane)
+		if agentType == "" || agentType == "unknown" || agentType == "user" {
 			continue
 		}
 
@@ -443,16 +440,21 @@ func filterWaitPanes(panes []tmux.Pane, opts WaitOptions) []tmux.Pane {
 		}
 
 		// Filter by agent type
-		if opts.AgentType != "" {
-			if !strings.EqualFold(agentType, opts.AgentType) {
-				continue
-			}
+		if !matchesAgentTypeFilter(agentType, opts.AgentType) {
+			continue
 		}
 
 		result = append(result, pane)
 	}
 
 	return result
+}
+
+func waitPaneAgentType(pane tmux.Pane) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
 }
 
 // checkWaitConditionMet checks if the wait condition is satisfied.

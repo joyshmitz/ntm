@@ -45,18 +45,18 @@ type InterruptError struct {
 
 // InterruptOptions configures the PrintInterrupt operation
 type InterruptOptions struct {
-	Session         string   // Target session name
-	Message         string   // Message to send after interrupt (optional)
-	Panes           []string // Specific pane indices to interrupt (empty = all agents)
-	All             bool     // Include all panes (including user)
-	Force           bool     // Send Ctrl+C even if agent appears idle
-	NoWait          bool     // Don't wait for ready state after interrupt
-	TimeoutMs       int      // Timeout for waiting for ready state (default 10000)
-	PollMs          int      // Poll interval (default 300)
-	DryRun          bool     // Preview mode: show what would happen without executing
-	RequestID       string   // External request identifier for REST parity
-	CorrelationID   string   // Correlation identifier for tracing request/outcome/verification
-	IdempotencyKey  string   // Idempotency key when provided by an upstream caller
+	Session        string   // Target session name
+	Message        string   // Message to send after interrupt (optional)
+	Panes          []string // Specific pane indices to interrupt (empty = all agents)
+	All            bool     // Include all panes (including user)
+	Force          bool     // Send Ctrl+C even if agent appears idle
+	NoWait         bool     // Don't wait for ready state after interrupt
+	TimeoutMs      int      // Timeout for waiting for ready state (default 10000)
+	PollMs         int      // Poll interval (default 300)
+	DryRun         bool     // Preview mode: show what would happen without executing
+	RequestID      string   // External request identifier for REST parity
+	CorrelationID  string   // Correlation identifier for tracing request/outcome/verification
+	IdempotencyKey string   // Idempotency key when provided by an upstream caller
 }
 
 // GetInterrupt sends Ctrl+C to panes and optionally a follow-up message, returning the result.
@@ -124,32 +124,11 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 	for _, p := range opts.Panes {
 		paneFilterMap[p] = true
 	}
-	hasPaneFilter := len(paneFilterMap) > 0
 
-	// Determine which panes to interrupt
-	var targetPanes []tmux.Pane
-	targetKeys := []string{}
-	for _, pane := range panes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		// Check specific pane filter
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-
-		// Skip user panes by default unless --all or specific pane filter
-		if !opts.All && !hasPaneFilter {
-			agentType := detectAgentType(pane.Title)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-		targetKeys = append(targetKeys, paneKey)
+	targetPanes := selectInterruptTargets(panes, paneFilterMap, opts.All)
+	targetKeys := make([]string, 0, len(targetPanes))
+	for _, pane := range targetPanes {
+		targetKeys = append(targetKeys, fmt.Sprintf("%d", pane.Index))
 	}
 
 	if len(targetPanes) == 0 {
@@ -166,14 +145,14 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 			output.PreviousStates[paneKey] = PaneState{
 				State:      "unknown",
 				LastOutput: "",
-				AgentType:  detectAgentType(pane.Title),
+				AgentType:  interruptPaneAgentType(pane),
 			}
 			continue
 		}
 
 		cleanOutput := stripANSI(captured)
 		lines := splitLines(cleanOutput)
-		agentType := detectAgentType(pane.Title)
+		agentType := interruptPaneAgentType(pane)
 		state := determineState(captured, agentType)
 
 		// Get last meaningful output (truncated)
@@ -266,7 +245,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 					continue
 				}
 
-				agentType := detectAgentType(targetPane.Title)
+				agentType := interruptPaneAgentType(*targetPane)
 				state := determineState(captured, agentType)
 
 				if state == "idle" {
@@ -303,6 +282,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		// Small delay to ensure interrupt settled
 		time.Sleep(100 * time.Millisecond)
 
+		promptTargets := make([]interruptMessageTarget, 0, len(output.ReadyForInput))
 		for _, paneKey := range output.ReadyForInput {
 			// Find the pane
 			var targetPane *tmux.Pane
@@ -314,17 +294,17 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 			}
 
 			if targetPane != nil {
-				err := tmux.SendKeys(targetPane.ID, opts.Message, true)
-				if err != nil {
-					output.Failed = append(output.Failed, InterruptError{
-						Pane:   paneKey,
-						Reason: fmt.Sprintf("failed to send message: %v", err),
-					})
-				}
+				promptTargets = append(promptTargets, interruptMessageTarget{
+					Pane:      paneKey,
+					Target:    targetPane.ID,
+					AgentType: interruptPaneTMUXAgentType(*targetPane),
+				})
 			}
 		}
 
-		if len(output.Failed) < len(output.ReadyForInput) {
+		messageErrors := sendInterruptMessages(promptTargets, opts.Message, tmux.SendKeysForAgentWithDelay)
+		output.Failed = append(output.Failed, messageErrors...)
+		if len(promptTargets) > len(messageErrors) {
 			output.MessageSent = true
 		}
 	}
@@ -343,6 +323,72 @@ func PrintInterrupt(opts InterruptOptions) error {
 		return err
 	}
 	return encodeJSON(output)
+}
+
+func selectInterruptTargets(panes []tmux.Pane, paneFilterMap map[string]bool, all bool) []tmux.Pane {
+	hasPaneFilter := len(paneFilterMap) > 0
+	var targetPanes []tmux.Pane
+	for _, pane := range panes {
+		paneKey := fmt.Sprintf("%d", pane.Index)
+
+		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
+			continue
+		}
+
+		if !all && !hasPaneFilter {
+			agentType := interruptPaneAgentType(pane)
+			if pane.Index == 0 && agentType == "unknown" {
+				continue
+			}
+			if agentType == "user" {
+				continue
+			}
+		}
+
+		targetPanes = append(targetPanes, pane)
+	}
+	return targetPanes
+}
+
+func interruptPaneAgentType(pane tmux.Pane) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
+}
+
+func interruptPaneTMUXAgentType(pane tmux.Pane) tmux.AgentType {
+	if canonical := tmux.AgentType(pane.Type).Canonical(); canonical.IsValid() {
+		return canonical
+	}
+	return tmux.AgentType(interruptPaneAgentType(pane)).Canonical()
+}
+
+type interruptMessageTarget struct {
+	Pane      string
+	Target    string
+	AgentType tmux.AgentType
+}
+
+func sendInterruptMessages(
+	targets []interruptMessageTarget,
+	message string,
+	send func(target, keys string, enter bool, enterDelay time.Duration, agentType tmux.AgentType) error,
+) []InterruptError {
+	var errors []InterruptError
+	for _, target := range targets {
+		enterDelay := tmux.DefaultEnterDelay
+		if target.AgentType == tmux.AgentUser || target.AgentType == tmux.AgentUnknown {
+			enterDelay = tmux.ShellEnterDelay
+		}
+		if err := send(target.Target, message, true, enterDelay, target.AgentType); err != nil {
+			errors = append(errors, InterruptError{
+				Pane:   target.Pane,
+				Reason: fmt.Sprintf("failed to send message: %v", err),
+			})
+		}
+	}
+	return errors
 }
 
 // getLastMeaningfulOutput extracts the last meaningful output lines up to maxLen chars

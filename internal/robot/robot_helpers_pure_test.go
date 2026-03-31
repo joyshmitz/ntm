@@ -704,6 +704,79 @@ func TestDashboardCounts(t *testing.T) {
 			t.Errorf("gemini = %d, want 1", counts["gemini"])
 		}
 	})
+
+	t.Run("aliases fold into canonical counts", func(t *testing.T) {
+		t.Parallel()
+		sessions := []SnapshotSession{
+			{
+				Name: "proj-aliases",
+				Agents: []SnapshotAgent{
+					{Type: " claude_code "},
+					{Type: "openai-codex"},
+					{Type: "google-gemini"},
+					{Type: "ws"},
+					{Type: "user"},
+				},
+			},
+		}
+		total, user, counts := dashboardCounts(sessions)
+		if total != 5 {
+			t.Errorf("total = %d, want 5", total)
+		}
+		if user != 1 {
+			t.Errorf("user = %d, want 1", user)
+		}
+		if counts["claude"] != 1 {
+			t.Errorf("claude = %d, want 1", counts["claude"])
+		}
+		if counts["codex"] != 1 {
+			t.Errorf("codex = %d, want 1", counts["codex"])
+		}
+		if counts["gemini"] != 1 {
+			t.Errorf("gemini = %d, want 1", counts["gemini"])
+		}
+		if counts["windsurf"] != 1 {
+			t.Errorf("windsurf = %d, want 1", counts["windsurf"])
+		}
+	})
+
+	t.Run("newer agent types count independently", func(t *testing.T) {
+		t.Parallel()
+		sessions := []SnapshotSession{
+			{
+				Name: "proj-modern",
+				Agents: []SnapshotAgent{
+					{Type: "cursor"},
+					{Type: "windsurf"},
+					{Type: "aider"},
+					{Type: "ollama"},
+					{Type: "mystery"},
+				},
+			},
+		}
+		total, user, counts := dashboardCounts(sessions)
+		if total != 5 {
+			t.Errorf("total = %d, want 5", total)
+		}
+		if user != 0 {
+			t.Errorf("user = %d, want 0", user)
+		}
+		if counts["cursor"] != 1 {
+			t.Errorf("cursor = %d, want 1", counts["cursor"])
+		}
+		if counts["windsurf"] != 1 {
+			t.Errorf("windsurf = %d, want 1", counts["windsurf"])
+		}
+		if counts["aider"] != 1 {
+			t.Errorf("aider = %d, want 1", counts["aider"])
+		}
+		if counts["ollama"] != 1 {
+			t.Errorf("ollama = %d, want 1", counts["ollama"])
+		}
+		if got := dashboardOtherAgentCount(total, user, counts); got != 1 {
+			t.Errorf("dashboardOtherAgentCount(...) = %d, want 1", got)
+		}
+	})
 }
 
 // =============================================================================
@@ -1263,6 +1336,53 @@ func TestPrintDashboardMarkdown_RendersAttentionOnce(t *testing.T) {
 		t.Fatalf("dashboard markdown missing attention section:\n%s", rendered)
 	} else if sessions := strings.Index(rendered, "## Sessions\n"); sessions == -1 || attn > sessions {
 		t.Fatalf("attention section should appear before sessions:\n%s", rendered)
+	}
+}
+
+func TestPrintDashboardMarkdown_RendersModernAgentCounts(t *testing.T) {
+	output := DashboardOutput{
+		RobotResponse: NewRobotResponse(true),
+		GeneratedAt:   time.Unix(1700000000, 0).UTC(),
+		Fleet:         "ntm",
+		System: SystemInfo{
+			Version:   "test-version",
+			GoVersion: "go1.test",
+			OS:        "linux",
+			Arch:      "amd64",
+		},
+		Agents: []SnapshotSession{
+			{
+				Name:     "proj-modern",
+				Attached: false,
+				Agents: []SnapshotAgent{
+					{Pane: "0.1", Type: "cursor"},
+					{Pane: "0.2", Type: "ws"},
+					{Pane: "0.3", Type: "aider"},
+					{Pane: "0.4", Type: "ollama"},
+					{Pane: "0.5", Type: "user"},
+					{Pane: "0.6", Type: "mystery"},
+				},
+			},
+		},
+		Attention: &SnapshotAttentionSummary{},
+	}
+
+	rendered, err := captureStdout(t, func() error { return printDashboardMarkdown(output) })
+	if err != nil {
+		t.Fatalf("printDashboardMarkdown() error = %v", err)
+	}
+	for _, want := range []string{
+		"| Cursor | 1 |",
+		"| Windsurf | 1 |",
+		"| Aider | 1 |",
+		"| Ollama | 1 |",
+		"| Other Agents | 1 |",
+		"| Session | Attached | Panes | User | Claude | Codex | Gemini | Cursor | Windsurf | Aider | Ollama | Other |",
+		"| proj-modern | no | 6 | 1 | 0 | 0 | 0 | 1 | 1 | 1 | 1 | 1 |",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("dashboard markdown missing %q:\n%s", want, rendered)
+		}
 	}
 }
 

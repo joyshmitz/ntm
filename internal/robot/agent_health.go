@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/caut"
 	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -428,19 +429,21 @@ func findPTState(ptStates map[string]*pt.AgentState, session, paneStr, agentType
 
 	// Try session__agenttype_pane pattern (e.g., "myproject__cc_1")
 	agentPrefix := ""
-	switch agentType {
-	case "cc", "claude-code", "claude":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		agentPrefix = "cc"
-	case "cod", "codex":
+	case agent.AgentTypeCodex:
 		agentPrefix = "cod"
-	case "gmi", "gemini":
+	case agent.AgentTypeGemini:
 		agentPrefix = "gmi"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		agentPrefix = "cursor"
-	case "windsurf":
+	case agent.AgentTypeWindsurf:
 		agentPrefix = "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		agentPrefix = "aider"
+	case agent.AgentTypeOllama:
+		agentPrefix = "ollama"
 	}
 
 	if agentPrefix != "" {

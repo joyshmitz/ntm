@@ -1300,10 +1300,10 @@ func InjectContextFromQuery(prompt string, queryConfig CASSConfig, filterConfig 
 
 // FormatForAgent returns the appropriate InjectionFormat for an agent type.
 func FormatForAgent(agentType string) InjectionFormat {
-	switch strings.ToLower(agentType) {
-	case "codex", "cod":
+	switch normalizeAgentType(agentType) {
+	case "codex":
 		return FormatMinimal
-	case "gemini", "gmi":
+	case "gemini":
 		return FormatStructured
 	default: // claude, cc, and others
 		return FormatMarkdown

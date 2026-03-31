@@ -14,10 +14,13 @@ func TestAgentTypeToProvider(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"cc", "claude"},
+		{" claude_code ", "claude"},
 		{"codex", "openai"},
 		{"cod", "openai"},
+		{"openai-codex", "openai"},
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
+		{"google-gemini", "gemini"},
 		{"unknown", "unknown"},
 	}
 
@@ -154,76 +157,109 @@ func TestDetectOAuthStatusErrorMessage(t *testing.T) {
 func TestDetectRateLimitStatusFromOutput(t *testing.T) {
 	tests := []struct {
 		name          string
+		agentType     string
 		output        string
 		expectStatus  RateLimitStatus
 		expectCountGt int
 	}{
 		{
 			name:          "rate limit hit",
+			agentType:     "cc",
 			output:        "error: rate limit exceeded, try again later",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "429 error",
+			agentType:     "cc",
 			output:        "HTTP 429 too many requests",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "multiple rate limit patterns",
+			agentType:     "cc",
 			output:        "rate limit exceeded (429), quota exceeded, too many requests",
 			expectStatus:  RateLimitLimited,
 			expectCountGt: 2,
 		},
 		{
 			name:          "clean output",
+			agentType:     "cc",
 			output:        "successfully completed the task",
 			expectStatus:  RateLimitOK,
 			expectCountGt: -1,
 		},
 		{
 			name:          "ratelimit single word",
+			agentType:     "cc",
 			output:        "ratelimit detected",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "rate-limit hyphenated",
+			agentType:     "cc",
 			output:        "rate-limit error",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "quota exceeded",
+			agentType:     "cc",
 			output:        "quota exceeded for this billing period",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "retry after",
+			agentType:     "cc",
 			output:        "retry after 30s",
 			expectStatus:  RateLimitWarning,
 			expectCountGt: 0,
 		},
 		{
 			name:          "empty output",
+			agentType:     "cc",
 			output:        "",
 			expectStatus:  RateLimitOK,
 			expectCountGt: -1,
+		},
+		{
+			name:          "codex-specific insufficient quota alias",
+			agentType:     "openai-codex",
+			output:        "error: insufficient_quota",
+			expectStatus:  RateLimitWarning,
+			expectCountGt: 0,
+		},
+		{
+			name:          "codex-specific billing limit alias",
+			agentType:     "openai-codex",
+			output:        "billing limit reached",
+			expectStatus:  RateLimitWarning,
+			expectCountGt: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status, count := detectRateLimitStatusFromOutput(tt.output)
+			status, count := detectRateLimitStatusFromOutput(tt.output, tt.agentType)
 			if status != tt.expectStatus {
-				t.Errorf("detectRateLimitStatusFromOutput(%q) status = %v, want %v", tt.output, status, tt.expectStatus)
+				t.Errorf("detectRateLimitStatusFromOutput(%q, %q) status = %v, want %v", tt.output, tt.agentType, status, tt.expectStatus)
 			}
 			if count <= tt.expectCountGt && tt.expectCountGt >= 0 {
-				t.Errorf("detectRateLimitStatusFromOutput(%q) count = %d, want > %d", tt.output, count, tt.expectCountGt)
+				t.Errorf("detectRateLimitStatusFromOutput(%q, %q) count = %d, want > %d", tt.output, tt.agentType, count, tt.expectCountGt)
 			}
 		})
+	}
+}
+
+func TestDetectRateLimitStatusFromOutput_RespectsAgentContext(t *testing.T) {
+	t.Parallel()
+
+	status, count := detectRateLimitStatusFromOutput("error: insufficient_quota", "cc")
+	if status != RateLimitOK || count != 0 {
+		t.Fatalf("expected non-Codex agent to ignore Codex-specific limit pattern, got status=%v count=%d", status, count)
 	}
 }
 

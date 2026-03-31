@@ -514,6 +514,21 @@ func TestBulkAssignControlPaneOnly(t *testing.T) {
 	}
 }
 
+func TestBulkAssignFilterPrefersParsedPaneType(t *testing.T) {
+	panes := []tmux.Pane{
+		{Index: 1, ID: "%1", Title: "scratch", Type: tmux.AgentClaude},
+		{Index: 2, ID: "%2", Title: "claude_notes", Type: tmux.AgentUser},
+	}
+
+	filtered := filterBulkAssignPanes(panes, nil)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 agent pane, got %d", len(filtered))
+	}
+	if filtered[0].Target != "%1" || filtered[0].AgentType != "claude" {
+		t.Fatalf("filtered pane = %+v, want target %%1 type claude", filtered[0])
+	}
+}
+
 func TestBulkAssignInvalidBeadIDInAllocation(t *testing.T) {
 	allocation := map[int]string{1: "bd-missing"}
 	panes := mockPanes("proj", []int{1})

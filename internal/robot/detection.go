@@ -13,6 +13,8 @@ import (
 type DetectionMethod string
 
 const (
+	// MethodTmuxPane indicates detection from tmux pane metadata.
+	MethodTmuxPane DetectionMethod = "tmux-pane"
 	// MethodTitle indicates detection from pane title
 	MethodTitle DetectionMethod = "title"
 	// MethodProcess indicates detection from running process/command
@@ -43,6 +45,7 @@ var processPatterns = map[string]string{
 	"windsurf":     "windsurf",
 	"aider":        "aider",
 	"aider-chat":   "aider",
+	"ollama":       "ollama",
 }
 
 // contentPatterns provides regex patterns for detecting agents from output
@@ -92,11 +95,23 @@ var contentPatterns = []struct {
 			regexp.MustCompile(`(?i)aider/`),
 		},
 	},
+	{
+		agentType: "ollama",
+		patterns: []*regexp.Regexp{
+			regexp.MustCompile(`(?im)(^ollama>\s*$|\bollama\s+(run|chat|serve|pull)\b|^\s*ollama\s+cli\b)`),
+		},
+	},
 }
 
-// DetectAgentTypeEnhanced performs multi-method agent type detection
-// Priority: Process > Content > Title > Unknown
+// DetectAgentTypeEnhanced performs multi-method agent type detection.
+// Priority: tmux pane metadata > Process > Content > Title > Unknown.
 func DetectAgentTypeEnhanced(pane tmux.Pane, content string) AgentDetection {
+	// Prefer tmux's parsed pane type when available; it is more reliable than
+	// command/title/content heuristics for customized panes.
+	if detection := detectFromPaneType(pane); detection.Type != "unknown" {
+		return detection
+	}
+
 	// Try process-based detection first (highest confidence)
 	if detection := detectFromProcess(pane.Command); detection.Type != "unknown" {
 		return detection
@@ -124,6 +139,19 @@ func DetectAgentTypeEnhanced(pane tmux.Pane, content string) AgentDetection {
 		Type:       "unknown",
 		Confidence: 0.0,
 		Method:     MethodUnknown,
+	}
+}
+
+func detectFromPaneType(pane tmux.Pane) AgentDetection {
+	agentType := agentTypeString(pane.Type)
+	if agentType == "unknown" || agentType == "user" {
+		return AgentDetection{Type: "unknown", Confidence: 0.0, Method: MethodUnknown}
+	}
+
+	return AgentDetection{
+		Type:       agentType,
+		Confidence: 1.0,
+		Method:     MethodTmuxPane,
 	}
 }
 
@@ -168,7 +196,7 @@ func detectFromContent(content string) AgentDetection {
 func DetectFromTitle(title string) AgentDetection {
 	title = strings.ToLower(title)
 
-	agents := []string{"claude", "codex", "gemini", "cursor", "windsurf", "aider"}
+	agents := []string{"claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama"}
 	for _, agent := range agents {
 		if strings.Contains(title, agent) {
 			return AgentDetection{
@@ -184,15 +212,25 @@ func DetectFromTitle(title string) AgentDetection {
 
 // DetectFromNTMTitle checks for NTM's pane title convention (session__type_n)
 func DetectFromNTMTitle(title string) AgentDetection {
-	// Check for __cc, __cod, __gmi suffixes (case-insensitive)
+	// Check for encoded pane type markers in titles like "proj__cc_1" or
+	// "proj__cursor_1". The helper enforces type-token boundaries to avoid
+	// false positives from unrelated substrings.
 	lower := strings.ToLower(title)
 	switch {
-	case strings.Contains(lower, "__cc"):
+	case containsShortForm(lower, "cc"):
 		return AgentDetection{Type: "claude", Confidence: 0.9, Method: MethodTitle}
-	case strings.Contains(lower, "__cod"):
+	case containsShortForm(lower, "cod"):
 		return AgentDetection{Type: "codex", Confidence: 0.9, Method: MethodTitle}
-	case strings.Contains(lower, "__gmi"):
+	case containsShortForm(lower, "gmi"):
 		return AgentDetection{Type: "gemini", Confidence: 0.9, Method: MethodTitle}
+	case containsShortForm(lower, "cursor"):
+		return AgentDetection{Type: "cursor", Confidence: 0.9, Method: MethodTitle}
+	case containsShortForm(lower, "windsurf"), containsShortForm(lower, "ws"):
+		return AgentDetection{Type: "windsurf", Confidence: 0.9, Method: MethodTitle}
+	case containsShortForm(lower, "aider"):
+		return AgentDetection{Type: "aider", Confidence: 0.9, Method: MethodTitle}
+	case containsShortForm(lower, "ollama"):
+		return AgentDetection{Type: "ollama", Confidence: 0.9, Method: MethodTitle}
 	}
 
 	return AgentDetection{Type: "unknown", Confidence: 0.0, Method: MethodUnknown}

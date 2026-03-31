@@ -248,21 +248,19 @@ func writeSnapshotSessionsMarkdown(sb *strings.Builder, sessions []SnapshotSessi
 			}
 			fmt.Fprintf(
 				sb,
-				"- %s%s: %d agents (cc:%d cod:%d gmi:%d) w:%d i:%d e:%d\n",
+				"- %s%s: %d agents (%s) w:%d i:%d e:%d\n",
 				sess.Name,
 				attached,
 				len(sess.Agents),
-				typeCounts["claude"],
-				typeCounts["codex"],
-				typeCounts["gemini"],
+				formatMarkdownAgentTypeCounts(typeCounts),
 				stateCounts["active"],
 				stateCounts["idle"],
 				stateCounts["error"],
 			)
 		}
 	} else {
-		sb.WriteString("| Session | Attached | Agents | Claude | Codex | Gemini | Working | Idle | Error |\n")
-		sb.WriteString("|---------|----------|--------|--------|-------|--------|---------|------|-------|\n")
+		sb.WriteString("| Session | Attached | Agents | Types | Working | Idle | Error |\n")
+		sb.WriteString("|---------|----------|--------|-------|---------|------|-------|\n")
 
 		for _, sess := range sessions {
 			typeCounts, stateCounts := snapshotSessionCounts(sess.Agents)
@@ -272,22 +270,57 @@ func writeSnapshotSessionsMarkdown(sb *strings.Builder, sessions []SnapshotSessi
 				attached = "yes"
 			}
 
-			fmt.Fprintf(sb, "| %s | %s | %d | %d | %d | %d | %d | %d | %d |\n",
+			fmt.Fprintf(sb, "| %s | %s | %d | %s | %d | %d | %d |\n",
 				sess.Name, attached, len(sess.Agents),
-				typeCounts["claude"], typeCounts["codex"], typeCounts["gemini"],
+				formatMarkdownAgentTypeCounts(typeCounts),
 				stateCounts["active"], stateCounts["idle"], stateCounts["error"])
 		}
 	}
 	sb.WriteString("\n")
 }
 
+var markdownAgentTypeOrder = []string{
+	"claude",
+	"codex",
+	"gemini",
+	"cursor",
+	"windsurf",
+	"aider",
+	"ollama",
+	"user",
+	"other",
+}
+
+var markdownAgentTypeLabels = map[string]string{
+	"claude":   "cc",
+	"codex":    "cod",
+	"gemini":   "gmi",
+	"cursor":   "cur",
+	"windsurf": "ws",
+	"aider":    "aid",
+	"ollama":   "oll",
+	"user":     "usr",
+	"other":    "oth",
+}
+
+func formatMarkdownAgentTypeCounts(counts map[string]int) string {
+	var parts []string
+	for _, agentType := range markdownAgentTypeOrder {
+		if counts[agentType] <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s:%d", markdownAgentTypeLabels[agentType], counts[agentType]))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, " ")
+}
+
 func snapshotSessionCounts(agents []SnapshotAgent) (map[string]int, map[string]int) {
-	counts := map[string]int{
-		"claude": 0,
-		"codex":  0,
-		"gemini": 0,
-		"user":   0,
-		"other":  0,
+	counts := make(map[string]int, len(markdownAgentTypeOrder))
+	for _, agentType := range markdownAgentTypeOrder {
+		counts[agentType] = 0
 	}
 	states := map[string]int{
 		"active": 0,
@@ -296,20 +329,14 @@ func snapshotSessionCounts(agents []SnapshotAgent) (map[string]int, map[string]i
 	}
 
 	for _, agent := range agents {
-		switch strings.ToLower(strings.TrimSpace(agent.Type)) {
-		case "claude":
-			counts["claude"]++
-		case "codex":
-			counts["codex"]++
-		case "gemini":
-			counts["gemini"]++
-		case "user":
-			counts["user"]++
+		switch normalizedType := normalizeAgentType(agent.Type); normalizedType {
+		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama", "user":
+			counts[normalizedType]++
 		default:
 			counts["other"]++
 		}
 
-		if strings.EqualFold(agent.Type, "user") {
+		if normalizeAgentType(agent.Type) == "user" {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(agent.State)) {
@@ -325,24 +352,15 @@ func snapshotSessionCounts(agents []SnapshotAgent) (map[string]int, map[string]i
 }
 
 func countAgentsByType(panes []tmux.Pane) map[string]int {
-	counts := map[string]int{
-		"claude": 0,
-		"codex":  0,
-		"gemini": 0,
-		"user":   0,
-		"other":  0,
+	counts := make(map[string]int, len(markdownAgentTypeOrder))
+	for _, agentType := range markdownAgentTypeOrder {
+		counts[agentType] = 0
 	}
 
 	for _, pane := range panes {
-		switch pane.Type {
-		case tmux.AgentClaude:
-			counts["claude"]++
-		case tmux.AgentCodex:
-			counts["codex"]++
-		case tmux.AgentGemini:
-			counts["gemini"]++
-		case tmux.AgentUser:
-			counts["user"]++
+		switch normalizedType := normalizeAgentType(string(pane.Type)); normalizedType {
+		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama", "user":
+			counts[normalizedType]++
 		default:
 			counts["other"]++
 		}
@@ -938,13 +956,11 @@ func renderMarkdownSessions(sb *strings.Builder, section ProjectedSection, headi
 				attached = "*"
 			}
 			fmt.Fprintf(sb,
-				"- %s%s: %d agents (cc:%d cod:%d gmi:%d) w:%d i:%d e:%d\n",
+				"- %s%s: %d agents (%s) w:%d i:%d e:%d\n",
 				sess.Name,
 				attached,
 				len(sess.Agents),
-				typeCounts["claude"],
-				typeCounts["codex"],
-				typeCounts["gemini"],
+				formatMarkdownAgentTypeCounts(typeCounts),
 				stateCounts["active"],
 				stateCounts["idle"],
 				stateCounts["error"],
@@ -959,8 +975,7 @@ func renderMarkdownSessions(sb *strings.Builder, section ProjectedSection, headi
 	sb.WriteString("|---|---|---|---|---|\n")
 	for _, sess := range sessions {
 		typeCounts, stateCounts := snapshotSessionCounts(sess.Agents)
-		types := fmt.Sprintf("cc:%d cod:%d gmi:%d",
-			typeCounts["claude"], typeCounts["codex"], typeCounts["gemini"])
+		types := formatMarkdownAgentTypeCounts(typeCounts)
 		states := fmt.Sprintf("w:%d i:%d e:%d",
 			stateCounts["active"], stateCounts["idle"], stateCounts["error"])
 		attached := "no"

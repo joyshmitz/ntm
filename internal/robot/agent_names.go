@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // NATOAlphabet is the NATO phonetic alphabet used for generating agent names.
@@ -245,16 +247,22 @@ func BuildNameMapFromSession(sessionName string, customNames []string) *AgentNam
 	}
 
 	for _, pane := range panes {
-		agentType := detectAgentTypeFromTitle(pane.Title)
-		if agentType == "" {
-			agentType = "user"
-		}
-
+		agentType := resolveAgentTypeForNaming(pane)
 		paneRef := fmt.Sprintf("0.%d", pane.Index)
 		nameMap.AssignNew(agentType, paneRef)
 	}
 
 	return nameMap
+}
+
+func resolveAgentTypeForNaming(pane tmuxPaneInfo) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	if agentType := detectAgentTypeFromTitle(pane.Title); agentType != "" {
+		return agentType
+	}
+	return "user"
 }
 
 // detectAgentTypeFromTitle extracts the agent type from a tmux pane title.
@@ -315,4 +323,5 @@ var tmuxGetPanesFn = func(session string) []tmuxPaneInfo { return tmuxGetPanesRe
 type tmuxPaneInfo struct {
 	Index int
 	Title string
+	Type  tmux.AgentType
 }

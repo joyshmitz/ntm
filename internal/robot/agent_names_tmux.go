@@ -22,7 +22,7 @@ func tmuxGetPanesReal(session string) []tmuxPaneInfo {
 	}
 	result := make([]tmuxPaneInfo, len(panes))
 	for i, p := range panes {
-		result[i] = tmuxPaneInfo{Index: p.Index, Title: p.Title}
+		result[i] = tmuxPaneInfo{Index: p.Index, Title: p.Title, Type: p.Type}
 	}
 	return result
 }

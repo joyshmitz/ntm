@@ -23,7 +23,7 @@ import (
 
 // exitAgent exits the current agent using the appropriate method.
 func exitAgent(session string, pane int, agentType string, seq *RestartSequence) error {
-	switch agentType {
+	switch restartCanonicalAgentType(agentType) {
 	case "cc":
 		return exitClaudeCode(session, pane, seq)
 	case "cod":

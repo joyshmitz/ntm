@@ -294,6 +294,18 @@ func TestCountAgentsByType(t *testing.T) {
 				"claude": 3, "codex": 0, "gemini": 0, "user": 0, "other": 0,
 			},
 		},
+		{
+			name: "newer agent types stay distinct",
+			panes: []tmux.Pane{
+				{Type: tmux.AgentCursor},
+				{Type: tmux.AgentWindsurf},
+				{Type: tmux.AgentAider},
+				{Type: tmux.AgentOllama},
+			},
+			expect: map[string]int{
+				"cursor": 1, "windsurf": 1, "aider": 1, "ollama": 1, "other": 0,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -306,6 +318,51 @@ func TestCountAgentsByType(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSnapshotSessionCountsCanonicalizesAndKeepsNewerTypes(t *testing.T) {
+	t.Parallel()
+
+	counts, states := snapshotSessionCounts([]SnapshotAgent{
+		{Type: "openai-codex", State: "idle"},
+		{Type: "google-gemini", State: "error"},
+		{Type: "cursor", State: "working"},
+		{Type: "ws", State: "busy"},
+		{Type: "aider", State: "active"},
+		{Type: "ollama", State: "idle"},
+		{Type: "user", State: "idle"},
+		{Type: "mystery", State: "error"},
+	})
+
+	if counts["codex"] != 1 || counts["gemini"] != 1 || counts["cursor"] != 1 || counts["windsurf"] != 1 || counts["aider"] != 1 || counts["ollama"] != 1 {
+		t.Fatalf("counts = %+v", counts)
+	}
+	if counts["user"] != 1 || counts["other"] != 1 {
+		t.Fatalf("counts = %+v, want user=1 other=1", counts)
+	}
+	if states["idle"] != 2 || states["error"] != 2 || states["active"] != 3 {
+		t.Fatalf("states = %+v, want idle=2 error=2 active=3", states)
+	}
+}
+
+func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
+	t.Parallel()
+
+	got := formatMarkdownAgentTypeCounts(map[string]int{
+		"claude":   1,
+		"codex":    2,
+		"cursor":   1,
+		"ollama":   1,
+		"user":     1,
+		"other":    1,
+		"gemini":   0,
+		"windsurf": 0,
+		"aider":    0,
+	})
+	want := "cc:1 cod:2 cur:1 oll:1 usr:1 oth:1"
+	if got != want {
+		t.Fatalf("formatMarkdownAgentTypeCounts() = %q, want %q", got, want)
 	}
 }
 
@@ -560,6 +617,40 @@ func TestRenderMarkdownFromProjection_CompactMode(t *testing.T) {
 	}
 	if len(compact) == 0 {
 		t.Error("expected non-empty compact output")
+	}
+}
+
+func TestRenderMarkdownFromProjection_SessionsKeepModernAgentTypes(t *testing.T) {
+	t.Parallel()
+
+	snapshot := &SnapshotOutput{
+		Sessions: []SnapshotSession{
+			{
+				Name:     "proj-modern",
+				Attached: true,
+				Agents: []SnapshotAgent{
+					{Type: "openai-codex", State: "idle"},
+					{Type: "google-gemini", State: "error"},
+					{Type: "cursor", State: "working"},
+					{Type: "ws", State: "busy"},
+					{Type: "ollama", State: "idle"},
+					{Type: "user", State: "idle"},
+					{Type: "mystery", State: "error"},
+				},
+			},
+		},
+	}
+
+	proj := ProjectSections(snapshot, SectionProjectionOptions{})
+	full := RenderMarkdownFromProjection(proj, false)
+	compact := RenderMarkdownFromProjection(proj, true)
+	wantTypes := "cod:1 gmi:1 cur:1 ws:1 oll:1 usr:1 oth:1"
+
+	if !strings.Contains(full, wantTypes) {
+		t.Fatalf("full projection markdown missing modern type summary %q:\n%s", wantTypes, full)
+	}
+	if !strings.Contains(compact, wantTypes) {
+		t.Fatalf("compact projection markdown missing modern type summary %q:\n%s", wantTypes, compact)
 	}
 }
 

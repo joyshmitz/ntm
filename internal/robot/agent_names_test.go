@@ -2,6 +2,8 @@ package robot
 
 import (
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestNATOAlphabetLength(t *testing.T) {
@@ -409,5 +411,30 @@ func TestBuildNameMapFromSession(t *testing.T) {
 	name4, ok := nameMap.NameForPane("0.4")
 	if !ok || name4 != "gemini-echo" {
 		t.Errorf("pane 0.4 name = %q, want gemini-echo", name4)
+	}
+}
+
+func TestBuildNameMapFromSessionUsesPaneTypeForCustomTitles(t *testing.T) {
+	origGetPanes := tmuxGetPanesFn
+	defer func() { tmuxGetPanesFn = origGetPanes }()
+
+	tmuxGetPanesFn = func(_ string) []tmuxPaneInfo {
+		return []tmuxPaneInfo{
+			{Index: 0, Title: "shell", Type: tmux.AgentUser},
+			{Index: 1, Title: "notes", Type: tmux.AgentClaude},
+			{Index: 2, Title: "logs", Type: tmux.AgentType("openai-codex")},
+		}
+	}
+
+	nameMap := BuildNameMapFromSession("proj", nil)
+
+	name1, ok := nameMap.NameForPane("0.1")
+	if !ok || name1 != "claude-bravo" {
+		t.Fatalf("pane 0.1 name = %q, want claude-bravo", name1)
+	}
+
+	name2, ok := nameMap.NameForPane("0.2")
+	if !ok || name2 != "codex-charlie" {
+		t.Fatalf("pane 0.2 name = %q, want codex-charlie", name2)
 	}
 }

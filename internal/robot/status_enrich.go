@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/process"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tokens"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
@@ -34,6 +35,17 @@ var rateLimitPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)too many requests`),
 	regexp.MustCompile(`RESOURCE_EXHAUSTED`),
 	regexp.MustCompile(`resets \d+[ap]m`),
+}
+
+var codexRateLimitPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)openai.*rate.?limit`),
+	regexp.MustCompile(`(?i)codex.*rate.?limit`),
+	regexp.MustCompile(`(?i)insufficient_quota`),
+	regexp.MustCompile(`(?i)billing.*limit|limit.*billing`),
+	regexp.MustCompile(`(?i)usage.*(?:cap|limit).*reached`),
+	regexp.MustCompile(`(?i)tokens?\s+per\s+min`),
+	regexp.MustCompile(`(?i)requests?\s+per\s+min`),
+	regexp.MustCompile(`(?i)RateLimitError`),
 }
 
 func enrichAgentStatus(agent *Agent, sessionName, modelName string, content string) {
@@ -70,7 +82,7 @@ func enrichAgentStatus(agent *Agent, sessionName, modelName string, content stri
 	// We use the content passed in from the caller (already captured once)
 	if content != "" {
 		// Rate limit
-		detected, match := detectRateLimit(content)
+		detected, match := detectRateLimit(content, agent.Type)
 		agent.RateLimitDetected = detected
 		agent.RateLimitMatch = match
 
@@ -126,11 +138,25 @@ func getProcessMemoryMB(pid int) (int, error) {
 	return 0, fmt.Errorf("failed to get memory for pid %d", pid)
 }
 
-func detectRateLimit(content string) (bool, string) {
+func detectRateLimit(content string, agentType string) (bool, string) {
+	cleaned := strings.TrimSpace(content)
 	for _, pattern := range rateLimitPatterns {
-		if match := pattern.FindString(content); match != "" {
+		if match := pattern.FindString(cleaned); match != "" {
 			return true, match
 		}
+	}
+	if normalizeAgentType(agentType) == "codex" {
+		for _, pattern := range codexRateLimitPatterns {
+			if match := pattern.FindString(cleaned); match != "" {
+				return true, match
+			}
+		}
+	}
+	if detection := ratelimit.DetectRateLimitForAgent(cleaned, agentType); detection.RateLimited {
+		if detection.ExitCode == 429 {
+			return true, "429"
+		}
+		return true, "rate limit"
 	}
 	return false, ""
 }

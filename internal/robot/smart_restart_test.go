@@ -873,3 +873,56 @@ func TestSplitBySpace(t *testing.T) {
 		}
 	}
 }
+
+func TestRestartCanonicalAgentType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"cc", "cc"},
+		{"claude", "cc"},
+		{"claude_code", "cc"},
+		{"codex-cli", "cod"},
+		{"openai-codex", "cod"},
+		{"google-gemini", "gmi"},
+		{"ws", "windsurf"},
+		{"ollama", "ollama"},
+		{"mystery-agent", "unknown"},
+		{"", "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := string(restartCanonicalAgentType(tt.input)); got != tt.want {
+				t.Errorf("restartCanonicalAgentType(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestartLaunchAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"claude", "cc"},
+		{"claude_code", "cc"},
+		{"codex", "cod"},
+		{"openai-codex", "cod"},
+		{"google-gemini", "gmi"},
+		{"ws", "windsurf"},
+		{"aider", "aider"},
+		{"ollama", "ollama"},
+		{"unknown", "cc"},
+		{"mystery-agent", "cc"},
+		{"", "cc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := restartLaunchAlias(tt.input); got != tt.want {
+				t.Errorf("restartLaunchAlias(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

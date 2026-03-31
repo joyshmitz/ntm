@@ -285,7 +285,7 @@ func FormatAggregatedLog(entry AggregatedLogEntry) string {
 
 // shortAgentType returns a short agent type identifier.
 func shortAgentType(agentType string) string {
-	switch agentType {
+	switch normalizeAgentType(agentType) {
 	case "claude":
 		return "cc"
 	case "codex":
@@ -293,6 +293,7 @@ func shortAgentType(agentType string) string {
 	case "gemini":
 		return "gmi"
 	default:
+		agentType = normalizeAgentType(agentType)
 		if len(agentType) > 3 {
 			return agentType[:3]
 		}

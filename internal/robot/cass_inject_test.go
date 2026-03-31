@@ -799,12 +799,15 @@ func TestFormatForAgent(t *testing.T) {
 	}{
 		{"claude", FormatMarkdown},
 		{"cc", FormatMarkdown},
+		{"claude_code", FormatMarkdown},
 		{"Claude", FormatMarkdown},
 		{"codex", FormatMinimal},
 		{"cod", FormatMinimal},
+		{"openai-codex", FormatMinimal},
 		{"Codex", FormatMinimal},
 		{"gemini", FormatStructured},
 		{"gmi", FormatStructured},
+		{"google-gemini", FormatStructured},
 		{"Gemini", FormatStructured},
 		{"unknown", FormatMarkdown}, // Default
 		{"", FormatMarkdown},        // Empty defaults to markdown

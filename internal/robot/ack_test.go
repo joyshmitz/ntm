@@ -4,6 +4,9 @@ package robot
 
 import (
 	"testing"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestDetectAcknowledgment(t *testing.T) {
@@ -223,6 +226,120 @@ func TestIsPromptLine(t *testing.T) {
 				t.Errorf("isPromptLine(%q, %q) = %v, want %v", tt.line, tt.paneTitle, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestAckPaneAgentTypePrefersParsedPaneType(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{
+		Title:   "custom title",
+		Type:    tmux.AgentCodex,
+		Command: "codex --model o3",
+	}
+
+	if got := ackPaneAgentType(pane); got != "codex" {
+		t.Fatalf("ackPaneAgentType() = %q, want %q", got, "codex")
+	}
+}
+
+func TestSelectAckTargetsSkipsUserPaneByDefault(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
+		{ID: "%1", Index: 1, Title: "custom pane", Type: tmux.AgentClaude, Command: "claude"},
+	}
+
+	targets := selectAckTargets(panes, nil)
+	if len(targets) != 1 {
+		t.Fatalf("selectAckTargets() returned %d panes, want 1", len(targets))
+	}
+	if targets[0].ID != "%1" {
+		t.Fatalf("selectAckTargets() picked %s, want %%1", targets[0].ID)
+	}
+}
+
+func TestSelectSendAndAckTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
+		{ID: "%1", Index: 1, Title: "notes", Type: tmux.AgentClaude, Command: "claude"},
+		{ID: "%2", Index: 2, Title: "build monitor", Type: tmux.AgentCodex, Command: "codex"},
+	}
+
+	targets, keys := selectSendAndAckTargets(
+		panes,
+		map[string]bool{},
+		map[string]bool{},
+		map[string]bool{"codex": true},
+		false,
+	)
+	if len(targets) != 1 {
+		t.Fatalf("selectSendAndAckTargets() returned %d panes, want 1", len(targets))
+	}
+	if targets[0].ID != "%2" {
+		t.Fatalf("selectSendAndAckTargets() picked %s, want %%2", targets[0].ID)
+	}
+	if len(keys) != 1 || keys[0] != "2" {
+		t.Fatalf("selectSendAndAckTargets() keys = %v, want [2]", keys)
+	}
+}
+
+func TestSendAndAckToPaneUsesDerivedAgentAwareSender(t *testing.T) {
+	t.Parallel()
+
+	pane := tmux.Pane{
+		ID:      "%2",
+		Index:   2,
+		Title:   "myproj__cod_2",
+		Type:    tmux.AgentUnknown,
+		Command: "codex --model o3",
+	}
+
+	var gotTarget string
+	var gotKeys string
+	var gotEnter bool
+	var gotDelay time.Duration
+	var gotAgentType tmux.AgentType
+
+	err := sendAndAckToPane(pane, "resume work", nil, func(target, keys string, enter bool, enterDelay time.Duration, agentType tmux.AgentType) error {
+		gotTarget = target
+		gotKeys = keys
+		gotEnter = enter
+		gotDelay = enterDelay
+		gotAgentType = agentType
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("sendAndAckToPane() returned error: %v", err)
+	}
+	if gotTarget != "%2" || gotKeys != "resume work" || !gotEnter {
+		t.Fatalf("sendAndAckToPane() sent unexpected payload target=%q keys=%q enter=%v", gotTarget, gotKeys, gotEnter)
+	}
+	if gotDelay != tmux.DefaultEnterDelay {
+		t.Fatalf("sendAndAckToPane() delay = %v, want %v", gotDelay, tmux.DefaultEnterDelay)
+	}
+	if gotAgentType != tmux.AgentCodex {
+		t.Fatalf("sendAndAckToPane() agentType = %v, want %v", gotAgentType, tmux.AgentCodex)
+	}
+}
+
+func TestDetectAcknowledgmentForAgentIgnoresAgentPrompts(t *testing.T) {
+	t.Parallel()
+
+	ackType, detected := detectAcknowledgmentForAgent(
+		"ready\n",
+		"ready\ncodex> \ncodex> \n",
+		"",
+		"codex",
+	)
+	if detected {
+		t.Fatalf("detectAcknowledgmentForAgent() detected = %v, want false (type=%v)", detected, ackType)
+	}
+	if ackType != AckNone {
+		t.Fatalf("detectAcknowledgmentForAgent() type = %v, want %v", ackType, AckNone)
 	}
 }
 

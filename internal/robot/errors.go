@@ -131,24 +131,12 @@ func isRobotErrorLine(line string) (bool, string) {
 
 // agentTypeFromPaneType converts tmux pane type to string.
 func agentTypeFromPaneType(t tmux.AgentType) string {
-	switch t {
-	case tmux.AgentClaude:
-		return "claude"
-	case tmux.AgentCodex:
-		return "codex"
-	case tmux.AgentGemini:
-		return "gemini"
-	case tmux.AgentCursor:
-		return "cursor"
-	case tmux.AgentWindsurf:
-		return "windsurf"
-	case tmux.AgentAider:
-		return "aider"
-	case tmux.AgentUser:
-		return "user"
-	default:
-		return "unknown"
-	}
+	return agentTypeString(t)
+}
+
+func detectErrorsPaneAgentType(pane tmux.Pane, paneOutput string) string {
+	detection := DetectAgentTypeEnhanced(pane, paneOutput)
+	return detection.Type
 }
 
 // GetErrors returns filtered error lines from session panes.
@@ -217,31 +205,26 @@ func GetErrors(opts ErrorsOptions) (*ErrorsOutput, error) {
 
 	// Process each pane
 	for _, pane := range panes {
-		// Skip user pane by default
-		if pane.Type == tmux.AgentUser {
-			continue
-		}
-
 		// Apply pane filter
 		if len(paneFilter) > 0 && !paneFilter[pane.Index] {
 			continue
 		}
 
-		// Apply agent type filter
-		agentType := agentTypeFromPaneType(pane.Type)
-		if opts.AgentType != "" {
-			if !strings.EqualFold(agentType, opts.AgentType) {
-				continue
-			}
-		}
-
-		// Capture pane output
+		// Capture pane output before filtering so enhanced detection can use it.
 		paneOutput, err := tmux.CapturePaneOutput(pane.ID, opts.Lines)
 		if err != nil {
 			continue
 		}
 
-		lines := strings.Split(paneOutput, "\n")
+		agentType := detectErrorsPaneAgentType(pane, paneOutput)
+		if agentType == "user" || agentType == "unknown" || agentType == "" {
+			continue
+		}
+		if !matchesAgentTypeFilter(agentType, opts.AgentType) {
+			continue
+		}
+
+		lines := splitLines(paneOutput)
 		output.Summary.TotalLines += len(lines)
 		output.Summary.PanesSearched++
 

@@ -100,7 +100,6 @@ func defaultPatterns() []Pattern {
 		{Name: "codex_prompt", RegexStr: `(?i)codex\s*>?\s*$`, Agent: "codex", State: StateWaiting, Category: CategoryIdle, Priority: 100, Description: "Codex prompt"},
 		{Name: "codex_context_left", RegexStr: `(?i)\b\d{1,3}%\s*context\s*left\b`, Agent: "codex", State: StateWaiting, Category: CategoryIdle, Priority: 96, Description: "Codex context status line"},
 		{Name: "codex_chevron_prompt", RegexStr: `(?m)^\s*›\s*.*$`, Agent: "codex", State: StateWaiting, Category: CategoryIdle, Priority: 92, Description: "Codex chevron prompt"},
-		{Name: "codex_dollar", RegexStr: `\$\s*$`, Agent: "codex", State: StateWaiting, Category: CategoryIdle, Priority: 50, Description: "Codex dollar prompt"},
 
 		// Gemini patterns
 		{Name: "gemini_prompt", RegexStr: `(?i)gemini\s*>?\s*$`, Agent: "gemini", State: StateWaiting, Category: CategoryIdle, Priority: 100, Description: "Gemini prompt"},
@@ -208,6 +207,12 @@ func (lib *PatternLibrary) Match(content string, agentType string) []PatternMatc
 			continue
 		}
 
+		// A plain shell prompt in a known-agent pane usually means the agent exited
+		// back to the shell, not that it is idle at its own prompt.
+		if p.Agent == "*" && isGenericShellIdlePattern(p.Name) && isKnownAgentPatternType(agentType) {
+			continue
+		}
+
 		if p.Regex != nil && p.Regex.MatchString(content) {
 			matches = append(matches, PatternMatch{
 				Pattern:  p.Name,
@@ -245,6 +250,12 @@ func (lib *PatternLibrary) MatchByCategory(content string, agentType string, cat
 
 		// Skip patterns for other agents
 		if p.Agent != "*" && p.Agent != "" && agentType != "" && p.Agent != agentType {
+			continue
+		}
+
+		// Keep shell fallback prompts out of known-agent panes; they indicate an
+		// exited agent rather than an idle agent prompt.
+		if p.Agent == "*" && isGenericShellIdlePattern(p.Name) && isKnownAgentPatternType(agentType) {
 			continue
 		}
 
@@ -384,6 +395,24 @@ func HasErrorPattern(content string, agentType string) bool {
 // HasIdlePattern checks for idle patterns in the default library.
 func HasIdlePattern(content string, agentType string) bool {
 	return DefaultLibrary.HasIdlePrompt(content, agentType)
+}
+
+func isGenericShellIdlePattern(name string) bool {
+	switch name {
+	case "shell_dollar", "shell_percent", "shell_hash":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownAgentPatternType(agentType string) bool {
+	switch normalizeAgentType(agentType) {
+	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama":
+		return true
+	default:
+		return false
+	}
 }
 
 // HasThinkingPattern checks for thinking patterns in the default library.

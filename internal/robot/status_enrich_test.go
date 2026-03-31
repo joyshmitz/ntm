@@ -19,75 +19,108 @@ import (
 func TestDetectRateLimit(t *testing.T) {
 	tests := []struct {
 		name         string
+		agentType    string
 		content      string
 		wantDetected bool
 		wantMatchHas string // substring that should be in match
 	}{
 		{
 			name:         "Claude rate limit message",
+			agentType:    "claude",
 			content:      "Error: You've hit your limit for the day. Please try again tomorrow.",
 			wantDetected: true,
 			wantMatchHas: "hit your limit",
 		},
 		{
 			name:         "Claude rate limit case insensitive",
+			agentType:    "claude",
 			content:      "YOU'VE HIT YOUR LIMIT",
 			wantDetected: true,
 			wantMatchHas: "HIT YOUR LIMIT",
 		},
 		{
 			name:         "Rate limit generic",
+			agentType:    "claude",
 			content:      "API rate limit exceeded, please slow down",
 			wantDetected: true,
 			wantMatchHas: "rate limit",
 		},
 		{
 			name:         "Too many requests",
+			agentType:    "claude",
 			content:      "Error 429: Too many requests. Retry after 60 seconds.",
 			wantDetected: true,
 			wantMatchHas: "Too many requests",
 		},
 		{
 			name:         "Google resource exhausted",
+			agentType:    "gemini",
 			content:      "Error: RESOURCE_EXHAUSTED: Quota exceeded",
 			wantDetected: true,
 			wantMatchHas: "RESOURCE_EXHAUSTED",
 		},
 		{
 			name:         "Reset time pattern AM",
+			agentType:    "claude",
 			content:      "Your limit resets 6am Pacific time",
 			wantDetected: true,
 			wantMatchHas: "resets 6am",
 		},
 		{
 			name:         "Reset time pattern PM",
+			agentType:    "claude",
 			content:      "Usage resets 10pm",
 			wantDetected: true,
 			wantMatchHas: "resets 10pm",
 		},
 		{
+			name:         "Codex insufficient quota alias",
+			agentType:    "openai-codex",
+			content:      "Error: insufficient_quota",
+			wantDetected: true,
+			wantMatchHas: "insufficient_quota",
+		},
+		{
+			name:         "Codex billing limit alias",
+			agentType:    "codex",
+			content:      "billing limit reached",
+			wantDetected: true,
+			wantMatchHas: "billing limit",
+		},
+		{
 			name:         "No rate limit - normal output",
+			agentType:    "claude",
 			content:      "Successfully completed the task.\nAll tests passed.",
 			wantDetected: false,
 			wantMatchHas: "",
 		},
 		{
 			name:         "No rate limit - empty",
+			agentType:    "claude",
 			content:      "",
 			wantDetected: false,
 			wantMatchHas: "",
 		},
 		{
 			name:         "No rate limit - code discussing rate limits",
+			agentType:    "claude",
 			content:      "// TODO: implement rate limiting for the API",
 			wantDetected: true, // This is a known false positive, but pattern matches
 			wantMatchHas: "rate limit",
 		},
 		{
 			name:         "Multiline with rate limit buried",
+			agentType:    "claude",
 			content:      "Working on feature...\nCompiling...\nError: Rate limit reached\nRetrying...",
 			wantDetected: true,
 			wantMatchHas: "Rate limit",
+		},
+		{
+			name:         "Non-codex ignores codex-specific quota message",
+			agentType:    "claude",
+			content:      "Error: insufficient_quota",
+			wantDetected: false,
+			wantMatchHas: "",
 		},
 	}
 
@@ -95,7 +128,7 @@ func TestDetectRateLimit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Logf("INPUT: content=%q", truncateForLog(tc.content, 100))
 
-			detected, match := detectRateLimit(tc.content)
+			detected, match := detectRateLimit(tc.content, tc.agentType)
 
 			t.Logf("OUTPUT: detected=%v match=%q", detected, match)
 			t.Logf("EXPECTED: detected=%v matchContains=%q", tc.wantDetected, tc.wantMatchHas)
@@ -460,6 +493,9 @@ func TestRateLimitPatterns_Count(t *testing.T) {
 	if len(rateLimitPatterns) < 3 {
 		t.Errorf("Expected at least 3 rate limit patterns, got %d", len(rateLimitPatterns))
 	}
+	if len(codexRateLimitPatterns) < 4 {
+		t.Errorf("Expected Codex-specific rate limit patterns, got %d", len(codexRateLimitPatterns))
+	}
 }
 
 // ====================
@@ -485,6 +521,25 @@ func TestEnrichAgentStatus_WithMockedData(t *testing.T) {
 	}
 	if agent.ChildPID != 0 {
 		t.Error("New agent should not have child PID set")
+	}
+}
+
+func TestEnrichAgentStatus_DetectsCodexSpecificRateLimit(t *testing.T) {
+	clearPaneStates()
+
+	agent := &Agent{
+		PID:  os.Getpid(),
+		Pane: "test-pane-codex-rate-limit",
+		Type: "openai-codex",
+	}
+
+	enrichAgentStatus(agent, "test-session", "", "Error: insufficient_quota")
+
+	if !agent.RateLimitDetected {
+		t.Fatal("expected enrichAgentStatus to mark Codex-specific rate limit output")
+	}
+	if !strings.Contains(strings.ToLower(agent.RateLimitMatch), "insufficient_quota") {
+		t.Fatalf("expected Codex-specific match detail, got %q", agent.RateLimitMatch)
 	}
 }
 
@@ -525,7 +580,7 @@ Please try again later.`
 		if err != nil {
 			t.Fatalf("Failed to read fixture: %v", err)
 		}
-		detected, match := detectRateLimit(string(content))
+		detected, match := detectRateLimit(string(content), "claude")
 		t.Logf("Healthy output: detected=%v match=%q", detected, match)
 		if detected {
 			t.Error("Healthy output should not be detected as rate limited")
@@ -537,7 +592,7 @@ Please try again later.`
 		if err != nil {
 			t.Fatalf("Failed to read fixture: %v", err)
 		}
-		detected, match := detectRateLimit(string(content))
+		detected, match := detectRateLimit(string(content), "claude")
 		t.Logf("Rate limited output: detected=%v match=%q", detected, match)
 		if !detected {
 			t.Error("Rate limited output should be detected")

@@ -1880,6 +1880,7 @@ func TestAgentTypeString(t *testing.T) {
 		{tmux.AgentCursor, "cursor"},
 		{tmux.AgentWindsurf, "windsurf"},
 		{tmux.AgentAider, "aider"},
+		{tmux.AgentOllama, "ollama"},
 		{tmux.AgentUser, "user"},
 		{tmux.AgentType("invalid"), "unknown"},
 	}
@@ -1889,6 +1890,44 @@ func TestAgentTypeString(t *testing.T) {
 			got := agentTypeString(tc.input)
 			if got != tc.expected {
 				t.Errorf("agentTypeString(%v) = %s, want %s", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestModelNameForPane(t *testing.T) {
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		cfg  *config.Config
+		want string
+	}{
+		{
+			name: "variant wins",
+			pane: tmux.Pane{Type: tmux.AgentOllama, Variant: "mistral"},
+			cfg:  &config.Config{},
+			want: "mistral",
+		},
+		{
+			name: "ollama config default",
+			pane: tmux.Pane{Type: tmux.AgentOllama},
+			cfg: &config.Config{
+				Models: config.ModelsConfig{DefaultOllama: "codellama:latest"},
+			},
+			want: "codellama:latest",
+		},
+		{
+			name: "ollama builtin fallback",
+			pane: tmux.Pane{Type: tmux.AgentOllama},
+			cfg:  nil,
+			want: "llama3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := modelNameForPane(tt.pane, tt.cfg); got != tt.want {
+				t.Fatalf("modelNameForPane(%+v) = %q, want %q", tt.pane, got, tt.want)
 			}
 		})
 	}
@@ -1945,6 +1984,33 @@ func TestResolveAgentType(t *testing.T) {
 			got := ResolveAgentType(tc.input)
 			if got != tc.expected {
 				t.Errorf("ResolveAgentType(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestMatchesAgentTypeFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		filter    string
+		want      bool
+	}{
+		{name: "empty filter", agentType: "claude", filter: "", want: true},
+		{name: "claude short alias", agentType: "claude", filter: "cc", want: true},
+		{name: "claude cli alias", agentType: "claude", filter: "claude_code", want: true},
+		{name: "codex alias", agentType: "codex", filter: "openai-codex", want: true},
+		{name: "gemini alias", agentType: "gemini", filter: "google-gemini", want: true},
+		{name: "mixed canonical and short", agentType: "codex", filter: "cod", want: true},
+		{name: "mismatch", agentType: "claude", filter: "codex", want: false},
+		{name: "invalid filter", agentType: "claude", filter: "not-an-agent", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := matchesAgentTypeFilter(tc.agentType, tc.filter)
+			if got != tc.want {
+				t.Errorf("matchesAgentTypeFilter(%q, %q) = %v, want %v", tc.agentType, tc.filter, got, tc.want)
 			}
 		})
 	}
@@ -2370,6 +2436,7 @@ func TestStatusSummaryMarshal(t *testing.T) {
 		CursorCount:   1,
 		WindsurfCount: 0,
 		AiderCount:    0,
+		OllamaCount:   1,
 	}
 
 	data, err := json.Marshal(summary)
@@ -2387,6 +2454,9 @@ func TestStatusSummaryMarshal(t *testing.T) {
 	}
 	if result.ClaudeCount != 4 {
 		t.Errorf("ClaudeCount = %d, want 4", result.ClaudeCount)
+	}
+	if result.OllamaCount != 1 {
+		t.Errorf("OllamaCount = %d, want 1", result.OllamaCount)
 	}
 }
 
@@ -3031,6 +3101,12 @@ func TestDashboardAgentTypeSkipsUserPane(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name:   "ollama pane kept",
+			pane:   tmux.Pane{Type: tmux.AgentOllama},
+			want:   "ollama",
+			wantOK: true,
+		},
+		{
 			name:   "unknown pane kept",
 			pane:   tmux.Pane{Type: tmux.AgentType("mystery")},
 			want:   "unknown",
@@ -3493,6 +3569,7 @@ func TestSnapshotFinalizeBuildsSummary(t *testing.T) {
 			Agents: []SnapshotAgent{
 				{Pane: "0.1", Type: "claude", State: "idle"},
 				{Pane: "0.2", Type: "codex", State: "error"},
+				{Pane: "0.3", Type: "ollama", State: "busy"},
 			},
 		},
 		{
@@ -3515,17 +3592,20 @@ func TestSnapshotFinalizeBuildsSummary(t *testing.T) {
 
 	snapshotFinalize(output, PaginationOptions{})
 
-	if output.Summary.TotalSessions != 2 || output.Summary.TotalAgents != 3 {
-		t.Fatalf("Summary totals = %+v, want 2 sessions and 3 agents", output.Summary)
+	if output.Summary.TotalSessions != 2 || output.Summary.TotalAgents != 4 {
+		t.Fatalf("Summary totals = %+v, want 2 sessions and 4 agents", output.Summary)
 	}
 	if output.Summary.AttachedCount != 1 {
 		t.Fatalf("AttachedCount = %d, want 1", output.Summary.AttachedCount)
 	}
-	if output.Summary.AgentsByType["claude"] != 1 || output.Summary.AgentsByType["codex"] != 1 || output.Summary.AgentsByType["gemini"] != 1 {
+	if output.Summary.AgentsByType["claude"] != 1 || output.Summary.AgentsByType["codex"] != 1 || output.Summary.AgentsByType["gemini"] != 1 || output.Summary.AgentsByType["ollama"] != 1 {
 		t.Fatalf("AgentsByType = %+v", output.Summary.AgentsByType)
 	}
-	if output.Summary.AgentsByState["idle"] != 1 || output.Summary.AgentsByState["busy"] != 1 || output.Summary.AgentsByState["error"] != 1 {
+	if output.Summary.AgentsByState["idle"] != 1 || output.Summary.AgentsByState["busy"] != 2 || output.Summary.AgentsByState["error"] != 1 {
 		t.Fatalf("AgentsByState = %+v", output.Summary.AgentsByState)
+	}
+	if output.Summary.OllamaCount != 1 {
+		t.Fatalf("OllamaCount = %d, want 1", output.Summary.OllamaCount)
 	}
 	if output.Summary.ReadyWork != 2 || output.Summary.InProgress != 1 {
 		t.Fatalf("Work summary = ready %d in_progress %d, want 2/1", output.Summary.ReadyWork, output.Summary.InProgress)

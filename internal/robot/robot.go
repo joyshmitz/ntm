@@ -1783,6 +1783,7 @@ type StatusSummary struct {
 	CursorCount   int            `json:"cursor_count"`
 	WindsurfCount int            `json:"windsurf_count"`
 	AiderCount    int            `json:"aider_count"`
+	OllamaCount   int            `json:"ollama_count"`
 	AgentsByState map[string]int `json:"agents_by_state"`
 	AgentsByType  map[string]int `json:"agents_by_type"`
 	ReadyWork     int            `json:"ready_work"`
@@ -2257,6 +2258,7 @@ func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
 		CursorCount:   base.Summary.CursorCount,
 		WindsurfCount: base.Summary.WindsurfCount,
 		AiderCount:    base.Summary.AiderCount,
+		OllamaCount:   base.Summary.OllamaCount,
 		AgentsByState: make(map[string]int, len(base.Summary.AgentsByState)),
 		AgentsByType:  make(map[string]int, len(base.Summary.AgentsByType)),
 		ReadyWork:     base.Summary.ReadyWork,
@@ -2580,6 +2582,8 @@ func statusAccumulateAgentSummary(summary *StatusSummary, agentType, agentState 
 		summary.WindsurfCount++
 	case "aider":
 		summary.AiderCount++
+	case "ollama":
+		summary.OllamaCount++
 	}
 }
 
@@ -3050,6 +3054,7 @@ func getInboxTally(ctx context.Context, client *agentmail.Client, projectKey, ag
 }
 
 type ntmPaneInfo struct {
+	Key       string
 	Label     string
 	Type      string
 	Index     int
@@ -3078,8 +3083,13 @@ func parseNTMPanes(panes []tmux.Pane) map[string][]ntmPaneInfo {
 
 		// Convert AgentType to string for map key
 		typ := string(p.Type)
+		key := p.ID
+		if key == "" {
+			key = fmt.Sprintf("%s:%d:%d", typ, idx, p.Index)
+		}
 
 		out[typ] = append(out[typ], ntmPaneInfo{
+			Key:       key,
 			Label:     fmt.Sprintf("%s_%d", typ, idx),
 			Type:      typ,
 			Index:     idx,
@@ -3200,7 +3210,7 @@ func assignAgentsToPanes(panes []ntmPaneInfo, agents []agentmail.Agent) map[stri
 		}
 
 		chosen := agents[bestIdx]
-		mapping[pane.Label] = chosen.Name
+		mapping[pane.Key] = chosen.Name
 		assigned[chosen.Name] = true
 	}
 
@@ -3854,7 +3864,7 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 		if err != nil {
 			// Include empty output on error
 			output.Panes[paneKey] = PaneOutput{
-				Type:      detectAgentType(pane.Title),
+				Type:      paneAgentType(pane),
 				State:     "unknown",
 				Lines:     []string{},
 				Truncated: false,
@@ -3867,7 +3877,7 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 		outputLines := splitLines(cleanOutput)
 
 		// Detect state from output
-		agentType := detectAgentType(pane.Title)
+		agentType := paneAgentType(pane)
 		state := determineState(captured, agentType)
 
 		// Check if truncated (we captured exactly the requested lines)
@@ -3946,11 +3956,23 @@ func generateTailHints(panes map[string]PaneOutput) *TailAgentHints {
 // determineState analyzes output to determine if agent is active, idle, or in error state.
 // It delegates to the status package for consistent detection logic.
 func determineState(output, agentType string) string {
+	normalizedType := normalizeAgentType(agentType)
 	// Normalize agent type for status package (expects "cc", "cod", etc.)
-	shortType := translateAgentTypeForStatus(agentType)
+	shortType := translateAgentTypeForStatus(normalizedType)
+	lastLine := status.GetLastNonEmptyLine(output)
 
 	if status.DetectErrorInOutput(output) != status.ErrorNone {
 		return "error"
+	}
+	// A bare shell prompt in a known agent pane usually means the agent exited
+	// and dropped back to the shell, not that the agent is idle at its own prompt.
+	// Guard this explicitly so generic shell patterns cannot override pane identity.
+	if isKnownAgentPatternType(normalizedType) &&
+		lastLine != "" &&
+		status.IsPromptLine(lastLine, "user") &&
+		!status.IsPromptLine(lastLine, shortType) &&
+		!HasIdlePattern(lastLine, normalizedType) {
+		return "active"
 	}
 	if status.DetectIdleFromOutput(output, shortType) {
 		return "idle"
@@ -3958,14 +3980,14 @@ func determineState(output, agentType string) string {
 	// Also check the robot pattern library which has richer agent-specific
 	// idle patterns (Claude Code version banner, bypass status, welcome
 	// message, arrow prompt) that the status package doesn't cover.
-	if HasIdlePattern(output, agentType) {
+	if HasIdlePattern(output, normalizedType) {
 		return "idle"
 	}
-	if isPythonPrompt(status.GetLastNonEmptyLine(output)) {
+	if isPythonPrompt(lastLine) {
 		return "idle"
 	}
 	// If output is empty and it's a user pane, treat as idle (prompt)
-	if strings.TrimSpace(output) == "" && (agentType == "" || agentType == "user") {
+	if strings.TrimSpace(output) == "" && (normalizedType == "" || normalizedType == "user") {
 		return "idle"
 	}
 	// Otherwise assume active/working
@@ -4134,7 +4156,7 @@ func fetchAgentMailData(projectKey string) (*SnapshotAgentMail, []agentmail.Agen
 	return summary, agents, statsMap
 }
 
-// resolveAgentsForSession maps pane titles to agent names for a specific session.
+// resolveAgentsForSession maps stable pane identifiers to agent names for a specific session.
 func resolveAgentsForSession(panes []tmux.Pane, mailAgents []agentmail.Agent) map[string]string {
 	if len(mailAgents) == 0 || len(panes) == 0 {
 		return nil
@@ -4481,7 +4503,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 			}
 
 			// Map pending mail if available
-			if agentName, ok := agentMapping[pane.Title]; ok {
+			if agentName, ok := agentMapping[pane.ID]; ok {
 				if stats, ok := mailStats[agentName]; ok {
 					agent.PendingMail = stats.Unread
 
@@ -5577,11 +5599,31 @@ func agentTypeString(t tmux.AgentType) string {
 		return "windsurf"
 	case tmux.AgentAider:
 		return "aider"
+	case tmux.AgentOllama:
+		return "ollama"
 	case tmux.AgentUser:
 		return "user"
 	default:
 		return "unknown"
 	}
+}
+
+func paneAgentType(pane tmux.Pane) string {
+	if resolved := agentTypeString(pane.Type); resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
+}
+
+func stateAgentTypeForPane(pane tmux.Pane, detectedType string) string {
+	if normalized := normalizeAgentType(detectedType); normalized != "unknown" {
+		return normalized
+	}
+	return paneAgentType(pane)
+}
+
+func determinePaneState(pane tmux.Pane, output, detectedType string) string {
+	return determineState(output, stateAgentTypeForPane(pane, detectedType))
 }
 
 func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
@@ -5602,6 +5644,10 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 			if cfg.Models.DefaultGemini != "" {
 				return cfg.Models.DefaultGemini
 			}
+		case tmux.AgentOllama:
+			if cfg.Models.DefaultOllama != "" {
+				return cfg.Models.DefaultOllama
+			}
 		}
 	}
 	switch pane.Type {
@@ -5617,6 +5663,8 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 		return "windsurf"
 	case tmux.AgentAider:
 		return "aider"
+	case tmux.AgentOllama:
+		return "llama3"
 	default:
 		return ""
 	}
@@ -6376,63 +6424,8 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		excludeMap[e] = true
 	}
 
-	// Build pane filter map (if specific panes requested)
-	paneFilterMap := make(map[string]bool)
-	for _, p := range opts.Panes {
-		paneFilterMap[p] = true
-	}
-	hasPaneFilter := len(paneFilterMap) > 0
-
-	// Build agent type filter map
-	typeFilterMap := make(map[string]bool)
-	for _, t := range opts.AgentTypes {
-		typeFilterMap[strings.ToLower(t)] = true
-	}
-	hasTypeFilter := len(typeFilterMap) > 0
-
-	// Determine which panes to target
-	var targetPanes []tmux.Pane
-	for _, pane := range panes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		// Check exclusions
-		if excludeMap[paneKey] || excludeMap[pane.ID] {
-			continue
-		}
-
-		// Check specific pane filter
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-
-		// Check agent type filter
-		if hasTypeFilter {
-			// Use authoritative type if available, otherwise fallback to loose detection
-			agentType := agentTypeString(pane.Type)
-			if agentType == "user" || agentType == "unknown" {
-				agentType = detectAgentType(pane.Title)
-			}
-
-			if !typeFilterMap[agentType] {
-				continue
-			}
-		}
-
-		// If not --all and no filters, skip user panes by default
-		if !opts.All && !hasPaneFilter && !hasTypeFilter {
-			agentType := detectAgentType(pane.Title)
-			// Skip user panes (first pane or explicitly marked as user)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-		output.Targets = append(output.Targets, paneKey)
-	}
+	targetPanes, targetKeys := selectSendTargets(panes, opts, excludeMap)
+	output.Targets = append(output.Targets, targetKeys...)
 
 	// Perform CASS injection if enabled
 	messageToSend := opts.Message
@@ -6455,7 +6448,7 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 
 		// If there are target panes, try to determine agent type for formatting
 		if len(targetPanes) > 0 {
-			agentType := detectAgentType(targetPanes[0].Title)
+			agentType := paneAgentType(targetPanes[0])
 			injectConfig.Format = FormatForAgent(agentType)
 		}
 
@@ -6528,7 +6521,7 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		// User/shell panes need a longer delay than AI agent TUIs because
 		// shells (bash, zsh) have different input buffering behavior.
 		enterDelay := tmux.DefaultEnterDelay
-		agentType := detectAgentType(pane.Title)
+		agentType := paneAgentType(pane)
 		if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
 			enterDelay = tmux.ShellEnterDelay
 		}
@@ -6558,6 +6551,52 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 	publishSendActuationOutcome(trace, opts, output)
 
 	return &output, nil
+}
+
+func selectSendTargets(panes []tmux.Pane, opts SendOptions, excludeMap map[string]bool) ([]tmux.Pane, []string) {
+	paneFilterMap := make(map[string]bool)
+	for _, p := range opts.Panes {
+		paneFilterMap[p] = true
+	}
+	hasPaneFilter := len(paneFilterMap) > 0
+
+	typeFilterMap := make(map[string]bool)
+	for _, t := range opts.AgentTypes {
+		typeFilterMap[normalizeAgentType(t)] = true
+	}
+	hasTypeFilter := len(typeFilterMap) > 0
+
+	var targetPanes []tmux.Pane
+	var targetKeys []string
+	for _, pane := range panes {
+		paneKey := fmt.Sprintf("%d", pane.Index)
+
+		if excludeMap[paneKey] || excludeMap[pane.ID] {
+			continue
+		}
+		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
+			continue
+		}
+
+		agentType := paneAgentType(pane)
+		if hasTypeFilter && !typeFilterMap[normalizeAgentType(agentType)] {
+			continue
+		}
+
+		if !opts.All && !hasPaneFilter && !hasTypeFilter {
+			if pane.Index == 0 && agentType == "unknown" {
+				continue
+			}
+			if agentType == "user" {
+				continue
+			}
+		}
+
+		targetPanes = append(targetPanes, pane)
+		targetKeys = append(targetKeys, paneKey)
+	}
+
+	return targetPanes, targetKeys
 }
 
 // PrintSend outputs the send operation result as JSON.
@@ -6868,14 +6907,9 @@ func collectNormalizedTmuxProjection(projectDir string, staleAfter time.Duration
 				PID:      pane.PID,
 			}
 
-			ntmType := agentTypeString(pane.Type)
-			if ntmType != "user" && ntmType != "unknown" {
-				agent.Type = ntmType
-			} else {
-				agent.Type = detectAgentType(pane.Title)
-			}
+			agent.Type = paneAgentType(pane)
 
-			if mappedName, ok := agentMapping[pane.Title]; ok {
+			if mappedName, ok := agentMapping[pane.ID]; ok {
 				agent.Name = mappedName
 			}
 
@@ -9440,7 +9474,7 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 	var totalUsage float64
 
 	for _, pane := range panes {
-		agentType := detectAgentType(pane.Title)
+		agentType := paneAgentType(pane)
 		if agentType == "unknown" || agentType == "user" {
 			continue // Skip non-agent panes
 		}
@@ -9449,8 +9483,7 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 
 		scrollback, _ := tmux.CapturePaneOutput(pane.ID, lines)
 		cleanText := stripANSI(scrollback)
-		lineList := splitLines(cleanText)
-		state := detectState(lineList, pane.Title)
+		state := determineState(cleanText, agentType)
 
 		charCount := len(cleanText)
 		// Rough token estimate: ~4 chars per token
@@ -9629,7 +9662,7 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 			continue
 		}
 
-		agentType := detectAgentType(pane.Title)
+		agentType := paneAgentType(pane)
 
 		// Skip non-agent panes (user, unknown)
 		if agentType == "unknown" || agentType == "user" {
@@ -9766,6 +9799,15 @@ func normalizeAgentType(t string) string {
 	return ResolveAgentType(t)
 }
 
+// matchesAgentTypeFilter compares an observed agent type against a user-supplied
+// filter using shared alias normalization. Empty filters match everything.
+func matchesAgentTypeFilter(agentType, filter string) bool {
+	if strings.TrimSpace(filter) == "" {
+		return true
+	}
+	return normalizeAgentType(agentType) == normalizeAgentType(filter)
+}
+
 // ============================================================================
 // --robot-diff: Compare agent activity and file changes
 // ============================================================================
@@ -9884,17 +9926,14 @@ func GetDiff(opts DiffOptions) (*DiffOutput, error) {
 
 	// Analyze activity windows per pane
 	for _, pane := range panes {
-		agentType := string(pane.Type)
-		if agentType == "" || agentType == "unknown" {
-			agentType = "user"
-		}
-
 		// Capture pane output for state detection
 		captured, _ := tmux.CapturePaneOutput(pane.ID, 100)
-		lines := strings.Split(captured, "\n")
+		detection := DetectAgentTypeEnhanced(pane, captured)
+		agentType := stateAgentTypeForPane(pane, detection.Type)
+		lines := splitLines(captured)
 
-		// Use the proper detectState function for accurate state detection
-		state := detectState(lines, pane.Title)
+		// Use authoritative pane metadata and enhanced detection instead of titles.
+		state := determinePaneState(pane, captured, detection.Type)
 		if state == "" {
 			state = "idle"
 		}

@@ -586,15 +586,25 @@ func isAgentReady(output, _ string) bool {
 
 // agentTypeShort returns short form for pane naming.
 func agentTypeShort(agentType string) string {
-	switch agentType {
-	case "claude":
+	switch tmux.AgentType(agentType).Canonical() {
+	case tmux.AgentClaude:
 		return "cc"
-	case "codex":
+	case tmux.AgentCodex:
 		return "cod"
-	case "gemini":
+	case tmux.AgentGemini:
 		return "gmi"
+	case tmux.AgentCursor:
+		return "cursor"
+	case tmux.AgentWindsurf:
+		return "windsurf"
+	case tmux.AgentAider:
+		return "aider"
+	case tmux.AgentOllama:
+		return "ollama"
+	case tmux.AgentUser:
+		return "user"
 	default:
-		return agentType
+		return strings.TrimSpace(agentType)
 	}
 }
 

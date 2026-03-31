@@ -504,11 +504,8 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 		}
 	}
 
-	// Step 4: Launch new agent using alias
-	alias := agentType // cc, cod, gmi
-	if alias == "unknown" {
-		alias = "cc" // Default to Claude Code if unknown
-	}
+	// Step 4: Launch new agent using the canonical agent alias/command name.
+	alias := restartLaunchAlias(agentType)
 
 	attemptedActions = append(attemptedActions, "launch-"+alias)
 	launchErr := sendKeys(session, pane, alias+"\n")
@@ -550,6 +547,32 @@ func executeRestart(session string, pane int, agentType string, opts SmartRestar
 	seq.AgentLaunched = true
 	_ = attemptedActions // Used for error reporting in failure paths
 	return seq, nil
+}
+
+func restartCanonicalAgentType(agentType string) agent.AgentType {
+	switch canonical := agent.AgentType(agentType).Canonical(); canonical {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama,
+		agent.AgentTypeUser,
+		agent.AgentTypeUnknown:
+		return canonical
+	default:
+		return agent.AgentTypeUnknown
+	}
+}
+
+func restartLaunchAlias(agentType string) string {
+	switch canonical := restartCanonicalAgentType(agentType); canonical {
+	case "", agent.AgentTypeUnknown:
+		return string(agent.AgentTypeClaudeCode)
+	default:
+		return string(canonical)
+	}
 }
 
 // verifyRestart checks the post-restart state of a pane.

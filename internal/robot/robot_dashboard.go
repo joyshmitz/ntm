@@ -108,6 +108,8 @@ func GetDashboard() (*DashboardOutput, error) {
 							output.Summary.WindsurfCount++
 						case "aider":
 							output.Summary.AiderCount++
+						case "ollama":
+							output.Summary.OllamaCount++
 						}
 						output.Summary.TotalAgents++
 						output.Summary.AgentsByType[agentType]++
@@ -210,7 +212,7 @@ func printDashboardMarkdown(output DashboardOutput) error {
 
 	totalPanes, userPanes, typeCounts := dashboardCounts(output.Agents)
 	agentPanes := totalPanes - userPanes
-	otherPanes := agentPanes - typeCounts["claude"] - typeCounts["codex"] - typeCounts["gemini"]
+	otherPanes := dashboardOtherAgentCount(totalPanes, userPanes, typeCounts)
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# NTM Fleet Dashboard: %s\n\n", escapeMarkdownCell(output.Fleet, 120))
@@ -242,6 +244,10 @@ func printDashboardMarkdown(output DashboardOutput) error {
 	fmt.Fprintf(&sb, "| Claude | %d |\n", typeCounts["claude"])
 	fmt.Fprintf(&sb, "| Codex | %d |\n", typeCounts["codex"])
 	fmt.Fprintf(&sb, "| Gemini | %d |\n", typeCounts["gemini"])
+	fmt.Fprintf(&sb, "| Cursor | %d |\n", typeCounts["cursor"])
+	fmt.Fprintf(&sb, "| Windsurf | %d |\n", typeCounts["windsurf"])
+	fmt.Fprintf(&sb, "| Aider | %d |\n", typeCounts["aider"])
+	fmt.Fprintf(&sb, "| Ollama | %d |\n", typeCounts["ollama"])
 	if otherPanes > 0 {
 		fmt.Fprintf(&sb, "| Other Agents | %d |\n", otherPanes)
 	}
@@ -271,13 +277,12 @@ func printDashboardMarkdown(output DashboardOutput) error {
 	if len(output.Agents) == 0 {
 		sb.WriteString("_No tmux sessions detected._\n\n")
 	} else {
-		sb.WriteString("| Session | Attached | Panes | User | Claude | Codex | Gemini | Other |\n")
-		sb.WriteString("|---|---|---:|---:|---:|---:|---:|---:|\n")
+		sb.WriteString("| Session | Attached | Panes | User | Claude | Codex | Gemini | Cursor | Windsurf | Aider | Ollama | Other |\n")
+		sb.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 		for _, sess := range output.Agents {
 			sessTotal, sessUsers, sessCounts := dashboardCounts([]SnapshotSession{sess})
-			sessAgents := sessTotal - sessUsers
-			sessOther := sessAgents - sessCounts["claude"] - sessCounts["codex"] - sessCounts["gemini"]
-			fmt.Fprintf(&sb, "| %s | %s | %d | %d | %d | %d | %d | %d |\n",
+			sessOther := dashboardOtherAgentCount(sessTotal, sessUsers, sessCounts)
+			fmt.Fprintf(&sb, "| %s | %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |\n",
 				escapeMarkdownCell(sess.Name, 80),
 				yesNo(sess.Attached),
 				sessTotal,
@@ -285,6 +290,10 @@ func printDashboardMarkdown(output DashboardOutput) error {
 				sessCounts["claude"],
 				sessCounts["codex"],
 				sessCounts["gemini"],
+				sessCounts["cursor"],
+				sessCounts["windsurf"],
+				sessCounts["aider"],
+				sessCounts["ollama"],
 				sessOther,
 			)
 		}
@@ -409,15 +418,19 @@ func writeAttentionSection(sb *strings.Builder, attention *SnapshotAttentionSumm
 
 func dashboardCounts(sessions []SnapshotSession) (totalPanes, userPanes int, typeCounts map[string]int) {
 	typeCounts = map[string]int{
-		"claude": 0,
-		"codex":  0,
-		"gemini": 0,
-		"user":   0,
+		"claude":   0,
+		"codex":    0,
+		"gemini":   0,
+		"cursor":   0,
+		"windsurf": 0,
+		"aider":    0,
+		"ollama":   0,
+		"user":     0,
 	}
 	for _, sess := range sessions {
 		for _, agent := range sess.Agents {
 			totalPanes++
-			typ := strings.TrimSpace(strings.ToLower(agent.Type))
+			typ := normalizeAgentType(agent.Type)
 			if typ == "" {
 				typ = "unknown"
 			}
@@ -430,6 +443,17 @@ func dashboardCounts(sessions []SnapshotSession) (totalPanes, userPanes int, typ
 		}
 	}
 	return totalPanes, userPanes, typeCounts
+}
+
+func dashboardOtherAgentCount(totalPanes, userPanes int, typeCounts map[string]int) int {
+	otherPanes := totalPanes - userPanes
+	for _, agentType := range []string{"claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama"} {
+		otherPanes -= typeCounts[agentType]
+	}
+	if otherPanes < 0 {
+		return 0
+	}
+	return otherPanes
 }
 
 func writeAgentsTable(sb *strings.Builder, sessions []SnapshotSession, maxRows int) {

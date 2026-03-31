@@ -150,6 +150,19 @@ func TestCheckExclusion(t *testing.T) {
 	}
 }
 
+func TestDetectRoutingRateLimit_UsesAgentContext(t *testing.T) {
+	t.Parallel()
+
+	const output = "billing limit reached"
+
+	if !detectRoutingRateLimit(output, "openai-codex") {
+		t.Fatalf("expected routing rate-limit detection to recognize Codex alias for %q", output)
+	}
+	if detectRoutingRateLimit(output, "cc") {
+		t.Fatalf("did not expect non-Codex routing detection to match Codex-specific pattern for %q", output)
+	}
+}
+
 func TestCalculateFinalScore(t *testing.T) {
 	scorer := NewAgentScorer(DefaultRoutingConfig())
 

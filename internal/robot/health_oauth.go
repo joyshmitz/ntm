@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -230,7 +231,7 @@ func getAgentOAuthHealth(session string, pane tmux.Pane, agentType string) Agent
 	health.OAuthStatus, health.OAuthError = detectOAuthStatus(outputLower)
 
 	// Detect rate limit status
-	health.RateLimitStatus, health.RateLimitCount = detectRateLimitStatusFromOutput(outputLower)
+	health.RateLimitStatus, health.RateLimitCount = detectRateLimitStatusFromOutput(outputLower, agentType)
 
 	// Check cooldown from backoff manager
 	manager := GetBackoffManager(session)
@@ -260,12 +261,12 @@ func getAgentOAuthHealth(session string, pane tmux.Pane, agentType string) Agent
 
 // agentTypeToProvider maps agent type to provider name.
 func agentTypeToProvider(agentType string) string {
-	switch agentType {
-	case "claude", "cc":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "claude"
-	case "codex", "cod":
+	case agent.AgentTypeCodex:
 		return "openai"
-	case "gemini", "gmi":
+	case agent.AgentTypeGemini:
 		return "gemini"
 	default:
 		return "unknown"
@@ -314,18 +315,30 @@ func detectOAuthStatus(outputLower string) (OAuthStatus, string) {
 }
 
 // detectRateLimitStatusFromOutput detects rate limit status from output.
-func detectRateLimitStatusFromOutput(outputLower string) (RateLimitStatus, int) {
+func detectRateLimitStatusFromOutput(output string, agentType string) (RateLimitStatus, int) {
 	rateLimitPatterns := []string{
 		"rate limit", "ratelimit", "rate-limit",
 		"429", "too many requests", "quota exceeded",
 		"try again", "retry after", "backoff",
 	}
+	if agent.AgentType(agentType).Canonical() == agent.AgentTypeCodex {
+		rateLimitPatterns = append(rateLimitPatterns,
+			"insufficient_quota",
+			"billing limit",
+			"usage cap",
+			"tokens per min",
+			"requests per min",
+		)
+	}
 
 	count := 0
 	for _, p := range rateLimitPatterns {
-		if strings.Contains(outputLower, p) {
+		if strings.Contains(output, p) {
 			count++
 		}
+	}
+	if count == 0 && ratelimit.DetectRateLimitForAgent(output, agentType).RateLimited {
+		count = 1
 	}
 
 	if count >= 3 {

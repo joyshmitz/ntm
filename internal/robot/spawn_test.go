@@ -80,20 +80,23 @@ func TestPrintSpawn(t *testing.T) {
 
 func TestAgentTypeShort(t *testing.T) {
 	tests := []struct {
-		input    tmux.AgentType
+		input    string
 		expected string
 	}{
-		{tmux.AgentClaude, "cc"},
-		{tmux.AgentCodex, "cod"},
-		{tmux.AgentGemini, "gmi"},
-		{tmux.AgentCursor, "cursor"},
-		{tmux.AgentWindsurf, "windsurf"},
-		{tmux.AgentAider, "aider"},
-		{tmux.AgentUser, "user"},
+		{string(tmux.AgentClaude), "cc"},
+		{string(tmux.AgentCodex), "cod"},
+		{string(tmux.AgentGemini), "gmi"},
+		{"claude_code", "cc"},
+		{" openai-codex ", "cod"},
+		{"google-gemini", "gmi"},
+		{string(tmux.AgentCursor), "cursor"},
+		{"ws", "windsurf"},
+		{string(tmux.AgentAider), "aider"},
+		{string(tmux.AgentUser), "user"},
 	}
 
 	for _, tc := range tests {
-		if got := agentTypeShort(string(tc.input)); got != tc.expected {
+		if got := agentTypeShort(tc.input); got != tc.expected {
 			t.Errorf("agentTypeShort(%v) = %q, want %q", tc.input, got, tc.expected)
 		}
 	}

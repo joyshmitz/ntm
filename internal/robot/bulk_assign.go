@@ -297,7 +297,7 @@ func filterBulkAssignPanes(panes []tmux.Pane, skip []int) []bulkPane {
 		if skipSet[pane.Index] {
 			continue
 		}
-		agentType := detectAgentType(pane.Title)
+		agentType := paneAgentType(pane)
 		if agentType == "unknown" || agentType == "user" {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestAssignAgentsToPanes_VariantPriority(t *testing.T) {
@@ -29,19 +30,51 @@ func TestAssignAgentsToPanes_VariantPriority(t *testing.T) {
 	// Pane 1: No variant (generic)
 	// Pane 2: Variant "pro"
 	panes := []ntmPaneInfo{
-		{Label: "cc_1", Variant: ""},
-		{Label: "cc_2", Variant: "pro"},
+		{Key: "%1", Label: "cc_1", Variant: ""},
+		{Key: "%2", Label: "cc_2", Variant: "pro"},
 	}
 
 	// Expected: cc_2 gets AgentA (pro), cc_1 gets AgentB
 	expected := map[string]string{
-		"cc_2": "AgentA",
-		"cc_1": "AgentB",
+		"%2": "AgentA",
+		"%1": "AgentB",
 	}
 
 	mapping := assignAgentsToPanes(panes, agents)
 
 	if !reflect.DeepEqual(mapping, expected) {
 		t.Errorf("Assignment mismatch.\nGot: %v\nWant: %v", mapping, expected)
+	}
+}
+
+func TestResolveAgentsForSessionUsesPaneIDForCustomTitles(t *testing.T) {
+	now := time.Now()
+	agents := []agentmail.Agent{
+		{
+			Name:        "BlueLake",
+			Program:     "claude-code",
+			InceptionTS: agentmail.FlexTime{Time: now.Add(-2 * time.Hour)},
+		},
+		{
+			Name:        "GreenStone",
+			Program:     "claude-code",
+			InceptionTS: agentmail.FlexTime{Time: now.Add(-1 * time.Hour)},
+		},
+	}
+
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, NTMIndex: 0, Type: tmux.AgentClaude, Title: "notes"},
+		{ID: "%2", Index: 2, NTMIndex: 0, Type: tmux.AgentClaude, Title: "logs"},
+	}
+
+	mapping := resolveAgentsForSession(panes, agents)
+	if len(mapping) != 2 {
+		t.Fatalf("mapping len = %d, want 2 (%v)", len(mapping), mapping)
+	}
+	if mapping["%1"] != "BlueLake" {
+		t.Fatalf("mapping[%%1] = %q, want %q", mapping["%1"], "BlueLake")
+	}
+	if mapping["%2"] != "GreenStone" {
+		t.Fatalf("mapping[%%2] = %q, want %q", mapping["%2"], "GreenStone")
 	}
 }

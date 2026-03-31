@@ -119,31 +119,9 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 	for _, p := range opts.Panes {
 		paneFilterMap[p] = true
 	}
-	hasPaneFilter := len(paneFilterMap) > 0
-
-	// Determine which panes to monitor
-	var targetPanes []tmux.Pane
-	for _, pane := range panes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		// Check specific pane filter
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-
-		// Skip user panes by default if no filter
-		if !hasPaneFilter {
-			agentType := detectAgentType(pane.Title)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-		output.Pending = append(output.Pending, paneKey)
+	targetPanes := selectAckTargets(panes, paneFilterMap)
+	for _, pane := range targetPanes {
+		output.Pending = append(output.Pending, fmt.Sprintf("%d", pane.Index))
 	}
 
 	if len(targetPanes) == 0 {
@@ -206,7 +184,7 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 			initialOutput := initialStates[paneKey]
 
 			// Check for acknowledgment
-			ackType, detected := detectAcknowledgment(initialOutput, currentOutput, opts.Message, targetPane.Title)
+			ackType, detected := detectAcknowledgmentForAgent(initialOutput, currentOutput, opts.Message, ackPaneAgentType(*targetPane))
 
 			if detected {
 				latency := time.Since(sentAt)
@@ -253,8 +231,67 @@ func PrintAck(opts AckOptions) error {
 	return encodeJSON(output)
 }
 
+func ackPaneAgentType(pane tmux.Pane) string {
+	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+		return resolved
+	}
+	return detectAgentType(pane.Title)
+}
+
+func ackPaneTMUXAgentType(pane tmux.Pane) tmux.AgentType {
+	switch ackPaneAgentType(pane) {
+	case "claude":
+		return tmux.AgentClaude
+	case "codex":
+		return tmux.AgentCodex
+	case "gemini":
+		return tmux.AgentGemini
+	case "cursor":
+		return tmux.AgentCursor
+	case "windsurf":
+		return tmux.AgentWindsurf
+	case "aider":
+		return tmux.AgentAider
+	case "ollama":
+		return tmux.AgentOllama
+	case "user":
+		return tmux.AgentUser
+	default:
+		return tmux.AgentUnknown
+	}
+}
+
+func shouldSkipDefaultAgentPane(pane tmux.Pane, agentType string) bool {
+	if pane.Index == 0 && agentType == "unknown" {
+		return true
+	}
+	return agentType == "user"
+}
+
+func selectAckTargets(panes []tmux.Pane, paneFilterMap map[string]bool) []tmux.Pane {
+	hasPaneFilter := len(paneFilterMap) > 0
+
+	var targetPanes []tmux.Pane
+	for _, pane := range panes {
+		paneKey := fmt.Sprintf("%d", pane.Index)
+		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
+			continue
+		}
+		if !hasPaneFilter && shouldSkipDefaultAgentPane(pane, ackPaneAgentType(pane)) {
+			continue
+		}
+		targetPanes = append(targetPanes, pane)
+	}
+
+	return targetPanes
+}
+
 // detectAcknowledgment checks if the agent has acknowledged the input
 func detectAcknowledgment(initialOutput, currentOutput, message, paneTitle string) (AckType, bool) {
+	return detectAcknowledgmentForAgent(initialOutput, currentOutput, message, detectAgentType(paneTitle))
+}
+
+func detectAcknowledgmentForAgent(initialOutput, currentOutput, message, agentType string) (AckType, bool) {
 	// No change means no ack yet
 	if initialOutput == currentOutput {
 		return AckNone, false
@@ -266,8 +303,8 @@ func detectAcknowledgment(initialOutput, currentOutput, message, paneTitle strin
 		return AckNone, false
 	}
 
-	// Derive agent type from pane title for prompt detection
-	agentType := translateAgentTypeForStatus(detectAgentType(paneTitle))
+	// Normalize the agent type for prompt detection.
+	agentType = translateAgentTypeForStatus(agentType)
 
 	// Check for echo of the sent message (basic confirmation)
 	if message != "" && strings.Contains(newContent, truncateForMatch(message)) {
@@ -572,51 +609,18 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 	for _, p := range opts.Panes {
 		paneFilterMap[p] = true
 	}
-	hasPaneFilter := len(paneFilterMap) > 0
 
 	// Build agent type filter map (resolves aliases to canonical form)
 	typeFilterMap := make(map[string]bool)
 	for _, t := range opts.AgentTypes {
 		typeFilterMap[ResolveAgentType(t)] = true
 	}
-	hasTypeFilter := len(typeFilterMap) > 0
-
 	// Determine target panes and capture initial state
-	var targetPanes []tmux.Pane
-	var targetKeys []string
+	targetPanes, targetKeys := selectSendAndAckTargets(panes, excludeMap, paneFilterMap, typeFilterMap, opts.All)
 	initialStates := make(map[string]string)
 
-	for _, pane := range panes {
+	for _, pane := range targetPanes {
 		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		if excludeMap[paneKey] || excludeMap[pane.ID] {
-			continue
-		}
-
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-
-		if hasTypeFilter {
-			agentType := detectAgentType(pane.Title)
-			if !typeFilterMap[agentType] {
-				continue
-			}
-		}
-
-		if !opts.All && !hasPaneFilter && !hasTypeFilter {
-			agentType := detectAgentType(pane.Title)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-		targetKeys = append(targetKeys, paneKey)
-
 		// Capture initial state before sending
 		captured, err := func() (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -651,7 +655,7 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 			time.Sleep(time.Duration(opts.DelayMs) * time.Millisecond)
 		}
 
-		err := tmux.SendKeys(pane.ID, opts.Message, true)
+		err := sendAndAckToPane(pane, opts.Message, opts.Enter, tmux.SendKeysForAgentWithDelay)
 		if err != nil {
 			sendOutput.Failed = append(sendOutput.Failed, SendError{
 				Pane:  paneKey,
@@ -726,7 +730,7 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 			currentOutput := status.StripANSI(captured)
 			initialOutput := initialStates[paneKey]
 
-			ackType, detected := detectAcknowledgment(initialOutput, currentOutput, opts.Message, targetPane.Title)
+			ackType, detected := detectAcknowledgmentForAgent(initialOutput, currentOutput, opts.Message, ackPaneAgentType(*targetPane))
 
 			if detected {
 				latency := time.Since(sentAt)
@@ -772,6 +776,57 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		Send:          sendOutput,
 		Ack:           ackOutput,
 	}, nil
+}
+
+func selectSendAndAckTargets(panes []tmux.Pane, excludeMap, paneFilterMap, typeFilterMap map[string]bool, all bool) ([]tmux.Pane, []string) {
+	hasPaneFilter := len(paneFilterMap) > 0
+	hasTypeFilter := len(typeFilterMap) > 0
+
+	var targetPanes []tmux.Pane
+	var targetKeys []string
+	for _, pane := range panes {
+		paneKey := fmt.Sprintf("%d", pane.Index)
+
+		if excludeMap[paneKey] || excludeMap[pane.ID] {
+			continue
+		}
+		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
+			continue
+		}
+
+		agentType := ackPaneAgentType(pane)
+		if hasTypeFilter && !typeFilterMap[agentType] {
+			continue
+		}
+		if !all && !hasPaneFilter && !hasTypeFilter && shouldSkipDefaultAgentPane(pane, agentType) {
+			continue
+		}
+
+		targetPanes = append(targetPanes, pane)
+		targetKeys = append(targetKeys, paneKey)
+	}
+
+	return targetPanes, targetKeys
+}
+
+func sendAndAckToPane(
+	pane tmux.Pane,
+	message string,
+	enterOverride *bool,
+	send func(target, keys string, enter bool, enterDelay time.Duration, agentType tmux.AgentType) error,
+) error {
+	sendEnter := true
+	if enterOverride != nil {
+		sendEnter = *enterOverride
+	}
+
+	enterDelay := tmux.DefaultEnterDelay
+	agentType := ackPaneAgentType(pane)
+	if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
+		enterDelay = tmux.ShellEnterDelay
+	}
+
+	return send(pane.ID, message, sendEnter, enterDelay, ackPaneTMUXAgentType(pane))
 }
 
 // PrintSendAndAck sends a message and waits for acknowledgment.
