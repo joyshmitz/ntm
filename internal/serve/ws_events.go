@@ -251,13 +251,21 @@ func (s *WSEventStore) getFromBuffer(since int64, topic string, limit int) ([]WS
 
 	// Find the oldest event in the buffer to check if since is still valid
 	var oldestSeq int64 = -1
-	s.buffer.Do(func(v interface{}) {
-		if ev, ok := v.(*WSStoredEvent); ok && ev != nil {
-			if oldestSeq == -1 || ev.Seq < oldestSeq {
-				oldestSeq = ev.Seq
+	if ev, ok := s.buffer.Value.(*WSStoredEvent); ok && ev != nil {
+		// Buffer is full and has wrapped, current pointer holds the oldest element
+		oldestSeq = ev.Seq
+	} else {
+		// Buffer hasn't wrapped. The oldest element is the very first one inserted.
+		curr := s.buffer
+		for i := 0; i < s.buffer.Len(); i++ {
+			if ev, ok := curr.Value.(*WSStoredEvent); ok && ev != nil {
+				if oldestSeq == -1 || ev.Seq < oldestSeq {
+					oldestSeq = ev.Seq
+				}
 			}
+			curr = curr.Next()
 		}
-	})
+	}
 
 	// If since is older than our oldest buffered event, buffer can't satisfy
 	if oldestSeq == -1 || since < oldestSeq-1 {
@@ -266,15 +274,18 @@ func (s *WSEventStore) getFromBuffer(since int64, topic string, limit int) ([]WS
 
 	// Collect matching events
 	var events []WSStoredEvent
-	s.buffer.Do(func(v interface{}) {
-		if ev, ok := v.(*WSStoredEvent); ok && ev != nil {
+	curr := s.buffer
+	for i := 0; i < s.buffer.Len(); i++ {
+		if ev, ok := curr.Value.(*WSStoredEvent); ok && ev != nil {
 			if ev.Seq > since && (topic == "" || matchTopic(topic, ev.Topic)) {
-				if len(events) < limit {
-					events = append(events, *ev)
+				events = append(events, *ev)
+				if len(events) >= limit {
+					break
 				}
 			}
 		}
-	})
+		curr = curr.Next()
+	}
 
 	return events, true
 }

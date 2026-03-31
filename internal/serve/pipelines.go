@@ -678,8 +678,8 @@ func (s *Server) runPipelineWithResult(ctx context.Context, opts pipeline.Pipeli
 		output.Status = "running"
 	} else {
 		// Synchronous execution
+		defer close(done)
 		state, err := executor.Run(runCtx, workflow, opts.Variables, progress)
-		close(done)
 		if err != nil {
 			output.RobotResponse = pipeline.NewErrorResponse(err, ErrCodePipelineFailed, "pipeline execution failed")
 			return output
@@ -795,8 +795,8 @@ func (s *Server) execPipelineInline(ctx context.Context, workflow *pipeline.Work
 		}()
 		output.Status = "running"
 	} else {
+		defer close(done)
 		state, err := executor.Run(runCtx, workflow, variables, progress)
-		close(done)
 		if err != nil {
 			output.RobotResponse = pipeline.NewErrorResponse(err, ErrCodePipelineFailed, "pipeline execution failed")
 			return output
@@ -912,8 +912,8 @@ func (s *Server) resumePipelineWithResult(ctx context.Context, runID, session st
 		}
 	}()
 
+	defer close(done)
 	newState, err := executor.Resume(runCtx, workflow, state, progress)
-	close(done)
 	if err != nil {
 		output.RobotResponse = pipeline.NewErrorResponse(err, ErrCodePipelineFailed, "pipeline resume failed")
 		return output

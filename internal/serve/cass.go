@@ -21,6 +21,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/cm"
+	"github.com/Dicklesworthstone/ntm/internal/process"
 )
 
 // CASS/Memory-specific error codes
@@ -632,6 +633,13 @@ func (s *Server) checkMemoryDaemon() *MemoryDaemonInfo {
 
 			var pidInfo cm.PIDFileInfo
 			if err := json.Unmarshal(data, &pidInfo); err != nil {
+				continue
+			}
+
+			// Verify the process is actually alive
+			if !process.IsAlive(pidInfo.PID) {
+				// Clean up stale pid file
+				_ = os.Remove(pidPath)
 				continue
 			}
 

@@ -51,10 +51,12 @@ type SendMessageRequest struct {
 
 // ReplyMessageRequest is the request body for POST /api/v1/mail/messages/{id}/reply
 type ReplyMessageRequest struct {
-	SenderName string   `json:"sender_name"`
-	BodyMD     string   `json:"body_md"`
-	To         []string `json:"to,omitempty"`
-	CC         []string `json:"cc,omitempty"`
+	SenderName    string   `json:"sender_name"`
+	BodyMD        string   `json:"body_md"`
+	To            []string `json:"to,omitempty"`
+	CC            []string `json:"cc,omitempty"`
+	BCC           []string `json:"bcc,omitempty"`
+	SubjectPrefix string   `json:"subject_prefix,omitempty"`
 }
 
 // ContactRequest is the request body for POST /api/v1/mail/contacts/request
@@ -801,12 +803,14 @@ func (s *Server) handleReplyMessage(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	message, err := client.ReplyMessage(ctx, agentmail.ReplyMessageOptions{
-		ProjectKey: s.projectDir,
-		MessageID:  messageID,
-		SenderName: req.SenderName,
-		BodyMD:     req.BodyMD,
-		To:         req.To,
-		CC:         req.CC,
+		ProjectKey:    s.projectDir,
+		MessageID:     messageID,
+		SenderName:    req.SenderName,
+		BodyMD:        req.BodyMD,
+		To:            req.To,
+		CC:            req.CC,
+		BCC:           req.BCC,
+		SubjectPrefix: req.SubjectPrefix,
 	})
 	if err != nil {
 		writeAgentMailMessageActionError(w, reqID, err, "message replies are not supported by the configured Agent Mail server")

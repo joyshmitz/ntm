@@ -441,25 +441,37 @@ func (t *TimelineTracker) Prune() int {
 
 	// Prune per-agent timelines
 	for _, timeline := range t.timelines {
-		newEvents := make([]AgentEvent, 0, len(timeline.events))
-		for _, event := range timeline.events {
+		keepFrom := -1
+		for i, event := range timeline.events {
 			if event.Timestamp.After(cutoff) {
-				newEvents = append(newEvents, event)
-			} else {
-				pruned++
+				keepFrom = i
+				break
 			}
 		}
-		timeline.events = newEvents
+
+		if keepFrom == -1 {
+			pruned += len(timeline.events)
+			timeline.events = timeline.events[:0]
+		} else if keepFrom > 0 {
+			pruned += keepFrom
+			timeline.events = timeline.events[keepFrom:]
+		}
 	}
 
 	// Prune global event list
-	newAllEvents := make([]AgentEvent, 0, len(t.allEvents))
-	for _, event := range t.allEvents {
+	keepFrom := -1
+	for i, event := range t.allEvents {
 		if event.Timestamp.After(cutoff) {
-			newAllEvents = append(newAllEvents, event)
+			keepFrom = i
+			break
 		}
 	}
-	t.allEvents = newAllEvents
+
+	if keepFrom == -1 {
+		t.allEvents = t.allEvents[:0]
+	} else if keepFrom > 0 {
+		t.allEvents = t.allEvents[keepFrom:]
+	}
 
 	return pruned
 }
@@ -534,31 +546,33 @@ func (t *TimelineTracker) ComputeStateDurations(agentID string, since, until tim
 	}
 
 	events := timeline.events
+	if len(events) == 0 {
+		return durations
+	}
+
 	for i, event := range events {
-		// Skip events before our window
-		if event.Timestamp.Before(since) {
-			continue
+		// Determine the start time for this state segment within our window
+		segmentStart := event.Timestamp
+		if segmentStart.Before(since) {
+			segmentStart = since
 		}
 
 		// Determine the end time for this state
-		var endTime time.Time
+		var segmentEnd time.Time
 		if i+1 < len(events) {
-			endTime = events[i+1].Timestamp
+			segmentEnd = events[i+1].Timestamp
 		} else {
-			endTime = until
+			segmentEnd = until
 		}
 
-		// Clamp to window
-		if event.Timestamp.Before(since) {
-			continue
-		}
-		if endTime.After(until) {
-			endTime = until
+		// Clamp end time to our window
+		if segmentEnd.After(until) {
+			segmentEnd = until
 		}
 
-		duration := endTime.Sub(event.Timestamp)
-		if duration > 0 {
-			durations[event.State] += duration
+		// Only add if the segment is within our window
+		if segmentEnd.After(since) && segmentEnd.After(segmentStart) {
+			durations[event.State] += segmentEnd.Sub(segmentStart)
 		}
 	}
 
@@ -708,18 +722,28 @@ func (t *TimelineTracker) PruneMarkers() int {
 	defer t.mu.Unlock()
 
 	cutoff := time.Now().Add(-t.config.RetentionDuration)
-	pruned := 0
-
-	newMarkers := make([]TimelineMarker, 0, len(t.markers))
-	for _, m := range t.markers {
+	
+	keepFrom := -1
+	for i, m := range t.markers {
 		if m.Timestamp.After(cutoff) {
-			newMarkers = append(newMarkers, m)
-		} else {
-			pruned++
+			keepFrom = i
+			break
 		}
 	}
-	t.markers = newMarkers
 
+	if keepFrom == -1 {
+		// All markers are old
+		pruned := len(t.markers)
+		t.markers = t.markers[:0]
+		return pruned
+	}
+
+	if keepFrom == 0 {
+		return 0
+	}
+
+	pruned := keepFrom
+	t.markers = t.markers[keepFrom:]
 	return pruned
 }
 

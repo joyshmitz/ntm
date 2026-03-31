@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,9 @@ const DefaultClientCacheTTL = 30 * time.Second
 // DefaultClientTimeout is the default timeout for bv commands
 const DefaultClientTimeout = 10 * time.Second
 
+// AvailabilityCacheTTL is how long to cache the availability check result.
+const AvailabilityCacheTTL = 30 * time.Second
+
 // BVClient provides a client-oriented API for bv integration.
 // It supports configurable caching, timeouts, and workspace paths.
 type BVClient struct {
@@ -37,11 +41,15 @@ type BVClient struct {
 	// Timeout is the max time for bv commands (default 10s)
 	Timeout time.Duration
 
-	// Internal cache
+	// Internal cache for triage data
 	mu             sync.RWMutex
 	triageCache    *TriageResponse
 	triageCacheDir string
 	triageCacheAt  time.Time
+
+	// Internal cache for availability
+	availableCache     atomic.Bool
+	availableCacheTime atomic.Int64
 }
 
 // NewBVClient creates a new BVClient with default settings.
@@ -115,6 +123,21 @@ type Insights struct {
 
 // IsAvailable checks if bv is installed and responsive.
 func (c *BVClient) IsAvailable() bool {
+	// Check cache first
+	cacheTime := c.availableCacheTime.Load()
+	if cacheTime > 0 && time.Now().Unix()-cacheTime < int64(AvailabilityCacheTTL.Seconds()) {
+		return c.availableCache.Load()
+	}
+
+	available := c.checkAvailability()
+
+	c.availableCache.Store(available)
+	c.availableCacheTime.Store(time.Now().Unix())
+
+	return available
+}
+
+func (c *BVClient) checkAvailability() bool {
 	if !IsInstalled() {
 		return false
 	}

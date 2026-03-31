@@ -64,7 +64,8 @@ func IsInstalled() bool {
 	return err == nil
 }
 
-// run executes bv with given args and returns stdout
+// run executes bv with given args and returns stdout.
+// It includes retry logic for transient database locks.
 func run(dir string, args ...string) (string, error) {
 	if !IsInstalled() {
 		return "", ErrNotInstalled
@@ -75,31 +76,48 @@ func run(dir string, args ...string) (string, error) {
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancel()
+	const maxAttempts = 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 
-	cmd := exec.CommandContext(ctx, "bv", args...)
-	cmd.Dir = normalizedDir
-	cmd.WaitDelay = time.Second // Prevent hanging on open pipes if child processes outlive context
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+		cmd := exec.CommandContext(ctx, "bv", args...)
+		cmd.Dir = normalizedDir
+		cmd.WaitDelay = time.Second // Prevent hanging on open pipes if child processes outlive context
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 
-	err = cmd.Run()
-	if err != nil {
-		// Check context timeout first since it's more fundamental
+		err = cmd.Run()
+		cancel()
+
+		if err == nil {
+			return strings.TrimSpace(stdout.String()), nil
+		}
+
+		// Check for specific error conditions
+		stderrStr := stderr.String()
+		stdoutStr := stdout.String()
+
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("bv timed out after %v", DefaultTimeout)
 		}
-		// Check for specific error conditions in stderr
-		stderrStr := stderr.String()
+
 		if strings.Contains(stderrStr, "No baseline found") {
 			return "", ErrNoBaseline
 		}
+
+		// Handle transient database locks (SQLite)
+		if attempt < maxAttempts && (strings.Contains(stderrStr, "database is locked") || 
+			strings.Contains(stdoutStr, "database is locked") ||
+			strings.Contains(stderrStr, "database is busy")) {
+			time.Sleep(transientBeadsDBBackoff(attempt))
+			continue
+		}
+
 		return "", fmt.Errorf("bv %s: %w: %s", strings.Join(args, " "), err, stderrStr)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return "", fmt.Errorf("bv %s: exceeded retry budget", strings.Join(args, " "))
 }
 
 // GetInsights returns graph analysis insights (bottlenecks, keystones, etc.)

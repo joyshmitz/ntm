@@ -86,7 +86,6 @@ func AssignRoundRobin(modes []string, panes []tmux.Pane) []ModeAssignment {
 // AssignByCategory assigns modes based on category-to-agent affinities.
 func AssignByCategory(modes []string, panes []tmux.Pane, catalog *ModeCatalog) []ModeAssignment {
 	logger := slog.Default()
-
 	items, err := resolveModeItems(modes, catalog)
 	if err != nil {
 		logger.Error("category assignment failed", "error", err)
@@ -155,6 +154,7 @@ func AssignByCategory(modes []string, panes []tmux.Pane, catalog *ModeCatalog) [
 // AssignExplicit assigns modes based on explicit user-specified mapping.
 // Specs are formatted as "mode:agent" entries (comma-separated).
 func AssignExplicit(specs []string, panes []tmux.Pane) ([]ModeAssignment, error) {
+	logger := slog.Default()
 	expanded := expandSpecs(specs)
 	if len(expanded) == 0 {
 		return nil, errors.New("explicit assignment requires at least one mapping")
@@ -212,7 +212,7 @@ func AssignExplicit(specs []string, panes []tmux.Pane) ([]ModeAssignment, error)
 			Status:     AssignmentPending,
 			AssignedAt: now,
 		})
-		slog.Default().Info("ensemble assignment decided",
+		logger.Info("ensemble assignment decided",
 			"strategy", "explicit",
 			"mode_id", modeID,
 			"pane", choice.Title,
