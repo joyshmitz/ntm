@@ -155,7 +155,7 @@ func TestNewFileReservationWatcherFromConfig_Disabled(t *testing.T) {
 	cfg := DefaultFileReservationConfigValues()
 	cfg.Enabled = false
 
-	result := NewFileReservationWatcherFromConfig(cfg, nil, "/tmp/project", "agent-1", nil)
+	result := NewFileReservationWatcherFromConfig(cfg, nil, "/tmp/project", "agent-1", "session-1", nil)
 	if result != nil {
 		t.Error("expected nil when Enabled is false")
 	}

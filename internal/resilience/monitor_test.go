@@ -447,6 +447,7 @@ func TestCheckHealthRateLimitUpdatesTracker(t *testing.T) {
 	m.RegisterAgent("pane-1", 1, 0, "cod", "gpt-4", "codex")
 
 	m.checkHealth(context.Background())
+	m.wg.Wait()
 
 	state := m.rateLimitTracker.GetProviderState("openai")
 	if state == nil {
@@ -536,6 +537,7 @@ func TestCheckHealthRateLimitClearedRecordsSuccess(t *testing.T) {
 	m.mu.Unlock()
 
 	m.checkHealth(context.Background())
+	m.wg.Wait()
 
 	state := m.rateLimitTracker.GetProviderState("openai")
 	if state == nil {
@@ -1006,6 +1008,7 @@ func TestRecordRateLimitHit_Direct(t *testing.T) {
 	m := NewMonitor("test-session", projectDir, cfg, true)
 
 	m.recordRateLimitHit("cod", 30)
+	m.wg.Wait()
 
 	state := m.rateLimitTracker.GetProviderState("openai")
 	if state == nil {
@@ -1032,6 +1035,7 @@ func TestRecordRateLimitSuccess_Direct(t *testing.T) {
 	m := NewMonitor("test-session", projectDir, cfg, true)
 
 	m.recordRateLimitSuccess("cod")
+	m.wg.Wait()
 
 	state := m.rateLimitTracker.GetProviderState("openai")
 	if state == nil {

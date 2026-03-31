@@ -928,22 +928,46 @@ func SendBufferWithDelay(target, content string, enter bool, enterDelay time.Dur
 }
 
 // SendKeysForAgent sends keys to a pane using the appropriate method for the agent type.
-// For Gemini and Claude Code agents with multi-line content, it uses the buffer mechanism
-// to avoid newlines being interpreted as Enter key presses.
-// For other agents, it uses the standard send-keys method.
+// It uses buffer-based paste for agents/content combinations that misbehave with raw
+// send-keys (for example multiline Claude/Gemini prompts or large/multiline Codex prompts).
+// Other combinations use the standard send-keys path.
 func (c *Client) SendKeysForAgent(target, keys string, enter bool, agentType AgentType) error {
 	return c.SendKeysForAgentWithDelay(target, keys, enter, DefaultEnterDelay, agentType)
 }
 
 // SendKeysForAgentWithDelay sends keys using the appropriate method with a configurable delay.
 func (c *Client) SendKeysForAgentWithDelay(target, keys string, enter bool, enterDelay time.Duration, agentType AgentType) error {
-	// Use buffer mechanism for Gemini and Claude Code when content contains newlines
-	// Their TUIs interpret newlines in send-keys as actual Enter presses,
-	// causing them to enter "quote mode" or submit prompts prematurely
+	// Use buffer-based paste when the agent/content combination needs it.
+	// This avoids newline interpretation issues and large-paste truncation quirks.
 	if needsBufferSend(agentType, keys) {
 		return c.SendBufferWithDelay(target, keys, enter, enterDelay)
 	}
 	return c.SendKeysWithDelay(target, keys, enter, enterDelay)
+}
+
+// canonicalAgentType folds user-facing aliases into the canonical short codes used
+// throughout pane metadata and agent-specific send behavior.
+func canonicalAgentType(agentType AgentType) AgentType {
+	switch strings.ToLower(strings.TrimSpace(string(agentType))) {
+	case "cc", "claude", "claude-code":
+		return AgentClaude
+	case "cod", "codex":
+		return AgentCodex
+	case "gmi", "gemini":
+		return AgentGemini
+	case "cursor":
+		return AgentCursor
+	case "windsurf", "ws":
+		return AgentWindsurf
+	case "aider":
+		return AgentAider
+	case "ollama":
+		return AgentOllama
+	case "user":
+		return AgentUser
+	default:
+		return agentType
+	}
 }
 
 // needsBufferSend returns true if the content should be sent via buffer mechanism
@@ -953,7 +977,7 @@ func needsBufferSend(agentType AgentType, content string) bool {
 	// Gemini's TUI interprets newlines in send-keys as actual Enter presses.
 	// Codex uses bracketed paste mode and shows "[Pasted Content N chars]" instead of
 	// actual content when receiving large send-keys input, and may not auto-execute.
-	switch agentType {
+	switch canonicalAgentType(agentType) {
 	case AgentClaude:
 		// Use buffer if content contains newlines — send-keys -l silently strips
 		// newlines (tmux 3.6+), while paste-buffer converts them to CR which

@@ -15,6 +15,11 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
+var (
+	getPanesWithActivity         = tmux.GetPanesWithActivity
+	captureForHealthCheckWithCtx = tmux.CaptureForHealthCheckContext
+)
+
 // SessionCoordinator manages agent coordination for a tmux session.
 type SessionCoordinator struct {
 	mu sync.RWMutex
@@ -275,7 +280,7 @@ func (c *SessionCoordinator) monitorLoop() {
 func (c *SessionCoordinator) updateAgentStates() {
 	// 1. Get panes with activity from tmux (single call)
 	// This returns both pane metadata and last activity timestamp
-	panes, err := tmux.GetPanesWithActivity(c.session)
+	panes, err := getPanesWithActivity(c.session)
 	if err != nil {
 		return
 	}
@@ -308,7 +313,7 @@ func (c *SessionCoordinator) updateAgentStates() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
-			output, err := tmux.CaptureForHealthCheckContext(ctx, paneID)
+			output, err := captureForHealthCheckWithCtx(ctx, paneID)
 			resultsCh <- captureResult{paneID: paneID, output: output, err: err}
 		}(p.Pane.ID)
 	}
@@ -362,11 +367,12 @@ func (c *SessionCoordinator) updateAgentStates() {
 	defer c.mu.Unlock()
 
 	// Track which panes we've seen
-	seenPanes := make(map[string]bool)
+	seenPanes := make(map[string]bool, len(agentPanes))
+	for _, pane := range agentPanes {
+		seenPanes[pane.Pane.ID] = true
+	}
 
 	for _, update := range updates {
-		seenPanes[update.paneID] = true
-
 		// Get or create agent state
 		agent, exists := c.agents[update.paneID]
 		if !exists {
@@ -409,6 +415,9 @@ func (c *SessionCoordinator) emitEvent(agent *AgentState, prevStatus robot.Agent
 
 	var busType string
 	switch {
+	case prevStatus == robot.StateError && agent.Status != robot.StateError:
+		eventType = EventAgentRecovered
+		busType = "agent.recovered"
 	case agent.Status == robot.StateWaiting && prevStatus != robot.StateWaiting:
 		eventType = EventAgentIdle
 		busType = "agent.idle"
@@ -418,9 +427,6 @@ func (c *SessionCoordinator) emitEvent(agent *AgentState, prevStatus robot.Agent
 	case agent.Status == robot.StateError:
 		eventType = EventAgentError
 		busType = "agent.error"
-	case prevStatus == robot.StateError && agent.Status != robot.StateError:
-		eventType = EventAgentRecovered
-		busType = "agent.recovered"
 	default:
 		return // No event for this transition
 	}

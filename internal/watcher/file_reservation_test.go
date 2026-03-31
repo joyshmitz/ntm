@@ -104,6 +104,7 @@ func TestNewFileReservationWatcher(t *testing.T) {
 			WithWatcherClient(client),
 			WithProjectDir("/test/project"),
 			WithAgentName("TestAgent"),
+			WithSessionFilter("test-session"),
 			WithReservationPollInterval(5*time.Second),
 			WithIdleTimeout(5*time.Minute),
 			WithReservationTTL(10*time.Minute),
@@ -121,6 +122,9 @@ func TestNewFileReservationWatcher(t *testing.T) {
 		}
 		if w.agentName != "TestAgent" {
 			t.Errorf("expected agentName=TestAgent, got %s", w.agentName)
+		}
+		if w.sessionFilter != "test-session" {
+			t.Errorf("expected sessionFilter=test-session, got %s", w.sessionFilter)
 		}
 		if w.pollInterval != 5*time.Second {
 			t.Errorf("expected pollInterval=5s, got %v", w.pollInterval)
@@ -514,6 +518,113 @@ func TestFileReservationWatcherStartStop(t *testing.T) {
 		w.Stop()
 		t.Logf("RESERVATION_TEST: stop_without_start completed safely")
 	})
+}
+
+func TestCheckPaneOutputsScansAgentPanes(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{
+					{ID: 11, PathPattern: "/watched.go", AgentName: "TestAgent", Exclusive: true},
+				},
+			}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithAgentName("TestAgent"),
+	)
+
+	var captured []string
+	w.listAllPanes = func(ctx context.Context) (map[string][]tmux.Pane, error) {
+		return map[string][]tmux.Pane{
+			"test-session": {
+				{ID: "%1", Type: tmux.AgentClaude},
+				{ID: "%2", Type: tmux.AgentUser},
+			},
+		}, nil
+	}
+	w.capturePaneOutput = func(ctx context.Context, paneID string, lines int) (string, error) {
+		captured = append(captured, paneID)
+		return "Modified /watched.go", nil
+	}
+
+	w.checkPaneOutputs(context.Background())
+
+	if len(captured) != 1 || captured[0] != "%1" {
+		t.Fatalf("expected only agent pane to be captured, got %v", captured)
+	}
+
+	reservations := w.GetActiveReservations()
+	got := reservations["%1"]
+	if got == nil {
+		t.Fatal("expected reservation for scanned agent pane")
+	}
+	if len(got.Files) != 1 || got.Files[0] != "/watched.go" {
+		t.Fatalf("expected watched file to be reserved, got %v", got.Files)
+	}
+	if len(got.ReservationID) != 1 || got.ReservationID[0] != 11 {
+		t.Fatalf("expected granted reservation ID to be tracked, got %v", got.ReservationID)
+	}
+}
+
+func TestCheckPaneOutputsRespectsSessionFilter(t *testing.T) {
+	t.Parallel()
+
+	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{
+					{ID: 12, PathPattern: "/watched.go", AgentName: "TestAgent", Exclusive: true},
+				},
+			}, nil
+		},
+	})
+	defer server.Close()
+
+	client := agentmail.NewClient(agentmail.WithBaseURL(server.URL + "/"))
+	w := NewFileReservationWatcher(
+		WithWatcherClient(client),
+		WithProjectDir("/test/project"),
+		WithAgentName("TestAgent"),
+		WithSessionFilter("target-session"),
+	)
+
+	var captured []string
+	w.listAllPanes = func(ctx context.Context) (map[string][]tmux.Pane, error) {
+		return map[string][]tmux.Pane{
+			"other-session": {
+				{ID: "%1", Type: tmux.AgentClaude},
+			},
+			"target-session": {
+				{ID: "%2", Type: tmux.AgentClaude},
+			},
+		}, nil
+	}
+	w.capturePaneOutput = func(ctx context.Context, paneID string, lines int) (string, error) {
+		captured = append(captured, paneID)
+		return "Modified /watched.go", nil
+	}
+
+	w.checkPaneOutputs(context.Background())
+
+	if len(captured) != 1 || captured[0] != "%2" {
+		t.Fatalf("expected only target-session pane to be captured, got %v", captured)
+	}
+
+	reservations := w.GetActiveReservations()
+	if reservations["%1"] != nil {
+		t.Fatal("expected other-session pane to be ignored")
+	}
+	if reservations["%2"] == nil {
+		t.Fatal("expected reservation for target-session pane")
+	}
 }
 
 // TestOnFileEditNoClient tests OnFileEdit behavior without a client.

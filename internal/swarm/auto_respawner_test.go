@@ -1298,8 +1298,10 @@ func TestNormalizeAgentType(t *testing.T) {
 		{"claude-code", "cc"},
 		{"cod", "cod"},
 		{"codex", "cod"},
+		{" CodEx ", "cod"},
 		{"gmi", "gmi"},
 		{"gemini", "gmi"},
+		{" GEMINI ", "gmi"},
 		{"unknown", "unknown"},
 	}
 

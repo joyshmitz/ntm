@@ -268,6 +268,80 @@ func TestBulkAssignUsesPaneTargetWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestBulkAssignUsesAgentAwareSend(t *testing.T) {
+	panes := []bulkPane{
+		{Index: 1, AgentType: "codex", Target: "%21"},
+	}
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "Title1"}})
+
+	var (
+		gotTarget    string
+		gotAgentType tmux.AgentType
+		fallbackUsed bool
+	)
+	deps := BulkAssignDependencies{
+		SendKeys: func(paneID, message string, enter bool) error {
+			fallbackUsed = true
+			return nil
+		},
+		SendKeysForAgent: func(paneID, message string, enter bool, agentType tmux.AgentType) error {
+			gotTarget = paneID
+			gotAgentType = agentType
+			return nil
+		},
+		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+	}
+	output := BulkAssignOutput{Session: "proj"}
+	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+
+	if fallbackUsed {
+		t.Fatal("expected agent-aware send path, but fallback SendKeys was used")
+	}
+	if gotTarget != "%21" {
+		t.Fatalf("expected send target %%21, got %q", gotTarget)
+	}
+	if gotAgentType != tmux.AgentCodex {
+		t.Fatalf("expected codex agent type, got %q", gotAgentType)
+	}
+}
+
+func TestBulkAssignCustomSendKeysStillWorksWithoutAgentAwareStub(t *testing.T) {
+	panes := []bulkPane{
+		{Index: 1, AgentType: "codex", Target: "%31"},
+	}
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{ID: "bd-1", Title: "Title1"}})
+
+	var (
+		gotTarget string
+		gotEnter  bool
+		gotCalls  int
+	)
+	deps := BulkAssignDependencies{
+		SendKeys: func(paneID, message string, enter bool) error {
+			gotTarget = paneID
+			gotEnter = enter
+			gotCalls++
+			return nil
+		},
+		ReadFile: func(path string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+	}
+	output := BulkAssignOutput{Session: "proj"}
+	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+
+	if gotCalls != 1 {
+		t.Fatalf("expected custom SendKeys to be called once, got %d", gotCalls)
+	}
+	if gotTarget != "%31" {
+		t.Fatalf("expected send target %%31, got %q", gotTarget)
+	}
+	if !gotEnter {
+		t.Fatal("expected enter=true for bulk assign prompt send")
+	}
+	if output.Assignments[0].Status != "assigned" {
+		t.Fatalf("expected assigned status, got %q", output.Assignments[0].Status)
+	}
+}
+
 func TestBulkAssignFailedDelivery(t *testing.T) {
 	panes := mockPanes("proj", []int{1, 2})
 	beads := []bulkBead{{ID: "bd-1", Title: "Title1"}, {ID: "bd-2", Title: "Title2"}}

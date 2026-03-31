@@ -9,11 +9,20 @@ import (
 	"time"
 )
 
+func setTestDefaultFIFODir(t *testing.T) string {
+	t.Helper()
+
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	return filepath.Join(stateDir, "ntm", "streams")
+}
+
 func TestPaneStreamerConfig_Defaults(t *testing.T) {
+	wantFIFODir := setTestDefaultFIFODir(t)
 	cfg := DefaultPaneStreamerConfig()
 
-	if cfg.FIFODir != "/tmp/ntm_pane_streams" {
-		t.Errorf("expected FIFODir /tmp/ntm_pane_streams, got %s", cfg.FIFODir)
+	if cfg.FIFODir != wantFIFODir {
+		t.Errorf("expected FIFODir %s, got %s", wantFIFODir, cfg.FIFODir)
 	}
 	if cfg.MaxLinesPerEvent != 100 {
 		t.Errorf("expected MaxLinesPerEvent 100, got %d", cfg.MaxLinesPerEvent)
@@ -318,6 +327,7 @@ func TestPaneStreamer_Start_RollsBackStateOnFIFODirError(t *testing.T) {
 
 func TestNewPaneStreamer_DefaultsApplied(t *testing.T) {
 	callback := func(event StreamEvent) {}
+	wantFIFODir := setTestDefaultFIFODir(t)
 
 	// Test with all zero/empty config values
 	cfg := PaneStreamerConfig{
@@ -331,8 +341,8 @@ func TestNewPaneStreamer_DefaultsApplied(t *testing.T) {
 	ps := NewPaneStreamer(DefaultClient, "test:0", callback, cfg)
 
 	// Verify defaults were applied
-	if ps.config.FIFODir != "/tmp/ntm_pane_streams" {
-		t.Errorf("expected default FIFODir, got %s", ps.config.FIFODir)
+	if ps.config.FIFODir != wantFIFODir {
+		t.Errorf("expected default FIFODir %s, got %s", wantFIFODir, ps.config.FIFODir)
 	}
 	if ps.config.MaxLinesPerEvent != 100 {
 		t.Errorf("expected default MaxLinesPerEvent 100, got %d", ps.config.MaxLinesPerEvent)
@@ -345,6 +355,14 @@ func TestNewPaneStreamer_DefaultsApplied(t *testing.T) {
 	}
 	if ps.config.FallbackPollLines != LinesHealthCheck {
 		t.Errorf("expected default FallbackPollLines, got %d", ps.config.FallbackPollLines)
+	}
+}
+
+func TestNewPaneStreamer_NilClientDefaultsToDefaultClient(t *testing.T) {
+	ps := NewPaneStreamer(nil, "test:0", func(StreamEvent) {}, PaneStreamerConfig{})
+
+	if ps.client != DefaultClient {
+		t.Fatal("expected nil client to default to DefaultClient")
 	}
 }
 
@@ -425,6 +443,15 @@ func TestStreamManager_StatsWithActiveStreams(t *testing.T) {
 	pipePaneCount := stats["pipe_pane_count"].(int)
 	if pipePaneCount != 0 {
 		t.Errorf("expected 0 pipe_pane streams, got %d", pipePaneCount)
+	}
+}
+
+func TestNewStreamManager_NilClientDefaultsToDefaultClient(t *testing.T) {
+	sm := NewStreamManager(nil, func(StreamEvent) {}, PaneStreamerConfig{})
+	defer sm.StopAll()
+
+	if sm.client != DefaultClient {
+		t.Fatal("expected nil client to default to DefaultClient")
 	}
 }
 

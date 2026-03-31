@@ -103,7 +103,7 @@ func TestAgentTypeToString(t *testing.T) {
 		{"claude", tmux.AgentClaude, "claude"},
 		{"codex", tmux.AgentCodex, "codex"},
 		{"gemini", tmux.AgentGemini, "gemini"},
-		{"empty string type", tmux.AgentType(""), "user"},
+		{"empty string type", tmux.AgentType(""), "unknown"},
 		{"custom type", tmux.AgentType("aider"), "aider"},
 	}
 

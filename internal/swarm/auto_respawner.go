@@ -881,7 +881,7 @@ func (r *AutoRespawner) getMarchingOrders(agentType string) (string, string) {
 
 // normalizeAgentType converts agent type aliases to canonical forms.
 func (r *AutoRespawner) normalizeAgentType(agentType string) string {
-	switch agentType {
+	switch strings.ToLower(strings.TrimSpace(agentType)) {
 	case "cc", "claude", "claude-code":
 		return "cc"
 	case "cod", "codex":

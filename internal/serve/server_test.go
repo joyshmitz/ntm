@@ -4100,9 +4100,9 @@ func TestIdempotencyStore(t *testing.T) {
 	store := NewIdempotencyStore(time.Hour)
 
 	// Test set and get
-	store.Set("key1", []byte(`{"test": true}`), 200)
+	store.Set("key1", []byte(`{"test": true}`), 200, nil)
 
-	resp, status, ok := store.Get("key1")
+	resp, status, _, ok := store.Get("key1")
 	if !ok {
 		t.Fatal("Expected to find key1")
 	}
@@ -4114,7 +4114,7 @@ func TestIdempotencyStore(t *testing.T) {
 	}
 
 	// Test non-existent key
-	_, _, ok = store.Get("nonexistent")
+	_, _, _, ok = store.Get("nonexistent")
 	if ok {
 		t.Error("Expected not to find nonexistent key")
 	}
@@ -6773,10 +6773,10 @@ func TestPartitionAttentionTopics(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		topics         []string
-		wantAttention  []string
-		wantRegular    []string
+		name          string
+		topics        []string
+		wantAttention []string
+		wantRegular   []string
 	}{
 		{
 			name:          "all attention",

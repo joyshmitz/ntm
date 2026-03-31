@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,6 +193,30 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_CustomDirectory(t *testing.T) {
 	}
 }
 
+func TestRestorer_RestoreFromCheckpoint_WorkingDirNotDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	r := NewRestorerWithStorage(NewStorageWithDir(tmpDir))
+
+	filePath := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          "test-checkpoint",
+		SessionName: "test-session",
+		WorkingDir:  filePath,
+		Session: SessionState{
+			Panes: []PaneState{{Index: 0, ID: "%0"}},
+		},
+	}
+
+	_, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	if !errors.Is(err, ErrWorkingDirInvalid) {
+		t.Fatalf("RestoreFromCheckpoint should fail with ErrWorkingDirInvalid, got %v", err)
+	}
+}
+
 func TestRestorer_ValidateCheckpoint_DirectoryNotFound(t *testing.T) {
 	r := NewRestorer()
 
@@ -243,6 +268,35 @@ func TestRestorer_ValidateCheckpoint_NoPanes(t *testing.T) {
 	}
 	if !found {
 		t.Error("Expected 'no panes' issue")
+	}
+}
+
+func TestRestorer_ValidateCheckpoint_WorkingDirNotDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	r := NewRestorerWithStorage(NewStorageWithDir(tmpDir))
+	cp := &Checkpoint{
+		WorkingDir: filePath,
+		Session: SessionState{
+			Panes: []PaneState{{Index: 0}},
+		},
+	}
+
+	issues := r.ValidateCheckpoint(cp, RestoreOptions{})
+
+	found := false
+	for _, issue := range issues {
+		if containsSubstr(issue, "not a directory") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected not-a-directory issue, got %v", issues)
 	}
 }
 

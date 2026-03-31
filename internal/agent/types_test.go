@@ -84,6 +84,30 @@ func TestAgentType_IsValid(t *testing.T) {
 	}
 }
 
+func TestAgentType_NeedsDoubleEnter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		at   AgentType
+		want bool
+	}{
+		{AgentTypeClaudeCode, false},
+		{AgentType("claude"), false},
+		{AgentTypeCodex, true},
+		{AgentType("codex"), true},
+		{AgentType(" CodEx "), true},
+		{AgentTypeGemini, true},
+		{AgentType("gemini"), true},
+		{AgentType("unknown"), false},
+	}
+
+	for _, tt := range tests {
+		if got := tt.at.NeedsDoubleEnter(); got != tt.want {
+			t.Errorf("AgentType(%q).NeedsDoubleEnter() = %v, want %v", tt.at, got, tt.want)
+		}
+	}
+}
+
 func TestAgentState_GetRecommendation(t *testing.T) {
 	tests := []struct {
 		name  string

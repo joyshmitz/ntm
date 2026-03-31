@@ -1408,6 +1408,18 @@ func TestNeedsBufferSend(t *testing.T) {
 			content:   "",
 			want:      false,
 		},
+		{
+			name:      "codex alias with newline",
+			agentType: AgentType("codex"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "codex alias long content no newline",
+			agentType: AgentType("codex"),
+			content:   strings.Repeat("a", 513),
+			want:      true,
+		},
 		// Claude cases - uses buffer for multi-line content
 		{
 			name:      "claude single line",
@@ -1426,6 +1438,24 @@ func TestNeedsBufferSend(t *testing.T) {
 			agentType: AgentClaude,
 			content:   strings.Repeat("x", 1000),
 			want:      false,
+		},
+		{
+			name:      "claude alias with newline",
+			agentType: AgentType("claude"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "gemini alias with newline",
+			agentType: AgentType("gemini"),
+			content:   "line1\nline2",
+			want:      true,
+		},
+		{
+			name:      "codex alias trimmed and cased",
+			agentType: AgentType(" CodEx "),
+			content:   strings.Repeat("z", 513),
+			want:      true,
 		},
 		// User pane - never uses buffer
 		{

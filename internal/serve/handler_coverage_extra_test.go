@@ -28,7 +28,7 @@ import (
 func TestIdempotencyStoreStop(t *testing.T) {
 	t.Parallel()
 	store := NewIdempotencyStore(time.Hour)
-	store.Set("key1", []byte(`{"ok":true}`), 200)
+	store.Set("key1", []byte(`{"ok":true}`), 200, nil)
 
 	// Stop should be safe to call multiple times
 	store.Stop()
@@ -36,7 +36,7 @@ func TestIdempotencyStoreStop(t *testing.T) {
 	store.Stop()
 
 	// After stop, Get should still work (just no cleanup goroutine)
-	data, code, ok := store.Get("key1")
+	data, code, _, ok := store.Get("key1")
 	if !ok {
 		t.Fatal("expected key1 to still be available after Stop")
 	}
@@ -53,10 +53,10 @@ func TestIdempotencyStoreExpiry(t *testing.T) {
 	store := NewIdempotencyStore(10 * time.Millisecond)
 	defer store.Stop()
 
-	store.Set("ephemeral", []byte(`{}`), 200)
+	store.Set("ephemeral", []byte(`{}`), 200, nil)
 	time.Sleep(20 * time.Millisecond)
 
-	_, _, ok := store.Get("ephemeral")
+	_, _, _, ok := store.Get("ephemeral")
 	if ok {
 		t.Error("expected expired entry to not be found")
 	}
@@ -329,6 +329,98 @@ func TestIdempotencyMiddlewareReplay(t *testing.T) {
 			t.Error("expected X-Idempotent-Replay header for PATCH replay")
 		}
 	})
+
+	t.Run("same key different path does not replay", func(t *testing.T) {
+		callCount = 0
+		key := "test-key-path-scope"
+
+		req1 := httptest.NewRequest(http.MethodPost, "/jobs", nil)
+		req1.Header.Set("Idempotency-Key", key)
+		rec1 := httptest.NewRecorder()
+		handler.ServeHTTP(rec1, req1)
+		if callCount != 1 {
+			t.Fatalf("first POST call: callCount = %d, want 1", callCount)
+		}
+
+		req2 := httptest.NewRequest(http.MethodPost, "/jobs/other", nil)
+		req2.Header.Set("Idempotency-Key", key)
+		rec2 := httptest.NewRecorder()
+		handler.ServeHTTP(rec2, req2)
+		if callCount != 2 {
+			t.Errorf("second POST call on different path: callCount = %d, want 2", callCount)
+		}
+		if rec2.Header().Get("X-Idempotent-Replay") == "true" {
+			t.Error("did not expect replay for different path")
+		}
+	})
+
+	t.Run("same key different method does not replay", func(t *testing.T) {
+		callCount = 0
+		key := "test-key-method-scope"
+
+		req1 := httptest.NewRequest(http.MethodPost, "/jobs", nil)
+		req1.Header.Set("Idempotency-Key", key)
+		rec1 := httptest.NewRecorder()
+		handler.ServeHTTP(rec1, req1)
+		if callCount != 1 {
+			t.Fatalf("first POST call: callCount = %d, want 1", callCount)
+		}
+
+		req2 := httptest.NewRequest(http.MethodPatch, "/jobs", nil)
+		req2.Header.Set("Idempotency-Key", key)
+		rec2 := httptest.NewRecorder()
+		handler.ServeHTTP(rec2, req2)
+		if callCount != 2 {
+			t.Errorf("PATCH call with same key: callCount = %d, want 2", callCount)
+		}
+		if rec2.Header().Get("X-Idempotent-Replay") == "true" {
+			t.Error("did not expect replay for different method")
+		}
+	})
+}
+
+func TestIdempotencyMiddlewarePreservesReplayRequestID(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := setupTestServer(t)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestIDFromContext(r.Context())
+		writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
+			"request_id_seen": reqID,
+		}, reqID)
+	})
+	handler := srv.requestIDMiddlewareFunc(srv.idempotencyMiddleware(inner))
+
+	req1 := httptest.NewRequest(http.MethodPost, "/jobs", nil)
+	req1.Header.Set("Idempotency-Key", "request-id-replay")
+	req1.Header.Set(requestIDHeader, "req-original")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/jobs", nil)
+	req2.Header.Set("Idempotency-Key", "request-id-replay")
+	req2.Header.Set(requestIDHeader, "req-second")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Header().Get("X-Idempotent-Replay") != "true" {
+		t.Fatal("expected replay header on second request")
+	}
+	if got := rec2.Header().Get(requestIDHeader); got != "req-original" {
+		t.Fatalf("replay %s = %q, want req-original", requestIDHeader, got)
+	}
+
+	var replayBody map[string]interface{}
+	if err := json.NewDecoder(rec2.Body).Decode(&replayBody); err != nil {
+		t.Fatalf("decode replay body: %v", err)
+	}
+	if got := replayBody["request_id"]; got != "req-original" {
+		t.Fatalf("replay body request_id = %v, want req-original", got)
+	}
+	if got := replayBody["request_id_seen"]; got != "req-original" {
+		t.Fatalf("replay body request_id_seen = %v, want req-original", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

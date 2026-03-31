@@ -15,9 +15,12 @@ import (
 var (
 	ErrSessionExists     = errors.New("session already exists (use Force option to override)")
 	ErrDirectoryNotFound = errors.New("checkpoint working directory not found")
+	ErrWorkingDirInvalid = errors.New("checkpoint working directory is invalid")
 	ErrNoAgentsToRestore = errors.New("checkpoint contains no agents to restore")
 	ErrNilCheckpoint     = errors.New("checkpoint is nil")
 )
+
+var errWorkingDirNotDirectory = errors.New("not a directory")
 
 // RestoreOptions configures how a checkpoint is restored.
 type RestoreOptions struct {
@@ -119,14 +122,16 @@ func (r *Restorer) RestoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (*
 		workDir = opts.CustomDirectory
 	}
 
-	// Validate working directory exists
+	// Validate working directory exists and is usable.
 	if workDir != "" {
-		if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		if err := validateWorkingDirectory(workDir); err != nil {
 			if opts.DryRun {
-				result.Warnings = append(result.Warnings,
-					fmt.Sprintf("working directory %q does not exist", workDir))
+				result.Warnings = append(result.Warnings, workingDirectoryIssue(workDir, err))
 			} else {
-				return nil, fmt.Errorf("%w: %s", ErrDirectoryNotFound, workDir)
+				if errors.Is(err, os.ErrNotExist) {
+					return nil, fmt.Errorf("%w: %s", ErrDirectoryNotFound, workDir)
+				}
+				return nil, fmt.Errorf("%w: %s: %v", ErrWorkingDirInvalid, workDir, err)
 			}
 		}
 	}
@@ -425,6 +430,28 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+func validateWorkingDirectory(workDir string) error {
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errWorkingDirNotDirectory
+	}
+	return nil
+}
+
+func workingDirectoryIssue(workDir string, err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Sprintf("working directory not found: %s", workDir)
+	case errors.Is(err, errWorkingDirNotDirectory):
+		return fmt.Sprintf("working directory is not a directory: %s", workDir)
+	default:
+		return fmt.Sprintf("working directory inaccessible: %s (%v)", workDir, err)
+	}
+}
+
 // RestoreLatest restores the most recent checkpoint for a session.
 func (r *Restorer) RestoreLatest(sessionName string, opts RestoreOptions) (*RestoreResult, error) {
 	cp, err := r.storage.GetLatest(sessionName)
@@ -448,8 +475,8 @@ func (r *Restorer) ValidateCheckpoint(cp *Checkpoint, opts RestoreOptions) []str
 		workDir = opts.CustomDirectory
 	}
 	if workDir != "" {
-		if _, err := os.Stat(workDir); os.IsNotExist(err) {
-			issues = append(issues, fmt.Sprintf("working directory not found: %s", workDir))
+		if err := validateWorkingDirectory(workDir); err != nil {
+			issues = append(issues, workingDirectoryIssue(workDir, err))
 		}
 	}
 

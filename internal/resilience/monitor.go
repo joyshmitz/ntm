@@ -755,15 +755,23 @@ func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
 		return
 	}
 
+	m.mu.Lock()
+	var attemptRestartCount int
+	if a, ok := m.agents[agent.PaneID]; ok {
+		a.RestartCount++
+		attemptRestartCount = a.RestartCount
+	}
+	m.mu.Unlock()
+
 	if err := sendFunc(agent.PaneID, paneCmd, true); err != nil {
-		log.Printf("[resilience] Failed to restart agent %s: %v", agent.PaneID, err)
+		log.Printf("[resilience] Failed to restart agent %s (attempt %d/%d): %v",
+			agent.PaneID, attemptRestartCount, m.cfg.Resilience.MaxRestarts, err)
 		return
 	}
 
 	m.mu.Lock()
 	var finalRestartCount int
 	if a, ok := m.agents[agent.PaneID]; ok {
-		a.RestartCount++
 		a.Healthy = true
 		a.LastRestart = time.Now()
 		finalRestartCount = a.RestartCount

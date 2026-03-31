@@ -166,10 +166,12 @@ func KillAllTestSessions(logger *TestLogger) {
 }
 
 // KillAllTestSessionsSilent kills all ntm test sessions without logging.
-// Use this in TestMain where a logger may not be available.
+// Use this in TestMain where a logger may not be available. The cleanup is
+// best-effort and intentionally avoids blocking on the global tmux test lock so
+// concurrent package startup can continue under multi-agent test runs.
 func KillAllTestSessionsSilent() int {
 	killed := 0
-	withGlobalTmuxTestLock(func() {
+	if !tryWithGlobalTmuxTestLock(func() {
 		out, err := exec.Command(tmux.BinaryPath(), "list-sessions", "-F", "#{session_name}").Output()
 		if err != nil {
 			return
@@ -182,7 +184,9 @@ func KillAllTestSessionsSilent() int {
 				killed++
 			}
 		}
-	})
+	}) {
+		return 0
+	}
 	return killed
 }
 

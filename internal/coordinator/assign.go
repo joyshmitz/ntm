@@ -210,26 +210,31 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 	// For now, we don't pre-reserve since we don't know the files yet
 	// The agent should reserve files when it starts working
 
-	// Send assignment message if mail client available
-	if c.mailClient != nil && assignment.AgentMailName != "" {
-		body := c.formatAssignmentMessage(assignment, rec)
-		_, err := c.mailClient.SendMessage(ctx, agentmail.SendMessageOptions{
-			ProjectKey:  c.projectKey,
-			SenderName:  c.agentName,
-			To:          []string{assignment.AgentMailName},
-			Subject:     fmt.Sprintf("Work Assignment: %s", assignment.BeadTitle),
-			BodyMD:      body,
-			Importance:  "normal",
-			AckRequired: true,
-		})
-
-		if err != nil {
-			result.Error = fmt.Sprintf("sending message: %v", err)
-			return result
-		}
-		result.MessageSent = true
+	if c.mailClient == nil {
+		result.Error = "assignment delivery unavailable: agent mail client is not configured"
+		return result
+	}
+	if assignment.AgentMailName == "" {
+		result.Error = "assignment delivery unavailable: agent has no agent-mail identity"
+		return result
 	}
 
+	body := c.formatAssignmentMessage(assignment, rec)
+	_, err := c.mailClient.SendMessage(ctx, agentmail.SendMessageOptions{
+		ProjectKey:  c.projectKey,
+		SenderName:  c.agentName,
+		To:          []string{assignment.AgentMailName},
+		Subject:     fmt.Sprintf("Work Assignment: %s", assignment.BeadTitle),
+		BodyMD:      body,
+		Importance:  "normal",
+		AckRequired: true,
+	})
+
+	if err != nil {
+		result.Error = fmt.Sprintf("sending message: %v", err)
+		return result
+	}
+	result.MessageSent = true
 	result.Success = true
 	return result
 }

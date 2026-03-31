@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -751,6 +752,8 @@ func (s *Server) startMemoryDaemonAsync(port int, sessionID string) {
 		return
 	}
 
+	go s.watchMemoryDaemonExit(cmd, sessionID)
+
 	// Wait a moment for the daemon to start
 	time.Sleep(2 * time.Second)
 
@@ -785,20 +788,25 @@ func (s *Server) handleMemoryDaemonStop(w http.ResponseWriter, r *http.Request) 
 	}
 
 	slog.Info("stopping memory daemon", "request_id", reqID, "pid", daemonInfo.PID)
+	memoryStore.SetDaemonInfo(&MemoryDaemonInfo{
+		State:     DaemonStateStopping,
+		PID:       daemonInfo.PID,
+		Port:      daemonInfo.Port,
+		StartedAt: daemonInfo.StartedAt,
+		SessionID: daemonInfo.SessionID,
+	})
 
-	// Kill the process
-	if daemonInfo.PID > 0 {
-		proc, err := os.FindProcess(daemonInfo.PID)
-		if err == nil {
-			_ = proc.Signal(os.Interrupt)
-		}
+	if err := stopMemoryDaemonProcess(daemonInfo.PID, 2*time.Second); err != nil {
+		memoryStore.SetDaemonInfo(daemonInfo)
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
+			fmt.Sprintf("failed to stop memory daemon: %v", err), map[string]interface{}{
+				"pid":        daemonInfo.PID,
+				"session_id": daemonInfo.SessionID,
+			}, reqID)
+		return
 	}
 
-	// Remove PID file
-	if daemonInfo.SessionID != "" {
-		pidPath := filepath.Join(s.projectDir, ".ntm", "pids", fmt.Sprintf("cm-%s.pid", daemonInfo.SessionID))
-		_ = os.Remove(pidPath)
-	}
+	s.removeMemoryDaemonPIDFileIfMatches(daemonInfo.SessionID, daemonInfo.PID)
 
 	memoryStore.SetDaemonInfo(&MemoryDaemonInfo{State: DaemonStateStopped})
 
@@ -811,6 +819,105 @@ func (s *Server) handleMemoryDaemonStop(w http.ResponseWriter, r *http.Request) 
 		"state":   DaemonStateStopped,
 		"message": "Memory daemon stopped",
 	}, reqID)
+}
+
+func (s *Server) watchMemoryDaemonExit(cmd *exec.Cmd, sessionID string) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	pid := cmd.Process.Pid
+	err := cmd.Wait()
+	pidFileRemoved := s.removeMemoryDaemonPIDFileIfMatches(sessionID, pid)
+
+	current := memoryStore.GetDaemonInfo()
+	if current == nil || current.PID != pid || current.SessionID != sessionID {
+		return
+	}
+	if current.State == DaemonStateStopping {
+		return
+	}
+
+	memoryStore.SetDaemonInfo(&MemoryDaemonInfo{State: DaemonStateStopped})
+	if err != nil {
+		slog.Warn("memory daemon exited", "pid", pid, "session_id", sessionID, "pid_file_removed", pidFileRemoved, "error", err)
+		s.publishMemoryEvent("memory.daemon.failed", map[string]interface{}{
+			"pid":        pid,
+			"session_id": sessionID,
+			"error":      err.Error(),
+		})
+		return
+	}
+
+	slog.Info("memory daemon exited", "pid", pid, "session_id", sessionID, "pid_file_removed", pidFileRemoved)
+	s.publishMemoryEvent("memory.daemon.stopped", map[string]interface{}{
+		"pid":        pid,
+		"session_id": sessionID,
+	})
+}
+
+func (s *Server) removeMemoryDaemonPIDFileIfMatches(sessionID string, pid int) bool {
+	if sessionID == "" || pid <= 0 {
+		return false
+	}
+
+	pidPath := filepath.Join(s.projectDir, ".ntm", "pids", fmt.Sprintf("cm-%s.pid", sessionID))
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return false
+	}
+
+	var pidInfo cm.PIDFileInfo
+	if err := json.Unmarshal(data, &pidInfo); err != nil {
+		return false
+	}
+	if pidInfo.PID != pid {
+		return false
+	}
+
+	if err := os.Remove(pidPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("failed to remove memory daemon pid file", "path", pidPath, "pid", pid, "error", err)
+		return false
+	}
+	return true
+}
+
+func stopMemoryDaemonProcess(pid int, timeout time.Duration) error {
+	if pid <= 0 || !process.IsAlive(pid) {
+		return nil
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", pid, err)
+	}
+
+	if err := proc.Signal(os.Interrupt); err != nil && process.IsAlive(pid) {
+		return fmt.Errorf("interrupt pid %d: %w", pid, err)
+	}
+	if waitForProcessExit(pid, timeout) {
+		return nil
+	}
+
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && process.IsAlive(pid) {
+		return fmt.Errorf("kill pid %d: %w", pid, err)
+	}
+	if waitForProcessExit(pid, 500*time.Millisecond) {
+		return nil
+	}
+
+	return fmt.Errorf("pid %d is still running after interrupt/kill", pid)
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !process.IsAlive(pid) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return !process.IsAlive(pid)
 }
 
 // handleMemoryContext retrieves context for a task

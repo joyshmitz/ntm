@@ -87,9 +87,9 @@ func TestNeedsDoubleEnter(t *testing.T) {
 		{"cc", false},
 		{"claude", false},
 		{"cod", true},
-		{"codex", false},
+		{"codex", true},
 		{"gmi", true},
-		{"gemini", false},
+		{"gemini", true},
 		{"unknown", false},
 	}
 
@@ -491,8 +491,8 @@ func TestPromptInjector_DoubleEnterQuirkHandling(t *testing.T) {
 		{
 			name:        "codex_alias_double_enter",
 			agentType:   "codex",
-			needsDouble: false,
-			description: "Raw alias is not normalized here; canonical cod uses double Enter",
+			needsDouble: true,
+			description: "Codex aliases should preserve double Enter behavior",
 		},
 		{
 			name:        "gemini_double_enter",
@@ -503,8 +503,8 @@ func TestPromptInjector_DoubleEnterQuirkHandling(t *testing.T) {
 		{
 			name:        "gemini_alias_double_enter",
 			agentType:   "gemini",
-			needsDouble: false,
-			description: "Raw alias is not normalized here; canonical gmi uses double Enter",
+			needsDouble: true,
+			description: "Gemini aliases should preserve double Enter behavior",
 		},
 		{
 			name:        "unknown_single_enter",

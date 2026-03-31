@@ -93,6 +93,9 @@ type PaneStreamer struct {
 
 // NewPaneStreamer creates a streamer for the given pane target.
 func NewPaneStreamer(client *Client, target string, callback StreamCallback, cfg PaneStreamerConfig) *PaneStreamer {
+	if client == nil {
+		client = DefaultClient
+	}
 	if cfg.FIFODir == "" {
 		cfg.FIFODir = defaultFIFODir()
 	}
@@ -428,6 +431,9 @@ type StreamManager struct {
 
 // NewStreamManager creates a new stream manager.
 func NewStreamManager(client *Client, callback StreamCallback, cfg PaneStreamerConfig) *StreamManager {
+	if client == nil {
+		client = DefaultClient
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &StreamManager{
 		client:    client,

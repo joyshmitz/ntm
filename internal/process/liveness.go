@@ -18,8 +18,20 @@ func IsAlive(pid int) bool {
 		return false
 	}
 
-	// Fast path: check /proc/<pid>/status exists (Linux).
-	if _, err := os.Stat(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+	// Fast path: inspect /proc state directly on Linux. Zombie and dead
+	// processes still have a /proc entry until reaped, but they are not alive.
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "State:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				state := fields[1]
+				return state != "Z" && state != "X" && state != "x"
+			}
+			break
+		}
 		return true
 	}
 

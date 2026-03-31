@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
@@ -51,6 +53,93 @@ func TestStatusUpdateSetsPaneStateAndTimestamp(t *testing.T) {
 	}
 	if got := len(m2.velocityByType[string(tmux.AgentCodex)]); got == 0 {
 		t.Fatalf("expected per-type velocity history to be recorded")
+	}
+}
+
+func TestStatusUpdateBatchesOllamaRefreshCmd(t *testing.T) {
+	t.Parallel()
+
+	m := New("session", "")
+	m.panes = []tmux.Pane{
+		{ID: "%1", Index: 0, Title: "session__ollama_1", Type: tmux.AgentOllama},
+	}
+	m.paneStatus[0] = PaneStatus{}
+
+	now := time.Now()
+	msg := StatusUpdateMsg{
+		Statuses: []status.AgentStatus{
+			{
+				PaneID:    "%1",
+				State:     status.StateIdle,
+				UpdatedAt: now,
+			},
+		},
+		Time: now,
+	}
+
+	updated, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected batched follow-up command")
+	}
+	m2 := updated.(Model)
+	if !m2.fetchingOllamaPS {
+		t.Fatal("expected status update to schedule an Ollama refresh")
+	}
+
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", cmd())
+	}
+	if len(batch) != 2 {
+		t.Fatalf("expected health and Ollama refresh commands, got %d", len(batch))
+	}
+}
+
+func TestSessionDataUpdateBatchesOllamaRefreshCmd(t *testing.T) {
+	t.Parallel()
+
+	m := New("session", "")
+	m.startupWarmupDone = true
+	m.panes = []tmux.Pane{
+		{ID: "%1", Index: 0, Title: "session__ollama_1_mistral", Type: tmux.AgentOllama, Variant: "mistral:7b"},
+	}
+	m.paneStatus[0] = PaneStatus{}
+
+	now := time.Now()
+	msg := SessionDataWithOutputMsg{
+		Panes: []tmux.Pane{
+			{ID: "%1", Index: 0, Title: "session__ollama_1_mistral", Type: tmux.AgentOllama, Variant: "mistral:7b"},
+		},
+		Outputs: []PaneOutputData{
+			{
+				PaneID:       "%1",
+				PaneIndex:    0,
+				LastActivity: now,
+				Output:       "hello from ollama",
+				AgentType:    string(tmux.AgentOllama),
+			},
+		},
+		Duration: 10 * time.Millisecond,
+	}
+
+	updated, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected batched follow-up command")
+	}
+	m2 := updated.(Model)
+	if !m2.fetchingOllamaPS {
+		t.Fatal("expected session data update to schedule an Ollama refresh")
+	}
+
+	switch result := cmd().(type) {
+	case tea.BatchMsg:
+		if len(result) != 1 {
+			t.Fatalf("expected Ollama refresh command to survive warmup batching, got %d", len(result))
+		}
+	case OllamaPSResultMsg:
+		// A single-command batch may collapse to the direct command result.
+	default:
+		t.Fatalf("expected Ollama refresh result, got %T", result)
 	}
 }
 

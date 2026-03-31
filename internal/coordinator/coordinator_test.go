@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestNewSessionCoordinator(t *testing.T) {
@@ -162,6 +164,59 @@ func TestGetIdleAgents(t *testing.T) {
 	}
 	if len(idle) > 0 && idle[0].PaneID != "%0" {
 		t.Errorf("expected idle agent to be %%0, got %s", idle[0].PaneID)
+	}
+}
+
+func TestUpdateAgentStates_RetainsExistingAgentWhenCaptureFails(t *testing.T) {
+	origGetPanesWithActivity := getPanesWithActivity
+	origCaptureForHealthCheckWithCtx := captureForHealthCheckWithCtx
+	t.Cleanup(func() {
+		getPanesWithActivity = origGetPanesWithActivity
+		captureForHealthCheckWithCtx = origCaptureForHealthCheckWithCtx
+	})
+
+	lastActivity := time.Now().Add(-1 * time.Minute).UTC()
+	getPanesWithActivity = func(session string) ([]tmux.PaneActivity, error) {
+		return []tmux.PaneActivity{
+			{
+				Pane: tmux.Pane{
+					ID:    "%0",
+					Index: 0,
+					Title: "test-session__cc_1",
+					Type:  tmux.AgentClaude,
+				},
+				LastActivity: lastActivity,
+			},
+		}, nil
+	}
+	captureForHealthCheckWithCtx = func(ctx context.Context, paneID string) (string, error) {
+		return "", errors.New("capture failed")
+	}
+
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	c.monitor = NewAgentMonitor(c.session, nil, c.projectKey)
+	c.mu.Lock()
+	c.agents["%0"] = &AgentState{
+		PaneID:       "%0",
+		PaneIndex:    0,
+		AgentType:    string(tmux.AgentClaude),
+		Status:       robot.StateWaiting,
+		Healthy:      true,
+		LastActivity: lastActivity,
+	}
+	c.mu.Unlock()
+
+	c.updateAgentStates()
+
+	agent := c.GetAgentByPaneID("%0")
+	if agent == nil {
+		t.Fatal("expected existing agent to remain tracked when capture fails")
+	}
+	if agent.Status != robot.StateWaiting {
+		t.Fatalf("status = %v, want %v", agent.Status, robot.StateWaiting)
+	}
+	if !agent.LastActivity.Equal(lastActivity) {
+		t.Fatalf("last activity changed unexpectedly: got %v want %v", agent.LastActivity, lastActivity)
 	}
 }
 
@@ -565,6 +620,28 @@ func TestEmitEvent_AgentRecovered(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timeout waiting for agent.recovered bus event")
+}
+
+func TestEmitEvent_AgentRecoveredTakesPrecedenceOverIdle(t *testing.T) {
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+
+	agent := &AgentState{
+		PaneID:    "%0",
+		PaneIndex: 1,
+		AgentType: "cc",
+		Status:    robot.StateWaiting,
+	}
+
+	c.emitEvent(agent, robot.StateError)
+
+	select {
+	case ev := <-c.Events():
+		if ev.Type != EventAgentRecovered {
+			t.Fatalf("expected EventAgentRecovered, got %v", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for recovered event")
+	}
 }
 
 func TestEmitEvent_NoEventForSameStatus(t *testing.T) {

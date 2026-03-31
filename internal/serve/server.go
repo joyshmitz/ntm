@@ -220,9 +220,10 @@ type IdempotencyStore struct {
 }
 
 type idempotencyEntry struct {
-	response   []byte
-	statusCode int
-	createdAt  time.Time
+	response     []byte
+	statusCode   int
+	createdAt    time.Time
+	replayHeader http.Header
 }
 
 // NewIdempotencyStore creates an idempotency cache with the given TTL.
@@ -272,28 +273,29 @@ func (s *IdempotencyStore) cleanup() {
 }
 
 // Get returns a cached response for the idempotency key.
-func (s *IdempotencyStore) Get(key string) ([]byte, int, bool) {
+func (s *IdempotencyStore) Get(key string) ([]byte, int, http.Header, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entry, ok := s.entries[key]
 	if !ok {
-		return nil, 0, false
+		return nil, 0, nil, false
 	}
 	if time.Since(entry.createdAt) > s.ttl {
-		return nil, 0, false
+		return nil, 0, nil, false
 	}
-	return entry.response, entry.statusCode, true
+	return entry.response, entry.statusCode, cloneReplayHeaders(entry.replayHeader), true
 }
 
 // Set stores a response for the idempotency key.
-func (s *IdempotencyStore) Set(key string, response []byte, statusCode int) {
+func (s *IdempotencyStore) Set(key string, response []byte, statusCode int, replayHeader http.Header) {
 	s.startCleanup()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries[key] = &idempotencyEntry{
-		response:   response,
-		statusCode: statusCode,
-		createdAt:  time.Now(),
+		response:     response,
+		statusCode:   statusCode,
+		createdAt:    time.Now(),
+		replayHeader: cloneReplayHeaders(replayHeader),
 	}
 }
 
@@ -1411,15 +1413,15 @@ func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		key := r.Header.Get("Idempotency-Key")
+		key := scopedIdempotencyKey(r)
 		if key == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		// Check cache
-		if cached, status, ok := s.idempotencyStore.Get(key); ok {
-			w.Header().Set("Content-Type", "application/json")
+		if cached, status, replayHeader, ok := s.idempotencyStore.Get(key); ok {
+			applyReplayHeaders(w.Header(), replayHeader)
 			w.Header().Set("X-Idempotent-Replay", "true")
 			w.WriteHeader(status)
 			_, _ = w.Write(cached) // Best-effort: client may have disconnected
@@ -1432,7 +1434,7 @@ func (s *Server) idempotencyMiddleware(next http.Handler) http.Handler {
 
 		// Cache successful responses
 		if rec.statusCode >= 200 && rec.statusCode < 300 {
-			s.idempotencyStore.Set(key, rec.body, rec.statusCode)
+			s.idempotencyStore.Set(key, rec.body, rec.statusCode, rec.Header())
 		}
 	})
 }
@@ -1456,6 +1458,63 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 
 func (r *responseRecorder) Bytes() []byte {
 	return r.body
+}
+
+func scopedIdempotencyKey(r *http.Request) string {
+	rawKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if rawKey == "" {
+		return ""
+	}
+	if r == nil || r.URL == nil {
+		return r.Method + "\x00" + rawKey
+	}
+	path := r.URL.EscapedPath()
+	if path == "" {
+		path = r.URL.Path
+	}
+	var b strings.Builder
+	b.Grow(len(r.Method) + len(path) + len(r.URL.RawQuery) + len(rawKey) + 3)
+	b.WriteString(r.Method)
+	b.WriteByte('\x00')
+	b.WriteString(path)
+	if r.URL.RawQuery != "" {
+		b.WriteByte('?')
+		b.WriteString(r.URL.RawQuery)
+	}
+	b.WriteByte('\x00')
+	b.WriteString(rawKey)
+	return b.String()
+}
+
+func cloneReplayHeaders(src http.Header) http.Header {
+	if len(src) == 0 {
+		return nil
+	}
+	clone := make(http.Header, 2)
+	for _, key := range []string{"Content-Type", requestIDHeader} {
+		values := src.Values(key)
+		if len(values) == 0 {
+			continue
+		}
+		copied := append([]string(nil), values...)
+		clone[key] = copied
+	}
+	if len(clone) == 0 {
+		return nil
+	}
+	return clone
+}
+
+func applyReplayHeaders(dst, src http.Header) {
+	if len(src) == 0 {
+		return
+	}
+	for key, values := range src {
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
 }
 
 func sanitizeRequestID(id string) string {

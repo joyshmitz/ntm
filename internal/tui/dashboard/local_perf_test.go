@@ -180,17 +180,8 @@ func TestModelRefreshOllamaPSIfNeeded_SkipWhenFresh(t *testing.T) {
 	prev := m.lastOllamaPSFetch
 
 	cmd := m.refreshOllamaPSIfNeeded(time.Now())
-	if cmd == nil {
-		t.Fatal("expected tea.Cmd")
-	}
-	msg := cmd()
-	
-	switch result := msg.(type) {
-	case OllamaPSResultMsg:
-		m.ollamaPSError = result.Err
-		m.fetchingOllamaPS = false
-	default:
-		t.Fatalf("unexpected msg type: %T", msg)
+	if cmd != nil {
+		t.Fatal("expected refresh to be skipped when cache is fresh")
 	}
 	if !m.lastOllamaPSFetch.Equal(prev) {
 		t.Fatal("expected refresh to be skipped when cache is fresh")
@@ -206,7 +197,7 @@ func TestModelRefreshOllamaPSIfNeeded_SetsErrorOnFailure(t *testing.T) {
 		t.Fatal("expected tea.Cmd")
 	}
 	msg := cmd()
-	
+
 	switch result := msg.(type) {
 	case OllamaPSResultMsg:
 		m.ollamaPSError = result.Err
@@ -240,11 +231,14 @@ func TestModelRefreshOllamaPSIfNeeded_Success(t *testing.T) {
 		t.Fatal("expected tea.Cmd")
 	}
 	msg := cmd()
-	
+
 	switch result := msg.(type) {
 	case OllamaPSResultMsg:
 		m.ollamaPSError = result.Err
 		m.fetchingOllamaPS = false
+		if result.Err == nil {
+			m.ollamaModelMemory = result.Memory
+		}
 	default:
 		t.Fatalf("unexpected msg type: %T", msg)
 	}

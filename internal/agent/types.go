@@ -95,10 +95,10 @@ func (t AgentType) IsValid() bool {
 // NeedsDoubleEnter returns true if the agent type typically requires a double-Enter
 // sequence to recognize input (often due to internal buffering or TUI quirks).
 func (t AgentType) NeedsDoubleEnter() bool {
-	switch t {
-	case AgentTypeCodex:
+	switch strings.ToLower(strings.TrimSpace(string(t))) {
+	case string(AgentTypeCodex), "codex":
 		return true
-	case AgentTypeGemini:
+	case string(AgentTypeGemini), "gemini":
 		// Gemini may also benefit from double-Enter in some cases
 		return true
 	default:

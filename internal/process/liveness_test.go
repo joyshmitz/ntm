@@ -2,8 +2,18 @@ package process
 
 import (
 	"os"
+	"os/exec"
+	"runtime"
 	"testing"
+	"time"
 )
+
+func TestLivenessHelperProcess(t *testing.T) {
+	if os.Getenv("NTM_PROCESS_HELPER") != "exit-immediately" {
+		return
+	}
+	os.Exit(0)
+}
 
 func TestIsAlive_CurrentProcess(t *testing.T) {
 	t.Parallel()
@@ -11,6 +21,35 @@ func TestIsAlive_CurrentProcess(t *testing.T) {
 	if !IsAlive(pid) {
 		t.Errorf("IsAlive(%d) = false, want true for current process", pid)
 	}
+}
+
+func TestIsAlive_ZombieProcessReturnsFalse(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("zombie-state check relies on /proc state semantics")
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestLivenessHelperProcess")
+	cmd.Env = append(os.Environ(), "NTM_PROCESS_HELPER=exit-immediately")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	defer func() {
+		_ = cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state, _, err := GetProcessState(cmd.Process.Pid)
+		if err == nil && state == "Z" {
+			if IsAlive(cmd.Process.Pid) {
+				t.Fatalf("IsAlive(%d) = true, want false for zombie process", cmd.Process.Pid)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("helper process %d never reached zombie state", cmd.Process.Pid)
 }
 
 func TestIsAlive_InvalidPID(t *testing.T) {

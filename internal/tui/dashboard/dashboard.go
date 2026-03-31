@@ -2156,7 +2156,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshCostPanel(now)
 		}
 
-		warmupCmds := []tea.Cmd{followUp}
+		warmupCmds := append([]tea.Cmd{followUp}, cmds...)
 		if msg.MetadataOnly {
 			m.initialPaneSnapshotDone = true
 			if cmd := m.requestSessionFetch(false); cmd != nil {
@@ -2322,8 +2322,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markUpdated(refreshStatus, msg.Time)
 		}
 		m.lastRefresh = msg.Time
-		// Also refresh health data after status update
-		return m, tea.Batch(followUp, m.fetchHealthCmd())
+		// Also refresh health data after status update.
+		cmds = append(cmds, followUp, m.fetchHealthCmd())
+		return m, tea.Batch(cmds...)
 
 	case HealthUpdateMsg:
 		if msg.Err == nil && msg.Health != nil {

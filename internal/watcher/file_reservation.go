@@ -46,10 +46,13 @@ type FileReservationWatcher struct {
 	client             *agentmail.Client
 	projectDir         string
 	agentName          string
+	sessionFilter      string
 	pollInterval       time.Duration
 	idleTimeout        time.Duration
 	reservationTTL     time.Duration
 	captureLines       int
+	listAllPanes       func(ctx context.Context) (map[string][]tmux.Pane, error)
+	capturePaneOutput  func(ctx context.Context, target string, lines int) (string, error)
 	paneOutputs        map[string]string           // paneID -> last captured output
 	activeReservations map[string]*PaneReservation // paneID -> reservation
 	mu                 sync.Mutex
@@ -80,6 +83,13 @@ func WithProjectDir(dir string) FileReservationWatcherOption {
 func WithAgentName(name string) FileReservationWatcherOption {
 	return func(w *FileReservationWatcher) {
 		w.agentName = name
+	}
+}
+
+// WithSessionFilter limits pane scanning to a single tmux session.
+func WithSessionFilter(session string) FileReservationWatcherOption {
+	return func(w *FileReservationWatcher) {
+		w.sessionFilter = strings.TrimSpace(session)
 	}
 }
 
@@ -140,6 +150,8 @@ func NewFileReservationWatcher(opts ...FileReservationWatcherOption) *FileReserv
 		idleTimeout:        DefaultIdleTimeout,
 		reservationTTL:     DefaultReservationTTL,
 		captureLines:       DefaultCaptureLinesReservation,
+		listAllPanes:       tmux.DefaultClient.GetAllPanesContext,
+		capturePaneOutput:  tmux.CapturePaneOutputContext,
 		paneOutputs:        make(map[string]string),
 		activeReservations: make(map[string]*PaneReservation),
 	}
@@ -220,31 +232,45 @@ func (w *FileReservationWatcher) run(ctx context.Context, stopCh <-chan struct{}
 
 // checkPaneOutputs scans all panes for file edits.
 func (w *FileReservationWatcher) checkPaneOutputs(ctx context.Context) {
-	// Get all sessions
-	sessions, err := tmux.ListSessions()
+	listAllPanes := w.listAllPanes
+	if listAllPanes == nil {
+		listAllPanes = tmux.DefaultClient.GetAllPanesContext
+	}
+
+	// ListSessions only returns session metadata; it does not populate Session.Panes.
+	// The watcher needs the pane-native API to actually inspect agent output.
+	panesBySession, err := listAllPanes(ctx)
 	if err != nil {
 		if w.debug {
-			log.Printf("[FileReservationWatcher] Error listing sessions: %v", err)
+			log.Printf("[FileReservationWatcher] Error listing panes: %v", err)
 		}
 		return
 	}
 
-	for _, session := range sessions {
-		for _, pane := range session.Panes {
-			// Only monitor agent panes (Claude, Codex, Gemini)
+	for sessionName, panes := range panesBySession {
+		if w.sessionFilter != "" && sessionName != w.sessionFilter {
+			continue
+		}
+		for _, pane := range panes {
+			// Ignore shell/user panes; all agent panes are eligible for edit detection.
 			if pane.Type == tmux.AgentUser {
 				continue
 			}
 
-			w.checkPaneForFileEdits(ctx, session.Name, pane)
+			w.checkPaneForFileEdits(ctx, sessionName, pane)
 		}
 	}
 }
 
 // checkPaneForFileEdits checks a single pane for file edits and reserves files.
 func (w *FileReservationWatcher) checkPaneForFileEdits(ctx context.Context, sessionName string, pane tmux.Pane) {
+	capturePaneOutput := w.capturePaneOutput
+	if capturePaneOutput == nil {
+		capturePaneOutput = tmux.CapturePaneOutputContext
+	}
+
 	// Capture recent output
-	output, err := tmux.CapturePaneOutputContext(ctx, pane.ID, w.captureLines)
+	output, err := capturePaneOutput(ctx, pane.ID, w.captureLines)
 	if err != nil {
 		if w.debug {
 			log.Printf("[FileReservationWatcher] Error capturing output from pane %s: %v", pane.ID, err)

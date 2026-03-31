@@ -75,7 +75,7 @@ approval_required:
 	}
 }
 
-func TestEvaluateSafetyCheck_DCGMissing_DoesNotBlockApprovalRequired(t *testing.T) {
+func TestEvaluateSafetyCheck_DCGMissing_PreservesApprovalRequired(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 
@@ -84,8 +84,8 @@ func TestEvaluateSafetyCheck_DCGMissing_DoesNotBlockApprovalRequired(t *testing.
 		t.Fatalf("evaluateSafetyCheck returned error: %v", err)
 	}
 
-	if exitCode != 0 {
-		t.Fatalf("expected exitCode=0, got %d", exitCode)
+	if exitCode != 1 {
+		t.Fatalf("expected exitCode=1, got %d", exitCode)
 	}
 
 	if resp.Action != string(policy.ActionApprove) {

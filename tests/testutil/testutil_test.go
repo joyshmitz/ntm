@@ -59,6 +59,20 @@ func TestLoggerElapsed(t *testing.T) {
 	}
 }
 
+func TestTryWithGlobalTmuxTestLock(t *testing.T) {
+	ran := false
+	acquired := tryWithGlobalTmuxTestLock(func() {
+		ran = true
+	})
+
+	if acquired && !ran {
+		t.Fatal("expected callback to run when lock acquisition succeeds")
+	}
+	if !acquired && ran {
+		t.Fatal("expected callback to be skipped when lock is busy")
+	}
+}
+
 func TestRequireTmux(t *testing.T) {
 	// This test just verifies RequireTmux doesn't panic
 	// It will skip if tmux is not installed

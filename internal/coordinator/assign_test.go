@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -163,6 +164,51 @@ func TestFindBestMatchEmpty(t *testing.T) {
 
 	if assignment != nil || rec != nil {
 		t.Error("expected nil for empty slice")
+	}
+}
+
+func TestAttemptAssignmentRequiresMailClient(t *testing.T) {
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	assignment := &WorkAssignment{
+		BeadID:        "ntm-001",
+		BeadTitle:     "Fix bug",
+		AgentPaneID:   "%0",
+		AgentMailName: "BlueFox",
+		AgentType:     "cc",
+	}
+	rec := &bv.TriageRecommendation{ID: "ntm-001", Title: "Fix bug"}
+
+	result := c.attemptAssignment(t.Context(), assignment, rec)
+	if result.Success {
+		t.Fatal("expected assignment to fail without mail client")
+	}
+	if result.MessageSent {
+		t.Fatal("expected no message to be sent without mail client")
+	}
+	if !strings.Contains(result.Error, "mail client") {
+		t.Fatalf("expected missing mail client error, got %q", result.Error)
+	}
+}
+
+func TestAttemptAssignmentRequiresAgentMailIdentity(t *testing.T) {
+	c := New("test-session", "/tmp/test", &agentmail.Client{}, "TestAgent")
+	assignment := &WorkAssignment{
+		BeadID:      "ntm-001",
+		BeadTitle:   "Fix bug",
+		AgentPaneID: "%0",
+		AgentType:   "cc",
+	}
+	rec := &bv.TriageRecommendation{ID: "ntm-001", Title: "Fix bug"}
+
+	result := c.attemptAssignment(t.Context(), assignment, rec)
+	if result.Success {
+		t.Fatal("expected assignment to fail without agent-mail identity")
+	}
+	if result.MessageSent {
+		t.Fatal("expected no message to be sent without agent-mail identity")
+	}
+	if !strings.Contains(result.Error, "agent-mail identity") {
+		t.Fatalf("expected missing identity error, got %q", result.Error)
 	}
 }
 

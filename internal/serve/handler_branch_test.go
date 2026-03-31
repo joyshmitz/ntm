@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -15,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,11 +33,33 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
+	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
+
+func TestServeMemoryDaemonHelperProcess(t *testing.T) {
+	switch os.Getenv("NTM_SERVE_HELPER_PROCESS") {
+	case "":
+		return
+	case "memory-daemon-exit-immediately":
+		os.Exit(0)
+	case "memory-daemon":
+	default:
+		return
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	select {
+	case <-sigCh:
+		os.Exit(0)
+	case <-time.After(60 * time.Second):
+		os.Exit(1)
+	}
+}
 
 func reserveSharedBeadsProjectDir(t *testing.T) string {
 	t.Helper()
@@ -407,10 +431,10 @@ func TestIdempotencyStore_CleanupExpiry(t *testing.T) {
 	store := NewIdempotencyStore(50 * time.Millisecond)
 	defer store.Stop()
 
-	store.Set("ephemeral", []byte(`{"ok":true}`), 200)
+	store.Set("ephemeral", []byte(`{"ok":true}`), 200, nil)
 
 	// Verify it's there
-	_, _, ok := store.Get("ephemeral")
+	_, _, _, ok := store.Get("ephemeral")
 	if !ok {
 		t.Fatal("expected ephemeral key to be present initially")
 	}
@@ -420,7 +444,7 @@ func TestIdempotencyStore_CleanupExpiry(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Get should now return false due to TTL check
-	_, _, ok = store.Get("ephemeral")
+	_, _, _, ok = store.Get("ephemeral")
 	if ok {
 		t.Error("expected ephemeral key to have expired")
 	}
@@ -2505,7 +2529,7 @@ func TestCheckMemoryDaemon_ValidPIDFile(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	// Valid cm-*.pid file with valid JSON
-	pidData := `{"pid":12345,"port":8200,"started_at":"2025-01-01T00:00:00Z"}`
+	pidData := fmt.Sprintf(`{"pid":%d,"port":8200,"started_at":"2025-01-01T00:00:00Z"}`, os.Getpid())
 	os.WriteFile(filepath.Join(pidsDir, "cm-mysession.pid"), []byte(pidData), 0o644)
 
 	srv := New(Config{})
@@ -2516,8 +2540,8 @@ func TestCheckMemoryDaemon_ValidPIDFile(t *testing.T) {
 	if info.State != DaemonStateRunning {
 		t.Fatalf("state = %v, want running", info.State)
 	}
-	if info.PID != 12345 {
-		t.Errorf("PID = %d, want 12345", info.PID)
+	if info.PID != os.Getpid() {
+		t.Errorf("PID = %d, want %d", info.PID, os.Getpid())
 	}
 	if info.Port != 8200 {
 		t.Errorf("Port = %d, want 8200", info.Port)
@@ -3848,17 +3872,41 @@ func TestHandleMemoryDaemonStop_RunningDaemon(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
-	os.MkdirAll(pidsDir, 0o755)
+	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll pidsDir: %v", err)
+	}
 
-	// Write a valid-looking PID file with a non-existent PID (Signal will silently fail)
+	cmd := exec.Command(os.Args[0], "-test.run=TestServeMemoryDaemonHelperProcess")
+	cmd.Env = append(os.Environ(), "NTM_SERVE_HELPER_PROCESS=memory-daemon")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		select {
+		case <-waitDone:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	// Use a disposable live PID so checkMemoryDaemon reports the daemon as running
+	// without interrupting the test process itself.
 	pidInfo := map[string]interface{}{
-		"pid":        999999999,
+		"pid":        cmd.Process.Pid,
 		"port":       8200,
 		"session_id": "test-session",
 		"started_at": time.Now().Format(time.RFC3339),
 	}
 	data, _ := json.Marshal(pidInfo)
-	os.WriteFile(filepath.Join(pidsDir, "cm-test-session.pid"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(pidsDir, "cm-test-session.pid"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile pid file: %v", err)
+	}
 
 	srv := New(Config{})
 	srv.projectDir = tmpDir
@@ -3870,6 +3918,73 @@ func TestHandleMemoryDaemonStop_RunningDaemon(t *testing.T) {
 	// Should succeed (200) — the daemon appears running due to our PID file
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case err := <-waitDone:
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			t.Fatalf("helper exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper process did not stop after interrupt")
+	}
+}
+
+func TestCheckMemoryDaemon_ZombiePIDFileIsCleanedUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
+	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll pidsDir: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestServeMemoryDaemonHelperProcess")
+	cmd.Env = append(os.Environ(), "NTM_SERVE_HELPER_PROCESS=memory-daemon-exit-immediately")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	defer func() {
+		_ = cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	foundZombie := false
+	for time.Now().Before(deadline) {
+		state, _, err := process.GetProcessState(cmd.Process.Pid)
+		if err == nil && state == "Z" {
+			foundZombie = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !foundZombie {
+		t.Fatalf("helper process %d never reached zombie state", cmd.Process.Pid)
+	}
+
+	pidPath := filepath.Join(pidsDir, "cm-zombie-session.pid")
+	pidInfo := map[string]interface{}{
+		"pid":        cmd.Process.Pid,
+		"port":       8200,
+		"session_id": "zombie-session",
+		"started_at": time.Now().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(pidInfo)
+	if err != nil {
+		t.Fatalf("Marshal pidInfo: %v", err)
+	}
+	if err := os.WriteFile(pidPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile pid file: %v", err)
+	}
+
+	srv := New(Config{})
+	srv.projectDir = tmpDir
+
+	info := srv.checkMemoryDaemon()
+	if info.State != DaemonStateStopped {
+		t.Fatalf("state = %v, want stopped for zombie pid", info.State)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("expected zombie pid file to be removed, stat err=%v", err)
 	}
 }
 
@@ -4205,7 +4320,7 @@ func TestHandleMemoryDaemonStart_AlreadyRunning(t *testing.T) {
 
 	// Write a valid PID file so checkMemoryDaemon reports "running"
 	pidInfo := map[string]interface{}{
-		"pid":        999999999,
+		"pid":        os.Getpid(),
 		"port":       8200,
 		"session_id": "test-session",
 		"started_at": time.Now().Format(time.RFC3339),
@@ -5311,8 +5426,8 @@ func TestNewIdempotencyStore_DefaultTTL(t *testing.T) {
 	defer store.Stop()
 
 	// Should not panic; TTL defaults to 24h
-	store.Set("key1", []byte(`{"ok":true}`), 200)
-	data, code, ok := store.Get("key1")
+	store.Set("key1", []byte(`{"ok":true}`), 200, nil)
+	data, code, _, ok := store.Get("key1")
 	if !ok {
 		t.Fatal("expected key1 to be found")
 	}
@@ -5331,8 +5446,8 @@ func TestNewIdempotencyStore_NegativeTTL(t *testing.T) {
 	store := NewIdempotencyStore(-5 * time.Second)
 	defer store.Stop()
 
-	store.Set("k", []byte("v"), 201)
-	_, code, ok := store.Get("k")
+	store.Set("k", []byte("v"), 201, nil)
+	_, code, _, ok := store.Get("k")
 	if !ok || code != 201 {
 		t.Errorf("expected key found with code 201, got ok=%v code=%d", ok, code)
 	}
@@ -5345,10 +5460,10 @@ func TestIdempotencyStore_Get_Expired(t *testing.T) {
 	store := NewIdempotencyStore(1 * time.Millisecond)
 	defer store.Stop()
 
-	store.Set("ephemeral", []byte("data"), 200)
+	store.Set("ephemeral", []byte("data"), 200, nil)
 	time.Sleep(5 * time.Millisecond) // Wait for TTL to expire
 
-	_, _, ok := store.Get("ephemeral")
+	_, _, _, ok := store.Get("ephemeral")
 	if ok {
 		t.Error("expected expired entry to not be found")
 	}
@@ -10734,6 +10849,60 @@ func TestHandleRestoreCheckpoint_DirectoryNotFoundMappedToBadRequest(t *testing.
 	rctx.URLParams.Add("checkpointId", "cp-missing-dir")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/rs-missing-dir/checkpoints/cp-missing-dir/restore", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleRestoreCheckpoint(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleRestoreCheckpoint_InvalidDirectoryMappedToBadRequest(t *testing.T) {
+	s, _ := setupTestServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	cpDir := filepath.Join(tmpHome, ".local", "share", "ntm", "checkpoints", "rs-invalid-dir", "cp-invalid-dir")
+	if err := os.MkdirAll(cpDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	notDir := filepath.Join(tmpHome, "not-a-directory")
+	if err := os.WriteFile(notDir, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile not-a-directory: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Version:     1,
+		ID:          "cp-invalid-dir",
+		Name:        "invalid-dir",
+		SessionName: "rs-invalid-dir",
+		WorkingDir:  notDir,
+		CreatedAt:   time.Now().UTC(),
+		Session: checkpoint.SessionState{
+			Panes: []checkpoint.PaneState{
+				{Index: 0, ID: "%0", Title: "pane0"},
+			},
+		},
+		PaneCount: 1,
+	}
+	metadata, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatalf("Marshal checkpoint: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cpDir, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatalf("WriteFile metadata.json: %v", err)
+	}
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "rs-invalid-dir")
+	rctx.URLParams.Add("checkpointId", "cp-invalid-dir")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/rs-invalid-dir/checkpoints/cp-invalid-dir/restore", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	rec := httptest.NewRecorder()

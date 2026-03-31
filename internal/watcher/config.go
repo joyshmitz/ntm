@@ -29,6 +29,7 @@ func NewFileReservationWatcherFromConfig(
 	client *agentmail.Client,
 	projectDir string,
 	agentName string,
+	sessionName string,
 	conflictCallback ConflictCallback,
 ) *FileReservationWatcher {
 	if !cfg.Enabled {
@@ -39,6 +40,7 @@ func NewFileReservationWatcherFromConfig(
 		WithWatcherClient(client),
 		WithProjectDir(projectDir),
 		WithAgentName(agentName),
+		WithSessionFilter(sessionName),
 		WithDebug(cfg.Debug),
 	}
 

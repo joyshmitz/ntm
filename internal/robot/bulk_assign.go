@@ -38,6 +38,7 @@ type BulkAssignDependencies struct {
 	FetchInProgress  func(dir string, limit int) ([]bv.BeadInProgress, error)
 	ListPanes        func(session string) ([]tmux.Pane, error)
 	SendKeys         func(paneID, message string, enter bool) error
+	SendKeysForAgent func(paneID, message string, enter bool, agentType tmux.AgentType) error
 	ReadFile         func(path string) ([]byte, error)
 	FetchBeadTitle   func(dir, beadID string) (string, error)
 	FetchBeadDetails func(dir, beadID string) (BeadDetails, error)
@@ -222,6 +223,7 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 		FetchInProgress:  func(dir string, limit int) ([]bv.BeadInProgress, error) { return bv.GetInProgressList(dir, limit), nil },
 		ListPanes:        tmux.GetPanes,
 		SendKeys:         tmux.SendKeys,
+		SendKeysForAgent: tmux.SendKeysForAgent,
 		ReadFile:         os.ReadFile,
 		FetchBeadTitle:   fetchBeadTitle,
 		FetchBeadDetails: fetchBeadDetails,
@@ -243,6 +245,14 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 	if custom.SendKeys != nil {
 		deps.SendKeys = custom.SendKeys
+		if custom.SendKeysForAgent == nil {
+			deps.SendKeysForAgent = func(paneID, message string, enter bool, _ tmux.AgentType) error {
+				return custom.SendKeys(paneID, message, enter)
+			}
+		}
+	}
+	if custom.SendKeysForAgent != nil {
+		deps.SendKeysForAgent = custom.SendKeysForAgent
 	}
 	if custom.ReadFile != nil {
 		deps.ReadFile = custom.ReadFile
@@ -609,7 +619,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 				}
 
 				paneID := bulkAssignPaneTarget(output.Session, a)
-				if err := deps.SendKeys(paneID, prompt, true); err != nil {
+				if err := sendBulkAssignPrompt(deps, paneID, prompt, a.AgentType); err != nil {
 					a.Status = "failed"
 					a.Error = err.Error()
 					a.PromptSent = false
@@ -643,7 +653,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 				assignment.PromptSent = false
 			} else {
 				paneID := bulkAssignPaneTarget(output.Session, assignment)
-				if err := deps.SendKeys(paneID, prompt, true); err != nil {
+				if err := sendBulkAssignPrompt(deps, paneID, prompt, assignment.AgentType); err != nil {
 					assignment.Status = "failed"
 					assignment.Error = err.Error()
 					assignment.PromptSent = false
@@ -680,6 +690,39 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		Assigned:   assigned,
 		Skipped:    0,
 		Failed:     failed,
+	}
+}
+
+func sendBulkAssignPrompt(deps BulkAssignDependencies, paneID, prompt, agentType string) error {
+	if deps.SendKeysForAgent != nil {
+		return deps.SendKeysForAgent(paneID, prompt, true, bulkAssignTMUXAgentType(agentType))
+	}
+	if deps.SendKeys != nil {
+		return deps.SendKeys(paneID, prompt, true)
+	}
+	return fmt.Errorf("bulk assign send function not configured")
+}
+
+func bulkAssignTMUXAgentType(agentType string) tmux.AgentType {
+	switch normalizeAgentType(agentType) {
+	case "claude":
+		return tmux.AgentClaude
+	case "codex":
+		return tmux.AgentCodex
+	case "gemini":
+		return tmux.AgentGemini
+	case "cursor":
+		return tmux.AgentCursor
+	case "windsurf":
+		return tmux.AgentWindsurf
+	case "aider":
+		return tmux.AgentAider
+	case "ollama":
+		return tmux.AgentOllama
+	case "user":
+		return tmux.AgentUser
+	default:
+		return tmux.AgentUnknown
 	}
 }
 

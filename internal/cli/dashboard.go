@@ -178,6 +178,7 @@ func startDashboardReservationWatcher(session, projectDir string) func() {
 			amClient,
 			projectDir,
 			session, // Use session name as agent name
+			session, // Restrict watcher scans to this dashboard session
 			conflictCallback,
 		)
 		if reservationWatcher == nil {

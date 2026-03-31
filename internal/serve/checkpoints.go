@@ -353,7 +353,7 @@ func (s *Server) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request)
 		if errors.Is(err, checkpoint.ErrSessionExists) {
 			statusCode = http.StatusConflict
 			errCode = "SESSION_EXISTS"
-		} else if errors.Is(err, checkpoint.ErrDirectoryNotFound) {
+		} else if errors.Is(err, checkpoint.ErrDirectoryNotFound) || errors.Is(err, checkpoint.ErrWorkingDirInvalid) {
 			statusCode = http.StatusBadRequest
 			errCode = ErrCodeBadRequest
 		}
