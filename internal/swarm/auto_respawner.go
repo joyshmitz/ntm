@@ -724,12 +724,6 @@ func (r *AutoRespawner) isShellPrompt(output string) bool {
 				return true
 			}
 		}
-		// Also check for common prompt patterns anywhere in line
-		for _, prompt := range prompts {
-			if strings.Contains(line, prompt) {
-				return true
-			}
-		}
 		// Only check the last non-empty line
 		break
 	}

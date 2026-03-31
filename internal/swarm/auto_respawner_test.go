@@ -977,7 +977,8 @@ func TestIsShellPrompt(t *testing.T) {
 		{"agent running", "Thinking...", false},
 		{"multiline with prompt", "some output\nmore output\nuser@host:~$ ", true},
 		{"newlines only", "\n\n\n", false},
-		{"prompt in middle", "some output$ more", true},
+		{"prompt in middle", "some output$ more", false},
+		{"redirect symbol in text", "writing report > output.txt", false},
 		{"just whitespace", "   \t  ", false},
 	}
 
@@ -988,6 +989,28 @@ func TestIsShellPrompt(t *testing.T) {
 				t.Errorf("isShellPrompt(%q) = %v, expected %v", tt.output, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestAutoRespawnerKillWithFallbackPromptCharacterInsideLineStillForceKills(t *testing.T) {
+	mock := &mockTmuxClient{
+		captureSeq: []string{"still running > processing next step"},
+	}
+	r := NewAutoRespawner().WithTmuxClient(mock)
+	r.Config.ExitWaitTimeout = 20 * time.Millisecond
+	r.Config.ExitPollInterval = 5 * time.Millisecond
+
+	called := false
+	r.forceKillFn = func(sessionPane string) error {
+		called = true
+		return nil
+	}
+
+	if err := r.killWithFallback("test:1.1", "cc"); err != nil {
+		t.Fatalf("killWithFallback failed: %v", err)
+	}
+	if !called {
+		t.Fatal("expected forceKill to be called when output only contains prompt-like characters inside text")
 	}
 }
 

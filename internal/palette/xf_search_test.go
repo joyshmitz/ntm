@@ -138,6 +138,31 @@ func TestXFSearchResultsMsg(t *testing.T) {
 	}
 }
 
+func TestXFSearchResultsMsgClearsPreviousErrorOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	m := New("test-session", testCommands)
+	m.enterXFSearch()
+	m.xfErr = tools.ErrTimeout
+
+	results := []tools.XFSearchResult{
+		{ID: "tweet-1", Content: "Recovered search result", CreatedAt: "2024-01-15", Type: "tweet", Score: 0.95},
+	}
+
+	updated, _ := m.Update(XFSearchResultsMsg{
+		Query:   "recovered",
+		Results: results,
+	})
+	result := updated.(Model)
+
+	if result.phase != PhaseXFResults {
+		t.Fatalf("expected PhaseXFResults, got %d", result.phase)
+	}
+	if result.xfErr != nil {
+		t.Fatalf("expected xfErr to be cleared on success, got %v", result.xfErr)
+	}
+}
+
 func TestXFSearchResultsMsgEmpty(t *testing.T) {
 	t.Parallel()
 	m := New("test-session", testCommands)

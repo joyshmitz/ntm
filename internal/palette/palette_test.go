@@ -120,6 +120,26 @@ func TestUpdateWindowSize(t *testing.T) {
 	}
 }
 
+func TestReloadMsgClearsCommandsWhenReloadedEmpty(t *testing.T) {
+	m := New("test-session", testCommands)
+
+	updated, _ := m.Update(ReloadMsg{Commands: nil})
+	result := updated.(Model)
+
+	if len(result.commands) != 0 {
+		t.Fatalf("expected commands to be cleared, got %d", len(result.commands))
+	}
+	if len(result.filtered) != 0 {
+		t.Fatalf("expected filtered commands to be cleared, got %d", len(result.filtered))
+	}
+	if len(result.visualOrder) != 0 {
+		t.Fatalf("expected visual order to be cleared, got %d", len(result.visualOrder))
+	}
+	if result.cursor != 0 {
+		t.Fatalf("expected cursor reset to 0, got %d", result.cursor)
+	}
+}
+
 func TestUpdateAnimationTick(t *testing.T) {
 	t.Setenv("NTM_ANIMATIONS", "1")
 	t.Setenv("TMUX", "")

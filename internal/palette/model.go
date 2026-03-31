@@ -589,10 +589,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ReloadMsg:
-		if len(msg.Commands) > 0 {
-			m.commands = msg.Commands
-			m.updateFiltered()
-		}
+		m.commands = msg.Commands
+		m.updateFiltered()
 		return m, nil
 
 	case XFSearchResultsMsg:
@@ -601,6 +599,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.xfErr = msg.Err
 			return m, nil
 		}
+		m.xfErr = nil
 		m.xfResults = msg.Results
 		m.xfCursor = 0
 		if len(msg.Results) > 0 {
