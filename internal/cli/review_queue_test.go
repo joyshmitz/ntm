@@ -278,11 +278,15 @@ func TestMatchesReviewQueueFilter(t *testing.T) {
 	}{
 		{"claude", "cc", true},
 		{"cc", "cc", true},
+		{"claude", "claude_code", true},
 		{"codex", "cc", false},
 		{"codex", "cod", true},
+		{"cod_2", "openai-codex", true},
 		{"gemini", "gmi", true},
+		{"gmi_3", "google-gemini", true},
 		{"claude", "", true},
 		{"codex", "", true},
+		{"claude", "not-an-agent", false},
 	}
 
 	for _, tt := range tests {

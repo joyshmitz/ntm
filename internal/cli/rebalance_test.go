@@ -124,16 +124,21 @@ func TestMatchesRebalanceFilter(t *testing.T) {
 		{name: "no filter", agentType: "claude", filter: "", want: true},
 		{name: "cc matches claude", agentType: "claude", filter: "cc", want: true},
 		{name: "claude matches claude", agentType: "claude", filter: "claude", want: true},
+		{name: "claude alias matches", agentType: "claude", filter: "claude_code", want: true},
 		{name: "cc prefix matches", agentType: "cc_1", filter: "cc", want: true},
 		{name: "cod matches codex", agentType: "codex", filter: "cod", want: true},
 		{name: "codex matches codex", agentType: "codex", filter: "codex", want: true},
+		{name: "codex alias matches", agentType: "cod_2", filter: "openai-codex", want: true},
 		{name: "cod prefix matches", agentType: "cod_2", filter: "cod", want: true},
 		{name: "gmi matches gemini", agentType: "gemini", filter: "gmi", want: true},
 		{name: "gemini matches gemini", agentType: "gemini", filter: "gemini", want: true},
+		{name: "gemini alias matches", agentType: "gmi_3", filter: "google_gemini", want: true},
 		{name: "gmi prefix matches", agentType: "gmi_3", filter: "gmi", want: true},
+		{name: "windsurf alias matches", agentType: "windsurf", filter: "ws", want: true},
 		{name: "claude does not match cod", agentType: "claude", filter: "cod", want: false},
 		{name: "codex does not match cc", agentType: "codex", filter: "cc", want: false},
 		{name: "unknown type with filter returns false", agentType: "unknown", filter: "cc", want: false},
+		{name: "invalid filter returns false", agentType: "claude", filter: "not-an-agent", want: false},
 		{name: "case insensitive filter", agentType: "Claude", filter: "CC", want: true},
 	}
 
@@ -142,6 +147,34 @@ func TestMatchesRebalanceFilter(t *testing.T) {
 			got := matchesRebalanceFilter(tt.agentType, tt.filter)
 			if got != tt.want {
 				t.Errorf("matchesRebalanceFilter(%q, %q) = %v, want %v", tt.agentType, tt.filter, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeAgentTypeFilter(t *testing.T) {
+	tests := []struct {
+		name    string
+		filter  string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty", filter: "", want: ""},
+		{name: "claude alias", filter: " claude_code ", want: "cc"},
+		{name: "codex alias", filter: "openai-codex", want: "cod"},
+		{name: "gemini alias", filter: "google-gemini", want: "gmi"},
+		{name: "windsurf alias", filter: "ws", want: "windsurf"},
+		{name: "invalid", filter: "not-an-agent", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeAgentTypeFilter(tt.filter)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeAgentTypeFilter(%q) error = %v, wantErr %v", tt.filter, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("normalizeAgentTypeFilter(%q) = %q, want %q", tt.filter, got, tt.want)
 			}
 		})
 	}

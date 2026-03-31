@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 var nameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -56,22 +57,22 @@ type PersonasConfig struct {
 }
 
 // AgentTypeFlag returns the NTM flag for this persona's agent type.
-// e.g., "claude" -> "cc", "codex" -> "cod", "gemini" -> "gmi"
+// e.g., "claude" -> "cc", "openai-codex" -> "cod", "google-gemini" -> "gmi"
 func (p *Persona) AgentTypeFlag() string {
-	switch strings.ToLower(p.AgentType) {
-	case "claude", "cc":
+	switch agentpkg.AgentType(p.AgentType).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
 		return "cc"
-	case "codex", "cod":
+	case agentpkg.AgentTypeCodex:
 		return "cod"
-	case "gemini", "gmi":
+	case agentpkg.AgentTypeGemini:
 		return "gmi"
-	case "cursor":
+	case agentpkg.AgentTypeCursor:
 		return "cursor"
-	case "windsurf":
+	case agentpkg.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agentpkg.AgentTypeAider:
 		return "aider"
-	case "ollama":
+	case agentpkg.AgentTypeOllama:
 		return "ollama"
 	default:
 		return "cc" // Default to Claude
@@ -90,9 +91,10 @@ func (p *Persona) Validate() error {
 		return fmt.Errorf("persona %q: agent_type is required", p.Name)
 	}
 
-	// Validate agent type
-	switch strings.ToLower(p.AgentType) {
-	case "claude", "cc", "codex", "cod", "gemini", "gmi", "cursor", "windsurf", "aider", "ollama":
+	// Validate agent type aliases against the shared canonical resolver.
+	switch agentpkg.AgentType(p.AgentType).Canonical() {
+	case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
+		agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
 		// valid
 	default:
 		return fmt.Errorf("persona %q: invalid agent_type %q", p.Name, p.AgentType)

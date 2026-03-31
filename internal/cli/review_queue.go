@@ -102,7 +102,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&filter, "filter", "", "Filter by agent type (cc, cod, gmi)")
+	cmd.Flags().StringVar(&filter, "filter", "", "Filter by agent type alias (claude|cc, codex|cod, gemini|gmi, cursor, windsurf|ws, aider, ollama)")
 	cmd.Flags().DurationVar(&idleThreshold, "idle-threshold", 2*time.Minute, "Minimum idle time to consider an agent idle")
 	cmd.Flags().BoolVar(&send, "send", false, "Prompt for confirmation then send review prompts")
 	cmd.Flags().StringVar(&formatOut, "format", "", "Output format: json for robot mode")
@@ -113,6 +113,13 @@ Examples:
 
 func runReviewQueue(session, filter string, idleThreshold time.Duration, send bool, formatOut string, commitLimit int) error {
 	isJSON := formatOut == "json"
+	normalizedFilter, err := normalizeAgentTypeFilter(filter)
+	if err != nil {
+		if isJSON {
+			return outputReviewQueueError(session, err.Error())
+		}
+		return err
+	}
 
 	slog.Info("[E2E-REVIEWQ] start", "session", session, "filter", filter, "idle_threshold", idleThreshold)
 
@@ -142,7 +149,7 @@ func runReviewQueue(session, filter string, idleThreshold time.Duration, send bo
 	}
 
 	// Detect idle agents
-	idleAgents := detectIdleAgents(store, panes, filter, idleThreshold)
+	idleAgents := detectIdleAgents(store, panes, normalizedFilter, idleThreshold)
 
 	// Generate review suggestions
 	suggestions := generateReviewSuggestions(store, idleAgents, commitLimit)

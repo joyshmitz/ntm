@@ -333,16 +333,23 @@ func TestNormalizeAgentType(t *testing.T) {
 		{"claude", "claude"},
 		{"cc", "claude"},
 		{"claude-code", "claude"},
+		{" claude_code ", "claude"},
 		{"CLAUDE", "claude"},
 		{"Opus", "claude"},
 		{"sonnet", "claude"},
+		{"haiku", "claude"},
 		{"codex", "codex"},
 		{"cod", "codex"},
 		{"openai", "codex"},
+		{"openai-codex", "codex"},
 		{"GPT", "codex"},
+		{"gpt-5.3-codex", "codex"},
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
 		{"google", "gemini"},
+		{"google-gemini", "gemini"},
+		{"gemini-3-pro-preview", "gemini"},
+		{" ws ", "windsurf"},
 		{"unknown", "unknown"},
 	}
 
@@ -393,8 +400,12 @@ func TestParseAgentType(t *testing.T) {
 	}{
 		{"claude", AgentTypeClaude},
 		{"cc", AgentTypeClaude},
+		{" claude_code ", AgentTypeClaude},
 		{"codex", AgentTypeCodex},
+		{"openai-codex", AgentTypeCodex},
 		{"gemini", AgentTypeGemini},
+		{"google_gemini", AgentTypeGemini},
+		{"ws", AgentType("windsurf")},
 	}
 
 	for _, tt := range tests {

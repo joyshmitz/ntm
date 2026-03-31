@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -617,20 +618,20 @@ func parseEnsembleAgentMix(value string) (map[string]int, error) {
 }
 
 func normalizeEnsembleAgentType(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "cc", "claude", "claude-code", "claude_code":
+	switch agent.AgentType(value).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "cc"
-	case "cod", "codex", "codex-cli", "codex_cli":
+	case agent.AgentTypeCodex:
 		return "cod"
-	case "gmi", "gemini", "gemini-cli", "gemini_cli":
+	case agent.AgentTypeGemini:
 		return "gmi"
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return "cursor"
-	case "windsurf", "ws":
+	case agent.AgentTypeWindsurf:
 		return "windsurf"
-	case "aider":
+	case agent.AgentTypeAider:
 		return "aider"
-	case "ollama":
+	case agent.AgentTypeOllama:
 		return "ollama"
 	default:
 		return ""

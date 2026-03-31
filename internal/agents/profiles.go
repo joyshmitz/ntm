@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/models"
 )
 
@@ -517,15 +518,35 @@ func (pm *ProfileMatcher) GetPerformanceStats() map[AgentType]Performance {
 
 // NormalizeAgentType converts various agent type strings to canonical form.
 func NormalizeAgentType(t string) string {
-	switch strings.ToLower(t) {
-	case "claude", "cc", "claude-code", "opus", "sonnet":
+	normalized := strings.ToLower(strings.TrimSpace(t))
+	switch normalized {
+	case "opus", "sonnet", "haiku":
 		return "claude"
-	case "codex", "cod", "openai", "gpt", "gpt-5":
+	case "gpt", "gpt-5", "gpt-5-codex", "gpt-5.3-codex":
 		return "codex"
-	case "gemini", "gmi", "google", "gemini-ultra":
+	case "gemini-pro", "gemini-ultra", "gemini-3-pro-preview":
 		return "gemini"
+	}
+
+	switch agentpkg.AgentType(normalized).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return "claude"
+	case agentpkg.AgentTypeCodex:
+		return "codex"
+	case agentpkg.AgentTypeGemini:
+		return "gemini"
+	case agentpkg.AgentTypeCursor:
+		return "cursor"
+	case agentpkg.AgentTypeWindsurf:
+		return "windsurf"
+	case agentpkg.AgentTypeAider:
+		return "aider"
+	case agentpkg.AgentTypeOllama:
+		return "ollama"
+	case agentpkg.AgentTypeUser:
+		return "user"
 	default:
-		return strings.ToLower(t)
+		return normalized
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -60,7 +61,7 @@ func newPersonasListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&filterAgent, "agent", "", "Filter by agent type (claude, codex, gemini)")
+	cmd.Flags().StringVar(&filterAgent, "agent", "", "Filter by agent type alias (claude|cc, codex|cod, gemini|gmi, cursor, windsurf|ws, aider, ollama)")
 	cmd.Flags().StringVar(&filterTag, "tag", "", "Filter by tag")
 
 	return cmd
@@ -86,11 +87,8 @@ func runPersonasList(filterAgent, filterTag string) error {
 	filtered := make([]*persona.Persona, 0, len(personas))
 	for _, p := range personas {
 		// Agent type filter
-		if filterAgent != "" {
-			if !strings.EqualFold(p.AgentTypeFlag(), filterAgent) &&
-				!strings.EqualFold(p.AgentType, filterAgent) {
-				continue
-			}
+		if !matchesPersonaAgentFilter(p.AgentType, filterAgent) {
+			continue
 		}
 
 		// Tag filter
@@ -171,26 +169,48 @@ func runPersonasList(filterAgent, filterTag string) error {
 
 // formatAgentType formats an agent type with icon and color
 func formatAgentType(agentType string, th theme.Theme, ic icons.IconSet) string {
-	var icon string
-	var color lipgloss.Color
-
-	switch strings.ToLower(agentType) {
-	case "cc", "claude":
-		icon = ic.Claude
-		color = th.Claude
-	case "cod", "codex":
-		icon = ic.Codex
-		color = th.Codex
-	case "gmi", "gemini":
-		icon = ic.Gemini
-		color = th.Gemini
-	default:
-		icon = ic.Robot
-		color = th.Overlay
-	}
-
+	icon, color, label := personaAgentPresentation(agentType, th, ic)
 	style := lipgloss.NewStyle().Foreground(color)
-	return style.Render(icon + " " + agentType)
+	return style.Render(icon + " " + label)
+}
+
+func matchesPersonaAgentFilter(agentType, filter string) bool {
+	if strings.TrimSpace(filter) == "" {
+		return true
+	}
+	return normalizePersonaAgentType(agentType) == normalizePersonaAgentType(filter)
+}
+
+func personaAgentPresentation(agentType string, th theme.Theme, ic icons.IconSet) (string, lipgloss.Color, string) {
+	canonical := normalizePersonaAgentType(agentType)
+	switch canonical {
+	case "cc":
+		return ic.Claude, th.Claude, "cc"
+	case "cod":
+		return ic.Codex, th.Codex, "cod"
+	case "gmi":
+		return ic.Gemini, th.Gemini, "gmi"
+	case "cursor":
+		return ic.Cursor, th.Cursor, "cursor"
+	case "windsurf":
+		return ic.Windsurf, th.Windsurf, "windsurf"
+	case "aider":
+		return ic.Aider, th.Aider, "aider"
+	case "ollama":
+		return ic.Ollama, th.Ollama, "ollama"
+	case "user":
+		return ic.User, th.User, "user"
+	default:
+		label := strings.TrimSpace(agentType)
+		if label == "" {
+			label = "unknown"
+		}
+		return ic.Robot, th.Overlay, label
+	}
+}
+
+func normalizePersonaAgentType(agentType string) string {
+	return string(agentpkg.AgentType(agentType).Canonical())
 }
 
 // renderProfileSets renders profile sets section with styling
@@ -284,15 +304,7 @@ func runPersonasShow(name string) error {
 	bottomLeft := "╰"
 
 	// Header - use appropriate icon for agent type
-	agentIcon := ic.Robot
-	switch strings.ToLower(p.AgentType) {
-	case "claude", "cc":
-		agentIcon = ic.Claude
-	case "codex", "cod":
-		agentIcon = ic.Codex
-	case "gemini", "gmi":
-		agentIcon = ic.Gemini
-	}
+	agentIcon, _, _ := personaAgentPresentation(p.AgentType, th, ic)
 	fmt.Println(headerStyle.Render(topLeft + "─ " + agentIcon + " Profile: " + p.Name))
 	fmt.Println(borderStyle.Render(vertical))
 

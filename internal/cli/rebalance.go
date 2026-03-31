@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -110,7 +111,7 @@ Examples:
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show suggestions without prompting for confirmation")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Prompt for confirmation before applying")
-	cmd.Flags().StringVar(&filter, "filter", "", "Filter by agent type (cc, cod, gmi)")
+	cmd.Flags().StringVar(&filter, "filter", "", "Filter by agent type alias (claude|cc, codex|cod, gemini|gmi, cursor, windsurf|ws, aider, ollama)")
 	cmd.Flags().Float64Var(&threshold, "threshold", 0.0, "Only suggest if imbalance score exceeds threshold")
 	cmd.Flags().StringVar(&formatOut, "format", "", "Output format: json for robot mode")
 
@@ -119,6 +120,13 @@ Examples:
 
 func runRebalance(session string, dryRun, apply bool, filter string, threshold float64, formatOut string) error {
 	isJSON := formatOut == "json"
+	normalizedFilter, err := normalizeAgentTypeFilter(filter)
+	if err != nil {
+		if isJSON {
+			return outputRebalanceError(session, err.Error())
+		}
+		return err
+	}
 
 	// Load assignment store
 	store, err := assignment.LoadStore(session)
@@ -146,7 +154,7 @@ func runRebalance(session string, dryRun, apply bool, filter string, threshold f
 	}
 
 	// Build workload map
-	workloads := buildRebalanceWorkloads(store, panes, filter)
+	workloads := buildRebalanceWorkloads(store, panes, normalizedFilter)
 
 	// Calculate imbalance score
 	imbalanceScore := calculateImbalanceScore(workloads)
@@ -279,26 +287,52 @@ func buildRebalanceWorkloads(store *assignment.AssignmentStore, panes []tmux.Pan
 }
 
 func matchesRebalanceFilter(agentType, filter string) bool {
-	filter = strings.ToLower(filter)
-	agentType = strings.ToLower(agentType)
-
-	switch filter {
-	case "cc", "claude":
-		return agentType == "claude" || strings.HasPrefix(agentType, "cc")
-	case "cod", "codex":
-		return agentType == "codex" || strings.HasPrefix(agentType, "cod")
-	case "gmi", "gemini":
-		return agentType == "gemini" || strings.HasPrefix(agentType, "gmi")
-	case "cursor":
-		return agentType == "cursor"
-	case "windsurf":
-		return agentType == "windsurf"
-	case "aider":
-		return agentType == "aider"
-	case "ollama":
-		return agentType == "ollama"
+	normalizedFilter, err := normalizeAgentTypeFilter(filter)
+	if err != nil {
+		return false
 	}
-	return true
+	if normalizedFilter == "" {
+		return true
+	}
+	return normalizeAgentTypeLike(agentType) == normalizedFilter
+}
+
+func normalizeAgentTypeFilter(filter string) (string, error) {
+	trimmed := strings.TrimSpace(filter)
+	if trimmed == "" {
+		return "", nil
+	}
+	normalized := normalizeAgentTypeLike(trimmed)
+	if normalized == "" {
+		return "", fmt.Errorf("invalid agent filter %q: must be one of claude|cc, codex|cod, gemini|gmi, cursor, windsurf|ws, aider, ollama", filter)
+	}
+	return normalized, nil
+}
+
+func normalizeAgentTypeLike(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	if trimmed == "" {
+		return ""
+	}
+	if canonical := agentpkg.AgentType(trimmed).Canonical(); isSupportedWorkAgentType(canonical) {
+		return string(canonical)
+	}
+	if head, _, ok := strings.Cut(trimmed, "_"); ok {
+		if canonical := agentpkg.AgentType(head).Canonical(); isSupportedWorkAgentType(canonical) {
+			return string(canonical)
+		}
+	}
+	return ""
+}
+
+func isSupportedWorkAgentType(agentType agentpkg.AgentType) bool {
+	switch agentType {
+	case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
+		agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
+		return true
+	default:
+		return false
+	}
 }
 
 func calculateImbalanceScore(workloads []RebalanceWorkload) float64 {

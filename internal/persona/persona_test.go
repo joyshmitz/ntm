@@ -54,6 +54,14 @@ func TestPersonaValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid claude alias with spacing",
+			persona: Persona{
+				Name:      "test",
+				AgentType: " claude_code ",
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid codex",
 			persona: Persona{
 				Name:      "test",
@@ -62,10 +70,34 @@ func TestPersonaValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid codex alias",
+			persona: Persona{
+				Name:      "test",
+				AgentType: "openai-codex",
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid gemini short name",
 			persona: Persona{
 				Name:      "test",
 				AgentType: "gmi",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid gemini alias",
+			persona: Persona{
+				Name:      "test",
+				AgentType: "google_gemini",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid windsurf alias",
+			persona: Persona{
+				Name:      "test",
+				AgentType: "ws",
 			},
 			wantErr: false,
 		},
@@ -119,9 +151,13 @@ func TestAgentTypeFlag(t *testing.T) {
 		{"codex", "cod"},
 		{"Codex", "cod"},
 		{"cod", "cod"},
+		{" openai-codex ", "cod"},
 		{"gemini", "gmi"},
 		{"Gemini", "gmi"},
 		{"gmi", "gmi"},
+		{" google_gemini ", "gmi"},
+		{"claude_code", "cc"},
+		{"ws", "windsurf"},
 		{"unknown", "cc"}, // defaults to cc
 	}
 

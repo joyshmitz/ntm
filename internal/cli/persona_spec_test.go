@@ -2,6 +2,9 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
+	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
 func TestParsePersonaSpec(t *testing.T) {
@@ -186,5 +189,42 @@ func TestPersonaSpecsType(t *testing.T) {
 	var specs PersonaSpecs
 	if got := specs.Type(); got != "name[:count]" {
 		t.Errorf("PersonaSpecs.Type() = %v, want name[:count]", got)
+	}
+}
+
+func TestMatchesPersonaAgentFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		filter    string
+		want      bool
+	}{
+		{name: "empty filter", agentType: "claude", filter: "", want: true},
+		{name: "claude alias", agentType: "claude", filter: "claude_code", want: true},
+		{name: "codex alias", agentType: "codex", filter: "openai-codex", want: true},
+		{name: "gemini alias", agentType: "gemini", filter: "google_gemini", want: true},
+		{name: "windsurf alias", agentType: "windsurf", filter: "ws", want: true},
+		{name: "mismatch", agentType: "claude", filter: "codex", want: false},
+		{name: "invalid filter", agentType: "claude", filter: "not-an-agent", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesPersonaAgentFilter(tt.agentType, tt.filter); got != tt.want {
+				t.Errorf("matchesPersonaAgentFilter(%q, %q) = %v, want %v", tt.agentType, tt.filter, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatAgentTypeCanonicalizesAliases(t *testing.T) {
+	got := formatAgentType(" google-gemini ", theme.Plain, icons.ASCII)
+	if got != "G gmi" {
+		t.Errorf("formatAgentType() = %q, want %q", got, "G gmi")
+	}
+
+	got = formatAgentType("ws", theme.Plain, icons.ASCII)
+	if got != "W windsurf" {
+		t.Errorf("formatAgentType() = %q, want %q", got, "W windsurf")
 	}
 }
