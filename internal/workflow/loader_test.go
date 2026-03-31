@@ -338,23 +338,27 @@ func TestProfileToAgentType(t *testing.T) {
 		{"claude", "cc"},
 		{"cc", "cc"},
 		{"claude-code", "cc"},
+		{"claude_code", "cc"},
 		{"CLAUDE", "cc"},
 		{"CC", "cc"},
 		// Codex variants
 		{"codex", "cod"},
 		{"cod", "cod"},
 		{"codex-cli", "cod"},
+		{"openai-codex", "cod"},
 		{"CODEX", "cod"},
 		// Gemini variants
 		{"gemini", "gmi"},
 		{"gmi", "gmi"},
 		{"gemini-cli", "gmi"},
+		{"google-gemini", "gmi"},
 		{"GEMINI", "gmi"},
 		// Cursor variants
 		{"cursor", "cursor"},
 		{"CURSOR", "cursor"},
 		// Windsurf variants
 		{"windsurf", "windsurf"},
+		{"ws", "windsurf"},
 		{"WINDSURF", "windsurf"},
 		// Aider variants
 		{"aider", "aider"},
@@ -365,6 +369,7 @@ func TestProfileToAgentType(t *testing.T) {
 		{"explorer", "cc"},
 		{"unknown", "cc"},
 		{"", "cc"},
+		{"  codex-cli  ", "cod"},
 	}
 
 	for _, tt := range tests {

@@ -227,21 +227,20 @@ func SourceDescription(source string) string {
 //   - "gemini", "gmi", "gemini-cli" → "gmi"
 //   - Other profiles default to "cc" (Claude Code)
 func ProfileToAgentType(profile string) string {
-	profile = strings.ToLower(profile)
-	switch profile {
-	case "claude", "cc", "claude-code":
+	switch agent.AgentType(strings.TrimSpace(profile)).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return string(agent.AgentTypeClaudeCode)
-	case "codex", "cod", "codex-cli":
+	case agent.AgentTypeCodex:
 		return string(agent.AgentTypeCodex)
-	case "gemini", "gmi", "gemini-cli":
+	case agent.AgentTypeGemini:
 		return string(agent.AgentTypeGemini)
-	case "cursor":
+	case agent.AgentTypeCursor:
 		return string(agent.AgentTypeCursor)
-	case "windsurf":
+	case agent.AgentTypeWindsurf:
 		return string(agent.AgentTypeWindsurf)
-	case "aider":
+	case agent.AgentTypeAider:
 		return string(agent.AgentTypeAider)
-	case "ollama":
+	case agent.AgentTypeOllama:
 		return string(agent.AgentTypeOllama)
 	default:
 		// Default to Claude for unknown profiles (most capable agent)

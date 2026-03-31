@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
@@ -125,15 +126,23 @@ func findPaneForStage(session, agentType, model string) (string, error) {
 }
 
 func normalizeAgentType(t string) string {
-	switch strings.ToLower(t) {
-	case "claude", "cc", "claude-code":
+	switch agent.AgentType(t).Canonical() {
+	case agent.AgentTypeClaudeCode:
 		return "cc"
-	case "codex", "cod", "openai":
+	case agent.AgentTypeCodex:
 		return "cod"
-	case "gemini", "gmi", "google":
+	case agent.AgentTypeGemini:
 		return "gmi"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
 	default:
-		return t
+		return strings.ToLower(strings.TrimSpace(t))
 	}
 }
 

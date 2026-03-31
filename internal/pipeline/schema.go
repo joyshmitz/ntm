@@ -3,6 +3,8 @@ package pipeline
 import (
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // SchemaVersion is the current workflow schema version
@@ -89,7 +91,7 @@ type Step struct {
 	Name string `yaml:"name,omitempty" toml:"name,omitempty" json:"name,omitempty"` // Human-readable name
 
 	// Agent selection (choose one)
-	Agent string          `yaml:"agent,omitempty" toml:"agent,omitempty" json:"agent,omitempty"` // Agent type: claude, codex, gemini
+	Agent string          `yaml:"agent,omitempty" toml:"agent,omitempty" json:"agent,omitempty"` // Agent type: claude, codex, gemini, cursor, windsurf, aider, ollama
 	Pane  int             `yaml:"pane,omitempty" toml:"pane,omitempty" json:"pane,omitempty"`    // Specific pane index
 	Route RoutingStrategy `yaml:"route,omitempty" toml:"route,omitempty" json:"route,omitempty"` // Routing strategy
 
@@ -298,32 +300,37 @@ func DefaultStepTimeout() Duration {
 	return Duration{Duration: 5 * time.Minute}
 }
 
-// AgentTypeAliases maps various agent type names to canonical forms
-var AgentTypeAliases = map[string]string{
-	"claude":      "claude",
-	"cc":          "claude",
-	"claude-code": "claude",
-	"codex":       "codex",
-	"cod":         "codex",
-	"openai":      "codex",
-	"gemini":      "gemini",
-	"gmi":         "gemini",
-	"google":      "gemini",
-}
-
 // NormalizeAgentType converts agent type aliases to canonical form.
 // Case-insensitive: "Claude", "CLAUDE", "claude" all normalize to "claude".
 func NormalizeAgentType(t string) string {
-	lower := strings.ToLower(t)
-	if canonical, ok := AgentTypeAliases[lower]; ok {
-		return canonical
+	trimmed := strings.TrimSpace(t)
+	switch agent.AgentType(trimmed).Canonical() {
+	case agent.AgentTypeClaudeCode:
+		return "claude"
+	case agent.AgentTypeCodex:
+		return "codex"
+	case agent.AgentTypeGemini:
+		return "gemini"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	default:
+		return strings.ToLower(trimmed)
 	}
-	return lower
 }
 
 // IsValidAgentType checks if the given agent type is recognized.
 // Case-insensitive: "Claude", "CLAUDE", "claude" are all valid.
 func IsValidAgentType(t string) bool {
-	_, ok := AgentTypeAliases[strings.ToLower(t)]
-	return ok
+	switch NormalizeAgentType(t) {
+	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama":
+		return true
+	default:
+		return false
+	}
 }

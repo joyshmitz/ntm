@@ -875,12 +875,22 @@ func TestNormalizeAgentType(t *testing.T) {
 		{"claude", "claude"},
 		{"cc", "claude"},
 		{"claude-code", "claude"},
+		{" claude_code ", "claude"},
 		{"codex", "codex"},
 		{"cod", "codex"},
 		{"openai", "codex"},
+		{"openai-codex", "codex"},
+		{" codex-cli ", "codex"},
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
 		{"google", "gemini"},
+		{"google-gemini", "gemini"},
+		{" gemini_cli ", "gemini"},
+		{"cursor", "cursor"},
+		{"ws", "windsurf"},
+		{" Windsurf ", "windsurf"},
+		{"aider", "aider"},
+		{"ollama", "ollama"},
 		{"unknown", "unknown"},
 		// Case-insensitive handling
 		{"Claude", "claude"},
@@ -914,12 +924,22 @@ func TestIsValidAgentType(t *testing.T) {
 		{"claude", true},
 		{"cc", true},
 		{"claude-code", true},
+		{" claude_code ", true},
 		{"codex", true},
 		{"cod", true},
 		{"openai", true},
+		{"openai-codex", true},
+		{" codex-cli ", true},
 		{"gemini", true},
 		{"gmi", true},
 		{"google", true},
+		{"google-gemini", true},
+		{" gemini_cli ", true},
+		{"cursor", true},
+		{"ws", true},
+		{"windsurf", true},
+		{"aider", true},
+		{"ollama", true},
 		// Case-insensitive handling
 		{"Claude", true},
 		{"CLAUDE", true},
@@ -1280,6 +1300,29 @@ func TestValidate_StepWithUnknownAgent(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected warning about unknown agent type")
+	}
+}
+
+func TestValidate_StepWithExtendedSupportedAgentDoesNotWarn(t *testing.T) {
+	t.Parallel()
+
+	w := &Workflow{
+		SchemaVersion: "2.0",
+		Name:          "test",
+		Steps: []Step{
+			{
+				ID:     "s1",
+				Agent:  "ws",
+				Prompt: "test",
+			},
+		},
+	}
+
+	result := Validate(w)
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning.Message, "unknown agent type") {
+			t.Fatalf("unexpected unknown agent warning for supported alias: %+v", warning)
+		}
 	}
 }
 
