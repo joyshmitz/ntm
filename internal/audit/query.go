@@ -504,18 +504,18 @@ func (s *Searcher) searchFile(ctx context.Context, filePath string, filter func(
 		default:
 		}
 
-		line := scanner.Text()
-		if line == "" {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
 
 		// Full-text grep filter (before parsing JSON for efficiency)
-		if grepRegex != nil && !grepRegex.MatchString(line) {
+		if grepRegex != nil && !grepRegex.Match(line) {
 			continue
 		}
 
 		var entry AuditEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			// Skip malformed entries
 			continue
 		}
@@ -564,13 +564,13 @@ func (s *Searcher) BuildIndex(ctx context.Context) error {
 		scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
+			line := scanner.Bytes()
+			if len(line) == 0 {
 				continue
 			}
 
 			var entry AuditEntry
-			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			if err := json.Unmarshal(line, &entry); err != nil {
 				continue
 			}
 
@@ -674,20 +674,16 @@ func extractDateFromFilename(filename string) string {
 	// Remove .jsonl suffix
 	name := strings.TrimSuffix(filename, ".jsonl")
 
-	// Find the last dash followed by date pattern
-	parts := strings.Split(name, "-")
-	if len(parts) >= 3 {
-		// Try to extract YYYY-MM-DD from the end
-		if len(parts) >= 3 {
-			year := parts[len(parts)-3]
-			month := parts[len(parts)-2]
-			day := parts[len(parts)-1]
+	// The date is always the last 10 characters in YYYY-MM-DD format
+	if len(name) < 10 {
+		return ""
+	}
 
-			// Validate format
-			if len(year) == 4 && len(month) == 2 && len(day) == 2 {
-				return year + "-" + month + "-" + day
-			}
-		}
+	datePart := name[len(name)-10:]
+	// Validate YYYY-MM-DD format
+	parts := strings.Split(datePart, "-")
+	if len(parts) == 3 && len(parts[0]) == 4 && len(parts[1]) == 2 && len(parts[2]) == 2 {
+		return datePart
 	}
 
 	return ""

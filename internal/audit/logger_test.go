@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -378,29 +379,13 @@ func TestAuditLogger_ResumeFromExistingLog(t *testing.T) {
 
 // Helper function to split content into non-empty lines
 func splitLines(content string) []string {
-	lines := make([]string, 0)
-	for _, line := range []string{} {
-		line = line[:len(line)-1] // Remove newline
-		if line != "" {
-			lines = append(lines, line)
+	parts := strings.Split(content, "\n")
+	lines := make([]string, 0, len(parts))
+	for _, line := range parts {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			lines = append(lines, trimmed)
 		}
 	}
-
-	// Better implementation
-	current := ""
-	for _, char := range content {
-		if char == '\n' {
-			if current != "" {
-				lines = append(lines, current)
-				current = ""
-			}
-		} else {
-			current += string(char)
-		}
-	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-
 	return lines
 }

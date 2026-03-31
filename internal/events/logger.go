@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -481,7 +482,11 @@ func (l *Logger) LastEvent() (*Event, error) {
 		return nil, nil
 	}
 
-	f, err := os.Open(l.path)
+	l.mu.Lock()
+	path := l.path
+	l.mu.Unlock()
+
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -490,31 +495,80 @@ func (l *Logger) LastEvent() (*Event, error) {
 	}
 	defer f.Close()
 
-	var lastEvent *Event
-	scanner := bufio.NewScanner(f)
-	// Set max line size for large events (10MB), start with 64KB
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		// Decrypt if encrypted
-		plain, err := decryptJSONLine(line)
-		if err != nil {
-			slog.Warn("event last: skipping unreadable line", "error", err)
-			continue
-		}
-
-		var event Event
-		if err := json.Unmarshal(plain, &event); err != nil {
-			slog.Warn("event last: skipping malformed line", "error", err)
-			continue
-		}
-		lastEvent = &event
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	fileSize := stat.Size()
+	if fileSize == 0 {
+		return nil, nil
 	}
 
-	return lastEvent, nil
+	// Scan backward for the last line
+	const bufferSize = 4096
+	buf := make([]byte, bufferSize)
+	offset := fileSize
+
+	for offset > 0 {
+		readSize := int64(bufferSize)
+		if offset < readSize {
+			readSize = offset
+		}
+		offset -= readSize
+
+		_, err := f.ReadAt(buf[:readSize], offset)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+
+		for i := int(readSize) - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				// Potential end of a line.
+				// If this is the very last byte of file, it's just the terminator of the last line.
+				if offset+int64(i) == fileSize-1 {
+					continue
+				}
+
+				// Found start of the last line
+				lineStart := offset + int64(i) + 1
+				lineLen := fileSize - lineStart
+				if lineLen > 10*1024*1024 {
+					continue // Sanity check
+				}
+
+				lineBuf := make([]byte, lineLen)
+				if _, err := f.ReadAt(lineBuf, lineStart); err != nil && err != io.EOF {
+					continue
+				}
+
+				// Decrypt if encrypted
+				plain, err := decryptJSONLine(lineBuf)
+				if err != nil {
+					continue
+				}
+
+				var event Event
+				if err := json.Unmarshal(plain, &event); err == nil {
+					return &event, nil
+				}
+			}
+		}
+	}
+
+	// If we got here, maybe only one line and no trailing newline
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+		if scanner.Scan() {
+			plain, err := decryptJSONLine(scanner.Bytes())
+			if err == nil {
+				var event Event
+				if err := json.Unmarshal(plain, &event); err == nil {
+					return &event, nil
+				}
+			}
+		}
+	}
+
+	return nil, nil
 }

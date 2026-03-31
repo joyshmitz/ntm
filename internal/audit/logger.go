@@ -86,7 +86,34 @@ var (
 
 	loggerMu    sync.Mutex
 	loggerCache = map[string]*AuditLogger{}
+	lastAccess  = map[string]time.Time{}
 )
+
+func init() {
+	// Start background cleanup for logger cache
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		for range ticker.C {
+			cleanupLoggerCache()
+		}
+	}()
+}
+
+func cleanupLoggerCache() {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+
+	now := time.Now()
+	for sessionID, lastUsed := range lastAccess {
+		if now.Sub(lastUsed) > 30*time.Minute {
+			if logger, ok := loggerCache[sessionID]; ok {
+				_ = logger.Close()
+				delete(loggerCache, sessionID)
+				delete(lastAccess, sessionID)
+			}
+		}
+	}
+}
 
 // SetRedactionConfig sets the redaction config for audit payloads.
 // Audit logs always redact when redaction is enabled.
@@ -146,6 +173,7 @@ func CloseAll() error {
 			firstErr = err
 		}
 		delete(loggerCache, key)
+		delete(lastAccess, key)
 	}
 	return firstErr
 }
@@ -174,6 +202,7 @@ func getLoggerForSession(session string) (*AuditLogger, error) {
 	loggerMu.Lock()
 	defer loggerMu.Unlock()
 
+	lastAccess[sessionID] = time.Now()
 	if logger := loggerCache[sessionID]; logger != nil {
 		return logger, nil
 	}
@@ -343,10 +372,6 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 	buf := make([]byte, bufferSize)
 	offset := fileSize
 
-	// We need to find the last line that contains valid JSON.
-	// We'll scan backward looking for newlines, and try to parse the content.
-
-	// Start from end
 	for offset > 0 {
 		readSize := int64(bufferSize)
 		if offset < readSize {
@@ -370,41 +395,39 @@ func (al *AuditLogger) readLastEntry(fileSize int64) (*AuditEntry, error) {
 
 				// Found a newline. The line starts after this newline (or at file start).
 				lineStart := offset + int64(i) + 1
-
-				// Read this line
-				if _, err := readFile.Seek(lineStart, io.SeekStart); err != nil {
-					return nil, err
+				lineLen := fileSize - lineStart
+				// Limit max line size to read
+				if lineLen > 10*1024*1024 {
+					continue
 				}
 
-				scanner := bufio.NewScanner(readFile)
-				// Set max line size for large audit payloads (10MB), start with 64KB
-				scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+				lineBuf := make([]byte, lineLen)
+				if _, err := readFile.ReadAt(lineBuf, lineStart); err != nil && err != io.EOF {
+					continue
+				}
 
-				if scanner.Scan() {
-					line := scanner.Text()
-					var entry AuditEntry
-					if err := json.Unmarshal([]byte(line), &entry); err == nil {
-						return &entry, nil
-					}
-					// If invalid JSON, keep searching backwards (skip corrupted tail)
+				line := strings.TrimSpace(string(lineBuf))
+				if line == "" {
+					continue
+				}
+
+				var entry AuditEntry
+				if err := json.Unmarshal([]byte(line), &entry); err == nil {
+					return &entry, nil
 				}
 			}
 		}
 	}
 
 	// If we reached start of file, try reading the first line
-	if _, err := readFile.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	scanner := bufio.NewScanner(readFile)
-	// Set max line size for large audit payloads (10MB), start with 64KB
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
-	if scanner.Scan() {
-		line := scanner.Text()
-		var entry AuditEntry
-		if err := json.Unmarshal([]byte(line), &entry); err == nil {
-			return &entry, nil
+	lineBuf := make([]byte, fileSize)
+	if _, err := readFile.ReadAt(lineBuf, 0); err == nil || err == io.EOF {
+		line := strings.TrimSpace(string(lineBuf))
+		if line != "" {
+			var entry AuditEntry
+			if err := json.Unmarshal([]byte(line), &entry); err == nil {
+				return &entry, nil
+			}
 		}
 	}
 
