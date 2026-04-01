@@ -2,6 +2,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestDetectRateLimit(t *testing.T) {
@@ -172,5 +174,59 @@ error: fifth unique error message`
 	if len(result) > 3 {
 		t.Errorf("detectErrors() returned %d errors; want max 3\nGot: %v",
 			len(result), result)
+	}
+}
+
+func TestGetAgentTypeShort_CanonicalizesAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   tmux.AgentType
+		want string
+	}{
+		{name: "claude alias", in: tmux.AgentType("claude_code"), want: "cc"},
+		{name: "codex alias", in: tmux.AgentType("openai-codex"), want: "cod"},
+		{name: "gemini alias", in: tmux.AgentType("google-gemini"), want: "gmi"},
+		{name: "windsurf short alias", in: tmux.AgentType("ws"), want: "windsurf"},
+		{name: "ollama", in: tmux.AgentOllama, want: "ollama"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := getAgentTypeShort(tt.in); got != tt.want {
+				t.Fatalf("getAgentTypeShort(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnalyzePaneOutput_AliasTypesUseCanonicalStateDetection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		paneType  tmux.AgentType
+		captured  string
+		wantType  string
+		wantState string
+	}{
+		{name: "codex alias", paneType: tmux.AgentType("openai-codex"), captured: "12% context left", wantType: "cod", wantState: "WAITING"},
+		{name: "claude alias", paneType: tmux.AgentType("claude_code"), captured: "Welcome back", wantType: "cc", wantState: "WAITING"},
+		{name: "windsurf short alias", paneType: tmux.AgentType("ws"), captured: "windsurf>", wantType: "windsurf", wantState: "WAITING"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status := analyzePaneOutput(tmux.Pane{Index: 1, Type: tt.paneType}, tt.captured)
+			if status.Type != tt.wantType {
+				t.Fatalf("analyzePaneOutput type = %q, want %q", status.Type, tt.wantType)
+			}
+			if status.State != tt.wantState {
+				t.Fatalf("analyzePaneOutput state = %q, want %q", status.State, tt.wantState)
+			}
+		})
 	}
 }

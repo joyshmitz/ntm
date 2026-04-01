@@ -167,7 +167,7 @@ func analyzePaneOutput(pane tmux.Pane, captured string) *paneStatus {
 }
 
 func getAgentTypeShort(agentType tmux.AgentType) string {
-	switch agentType {
+	switch tmux.AgentType(agentType).Canonical() {
 	case tmux.AgentClaude:
 		return "cc"
 	case tmux.AgentCodex:
@@ -182,7 +182,12 @@ func getAgentTypeShort(agentType tmux.AgentType) string {
 		return "windsurf"
 	case tmux.AgentAider:
 		return "aider"
+	case tmux.AgentOllama:
+		return "ollama"
 	default:
+		if canonical := tmux.AgentType(agentType).Canonical(); canonical != "" && canonical != tmux.AgentUnknown {
+			return string(canonical)
+		}
 		if s := string(agentType); s != "" {
 			return s
 		}

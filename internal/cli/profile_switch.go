@@ -14,8 +14,12 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
-// agentIDPattern matches agent IDs like "cc_1", "cod_2", "gmi_3"
-var agentIDPattern = regexp.MustCompile(`^(cc|cod|gmi)_(\d+)$`)
+// agentIDPattern matches agent IDs like "cc_1", "cursor_2", or "claude_code_3".
+var agentIDPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)_(\d+)$`)
+
+// profileSwitchPaneSuffixPattern matches the pane-title suffix portion:
+// {type}_{index} or {type}_{index}_{variant}, after any trailing [tags] are removed.
+var profileSwitchPaneSuffixPattern = regexp.MustCompile(`^([\w-]+)_(\d+)(?:_([A-Za-z0-9._/@:+-]+))?$`)
 
 // ProfileSwitchResult contains the result of a profile switch operation
 type ProfileSwitchResult struct {
@@ -42,9 +46,15 @@ func newProfileSwitchCmd() *cobra.Command {
 		Long: `Switch an agent to a different profile dynamically.
 
 The agent-id format is: {type}_{index}
-  - cc_1  = First Claude agent
-  - cod_2 = Second Codex agent
-  - gmi_1 = First Gemini agent
+
+Supported agent IDs include:
+  - cc_1       = First Claude agent
+  - cod_2      = Second Codex agent
+  - gmi_1      = First Gemini agent
+  - cursor_1   = First Cursor agent
+  - windsurf_1 = First Windsurf agent
+  - aider_1    = First Aider agent
+  - ollama_1   = First Ollama agent
 
 This command:
 1. Finds the target pane by agent ID
@@ -53,8 +63,10 @@ This command:
 4. Updates the pane title to reflect the new profile
 
 Examples:
-  ntm profiles switch cc_1 reviewer     # Switch cc_1 to reviewer profile
-  ntm profiles switch cc_2 architect    # Switch cc_2 to architect profile
+  ntm profiles switch cc_1 reviewer          # Switch cc_1 to reviewer profile
+  ntm profiles switch cod_2 architect        # Switch cod_2 to architect profile
+  ntm profiles switch cursor_1 reviewer      # Switch cursor_1 to reviewer profile
+  ntm profiles switch ollama_1 local-mentor  # Switch ollama_1 to local-mentor
   ntm profiles switch cc_1 reviewer --session myproject
   ntm profiles switch cc_1 reviewer --no-prompt  # Skip transition prompt
   ntm profiles switch cc_1 reviewer --dry-run    # Preview without applying`,
@@ -68,6 +80,7 @@ Examples:
 	cmd.Flags().StringVar(&transitionPrompt, "prompt", "", "Custom transition prompt (default: auto-generated)")
 	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Skip sending transition prompt to agent")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without applying them")
+	cmd.ValidArgsFunction = completeProfileSwitchArgs
 
 	return cmd
 }
@@ -150,8 +163,8 @@ func runProfileSwitch(agentID, newProfileName, sessionName, customPrompt string,
 		}
 	}
 
-	// Update pane title
-	newTitle := tmux.FormatPaneName(sessionName, agentType, agentIndex, newProfile.Name)
+	// Update pane title while preserving any existing pane tags.
+	newTitle := formatProfileSwitchPaneTitle(sessionName, agentType, agentIndex, newProfile.Name, targetPane.Tags)
 	if err := tmux.SetPaneTitle(targetPane.ID, newTitle); err != nil {
 		return outputProfileSwitchError(agentID, targetPane.ID, newProfileName, fmt.Errorf("updating pane title: %w", err))
 	}
@@ -179,40 +192,94 @@ func resolveProfileSwitchProjectDir(sessionName string) (string, error) {
 	return projectDir, nil
 }
 
-// parseAgentID parses an agent ID like "cc_1" into type and index
+// parseAgentID parses an agent ID like "cc_1" into canonical type and index.
 func parseAgentID(id string) (string, int, error) {
 	matches := agentIDPattern.FindStringSubmatch(id)
 	if matches == nil {
-		return "", 0, fmt.Errorf("invalid agent ID %q (expected format: cc_1, cod_2, gmi_3)", id)
+		return "", 0, fmt.Errorf("invalid agent ID %q (expected format like cc_1, cod_2, gmi_3, cursor_1, windsurf_1, aider_1, or ollama_1)", id)
 	}
 
 	index, err := strconv.Atoi(matches[2])
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid index in agent ID: %w", err)
 	}
+	if index <= 0 {
+		return "", 0, fmt.Errorf("invalid agent ID %q (index must be >= 1)", id)
+	}
 
-	return matches[1], index, nil
+	agentType := tmux.AgentType(matches[1]).Canonical()
+	if !supportsProfileSwitchAgentType(agentType) {
+		return "", 0, fmt.Errorf("invalid agent ID %q (unsupported agent type %q)", id, matches[1])
+	}
+
+	return string(agentType), index, nil
 }
 
 // findPaneByAgentID finds a pane matching the agent type and index
 func findPaneByAgentID(panes []tmux.Pane, session, agentType string, agentIndex int) (*tmux.Pane, string, error) {
-	// Build expected title prefix: {session}__{type}_{index}
-	prefix := fmt.Sprintf("%s__%s_%d", session, agentType, agentIndex)
+	targetType := tmux.AgentType(agentType).Canonical()
 
 	for i := range panes {
 		pane := &panes[i]
-		// Match exact prefix or prefix with variant suffix
-		if pane.Title == prefix || strings.HasPrefix(pane.Title, prefix+"_") {
-			// Extract old profile from variant if present
-			oldProfile := ""
-			if len(pane.Title) > len(prefix)+1 {
-				oldProfile = pane.Title[len(prefix)+1:]
-			}
+		matched, oldProfile := paneMatchesAgentID(*pane, session, targetType, agentIndex)
+		if matched {
 			return pane, oldProfile, nil
 		}
 	}
 
 	return nil, "", fmt.Errorf("no pane found for agent %s_%d in session %s", agentType, agentIndex, session)
+}
+
+func supportsProfileSwitchAgentType(agentType tmux.AgentType) bool {
+	switch agentType.Canonical() {
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama:
+		return true
+	default:
+		return false
+	}
+}
+
+func paneMatchesAgentID(pane tmux.Pane, session string, agentType tmux.AgentType, agentIndex int) (bool, string) {
+	if tmux.PaneTitleSession(pane.Title) != session {
+		return false, ""
+	}
+
+	canonicalType := agentType.Canonical()
+	if pane.NTMIndex == agentIndex && pane.Type != "" && pane.Type.Canonical() == canonicalType {
+		return true, pane.Variant
+	}
+
+	suffix := tmux.PaneTitleSuffix(pane.Title)
+	if suffix == "" {
+		return false, ""
+	}
+	suffix = stripPaneTitleTags(suffix)
+
+	matches := profileSwitchPaneSuffixPattern.FindStringSubmatch(suffix)
+	if matches == nil {
+		return false, ""
+	}
+
+	idx, err := strconv.Atoi(matches[2])
+	if err != nil || idx != agentIndex {
+		return false, ""
+	}
+	if tmux.AgentType(matches[1]).Canonical() != canonicalType {
+		return false, ""
+	}
+
+	return true, matches[3]
+}
+
+func stripPaneTitleTags(title string) string {
+	if idx := strings.LastIndex(title, "["); idx >= 0 && strings.HasSuffix(title, "]") && idx < len(title)-1 {
+		return title[:idx]
+	}
+	return title
+}
+
+func formatProfileSwitchPaneTitle(session, agentType string, agentIndex int, profile string, tags []string) string {
+	return tmux.FormatPaneName(session, agentType, agentIndex, profile) + tmux.FormatTags(tags)
 }
 
 // generateTransitionPrompt creates a prompt to inform the agent of the profile change

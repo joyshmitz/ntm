@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -84,6 +85,24 @@ func completeAgentIDs(cmd *cobra.Command, args []string, toComplete string) ([]s
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	return filterByPrefix(listAgentIDs(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+func completeProfileSwitchArgs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	session := sessionFromFlagOrSingle(cmd)
+	switch len(args) {
+	case 0:
+		if session == "" {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return filterByPrefix(listAgentIDs(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+	case 1:
+		if session == "" {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return filterByPrefix(listProfileNamesForSession(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+	default:
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 }
 
 func completePaneIndexes(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -200,16 +219,44 @@ func listAgentIDs(session string) []string {
 	}
 	ids := make([]string, 0, len(panes))
 	for _, p := range panes {
-		if p.NTMIndex <= 0 {
-			continue
-		}
-		switch p.Type {
-		case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider:
-			ids = append(ids, fmt.Sprintf("%s_%d", p.Type, p.NTMIndex))
+		if id, ok := completionAgentID(p); ok {
+			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+func completionAgentID(p tmux.Pane) (string, bool) {
+	if p.NTMIndex <= 0 {
+		return "", false
+	}
+	switch canonical := p.Type.Canonical(); canonical {
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama:
+		return fmt.Sprintf("%s_%d", canonical, p.NTMIndex), true
+	default:
+		return "", false
+	}
+}
+
+func listProfileNamesForSession(session string) []string {
+	projectDir, err := resolveProfileSwitchProjectDir(session)
+	if err != nil || projectDir == "" {
+		return nil
+	}
+	registry, err := persona.LoadRegistry(projectDir)
+	if err != nil {
+		return nil
+	}
+	profiles := registry.List()
+	out := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile != nil && profile.Name != "" {
+			out = append(out, profile.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func listReadyBeadIDs() []string {

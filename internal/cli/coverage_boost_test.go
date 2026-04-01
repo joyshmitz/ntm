@@ -1591,6 +1591,28 @@ func TestResolveAgentName_GeminiFallback(t *testing.T) {
 	}
 }
 
+func TestResolveAgentName_NewAgentFallbacks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want string
+	}{
+		{name: "cursor", pane: tmux.Pane{Title: "", Type: tmux.AgentCursor, Index: 1}, want: "CursorAgent1"},
+		{name: "windsurf alias canonicalized", pane: tmux.Pane{Title: "pane_2", Type: tmux.AgentType("ws"), Index: 2}, want: "WindsurfAgent2"},
+		{name: "aider", pane: tmux.Pane{Title: "", Type: tmux.AgentAider, Index: 3}, want: "AiderAgent3"},
+		{name: "ollama", pane: tmux.Pane{Title: "", Type: tmux.AgentOllama, Index: 4}, want: "OllamaAgent4"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveAgentName(tc.pane); got != tc.want {
+				t.Fatalf("resolveAgentName(%+v) = %q, want %q", tc.pane, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveAgentName_UnknownType(t *testing.T) {
 	t.Parallel()
 	p := tmux.Pane{Title: "", Type: "unknown", Index: 1}

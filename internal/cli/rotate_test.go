@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/quota"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestRotateCmdValidation(t *testing.T) {
@@ -118,4 +121,58 @@ func errorMatchesAny(err string, matches []string) bool {
 		}
 	}
 	return false
+}
+
+func TestQuotaProviderForAgentType_CanonicalizesAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agentType tmux.AgentType
+		want      quota.Provider
+		ok        bool
+	}{
+		{name: "claude alias", agentType: tmux.AgentType("claude_code"), want: quota.ProviderClaude, ok: true},
+		{name: "codex alias", agentType: tmux.AgentType("openai-codex"), want: quota.ProviderCodex, ok: true},
+		{name: "gemini alias", agentType: tmux.AgentType("google-gemini"), want: quota.ProviderGemini, ok: true},
+		{name: "unsupported cursor", agentType: tmux.AgentCursor, ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := quotaProviderForAgentType(tt.agentType)
+			if ok != tt.ok {
+				t.Fatalf("quotaProviderForAgentType(%q) ok = %v, want %v", tt.agentType, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("quotaProviderForAgentType(%q) = %q, want %q", tt.agentType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizedProviderName_CanonicalizesFallbacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agentType tmux.AgentType
+		want      string
+	}{
+		{name: "claude alias", agentType: tmux.AgentType("claude_code"), want: "claude"},
+		{name: "codex alias", agentType: tmux.AgentType("openai-codex"), want: "codex"},
+		{name: "gemini alias", agentType: tmux.AgentType("google-gemini"), want: "gemini"},
+		{name: "windsurf short alias", agentType: tmux.AgentType("ws"), want: "windsurf"},
+		{name: "unknown falls back raw", agentType: tmux.AgentType("mystery"), want: "mystery"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizedProviderName(tt.agentType); got != tt.want {
+				t.Fatalf("normalizedProviderName(%q) = %q, want %q", tt.agentType, got, tt.want)
+			}
+		})
+	}
 }

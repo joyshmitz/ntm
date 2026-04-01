@@ -538,7 +538,7 @@ func confirm(prompt string) bool {
 
 // agentTypeToString converts a tmux.AgentType to a string for JSON output
 func agentTypeToString(t tmux.AgentType) string {
-	switch t {
+	switch tmux.AgentType(t).Canonical() {
 	case tmux.AgentClaude:
 		return "claude"
 	case tmux.AgentCodex:
@@ -556,6 +556,9 @@ func agentTypeToString(t tmux.AgentType) string {
 	case tmux.AgentUser:
 		return "user"
 	default:
+		if canonical := tmux.AgentType(t).Canonical(); canonical != "" && canonical != tmux.AgentUnknown {
+			return string(canonical)
+		}
 		if s := string(t); s != "" {
 			return s
 		}

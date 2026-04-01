@@ -151,6 +151,9 @@ func TestAgentFilter_Matches(t *testing.T) {
 		{"codex_filter_not_matches_claude", AgentFilter{Codex: true}, tmux.AgentClaude, false},
 		{"gemini_filter_matches_gemini", AgentFilter{Gemini: true}, tmux.AgentGemini, true},
 		{"gemini_filter_not_matches_user", AgentFilter{Gemini: true}, tmux.AgentUser, false},
+		{"claude_filter_matches_claude_alias", AgentFilter{Claude: true}, tmux.AgentType("claude_code"), true},
+		{"codex_filter_matches_codex_alias", AgentFilter{Codex: true}, tmux.AgentType("openai-codex"), true},
+		{"gemini_filter_matches_gemini_alias", AgentFilter{Gemini: true}, tmux.AgentType("google-gemini"), true},
 
 		// Empty filter matches nothing
 		{"empty_not_matches_claude", AgentFilter{}, tmux.AgentClaude, false},

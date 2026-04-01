@@ -3317,7 +3317,7 @@ func init() {
 
 	// Robot-controller-spawn flags for launching controller agent
 	rootCmd.Flags().StringVar(&robotControllerSpawn, "robot-controller-spawn", "", "Launch controller agent in session. Required: SESSION. Example: ntm --robot-controller-spawn=proj")
-	rootCmd.Flags().StringVar(&robotControllerAgentType, "controller-agent-type", "cc", "Agent type for controller: cc, cod, gmi. Use with --robot-controller-spawn")
+	rootCmd.Flags().StringVar(&robotControllerAgentType, "controller-agent-type", "cc", "Agent type for controller: cc, cod, gmi, cursor, windsurf|ws, aider, or ollama. Use with --robot-controller-spawn")
 	rootCmd.Flags().StringVar(&robotControllerPrompt, "controller-prompt", "", "Custom prompt file. Use with --robot-controller-spawn")
 	rootCmd.Flags().BoolVar(&robotControllerNoPrompt, "controller-no-prompt", false, "Skip initial prompt. Use with --robot-controller-spawn")
 

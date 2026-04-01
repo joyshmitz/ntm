@@ -433,7 +433,7 @@ func resolveScaleSession(session string) (string, error) {
 
 // scaleAgentTypeLabel maps a tmux.AgentType to the short string label used in scale
 func scaleAgentTypeLabel(t tmux.AgentType) string {
-	switch t {
+	switch tmux.AgentType(t).Canonical() {
 	case tmux.AgentClaude:
 		return "cc"
 	case tmux.AgentCodex:

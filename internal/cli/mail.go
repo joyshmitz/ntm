@@ -757,15 +757,23 @@ func resolveAgentName(p tmux.Pane) string {
 		}
 	}
 
-	// Fall back to generated name based on type and index
+	// Fall back to generated name based on canonical pane type and index.
 	var prefix string
-	switch p.Type {
+	switch p.Type.Canonical() {
 	case tmux.AgentClaude:
 		prefix = "Claude"
 	case tmux.AgentCodex:
 		prefix = "Codex"
 	case tmux.AgentGemini:
 		prefix = "Gemini"
+	case tmux.AgentCursor:
+		prefix = "Cursor"
+	case tmux.AgentWindsurf:
+		prefix = "Windsurf"
+	case tmux.AgentAider:
+		prefix = "Aider"
+	case tmux.AgentOllama:
+		prefix = "Ollama"
 	default:
 		return ""
 	}

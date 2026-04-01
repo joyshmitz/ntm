@@ -76,7 +76,7 @@ Examples:
 			for _, p := range panes {
 				if p.Index == paneIndex {
 					paneID = p.ID
-					provider = string(p.Type)
+					provider = normalizedProviderName(p.Type)
 					modelAlias = p.Variant
 					break
 				}
@@ -144,20 +144,13 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 
 	for _, p := range panes {
 		// Skip user panes
-		if p.Type == tmux.AgentUser {
+		if tmux.AgentType(p.Type).Canonical() == tmux.AgentUser {
 			continue
 		}
 
 		// Check quota
-		var provider quota.Provider
-		switch p.Type {
-		case tmux.AgentClaude:
-			provider = quota.ProviderClaude
-		case tmux.AgentCodex:
-			provider = quota.ProviderCodex
-		case tmux.AgentGemini:
-			provider = quota.ProviderGemini
-		default:
+		provider, ok := quotaProviderForAgentType(p.Type)
+		if !ok {
 			continue
 		}
 
@@ -186,7 +179,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 	// Suggest account from config if not specified
 	if targetAccount == "" && cfg != nil {
 		// Use first limited pane to suggest account
-		providerStr := string(limitedPanes[0].Type)
+		providerStr := normalizedProviderName(limitedPanes[0].Type)
 		if suggested := cfg.Rotation.SuggestNextAccount(providerStr, ""); suggested != nil {
 			targetAccount = suggested.Email
 			if suggested.Alias != "" {
@@ -211,7 +204,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 	fmt.Println("\nStep 1/3: Terminating sessions...")
 	for _, p := range limitedPanes {
 		fmt.Printf("  Terminating %s (pane %d)...\n", p.Title, p.Index)
-		if err := orchestrator.TerminateSession(p.ID, string(p.Type)); err != nil {
+		if err := orchestrator.TerminateSession(p.ID, normalizedProviderName(p.Type)); err != nil {
 			fmt.Printf("    Error terminating: %v\n", err)
 		}
 	}
@@ -245,7 +238,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool) error {
 		fmt.Printf("  Starting %s...\n", p.Title)
 		ctx := auth.RestartContext{
 			PaneID:      p.ID,
-			Provider:    string(p.Type),
+			Provider:    normalizedProviderName(p.Type),
 			TargetEmail: targetAccount,
 			ModelAlias:  p.Variant,
 			SessionName: session,

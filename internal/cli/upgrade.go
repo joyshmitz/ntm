@@ -282,7 +282,7 @@ func findUpgradeAsset(assets []GitHubAsset, targetOS, targetArch, version string
 		return match, tried
 	}
 
-	if match := matchExactBinary(assets, binaryAssetName); match != nil {
+	if match := matchExactBinary(assets, binaryAssetName, targetOS); match != nil {
 		return match, tried
 	}
 
@@ -303,7 +303,7 @@ func findUpgradeAsset(assets []GitHubAsset, targetOS, targetArch, version string
 
 	legacyNames := legacyDashNames(targetOS, targetArch, version)
 	tried = append(tried, legacyNames...)
-	if match := matchLegacyDash(assets, legacyNames); match != nil {
+	if match := matchLegacyDash(assets, legacyNames, targetOS); match != nil {
 		return match, tried
 	}
 
@@ -324,9 +324,35 @@ func matchExactArchive(assets []GitHubAsset, archiveName string) *assetMatch {
 	return nil
 }
 
-func matchExactBinary(assets []GitHubAsset, binaryName string) *assetMatch {
+func upgradeAssetKind(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".tar.gz"):
+		return "tar.gz"
+	case strings.HasSuffix(name, ".zip"):
+		return "zip"
+	case strings.HasSuffix(name, ".exe"):
+		return "exe"
+	case !strings.Contains(filepath.Base(name), "."):
+		return "raw"
+	default:
+		return "unsupported"
+	}
+}
+
+func isSupportedUpgradeAsset(name, targetOS string) bool {
+	switch targetOS {
+	case "windows":
+		kind := upgradeAssetKind(name)
+		return kind == "zip" || kind == "exe"
+	default:
+		kind := upgradeAssetKind(name)
+		return kind == "tar.gz" || kind == "raw"
+	}
+}
+
+func matchExactBinary(assets []GitHubAsset, binaryName, targetOS string) *assetMatch {
 	for i := range assets {
-		if trimAssetExt(assets[i].Name) == binaryName {
+		if trimAssetExt(assets[i].Name) == binaryName && isSupportedUpgradeAsset(assets[i].Name, targetOS) {
 			return &assetMatch{
 				Asset:      &assets[i],
 				Strategy:   "exact_binary",
@@ -342,6 +368,9 @@ func matchPrefix(assets []GitHubAsset, binaryName, version, targetOS, targetArch
 	arch := normalizedArch(targetOS, targetArch)
 	versionPrefix := fmt.Sprintf("ntm_%s_%s_%s", version, targetOS, arch)
 	for i := range assets {
+		if !isSupportedUpgradeAsset(assets[i].Name, targetOS) {
+			continue
+		}
 		baseName := trimAssetExt(assets[i].Name)
 		if strings.HasPrefix(baseName, binaryName) || strings.HasPrefix(baseName, versionPrefix) {
 			return &assetMatch{
@@ -359,6 +388,9 @@ func matchSameOS(assets []GitHubAsset, targetOS, targetArch string) *assetMatch 
 	candidates := archCandidates(targetOS, targetArch)
 	for _, arch := range candidates {
 		for i := range assets {
+			if !isSupportedUpgradeAsset(assets[i].Name, targetOS) {
+				continue
+			}
 			baseName := trimAssetExt(assets[i].Name)
 			if strings.HasPrefix(baseName, "ntm-") {
 				continue
@@ -383,12 +415,15 @@ func matchSameOS(assets []GitHubAsset, targetOS, targetArch string) *assetMatch 
 	return nil
 }
 
-func matchLegacyDash(assets []GitHubAsset, names []string) *assetMatch {
+func matchLegacyDash(assets []GitHubAsset, names []string, targetOS string) *assetMatch {
 	nameSet := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		nameSet[name] = struct{}{}
 	}
 	for i := range assets {
+		if !isSupportedUpgradeAsset(assets[i].Name, targetOS) {
+			continue
+		}
 		baseName := trimAssetExt(assets[i].Name)
 		if _, ok := nameSet[baseName]; ok {
 			return &assetMatch{
@@ -932,25 +967,56 @@ func downloadFile(destPath string, url string, expectedSize int64) error {
 	return err
 }
 
-// fetchChecksums downloads and parses the checksums.txt file from a GitHub release.
-// GoReleaser generates this file with SHA256 hashes for all release assets.
-// Format: "<sha256hash>  <filename>" (note: two spaces between hash and filename)
-// Returns a map[filename]hash, or error if checksums.txt is not found.
-func fetchChecksums(release *GitHubRelease) (map[string]string, error) {
-	// Find the checksums.txt asset
-	var checksumAsset *GitHubAsset
-	for i := range release.Assets {
-		if release.Assets[i].Name == "checksums.txt" {
-			checksumAsset = &release.Assets[i]
-			break
+func findChecksumsAsset(assets []GitHubAsset) *GitHubAsset {
+	preferredNames := []string{"SHA256SUMS", "checksums.txt", "sha256sums.txt"}
+	for _, preferred := range preferredNames {
+		for i := range assets {
+			if strings.EqualFold(assets[i].Name, preferred) {
+				return &assets[i]
+			}
 		}
 	}
+	return nil
+}
 
-	if checksumAsset == nil {
-		return nil, fmt.Errorf("checksums.txt not found in release")
+func parseChecksums(r io.Reader) (map[string]string, error) {
+	checksums := make(map[string]string)
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		hash := parts[0]
+		filename := filepath.Base(parts[len(parts)-1])
+		checksums[filename] = hash
 	}
 
-	// Download checksums.txt
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read checksums: %w", err)
+	}
+	if len(checksums) == 0 {
+		return nil, fmt.Errorf("no checksums found in checksum file")
+	}
+
+	return checksums, nil
+}
+
+// fetchChecksums downloads and parses the checksum asset from a GitHub release.
+// The release pipeline may publish either SHA256SUMS or checksums.txt depending on the path used.
+// Format: "<sha256hash>  <filename>" or "<sha256hash> <filename>".
+func fetchChecksums(release *GitHubRelease) (map[string]string, error) {
+	checksumAsset := findChecksumsAsset(release.Assets)
+	if checksumAsset == nil {
+		return nil, fmt.Errorf("checksum asset not found in release")
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(checksumAsset.BrowserDownloadURL)
 	if err != nil {
@@ -962,35 +1028,7 @@ func fetchChecksums(release *GitHubRelease) (map[string]string, error) {
 		return nil, fmt.Errorf("checksums download failed with status %d", resp.StatusCode)
 	}
 
-	// Parse checksums.txt
-	// Format: "<sha256hash>  <filename>" (BSD-style: two spaces)
-	// or:     "<sha256hash> <filename>"  (GNU-style: one space)
-	checksums := make(map[string]string)
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Skip empty lines and comments
-		}
-
-		// Split on whitespace - handles both "hash  filename" and "hash filename"
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			hash := parts[0]
-			filename := parts[len(parts)-1] // Take last part in case of path
-			checksums[filename] = hash
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read checksums: %w", err)
-	}
-
-	if len(checksums) == 0 {
-		return nil, fmt.Errorf("no checksums found in checksums.txt")
-	}
-
-	return checksums, nil
+	return parseChecksums(resp.Body)
 }
 
 // verifyChecksum computes the SHA256 hash of a file and compares it to the expected hash.

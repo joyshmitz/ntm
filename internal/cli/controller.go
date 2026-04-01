@@ -157,7 +157,7 @@ Custom prompt files support template variables:
 		},
 	}
 
-	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc (Claude), cod (Codex), gmi (Gemini)")
+	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc, cod, gmi, cursor, windsurf|ws, aider, or ollama")
 	cmd.Flags().StringVar(&promptFile, "prompt", "", "Custom prompt file (supports template variables)")
 	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Skip sending initial prompt")
 	cmd.ValidArgsFunction = completeSessionArgs
@@ -222,15 +222,8 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		return nil, fmt.Errorf("getting panes: %w", err)
 	}
 
-	// Build agent list for prompt
-	var agentList []string
-	agentCount := 0
-	for _, p := range panes {
-		if p.Type == tmux.AgentClaude || p.Type == tmux.AgentCodex || p.Type == tmux.AgentGemini || p.Type == tmux.AgentCursor || p.Type == tmux.AgentWindsurf || p.Type == tmux.AgentAider {
-			agentCount++
-			agentList = append(agentList, fmt.Sprintf("- Pane %d: %s", p.Index, p.Type))
-		}
-	}
+	// Build agent list for prompt.
+	agentList, agentCount := controllerAgentList(panes)
 
 	// Determine agent type
 	agentType := opts.AgentType
@@ -354,6 +347,20 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		AgentCount:          agentCount,
 		AgentList:           strings.Join(agentList, "\n"),
 	}, nil
+}
+
+func controllerAgentList(panes []tmux.Pane) ([]string, int) {
+	list := make([]string, 0, len(panes))
+	count := 0
+	for _, p := range panes {
+		canonical := p.Type.Canonical()
+		switch canonical {
+		case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama:
+			count++
+			list = append(list, fmt.Sprintf("- Pane %d: %s", p.Index, canonical))
+		}
+	}
+	return list, count
 }
 
 // resolveControllerPrompt resolves the controller prompt from file or default.

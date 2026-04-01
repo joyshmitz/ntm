@@ -116,7 +116,7 @@ func (f AgentFilter) Matches(agentType tmux.AgentType) bool {
 	if f.All {
 		return true
 	}
-	switch agentType {
+	switch tmux.AgentType(agentType).Canonical() {
 	case tmux.AgentClaude:
 		return f.Claude
 	case tmux.AgentCodex:

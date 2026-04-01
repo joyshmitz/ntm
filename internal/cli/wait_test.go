@@ -42,6 +42,7 @@ func TestDetectAgentType(t *testing.T) {
 		{"claude agent", "myproject__cc_1", "cc"},
 		{"codex agent", "myproject__cod_2", "cod"},
 		{"gemini agent", "myproject__gmi_3", "gmi"},
+		{"session with embedded double underscore", "my__project__cc_1", "cc"},
 		{"user pane", "myproject", ""},
 		{"empty title", "", ""},
 		{"no double underscore", "myproject_cc_1", ""},

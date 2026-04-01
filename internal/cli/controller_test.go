@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,41 @@ type agentTypeError struct {
 
 func (e *agentTypeError) Error() string {
 	return "unknown agent type: " + e.agentType
+}
+
+func TestControllerAgentListCanonicalizesAliasesAndIncludesOllama(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{Index: 2, Type: tmux.AgentType("claude_code")},
+		{Index: 3, Type: tmux.AgentType("openai-codex")},
+		{Index: 4, Type: tmux.AgentType("google-gemini")},
+		{Index: 5, Type: tmux.AgentType("ws")},
+		{Index: 6, Type: tmux.AgentOllama},
+		{Index: 7, Type: tmux.AgentType("controller_codex")},
+		{Index: 8, Type: tmux.AgentUser},
+	}
+
+	list, count := controllerAgentList(panes)
+	if count != 5 {
+		t.Fatalf("controllerAgentList() count = %d, want 5", count)
+	}
+
+	want := []string{
+		"- Pane 2: cc",
+		"- Pane 3: cod",
+		"- Pane 4: gmi",
+		"- Pane 5: windsurf",
+		"- Pane 6: ollama",
+	}
+	if len(list) != len(want) {
+		t.Fatalf("controllerAgentList() len = %d, want %d (%v)", len(list), len(want), list)
+	}
+	for i := range want {
+		if list[i] != want[i] {
+			t.Fatalf("controllerAgentList()[%d] = %q, want %q", i, list[i], want[i])
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

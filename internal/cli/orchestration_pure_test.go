@@ -325,6 +325,24 @@ func TestPaneAgentLabel_TitleWithPrefix(t *testing.T) {
 	}
 }
 
+func TestPaneAgentLabel_TitleWithEmbeddedDoubleUnderscoreSession(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Index: 3, Title: "my__project__cc_1"}
+	got := paneAgentLabel(p)
+	if got != "cc_1" {
+		t.Errorf("paneAgentLabel() = %q, want %q", got, "cc_1")
+	}
+}
+
+func TestTimelineAgentIDFromPane_TitleWithEmbeddedDoubleUnderscoreSession(t *testing.T) {
+	t.Parallel()
+	p := tmux.Pane{Index: 3, Title: "my__project__cod_2"}
+	got := timelineAgentIDFromPane(p)
+	if got != "cod_2" {
+		t.Errorf("timelineAgentIDFromPane() = %q, want %q", got, "cod_2")
+	}
+}
+
 func TestPaneAgentLabel_TitleWithoutPrefix(t *testing.T) {
 	t.Parallel()
 	p := tmux.Pane{Index: 3, Title: "custom_title"}

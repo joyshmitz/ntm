@@ -68,20 +68,13 @@ func runQuota(session string) error {
 	}
 
 	for _, p := range panes {
-		var provider quota.Provider
-		switch p.Type {
-		case tmux.AgentClaude:
-			provider = quota.ProviderClaude
-		case tmux.AgentCodex:
-			provider = quota.ProviderCodex
-		case tmux.AgentGemini:
-			provider = quota.ProviderGemini
-		default:
+		provider, ok := quotaProviderForAgentType(p.Type)
+		if !ok {
 			continue // Skip user/unknown panes
 		}
 
 		if !IsJSONOutput() {
-			fmt.Printf("  Checking pane %d (%s)...\n", p.Index, p.Type)
+			fmt.Printf("  Checking pane %d (%s)...\n", p.Index, provider)
 		}
 
 		info, err := fetcher.FetchQuota(ctx, p.ID, provider)
@@ -106,6 +99,29 @@ func runQuota(session string) error {
 
 	printQuotaTable(results)
 	return nil
+}
+
+func quotaProviderForAgentType(agentType tmux.AgentType) (quota.Provider, bool) {
+	switch tmux.AgentType(agentType).Canonical() {
+	case tmux.AgentClaude:
+		return quota.ProviderClaude, true
+	case tmux.AgentCodex:
+		return quota.ProviderCodex, true
+	case tmux.AgentGemini:
+		return quota.ProviderGemini, true
+	default:
+		return "", false
+	}
+}
+
+func normalizedProviderName(agentType tmux.AgentType) string {
+	if provider, ok := quotaProviderForAgentType(agentType); ok {
+		return string(provider)
+	}
+	if canonical := tmux.AgentType(agentType).Canonical(); canonical != "" && canonical != tmux.AgentUnknown {
+		return string(canonical)
+	}
+	return string(agentType)
 }
 
 func printQuotaTable(results []*quota.QuotaInfo) {

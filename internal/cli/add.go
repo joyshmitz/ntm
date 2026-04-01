@@ -191,6 +191,34 @@ func newAddCmd() *cobra.Command {
 	return cmd
 }
 
+func paneTitleTypeAndIndex(title string) (string, int, bool) {
+	suffix := tmux.PaneTitleSuffix(title)
+	if suffix == "" {
+		return "", 0, false
+	}
+	if idx := strings.LastIndex(suffix, "["); idx >= 0 && strings.HasSuffix(suffix, "]") {
+		suffix = suffix[:idx]
+	}
+
+	parts := strings.Split(suffix, "_")
+	for i, part := range parts {
+		num, err := strconv.Atoi(part)
+		if err != nil || num <= 0 {
+			continue
+		}
+		typeStr := strings.Join(parts[:i], "_")
+		if typeStr == "" {
+			return "", 0, false
+		}
+		if canonical := tmux.AgentType(typeStr).Canonical(); canonical.IsValid() {
+			typeStr = string(canonical)
+		}
+		return typeStr, num, true
+	}
+
+	return "", 0, false
+}
+
 func runAdd(opts AddOptions) error {
 	totalAgents := opts.Agents.TotalCount()
 	session := opts.Session
@@ -306,20 +334,9 @@ func runAdd(opts AddOptions) error {
 
 	// Helper to parse index from title
 	parseIndex := func(title string) {
-		parts := strings.Split(title, "__")
-		if len(parts) >= 2 {
-			sub := parts[1]
-			subParts := strings.Split(sub, "_")
-			// Iterate to find the index part
-			for i, p := range subParts {
-				if num, err := strconv.Atoi(p); err == nil && num > 0 {
-					typeStr := strings.Join(subParts[:i], "_")
-					if num > maxIndices[typeStr] {
-						maxIndices[typeStr] = num
-					}
-					break
-				}
-			}
+		typeStr, num, ok := paneTitleTypeAndIndex(title)
+		if ok && num > maxIndices[typeStr] {
+			maxIndices[typeStr] = num
 		}
 	}
 

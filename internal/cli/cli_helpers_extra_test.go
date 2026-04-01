@@ -127,6 +127,36 @@ func TestCollectReadyAgentPanesUsesParsedPaneType(t *testing.T) {
 	}
 }
 
+func TestPaneTitleTypeAndIndex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		title string
+		wantT string
+		wantN int
+		want  bool
+	}{
+		{"simple", "project__cc_2", "cc", 2, true},
+		{"embedded double underscore session", "my__project__cursor_4", "cursor", 4, true},
+		{"variant preserved before index parse", "my__project__cod_3_opus", "cod", 3, true},
+		{"tagged pane title", "my__project__cc_7[frontend,api]", "cc", 7, true},
+		{"claude alias title canonicalized", "my__project__claude_5", "cc", 5, true},
+		{"codex alias title canonicalized", "my__project__openai-codex_6", "cod", 6, true},
+		{"invalid", "custom-title", "", 0, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotType, gotNum, gotOK := paneTitleTypeAndIndex(tc.title)
+			if gotType != tc.wantT || gotNum != tc.wantN || gotOK != tc.want {
+				t.Fatalf("paneTitleTypeAndIndex(%q) = (%q, %d, %v), want (%q, %d, %v)", tc.title, gotType, gotNum, gotOK, tc.wantT, tc.wantN, tc.want)
+			}
+		})
+	}
+}
+
 func TestGenerateRecommendationsUsesParsedPaneType(t *testing.T) {
 	t.Parallel()
 

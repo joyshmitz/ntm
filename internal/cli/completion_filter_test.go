@@ -11,6 +11,37 @@ import (
 // filterByPrefix — 28.6% → 100%
 // ---------------------------------------------------------------------------
 
+func TestCompletionAgentID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want string
+		ok   bool
+	}{
+		{name: "canonical claude", pane: tmux.Pane{Type: tmux.AgentClaude, NTMIndex: 1}, want: "cc_1", ok: true},
+		{name: "aliased codex", pane: tmux.Pane{Type: tmux.AgentType("openai-codex"), NTMIndex: 2}, want: "cod_2", ok: true},
+		{name: "aliased windsurf", pane: tmux.Pane{Type: tmux.AgentType("ws"), NTMIndex: 3}, want: "windsurf_3", ok: true},
+		{name: "ollama included", pane: tmux.Pane{Type: tmux.AgentOllama, NTMIndex: 4}, want: "ollama_4", ok: true},
+		{name: "controller ignored", pane: tmux.Pane{Type: tmux.AgentType("controller_codex"), NTMIndex: 1}, want: "", ok: false},
+		{name: "no ntm index ignored", pane: tmux.Pane{Type: tmux.AgentClaude, NTMIndex: 0}, want: "", ok: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := completionAgentID(tc.pane)
+			if ok != tc.ok {
+				t.Fatalf("completionAgentID(%+v) ok = %v, want %v", tc.pane, ok, tc.ok)
+			}
+			if got != tc.want {
+				t.Fatalf("completionAgentID(%+v) = %q, want %q", tc.pane, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFilterByPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -103,6 +134,10 @@ func TestAgentTypeToString(t *testing.T) {
 		{"claude", tmux.AgentClaude, "claude"},
 		{"codex", tmux.AgentCodex, "codex"},
 		{"gemini", tmux.AgentGemini, "gemini"},
+		{"claude alias", tmux.AgentType("claude_code"), "claude"},
+		{"codex alias", tmux.AgentType("openai-codex"), "codex"},
+		{"gemini alias", tmux.AgentType("google-gemini"), "gemini"},
+		{"windsurf alias", tmux.AgentType("ws"), "windsurf"},
 		{"empty string type", tmux.AgentType(""), "unknown"},
 		{"custom type", tmux.AgentType("aider"), "aider"},
 	}
