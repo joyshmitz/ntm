@@ -191,25 +191,105 @@ get_latest_release() {
     fi
 }
 
+# Get a specific tagged release info from GitHub
+get_release_by_tag() {
+    local version="$1"
+    local url="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${version}"
+
+    if has_cmd curl; then
+        curl -fsSL "$url" 2>/dev/null || return 1
+    elif has_cmd wget; then
+        wget -qO- "$url" 2>/dev/null || return 1
+    else
+        return 1
+    fi
+}
+
 # Extract version from release JSON
 extract_version() {
     # Simple grep/sed extraction - works without jq
     grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1
 }
 
-# Find the download URL for a platform from release JSON
-find_download_url() {
+# Find the best asset name for a platform from release JSON
+find_asset_name() {
     local platform="$1"
     local release_json="$2"
+    local asset_name
 
-    # Try to find the raw binary first (faster download)
-    # Binary archive format: ntm_linux_amd64, ntm_darwin_arm64, etc.
-    local binary_pattern="${BIN_NAME}_${platform}"
+    if [[ "$platform" == windows_* ]]; then
+        asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_${platform}\\.zip\"" | \
+            sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+        if [ -n "$asset_name" ]; then
+            printf '%s\n' "$asset_name"
+            return 0
+        fi
+    fi
 
-    # Extract browser_download_url for matching asset
-    # Use || true to prevent grep from causing script exit when no match found (set -e)
-    echo "$release_json" | grep -o '"browser_download_url":[[:space:]]*"[^"]*'"${binary_pattern}"'"' | \
-        sed -E 's/.*"browser_download_url":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true
+    asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_[^\"]*_${platform}\\.tar\\.gz\"" | \
+        sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+    if [ -n "$asset_name" ]; then
+        printf '%s\n' "$asset_name"
+        return 0
+    fi
+
+    asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_${platform}\\.tar\\.gz\"" | \
+        sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+    if [ -n "$asset_name" ]; then
+        printf '%s\n' "$asset_name"
+        return 0
+    fi
+
+    asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_[^\"]*_${platform}\\.zip\"" | \
+        sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+    if [ -n "$asset_name" ]; then
+        printf '%s\n' "$asset_name"
+        return 0
+    fi
+
+    asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_${platform}\\.zip\"" | \
+        sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+    if [ -n "$asset_name" ]; then
+        printf '%s\n' "$asset_name"
+        return 0
+    fi
+
+    asset_name=$(printf '%s\n' "$release_json" | grep -o "\"name\":[[:space:]]*\"${BIN_NAME}_${platform}\"" | \
+        sed -E 's/.*"name":[[:space:]]*"([^"]+)".*/\1/' | head -1 || true)
+    printf '%s\n' "$asset_name"
+}
+
+build_download_url() {
+    local version="$1"
+    local asset_name="$2"
+    printf 'https://github.com/%s/%s/releases/download/%s/%s\n' "$REPO_OWNER" "$REPO_NAME" "$version" "$asset_name"
+}
+
+extract_downloaded_asset() {
+    local asset_name="$1"
+    local downloaded_path="$2"
+    local tmp_dir="$3"
+
+    case "$asset_name" in
+        *.tar.gz)
+            tar -xzf "$downloaded_path" -C "$tmp_dir"
+            ;;
+        *.zip)
+            if has_cmd unzip; then
+                unzip -q "$downloaded_path" -d "$tmp_dir"
+            elif has_cmd bsdtar; then
+                bsdtar -xf "$downloaded_path" -C "$tmp_dir"
+            else
+                print_error "Need unzip or bsdtar to extract $asset_name"
+                return 1
+            fi
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    return 0
 }
 
 # Ensure install directory exists
@@ -230,7 +310,7 @@ ensure_install_dir() {
 
 # Main installation function
 install_ntm() {
-    local platform version install_dir tmp_dir download_url binary_path
+    local platform version install_dir tmp_dir asset_name download_url download_path binary_path
 
     print_info "Installing ${BIN_NAME}..."
 
@@ -259,8 +339,8 @@ install_ntm() {
         version="$VERSION"
         # Fetch release info for this version
         local release_json
-        release_json=$(get_latest_release) || {
-            print_error "Could not fetch release info from GitHub"
+        release_json=$(get_release_by_tag "$version") || {
+            print_error "Could not fetch release info for ${version} from GitHub"
             exit 1
         }
     fi
@@ -275,40 +355,57 @@ install_ntm() {
         }
     fi
 
-    # Find download URL
-    download_url=$(find_download_url "$platform" "$release_json")
+    # Find download asset
+    asset_name=$(find_asset_name "$platform" "$release_json")
 
-    if [ -z "$download_url" ]; then
+    if [ -z "$asset_name" ]; then
         # Try alternate naming conventions
         # Some releases use dashes instead of underscores
         local alt_platform="${platform//_/-}"
-        download_url=$(find_download_url "$alt_platform" "$release_json")
+        asset_name=$(find_asset_name "$alt_platform" "$release_json")
     fi
 
-    if [ -z "$download_url" ]; then
+    if [ -z "$asset_name" ]; then
         # macOS uses universal binary (darwin_all) instead of arch-specific
         case "$platform" in
             darwin_amd64|darwin_arm64)
-                download_url=$(find_download_url "darwin_all" "$release_json")
+                asset_name=$(find_asset_name "darwin_all" "$release_json")
                 ;;
         esac
     fi
 
-    if [ -z "$download_url" ]; then
+    if [ -z "$asset_name" ]; then
         print_error "No pre-built binary found for $platform"
         print_info "You can build from source with: go install github.com/${REPO_OWNER}/${REPO_NAME}/cmd/${BIN_NAME}@latest"
         exit 1
     fi
 
+    download_url=$(build_download_url "$version" "$asset_name")
+
     print_info "Downloading from $download_url..."
 
     # Create temp directory
     tmp_dir=$(make_tmp_dir)
+    download_path="${tmp_dir}/${asset_name}"
     binary_path="${tmp_dir}/${BIN_NAME}"
 
     # Download
-    if ! download_file "$download_url" "$binary_path"; then
+    if ! download_file "$download_url" "$download_path"; then
         print_error "Download failed"
+        exit 1
+    fi
+
+    if ! extract_downloaded_asset "$asset_name" "$download_path" "$tmp_dir"; then
+        print_error "Could not extract downloaded archive"
+        exit 1
+    fi
+
+    if [ ! -f "$binary_path" ] && [ -f "${tmp_dir}/${BIN_NAME}.exe" ]; then
+        binary_path="${tmp_dir}/${BIN_NAME}.exe"
+    fi
+
+    if [ ! -f "$binary_path" ]; then
+        print_error "Could not find ${BIN_NAME} in downloaded asset"
         exit 1
     fi
 
