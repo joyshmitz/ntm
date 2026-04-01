@@ -488,6 +488,11 @@ func TestGetModelName(t *testing.T) {
 		{"codex", "gpt4", "gpt-4"},
 		{"gemini", "flash", "gemini-3-flash"},
 		{"claude", "custom-model", "custom-model"},
+		{"claude-code", "", models.DefaultClaude},
+		{"codex-cli", "gpt4", "gpt-4"},
+		{"openai-codex", "", models.DefaultCodex},
+		{"google-gemini", "flash", "gemini-3-flash"},
+		{"  CodEx-Cli  ", "o3", "o3"},
 		{"unknown", "", ""},
 	}
 	for _, tt := range tests {

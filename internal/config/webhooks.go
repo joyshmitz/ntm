@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 )
 
@@ -23,7 +24,7 @@ type WebhookFilterConfig struct {
 	// Session is an optional glob for matching session names (e.g. "myproject*").
 	Session string `yaml:"session"`
 
-	// AgentType is an optional allowlist of agent types ("claude", "codex", "gemini").
+	// AgentType is an optional allowlist of supported agent types and aliases.
 	AgentType []string `yaml:"agent_type"`
 
 	// Severity is an optional allowlist of severities ("info", "success", "warning", "error").
@@ -106,7 +107,7 @@ func (c *WebhookConfig) ValidateConfig() error {
 
 	for _, t := range c.Filter.AgentType {
 		if !isValidWebhookAgentType(t) {
-			return fmt.Errorf("invalid filter.agent_type %q (supported: claude, codex, gemini)", strings.TrimSpace(t))
+			return fmt.Errorf("invalid filter.agent_type %q (supported: claude, codex, gemini, cursor, windsurf, aider, ollama)", strings.TrimSpace(t))
 		}
 	}
 
@@ -383,10 +384,15 @@ func isValidWebhookFormatter(format string) bool {
 		return false
 	}
 }
-
 func isValidWebhookAgentType(agentType string) bool {
-	switch strings.ToLower(strings.TrimSpace(agentType)) {
-	case "claude", "cc", "codex", "cod", "gemini", "gmi":
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode,
+		agent.AgentTypeCodex,
+		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
+		agent.AgentTypeWindsurf,
+		agent.AgentTypeAider,
+		agent.AgentTypeOllama:
 		return true
 	default:
 		return false

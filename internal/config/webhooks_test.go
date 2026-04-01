@@ -64,6 +64,27 @@ webhooks:
 	}
 }
 
+func TestParseWebhookConfig_SupportsExtendedAgentTypes(t *testing.T) {
+	content := `
+webhooks:
+  - name: agent-routing
+    url: https://example.com/hook
+    filter:
+      agent_type: [cursor, ws, aider, ollama, claude-code, codex-cli, google-gemini]
+`
+
+	cfgs, err := ParseWebhookConfig([]byte(content))
+	if err != nil {
+		t.Fatalf("ParseWebhookConfig failed: %v", err)
+	}
+	if len(cfgs) != 1 {
+		t.Fatalf("expected 1 webhook, got %d", len(cfgs))
+	}
+	if got := len(cfgs[0].Filter.AgentType); got != 7 {
+		t.Fatalf("unexpected filter.agent_type length: %d", got)
+	}
+}
+
 func TestParseWebhookConfig_MissingEnvVar(t *testing.T) {
 	content := `
 webhooks:
@@ -238,6 +259,14 @@ func TestIsValidWebhookAgentType(t *testing.T) {
 		{"CLAUDE", true},
 		{"  cc  ", true},
 		{"Codex", true},
+		{"cursor", true},
+		{"windsurf", true},
+		{"ws", true},
+		{"aider", true},
+		{"ollama", true},
+		{"claude-code", true},
+		{"codex-cli", true},
+		{"google-gemini", true},
 		{"", false},
 		{"python", false},
 		{"claude2", false},

@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/notify"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
@@ -1576,18 +1577,40 @@ func DefaultModels() ModelsConfig {
 		},
 	}
 }
+func canonicalModelLookupAgentType(agentType string) string {
+	switch agent.AgentType(agentType).Canonical() {
+	case agent.AgentTypeClaudeCode:
+		return "claude"
+	case agent.AgentTypeCodex:
+		return "codex"
+	case agent.AgentTypeGemini:
+		return "gemini"
+	case agent.AgentTypeOllama:
+		return "ollama"
+	case agent.AgentTypeCursor:
+		return "cursor"
+	case agent.AgentTypeWindsurf:
+		return "windsurf"
+	case agent.AgentTypeAider:
+		return "aider"
+	default:
+		return strings.ToLower(strings.TrimSpace(agentType))
+	}
+}
 
 // GetModelName resolves a model alias to its full model name.
 // Returns the alias itself if no mapping is found.
 func (m *ModelsConfig) GetModelName(agentType, alias string) string {
+	normalizedAgentType := canonicalModelLookupAgentType(agentType)
+
 	if alias == "" {
-		// Return default if no alias specified
-		switch strings.ToLower(agentType) {
-		case "claude", "cc":
+		// Return default if no alias specified.
+		switch normalizedAgentType {
+		case "claude":
 			return m.DefaultClaude
-		case "codex", "cod":
+		case "codex":
 			return m.DefaultCodex
-		case "gemini", "gmi":
+		case "gemini":
 			return m.DefaultGemini
 		case "ollama":
 			return m.DefaultOllama
@@ -1595,14 +1618,14 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 		return ""
 	}
 
-	// Check agent-specific aliases
+	// Check agent-specific aliases.
 	var aliases map[string]string
-	switch strings.ToLower(agentType) {
-	case "claude", "cc":
+	switch normalizedAgentType {
+	case "claude":
 		aliases = m.Claude
-	case "codex", "cod":
+	case "codex":
 		aliases = m.Codex
-	case "gemini", "gmi":
+	case "gemini":
 		aliases = m.Gemini
 	case "ollama":
 		aliases = m.Ollama
@@ -1620,7 +1643,7 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 		}
 	}
 
-	// Return the alias as-is (assume it's a full model name)
+	// Return the alias as-is (assume it's a full model name).
 	return alias
 }
 
