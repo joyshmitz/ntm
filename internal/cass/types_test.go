@@ -314,6 +314,34 @@ func TestCapabilitiesUnmarshal(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesUnmarshalCurrentLimitsSchema(t *testing.T) {
+	jsonData := `{
+		"crate_version": "0.2.5",
+		"api_version": 1,
+		"contract_version": "1",
+		"features": ["json_output"],
+		"connectors": ["claude_code", "codex"],
+		"limits": {
+			"max_limit": 0,
+			"max_content_length": 0,
+			"max_fields": 50,
+			"max_agg_buckets": 10
+		}
+	}`
+
+	var caps Capabilities
+	if err := json.Unmarshal([]byte(jsonData), &caps); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	limits := caps.Limits.ToMap()
+	if got := limits["max_fields"]; got != 50 {
+		t.Fatalf("limits[max_fields] = %v, want 50", got)
+	}
+	if got := limits["max_agg_buckets"]; got != 10 {
+		t.Fatalf("limits[max_agg_buckets] = %v, want 10", got)
+	}
+}
 func TestMessageTimestampTime(t *testing.T) {
 	ts := int64(1702200000)
 	tm := time.Unix(ts, 0)

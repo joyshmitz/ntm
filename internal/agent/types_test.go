@@ -67,15 +67,18 @@ func TestAgentType_Canonical(t *testing.T) {
 		want AgentType
 	}{
 		{AgentTypeClaudeCode, AgentTypeClaudeCode},
+		{AgentType("claudecode"), AgentTypeClaudeCode},
 		{AgentType("claude"), AgentTypeClaudeCode},
 		{AgentType(" Claude-Code "), AgentTypeClaudeCode},
 		{AgentType("claude_code"), AgentTypeClaudeCode},
 		{AgentType("codex"), AgentTypeCodex},
+		{AgentType("openaicodex"), AgentTypeCodex},
 		{AgentType("codex-cli"), AgentTypeCodex},
 		{AgentType("openai"), AgentTypeCodex},
 		{AgentType("openai-codex"), AgentTypeCodex},
 		{AgentType(" GMI "), AgentTypeGemini},
 		{AgentType("google"), AgentTypeGemini},
+		{AgentType("googlegemini"), AgentTypeGemini},
 		{AgentType("gemini_cli"), AgentTypeGemini},
 		{AgentType("google-gemini"), AgentTypeGemini},
 		{AgentType("ws"), AgentTypeWindsurf},

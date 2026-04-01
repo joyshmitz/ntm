@@ -169,6 +169,8 @@ type Model struct {
 	lastCassContextFetch time.Time
 	lastScanFetch        time.Time
 	lastHandoffFetch     time.Time
+	lastHistoryFetch     time.Time
+	lastFileChangesFetch time.Time
 
 	// Fetch state tracking to prevent pile-up
 	fetchingSession     bool
@@ -614,6 +616,8 @@ func New(session, projectDir string) Model {
 	m.lastAlertsFetch = now
 	m.lastAttentionFetch = now
 	m.lastBeadsFetch = now
+	m.lastHistoryFetch = now
+	m.lastFileChangesFetch = now
 	m.lastCassContextFetch = now
 	m.lastScanFetch = now
 	m.lastRanoNetworkFetch = now

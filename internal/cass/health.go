@@ -51,8 +51,8 @@ func (c *Client) Capabilities(ctx context.Context) (*Capabilities, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	// Call: cass capabilities --json
-	output, err := c.executor.Run(ctx, "capabilities", "--json")
+	// Call: cass capabilities --robot-format=json
+	output, err := c.executor.Run(ctx, "capabilities", "--robot-format=json")
 	if err != nil {
 		return nil, err
 	}

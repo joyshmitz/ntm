@@ -195,12 +195,34 @@ func (s StatusResponse) IsHealthy() bool {
 	return s.Healthy && s.Index.Healthy && s.Database.Healthy
 }
 
-// Limits defines API limits
+// Limits defines API limits.
+//
+// CASS has emitted more than one capabilities schema over time. Keep both the
+// legacy fields and the current robot-format fields so callers can parse either
+// response shape without guessing which CLI version they are talking to.
 type Limits struct {
 	MaxQueryLength       int `json:"max_query_length"`
 	MaxResults           int `json:"max_results"`
 	MaxConcurrentQueries int `json:"max_concurrent_queries"`
 	RateLimitPerMinute   int `json:"rate_limit_per_minute"`
+	MaxLimit             int `json:"max_limit"`
+	MaxContentLength     int `json:"max_content_length"`
+	MaxFields            int `json:"max_fields"`
+	MaxAggBuckets        int `json:"max_agg_buckets"`
+}
+
+// ToMap returns the populated limits in a JSON-ready shape.
+func (l Limits) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"max_query_length":       l.MaxQueryLength,
+		"max_results":            l.MaxResults,
+		"max_concurrent_queries": l.MaxConcurrentQueries,
+		"rate_limit_per_minute":  l.RateLimitPerMinute,
+		"max_limit":              l.MaxLimit,
+		"max_content_length":     l.MaxContentLength,
+		"max_fields":             l.MaxFields,
+		"max_agg_buckets":        l.MaxAggBuckets,
+	}
 }
 
 // Capabilities describes the features supported by the CASS instance

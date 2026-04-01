@@ -32,11 +32,11 @@ func (t AgentType) String() string {
 // used throughout tmux metadata and parser dispatch.
 func (t AgentType) Canonical() AgentType {
 	switch strings.ToLower(strings.TrimSpace(string(t))) {
-	case "cc", "claude", "claude-code", "claude_code":
+	case "cc", "claude", "claude-code", "claude_code", "claudecode":
 		return AgentTypeClaudeCode
-	case "cod", "codex", "codex-cli", "codex_cli", "openai", "openai-codex", "openai_codex":
+	case "cod", "codex", "codex-cli", "codex_cli", "codexcli", "openai", "openai-codex", "openai_codex", "openaicodex":
 		return AgentTypeCodex
-	case "gmi", "gemini", "gemini-cli", "gemini_cli", "google", "google-ai", "google_ai", "google-gemini", "google_gemini":
+	case "gmi", "gemini", "gemini-cli", "gemini_cli", "geminicli", "google", "google-ai", "google_ai", "google-gemini", "google_gemini", "googlegemini":
 		return AgentTypeGemini
 	case "cursor":
 		return AgentTypeCursor

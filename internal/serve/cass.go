@@ -336,12 +336,7 @@ func (s *Server) handleCASSCapabilities(w http.ResponseWriter, r *http.Request) 
 		"contract_version": caps.ContractVersion,
 		"features":         caps.Features,
 		"connectors":       caps.Connectors,
-		"limits": map[string]interface{}{
-			"max_query_length":       caps.Limits.MaxQueryLength,
-			"max_results":            caps.Limits.MaxResults,
-			"max_concurrent_queries": caps.Limits.MaxConcurrentQueries,
-			"rate_limit_per_minute":  caps.Limits.RateLimitPerMinute,
-		},
+		"limits":           caps.Limits.ToMap(),
 	}, reqID)
 }
 

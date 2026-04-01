@@ -982,6 +982,10 @@
             "description": "Mail urgent",
             "type": "integer"
           },
+          "ollama_count": {
+            "description": "Ollama count",
+            "type": "integer"
+          },
           "ready_work": {
             "description": "Ready work",
             "type": "integer"
@@ -1009,6 +1013,7 @@
           "cursor_count",
           "windsurf_count",
           "aider_count",
+          "ollama_count",
           "agents_by_state",
           "agents_by_type",
           "ready_work",

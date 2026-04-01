@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -275,8 +276,8 @@ func detectAgentTypeFromTitle(title string) string {
 		if underscore := strings.IndexByte(typePart, '_'); underscore >= 0 {
 			typePart = typePart[:underscore]
 		}
-		if resolved := ResolveAgentType(typePart); resolved != "" && resolved != "unknown" {
-			return resolved
+		if canonical := agent.AgentType(typePart).Canonical(); canonical.IsValid() {
+			return ResolveAgentType(string(canonical))
 		}
 	}
 

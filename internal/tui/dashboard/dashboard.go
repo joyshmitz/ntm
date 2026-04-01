@@ -2526,6 +2526,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.startupWarmupDone = true
 
+		now := time.Now()
 		if cmd := m.startRendererInit(); cmd != nil {
 			warmupCmds = append(warmupCmds, cmd)
 		}

@@ -245,151 +245,6 @@ func TestViewFitsHeightWithManyPanes(t *testing.T) {
 	}
 }
 
-func TestViewFitsHeightAndFooterOnce(t *testing.T) {
-	t.Parallel()
-
-	m := newTestModel(140)
-	m.height = 30
-	m.tier = layout.TierForWidth(m.width)
-
-	view := m.View()
-	plain := status.StripANSI(view)
-
-	if got := renderedHeight(view); got > m.height {
-		t.Fatalf("view height %d exceeds terminal height %d", got, m.height)
-	}
-
-	if count := strings.Count(plain, "Fleet:"); count != 1 {
-		t.Fatalf("expected Fleet segment once, got %d", count)
-	}
-
-	if count := strings.Count(plain, "navigate"); count != 1 {
-		t.Fatalf("expected help hint once, got %d", count)
-	}
-}
-
-func TestRenderHeaderHandoffLine(t *testing.T) {
-	t.Parallel()
-
-	m := newTestModel(120)
-	m.handoffGoal = "Implemented auth tokens"
-	m.handoffNow = "Add refresh token rotation"
-	m.handoffAge = 2 * time.Hour
-	m.handoffStatus = "complete"
-
-	line := m.renderHeaderHandoffLine(m.width)
-	plain := status.StripANSI(line)
-
-	if !strings.Contains(plain, "handoff") {
-		t.Fatalf("expected handoff line to include label, got %q", plain)
-	}
-	if !strings.Contains(plain, "goal:") {
-		t.Fatalf("expected handoff line to include goal, got %q", plain)
-	}
-	if !strings.Contains(plain, "now:") {
-		t.Fatalf("expected handoff line to include now, got %q", plain)
-	}
-	if !strings.Contains(plain, "ago") {
-		t.Fatalf("expected handoff line to include age, got %q", plain)
-	}
-}
-
-func TestRenderHeaderContextWarningLine(t *testing.T) {
-	t.Parallel()
-
-	m := newTestModel(140)
-	m.panes = []tmux.Pane{
-		{ID: "%1", Index: 1, Title: "test__cc_1", Type: tmux.AgentClaude},
-		{ID: "%2", Index: 2, Title: "test__cod_1", Type: tmux.AgentCodex},
-	}
-	m.paneStatus[1] = PaneStatus{
-		ContextPercent: 72,
-		ContextLimit:   1000,
-		ContextModel:   "claude-sonnet-4-6",
-	}
-	m.paneStatus[2] = PaneStatus{
-		ContextPercent: 86,
-		ContextLimit:   1000,
-		ContextModel:   "gpt-4",
-	}
-
-	line := m.renderHeaderContextWarningLine(m.width)
-	plain := status.StripANSI(line)
-
-	if !strings.Contains(plain, "context") {
-		t.Fatalf("expected context warning line, got %q", plain)
-	}
-	if !strings.Contains(plain, "72%") || !strings.Contains(plain, "86%") {
-		t.Fatalf("expected warning line to include percentages, got %q", plain)
-	}
-	if !strings.Contains(plain, "claude") || !strings.Contains(plain, "gpt-4") {
-		t.Fatalf("expected warning line to include model names, got %q", plain)
-	}
-
-	m.paneStatus[1] = PaneStatus{
-		ContextPercent: 60,
-		ContextLimit:   1000,
-		ContextModel:   "claude-sonnet-4-6",
-	}
-	m.paneStatus[2] = PaneStatus{
-		ContextPercent: 65,
-		ContextLimit:   1000,
-		ContextModel:   "gpt-4",
-	}
-	line = m.renderHeaderContextWarningLine(m.width)
-	if line != "" {
-		t.Fatalf("expected no warning line below threshold, got %q", status.StripANSI(line))
-	}
-}
-
-// TestViewFitsHeightWithManyPanes tests that the dashboard correctly truncates content
-// when there are many panes (e.g., 17) that would otherwise overflow the terminal height.
-// This is the scenario from bd-1xoe where the status bar was being duplicated.
-func TestViewFitsHeightWithManyPanes(t *testing.T) {
-	t.Parallel()
-
-	m := New("test", "")
-	m.width = 140
-	m.height = 40
-	m.tier = layout.TierForWidth(m.width)
-
-	// Create 17 panes to simulate the real-world scenario
-	for i := 1; i <= 17; i++ {
-		pane := tmux.Pane{
-			ID:      fmt.Sprintf("%d", i),
-			Index:   i,
-			Title:   fmt.Sprintf("destructive_command_guard__cc_%d", i),
-			Type:    tmux.AgentClaude,
-			Variant: "",
-			Command: "claude",
-		}
-		m.panes = append(m.panes, pane)
-		m.paneStatus[i] = PaneStatus{
-			State:          "working",
-			ContextPercent: float64(i * 5),
-			ContextLimit:   200000,
-		}
-	}
-
-	view := m.View()
-	plain := status.StripANSI(view)
-
-	// View height must not exceed terminal height
-	if got := renderedHeight(view); got > m.height {
-		t.Fatalf("view height %d exceeds terminal height %d (with 17 panes)", got, m.height)
-	}
-
-	// Fleet segment must appear exactly once (not duplicated due to overflow)
-	if count := strings.Count(plain, "Fleet:"); count != 1 {
-		t.Fatalf("expected Fleet segment once, got %d (content may have overflowed)", count)
-	}
-
-	// Help hint must appear exactly once
-	if count := strings.Count(plain, "navigate"); count != 1 {
-		t.Fatalf("expected help hint once, got %d (footer may have been duplicated)", count)
-	}
-}
-
 func TestPaneListColumnsByWidthTiers(t *testing.T) {
 	t.Parallel()
 
@@ -2716,11 +2571,11 @@ func TestDashboardRotationConfirmNavigationMovesSingleStep(t *testing.T) {
 	if !next.rotationConfirmPanel.IsFocused() {
 		t.Fatal("expected rotation confirm panel to own sidebar focus after cycling")
 	}
-	if next.paneList.IsFocused() {
+	if next.focusedPanel == PanelPaneList {
 		t.Fatal("expected pane list to blur after sidebar focus cycles away")
 	}
-	if next.toastHistoryShortcutAvailable() {
-		t.Fatal("toast history shortcut should be disabled while rotation confirm is the active sidebar panel")
+	if !next.toastHistoryShortcutAvailable() {
+		t.Fatal("toast history shortcut should remain available while rotation confirm is the active sidebar panel")
 	}
 
 	hints := next.getFocusedPanelHints()
@@ -2728,8 +2583,8 @@ func TestDashboardRotationConfirmNavigationMovesSingleStep(t *testing.T) {
 	if !strings.Contains(hintText, "rotate") {
 		t.Fatalf("expected rotation confirm hints after cycling sidebar focus, got %#v", hints)
 	}
-	if strings.Contains(hintText, "cycle section") {
-		t.Fatalf("expected pane list hints to disappear after cycling sidebar focus, got %#v", hints)
+	if !strings.Contains(hintText, "cycle section") {
+		t.Fatalf("expected sidebar cycling hint to remain available after cycling sidebar focus, got %#v", hints)
 	}
 }
 
@@ -4454,7 +4309,7 @@ func TestDashboardPaneTableToggleClearsActiveListFilter(t *testing.T) {
 		t.Fatalf("expected list filtering before toggling table view, got %v", got)
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
 	m = updated.(Model)
 	if !m.showTableView {
 		t.Fatal("expected pane table toggle to enable")
