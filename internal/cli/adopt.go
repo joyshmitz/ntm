@@ -8,20 +8,39 @@ import (
 
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
+type adoptTypeSpec struct {
+	Flag        string
+	AgentType   agentpkg.AgentType
+	Description string
+	Example     string
+}
+
+var supportedAdoptTypes = []adoptTypeSpec{
+	{Flag: "cc", AgentType: agentpkg.AgentTypeClaudeCode, Description: "Claude agents", Example: "0,1,2"},
+	{Flag: "cod", AgentType: agentpkg.AgentTypeCodex, Description: "Codex agents", Example: "3,4"},
+	{Flag: "gmi", AgentType: agentpkg.AgentTypeGemini, Description: "Gemini agents", Example: "5"},
+	{Flag: "cursor", AgentType: agentpkg.AgentTypeCursor, Description: "Cursor agents", Example: "6"},
+	{Flag: "windsurf", AgentType: agentpkg.AgentTypeWindsurf, Description: "Windsurf agents", Example: "7"},
+	{Flag: "aider", AgentType: agentpkg.AgentTypeAider, Description: "Aider agents", Example: "8"},
+	{Flag: "ollama", AgentType: agentpkg.AgentTypeOllama, Description: "Ollama agents", Example: "9"},
+	{Flag: "user", AgentType: agentpkg.AgentTypeUser, Description: "User panes", Example: "10"},
+}
+
 func newAdoptCmd() *cobra.Command {
 	var (
-		ccPanes   string
-		codPanes  string
-		gmiPanes  string
-		userPanes string
-		autoName  bool
-		dryRun    bool
+		autoName bool
+		dryRun   bool
 	)
+	paneFlags := make(map[agentpkg.AgentType]*string, len(supportedAdoptTypes))
+	for _, spec := range supportedAdoptTypes {
+		paneFlags[spec.AgentType] = new(string)
+	}
 
 	cmd := &cobra.Command{
 		Use:   "adopt <session-name>",
@@ -41,35 +60,40 @@ Examples:
   ntm adopt my_session --cc=0,1,2,3,4,5
 
   # Adopt with mixed agent types
-  ntm adopt my_session --cc=0,1,2 --cod=3,4 --gmi=5
+  ntm adopt my_session --cc=0,1,2 --cod=3,4 --gmi=5 --cursor=6
 
   # Preview what would be changed
-  ntm adopt my_session --cc=0,1 --dry-run
+  ntm adopt my_session --windsurf=0 --aider=1 --ollama=2 --dry-run
 
   # Auto-rename panes based on agent type
   ntm adopt my_session --cc=0,1 --auto-name`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			sessionName := args[0]
+			assignments := make(map[agentpkg.AgentType][]int, len(supportedAdoptTypes))
+			for _, spec := range supportedAdoptTypes {
+				assignments[spec.AgentType] = parsePaneList(*paneFlags[spec.AgentType])
+			}
 
 			opts := AdoptOptions{
-				Session:   sessionName,
-				AutoName:  autoName,
-				DryRun:    dryRun,
-				CCPanes:   parsePaneList(ccPanes),
-				CodPanes:  parsePaneList(codPanes),
-				GmiPanes:  parsePaneList(gmiPanes),
-				UserPanes: parsePaneList(userPanes),
+				Session:         sessionName,
+				AutoName:        autoName,
+				DryRun:          dryRun,
+				PaneAssignments: assignments,
 			}
 
 			return runAdopt(opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&ccPanes, "cc", "", "Comma-separated pane indices for Claude agents (e.g., 0,1,2)")
-	cmd.Flags().StringVar(&codPanes, "cod", "", "Comma-separated pane indices for Codex agents (e.g., 3,4)")
-	cmd.Flags().StringVar(&gmiPanes, "gmi", "", "Comma-separated pane indices for Gemini agents (e.g., 5)")
-	cmd.Flags().StringVar(&userPanes, "user", "", "Comma-separated pane indices for user panes (e.g., 6)")
+	for _, spec := range supportedAdoptTypes {
+		cmd.Flags().StringVar(
+			paneFlags[spec.AgentType],
+			spec.Flag,
+			"",
+			fmt.Sprintf("Comma-separated pane indices for %s (e.g., %s)", spec.Description, spec.Example),
+		)
+	}
 	cmd.Flags().BoolVar(&autoName, "auto-name", true, "Automatically rename panes to NTM convention")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without applying them")
 
@@ -78,13 +102,10 @@ Examples:
 
 // AdoptOptions configures session adoption
 type AdoptOptions struct {
-	Session   string
-	AutoName  bool
-	DryRun    bool
-	CCPanes   []int
-	CodPanes  []int
-	GmiPanes  []int
-	UserPanes []int
+	Session         string
+	AutoName        bool
+	DryRun          bool
+	PaneAssignments map[agentpkg.AgentType][]int
 }
 
 // AdoptResult represents the result of an adopt operation
@@ -110,14 +131,76 @@ type AdoptedPaneInfo struct {
 
 // AdoptedAgentCounts tracks agent counts by type
 type AdoptedAgentCounts struct {
-	Claude int `json:"cc"`
-	Codex  int `json:"cod"`
-	Gemini int `json:"gmi"`
-	User   int `json:"user"`
+	CC       int `json:"cc"`
+	Cod      int `json:"cod"`
+	Gmi      int `json:"gmi"`
+	Cursor   int `json:"cursor"`
+	Windsurf int `json:"windsurf"`
+	Aider    int `json:"aider"`
+	Ollama   int `json:"ollama"`
+	User     int `json:"user"`
 }
 
 func (a AdoptedAgentCounts) Total() int {
-	return a.Claude + a.Codex + a.Gemini + a.User
+	return a.CC + a.Cod + a.Gmi + a.Cursor + a.Windsurf + a.Aider + a.Ollama + a.User
+}
+
+func (a AdoptedAgentCounts) Summary() string {
+	parts := make([]string, 0, len(supportedAdoptTypes))
+	for _, spec := range supportedAdoptTypes {
+		count := a.countFor(spec.AgentType)
+		if count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", spec.AgentType, count))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (a *AdoptedAgentCounts) increment(agentType agentpkg.AgentType) {
+	switch agentType.Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		a.CC++
+	case agentpkg.AgentTypeCodex:
+		a.Cod++
+	case agentpkg.AgentTypeGemini:
+		a.Gmi++
+	case agentpkg.AgentTypeCursor:
+		a.Cursor++
+	case agentpkg.AgentTypeWindsurf:
+		a.Windsurf++
+	case agentpkg.AgentTypeAider:
+		a.Aider++
+	case agentpkg.AgentTypeOllama:
+		a.Ollama++
+	case agentpkg.AgentTypeUser:
+		a.User++
+	}
+}
+
+func (a AdoptedAgentCounts) countFor(agentType agentpkg.AgentType) int {
+	switch agentType.Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return a.CC
+	case agentpkg.AgentTypeCodex:
+		return a.Cod
+	case agentpkg.AgentTypeGemini:
+		return a.Gmi
+	case agentpkg.AgentTypeCursor:
+		return a.Cursor
+	case agentpkg.AgentTypeWindsurf:
+		return a.Windsurf
+	case agentpkg.AgentTypeAider:
+		return a.Aider
+	case agentpkg.AgentTypeOllama:
+		return a.Ollama
+	case agentpkg.AgentTypeUser:
+		return a.User
+	default:
+		return 0
+	}
 }
 
 func (r *AdoptResult) Text(w io.Writer) error {
@@ -138,8 +221,7 @@ func (r *AdoptResult) Text(w io.Writer) error {
 	}
 
 	fmt.Fprintf(w, "  Total panes: %d\n", r.TotalPanes)
-	fmt.Fprintf(w, "  Adopted: %d (cc:%d, cod:%d, gmi:%d, user:%d)\n",
-		r.Agents.Total(), r.Agents.Claude, r.Agents.Codex, r.Agents.Gemini, r.Agents.User)
+	fmt.Fprintf(w, "  Adopted: %d (%s)\n", r.Agents.Total(), r.Agents.Summary())
 
 	if len(r.AdoptedPanes) > 0 {
 		fmt.Fprintf(w, "\n%sPanes:%s\n", colorize(t.Blue), colorize(t.Text))
@@ -165,7 +247,6 @@ func runAdopt(opts AdoptOptions) error {
 		return err
 	}
 
-	// Check session exists
 	if !tmux.SessionExists(opts.Session) {
 		result := &AdoptResult{
 			Success: false,
@@ -175,7 +256,6 @@ func runAdopt(opts AdoptOptions) error {
 		return output.New(output.WithJSON(jsonOutput)).Output(result)
 	}
 
-	// Get existing panes
 	panes, err := tmux.GetPanes(opts.Session)
 	if err != nil {
 		result := &AdoptResult{
@@ -186,40 +266,39 @@ func runAdopt(opts AdoptOptions) error {
 		return output.New(output.WithJSON(jsonOutput)).Output(result)
 	}
 
-	// Build pane index lookup
 	paneByIndex := make(map[int]*tmux.Pane)
 	for i := range panes {
 		paneByIndex[panes[i].Index] = &panes[i]
 	}
 
-	// Build adoption plan
-	adoptedPanes := []AdoptedPaneInfo{}
-	counts := AdoptedAgentCounts{}
-
-	// Track NTM index per agent type
-	ntmIndex := map[string]int{
-		"cc":   1,
-		"cod":  1,
-		"gmi":  1,
-		"user": 1,
+	if err := validateAdoptAssignments(opts.PaneAssignments); err != nil {
+		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
+		return output.New(output.WithJSON(jsonOutput)).Output(result)
 	}
 
-	// Helper to adopt panes for a type
-	adoptType := func(paneIndices []int, agentType string, counter *int) error {
+	adoptedPanes := []AdoptedPaneInfo{}
+	counts := AdoptedAgentCounts{}
+	ntmIndex := make(map[agentpkg.AgentType]int, len(supportedAdoptTypes))
+	for _, spec := range supportedAdoptTypes {
+		ntmIndex[spec.AgentType] = 1
+	}
+
+	adoptType := func(paneIndices []int, agentType agentpkg.AgentType) error {
+		canonicalType := agentType.Canonical()
 		for _, idx := range paneIndices {
 			pane, ok := paneByIndex[idx]
 			if !ok {
 				return fmt.Errorf("pane index %d not found in session", idx)
 			}
 
-			newTitle := tmux.FormatPaneName(opts.Session, agentType, ntmIndex[agentType], "")
+			newTitle := tmux.FormatPaneName(opts.Session, canonicalType.String(), ntmIndex[canonicalType], "")
 			info := AdoptedPaneInfo{
 				PaneID:    pane.ID,
 				PaneIndex: pane.Index,
-				AgentType: agentType,
+				AgentType: canonicalType.String(),
 				OldTitle:  pane.Title,
 				NewTitle:  newTitle,
-				NTMIndex:  ntmIndex[agentType],
+				NTMIndex:  ntmIndex[canonicalType],
 			}
 
 			if opts.AutoName && !opts.DryRun {
@@ -229,38 +308,17 @@ func runAdopt(opts AdoptOptions) error {
 			}
 
 			adoptedPanes = append(adoptedPanes, info)
-			ntmIndex[agentType]++
-			*counter++
+			ntmIndex[canonicalType]++
+			counts.increment(canonicalType)
 		}
 		return nil
 	}
 
-	// Adopt each type
-	if err := adoptType(opts.CCPanes, "cc", &counts.Claude); err != nil {
-		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
-	}
-	if err := adoptType(opts.CodPanes, "cod", &counts.Codex); err != nil {
-		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
-	}
-	if err := adoptType(opts.GmiPanes, "gmi", &counts.Gemini); err != nil {
-		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
-	}
-	if err := adoptType(opts.UserPanes, "user", &counts.User); err != nil {
-		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
-	}
-
-	// Check if any panes were specified
-	if counts.Total() == 0 {
-		result := &AdoptResult{
-			Success: false,
-			Session: opts.Session,
-			Error:   "no panes specified for adoption; use --cc, --cod, --gmi, or --user flags",
+	for _, spec := range supportedAdoptTypes {
+		if err := adoptType(opts.PaneAssignments[spec.AgentType], spec.AgentType); err != nil {
+			result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
+			return output.New(output.WithJSON(jsonOutput)).Output(result)
 		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
 	}
 
 	result := &AdoptResult{
@@ -273,6 +331,36 @@ func runAdopt(opts AdoptOptions) error {
 	}
 
 	return output.New(output.WithJSON(jsonOutput)).Output(result)
+}
+
+func validateAdoptAssignments(assignments map[agentpkg.AgentType][]int) error {
+	seen := make(map[int]agentpkg.AgentType)
+	for _, spec := range supportedAdoptTypes {
+		for _, idx := range assignments[spec.AgentType] {
+			if idx < 0 {
+				return fmt.Errorf("pane index %d is invalid; pane indices must be non-negative", idx)
+			}
+			if previous, ok := seen[idx]; ok {
+				return fmt.Errorf("pane index %d assigned multiple times (%s and %s)", idx, previous, spec.AgentType)
+			}
+			seen[idx] = spec.AgentType
+		}
+	}
+	if len(seen) == 0 {
+		return fmt.Errorf("no panes specified for adoption; use one or more of %s", adoptFlagList())
+	}
+	return nil
+}
+
+func adoptFlagList() string {
+	parts := make([]string, 0, len(supportedAdoptTypes))
+	for _, spec := range supportedAdoptTypes {
+		parts = append(parts, "--"+spec.Flag)
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + ", or " + parts[len(parts)-1]
 }
 
 // parsePaneList parses a comma-separated list of pane indices
@@ -304,7 +392,6 @@ func parsePaneList(s string) []int {
 			}
 		}
 
-		// Single index
 		if idx, err := strconv.Atoi(p); err == nil {
 			result = append(result, idx)
 		}
