@@ -82,14 +82,22 @@ func builtinWorkflows() ([]WorkflowTemplate, error) {
 func parseWorkflowsFromContent(content string) ([]WorkflowTemplate, error) {
 	// Try workflows array format first (used by builtins)
 	var wf WorkflowsFile
-	if _, err := toml.Decode(content, &wf); err == nil && len(wf.Workflows) > 0 {
+	md, err := toml.Decode(content, &wf)
+	if err == nil && len(wf.Workflows) > 0 {
+		if fields := undecodedWorkflowFields(md); len(fields) > 0 {
+			return nil, fmt.Errorf("unknown field(s): %s", strings.Join(fields, ", "))
+		}
 		return validateWorkflows(wf.Workflows)
 	}
 
 	// Try single workflow format
 	var tmpl WorkflowTemplate
-	if _, err := toml.Decode(content, &tmpl); err != nil {
+	md, err = toml.Decode(content, &tmpl)
+	if err != nil {
 		return nil, fmt.Errorf("parse TOML: %w", err)
+	}
+	if fields := undecodedWorkflowFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("unknown field(s): %s", strings.Join(fields, ", "))
 	}
 	return validateWorkflows([]WorkflowTemplate{tmpl})
 }
@@ -124,6 +132,8 @@ func (l *Loader) LoadAll() ([]WorkflowTemplate, error) {
 		for _, w := range userWorkflows {
 			workflows[w.Name] = w
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 
 	// 3. Load project workflows (highest priority)
@@ -132,6 +142,8 @@ func (l *Loader) LoadAll() ([]WorkflowTemplate, error) {
 		for _, w := range projectWorkflows {
 			workflows[w.Name] = w
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 
 	// Convert map to slice, preserving reasonable order (builtins first)
@@ -167,14 +179,15 @@ func loadFromDir(dir, source string) ([]WorkflowTemplate, error) {
 			continue
 		}
 
-		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		path := filepath.Join(dir, entry.Name())
+		content, err := os.ReadFile(path)
 		if err != nil {
-			continue // Skip files we can't read
+			return nil, fmt.Errorf("reading workflow %s: %w", path, err)
 		}
 
 		tmpls, err := parseWorkflowsFromContent(string(content))
 		if err != nil {
-			continue // Skip files we can't parse
+			return nil, fmt.Errorf("parsing workflow %s: %w", path, err)
 		}
 		for i := range tmpls {
 			tmpls[i].Source = source

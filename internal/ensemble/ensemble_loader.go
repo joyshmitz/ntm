@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -27,6 +28,19 @@ type ensemblesFile struct {
 }
 
 const importedEnsemblesFilename = "ensembles.imported.toml"
+
+func undecodedEnsembleFields(md toml.MetaData) []string {
+	fields := md.Undecoded()
+	if len(fields) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		names = append(names, field.String())
+	}
+	sort.Strings(names)
+	return names
+}
 
 // ImportedEnsemblesPath returns the default path for imported ensembles.
 func ImportedEnsemblesPath(userConfigDir string) string {
@@ -114,8 +128,12 @@ func (l *EnsembleLoader) mergeFromFile(merged map[string]EnsemblePreset, path, s
 	}
 
 	var file ensemblesFile
-	if _, err := toml.Decode(string(data), &file); err != nil {
+	md, err := toml.Decode(string(data), &file)
+	if err != nil {
 		return fmt.Errorf("parse TOML: %w", err)
+	}
+	if unknown := undecodedEnsembleFields(md); len(unknown) > 0 {
+		return fmt.Errorf("parse TOML: unknown field(s): %s", strings.Join(unknown, ", "))
 	}
 
 	for i := range file.Ensembles {
@@ -150,8 +168,12 @@ func LoadEnsemblesFile(path string) ([]EnsemblePreset, error) {
 	}
 
 	var file ensemblesFile
-	if _, err := toml.Decode(string(data), &file); err != nil {
+	md, err := toml.Decode(string(data), &file)
+	if err != nil {
 		return nil, fmt.Errorf("parse TOML: %w", err)
+	}
+	if unknown := undecodedEnsembleFields(md); len(unknown) > 0 {
+		return nil, fmt.Errorf("parse TOML: unknown field(s): %s", strings.Join(unknown, ", "))
 	}
 	if file.Ensembles == nil {
 		return []EnsemblePreset{}, nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,6 +123,50 @@ type CommandHooksConfig struct {
 	Hooks []CommandHook `toml:"command_hooks"`
 }
 
+func undecodedHookFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+func filterHookSectionFields(fields []string) []string {
+	if len(fields) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field == "command_hooks" || strings.HasPrefix(field, "command_hooks.") {
+			filtered = append(filtered, field)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func parseCommandHooksConfig(data []byte, label string) (*CommandHooksConfig, error) {
+	var cfg CommandHooksConfig
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	if fields := undecodedHookFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("%s: unknown field(s): %s", label, strings.Join(fields, ", "))
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid hooks config: %w", err)
+	}
+	return &cfg, nil
+}
+
 // Validate checks if the command hook configuration is valid
 func (h *CommandHook) Validate() error {
 	if strings.TrimSpace(h.Command) == "" {
@@ -217,30 +262,12 @@ func LoadCommandHooks(path string) (*CommandHooksConfig, error) {
 		return nil, fmt.Errorf("reading hooks config: %w", err)
 	}
 
-	var cfg CommandHooksConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing hooks config: %w", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid hooks config: %w", err)
-	}
-
-	return &cfg, nil
+	return parseCommandHooksConfig(data, "parsing hooks config")
 }
 
 // LoadCommandHooksFromTOML parses command hooks from TOML content directly
 func LoadCommandHooksFromTOML(content string) (*CommandHooksConfig, error) {
-	var cfg CommandHooksConfig
-	if err := toml.Unmarshal([]byte(content), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing hooks TOML: %w", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid hooks config: %w", err)
-	}
-
-	return &cfg, nil
+	return parseCommandHooksConfig([]byte(content), "parsing hooks TOML")
 }
 
 // LoadCommandHooksFromMainConfig extracts hooks from the main ntm config.
@@ -268,8 +295,12 @@ func LoadCommandHooksFromMainConfig(mainConfigPath string) (*CommandHooksConfig,
 	}
 
 	var cfg CommandHooksConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing main config: %w", err)
+	}
+	if fields := filterHookSectionFields(undecodedHookFields(md)); len(fields) > 0 {
+		return nil, fmt.Errorf("parsing main config: unknown command_hooks field(s): %s", strings.Join(fields, ", "))
 	}
 
 	// Validate only if we found hooks

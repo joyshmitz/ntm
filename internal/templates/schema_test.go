@@ -343,6 +343,63 @@ spec:
 	}
 }
 
+func TestSessionTemplateLoader_Load_ProjectErrorWinsOverBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, ".ntm", "templates")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	testBuiltin := &SessionTemplate{
+		APIVersion: "v1",
+		Kind:       "SessionTemplate",
+		Metadata: SessionTemplateMetadata{
+			Name:        "broken-shadow",
+			Description: "builtin fallback",
+		},
+		Spec: SessionTemplateSpec{},
+	}
+	RegisterBuiltinSessionTemplate(testBuiltin)
+	defer func() {
+		delete(builtinSessionTemplates, "broken-shadow")
+	}()
+
+	content := `apiVersion: [
+`
+	if err := os.WriteFile(filepath.Join(projectDir, "broken-shadow.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loader := NewSessionTemplateLoaderWithProject(tmpDir)
+	_, err := loader.Load("broken-shadow")
+	if err == nil {
+		t.Fatal("expected invalid project template to fail")
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("got not-found style error instead of project parse error: %v", err)
+	}
+}
+
+func TestSessionTemplateLoader_List_ErrorsOnInvalidProjectTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, ".ntm", "templates")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	content := `apiVersion: [
+`
+	if err := os.WriteFile(filepath.Join(projectDir, "broken.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loader := NewSessionTemplateLoaderWithProject(tmpDir)
+	_, err := loader.List()
+	if err == nil {
+		t.Fatal("expected invalid project session template to fail")
+	}
+}
+
 func TestSessionTemplateLoader_NotFound(t *testing.T) {
 	loader := NewSessionTemplateLoader()
 	_, err := loader.Load("nonexistent-template-xyz")
@@ -642,4 +699,56 @@ func TestSessionTemplateValidate_InvalidName(t *testing.T) {
 
 func intPtr(v int) *int {
 	return &v
+}
+
+func TestParseSessionTemplate_UnknownField(t *testing.T) {
+	content := []byte(`apiVersion: v1
+kind: SessionTemplate
+legacy: true
+metadata:
+  name: strict-template
+spec:
+  agents:
+    claude:
+      count: 1
+`)
+
+	_, err := ParseSessionTemplate(content)
+	if err == nil {
+		t.Fatal("expected error for unknown session-template field")
+	}
+	if !strings.Contains(err.Error(), "field legacy not found") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}
+
+func TestSessionTemplateLoader_Load_UnknownFieldFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, ".ntm", "templates")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	content := `apiVersion: v1
+kind: SessionTemplate
+legacy: true
+metadata:
+  name: broken-strict-template
+spec:
+  agents:
+    claude:
+      count: 1
+`
+	if err := os.WriteFile(filepath.Join(projectDir, "broken-strict-template.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loader := NewSessionTemplateLoaderWithProject(tmpDir)
+	_, err := loader.Load("broken-strict-template")
+	if err == nil {
+		t.Fatal("expected load error for unknown session-template field")
+	}
+	if !strings.Contains(err.Error(), "field legacy not found") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
 }

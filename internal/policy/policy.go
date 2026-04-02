@@ -2,7 +2,9 @@
 package policy
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,6 +58,25 @@ type Match struct {
 	SLB     bool // Whether this match requires SLB approval
 }
 
+// DecodeYAML decodes policy YAML strictly, rejecting unknown fields.
+func DecodeYAML(data []byte) (*Policy, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return &Policy{}, nil
+	}
+
+	var p Policy
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&p); err != nil {
+		if err == io.EOF {
+			return &Policy{}, nil
+		}
+		return nil, fmt.Errorf("parsing policy file: %w", err)
+	}
+
+	return &p, nil
+}
+
 // Load reads and parses a policy file from the given path.
 func Load(path string) (*Policy, error) {
 	data, err := os.ReadFile(path)
@@ -63,17 +84,16 @@ func Load(path string) (*Policy, error) {
 		return nil, fmt.Errorf("reading policy file: %w", err)
 	}
 
-	var p Policy
-	if err := yaml.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("parsing policy file: %w", err)
-	}
-
-	// Compile all regex patterns
-	if err := p.compile(); err != nil {
+	p, err := DecodeYAML(data)
+	if err != nil {
 		return nil, err
 	}
 
-	return &p, nil
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+
+	return p, nil
 }
 
 // LoadOrDefault loads the policy from the default path, or returns an empty policy if not found.

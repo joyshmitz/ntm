@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +47,30 @@ type ValidationResult struct {
 	Warnings []ParseError `json:"warnings,omitempty"`
 }
 
+func parseYAMLWorkflow(data []byte, workflow *Workflow) error {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(workflow); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func formatUndecodedTOMLKeys(keys []toml.Key) string {
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key.String())
+	}
+	return strings.Join(parts, ", ")
+}
+
 // ParseFile parses a workflow file (YAML or TOML) and returns the workflow
 func ParseFile(path string) (*Workflow, error) {
 	data, err := os.ReadFile(path)
@@ -57,19 +83,28 @@ func ParseFile(path string) (*Workflow, error) {
 
 	switch ext {
 	case ".yaml", ".yml":
-		if err := yaml.Unmarshal(data, &workflow); err != nil {
+		if err := parseYAMLWorkflow(data, &workflow); err != nil {
 			return nil, &ParseError{
 				File:    path,
 				Message: fmt.Sprintf("YAML parse error: %v", err),
-				Hint:    "Check YAML syntax - indentation and colons matter",
+				Hint:    "Check YAML syntax and remove unsupported fields",
 			}
 		}
 	case ".toml":
-		if _, err := toml.Decode(string(data), &workflow); err != nil {
+		md, err := toml.Decode(string(data), &workflow)
+		if err != nil {
 			return nil, &ParseError{
 				File:    path,
 				Message: fmt.Sprintf("TOML parse error: %v", err),
 				Hint:    "Check TOML syntax - keys and values must be properly formatted",
+			}
+		}
+		if undecoded := md.Undecoded(); len(undecoded) > 0 {
+			return nil, &ParseError{
+				File:    path,
+				Field:   undecoded[0].String(),
+				Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
+				Hint:    "Remove or rename unsupported fields",
 			}
 		}
 	default:
@@ -89,15 +124,23 @@ func ParseString(content string, format string) (*Workflow, error) {
 
 	switch strings.ToLower(format) {
 	case "yaml", "yml":
-		if err := yaml.Unmarshal([]byte(content), &workflow); err != nil {
+		if err := parseYAMLWorkflow([]byte(content), &workflow); err != nil {
 			return nil, &ParseError{
 				Message: fmt.Sprintf("YAML parse error: %v", err),
 			}
 		}
 	case "toml":
-		if _, err := toml.Decode(content, &workflow); err != nil {
+		md, err := toml.Decode(content, &workflow)
+		if err != nil {
 			return nil, &ParseError{
 				Message: fmt.Sprintf("TOML parse error: %v", err),
+			}
+		}
+		if undecoded := md.Undecoded(); len(undecoded) > 0 {
+			return nil, &ParseError{
+				Field:   undecoded[0].String(),
+				Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
+				Hint:    "Remove or rename unsupported fields",
 			}
 		}
 	default:

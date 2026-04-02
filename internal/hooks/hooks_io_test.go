@@ -57,6 +57,55 @@ func TestLoadCommandHooksFromMainConfig_ValidFile(t *testing.T) {
 	}
 }
 
+func TestLoadCommandHooksFromMainConfig_AllowsUnrelatedSections(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `theme = "nord"
+
+[agents]
+claude = "claude"
+` + validHookTOML
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadCommandHooksFromMainConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Hooks) != 1 {
+		t.Fatalf("expected 1 hook, got %d", len(cfg.Hooks))
+	}
+}
+
+func TestLoadCommandHooksFromMainConfig_UnknownHookField(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `theme = "nord"
+
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo hello"
+legacy = true
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadCommandHooksFromMainConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for unknown command_hooks field")
+	}
+	if got := err.Error(); !strings.Contains(got, "unknown command_hooks field") {
+		t.Fatalf("expected unknown command_hooks field error, got %q", got)
+	}
+	if got := err.Error(); !strings.Contains(got, "command_hooks.legacy") {
+		t.Fatalf("expected error to mention command_hooks.legacy, got %q", got)
+	}
+}
+
 func TestLoadCommandHooksFromMainConfig_InvalidTOML(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

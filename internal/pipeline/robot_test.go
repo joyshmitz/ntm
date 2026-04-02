@@ -717,7 +717,7 @@ func TestPrintPipelineRun_WorkflowLoadErrors(t *testing.T) {
 					t.Fatalf("Failed to create temp file: %v", err)
 				}
 				// Valid YAML but missing required 'schema_version' field
-				f.WriteString("name: test-workflow\nsteps:\n  - id: step1\n    command: echo hello\n")
+				f.WriteString("name: test-workflow\nsteps:\n  - id: step1\n    agent: claude\n    prompt: hello\n")
 				f.Close()
 				return f.Name()
 			},
@@ -732,7 +732,7 @@ func TestPrintPipelineRun_WorkflowLoadErrors(t *testing.T) {
 					t.Fatalf("Failed to create temp file: %v", err)
 				}
 				// Valid YAML but missing required 'name' field (has schema_version)
-				f.WriteString("schema_version: \"1.0\"\nsteps:\n  - id: step1\n    command: echo hello\n")
+				f.WriteString("schema_version: \"2.0\"\nsteps:\n  - id: step1\n    agent: claude\n    prompt: hello\n")
 				f.Close()
 				return f.Name()
 			},

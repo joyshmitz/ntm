@@ -5,13 +5,14 @@ package persona
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
 	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
@@ -56,6 +57,25 @@ type PersonasConfig struct {
 	PersonaSets []PersonaSet `toml:"persona_sets,omitempty"`
 }
 
+// Validate checks if the persona set configuration is valid.
+func (s *PersonaSet) Validate() error {
+	if strings.TrimSpace(s.Name) == "" {
+		return fmt.Errorf("persona set name is required")
+	}
+	if !nameRegex.MatchString(strings.TrimSpace(s.Name)) {
+		return fmt.Errorf("persona set name %q contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)", s.Name)
+	}
+	if len(s.Personas) == 0 {
+		return fmt.Errorf("persona set %q must contain at least one persona", s.Name)
+	}
+	for i, name := range s.Personas {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("persona set %q has empty persona reference at index %d", s.Name, i)
+		}
+	}
+	return nil
+}
+
 // AgentTypeFlag returns the NTM flag for this persona's agent type.
 // e.g., "claude" -> "cc", "openai-codex" -> "cod", "google-gemini" -> "gmi"
 func (p *Persona) AgentTypeFlag() string {
@@ -87,17 +107,19 @@ func (p *Persona) Validate() error {
 	if !nameRegex.MatchString(p.Name) {
 		return fmt.Errorf("persona name %q contains invalid characters (allowed: a-z, A-Z, 0-9, _, -)", p.Name)
 	}
-	if p.AgentType == "" {
+	if strings.TrimSpace(p.AgentType) == "" && strings.TrimSpace(p.Extends) == "" {
 		return fmt.Errorf("persona %q: agent_type is required", p.Name)
 	}
 
-	// Validate agent type aliases against the shared canonical resolver.
-	switch agentpkg.AgentType(p.AgentType).Canonical() {
-	case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
-		agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
-		// valid
-	default:
-		return fmt.Errorf("persona %q: invalid agent_type %q", p.Name, p.AgentType)
+	if strings.TrimSpace(p.AgentType) != "" {
+		// Validate agent type aliases against the shared canonical resolver.
+		switch agentpkg.AgentType(p.AgentType).Canonical() {
+		case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
+			agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
+			// valid
+		default:
+			return fmt.Errorf("persona %q: invalid agent_type %q", p.Name, p.AgentType)
+		}
 	}
 
 	// Validate temperature if set
@@ -301,6 +323,19 @@ func mergePersonas(parent, child *Persona) *Persona {
 	return merged
 }
 
+func undecodedPersonaFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
+}
+
 // LoadFromFile loads personas from a TOML file.
 func LoadFromFile(path string) (*PersonasConfig, error) {
 	data, err := os.ReadFile(path)
@@ -309,13 +344,39 @@ func LoadFromFile(path string) (*PersonasConfig, error) {
 	}
 
 	var cfg PersonasConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing personas file %s: %w", path, err)
 	}
+	if fields := undecodedPersonaFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("parsing personas file %s: unknown field(s): %s", path, strings.Join(fields, ", "))
+	}
 
+	seenPersonas := make(map[string]struct{}, len(cfg.Personas))
 	// Validate all personas
 	for i := range cfg.Personas {
+		key := strings.ToLower(strings.TrimSpace(cfg.Personas[i].Name))
+		if key != "" {
+			if _, exists := seenPersonas[key]; exists {
+				return nil, fmt.Errorf("duplicate persona name %q", cfg.Personas[i].Name)
+			}
+			seenPersonas[key] = struct{}{}
+		}
 		if err := cfg.Personas[i].Validate(); err != nil {
+			return nil, err
+		}
+	}
+
+	seenSets := make(map[string]struct{}, len(cfg.PersonaSets))
+	for i := range cfg.PersonaSets {
+		key := strings.ToLower(strings.TrimSpace(cfg.PersonaSets[i].Name))
+		if key != "" {
+			if _, exists := seenSets[key]; exists {
+				return nil, fmt.Errorf("duplicate persona set name %q", cfg.PersonaSets[i].Name)
+			}
+			seenSets[key] = struct{}{}
+		}
+		if err := cfg.PersonaSets[i].Validate(); err != nil {
 			return nil, err
 		}
 	}
@@ -364,7 +425,7 @@ func LoadRegistry(projectDir string) (*Registry, error) {
 		registry.AddSet(&s)
 	}
 
-	// 2. Load user personas (ignore file-not-found; report parse errors)
+	// 2. Load user personas (ignore file-not-found; invalid content is an error)
 	userPath := DefaultUserPath()
 	if cfg, err := LoadFromFile(userPath); err == nil {
 		for i := range cfg.Personas {
@@ -374,10 +435,10 @@ func LoadRegistry(projectDir string) (*Registry, error) {
 			registry.AddSet(&cfg.PersonaSets[i])
 		}
 	} else if !os.IsNotExist(err) {
-		slog.Warn("failed to load user personas", "path", userPath, "error", err)
+		return nil, fmt.Errorf("loading user personas: %w", err)
 	}
 
-	// 3. Load project personas (ignore file-not-found; report parse errors)
+	// 3. Load project personas (ignore file-not-found; invalid content is an error)
 	if projectDir != "" {
 		projectPath := filepath.Join(projectDir, DefaultProjectPath())
 		if cfg, err := LoadFromFile(projectPath); err == nil {
@@ -388,7 +449,7 @@ func LoadRegistry(projectDir string) (*Registry, error) {
 				registry.AddSet(&cfg.PersonaSets[i])
 			}
 		} else if !os.IsNotExist(err) {
-			slog.Warn("failed to load project personas", "path", projectPath, "error", err)
+			return nil, fmt.Errorf("loading project personas: %w", err)
 		}
 	}
 
@@ -397,7 +458,23 @@ func LoadRegistry(projectDir string) (*Registry, error) {
 		return nil, fmt.Errorf("resolving persona inheritance: %w", err)
 	}
 
+	if err := registry.ValidatePersonaSets(); err != nil {
+		return nil, err
+	}
+
 	return registry, nil
+}
+
+// ValidatePersonaSets ensures persona sets only reference personas that exist in the merged registry.
+func (r *Registry) ValidatePersonaSets() error {
+	for _, set := range r.personaSets {
+		for _, name := range set.Personas {
+			if _, ok := r.Get(name); !ok {
+				return fmt.Errorf("persona set %q references unknown persona %q", set.Name, name)
+			}
+		}
+	}
+	return nil
 }
 
 // BuiltinPersonas returns the default built-in persona definitions.

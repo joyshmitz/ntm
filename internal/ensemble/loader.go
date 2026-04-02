@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -93,8 +94,12 @@ func (l *ModeLoader) mergeFromFile(merged map[string]ReasoningMode, path, source
 	}
 
 	var file modesFile
-	if _, err := toml.Decode(string(data), &file); err != nil {
+	md, err := toml.Decode(string(data), &file)
+	if err != nil {
 		return fmt.Errorf("parse TOML: %w", err)
+	}
+	if unknown := undecodedEnsembleFields(md); len(unknown) > 0 {
+		return fmt.Errorf("parse TOML: unknown field(s): %s", strings.Join(unknown, ", "))
 	}
 
 	for i := range file.Modes {

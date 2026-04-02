@@ -3,6 +3,7 @@ package ensemble
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +103,38 @@ name = "broken"`
 
 	if _, err := loader.Load(); err == nil {
 		t.Fatal("expected error for invalid TOML")
+	}
+}
+
+func TestEnsembleLoader_RejectsUnknownFields(t *testing.T) {
+	tmp := t.TempDir()
+	userDir := filepath.Join(tmp, "user")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatalf("mkdir user dir: %v", err)
+	}
+
+	badConfig := `[[ensembles]]
+name = "project-diagnosis"
+description = "bad field"
+legacy = true
+modes = [{id = "deductive"}, {id = "abductive"}]
+`
+	if err := os.WriteFile(filepath.Join(userDir, "ensembles.toml"), []byte(badConfig), 0o644); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	loader := &EnsembleLoader{
+		UserConfigDir: userDir,
+		ProjectDir:    tmp,
+		ModeCatalog:   nil,
+	}
+
+	_, err := loader.Load()
+	if err == nil {
+		t.Fatal("expected error for unknown TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): ensembles.legacy") {
+		t.Fatalf("expected unknown field error, got %v", err)
 	}
 }
 

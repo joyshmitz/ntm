@@ -3,6 +3,7 @@ package ensemble
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -195,6 +196,33 @@ func TestLoadEnsemblesFile_InvalidTOML(t *testing.T) {
 	_, err := LoadEnsemblesFile(path)
 	if err == nil {
 		t.Error("expected error for invalid TOML")
+	}
+}
+
+func TestLoadEnsemblesFile_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unknown.toml")
+
+	content := `[[ensembles]]
+name = "diagnosis"
+description = "unknown field test"
+legacy = true
+
+  [[ensembles.modes]]
+  id = "deductive"
+`
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := LoadEnsemblesFile(path)
+	if err == nil {
+		t.Fatal("expected error for unknown TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): ensembles.legacy") {
+		t.Fatalf("expected unknown field error, got %v", err)
 	}
 }
 

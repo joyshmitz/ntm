@@ -3,6 +3,7 @@ package recipe
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +15,11 @@ func TestValidateAgentSpec(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", AgentSpec{Type: "cc", Count: 1}, false},
-		{"valid_custom", AgentSpec{Type: "cursor", Count: 1}, false},
+		{"valid_cursor", AgentSpec{Type: "cursor", Count: 1}, false},
+		{"valid_claude_alias", AgentSpec{Type: "claude", Count: 1}, false},
+		{"valid_codex_alias", AgentSpec{Type: "openai-codex", Count: 1}, false},
+		{"valid_gemini_alias", AgentSpec{Type: "google-gemini", Count: 1}, false},
+		{"valid_windsurf_alias", AgentSpec{Type: "ws", Count: 1}, false},
 		{"missing_type", AgentSpec{Count: 1}, true},
 		{"zero_count", AgentSpec{Type: "cc", Count: 0}, true},
 		{"negative_count", AgentSpec{Type: "cc", Count: -1}, true},
@@ -22,6 +27,8 @@ func TestValidateAgentSpec(t *testing.T) {
 		{"max_count", AgentSpec{Type: "cc", Count: 20}, false},
 		{"with_model", AgentSpec{Type: "cc", Count: 1, Model: "opus"}, false},
 		{"with_persona", AgentSpec{Type: "cc", Count: 1, Persona: "code-reviewer"}, false},
+		{"user_not_supported", AgentSpec{Type: "user", Count: 1}, true},
+		{"unknown_type", AgentSpec{Type: "custom-plugin", Count: 1}, true},
 	}
 
 	for _, tt := range tests {
@@ -38,17 +45,18 @@ func TestRecipeHelpers(t *testing.T) {
 	r := Recipe{
 		Agents: []AgentSpec{
 			{Type: "cc", Count: 2},
-			{Type: "cod", Count: 1},
+			{Type: "openai-codex", Count: 1},
+			{Type: "claude", Count: 1},
 		},
 	}
 
-	if total := r.TotalAgents(); total != 3 {
-		t.Errorf("TotalAgents() = %d, want 3", total)
+	if total := r.TotalAgents(); total != 4 {
+		t.Errorf("TotalAgents() = %d, want 4", total)
 	}
 
 	counts := r.AgentCounts()
-	if counts["cc"] != 2 {
-		t.Errorf("AgentCounts[cc] = %d, want 2", counts["cc"])
+	if counts["cc"] != 3 {
+		t.Errorf("AgentCounts[cc] = %d, want 3", counts["cc"])
 	}
 	if counts["cod"] != 1 {
 		t.Errorf("AgentCounts[cod] = %d, want 1", counts["cod"])
@@ -219,6 +227,70 @@ count = 2
 	}
 }
 
+func TestLoadFromFile_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	recipesPath := filepath.Join(tmpDir, "recipes.toml")
+	content := `
+legacy = true
+
+[[recipes]]
+name = "test-recipe"
+description = "A test recipe"
+[[recipes.agents]]
+type = "cc"
+count = 1
+`
+	if err := os.WriteFile(recipesPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write recipes.toml: %v", err)
+	}
+
+	_, err := loadFromFile(recipesPath, "project")
+	if err == nil {
+		t.Fatal("expected unknown field error")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadFromFile_NormalizesBuiltInAliases(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	recipesPath := filepath.Join(tmpDir, "recipes.toml")
+	content := `
+[[recipes]]
+name = "alias-recipe"
+description = "A test recipe"
+[[recipes.agents]]
+type = "claude"
+count = 1
+[[recipes.agents]]
+type = "openai-codex"
+count = 2
+[[recipes.agents]]
+type = "ws"
+count = 1
+`
+	if err := os.WriteFile(recipesPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	recipes, err := loadFromFile(recipesPath, "test")
+	if err != nil {
+		t.Fatalf("loadFromFile() error: %v", err)
+	}
+	if got := recipes[0].Agents[0].Type; got != "cc" {
+		t.Fatalf("recipes[0].Agents[0].Type = %q, want %q", got, "cc")
+	}
+	if got := recipes[0].Agents[1].Type; got != "cod" {
+		t.Fatalf("recipes[0].Agents[1].Type = %q, want %q", got, "cod")
+	}
+	if got := recipes[0].Agents[2].Type; got != "windsurf" {
+		t.Fatalf("recipes[0].Agents[2].Type = %q, want %q", got, "windsurf")
+	}
+}
+
 func TestLoadFromFile_NonExistent(t *testing.T) {
 	t.Parallel()
 	_, err := loadFromFile("/nonexistent/path/recipes.toml", "test")
@@ -239,6 +311,28 @@ func TestLoadFromFile_InvalidTOML(t *testing.T) {
 	_, err := loadFromFile(recipesPath, "test")
 	if err == nil {
 		t.Error("expected error for invalid TOML")
+	}
+}
+
+func TestLoadFromFile_InvalidRecipeType(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	recipesPath := filepath.Join(tmpDir, "recipes.toml")
+	content := `
+[[recipes]]
+name = "bad-recipe"
+description = "A bad recipe"
+[[recipes.agents]]
+type = "user"
+count = 1
+`
+	if err := os.WriteFile(recipesPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	_, err := loadFromFile(recipesPath, "test")
+	if err == nil {
+		t.Fatal("expected error for unsupported recipe agent type")
 	}
 }
 
@@ -364,6 +458,67 @@ count = 3
 	}
 	if !found {
 		t.Error("project recipe 'project-custom' not found in LoadAll results")
+	}
+}
+
+func TestLoaderLoadAll_ErrorsOnInvalidProjectRecipes(t *testing.T) {
+	tmpDir := t.TempDir()
+	ntmDir := filepath.Join(tmpDir, ".ntm")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("failed to create .ntm dir: %v", err)
+	}
+
+	content := `
+[[recipes]]
+name = "broken-project-recipe"
+description = "Project-specific recipe"
+[[recipes.agents]]
+type = "user"
+count = 1
+`
+	if err := os.WriteFile(filepath.Join(ntmDir, "recipes.toml"), []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write recipes.toml: %v", err)
+	}
+
+	loader := &Loader{
+		UserConfigDir: t.TempDir(),
+		ProjectDir:    tmpDir,
+	}
+
+	_, err := loader.LoadAll()
+	if err == nil {
+		t.Fatal("expected invalid project recipes to fail")
+	}
+	if !strings.Contains(err.Error(), "unsupported recipe agent type") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoaderLoadAll_ErrorsOnInvalidUserRecipes(t *testing.T) {
+	userDir := t.TempDir()
+	content := `
+[[recipes]]
+name = "broken-user-recipe"
+description = "User recipe"
+[[recipes.agents]]
+type = "nope"
+count = 1
+`
+	if err := os.WriteFile(filepath.Join(userDir, "recipes.toml"), []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write recipes.toml: %v", err)
+	}
+
+	loader := &Loader{
+		UserConfigDir: userDir,
+		ProjectDir:    t.TempDir(),
+	}
+
+	_, err := loader.LoadAll()
+	if err == nil {
+		t.Fatal("expected invalid user recipes to fail")
+	}
+	if !strings.Contains(err.Error(), "unsupported recipe agent type") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

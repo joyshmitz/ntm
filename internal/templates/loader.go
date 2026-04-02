@@ -1,7 +1,9 @@
 package templates
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,10 @@ func getDefaultUserTemplateDir() string {
 	return filepath.Join(home, ".config", "ntm", "templates")
 }
 
+func isNotExistErr(err error) bool {
+	return err != nil && (os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist))
+}
+
 // Load finds and loads a template by name.
 // Search order: project > user > builtin
 // Returns the first matching template found.
@@ -78,7 +84,7 @@ func (l *Loader) Load(name string) (*Template, error) {
 	if l.projectDir != "" {
 		if tmpl, err := l.loadFromDir(l.projectDir, name, SourceProject); err == nil {
 			return tmpl, nil
-		} else if !os.IsNotExist(err) {
+		} else if !isNotExistErr(err) {
 			return nil, err
 		}
 	}
@@ -87,7 +93,7 @@ func (l *Loader) Load(name string) (*Template, error) {
 	if l.userDir != "" {
 		if tmpl, err := l.loadFromDir(l.userDir, name, SourceUser); err == nil {
 			return tmpl, nil
-		} else if !os.IsNotExist(err) {
+		} else if !isNotExistErr(err) {
 			return nil, err
 		}
 	}
@@ -155,6 +161,8 @@ func (l *Loader) List() ([]*Template, error) {
 					templates = append(templates, t)
 				}
 			}
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -167,6 +175,8 @@ func (l *Loader) List() ([]*Template, error) {
 					templates = append(templates, t)
 				}
 			}
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -202,12 +212,12 @@ func (l *Loader) listFromDir(dir string, source TemplateSource) ([]*Template, er
 
 		content, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
 		tmpl, err := Parse(string(content))
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("parsing template %s: %w", path, err)
 		}
 
 		if tmpl.Name == "" {

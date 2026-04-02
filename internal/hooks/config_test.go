@@ -3,6 +3,7 @@ package hooks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -308,6 +309,26 @@ command = ""`,
 	}
 }
 
+func TestLoadCommandHooksFromTOML_UnknownField(t *testing.T) {
+	toml := `
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo hello"
+legacy = true
+`
+
+	_, err := LoadCommandHooksFromTOML(toml)
+	if err == nil {
+		t.Fatal("LoadCommandHooksFromTOML() expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("LoadCommandHooksFromTOML() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("LoadCommandHooksFromTOML() error = %v, want legacy field name", err)
+	}
+}
+
 func TestLoadCommandHooksNonExistentFile(t *testing.T) {
 	cfg, err := LoadCommandHooks("/nonexistent/path/hooks.toml")
 	if err != nil {
@@ -348,6 +369,32 @@ timeout = "10s"
 	}
 	if h.GetTimeout() != 10*time.Second {
 		t.Errorf("hook.GetTimeout() = %v, want 10s", h.GetTimeout())
+	}
+}
+
+func TestLoadCommandHooksFromFile_UnknownField(t *testing.T) {
+	tmpDir := t.TempDir()
+	hooksPath := filepath.Join(tmpDir, "hooks.toml")
+
+	content := `
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo hi"
+legacy = "bad"
+`
+	if err := os.WriteFile(hooksPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	_, err := LoadCommandHooks(hooksPath)
+	if err == nil {
+		t.Fatal("LoadCommandHooks() expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("LoadCommandHooks() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("LoadCommandHooks() error = %v, want legacy field name", err)
 	}
 }
 

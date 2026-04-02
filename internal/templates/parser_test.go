@@ -473,3 +473,55 @@ func TestTemplate_HasVariable_Empty(t *testing.T) {
 		t.Error("HasVariable should return false for template with no variables")
 	}
 }
+
+func TestParse_WithUnknownFrontmatterField(t *testing.T) {
+	content := `---
+name: strict_template
+legacy: true
+---
+Hello`
+
+	_, err := Parse(content)
+	if err == nil {
+		t.Fatal("expected error for unknown frontmatter field")
+	}
+	if !contains(err.Error(), "field legacy not found") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}
+
+func TestLoader_Load_ReturnsUnknownFrontmatterError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	projectDir := filepath.Join(tmp, "project")
+	templateDir := filepath.Join(projectDir, ".ntm", "templates")
+	if err := os.MkdirAll(templateDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	name := "bad_unknown_field_template"
+	content := `---
+name: bad_template
+legacy: true
+---
+Hello
+`
+	if err := os.WriteFile(filepath.Join(templateDir, name+".md"), []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loader := NewLoaderWithProject(projectDir)
+	_, err := loader.Load(name)
+	if err == nil {
+		t.Fatalf("Load(%q) expected error, got nil", name)
+	}
+
+	var notFound *TemplateNotFoundError
+	if errors.As(err, &notFound) {
+		t.Fatalf("Load(%q) returned TemplateNotFoundError; want parse error: %v", name, err)
+	}
+	if !contains(err.Error(), "field legacy not found") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}

@@ -256,6 +256,30 @@ content`), 0644)
 	}
 }
 
+func TestLoader_List_ErrorsOnInvalidProjectTemplate(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, ".ntm", "templates")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	content := `---
+name: [
+---
+body
+`
+	if err := os.WriteFile(filepath.Join(projectDir, "broken.md"), []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loader := NewLoaderWithProject(tmpDir)
+	_, err := loader.List()
+	if err == nil {
+		t.Fatal("expected invalid project template to fail")
+	}
+}
+
 func TestLoader_listFromDir_NonExistent(t *testing.T) {
 	t.Parallel()
 

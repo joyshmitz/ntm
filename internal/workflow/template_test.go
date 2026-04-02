@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -481,6 +482,50 @@ role = "doer"
 	}
 	if w.Coordination != CoordParallel {
 		t.Errorf("Coordination = %q, want %q", w.Coordination, CoordParallel)
+	}
+}
+
+func TestParseWorkflows_RejectsUnknownFields(t *testing.T) {
+	content := `
+legacy = true
+
+[[workflows]]
+name = "red-green"
+description = "TDD workflow"
+coordination = "parallel"
+
+[[workflows.agents]]
+profile = "tester"
+role = "red"
+`
+
+	_, err := ParseWorkflows(content)
+	if err == nil {
+		t.Fatal("ParseWorkflows() expected unknown field error")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseWorkflow_RejectsUnknownFields(t *testing.T) {
+	content := `
+name = "simple-workflow"
+description = "A simple workflow"
+coordination = "parallel"
+legacy = true
+
+[[agents]]
+profile = "worker"
+role = "doer"
+`
+
+	_, err := ParseWorkflow(content)
+	if err == nil {
+		t.Fatal("ParseWorkflow() expected unknown field error")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): legacy") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

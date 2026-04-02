@@ -4,6 +4,7 @@ package workflow
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -295,7 +296,31 @@ coordination = "parallel"
 	}
 }
 
-func TestLoadFromDir_SkipsInvalidWorkflowFiles(t *testing.T) {
+func TestParseWorkflowFromContent_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	invalid := `legacy = true
+
+[[workflows]]
+name = "array-test"
+description = "Array format test"
+coordination = "parallel"
+
+[[workflows.agents]]
+profile = "worker"
+role = "builder"
+`
+
+	_, err := parseWorkflowsFromContent(invalid)
+	if err == nil {
+		t.Fatal("expected unknown field content to fail")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadFromDir_ErrorsOnInvalidWorkflowFiles(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -317,15 +342,55 @@ coordination = "parallel"
 		t.Fatalf("write invalid workflow: %v", err)
 	}
 
-	workflows, err := loadFromDir(dir, "project")
-	if err != nil {
-		t.Fatalf("loadFromDir failed: %v", err)
+	_, err := loadFromDir(dir, "project")
+	if err == nil {
+		t.Fatal("expected invalid workflow file to fail")
 	}
-	if len(workflows) != 1 {
-		t.Fatalf("expected 1 valid workflow, got %d", len(workflows))
+}
+
+func TestLoader_LoadAll_ErrorsOnInvalidUserWorkflow(t *testing.T) {
+	t.Parallel()
+
+	userDir := t.TempDir()
+	workflowsDir := filepath.Join(userDir, "workflows")
+	if err := os.MkdirAll(workflowsDir, 0755); err != nil {
+		t.Fatalf("failed to create workflows dir: %v", err)
 	}
-	if workflows[0].Name != "valid-workflow" {
-		t.Fatalf("loaded workflow name = %q, want %q", workflows[0].Name, "valid-workflow")
+
+	invalid := `description = "missing required fields"
+coordination = "parallel"
+`
+	if err := os.WriteFile(filepath.Join(workflowsDir, "broken.toml"), []byte(invalid), 0644); err != nil {
+		t.Fatalf("failed to write invalid workflow: %v", err)
+	}
+
+	loader := &Loader{UserConfigDir: userDir, ProjectDir: t.TempDir()}
+	_, err := loader.LoadAll()
+	if err == nil {
+		t.Fatal("expected invalid user workflow to fail")
+	}
+}
+
+func TestLoader_LoadAll_ErrorsOnInvalidProjectWorkflow(t *testing.T) {
+	t.Parallel()
+
+	projectDir := t.TempDir()
+	ntmDir := filepath.Join(projectDir, ".ntm", "workflows")
+	if err := os.MkdirAll(ntmDir, 0755); err != nil {
+		t.Fatalf("failed to create .ntm/workflows dir: %v", err)
+	}
+
+	invalid := `description = "missing required fields"
+coordination = "parallel"
+`
+	if err := os.WriteFile(filepath.Join(ntmDir, "broken.toml"), []byte(invalid), 0644); err != nil {
+		t.Fatalf("failed to write invalid workflow: %v", err)
+	}
+
+	loader := &Loader{UserConfigDir: t.TempDir(), ProjectDir: projectDir}
+	_, err := loader.LoadAll()
+	if err == nil {
+		t.Fatal("expected invalid project workflow to fail")
 	}
 }
 

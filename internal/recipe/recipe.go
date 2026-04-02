@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
 // Recipe defines a reusable session configuration preset.
@@ -41,7 +44,11 @@ func (r *Recipe) TotalAgents() int {
 func (r *Recipe) AgentCounts() map[string]int {
 	counts := make(map[string]int)
 	for _, a := range r.Agents {
-		counts[a.Type] += a.Count
+		agentType := strings.TrimSpace(a.Type)
+		if canonical, err := normalizeRecipeAgentType(agentType); err == nil {
+			agentType = canonical
+		}
+		counts[agentType] += a.Count
 	}
 	return counts
 }
@@ -49,6 +56,19 @@ func (r *Recipe) AgentCounts() map[string]int {
 // recipesFile represents the structure of a recipes TOML file.
 type recipesFile struct {
 	Recipes []Recipe `toml:"recipes"`
+}
+
+func undecodedRecipeFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 // builtinRecipes returns the default built-in recipes.
@@ -158,6 +178,8 @@ func (l *Loader) LoadAll() ([]Recipe, error) {
 		for _, r := range userRecipes {
 			recipes[r.Name] = r
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 
 	// 3. Load project recipes (highest priority)
@@ -166,6 +188,8 @@ func (l *Loader) LoadAll() ([]Recipe, error) {
 		for _, r := range projectRecipes {
 			recipes[r.Name] = r
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 
 	// Convert map to slice, preserving a reasonable order
@@ -211,13 +235,23 @@ func loadFromFile(path, source string) ([]Recipe, error) {
 	}
 
 	var rf recipesFile
-	if err := toml.Unmarshal(data, &rf); err != nil {
+	md, err := toml.Decode(string(data), &rf)
+	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if fields := undecodedRecipeFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("parsing %s: unknown field(s): %s", path, strings.Join(fields, ", "))
 	}
 
 	// Set source for all loaded recipes
 	for i := range rf.Recipes {
 		rf.Recipes[i].Source = source
+		if err := normalizeRecipe(&rf.Recipes[i]); err != nil {
+			return nil, fmt.Errorf("validating %s recipe[%d]: %w", path, i, err)
+		}
+		if err := rf.Recipes[i].Validate(); err != nil {
+			return nil, fmt.Errorf("validating %s recipe[%d]: %w", path, i, err)
+		}
 	}
 
 	return rf.Recipes, nil
@@ -235,8 +269,11 @@ func BuiltinNames() []string {
 
 // ValidateAgentSpec validates an agent specification.
 func ValidateAgentSpec(spec AgentSpec) error {
-	if spec.Type == "" {
+	if strings.TrimSpace(spec.Type) == "" {
 		return fmt.Errorf("agent type is required")
+	}
+	if _, err := normalizeRecipeAgentType(spec.Type); err != nil {
+		return err
 	}
 	if spec.Count < 1 {
 		return fmt.Errorf("agent count must be at least 1, got %d", spec.Count)
@@ -245,6 +282,49 @@ func ValidateAgentSpec(spec AgentSpec) error {
 		return fmt.Errorf("agent count too high: %d (max 20)", spec.Count)
 	}
 	return nil
+}
+
+func normalizeRecipe(recipe *Recipe) error {
+	for i := range recipe.Agents {
+		if err := normalizeRecipeAgentSpec(&recipe.Agents[i]); err != nil {
+			return fmt.Errorf("agent[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func normalizeRecipeAgentSpec(spec *AgentSpec) error {
+	spec.Type = strings.TrimSpace(spec.Type)
+	spec.Model = strings.TrimSpace(spec.Model)
+	spec.Persona = strings.TrimSpace(spec.Persona)
+
+	canonical, err := normalizeRecipeAgentType(spec.Type)
+	if err != nil {
+		return err
+	}
+	spec.Type = canonical
+	return nil
+}
+
+func normalizeRecipeAgentType(raw string) (string, error) {
+	switch agentpkg.AgentType(raw).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return string(agentpkg.AgentTypeClaudeCode), nil
+	case agentpkg.AgentTypeCodex:
+		return string(agentpkg.AgentTypeCodex), nil
+	case agentpkg.AgentTypeGemini:
+		return string(agentpkg.AgentTypeGemini), nil
+	case agentpkg.AgentTypeCursor:
+		return string(agentpkg.AgentTypeCursor), nil
+	case agentpkg.AgentTypeWindsurf:
+		return string(agentpkg.AgentTypeWindsurf), nil
+	case agentpkg.AgentTypeAider:
+		return string(agentpkg.AgentTypeAider), nil
+	case agentpkg.AgentTypeOllama:
+		return string(agentpkg.AgentTypeOllama), nil
+	default:
+		return "", fmt.Errorf("unsupported recipe agent type %q", strings.TrimSpace(raw))
+	}
 }
 
 // Validate validates a recipe.

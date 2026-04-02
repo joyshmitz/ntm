@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -216,6 +217,37 @@ func TestModeLoader_InvalidTOML(t *testing.T) {
 	_, err := loader.Load()
 	if err == nil {
 		t.Fatal("Load() should fail on invalid TOML")
+	}
+}
+
+func TestModeLoader_RejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+
+	modesContent := `
+[[modes]]
+id = "deductive"
+name = "Custom Deductive"
+category = "Formal"
+short_desc = "Overridden deductive mode"
+code = "A1"
+tier = "core"
+legacy = true
+`
+	if err := os.WriteFile(filepath.Join(dir, "modes.toml"), []byte(modesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := &ModeLoader{
+		UserConfigDir: dir,
+		ProjectDir:    "/nonexistent",
+	}
+
+	_, err := loader.Load()
+	if err == nil {
+		t.Fatal("Load() should fail on unknown TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s): modes.legacy") {
+		t.Fatalf("expected unknown field error, got %v", err)
 	}
 }
 

@@ -1,7 +1,9 @@
 package templates
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -35,9 +37,14 @@ func Parse(content string) (*Template, error) {
 	if strings.HasPrefix(content, "---") {
 		parts := strings.SplitN(content, "---", 3)
 		if len(parts) >= 3 {
-			// Parse YAML frontmatter
-			if err := yaml.Unmarshal([]byte(parts[1]), tmpl); err != nil {
-				return nil, err
+			// Parse YAML frontmatter strictly so typos fail loudly.
+			frontmatter := []byte(parts[1])
+			if len(bytes.TrimSpace(frontmatter)) > 0 {
+				dec := yaml.NewDecoder(bytes.NewReader(frontmatter))
+				dec.KnownFields(true)
+				if err := dec.Decode(tmpl); err != nil && err != io.EOF {
+					return nil, err
+				}
 			}
 			tmpl.Body = strings.TrimSpace(parts[2])
 		} else {

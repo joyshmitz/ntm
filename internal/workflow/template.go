@@ -4,6 +4,7 @@ package workflow
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -374,11 +375,28 @@ type WorkflowsFile struct {
 	Workflows []WorkflowTemplate `toml:"workflows"`
 }
 
+func undecodedWorkflowFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
+}
+
 // ParseWorkflows parses workflow templates from TOML content.
 func ParseWorkflows(content string) ([]WorkflowTemplate, error) {
 	var file WorkflowsFile
-	if _, err := toml.Decode(content, &file); err != nil {
+	md, err := toml.Decode(content, &file)
+	if err != nil {
 		return nil, fmt.Errorf("parse TOML: %w", err)
+	}
+	if fields := undecodedWorkflowFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("unknown field(s): %s", strings.Join(fields, ", "))
 	}
 	return file.Workflows, nil
 }
@@ -393,8 +411,12 @@ func ParseWorkflow(content string) (*WorkflowTemplate, error) {
 
 	// Try single workflow format
 	var tmpl WorkflowTemplate
-	if _, err := toml.Decode(content, &tmpl); err != nil {
+	md, err := toml.Decode(content, &tmpl)
+	if err != nil {
 		return nil, fmt.Errorf("parse TOML: %w", err)
+	}
+	if fields := undecodedWorkflowFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("unknown field(s): %s", strings.Join(fields, ", "))
 	}
 	return &tmpl, nil
 }

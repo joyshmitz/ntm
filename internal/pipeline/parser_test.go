@@ -1528,3 +1528,144 @@ func TestValidate_StepWithInvalidPromptFile(t *testing.T) {
 		t.Errorf("expected warning about invalid prompt_file path, got %v", result.Warnings)
 	}
 }
+
+func TestParseFile_YAMLUnknownField(t *testing.T) {
+	t.Parallel()
+
+	content := `
+schema_version: "2.0"
+name: test-workflow
+legacy: true
+steps:
+  - id: step1
+    agent: claude
+    prompt: Do something
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "workflow.yaml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(path)
+	if err == nil {
+		t.Fatal("expected error for unknown YAML field")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if !strings.Contains(pe.Message, "field legacy not found") {
+		t.Fatalf("expected unknown-field message, got %q", pe.Message)
+	}
+}
+
+func TestParseFile_TOMLUnknownField(t *testing.T) {
+	t.Parallel()
+
+	content := `
+schema_version = "2.0"
+name = "test-workflow"
+legacy = true
+
+[[steps]]
+id = "step1"
+agent = "claude"
+prompt = "Do something"
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "workflow.toml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseFile(path)
+	if err == nil {
+		t.Fatal("expected error for unknown TOML field")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if pe.Field != "legacy" {
+		t.Fatalf("expected field legacy, got %q", pe.Field)
+	}
+	if !strings.Contains(pe.Message, "unknown TOML field") {
+		t.Fatalf("expected unknown TOML field message, got %q", pe.Message)
+	}
+}
+
+func TestParseString_YAMLUnknownField(t *testing.T) {
+	t.Parallel()
+
+	content := `
+schema_version: "2.0"
+name: test-workflow
+legacy: true
+steps:
+  - id: step1
+    agent: claude
+    prompt: Do something
+`
+
+	_, err := ParseString(content, "yaml")
+	if err == nil {
+		t.Fatal("expected error for unknown YAML field")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if !strings.Contains(pe.Message, "field legacy not found") {
+		t.Fatalf("expected unknown-field message, got %q", pe.Message)
+	}
+}
+
+func TestParseString_TOMLUnknownField(t *testing.T) {
+	t.Parallel()
+
+	content := `
+schema_version = "2.0"
+name = "test-workflow"
+legacy = true
+
+[[steps]]
+id = "step1"
+agent = "claude"
+prompt = "Do something"
+`
+
+	_, err := ParseString(content, "toml")
+	if err == nil {
+		t.Fatal("expected error for unknown TOML field")
+	}
+
+	pe, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if pe.Field != "legacy" {
+		t.Fatalf("expected field legacy, got %q", pe.Field)
+	}
+	if !strings.Contains(pe.Message, "unknown TOML field") {
+		t.Fatalf("expected unknown TOML field message, got %q", pe.Message)
+	}
+}
+
+func TestParseString_YAMLCommentOnly(t *testing.T) {
+	t.Parallel()
+
+	w, err := ParseString("# comment only\n", "yaml")
+	if err != nil {
+		t.Fatalf("ParseString failed for comment-only YAML: %v", err)
+	}
+	if w == nil {
+		t.Fatal("expected workflow value")
+	}
+	if w.Name != "" || w.SchemaVersion != "" || len(w.Steps) != 0 {
+		t.Fatalf("expected zero-value workflow, got %#v", w)
+	}
+}

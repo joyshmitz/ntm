@@ -38,6 +38,14 @@ func TestPersonaValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "missing agent_type allowed when extending",
+			persona: Persona{
+				Name:    "child",
+				Extends: "base",
+			},
+			wantErr: false,
+		},
+		{
 			name: "invalid agent_type",
 			persona: Persona{
 				Name:      "test",
@@ -1045,5 +1053,279 @@ name = "incomplete"
 	_, err := LoadFromFile(personasFile)
 	if err == nil {
 		t.Error("expected error for invalid persona")
+	}
+}
+
+func TestLoadFromFileUnknownField(t *testing.T) {
+	tmpDir := t.TempDir()
+	personasFile := filepath.Join(tmpDir, "personas.toml")
+
+	content := `
+[[personas]]
+name = "dev"
+agent_type = "claude"
+legacy = true
+`
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromFile(personasFile)
+	if err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadFromFileDuplicatePersonaName(t *testing.T) {
+	tmpDir := t.TempDir()
+	personasFile := filepath.Join(tmpDir, "personas.toml")
+
+	content := `
+[[personas]]
+name = "dup"
+agent_type = "claude"
+
+[[personas]]
+name = "Dup"
+agent_type = "codex"
+`
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromFile(personasFile)
+	if err == nil {
+		t.Fatal("expected error for duplicate persona name")
+	}
+}
+
+func TestLoadFromFileDuplicatePersonaSetName(t *testing.T) {
+	tmpDir := t.TempDir()
+	personasFile := filepath.Join(tmpDir, "personas.toml")
+
+	content := `
+[[personas]]
+name = "dev"
+agent_type = "claude"
+
+[[persona_sets]]
+name = "team"
+personas = ["dev"]
+
+[[persona_sets]]
+name = "TEAM"
+personas = ["dev"]
+`
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromFile(personasFile)
+	if err == nil {
+		t.Fatal("expected error for duplicate persona set name")
+	}
+}
+
+func TestLoadFromFileInvalidPersonaSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	personasFile := filepath.Join(tmpDir, "personas.toml")
+
+	content := `
+[[personas]]
+name = "dev"
+agent_type = "claude"
+
+[[persona_sets]]
+name = ""
+personas = []
+`
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromFile(personasFile)
+	if err == nil {
+		t.Fatal("expected error for invalid persona set")
+	}
+}
+
+func TestLoadFromFileAllowsExtendingPersonaWithoutAgentType(t *testing.T) {
+	tmpDir := t.TempDir()
+	personasFile := filepath.Join(tmpDir, "personas.toml")
+
+	content := `
+[[personas]]
+name = "base"
+agent_type = "claude"
+system_prompt = "Base"
+
+[[personas]]
+name = "child"
+extends = "base"
+system_prompt_append = "Extra"
+`
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(personasFile)
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+	if len(cfg.Personas) != 2 {
+		t.Fatalf("expected 2 personas, got %d", len(cfg.Personas))
+	}
+	if got := cfg.Personas[1].AgentType; got != "" {
+		t.Fatalf("child AgentType = %q, want empty before inheritance resolution", got)
+	}
+}
+
+func TestLoadRegistryRejectsUnknownPersonaSetReference(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `
+[[personas]]
+name = "dev"
+agent_type = "claude"
+system_prompt = "Dev"
+
+[[persona_sets]]
+name = "broken"
+personas = ["dev", "missing"]
+`
+	personasFile := filepath.Join(projectDir, ".ntm", "personas.toml")
+	if err := os.WriteFile(personasFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadRegistry(projectDir)
+	if err == nil {
+		t.Fatal("expected error for unknown persona set member")
+	}
+	if !strings.Contains(err.Error(), "references unknown persona") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRegistry_UserPersonaParseError(t *testing.T) {
+	tmpDir := t.TempDir()
+	xdgDir := filepath.Join(tmpDir, "xdg")
+	userDir := filepath.Join(xdgDir, "ntm")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+
+	content := `
+[[personas]]
+name = "broken"
+agent_type = "claude"
+legacy = true
+`
+	if err := os.WriteFile(filepath.Join(userDir, "personas.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadRegistry(filepath.Join(tmpDir, "project"))
+	if err == nil {
+		t.Fatal("expected error for invalid user personas file")
+	}
+	if !strings.Contains(err.Error(), "loading user personas") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRegistry_ProjectPersonaParseError(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `
+[[personas]]
+name = "broken"
+agent_type = "claude"
+legacy = true
+`
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "personas.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadRegistry(projectDir)
+	if err == nil {
+		t.Fatal("expected error for invalid project personas file")
+	}
+	if !strings.Contains(err.Error(), "loading project personas") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRegistry_ProjectPersonaExtendsUserPersonaWithoutAgentType(t *testing.T) {
+	tmpDir := t.TempDir()
+	xdgDir := filepath.Join(tmpDir, "xdg")
+	userDir := filepath.Join(xdgDir, "ntm")
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+
+	userContent := `
+[[personas]]
+name = "base"
+agent_type = "claude"
+model = "sonnet"
+system_prompt = "Base prompt"
+`
+	if err := os.WriteFile(filepath.Join(userDir, "personas.toml"), []byte(userContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectContent := `
+[[personas]]
+name = "child"
+extends = "base"
+system_prompt_append = "Extra detail"
+`
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "personas.toml"), []byte(projectContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := LoadRegistry(projectDir)
+	if err != nil {
+		t.Fatalf("LoadRegistry failed: %v", err)
+	}
+	child, ok := registry.Get("child")
+	if !ok {
+		t.Fatal("expected child persona in registry")
+	}
+	if child.AgentType != "claude" {
+		t.Fatalf("child AgentType = %q, want %q", child.AgentType, "claude")
+	}
+	if child.Model != "sonnet" {
+		t.Fatalf("child Model = %q, want %q", child.Model, "sonnet")
+	}
+	if !strings.Contains(child.SystemPrompt, "Extra detail") {
+		t.Fatalf("child SystemPrompt = %q, want appended content", child.SystemPrompt)
 	}
 }

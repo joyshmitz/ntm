@@ -3,8 +3,10 @@
 package templates
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -312,13 +314,28 @@ func expandEnvVarsInContent(content []byte) []byte {
 	return []byte(expandEnvVars(string(content)))
 }
 
+func parseSessionTemplateYAML(content []byte, tmpl *SessionTemplate) error {
+	if len(bytes.TrimSpace(content)) == 0 {
+		return nil
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(content))
+	dec.KnownFields(true)
+	if err := dec.Decode(tmpl); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // ParseSessionTemplate parses a session template from YAML content.
 // Environment variables in the content are expanded using ${VAR} or ${VAR:-default} syntax.
 func ParseSessionTemplate(content []byte) (*SessionTemplate, error) {
 	expanded := expandEnvVarsInContent(content)
 
 	var tmpl SessionTemplate
-	if err := yaml.Unmarshal(expanded, &tmpl); err != nil {
+	if err := parseSessionTemplateYAML(expanded, &tmpl); err != nil {
 		return nil, fmt.Errorf("parsing session template: %w", err)
 	}
 	return &tmpl, nil
@@ -327,7 +344,7 @@ func ParseSessionTemplate(content []byte) (*SessionTemplate, error) {
 // ParseSessionTemplateRaw parses a session template without environment variable expansion.
 func ParseSessionTemplateRaw(content []byte) (*SessionTemplate, error) {
 	var tmpl SessionTemplate
-	if err := yaml.Unmarshal(content, &tmpl); err != nil {
+	if err := parseSessionTemplateYAML(content, &tmpl); err != nil {
 		return nil, fmt.Errorf("parsing session template: %w", err)
 	}
 	return &tmpl, nil
@@ -760,11 +777,15 @@ func (l *SessionTemplateLoader) loadDirect(name string) (*SessionTemplate, error
 		if tmpl, err := LoadSessionTemplate(path); err == nil {
 			tmpl.Metadata.Source = "project"
 			return tmpl, nil
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 		path = filepath.Join(l.projectDir, name+".yml")
 		if tmpl, err := LoadSessionTemplate(path); err == nil {
 			tmpl.Metadata.Source = "project"
 			return tmpl, nil
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -773,11 +794,15 @@ func (l *SessionTemplateLoader) loadDirect(name string) (*SessionTemplate, error
 		if tmpl, err := LoadSessionTemplate(path); err == nil {
 			tmpl.Metadata.Source = "user"
 			return tmpl, nil
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 		path = filepath.Join(l.userDir, name+".yml")
 		if tmpl, err := LoadSessionTemplate(path); err == nil {
 			tmpl.Metadata.Source = "user"
 			return tmpl, nil
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -804,6 +829,8 @@ func (l *SessionTemplateLoader) List() ([]*SessionTemplate, error) {
 					templates = append(templates, t)
 				}
 			}
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -817,6 +844,8 @@ func (l *SessionTemplateLoader) List() ([]*SessionTemplate, error) {
 					templates = append(templates, t)
 				}
 			}
+		} else if !isNotExistErr(err) {
+			return nil, err
 		}
 	}
 
@@ -851,11 +880,11 @@ func listSessionTemplatesFromDir(dir string) ([]*SessionTemplate, error) {
 		path := filepath.Join(dir, name)
 		tmpl, err := LoadSessionTemplate(path)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
 		if err := tmpl.Validate(); err != nil {
-			continue
+			return nil, fmt.Errorf("validating session template %s: %w", path, err)
 		}
 
 		templates = append(templates, tmpl)

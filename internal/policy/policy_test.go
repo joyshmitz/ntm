@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -479,6 +480,36 @@ blocked:
 		_, err := Load(path)
 		if err == nil {
 			t.Error("expected error for invalid YAML")
+		}
+	})
+	t.Run("unknown field", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "policy.yaml")
+		content := `version: 1
+blocked:
+  - pattern: "rm -rf /"
+legacy: true
+`
+		os.WriteFile(path, []byte(content), 0644)
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "field legacy not found") {
+			t.Fatalf("expected strict unknown-field error, got %v", err)
+		}
+	})
+
+	t.Run("invalid force_release in load", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "policy.yaml")
+		content := `version: 1
+automation:
+  force_release: invalid_value
+`
+		os.WriteFile(path, []byte(content), 0644)
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "invalid force_release value") {
+			t.Fatalf("expected force_release validation error, got %v", err)
 		}
 	})
 }
