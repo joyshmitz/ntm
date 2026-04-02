@@ -162,12 +162,9 @@ func TestApprovalStatusConstants(t *testing.T) {
 // ======================
 
 func TestOpenDefault(t *testing.T) {
-	// Test default path (uses user home dir)
-	// Save and restore HOME to avoid affecting real config
-	origHome := os.Getenv("HOME")
 	tmpDir := t.TempDir()
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	store, err := Open("")
 	if err != nil {
@@ -175,8 +172,42 @@ func TestOpenDefault(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Check default path
 	wantPath := filepath.Join(tmpDir, ".config", "ntm", "state.db")
+	if store.Path() != wantPath {
+		t.Errorf("Path() = %q, want %q", store.Path(), wantPath)
+	}
+}
+
+func TestOpenDefaultRespectsXDGConfigHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg-config"))
+
+	store, err := Open("")
+	if err != nil {
+		t.Fatalf("Open(\"\") error: %v", err)
+	}
+	defer store.Close()
+
+	wantPath := filepath.Join(tmpDir, "xdg-config", "ntm", "state.db")
+	if store.Path() != wantPath {
+		t.Errorf("Path() = %q, want %q", store.Path(), wantPath)
+	}
+}
+
+func TestOpenDefaultRespectsNTMConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg-config"))
+	t.Setenv("NTM_CONFIG", filepath.Join(tmpDir, "custom-root", "custom.toml"))
+
+	store, err := Open("")
+	if err != nil {
+		t.Fatalf("Open(\"\") error: %v", err)
+	}
+	defer store.Close()
+
+	wantPath := filepath.Join(tmpDir, "custom-root", "state.db")
 	if store.Path() != wantPath {
 		t.Errorf("Path() = %q, want %q", store.Path(), wantPath)
 	}
@@ -210,6 +241,8 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query sqlite_master error: %v", err)
 	}
+	defer rows.Close()
+
 	var existingTables []string
 	for rows.Next() {
 		var name string
@@ -218,7 +251,9 @@ func TestMigrate(t *testing.T) {
 		}
 		existingTables = append(existingTables, name)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err() error: %v", err)
+	}
 	t.Logf("Existing tables: %v", existingTables)
 
 	// Verify tables exist by trying to query them

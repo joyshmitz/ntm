@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +20,29 @@ type Store struct {
 	path string
 }
 
+func expandSelectedConfigPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
 // DefaultPath returns the default state store path.
 func DefaultPath() string {
+	if cfgPath := expandSelectedConfigPath(os.Getenv("NTM_CONFIG")); cfgPath != "" {
+		return filepath.Join(filepath.Dir(cfgPath), "state.db")
+	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "ntm", "state.db")
 	}
@@ -32,7 +54,7 @@ func DefaultPath() string {
 }
 
 // Open opens or creates a SQLite database at the given path.
-// If the path is empty, it defaults to the user state DB under XDG or ~/.config.
+// If the path is empty, it defaults to the state DB next to the selected config path, or under XDG or ~/.config.
 func Open(path string) (*Store, error) {
 	if path == "" {
 		path = DefaultPath()
