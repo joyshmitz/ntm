@@ -1177,3 +1177,56 @@ func TestVerifyAll_ReportsUnreadableCheckpoint(t *testing.T) {
 		t.Fatalf("Broken checkpoint errors = %#v, want missing %s", result.Errors, SessionFile)
 	}
 }
+
+func TestVerifyAll_ReportsSymlinkCheckpointEntry(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-verifyall-symlink-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "test-session"
+
+	valid := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          GenerateID("valid"),
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{
+			Panes: []PaneState{{ID: "%0", Index: 0}},
+		},
+		PaneCount: 1,
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Failed to save valid checkpoint: %v", err)
+	}
+
+	brokenID := "symlink-checkpoint"
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(tmpDir, sessionName, brokenID)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	results, err := VerifyAll(storage, sessionName)
+	if err != nil {
+		t.Fatalf("VerifyAll failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 results, got %d", len(results))
+	}
+	result, ok := results[brokenID]
+	if !ok {
+		t.Fatalf("Missing symlink checkpoint result for %s", brokenID)
+	}
+	if result.Valid {
+		t.Fatal("Symlink checkpoint unexpectedly reported valid")
+	}
+	if len(result.Errors) == 0 {
+		t.Fatal("Symlink checkpoint errors = nil, want checkpoint path error")
+	}
+	if !strings.Contains(strings.Join(result.Errors, "\n"), "checkpoint path must not be a symlink") {
+		t.Fatalf("Symlink checkpoint errors = %#v, want symlink rejection", result.Errors)
+	}
+}

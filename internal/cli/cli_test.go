@@ -3449,6 +3449,33 @@ func TestConfigGetUsesProjectMergedConfig(t *testing.T) {
 	}
 }
 
+func envWithOverrides(env []string, overrides ...string) []string {
+	replacements := make(map[string]string, len(overrides))
+	for _, override := range overrides {
+		key, value, ok := strings.Cut(override, "=")
+		if !ok {
+			continue
+		}
+		replacements[key] = value
+	}
+
+	merged := make([]string, 0, len(env)+len(replacements))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, replaced := replacements[key]; replaced {
+				continue
+			}
+		}
+		merged = append(merged, entry)
+	}
+
+	for key, value := range replacements {
+		merged = append(merged, key+"="+value)
+	}
+	return merged
+}
+
 func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
@@ -3459,7 +3486,7 @@ func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
 
 	buildCmd := exec.Command("go", "build", "-trimpath", "-o", binaryPath, "./cmd/ntm")
 	buildCmd.Dir = root
-	buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	buildCmd.Env = envWithOverrides(os.Environ(), "CGO_ENABLED=0")
 	buildOut, err := buildCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("CGO-disabled go build failed: %v\n%s", err, strings.TrimSpace(string(buildOut)))
@@ -3479,7 +3506,7 @@ func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			cmd := exec.Command(binaryPath, flag)
 			cmd.Dir = tmpDir
-			cmd.Env = append(os.Environ(), "HOME="+homeDir, "XDG_CONFIG_HOME="+configHome)
+			cmd.Env = envWithOverrides(os.Environ(), "HOME="+homeDir, "XDG_CONFIG_HOME="+configHome)
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			cmd.Stdout = &stdout

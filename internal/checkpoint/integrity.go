@@ -629,7 +629,7 @@ func VerifyAll(storage *Storage, sessionName string) (map[string]*IntegrityResul
 
 	results := make(map[string]*IntegrityResult)
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !directoryLikeEntry(entry) {
 			continue
 		}
 		if entry.Name() == "incremental" {

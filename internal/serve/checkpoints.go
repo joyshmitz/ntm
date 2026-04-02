@@ -183,6 +183,12 @@ func (s *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	sessionName := chi.URLParam(r, "sessionName")
 	reqID := requestIDFromContext(r.Context())
 
+	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid session name: %v", err), nil, reqID)
+		return
+	}
+
 	// Parse optional query params
 	includeDetails := r.URL.Query().Get("details") == "true"
 

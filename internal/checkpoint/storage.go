@@ -121,6 +121,10 @@ func validateExistingDirectoryPath(path, kind string) error {
 	return nil
 }
 
+func directoryLikeEntry(entry os.DirEntry) bool {
+	return entry.IsDir() || entry.Type()&os.ModeSymlink != 0
+}
+
 func (s *Storage) safeCheckpointDir(sessionName, checkpointID string) (string, error) {
 	sessionDir, err := s.safeSessionDir(sessionName)
 	if err != nil {
@@ -507,7 +511,7 @@ func (s *Storage) List(sessionName string) ([]*Checkpoint, error) {
 
 	var checkpoints []*Checkpoint
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !directoryLikeEntry(entry) {
 			continue
 		}
 
@@ -539,7 +543,7 @@ func (s *Storage) ListAll() ([]*Checkpoint, error) {
 
 	var all []*Checkpoint
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !directoryLikeEntry(entry) {
 			continue
 		}
 		sessionCheckpoints, err := s.List(entry.Name())
