@@ -325,6 +325,12 @@ func TestMatchesSendTarget(t *testing.T) {
 			SendTarget{Type: AgentTypeClaude},
 			false,
 		},
+		{
+			"alias pane matches canonical target",
+			tmux.Pane{Type: tmux.AgentType("openai-codex")},
+			SendTarget{Type: AgentTypeCodex},
+			true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -510,6 +516,64 @@ func TestMessageAndStyleHelpers(t *testing.T) {
 			// The content should be preserved (possibly with ANSI codes)
 			if stripped := stripANSI(got); stripped == "" {
 				t.Errorf("%s stripped to empty", name)
+			}
+		})
+	}
+}
+
+func TestMatchesLegacySendTypeFilterCanonicalizesAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		pane      tmux.Pane
+		targetCC  bool
+		targetCod bool
+		targetGmi bool
+		want      bool
+	}{
+		{name: "claude alias", pane: tmux.Pane{Type: tmux.AgentType("claude_code")}, targetCC: true, want: true},
+		{name: "codex alias", pane: tmux.Pane{Type: tmux.AgentType("openai-codex")}, targetCod: true, want: true},
+		{name: "gemini alias", pane: tmux.Pane{Type: tmux.AgentType("google-gemini")}, targetGmi: true, want: true},
+		{name: "cursor unsupported by legacy flags", pane: tmux.Pane{Type: tmux.AgentCursor}, targetCC: true, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchesLegacySendTypeFilter(tc.pane, tc.targetCC, tc.targetCod, tc.targetGmi); got != tc.want {
+				t.Fatalf("matchesLegacySendTypeFilter(%v, %v, %v, %v) = %v, want %v", tc.pane, tc.targetCC, tc.targetCod, tc.targetGmi, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsInterruptibleAgentPane(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want bool
+	}{
+		{name: "claude alias", pane: tmux.Pane{Type: tmux.AgentType("claude_code")}, want: true},
+		{name: "codex alias", pane: tmux.Pane{Type: tmux.AgentType("openai-codex")}, want: true},
+		{name: "gemini alias", pane: tmux.Pane{Type: tmux.AgentType("google-gemini")}, want: true},
+		{name: "cursor", pane: tmux.Pane{Type: tmux.AgentCursor}, want: true},
+		{name: "windsurf alias", pane: tmux.Pane{Type: tmux.AgentType("ws")}, want: true},
+		{name: "aider", pane: tmux.Pane{Type: tmux.AgentAider}, want: true},
+		{name: "ollama", pane: tmux.Pane{Type: tmux.AgentOllama}, want: true},
+		{name: "user", pane: tmux.Pane{Type: tmux.AgentUser}, want: false},
+		{name: "unknown", pane: tmux.Pane{Type: tmux.AgentUnknown}, want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isInterruptibleAgentPane(tc.pane); got != tc.want {
+				t.Fatalf("isInterruptibleAgentPane(%v) = %v, want %v", tc.pane, got, tc.want)
 			}
 		})
 	}

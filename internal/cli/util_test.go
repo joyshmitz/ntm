@@ -321,6 +321,49 @@ func TestParseEditorCommand(t *testing.T) {
 	}
 }
 
+func TestBuildEditorCommandWithFallback(t *testing.T) {
+	t.Run("uses visual when editor empty", func(t *testing.T) {
+		t.Setenv("EDITOR", "")
+		t.Setenv("VISUAL", "cat -n")
+
+		cmd, err := buildEditorCommandWithFallback("/tmp/demo.txt", "vi")
+		if err != nil {
+			t.Fatalf("buildEditorCommandWithFallback returned error: %v", err)
+		}
+		if got := filepath.Base(cmd.Path); got != "cat" {
+			t.Fatalf("cmd.Path base = %q, want %q", got, "cat")
+		}
+		if len(cmd.Args) != 3 {
+			t.Fatalf("len(cmd.Args) = %d, want 3 (%v)", len(cmd.Args), cmd.Args)
+		}
+		if cmd.Args[1] != "-n" {
+			t.Fatalf("cmd.Args[1] = %q, want %q", cmd.Args[1], "-n")
+		}
+		if cmd.Args[2] != "/tmp/demo.txt" {
+			t.Fatalf("cmd.Args[2] = %q, want %q", cmd.Args[2], "/tmp/demo.txt")
+		}
+	})
+
+	t.Run("falls back on unsafe editor", func(t *testing.T) {
+		t.Setenv("EDITOR", "vim;rm -rf /")
+		t.Setenv("VISUAL", "")
+
+		cmd, err := buildEditorCommandWithFallback("/tmp/demo.txt", "cat")
+		if err != nil {
+			t.Fatalf("buildEditorCommandWithFallback returned error: %v", err)
+		}
+		if got := filepath.Base(cmd.Path); got != "cat" {
+			t.Fatalf("cmd.Path base = %q, want %q", got, "cat")
+		}
+		if len(cmd.Args) != 2 {
+			t.Fatalf("len(cmd.Args) = %d, want 2 (%v)", len(cmd.Args), cmd.Args)
+		}
+		if cmd.Args[1] != "/tmp/demo.txt" {
+			t.Fatalf("cmd.Args[1] = %q, want %q", cmd.Args[1], "/tmp/demo.txt")
+		}
+	})
+}
+
 // =============================================================================
 // HasAnyTag
 // =============================================================================

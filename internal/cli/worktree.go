@@ -388,11 +388,18 @@ func printWorktreesJSON(worktrees []*git.WorktreeInfo) error {
 	return encoder.Encode(worktrees)
 }
 
+func loadWorktreeConfig() (*config.Config, error) {
+	if cfg != nil {
+		return cfg, nil
+	}
+	return config.Load(cfgFile)
+}
+
 // runWorktreeAutoProvision handles the 'ntm worktree auto-provision' command
 func runWorktreeAutoProvision(cmd *cobra.Command, args []string) error {
 	sessionName := args[0]
 
-	cfg, err := config.Load("config.toml")
+	cfg, err := loadWorktreeConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -463,7 +470,7 @@ func runWorktreeStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	cfg, err := config.Load("config.toml")
+	cfg, err := loadWorktreeConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -513,7 +520,7 @@ func runWorktreeStatus(cmd *cobra.Command, args []string) error {
 func runWorktreeCleanSession(cmd *cobra.Command, args []string) error {
 	sessionName := args[0]
 
-	cfg, err := config.Load("config.toml")
+	cfg, err := loadWorktreeConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

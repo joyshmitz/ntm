@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,6 +37,33 @@ type AddOptions struct {
 	CassContextQuery string
 	NoCassContext    bool
 	Prompt           string
+}
+
+func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]plugins.AgentPlugin, ollamaHost string) (string, map[string]string, error) {
+	switch agentType {
+	case AgentTypeClaude:
+		return cfg.Agents.Claude, nil, nil
+	case AgentTypeCodex:
+		return cfg.Agents.Codex, nil, nil
+	case AgentTypeGemini:
+		return cfg.Agents.Gemini, nil, nil
+	case AgentTypeOllama:
+		if ollamaHost == "" {
+			return cfg.Agents.Ollama, nil, nil
+		}
+		return cfg.Agents.Ollama, map[string]string{"OLLAMA_HOST": ollamaHost}, nil
+	case AgentTypeCursor:
+		return cfg.Agents.Cursor, nil, nil
+	case AgentTypeWindsurf:
+		return cfg.Agents.Windsurf, nil, nil
+	case AgentTypeAider:
+		return cfg.Agents.Aider, nil, nil
+	default:
+		if p, ok := pluginMap[string(agentType)]; ok {
+			return p.Command, p.Env, nil
+		}
+		return "", nil, fmt.Errorf("unknown agent type: %s", agentType)
+	}
 }
 
 func newAddCmd() *cobra.Command {
@@ -107,8 +135,7 @@ func newAddCmd() *cobra.Command {
 
 			// Load plugins (re-load here to ensure latest state and to pass map)
 			// Ideally we should share this logic or load once.
-			configDir := filepath.Dir(config.DefaultPath())
-			pluginsDir := filepath.Join(configDir, "agents")
+			pluginsDir := filepath.Join(selectedConfigDir(), "agents")
 			loadedPlugins, _ := plugins.LoadAgentPlugins(pluginsDir)
 			pluginMap := make(map[string]plugins.AgentPlugin)
 			for _, p := range loadedPlugins {
@@ -161,6 +188,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeClaude, &agentSpecs), "cc", "Claude agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCodex, &agentSpecs), "cod", "Codex agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGemini, &agentSpecs), "gmi", "Gemini agents (N or N:model)")
+	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeOllama, &agentSpecs), "ollama", "Ollama agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAider, &agentSpecs), "aider", "Aider agents (N or N:model)")
@@ -177,8 +205,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&prompt, "prompt", "", "Prompt to initialize agents with")
 
 	// Register plugin flags
-	configDir := filepath.Dir(config.DefaultPath())
-	pluginsDir := filepath.Join(configDir, "agents")
+	pluginsDir := pluginAgentsDirForArgs(os.Args[1:])
 	loadedPlugins, _ := plugins.LoadAgentPlugins(pluginsDir)
 	for _, p := range loadedPlugins {
 		agentType := AgentType(p.Name)
@@ -364,18 +391,31 @@ func runAdd(opts AddOptions) error {
 
 	// Add agents
 	flatAgents := opts.Agents.Flatten()
-	ccCount, codCount, gmiCount, cursorCount, windsurfCount, aiderCount := 0, 0, 0, 0, 0, 0
+	ccCount, codCount, gmiCount, ollamaCount, cursorCount, windsurfCount, aiderCount := 0, 0, 0, 0, 0, 0, 0
 	var rateLimitTracker *ratelimit.RateLimitTracker
 	openAICooldownWaited := false
+	ollamaHost := ""
+	needsCodexTracker := false
+	needsOllamaHost := false
 
 	for _, agent := range flatAgents {
-		if agent.Type == AgentTypeCodex {
-			rateLimitTracker = ratelimit.NewRateLimitTracker(dir)
-			if err := rateLimitTracker.LoadFromDir(dir); err != nil && !IsJSONOutput() {
-				output.PrintWarningf("Failed to load rate limit history: %v", err)
-			}
-			break
+		switch agent.Type {
+		case AgentTypeCodex:
+			needsCodexTracker = true
+		case AgentTypeOllama:
+			needsOllamaHost = true
 		}
+	}
+
+	if needsCodexTracker {
+		rateLimitTracker = ratelimit.NewRateLimitTracker(dir)
+		if err := rateLimitTracker.LoadFromDir(dir); err != nil && !IsJSONOutput() {
+			output.PrintWarningf("Failed to load rate limit history: %v", err)
+		}
+	}
+
+	if needsOllamaHost {
+		ollamaHost = resolveOllamaHost("")
 	}
 
 	// Get pane initialization delay from config (same as spawn command)
@@ -411,35 +451,26 @@ func runAdd(opts AddOptions) error {
 		}
 
 		// Generate command
-		var agentCmd string
-		var envVars map[string]string
+		agentCmd, envVars, err := resolveAddAgentCommandTemplate(agent.Type, opts.PluginMap, ollamaHost)
+		if err != nil {
+			return outputError(err)
+		}
 
 		switch agent.Type {
 		case AgentTypeClaude:
-			agentCmd = cfg.Agents.Claude
 			ccCount++
 		case AgentTypeCodex:
-			agentCmd = cfg.Agents.Codex
 			codCount++
 		case AgentTypeGemini:
-			agentCmd = cfg.Agents.Gemini
 			gmiCount++
+		case AgentTypeOllama:
+			ollamaCount++
 		case AgentTypeCursor:
-			agentCmd = cfg.Agents.Cursor
 			cursorCount++
 		case AgentTypeWindsurf:
-			agentCmd = cfg.Agents.Windsurf
 			windsurfCount++
 		case AgentTypeAider:
-			agentCmd = cfg.Agents.Aider
 			aiderCount++
-		default:
-			if p, ok := opts.PluginMap[agentTypeStr]; ok {
-				agentCmd = p.Command
-				envVars = p.Env
-			} else {
-				return outputError(fmt.Errorf("unknown agent type: %s", agent.Type))
-			}
 		}
 
 		// Configure Claude hooks for DCG and RCH integrations
@@ -681,6 +712,7 @@ func runAdd(opts AddOptions) error {
 			AddedClaude:         ccCount,
 			AddedCodex:          codCount,
 			AddedGemini:         gmiCount,
+			AddedOllama:         ollamaCount,
 			AddedCursor:         cursorCount,
 			AddedWindsurf:       windsurfCount,
 			AddedAider:          aiderCount,

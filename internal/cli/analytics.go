@@ -216,6 +216,10 @@ func aggregateStats(eventList []events.Event, days int, since string, cutoff tim
 				stats.TotalAgents += int(aider)
 				updateAgentStats(stats.AgentBreakdown, "aider", int(aider), 0, 0)
 			}
+			if ollama, ok := event.Data["ollama_count"].(float64); ok {
+				stats.TotalAgents += int(ollama)
+				updateAgentStats(stats.AgentBreakdown, "ollama", int(ollama), 0, 0)
+			}
 
 		case events.EventAgentSpawn:
 			if agentType, ok := event.Data["agent_type"].(string); ok {
@@ -274,27 +278,49 @@ func updateAgentStats(breakdown map[string]AgentStats, agentType string, countDe
 	breakdown[agentType] = current
 }
 
+func isAnalyticsAgentType(agentType string) bool {
+	switch agentType {
+	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama":
+		return true
+	default:
+		return false
+	}
+}
+
 // parseTargetTypes parses the target_types string to extract agent types.
 func parseTargetTypes(targets string) []string {
-	var result []string
-	targets = strings.ToLower(targets)
+	legacyAll := false
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
 
-	if strings.Contains(targets, "cc") || strings.Contains(targets, "claude") {
-		result = append(result, "claude")
-	}
-	if strings.Contains(targets, "cod") || strings.Contains(targets, "codex") {
-		result = append(result, "codex")
-	}
-	if strings.Contains(targets, "gmi") || strings.Contains(targets, "gemini") {
-		result = append(result, "gemini")
-	}
-	if strings.Contains(targets, "all") || strings.Contains(targets, "agents") {
-		// "all" or "agents" means all types
-		if len(result) == 0 {
-			result = []string{"claude", "codex", "gemini"}
+	for _, part := range strings.Split(strings.ToLower(targets), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
+		switch {
+		case part == "all" || part == "agents" || part == "all-agents":
+			legacyAll = true
+			continue
+		case strings.HasPrefix(part, "pane:"):
+			continue
+		case strings.HasPrefix(part, "tags:["):
+			continue
+		}
+		normalized := normalizeAgentType(part)
+		if !isAnalyticsAgentType(normalized) {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
 	}
 
+	if legacyAll && len(result) == 0 {
+		return []string{"claude", "codex", "gemini"}
+	}
 	return result
 }
 
@@ -337,6 +363,9 @@ func buildSessionDetails(eventList []events.Event) []SessionSummary {
 			}
 			if aider, ok := event.Data["aider_count"].(float64); ok {
 				summary.AgentCount += int(aider)
+			}
+			if ollama, ok := event.Data["ollama_count"].(float64); ok {
+				summary.AgentCount += int(ollama)
 			}
 		case events.EventPromptSend:
 			summary.PromptCount++

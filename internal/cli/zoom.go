@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
@@ -269,6 +270,11 @@ func resolvePaneSelector(session, selector string) (int, error) {
 }
 
 // runPaneSelector shows a simple pane selector and returns the selected pane index
+func zoomPanePresentation(pane tmux.Pane, th theme.Theme, ic icons.IconSet) (string, string) {
+	colorKey, icon := sessionPanePresentation(pane, th, ic)
+	return fmt.Sprintf("\033[38;2;%s", colorToRGB(colorKey)), icon
+}
+
 func runPaneSelector(session string, panes []tmux.Pane) (int, error) {
 	t := theme.Current()
 
@@ -279,23 +285,9 @@ func runPaneSelector(session string, panes []tmux.Pane) (int, error) {
 	// For now, use a simple numbered list
 	fmt.Printf("\n%sSelect pane to zoom:%s\n\n", "\033[1m", "\033[0m")
 
+	ic := icons.Current()
 	for i, p := range panes {
-		typeIcon := ""
-		typeColor := ""
-		switch p.Type {
-		case tmux.AgentClaude:
-			typeIcon = "󰗣"
-			typeColor = fmt.Sprintf("\033[38;2;%s", colorToRGB(t.Claude))
-		case tmux.AgentCodex:
-			typeIcon = ""
-			typeColor = fmt.Sprintf("\033[38;2;%s", colorToRGB(t.Codex))
-		case tmux.AgentGemini:
-			typeIcon = "󰊤"
-			typeColor = fmt.Sprintf("\033[38;2;%s", colorToRGB(t.Gemini))
-		default:
-			typeIcon = ""
-			typeColor = fmt.Sprintf("\033[38;2;%s", colorToRGB(t.Green))
-		}
+		typeColor, typeIcon := zoomPanePresentation(p, t, ic)
 
 		num := i + 1
 		if num <= 9 {

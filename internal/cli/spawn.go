@@ -187,6 +187,162 @@ func parseLocalFallbackProvider(raw string) (AgentType, error) {
 	}
 }
 
+func canonicalSpawnAgentType(raw string) (AgentType, bool) {
+	switch agentpkg.AgentType(raw).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return AgentTypeClaude, true
+	case agentpkg.AgentTypeCodex:
+		return AgentTypeCodex, true
+	case agentpkg.AgentTypeGemini:
+		return AgentTypeGemini, true
+	case agentpkg.AgentTypeCursor:
+		return AgentTypeCursor, true
+	case agentpkg.AgentTypeWindsurf:
+		return AgentTypeWindsurf, true
+	case agentpkg.AgentTypeAider:
+		return AgentTypeAider, true
+	case agentpkg.AgentTypeOllama:
+		return AgentTypeOllama, true
+	default:
+		return "", false
+	}
+}
+
+func orderedSpawnAgentTypes() []AgentType {
+	return []AgentType{
+		AgentTypeClaude,
+		AgentTypeCodex,
+		AgentTypeGemini,
+		AgentTypeCursor,
+		AgentTypeWindsurf,
+		AgentTypeAider,
+		AgentTypeOllama,
+	}
+}
+
+func existingSpawnAgentTypes(specs AgentSpecs) map[AgentType]bool {
+	existing := make(map[AgentType]bool, len(specs))
+	for _, spec := range specs {
+		existing[spec.Type] = true
+	}
+	return existing
+}
+
+func canonicalSpawnCountTotals(counts map[string]int) map[AgentType]int {
+	totals := make(map[AgentType]int)
+	for rawType, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		agentType, ok := canonicalSpawnAgentType(rawType)
+		if !ok {
+			continue
+		}
+		totals[agentType] += count
+	}
+	return totals
+}
+
+func formatSpawnCountSummary(counts map[string]int) string {
+	totals := canonicalSpawnCountTotals(counts)
+	parts := make([]string, 0, len(totals))
+	for _, agentType := range orderedSpawnAgentTypes() {
+		count := totals[agentType]
+		if count <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", count, agentType))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func appendMissingCountMapAgentSpecs(agentSpecs *AgentSpecs, counts map[string]int) {
+	if agentSpecs == nil || len(counts) == 0 {
+		return
+	}
+
+	existing := existingSpawnAgentTypes(*agentSpecs)
+	totals := canonicalSpawnCountTotals(counts)
+	for _, agentType := range orderedSpawnAgentTypes() {
+		count := totals[agentType]
+		if count <= 0 || existing[agentType] {
+			continue
+		}
+		*agentSpecs = append(*agentSpecs, AgentSpec{Type: agentType, Count: count})
+	}
+}
+
+func appendMissingRecipeAgentSpecs(agentSpecs *AgentSpecs, personaMap map[string]*persona.Persona, recipeName, projectDir string, recipeAgents []recipe.AgentSpec) error {
+	if agentSpecs == nil || len(recipeAgents) == 0 {
+		return nil
+	}
+
+	existing := existingSpawnAgentTypes(*agentSpecs)
+
+	var registry *persona.Registry
+	loadRegistry := func() (*persona.Registry, error) {
+		if registry != nil {
+			return registry, nil
+		}
+		loaded, err := persona.LoadRegistry(projectDir)
+		if err != nil {
+			return nil, err
+		}
+		registry = loaded
+		return registry, nil
+	}
+
+	for i, recipeAgent := range recipeAgents {
+		if recipeAgent.Count <= 0 {
+			continue
+		}
+
+		agentType, ok := canonicalSpawnAgentType(recipeAgent.Type)
+		if !ok {
+			return fmt.Errorf("recipe %q uses unsupported agent type %q", recipeName, recipeAgent.Type)
+		}
+		if existing[agentType] {
+			continue
+		}
+
+		spec := AgentSpec{
+			Type:  agentType,
+			Count: recipeAgent.Count,
+			Model: strings.TrimSpace(recipeAgent.Model),
+		}
+
+		personaName := strings.TrimSpace(recipeAgent.Persona)
+		if personaName != "" {
+			if personaMap == nil {
+				return fmt.Errorf("recipe %q requires persona support for %q", recipeName, personaName)
+			}
+			reg, err := loadRegistry()
+			if err != nil {
+				return fmt.Errorf("loading persona registry for recipe %q: %w", recipeName, err)
+			}
+			p, found := reg.Get(personaName)
+			if !found {
+				return fmt.Errorf("recipe %q references unknown persona %q", recipeName, recipeAgent.Persona)
+			}
+
+			personaKey := strings.ToLower(personaName)
+			if spec.Model != "" {
+				personaKey = fmt.Sprintf("__recipe_%s_%d_%s", strings.ToLower(recipeName), i, personaKey)
+				override := *p
+				override.Model = spec.Model
+				personaMap[personaKey] = &override
+			} else if _, exists := personaMap[personaKey]; !exists {
+				personaMap[personaKey] = p
+			}
+			spec.Model = personaKey
+		}
+
+		*agentSpecs = append(*agentSpecs, spec)
+	}
+
+	return nil
+}
+
 func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 	opts.CCCount = 0
 	opts.CodCount = 0
@@ -213,6 +369,82 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 		case AgentTypeOllama:
 			opts.OllamaCount++
 		}
+	}
+}
+
+func populateSpawnAgentsFromCounts(opts *SpawnOptions) {
+	if opts == nil || len(opts.Agents) > 0 {
+		return
+	}
+
+	specs := AgentSpecs{}
+	legacyCounts := []struct {
+		agentType AgentType
+		count     int
+	}{
+		{agentType: AgentTypeClaude, count: opts.CCCount},
+		{agentType: AgentTypeCodex, count: opts.CodCount},
+		{agentType: AgentTypeGemini, count: opts.GmiCount},
+		{agentType: AgentTypeCursor, count: opts.CursorCount},
+		{agentType: AgentTypeWindsurf, count: opts.WindsurfCount},
+		{agentType: AgentTypeAider, count: opts.AiderCount},
+		{agentType: AgentTypeOllama, count: opts.OllamaCount},
+	}
+	for _, entry := range legacyCounts {
+		if entry.count <= 0 {
+			continue
+		}
+		specs = append(specs, AgentSpec{Type: entry.agentType, Count: entry.count})
+	}
+	opts.Agents = specs.Flatten()
+}
+
+func normalizeSpawnOptions(opts *SpawnOptions) {
+	if opts == nil {
+		return
+	}
+	populateSpawnAgentsFromCounts(opts)
+	if len(opts.Agents) > 0 {
+		recomputeSpawnAgentCounts(opts)
+	}
+}
+
+func profileAssignmentWarning(profileCount, agentCount int) string {
+	if profileCount == 0 || agentCount == 0 || profileCount == agentCount {
+		return ""
+	}
+	return fmt.Sprintf("Warning: %d profiles for %d agents; profiles will be assigned in order", profileCount, agentCount)
+}
+
+func legacySpawnTotalAgentCount(opts SpawnOptions) int {
+	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OllamaCount
+}
+
+func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
+	return map[string]string{
+		"NTM_AGENT_COUNT_CC":       fmt.Sprintf("%d", opts.CCCount),
+		"NTM_AGENT_COUNT_COD":      fmt.Sprintf("%d", opts.CodCount),
+		"NTM_AGENT_COUNT_GMI":      fmt.Sprintf("%d", opts.GmiCount),
+		"NTM_AGENT_COUNT_CURSOR":   fmt.Sprintf("%d", opts.CursorCount),
+		"NTM_AGENT_COUNT_WINDSURF": fmt.Sprintf("%d", opts.WindsurfCount),
+		"NTM_AGENT_COUNT_AIDER":    fmt.Sprintf("%d", opts.AiderCount),
+		"NTM_AGENT_COUNT_OLLAMA":   fmt.Sprintf("%d", opts.OllamaCount),
+		"NTM_AGENT_COUNT_TOTAL":    fmt.Sprintf("%d", totalAgents),
+	}
+}
+
+func spawnSessionCreatedEventFields(opts SpawnOptions, dir string) map[string]string {
+	return map[string]string{
+		"project_dir":    dir,
+		"recipe":         opts.RecipeName,
+		"agent_count":    fmt.Sprintf("%d", legacySpawnTotalAgentCount(opts)),
+		"agent_cc":       fmt.Sprintf("%d", opts.CCCount),
+		"agent_cod":      fmt.Sprintf("%d", opts.CodCount),
+		"agent_gmi":      fmt.Sprintf("%d", opts.GmiCount),
+		"agent_cursor":   fmt.Sprintf("%d", opts.CursorCount),
+		"agent_windsurf": fmt.Sprintf("%d", opts.WindsurfCount),
+		"agent_aider":    fmt.Sprintf("%d", opts.AiderCount),
+		"agent_ollama":   fmt.Sprintf("%d", opts.OllamaCount),
 	}
 }
 
@@ -606,8 +838,7 @@ func newSpawnCmd() *cobra.Command {
 	// command. Plugin loading is fast (directory scan + TOML parse) but if it
 	// becomes a bottleneck, consider lazy flag registration via cobra's
 	// TraverseRunHooks or a PersistentPreRunE on the spawn subcommand.
-	configDir := filepath.Dir(config.DefaultPath())
-	pluginsDir := filepath.Join(configDir, "agents")
+	pluginsDir := pluginAgentsDirForArgs(os.Args[1:])
 	loadedPlugins, _ := plugins.LoadAgentPlugins(pluginsDir)
 	preloadedPluginMap := make(map[string]plugins.AgentPlugin)
 	for _, p := range loadedPlugins {
@@ -748,15 +979,7 @@ Examples:
 				if !wizResult.Confirmed {
 					return fmt.Errorf("spawn cancelled")
 				}
-				if wizResult.CCCount > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeClaude, Count: wizResult.CCCount})
-				}
-				if wizResult.CodCount > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeCodex, Count: wizResult.CodCount})
-				}
-				if wizResult.GmiCount > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeGemini, Count: wizResult.GmiCount})
-				}
+				agentSpecs = append(agentSpecs, wizardLaunchAgentSpecs(wizResult)...)
 				if wizResult.Recipe != "" {
 					recipeName = wizResult.Recipe
 				}
@@ -812,15 +1035,8 @@ Examples:
 				if err := r.Validate(); err != nil {
 					return fmt.Errorf("invalid recipe %q: %w", recipeName, err)
 				}
-				counts := r.AgentCounts()
-				if agentSpecs.ByType(AgentTypeClaude).TotalCount() == 0 && counts["cc"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeClaude, Count: counts["cc"]})
-				}
-				if agentSpecs.ByType(AgentTypeCodex).TotalCount() == 0 && counts["cod"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeCodex, Count: counts["cod"]})
-				}
-				if agentSpecs.ByType(AgentTypeGemini).TotalCount() == 0 && counts["gmi"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeGemini, Count: counts["gmi"]})
+				if err := appendMissingRecipeAgentSpecs(&agentSpecs, personaMap, r.Name, dir, r.Agents); err != nil {
+					return err
 				}
 				fmt.Printf("Using recipe '%s': %s\n", r.Name, r.Description)
 			}
@@ -840,17 +1056,7 @@ Examples:
 				if err := tmpl.Validate(); err != nil {
 					return fmt.Errorf("invalid template %q: %w", templateName, err)
 				}
-				counts := tmpl.AgentCounts()
-				// Apply template agent counts (CLI flags override these)
-				if agentSpecs.ByType(AgentTypeClaude).TotalCount() == 0 && counts["cc"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeClaude, Count: counts["cc"]})
-				}
-				if agentSpecs.ByType(AgentTypeCodex).TotalCount() == 0 && counts["cod"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeCodex, Count: counts["cod"]})
-				}
-				if agentSpecs.ByType(AgentTypeGemini).TotalCount() == 0 && counts["gmi"] > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeGemini, Count: counts["gmi"]})
-				}
+				appendMissingCountMapAgentSpecs(&agentSpecs, tmpl.AgentCounts())
 				if !IsJSONOutput() {
 					fmt.Printf("Using template '%s': %s (%s coordination)\n",
 						tmpl.Name, tmpl.Description, tmpl.Coordination)
@@ -874,20 +1080,12 @@ Examples:
 
 			// Apply defaults
 			if len(agentSpecs) == 0 && len(cfg.ProjectDefaults) > 0 {
-				if v, ok := cfg.ProjectDefaults["cc"]; ok && v > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeClaude, Count: v})
-				}
-				if v, ok := cfg.ProjectDefaults["cod"]; ok && v > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeCodex, Count: v})
-				}
-				if v, ok := cfg.ProjectDefaults["gmi"]; ok && v > 0 {
-					agentSpecs = append(agentSpecs, AgentSpec{Type: AgentTypeGemini, Count: v})
-				}
+				appendMissingCountMapAgentSpecs(&agentSpecs, cfg.ProjectDefaults)
 				ccCount = agentSpecs.ByType(AgentTypeClaude).TotalCount()
 				codCount = agentSpecs.ByType(AgentTypeCodex).TotalCount()
 				gmiCount = agentSpecs.ByType(AgentTypeGemini).TotalCount()
 				if !IsJSONOutput() && len(agentSpecs) > 0 {
-					fmt.Printf("Using default configuration: %d cc, %d cod, %d gmi\n", ccCount, codCount, gmiCount)
+					fmt.Printf("Using default configuration: %s\n", formatSpawnCountSummary(cfg.ProjectDefaults))
 				}
 			}
 
@@ -935,14 +1133,6 @@ Examples:
 					profileList = append(profileList, p)
 				}
 
-				// Warn if profile count doesn't match agent count
-				totalAgents := agentSpecs.TotalCount()
-				if len(profileList) > 0 && totalAgents > 0 && len(profileList) != totalAgents {
-					if !IsJSONOutput() {
-						fmt.Printf("Warning: %d profiles for %d agents; profiles will be assigned in order\n",
-							len(profileList), totalAgents)
-					}
-				}
 			}
 
 			// Parse marching orders file if provided (bd-2lodn)
@@ -999,6 +1189,8 @@ Examples:
 				Label:                 label,
 			}
 
+			normalizeSpawnOptions(&opts)
+
 			// Apply session profile if specified (bd-29kr).
 			// Profile provides defaults; explicit flags override.
 			if sessionProfileName != "" {
@@ -1007,6 +1199,10 @@ Examples:
 					return fmt.Errorf("loading profile %q: %w", sessionProfileName, err)
 				}
 				ApplySessionProfileToSpawnOptions(&opts, profile)
+				normalizeSpawnOptions(&opts)
+			}
+			if msg := profileAssignmentWarning(len(profileList), len(opts.Agents)); msg != "" && !IsJSONOutput() {
+				fmt.Println(msg)
 			}
 
 			return spawnSessionLogic(opts)
@@ -1121,6 +1317,8 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		return outputError(err)
 	}
 
+	normalizeSpawnOptions(&opts)
+
 	ollamaHost, err := preflightOllamaSpawn(opts)
 	if err != nil {
 		applied, fallbackMsg, fallbackErr := handleOllamaPreflightError(&opts, err)
@@ -1140,9 +1338,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	// Calculate total agents - either from Agents slice or explicit counts (legacy path)
 	var totalAgents int
 	if len(opts.Agents) == 0 {
-		totalAgents = opts.CCCount + opts.CodCount + opts.GmiCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount
+		totalAgents = legacySpawnTotalAgentCount(opts)
 		if totalAgents == 0 {
-			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --cursor, --windsurf, --aider or plugin flags)"))
+			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
 		}
 	} else {
 		totalAgents = len(opts.Agents)
@@ -1210,17 +1408,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 
 	// Build execution context for hooks
 	hookCtx := hooks.ExecutionContext{
-		SessionName: opts.Session,
-		ProjectDir:  dir,
-		AdditionalEnv: map[string]string{
-			"NTM_AGENT_COUNT_CC":       fmt.Sprintf("%d", opts.CCCount),
-			"NTM_AGENT_COUNT_COD":      fmt.Sprintf("%d", opts.CodCount),
-			"NTM_AGENT_COUNT_GMI":      fmt.Sprintf("%d", opts.GmiCount),
-			"NTM_AGENT_COUNT_CURSOR":   fmt.Sprintf("%d", opts.CursorCount),
-			"NTM_AGENT_COUNT_WINDSURF": fmt.Sprintf("%d", opts.WindsurfCount),
-			"NTM_AGENT_COUNT_AIDER":    fmt.Sprintf("%d", opts.AiderCount),
-			"NTM_AGENT_COUNT_TOTAL":    fmt.Sprintf("%d", totalAgents),
-		},
+		SessionName:   opts.Session,
+		ProjectDir:    dir,
+		AdditionalEnv: spawnHookCountEnv(totalAgents, opts),
 	}
 
 	// Run pre-spawn hooks
@@ -2083,14 +2273,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		"",
 		"",
 		fmt.Sprintf("Session %s created", opts.Session),
-		map[string]string{
-			"project_dir": dir,
-			"recipe":      opts.RecipeName,
-			"agent_count": fmt.Sprintf("%d", opts.CCCount+opts.CodCount+opts.GmiCount),
-			"agent_cc":    fmt.Sprintf("%d", opts.CCCount),
-			"agent_cod":   fmt.Sprintf("%d", opts.CodCount),
-			"agent_gmi":   fmt.Sprintf("%d", opts.GmiCount),
-		},
+		spawnSessionCreatedEventFields(opts, dir),
 	))
 
 	for _, agent := range launchedAgents {
@@ -2111,7 +2294,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	}
 
 	// Emit analytics events (JSONL) for session creation and agent spawns.
-	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, dir, opts.RecipeName)
+	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OllamaCount, dir, opts.RecipeName)
 	for _, agent := range launchedAgents {
 		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,

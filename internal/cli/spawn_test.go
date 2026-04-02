@@ -793,3 +793,234 @@ func TestGetMemoryContext_EmptyTask(t *testing.T) {
 	// but the function should not panic
 	_ = result // Just verify no panic
 }
+
+func TestLegacySpawnTotalAgentCount_IncludesOllama(t *testing.T) {
+	t.Parallel()
+
+	opts := SpawnOptions{
+		CCCount:       1,
+		CodCount:      2,
+		GmiCount:      3,
+		CursorCount:   4,
+		WindsurfCount: 5,
+		AiderCount:    6,
+		OllamaCount:   7,
+	}
+
+	if got := legacySpawnTotalAgentCount(opts); got != 28 {
+		t.Fatalf("legacySpawnTotalAgentCount() = %d, want 28", got)
+	}
+}
+
+func TestSpawnHookCountEnv_IncludesOllama(t *testing.T) {
+	t.Parallel()
+
+	env := spawnHookCountEnv(5, SpawnOptions{OllamaCount: 2, CursorCount: 3})
+	if env["NTM_AGENT_COUNT_OLLAMA"] != "2" {
+		t.Fatalf("NTM_AGENT_COUNT_OLLAMA = %q, want 2", env["NTM_AGENT_COUNT_OLLAMA"])
+	}
+	if env["NTM_AGENT_COUNT_TOTAL"] != "5" {
+		t.Fatalf("NTM_AGENT_COUNT_TOTAL = %q, want 5", env["NTM_AGENT_COUNT_TOTAL"])
+	}
+}
+
+func TestSpawnSessionCreatedEventFields_IncludeModernTypes(t *testing.T) {
+	t.Parallel()
+
+	fields := spawnSessionCreatedEventFields(SpawnOptions{
+		RecipeName:    "default",
+		CCCount:       1,
+		CursorCount:   2,
+		WindsurfCount: 3,
+		AiderCount:    4,
+		OllamaCount:   5,
+	}, "/tmp/project")
+
+	if fields["agent_count"] != "15" {
+		t.Fatalf("agent_count = %q, want 15", fields["agent_count"])
+	}
+	if fields["agent_cursor"] != "2" || fields["agent_windsurf"] != "3" || fields["agent_aider"] != "4" || fields["agent_ollama"] != "5" {
+		t.Fatalf("spawnSessionCreatedEventFields() missing modern counts: %+v", fields)
+	}
+}
+
+func TestNormalizeSpawnOptions_ExpandsLegacyCountsIncludingOllama(t *testing.T) {
+	t.Parallel()
+
+	opts := SpawnOptions{
+		CursorCount: 2,
+		OllamaCount: 1,
+	}
+
+	normalizeSpawnOptions(&opts)
+
+	if len(opts.Agents) != 3 {
+		t.Fatalf("len(opts.Agents) = %d, want 3", len(opts.Agents))
+	}
+	if opts.CursorCount != 2 {
+		t.Fatalf("CursorCount = %d, want 2", opts.CursorCount)
+	}
+	if opts.OllamaCount != 1 {
+		t.Fatalf("OllamaCount = %d, want 1", opts.OllamaCount)
+	}
+	if opts.Agents[0].Type != AgentTypeCursor || opts.Agents[0].Index != 1 {
+		t.Fatalf("agent[0] = %+v, want cursor_1", opts.Agents[0])
+	}
+	if opts.Agents[1].Type != AgentTypeCursor || opts.Agents[1].Index != 2 {
+		t.Fatalf("agent[1] = %+v, want cursor_2", opts.Agents[1])
+	}
+	if opts.Agents[2].Type != AgentTypeOllama || opts.Agents[2].Index != 1 {
+		t.Fatalf("agent[2] = %+v, want ollama_1", opts.Agents[2])
+	}
+}
+
+func TestNormalizeSpawnOptions_RecomputesModernCountsFromAgents(t *testing.T) {
+	t.Parallel()
+
+	opts := SpawnOptions{
+		Agents: []FlatAgent{
+			{Type: AgentTypeCursor, Index: 1},
+			{Type: AgentTypeWindsurf, Index: 1},
+			{Type: AgentTypeOllama, Index: 1},
+			{Type: AgentTypeOllama, Index: 2},
+		},
+	}
+
+	normalizeSpawnOptions(&opts)
+
+	if opts.CCCount != 0 || opts.CodCount != 0 || opts.GmiCount != 0 {
+		t.Fatalf("legacy cloud counts changed unexpectedly: cc=%d cod=%d gmi=%d", opts.CCCount, opts.CodCount, opts.GmiCount)
+	}
+	if opts.CursorCount != 1 {
+		t.Fatalf("CursorCount = %d, want 1", opts.CursorCount)
+	}
+	if opts.WindsurfCount != 1 {
+		t.Fatalf("WindsurfCount = %d, want 1", opts.WindsurfCount)
+	}
+	if opts.OllamaCount != 2 {
+		t.Fatalf("OllamaCount = %d, want 2", opts.OllamaCount)
+	}
+}
+
+func TestProfileAssignmentWarning(t *testing.T) {
+	t.Parallel()
+
+	if msg := profileAssignmentWarning(0, 3); msg != "" {
+		t.Fatalf("profileAssignmentWarning(0, 3) = %q, want empty", msg)
+	}
+	if msg := profileAssignmentWarning(2, 2); msg != "" {
+		t.Fatalf("profileAssignmentWarning(2, 2) = %q, want empty", msg)
+	}
+	if msg := profileAssignmentWarning(2, 5); msg != "Warning: 2 profiles for 5 agents; profiles will be assigned in order" {
+		t.Fatalf("profileAssignmentWarning(2, 5) = %q", msg)
+	}
+}
+
+func TestWizardAgentSpecs_IncludesModernTypes(t *testing.T) {
+	t.Parallel()
+
+	specs := wizardAgentSpecs(SpawnWizardResult{
+		CCCount:       1,
+		CursorCount:   2,
+		WindsurfCount: 1,
+		AiderCount:    1,
+		OllamaCount:   3,
+	})
+
+	if len(specs) != 5 {
+		t.Fatalf("len(specs) = %d, want 5", len(specs))
+	}
+	if specs[0] != (AgentSpec{Type: AgentTypeClaude, Count: 1}) {
+		t.Fatalf("specs[0] = %+v, want Claude x1", specs[0])
+	}
+	if specs[1] != (AgentSpec{Type: AgentTypeCursor, Count: 2}) {
+		t.Fatalf("specs[1] = %+v, want Cursor x2", specs[1])
+	}
+	if specs[2] != (AgentSpec{Type: AgentTypeWindsurf, Count: 1}) {
+		t.Fatalf("specs[2] = %+v, want Windsurf x1", specs[2])
+	}
+	if specs[3] != (AgentSpec{Type: AgentTypeAider, Count: 1}) {
+		t.Fatalf("specs[3] = %+v, want Aider x1", specs[3])
+	}
+	if specs[4] != (AgentSpec{Type: AgentTypeOllama, Count: 3}) {
+		t.Fatalf("specs[4] = %+v, want Ollama x3", specs[4])
+	}
+}
+
+func TestSpawnWizardResultFromCounts_IncludesModernTypes(t *testing.T) {
+	t.Parallel()
+
+	result := spawnWizardResultFromCounts(map[string]int{
+		"cc":       1,
+		"cursor":   2,
+		"windsurf": 3,
+		"aider":    4,
+		"ollama":   5,
+	})
+
+	if result.CCCount != 1 || result.CursorCount != 2 || result.WindsurfCount != 3 || result.AiderCount != 4 || result.OllamaCount != 5 {
+		t.Fatalf("spawnWizardResultFromCounts() = %+v", result)
+	}
+}
+
+func TestFormatWizardAgentCountSummary_IncludesModernTypes(t *testing.T) {
+	t.Parallel()
+
+	got := formatWizardAgentCountSummary(map[string]int{
+		"cc":       1,
+		"cursor":   2,
+		"windsurf": 1,
+		"aider":    1,
+		"ollama":   3,
+	})
+	want := "cc:1 cursor:2 windsurf:1 aider:1 ollama:3"
+	if got != want {
+		t.Fatalf("formatWizardAgentCountSummary() = %q, want %q", got, want)
+	}
+	if got := formatWizardAgentCountSummary(nil); got != "no agents" {
+		t.Fatalf("formatWizardAgentCountSummary(nil) = %q, want %q", got, "no agents")
+	}
+}
+
+func TestWizardLaunchAgentSpecs_ManualWizardKeepsCounts(t *testing.T) {
+	t.Parallel()
+
+	specs := wizardLaunchAgentSpecs(SpawnWizardResult{
+		CCCount:       1,
+		CursorCount:   2,
+		WindsurfCount: 1,
+	})
+
+	if len(specs) != 3 {
+		t.Fatalf("len(specs) = %d, want 3", len(specs))
+	}
+	if specs[0] != (AgentSpec{Type: AgentTypeClaude, Count: 1}) {
+		t.Fatalf("specs[0] = %+v, want Claude x1", specs[0])
+	}
+	if specs[1] != (AgentSpec{Type: AgentTypeCursor, Count: 2}) {
+		t.Fatalf("specs[1] = %+v, want Cursor x2", specs[1])
+	}
+	if specs[2] != (AgentSpec{Type: AgentTypeWindsurf, Count: 1}) {
+		t.Fatalf("specs[2] = %+v, want Windsurf x1", specs[2])
+	}
+}
+
+func TestWizardLaunchAgentSpecs_RecipeAndTemplateSelectionsDeferCounts(t *testing.T) {
+	t.Parallel()
+
+	if specs := wizardLaunchAgentSpecs(SpawnWizardResult{CCCount: 2, Recipe: "review-team"}); len(specs) != 0 {
+		t.Fatalf("recipe selection specs = %+v, want empty", specs)
+	}
+	if specs := wizardLaunchAgentSpecs(SpawnWizardResult{CodCount: 1, Template: "red-green"}); len(specs) != 0 {
+		t.Fatalf("template selection specs = %+v, want empty", specs)
+	}
+	if !wizardDeferredSelection(SpawnWizardResult{Recipe: "review-team"}) {
+		t.Fatal("wizardDeferredSelection(recipe) = false, want true")
+	}
+	if !wizardDeferredSelection(SpawnWizardResult{Template: "red-green"}) {
+		t.Fatal("wizardDeferredSelection(template) = false, want true")
+	}
+	if wizardDeferredSelection(SpawnWizardResult{CCCount: 1}) {
+		t.Fatal("wizardDeferredSelection(manual) = true, want false")
+	}
+}

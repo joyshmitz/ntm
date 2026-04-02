@@ -320,6 +320,53 @@ func TestParseTargetTypes_NoMatch(t *testing.T) {
 	}
 }
 
+func TestParseTargetTypes_ModernAndAliased(t *testing.T) {
+	result := parseTargetTypes("openai-codex, ws, cursor, aider, ollama, codex, pane:3, tags:[backend]")
+	expected := []string{"codex", "windsurf", "cursor", "aider", "ollama"}
+	if len(result) != len(expected) {
+		t.Fatalf("parseTargetTypes returned %d results, want %d: %v", len(result), len(expected), result)
+	}
+	for i, want := range expected {
+		if result[i] != want {
+			t.Fatalf("parseTargetTypes result[%d] = %q, want %q (%v)", i, result[i], want, result)
+		}
+	}
+}
+
+func TestAggregateStats_OllamaAgents(t *testing.T) {
+	now := time.Now().UTC()
+	testEvents := []events.Event{
+		{Timestamp: now, Type: events.EventSessionCreate, Session: "s1", Data: map[string]interface{}{"ollama_count": float64(2)}},
+	}
+
+	stats := aggregateStats(testEvents, 30, "", now.AddDate(0, 0, -30))
+	if stats.TotalAgents != 2 {
+		t.Fatalf("TotalAgents = %d, want 2", stats.TotalAgents)
+	}
+	ollama, ok := stats.AgentBreakdown["ollama"]
+	if !ok {
+		t.Fatal("Missing ollama in agent breakdown")
+	}
+	if ollama.Count != 2 {
+		t.Fatalf("ollama.Count = %d, want 2", ollama.Count)
+	}
+}
+
+func TestBuildSessionDetails_IncludesOllamaAgents(t *testing.T) {
+	now := time.Now().UTC()
+	testEvents := []events.Event{
+		{Timestamp: now, Type: events.EventSessionCreate, Session: "s1", Data: map[string]interface{}{"codex_count": float64(1), "ollama_count": float64(2)}},
+	}
+
+	details := buildSessionDetails(testEvents)
+	if len(details) != 1 {
+		t.Fatalf("Got %d sessions, want 1", len(details))
+	}
+	if details[0].AgentCount != 3 {
+		t.Fatalf("AgentCount = %d, want 3", details[0].AgentCount)
+	}
+}
+
 func TestUpdateAgentStats_Cumulative(t *testing.T) {
 	breakdown := make(map[string]AgentStats)
 

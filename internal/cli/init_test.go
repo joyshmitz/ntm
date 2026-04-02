@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/startup"
 )
 
 // TestInitCmd_NoArgs verifies ntm init with no arguments uses current working directory
@@ -631,6 +632,40 @@ func TestRunShellInit_InvalidShell(t *testing.T) {
 	}
 
 	t.Logf("TEST: RunShellInit_InvalidShell | Input: powershell | Expected: error | Got: %v", err)
+}
+
+func TestRunShellInit_UsesSelectedConfigPath(t *testing.T) {
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	configBody := `[agents]
+claude = "echo custom-claude"
+`
+	if err := os.WriteFile(customPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	cfgFile = customPath
+
+	out, err := captureStdout(t, func() error {
+		return runShellInit("zsh")
+	})
+	if err != nil {
+		t.Fatalf("runShellInit(zsh) failed: %v", err)
+	}
+	if !strings.Contains(out, "alias cc='echo custom-claude'") {
+		t.Fatalf("shell output missing custom claude command: %q", out)
+	}
 }
 
 // TestInstallGitHooks_NotGitRepo verifies hooks installation skips non-git directories

@@ -586,8 +586,10 @@ func incrementAgentCounts(counts *output.AgentCountsResponse, t tmux.AgentType) 
 		counts.Windsurf++
 	case tmux.AgentAider:
 		counts.Aider++
-	default:
+	case tmux.AgentUser:
 		counts.User++
+	default:
+		counts.Other++
 	}
 
 	counts.Total++

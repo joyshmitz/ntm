@@ -21,6 +21,7 @@ type SessionProfile struct {
 	CC        int    `toml:"cc,omitempty" json:"cc,omitempty"`
 	Cod       int    `toml:"cod,omitempty" json:"cod,omitempty"`
 	Gmi       int    `toml:"gmi,omitempty" json:"gmi,omitempty"`
+	Ollama    int    `toml:"ollama,omitempty" json:"ollama,omitempty"`
 	Cursor    int    `toml:"cursor,omitempty" json:"cursor,omitempty"`
 	Windsurf  int    `toml:"windsurf,omitempty" json:"windsurf,omitempty"`
 	Aider     int    `toml:"aider,omitempty" json:"aider,omitempty"`
@@ -32,6 +33,51 @@ type SessionProfile struct {
 }
 
 var validProfileName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+
+func validateSessionProfileName(name string) error {
+	if !validProfileName.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q: must be alphanumeric with hyphens/underscores", name)
+	}
+	return nil
+}
+
+func (p SessionProfile) Validate() error {
+	counts := map[string]int{
+		"cc":       p.CC,
+		"cod":      p.Cod,
+		"gmi":      p.Gmi,
+		"ollama":   p.Ollama,
+		"cursor":   p.Cursor,
+		"windsurf": p.Windsurf,
+		"aider":    p.Aider,
+	}
+	for name, count := range counts {
+		if count < 0 {
+			return fmt.Errorf("%s count cannot be negative", name)
+		}
+	}
+	return nil
+}
+
+func decodeSessionProfile(name string, data []byte) (*SessionProfile, error) {
+	var cfg SessionProfile
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("parsing profile %q: %w", name, err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		fields := make([]string, 0, len(undecoded))
+		for _, key := range undecoded {
+			fields = append(fields, key.String())
+		}
+		sort.Strings(fields)
+		return nil, fmt.Errorf("parsing profile %q: unknown field(s): %s", name, strings.Join(fields, ", "))
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid profile %q: %w", name, err)
+	}
+	return &cfg, nil
+}
 
 // sessionProfileDir returns the directory where profiles are stored.
 func sessionProfileDir() string {
@@ -54,8 +100,11 @@ func sessionProfilePath(name string) string {
 
 // SaveSessionProfile writes a profile to disk.
 func SaveSessionProfile(name string, cfg SessionProfile) error {
-	if !validProfileName.MatchString(name) {
-		return fmt.Errorf("invalid profile name %q: must be alphanumeric with hyphens/underscores", name)
+	if err := validateSessionProfileName(name); err != nil {
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid profile %q: %w", name, err)
 	}
 	dir := sessionProfileDirFunc()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -75,6 +124,9 @@ func SaveSessionProfile(name string, cfg SessionProfile) error {
 
 // LoadSessionProfile reads a profile from disk.
 func LoadSessionProfile(name string) (*SessionProfile, error) {
+	if err := validateSessionProfileName(name); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(sessionProfilePath(name))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -82,11 +134,7 @@ func LoadSessionProfile(name string) (*SessionProfile, error) {
 		}
 		return nil, fmt.Errorf("reading profile: %w", err)
 	}
-	var cfg SessionProfile
-	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parsing profile %q: %w", name, err)
-	}
-	return &cfg, nil
+	return decodeSessionProfile(name, data)
 }
 
 // ListSessionProfiles returns the names of all saved profiles (sorted).
@@ -104,7 +152,14 @@ func ListSessionProfiles() ([]string, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
 			continue
 		}
-		names = append(names, strings.TrimSuffix(e.Name(), ".toml"))
+		name := strings.TrimSuffix(e.Name(), ".toml")
+		if err := validateSessionProfileName(name); err != nil {
+			return nil, fmt.Errorf("invalid profile file %q: %w", e.Name(), err)
+		}
+		if _, err := LoadSessionProfile(name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil
@@ -112,6 +167,9 @@ func ListSessionProfiles() ([]string, error) {
 
 // DeleteSessionProfile removes a profile from disk.
 func DeleteSessionProfile(name string) error {
+	if err := validateSessionProfileName(name); err != nil {
+		return err
+	}
 	path := sessionProfilePath(name)
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -140,11 +198,11 @@ func newSessionProfileCmd() *cobra.Command {
 
 func newSessionProfileSaveCmd() *cobra.Command {
 	var (
-		cc, cod, gmi         int
-		cursorCount, wsCount int
-		aiderCount           int
-		userPane, safety, wt bool
-		prompt, initFile     string
+		cc, cod, gmi, ollamaCount int
+		cursorCount, wsCount      int
+		aiderCount                int
+		userPane, safety, wt      bool
+		prompt, initFile          string
 	)
 
 	cmd := &cobra.Command{
@@ -154,9 +212,10 @@ func newSessionProfileSaveCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 			cfg := SessionProfile{
-				CC:  cc,
-				Cod: cod,
-				Gmi: gmi,
+				CC:     cc,
+				Cod:    cod,
+				Gmi:    gmi,
+				Ollama: ollamaCount,
 			}
 			if cursorCount > 0 {
 				cfg.Cursor = cursorCount
@@ -193,6 +252,7 @@ func newSessionProfileSaveCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cc, "cc", 0, "Number of Claude agents")
 	cmd.Flags().IntVar(&cod, "cod", 0, "Number of Codex agents")
 	cmd.Flags().IntVar(&gmi, "gmi", 0, "Number of Gemini agents")
+	cmd.Flags().IntVar(&ollamaCount, "ollama", 0, "Number of Ollama agents")
 	cmd.Flags().IntVar(&cursorCount, "cursor", 0, "Number of Cursor agents")
 	cmd.Flags().IntVar(&wsCount, "windsurf", 0, "Number of Windsurf agents")
 	cmd.Flags().IntVar(&aiderCount, "aider", 0, "Number of Aider agents")
@@ -248,6 +308,9 @@ func newSessionProfileShowCmd() *cobra.Command {
 		Short: "Show a saved profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if _, err := LoadSessionProfile(args[0]); err != nil {
+				return err
+			}
 			data, err := os.ReadFile(sessionProfilePath(args[0]))
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
@@ -312,6 +375,9 @@ func ApplySessionProfileToSpawnOptions(opts *SpawnOptions, profile *SessionProfi
 	}
 	if opts.GmiCount == 0 && profile.Gmi > 0 {
 		opts.GmiCount = profile.Gmi
+	}
+	if opts.OllamaCount == 0 && profile.Ollama > 0 {
+		opts.OllamaCount = profile.Ollama
 	}
 	if opts.CursorCount == 0 && profile.Cursor > 0 {
 		opts.CursorCount = profile.Cursor

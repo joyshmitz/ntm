@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/policy"
@@ -287,8 +286,8 @@ func runPolicyValidate(policyFile string) error {
 	}
 
 	// Parse YAML
-	var p policy.Policy
-	if err := yaml.Unmarshal(data, &p); err != nil {
+	p, err := policy.DecodeYAML(data)
+	if err != nil {
 		errors = append(errors, fmt.Sprintf("Invalid YAML: %v", err))
 		return outputValidationResult(policyFile, false, errors, warnings)
 	}
@@ -512,12 +511,6 @@ func runPolicyEdit(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("writing default policy: %w", err)
 		}
-	}
-
-	// Get editor
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vim"
 	}
 
 	// Open in editor

@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/archive"
-	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
@@ -119,8 +118,7 @@ func runMonitor(session string) error {
 	}
 
 	// Load plugins to populate config
-	configDir := filepath.Dir(config.DefaultPath())
-	pluginsDir := filepath.Join(configDir, "agents")
+	pluginsDir := filepath.Join(selectedConfigDir(), "agents")
 	if loadedPlugins, err := plugins.LoadAgentPlugins(pluginsDir); err == nil && cfg != nil {
 		if cfg.Agents.Plugins == nil {
 			cfg.Agents.Plugins = make(map[string]string)

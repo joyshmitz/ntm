@@ -361,17 +361,37 @@ func (s SendTargets) MatchesPane(pane tmux.Pane) bool {
 	return false
 }
 
-// matchesSendTarget checks if a pane matches a send target
+// matchesSendTarget checks if a pane matches a send target.
 func matchesSendTarget(pane tmux.Pane, target SendTarget) bool {
-	// Type must match
-	if string(pane.Type) != string(target.Type) {
+	if normalizeAgentType(string(pane.Type)) != normalizeAgentType(string(target.Type)) {
 		return false
 	}
-	// If variant is specified, it must also match
 	if target.Variant != "" && pane.Variant != target.Variant {
 		return false
 	}
 	return true
+}
+
+func matchesLegacySendTypeFilter(pane tmux.Pane, targetCC, targetCod, targetGmi bool) bool {
+	switch tmux.AgentType(pane.Type).Canonical() {
+	case tmux.AgentClaude:
+		return targetCC
+	case tmux.AgentCodex:
+		return targetCod
+	case tmux.AgentGemini:
+		return targetGmi
+	default:
+		return false
+	}
+}
+
+func isInterruptibleAgentPane(pane tmux.Pane) bool {
+	switch tmux.AgentType(pane.Type).Canonical() {
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama:
+		return true
+	default:
+		return false
+	}
 }
 
 func intsToStrings(ints []int) []string {
@@ -1447,16 +1467,7 @@ func runSendInternal(opts SendOptions) (err error) {
 							continue
 						}
 					} else {
-						match := false
-						if targetCC && p.Type == tmux.AgentClaude {
-							match = true
-						}
-						if targetCod && p.Type == tmux.AgentCodex {
-							match = true
-						}
-						if targetGmi && p.Type == tmux.AgentGemini {
-							match = true
-						}
+						match := matchesLegacySendTypeFilter(p, targetCC, targetCod, targetGmi)
 						if !match {
 							continue
 						}
@@ -1612,7 +1623,7 @@ func runSendInternal(opts SendOptions) (err error) {
 
 	// Emit prompt_send event
 	if delivered > 0 {
-		events.EmitPromptSend(session, delivered, len(prompt), "", buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex, tags), len(hookCtx.AdditionalEnv) > 0)
+		events.EmitPromptSend(session, delivered, len(prompt), "", buildObservedTargetTypes(selectedPanes), len(hookCtx.AdditionalEnv) > 0)
 	}
 
 	// JSON output mode
@@ -1777,7 +1788,7 @@ func runInterrupt(session string, tags []string) error {
 	count := 0
 	for _, p := range panes {
 		// Only interrupt agent panes
-		if p.Type == tmux.AgentClaude || p.Type == tmux.AgentCodex || p.Type == tmux.AgentGemini || p.Type == tmux.AgentCursor || p.Type == tmux.AgentWindsurf || p.Type == tmux.AgentAider {
+		if isInterruptibleAgentPane(p) {
 			// Check tags
 			if len(tags) > 0 {
 				if !HasAnyTag(p.Tags, tags) {
@@ -1823,7 +1834,7 @@ func buildInterruptResponse(session string, tags []string) (*output.InterruptRes
 
 	for _, p := range panes {
 		// Only interrupt agent panes
-		if p.Type == tmux.AgentClaude || p.Type == tmux.AgentCodex || p.Type == tmux.AgentGemini || p.Type == tmux.AgentCursor || p.Type == tmux.AgentWindsurf || p.Type == tmux.AgentAider {
+		if isInterruptibleAgentPane(p) {
 			// Check tags
 			if len(tags) > 0 {
 				if !HasAnyTag(p.Tags, tags) {
@@ -2471,6 +2482,23 @@ func truncatePrompt(s string, maxLen int) string {
 }
 
 // buildTargetDescription creates a human-readable description of send targets
+func buildObservedTargetTypes(panes []tmux.Pane) string {
+	seen := make(map[string]struct{})
+	targets := make([]string, 0, len(panes))
+	for _, p := range panes {
+		normalized := normalizeAgentType(string(p.Type))
+		if !isAnalyticsAgentType(normalized) {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		targets = append(targets, normalized)
+	}
+	return strings.Join(targets, ",")
+}
+
 func buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst bool, paneIndex int, tags []string) string {
 	if paneIndex >= 0 {
 		return fmt.Sprintf("pane:%d", paneIndex)

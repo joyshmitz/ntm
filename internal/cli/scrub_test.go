@@ -112,3 +112,33 @@ func TestScrub_CommandSinceSkipsOldFiles(t *testing.T) {
 		t.Fatalf("expected no findings, got %d", len(res.Findings))
 	}
 }
+
+func TestResolveScrubRootsUsesSelectedConfigDir(t *testing.T) {
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	base := t.TempDir()
+	t.Setenv("HOME", base)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "xdg"))
+
+	customPath := filepath.Join(base, "custom", "ntm.toml")
+	customDir := filepath.Dir(customPath)
+	if err := os.MkdirAll(customDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(customDir) failed: %v", err)
+	}
+	cfgFile = customPath
+
+	roots, err := resolveScrubRoots(nil)
+	if err != nil {
+		t.Fatalf("resolveScrubRoots(nil) failed: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 scrub root, got %d (%v)", len(roots), roots)
+	}
+	if roots[0] != customDir {
+		t.Fatalf("scrub root = %q, want %q", roots[0], customDir)
+	}
+}

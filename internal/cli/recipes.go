@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -139,18 +140,7 @@ func runRecipesList() error {
 
 		fmt.Printf("  %s%s:%s\n", colorize(t.Info), sourceLabels[source], "\033[0m")
 		for _, r := range group {
-			counts := r.AgentCounts()
-			var parts []string
-			if c := counts["cc"]; c > 0 {
-				parts = append(parts, fmt.Sprintf("%d cc", c))
-			}
-			if c := counts["cod"]; c > 0 {
-				parts = append(parts, fmt.Sprintf("%d cod", c))
-			}
-			if c := counts["gmi"]; c > 0 {
-				parts = append(parts, fmt.Sprintf("%d gmi", c))
-			}
-			agentSummary := strings.Join(parts, ", ")
+			agentSummary := formatSpawnCountSummary(r.AgentCounts())
 
 			fmt.Printf("    %s%-15s%s %s\n", colorize(t.Primary), r.Name, "\033[0m", r.Description)
 			fmt.Printf("    %s               [%s]%s\n", "\033[2m", agentSummary, "\033[0m")
@@ -247,14 +237,5 @@ func sourceDescription(source string) string {
 
 // formatAgentTypeSimple returns a formatted agent type name (simple version without styling).
 func formatAgentTypeSimple(t string) string {
-	switch t {
-	case "cc":
-		return "Claude"
-	case "cod":
-		return "Codex"
-	case "gmi":
-		return "Gemini"
-	default:
-		return t
-	}
+	return agentpkg.AgentType(t).ProfileName()
 }

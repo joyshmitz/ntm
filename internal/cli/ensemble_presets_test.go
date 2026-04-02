@@ -419,6 +419,44 @@ func TestEnsembleExportImport_RoundTrip(t *testing.T) {
 	t.Log("TEST: TestEnsembleExportImport_RoundTrip - assertion: export/import works")
 }
 
+func TestRunEnsembleImport_RejectsUnknownFields(t *testing.T) {
+	t.Log("TEST: TestRunEnsembleImport_RejectsUnknownFields - starting")
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ensemble.ResetGlobalEnsembleRegistry()
+	ensemble.ResetGlobalCatalog()
+
+	registry, err := ensemble.GlobalEnsembleRegistry()
+	if err != nil {
+		t.Fatalf("GlobalEnsembleRegistry failed: %v", err)
+	}
+	preset := registry.Get("project-diagnosis")
+	if preset == nil {
+		t.Fatal("expected embedded preset for export")
+	}
+	payload := ensemble.ExportFromPreset(*preset)
+	payload.Name = "project-diagnosis-import"
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(payload); err != nil {
+		t.Fatalf("encode export: %v", err)
+	}
+	data := append(buf.Bytes(), []byte("\nlegacy = true\n")...)
+	path := filepath.Join(t.TempDir(), "bad-import.toml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write import file: %v", err)
+	}
+
+	err = runEnsembleImport(&bytes.Buffer{}, path, ensembleImportOptions{})
+	if err == nil {
+		t.Fatal("expected error for unknown TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field(s):") || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("expected unknown field error, got %v", err)
+	}
+
+	t.Log("TEST: TestRunEnsembleImport_RejectsUnknownFields - assertion: unknown fields fail early")
+}
+
 func TestRunEnsembleImport_RemoteChecksum(t *testing.T) {
 	t.Log("TEST: TestRunEnsembleImport_RemoteChecksum - starting")
 

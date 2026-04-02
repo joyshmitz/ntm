@@ -5,14 +5,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
+	"github.com/Dicklesworthstone/ntm/internal/recipe"
 )
 
 // ValidationResult represents the outcome of validating a config file or section.
@@ -64,7 +67,7 @@ func newConfigValidateCmd() *cobra.Command {
 		Long: `Validate NTM configuration files for errors and inconsistencies.
 
 Checks:
-  - Main config (~/.config/ntm/config.toml)
+  - Main config (selected via --config, or ~/.config/ntm/config.toml by default)
   - Project config (.ntm/config.toml)
   - Recipes files (user and project)
   - Personas files (user and project)
@@ -97,7 +100,7 @@ func discoverConfigs(all bool) []ConfigLocation {
 	var locations []ConfigLocation
 
 	// Main user config
-	mainPath := config.DefaultPath()
+	mainPath := selectedConfigPath()
 	locations = append(locations, ConfigLocation{
 		Path:   mainPath,
 		Type:   "main",
@@ -460,33 +463,38 @@ func validateRecipesFile(path string, result *ValidationResult) {
 		return
 	}
 
-	// Basic TOML syntax check via unmarshaling
-	var recipes map[string]interface{}
-	if err := tomlUnmarshal(data, &recipes); err != nil {
+	var rf struct {
+		Recipes []recipe.Recipe `toml:"recipes"`
+	}
+	if err := tomlUnmarshal(data, &rf); err != nil {
 		result.Errors = append(result.Errors, ValidationIssue{
 			Message: fmt.Sprintf("invalid TOML syntax: %v", err),
 		})
 		return
 	}
+	if len(rf.Recipes) == 0 {
+		result.Errors = append(result.Errors, ValidationIssue{
+			Field:   "recipes",
+			Message: "recipes.toml must contain at least one [[recipes]] entry",
+		})
+		return
+	}
 
-	// Check recipe structure
-	for name, v := range recipes {
-		recipe, ok := v.(map[string]interface{})
-		if !ok {
-			continue
+	for i, r := range rf.Recipes {
+		field := fmt.Sprintf("recipes[%d]", i)
+		if strings.TrimSpace(r.Name) != "" {
+			field = r.Name
 		}
-
-		// Check required fields
-		if _, has := recipe["description"]; !has {
+		if strings.TrimSpace(r.Description) == "" {
 			result.Warnings = append(result.Warnings, ValidationIssue{
-				Field:   name,
+				Field:   field,
 				Message: "recipe missing description field",
 			})
 		}
-		if _, has := recipe["steps"]; !has {
-			result.Warnings = append(result.Warnings, ValidationIssue{
-				Field:   name,
-				Message: "recipe missing steps field",
+		if err := r.Validate(); err != nil {
+			result.Errors = append(result.Errors, ValidationIssue{
+				Field:   field,
+				Message: err.Error(),
 			})
 		}
 	}
@@ -494,42 +502,83 @@ func validateRecipesFile(path string, result *ValidationResult) {
 
 // validatePersonasFile validates a personas.toml file.
 func validatePersonasFile(path string, result *ValidationResult) {
-	data, err := os.ReadFile(path)
+	cfg, err := persona.LoadFromFile(path)
 	if err != nil {
 		result.Errors = append(result.Errors, ValidationIssue{
-			Message: fmt.Sprintf("failed to read: %v", err),
+			Message: err.Error(),
 		})
 		return
 	}
-
-	// Basic TOML syntax check
-	var personas map[string]interface{}
-	if err := tomlUnmarshal(data, &personas); err != nil {
+	if len(cfg.Personas) == 0 {
 		result.Errors = append(result.Errors, ValidationIssue{
-			Message: fmt.Sprintf("invalid TOML syntax: %v", err),
+			Field:   "personas",
+			Message: "personas.toml must contain at least one [[personas]] entry",
+		})
+		return
+	}
+	if _, err := buildValidationPersonaRegistry(path, cfg); err != nil {
+		result.Errors = append(result.Errors, ValidationIssue{
+			Message: err.Error(),
 		})
 		return
 	}
 
-	// Check persona structure
-	for name, v := range personas {
-		if name == "personas" {
-			// Top-level personas table
-			continue
+	for i := range cfg.Personas {
+		p := &cfg.Personas[i]
+		field := fmt.Sprintf("personas[%d]", i)
+		if strings.TrimSpace(p.Name) != "" {
+			field = p.Name
 		}
-		persona, ok := v.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Check for system_prompt
-		if _, has := persona["system_prompt"]; !has {
+		if strings.TrimSpace(p.SystemPrompt) == "" && strings.TrimSpace(p.Extends) == "" {
 			result.Warnings = append(result.Warnings, ValidationIssue{
-				Field:   name,
+				Field:   field,
 				Message: "persona missing system_prompt field",
 			})
 		}
 	}
+}
+
+func buildValidationPersonaRegistry(path string, primary *persona.PersonasConfig) (*persona.Registry, error) {
+	registry := persona.NewRegistry()
+	for _, p := range persona.BuiltinPersonas() {
+		registry.Add(&p)
+	}
+	for _, s := range persona.BuiltinPersonaSets() {
+		registry.AddSet(&s)
+	}
+
+	if isProjectPersonasPath(path) {
+		userPath := persona.DefaultUserPath()
+		if userPath != "" && filepath.Clean(userPath) != filepath.Clean(path) {
+			if userCfg, err := persona.LoadFromFile(userPath); err == nil {
+				for i := range userCfg.Personas {
+					registry.Add(&userCfg.Personas[i])
+				}
+				for i := range userCfg.PersonaSets {
+					registry.AddSet(&userCfg.PersonaSets[i])
+				}
+			}
+		}
+	}
+
+	for i := range primary.Personas {
+		registry.Add(&primary.Personas[i])
+	}
+	for i := range primary.PersonaSets {
+		registry.AddSet(&primary.PersonaSets[i])
+	}
+
+	if err := registry.ResolveInheritance(); err != nil {
+		return nil, fmt.Errorf("resolving persona inheritance: %w", err)
+	}
+	if err := registry.ValidatePersonaSets(); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+func isProjectPersonasPath(path string) bool {
+	return filepath.Base(path) == "personas.toml" && filepath.Base(filepath.Dir(path)) == ".ntm"
 }
 
 // validatePolicyFile validates .ntm/policy.yaml.
@@ -542,24 +591,33 @@ func validatePolicyFile(path string, result *ValidationResult) {
 		return
 	}
 
-	// Basic YAML syntax check
-	var policy map[string]interface{}
-	if err := yamlUnmarshal(data, &policy); err != nil {
+	p, err := policy.DecodeYAML(data)
+	if err != nil {
 		result.Errors = append(result.Errors, ValidationIssue{
 			Message: fmt.Sprintf("invalid YAML syntax: %v", err),
 		})
 		return
 	}
 
-	// Check for expected top-level keys
-	expectedKeys := []string{"version", "rules"}
-	for _, key := range expectedKeys {
-		if _, has := policy[key]; !has {
-			result.Warnings = append(result.Warnings, ValidationIssue{
-				Field:   key,
-				Message: fmt.Sprintf("missing expected field: %s", key),
-			})
-		}
+	if p.Version == 0 {
+		result.Warnings = append(result.Warnings, ValidationIssue{
+			Field:   "version",
+			Message: "no version specified, defaulting to 1",
+		})
+	}
+
+	if err := p.Validate(); err != nil {
+		result.Errors = append(result.Errors, ValidationIssue{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	blocked, approval, allowed := p.Stats()
+	if blocked == 0 && approval == 0 && allowed == 0 {
+		result.Warnings = append(result.Warnings, ValidationIssue{
+			Message: "policy has no rules defined",
+		})
 	}
 }
 
@@ -616,14 +674,29 @@ func printValidationReport(report ValidationReport) error {
 	return nil
 }
 
-// tomlUnmarshal wraps TOML unmarshaling.
-func tomlUnmarshal(data []byte, v interface{}) error {
-	return toml.Unmarshal(data, v)
+func undecodedTOMLFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
 }
 
-// yamlUnmarshal wraps YAML unmarshaling.
-func yamlUnmarshal(data []byte, v interface{}) error {
-	return yaml.Unmarshal(data, v)
+// tomlUnmarshal wraps TOML unmarshaling.
+func tomlUnmarshal(data []byte, v interface{}) error {
+	md, err := toml.Decode(string(data), v)
+	if err != nil {
+		return err
+	}
+	if fields := undecodedTOMLFields(md); len(fields) > 0 {
+		return fmt.Errorf("unknown field(s): %s", strings.Join(fields, ", "))
+	}
+	return nil
 }
 
 // dirExists checks if a directory exists.

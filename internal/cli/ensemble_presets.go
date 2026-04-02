@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -326,6 +327,19 @@ type ensembleImportOutput struct {
 	Source      string    `json:"source" yaml:"source"`
 }
 
+func undecodedEnsembleImportFields(md toml.MetaData) []string {
+	fields := md.Undecoded()
+	if len(fields) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		names = append(names, field.String())
+	}
+	sort.Strings(names)
+	return names
+}
+
 func newEnsembleImportCmd() *cobra.Command {
 	opts := ensembleImportOptions{}
 
@@ -361,8 +375,12 @@ func runEnsembleImport(w io.Writer, input string, opts ensembleImportOptions) er
 	}
 
 	var payload ensemble.EnsembleExport
-	if _, err := toml.Decode(string(data), &payload); err != nil {
+	md, err := toml.Decode(string(data), &payload)
+	if err != nil {
 		return fmt.Errorf("parse TOML: %w", err)
+	}
+	if unknown := undecodedEnsembleImportFields(md); len(unknown) > 0 {
+		return fmt.Errorf("parse TOML: unknown field(s): %s", strings.Join(unknown, ", "))
 	}
 
 	catalog, err := ensemble.GlobalCatalog()

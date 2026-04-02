@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,7 @@ func TestSessionProfileCRUD(t *testing.T) {
 			CC:       2,
 			Cod:      1,
 			Gmi:      3,
+			Ollama:   2,
 			Cursor:   1,
 			Windsurf: 1,
 			Aider:    1,
@@ -46,6 +48,9 @@ func TestSessionProfileCRUD(t *testing.T) {
 		}
 		if loaded.Gmi != 3 {
 			t.Errorf("Gmi: want 3, got %d", loaded.Gmi)
+		}
+		if loaded.Ollama != 2 {
+			t.Errorf("Ollama: want 2, got %d", loaded.Ollama)
 		}
 		if loaded.Cursor != 1 {
 			t.Errorf("Cursor: want 1, got %d", loaded.Cursor)
@@ -147,6 +152,127 @@ func TestSessionProfileCRUD(t *testing.T) {
 		sessionProfileDirFunc = func() string { return dir }
 	})
 
+	t.Run("list invalid profile file errors", func(t *testing.T) {
+		subDir := t.TempDir()
+		sessionProfileDirFunc = func() string { return subDir }
+
+		badPath := filepath.Join(subDir, "broken.toml")
+		if err := os.WriteFile(badPath, []byte("cc = ["), 0o644); err != nil {
+			t.Fatalf("write broken profile: %v", err)
+		}
+
+		_, err := ListSessionProfiles()
+		if err == nil {
+			t.Fatal("expected list error for invalid profile")
+		}
+		if !strings.Contains(err.Error(), `parsing profile "broken"`) {
+			t.Fatalf("expected parse error, got %v", err)
+		}
+
+		sessionProfileDirFunc = func() string { return dir }
+	})
+
+	t.Run("list unknown profile field errors", func(t *testing.T) {
+		subDir := t.TempDir()
+		sessionProfileDirFunc = func() string { return subDir }
+
+		badPath := filepath.Join(subDir, "unknown.toml")
+		if err := os.WriteFile(badPath, []byte("cc = 1\nclaud = 2\n"), 0o644); err != nil {
+			t.Fatalf("write unknown-field profile: %v", err)
+		}
+
+		_, err := ListSessionProfiles()
+		if err == nil {
+			t.Fatal("expected list error for unknown field")
+		}
+		if !strings.Contains(err.Error(), `unknown field(s): claud`) {
+			t.Fatalf("expected unknown field error, got %v", err)
+		}
+
+		sessionProfileDirFunc = func() string { return dir }
+	})
+
+	t.Run("load negative count errors", func(t *testing.T) {
+		subDir := t.TempDir()
+		sessionProfileDirFunc = func() string { return subDir }
+
+		badPath := filepath.Join(subDir, "negative.toml")
+		if err := os.WriteFile(badPath, []byte("cc = -1\n"), 0o644); err != nil {
+			t.Fatalf("write negative profile: %v", err)
+		}
+
+		_, err := LoadSessionProfile("negative")
+		if err == nil {
+			t.Fatal("expected invalid negative count error")
+		}
+		if !strings.Contains(err.Error(), `cc count cannot be negative`) {
+			t.Fatalf("expected negative count error, got %v", err)
+		}
+
+		sessionProfileDirFunc = func() string { return dir }
+	})
+
+	t.Run("list invalid profile filename errors", func(t *testing.T) {
+		subDir := t.TempDir()
+		sessionProfileDirFunc = func() string { return subDir }
+
+		badPath := filepath.Join(subDir, "bad name.toml")
+		if err := os.WriteFile(badPath, []byte("cc = 1\n"), 0o644); err != nil {
+			t.Fatalf("write invalid name profile: %v", err)
+		}
+
+		_, err := ListSessionProfiles()
+		if err == nil {
+			t.Fatal("expected list error for invalid profile filename")
+		}
+		if !strings.Contains(err.Error(), `invalid profile file "bad name.toml"`) {
+			t.Fatalf("expected invalid filename error, got %v", err)
+		}
+
+		sessionProfileDirFunc = func() string { return dir }
+	})
+
+	t.Run("load invalid name rejected", func(t *testing.T) {
+		_, err := LoadSessionProfile("../escape")
+		if err == nil {
+			t.Fatal("expected invalid name error")
+		}
+		if !strings.Contains(err.Error(), `invalid profile name`) {
+			t.Fatalf("expected invalid name error, got %v", err)
+		}
+	})
+
+	t.Run("delete invalid name rejected", func(t *testing.T) {
+		err := DeleteSessionProfile("../escape")
+		if err == nil {
+			t.Fatal("expected invalid name error")
+		}
+		if !strings.Contains(err.Error(), `invalid profile name`) {
+			t.Fatalf("expected invalid name error, got %v", err)
+		}
+	})
+
+	t.Run("show invalid profile errors", func(t *testing.T) {
+		subDir := t.TempDir()
+		sessionProfileDirFunc = func() string { return subDir }
+
+		badPath := filepath.Join(subDir, "broken.toml")
+		if err := os.WriteFile(badPath, []byte("cc = ["), 0o644); err != nil {
+			t.Fatalf("write broken profile: %v", err)
+		}
+
+		cmd := newSessionProfileShowCmd()
+		err := cmd.RunE(cmd, []string{"broken"})
+		if err == nil {
+			t.Fatal("expected show error for invalid profile")
+		}
+		if !strings.Contains(err.Error(), `parsing profile "broken"`) {
+			t.Fatalf("expected parse error, got %v", err)
+		}
+
+		sessionProfileDirFunc = func() string { return dir }
+	})
+
 	t.Run("delete", func(t *testing.T) {
 		SaveSessionProfile("doomed", SessionProfile{CC: 1})
 		if err := DeleteSessionProfile("doomed"); err != nil {
@@ -206,6 +332,13 @@ func TestSaveSessionProfile_InvalidName(t *testing.T) {
 	}
 }
 
+func TestSaveSessionProfile_InvalidConfig(t *testing.T) {
+	t.Parallel()
+	if err := SaveSessionProfile("negative", SessionProfile{CC: -1}); err == nil {
+		t.Fatal("expected error for negative agent count")
+	}
+}
+
 func TestApplySessionProfileToSpawnOptions(t *testing.T) {
 	t.Parallel()
 
@@ -216,6 +349,7 @@ func TestApplySessionProfileToSpawnOptions(t *testing.T) {
 			CC:        3,
 			Cod:       2,
 			Gmi:       1,
+			Ollama:    2,
 			Cursor:    1,
 			Windsurf:  1,
 			Aider:     1,
@@ -235,6 +369,9 @@ func TestApplySessionProfileToSpawnOptions(t *testing.T) {
 		}
 		if opts.GmiCount != 1 {
 			t.Errorf("GmiCount: want 1, got %d", opts.GmiCount)
+		}
+		if opts.OllamaCount != 2 {
+			t.Errorf("OllamaCount: want 2, got %d", opts.OllamaCount)
 		}
 		if opts.CursorCount != 1 {
 			t.Errorf("CursorCount: want 1, got %d", opts.CursorCount)

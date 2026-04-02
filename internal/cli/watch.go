@@ -388,13 +388,7 @@ func filterPanes(panes []tmux.Pane, opts watchOptions) []tmux.Pane {
 		}
 
 		// Filter by agent type
-		if opts.filterClaude && p.Type == tmux.AgentClaude {
-			filtered = append(filtered, p)
-		}
-		if opts.filterCodex && p.Type == tmux.AgentCodex {
-			filtered = append(filtered, p)
-		}
-		if opts.filterGemini && p.Type == tmux.AgentGemini {
+		if matchesLegacySendTypeFilter(p, opts.filterClaude, opts.filterCodex, opts.filterGemini) {
 			filtered = append(filtered, p)
 		}
 	}

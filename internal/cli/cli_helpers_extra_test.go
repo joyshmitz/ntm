@@ -6,6 +6,8 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -214,8 +216,11 @@ func TestIncrementAgentCounts(t *testing.T) {
 	if counts.Codex != 1 {
 		t.Fatalf("Codex = %d, want 1", counts.Codex)
 	}
-	if counts.User != 2 {
-		t.Fatalf("User = %d, want 2", counts.User)
+	if counts.User != 1 {
+		t.Fatalf("User = %d, want 1", counts.User)
+	}
+	if counts.Other != 1 {
+		t.Fatalf("Other = %d, want 1", counts.Other)
 	}
 	if counts.Total != 5 {
 		t.Fatalf("Total = %d, want 5", counts.Total)
@@ -545,5 +550,89 @@ func TestAgentSpecsStringFormatting(t *testing.T) {
 				t.Errorf("String() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAppendMissingCountMapAgentSpecs_CanonicalizesModernTypes(t *testing.T) {
+	t.Parallel()
+
+	specs := AgentSpecs{{Type: AgentTypeCursor, Count: 1, Model: "existing"}}
+	appendMissingCountMapAgentSpecs(&specs, map[string]int{
+		"cursor":       4,
+		"openai-codex": 3,
+		"ws":           2,
+		"ollama":       1,
+	})
+
+	if got := specs.ByType(AgentTypeCursor).TotalCount(); got != 1 {
+		t.Fatalf("cursor count = %d, want 1 existing override", got)
+	}
+	if got := specs.ByType(AgentTypeCodex).TotalCount(); got != 3 {
+		t.Fatalf("codex count = %d, want 3", got)
+	}
+	if got := specs.ByType(AgentTypeWindsurf).TotalCount(); got != 2 {
+		t.Fatalf("windsurf count = %d, want 2", got)
+	}
+	if got := specs.ByType(AgentTypeOllama).TotalCount(); got != 1 {
+		t.Fatalf("ollama count = %d, want 1", got)
+	}
+}
+
+func TestAppendMissingRecipeAgentSpecs_PreservesModelsAndPersonas(t *testing.T) {
+	t.Parallel()
+
+	specs := AgentSpecs{}
+	personaMap := map[string]*persona.Persona{}
+	err := appendMissingRecipeAgentSpecs(&specs, personaMap, "review-team", "", []recipe.AgentSpec{
+		{Type: "openai-codex", Count: 2, Model: "gpt-5"},
+		{Type: "claude", Count: 1, Persona: "architect", Model: "sonnet"},
+		{Type: "ws", Count: 3},
+	})
+	if err != nil {
+		t.Fatalf("appendMissingRecipeAgentSpecs error: %v", err)
+	}
+
+	codex := specs.ByType(AgentTypeCodex)
+	if len(codex) != 1 || codex[0].Count != 2 || codex[0].Model != "gpt-5" {
+		t.Fatalf("codex specs = %+v, want count=2 model=gpt-5", codex)
+	}
+
+	claude := specs.ByType(AgentTypeClaude)
+	if len(claude) != 1 || claude[0].Count != 1 || claude[0].Model == "" {
+		t.Fatalf("claude specs = %+v, want persona-backed model key", claude)
+	}
+	personaCfg, ok := personaMap[claude[0].Model]
+	if !ok {
+		t.Fatalf("personaMap missing key %q", claude[0].Model)
+	}
+	if personaCfg.Name != "architect" {
+		t.Fatalf("persona name = %q, want architect", personaCfg.Name)
+	}
+	if personaCfg.Model != "sonnet" {
+		t.Fatalf("persona model = %q, want sonnet override", personaCfg.Model)
+	}
+
+	if got := specs.ByType(AgentTypeWindsurf).TotalCount(); got != 3 {
+		t.Fatalf("windsurf count = %d, want 3", got)
+	}
+}
+
+func TestFormatSpawnCountSummaryAndRecipeLabels_CanonicalizeAliases(t *testing.T) {
+	t.Parallel()
+
+	got := formatSpawnCountSummary(map[string]int{
+		"openai-codex": 2,
+		"ws":           1,
+		"cursor":       1,
+	})
+	if got != "2 cod, 1 cursor, 1 windsurf" {
+		t.Fatalf("formatSpawnCountSummary() = %q", got)
+	}
+
+	if label := formatAgentTypeSimple("google-gemini"); label != "Gemini" {
+		t.Fatalf("formatAgentTypeSimple(google-gemini) = %q, want Gemini", label)
+	}
+	if label := formatAgentTypeSimple("ws"); label != "Windsurf" {
+		t.Fatalf("formatAgentTypeSimple(ws) = %q, want Windsurf", label)
 	}
 }

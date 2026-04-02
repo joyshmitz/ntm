@@ -3,6 +3,8 @@ package cli
 import (
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestParseWatchInterval(t *testing.T) {
@@ -61,5 +63,43 @@ func TestExtractBeadMentions(t *testing.T) {
 	}
 	if got[1] != "Done with BD-123" {
 		t.Fatalf("second mention = %q", got[1])
+	}
+}
+
+func TestFilterPanesCanonicalizesAliases(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{Index: 0, Type: tmux.AgentUser, Title: "user_0"},
+		{Index: 1, Type: tmux.AgentType("claude_code"), Title: "cc_1"},
+		{Index: 2, Type: tmux.AgentType("openai-codex"), Title: "cod_2"},
+		{Index: 3, Type: tmux.AgentType("google-gemini"), Title: "gmi_3"},
+	}
+
+	tests := []struct {
+		name string
+		opts watchOptions
+		want []int
+	}{
+		{name: "claude alias", opts: watchOptions{filterClaude: true}, want: []int{1}},
+		{name: "codex alias", opts: watchOptions{filterCodex: true}, want: []int{2}},
+		{name: "gemini alias", opts: watchOptions{filterGemini: true}, want: []int{3}},
+		{name: "multiple aliases", opts: watchOptions{filterClaude: true, filterGemini: true}, want: []int{1, 3}},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := filterPanes(panes, tc.opts)
+			if len(got) != len(tc.want) {
+				t.Fatalf("filterPanes(%+v) len = %d, want %d", tc.opts, len(got), len(tc.want))
+			}
+			for i, wantIdx := range tc.want {
+				if got[i].Index != wantIdx {
+					t.Fatalf("filterPanes(%+v)[%d].Index = %d, want %d", tc.opts, i, got[i].Index, wantIdx)
+				}
+			}
+		})
 	}
 }

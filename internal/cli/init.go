@@ -286,11 +286,7 @@ This adds:
 }
 
 func runShellInit(shell string) error {
-	// Load config for agent commands (use defaults if not found)
-	cfg, err := config.Load("")
-	if err != nil {
-		cfg = config.Default()
-	}
+	cfg := loadSelectedConfigOrDefault()
 
 	switch shell {
 	case "zsh":

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -52,7 +53,11 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 		if session != "" {
 			sess = session
 		}
-		return robot.PrintPalette(cfg, robot.PaletteOptions{
+		paletteCfg, err := loadPaletteRuntimeConfig(sess, strings.TrimSpace(sess) != "")
+		if err != nil {
+			return err
+		}
+		return robot.PrintPalette(paletteCfg, robot.PaletteOptions{
 			Session: sess,
 		})
 	}
@@ -70,12 +75,18 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 	}
 	res.ExplainIfInferred(errW)
 	session = res.Session
+	sessionExplicit := strings.TrimSpace(session) != "" && !res.Inferred
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	paletteCommands, err := loadPaletteCommands(cfg)
+	contextDir := paletteConfigContextDir(session, sessionExplicit)
+	paletteCfg, err := loadPaletteRuntimeConfig(session, sessionExplicit)
+	if err != nil {
+		return err
+	}
+	paletteCommands, err := loadPaletteCommands(paletteCfg)
 	if err != nil {
 		return err
 	}
@@ -84,29 +95,10 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 	}
 
 	// Create and run the TUI palette
-	statePath := ""
-	// Prefer persisting palette state in project config when available (shareable via git),
-	// otherwise fall back to the active global config file.
-	if cwd, err := os.Getwd(); err == nil {
-		if projectDir, _, err := config.FindProjectConfig(cwd); err == nil && projectDir != "" {
-			projectCfg := filepath.Join(projectDir, ".ntm", "config.toml")
-			if _, err := os.Stat(projectCfg); err == nil {
-				statePath = projectCfg
-			}
-		}
-	}
-	if statePath == "" {
-		cfgPath := cfgFile
-		if cfgPath == "" {
-			cfgPath = config.DefaultPath()
-		}
-		if _, err := os.Stat(cfgPath); err == nil {
-			statePath = cfgPath
-		}
-	}
+	statePath := paletteStatePath(contextDir)
 
 	model := palette.NewWithOptions(session, paletteCommands, palette.Options{
-		PaletteState:     cfg.PaletteState,
+		PaletteState:     paletteCfg.PaletteState,
 		PaletteStatePath: statePath,
 	})
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
@@ -117,7 +109,7 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 	p := tea.NewProgram(model, opts...)
 
 	// Watch config/palette for live reloads while the palette is open
-	stopWatchers, err := watchPaletteConfig(p)
+	stopWatchers, err := watchPaletteConfig(p, contextDir)
 	if err != nil {
 		// Non-fatal: continue without live reload
 		fmt.Fprintf(os.Stderr, "warning: live reload disabled: %v\n", err)
@@ -145,34 +137,126 @@ func runPalette(w io.Writer, errW io.Writer, session string) error {
 	return nil
 }
 
-// watchPaletteConfig watches the active config (and palette markdown if present)
-// and sends reload messages to the palette program on changes.
-func watchPaletteConfig(p *tea.Program) (func(), error) {
-	// Determine config path in use
-	cfgPath := cfgFile
-	if cfgPath == "" {
-		cfgPath = config.DefaultPath()
+func paletteConfigContextDir(session string, sessionExplicit bool) string {
+	if dir := resolveProjectDirForSession(session, sessionExplicit); strings.TrimSpace(dir) != "" {
+		return dir
 	}
-
-	// Build list of files to watch
-	var paths []string
-	if _, err := os.Stat(cfgPath); err == nil {
-		paths = append(paths, cfgPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
 	}
+	return cwd
+}
 
-	if palPath := config.DetectPalettePath(cfg); palPath != "" {
-		if _, err := os.Stat(palPath); err == nil {
-			paths = append(paths, palPath)
+func loadPaletteRuntimeConfig(session string, sessionExplicit bool) (*config.Config, error) {
+	return loadPaletteWatchConfig(paletteConfigContextDir(session, sessionExplicit))
+}
+
+func paletteProjectConfigPath(cwd string) string {
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return ""
 		}
 	}
+	if projectDir, _, err := config.FindProjectConfig(cwd); err == nil && projectDir != "" {
+		projectCfg := filepath.Join(projectDir, ".ntm", "config.toml")
+		if _, err := os.Stat(projectCfg); err == nil {
+			return projectCfg
+		}
+	}
+	return ""
+}
 
+func paletteProjectMarkdownPath(cwd string) string {
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return ""
+		}
+	}
+	projectDir, projectCfg, err := config.FindProjectConfig(cwd)
+	if err != nil || projectDir == "" || projectCfg == nil {
+		return ""
+	}
+	palettePath, err := config.ResolveProjectPalettePath(projectDir, projectCfg)
+	if err != nil || strings.TrimSpace(palettePath) == "" {
+		return ""
+	}
+	if _, err := os.Stat(palettePath); err == nil {
+		return palettePath
+	}
+	return ""
+}
+
+func paletteStatePath(cwd string) string {
+	if projectCfg := paletteProjectConfigPath(cwd); projectCfg != "" {
+		return projectCfg
+	}
+	cfgPath := selectedConfigPath()
+	if _, err := os.Stat(cfgPath); err == nil {
+		return cfgPath
+	}
+	return ""
+}
+
+func appendPaletteWatchPath(paths []string, candidate string) []string {
+	if candidate == "" {
+		return paths
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		return paths
+	}
+	cleanCandidate := filepath.Clean(candidate)
+	for _, existing := range paths {
+		if filepath.Clean(existing) == cleanCandidate {
+			return paths
+		}
+	}
+	return append(paths, candidate)
+}
+
+func paletteWatchPaths(cwd string, cfg *config.Config) []string {
+	paths := make([]string, 0, 4)
+	paths = appendPaletteWatchPath(paths, selectedConfigPath())
+	paths = appendPaletteWatchPath(paths, paletteProjectConfigPath(cwd))
+	paths = appendPaletteWatchPath(paths, paletteProjectMarkdownPath(cwd))
+	if palPath := config.DetectPalettePathForConfigPathAndCWD(cfg, selectedConfigPath(), cwd); palPath != "" {
+		paths = appendPaletteWatchPath(paths, palPath)
+	}
+	return paths
+}
+
+func loadPaletteWatchConfig(cwd string) (*config.Config, error) {
+	return config.LoadMerged(cwd, selectedConfigPath())
+}
+
+func loadPaletteWatchPaths(cwd string) ([]string, error) {
+	watchCfg, err := loadPaletteWatchConfig(cwd)
+	if err != nil {
+		return nil, err
+	}
+	paths := paletteWatchPaths(cwd, watchCfg)
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no config or palette file found to watch")
+	}
+	return paths, nil
+}
+
+// watchPaletteConfig watches the active config (and palette markdown if present)
+// and sends reload messages to the palette program on changes.
+func watchPaletteConfig(p *tea.Program, cwd string) (func(), error) {
+	// Build list of files to watch
+	paths, err := loadPaletteWatchPaths(cwd)
+	if err != nil {
+		return nil, err
 	}
 
 	w, err := watcher.New(func(events []watcher.Event) {
 		// Reload config on any relevant change
-		newCfg, loadErr := config.Load(cfgPath)
+		newCfg, loadErr := loadPaletteWatchConfig(cwd)
 		if loadErr != nil {
 			// ignore errors; keep previous config
 			return

@@ -5,6 +5,7 @@ package cli
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 
@@ -15,13 +16,87 @@ import (
 
 // SpawnWizardResult holds the agent configuration produced by the interactive wizard.
 type SpawnWizardResult struct {
-	CCCount     int
-	CodCount    int
-	GmiCount    int
-	Recipe      string // empty = no recipe
-	Template    string // empty = no template
-	AutoRestart bool
-	Confirmed   bool
+	CCCount       int
+	CodCount      int
+	GmiCount      int
+	CursorCount   int
+	WindsurfCount int
+	AiderCount    int
+	OllamaCount   int
+	Recipe        string // empty = no recipe
+	Template      string // empty = no template
+	AutoRestart   bool
+	Confirmed     bool
+}
+
+func wizardDeferredSelection(result SpawnWizardResult) bool {
+	return strings.TrimSpace(result.Recipe) != "" || strings.TrimSpace(result.Template) != ""
+}
+
+func wizardLaunchAgentSpecs(result SpawnWizardResult) AgentSpecs {
+	if wizardDeferredSelection(result) {
+		return nil
+	}
+	return wizardAgentSpecs(result)
+}
+
+func wizardAgentSpecs(result SpawnWizardResult) AgentSpecs {
+	specs := AgentSpecs{}
+	counts := []struct {
+		agentType AgentType
+		count     int
+	}{
+		{agentType: AgentTypeClaude, count: result.CCCount},
+		{agentType: AgentTypeCodex, count: result.CodCount},
+		{agentType: AgentTypeGemini, count: result.GmiCount},
+		{agentType: AgentTypeCursor, count: result.CursorCount},
+		{agentType: AgentTypeWindsurf, count: result.WindsurfCount},
+		{agentType: AgentTypeAider, count: result.AiderCount},
+		{agentType: AgentTypeOllama, count: result.OllamaCount},
+	}
+	for _, entry := range counts {
+		if entry.count <= 0 {
+			continue
+		}
+		specs = append(specs, AgentSpec{Type: entry.agentType, Count: entry.count})
+	}
+	return specs
+}
+
+func spawnWizardResultFromCounts(counts map[string]int) SpawnWizardResult {
+	return SpawnWizardResult{
+		CCCount:       counts["cc"],
+		CodCount:      counts["cod"],
+		GmiCount:      counts["gmi"],
+		CursorCount:   counts["cursor"],
+		WindsurfCount: counts["windsurf"],
+		AiderCount:    counts["aider"],
+		OllamaCount:   counts["ollama"],
+	}
+}
+
+func formatWizardAgentCountSummary(counts map[string]int) string {
+	entries := []struct {
+		key string
+	}{
+		{key: "cc"},
+		{key: "cod"},
+		{key: "gmi"},
+		{key: "cursor"},
+		{key: "windsurf"},
+		{key: "aider"},
+		{key: "ollama"},
+	}
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if count := counts[entry.key]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", entry.key, count))
+		}
+	}
+	if len(parts) == 0 {
+		return "no agents"
+	}
+	return strings.Join(parts, " ")
 }
 
 // runSpawnWizard presents an interactive huh form for configuring a spawn session.
@@ -159,7 +234,7 @@ func runRecipeWizard(sessionName string) (SpawnWizardResult, error) {
 			continue
 		}
 		counts := r.AgentCounts()
-		desc := fmt.Sprintf("%s (cc:%d cod:%d gmi:%d)", r.Description, counts["cc"], counts["cod"], counts["gmi"])
+		desc := fmt.Sprintf("%s (%s)", r.Description, formatWizardAgentCountSummary(counts))
 		options = append(options, huh.NewOption(desc, name))
 	}
 
@@ -183,10 +258,8 @@ func runRecipeWizard(sessionName string) (SpawnWizardResult, error) {
 		return result, err
 	}
 	counts := r.AgentCounts()
+	result = spawnWizardResultFromCounts(counts)
 	result.Recipe = selected
-	result.CCCount = counts["cc"]
-	result.CodCount = counts["cod"]
-	result.GmiCount = counts["gmi"]
 	result.Confirmed = true
 	return result, nil
 }
@@ -209,8 +282,8 @@ func runTemplateWizard(sessionName string) (SpawnWizardResult, error) {
 			continue
 		}
 		counts := tmpl.AgentCounts()
-		desc := fmt.Sprintf("%s — %s (cc:%d cod:%d gmi:%d)",
-			tmpl.Description, tmpl.Coordination, counts["cc"], counts["cod"], counts["gmi"])
+		desc := fmt.Sprintf("%s — %s (%s)",
+			tmpl.Description, tmpl.Coordination, formatWizardAgentCountSummary(counts))
 		options = append(options, huh.NewOption(desc, name))
 	}
 
@@ -234,10 +307,8 @@ func runTemplateWizard(sessionName string) (SpawnWizardResult, error) {
 		return result, err
 	}
 	counts := tmpl.AgentCounts()
+	result = spawnWizardResultFromCounts(counts)
 	result.Template = selected
-	result.CCCount = counts["cc"]
-	result.CodCount = counts["cod"]
-	result.GmiCount = counts["gmi"]
 	result.Confirmed = true
 	return result, nil
 }

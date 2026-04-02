@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
 )
 
@@ -27,7 +26,7 @@ func newPluginsListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List installed agent and command plugins",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			configDir := filepath.Dir(config.DefaultPath())
+			configDir := filepath.Dir(selectedConfigPath())
 
 			// Load Agent Plugins
 			agentsDir := filepath.Join(configDir, "agents")

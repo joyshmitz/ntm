@@ -117,7 +117,7 @@ Shell Integration:
 		defer startup.EndPhase2()
 
 		// Set config path for lazy loader
-		startup.SetConfigPath(cfgFile)
+		startup.SetConfigPath(selectedConfigPath())
 
 		// Load config lazily - only commands that need it will trigger loading
 		if needsConfigLoading(cmd.Name()) {
@@ -4003,8 +4003,7 @@ func init() {
 	)
 
 	// Load command plugins
-	configDir := filepath.Dir(config.DefaultPath())
-	cmdDir := filepath.Join(configDir, "commands")
+	cmdDir := pluginConfigDirForArgs(os.Args[1:])
 	cmds, _ := plugins.LoadCommandPlugins(cmdDir)
 
 	for _, p := range cmds {
@@ -4017,7 +4016,7 @@ func init() {
 			RunE: func(c *cobra.Command, args []string) error {
 				// Prepare env
 				env := map[string]string{
-					"NTM_CONFIG_PATH": config.DefaultPath(),
+					"NTM_CONFIG_PATH": selectedConfigPath(),
 					"NTM_VERSION":     Version,
 				}
 				if jsonOutput {
@@ -4298,6 +4297,63 @@ func buildVersionResponse() output.VersionResponse {
 	}
 }
 
+func selectedConfigPath() string {
+	if strings.TrimSpace(cfgFile) != "" {
+		return cfgFile
+	}
+	return configPathFromArgs(os.Args[1:])
+}
+
+func selectedConfigDir() string {
+	return filepath.Dir(selectedConfigPath())
+}
+
+func configPathFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
+			if value != "" {
+				return value
+			}
+			break
+		}
+		if arg == "--config" {
+			if i+1 < len(args) {
+				value := strings.TrimSpace(args[i+1])
+				if value != "" {
+					return value
+				}
+			}
+			break
+		}
+	}
+	return config.DefaultPath()
+}
+
+func pluginConfigDirForArgs(args []string) string {
+	return filepath.Join(filepath.Dir(configPathFromArgs(args)), "commands")
+}
+
+func pluginAgentsDirForArgs(args []string) string {
+	return filepath.Join(filepath.Dir(configPathFromArgs(args)), "agents")
+}
+
+func loadSelectedConfigOrDefault() *config.Config {
+	if cfg != nil {
+		return cfg
+	}
+	cwd, _ := os.Getwd()
+	loaded, err := config.LoadMerged(cwd, selectedConfigPath())
+	if err != nil {
+		return config.Default()
+	}
+	return loaded
+}
+
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
@@ -4313,7 +4369,7 @@ func newConfigCmd() *cobra.Command {
 				"phase":          "start",
 				"correlation_id": auditCorrelationID,
 			}, nil)
-			path, err := config.CreateDefault()
+			path, err := config.CreateDefault(selectedConfigPath())
 			if err != nil {
 				_ = audit.LogEvent("", audit.EventTypeCommand, audit.ActorUser, "config.init", map[string]interface{}{
 					"phase":          "finish",
@@ -4340,7 +4396,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "path",
 		Short: "Print configuration file path",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println(config.DefaultPath())
+			fmt.Println(selectedConfigPath())
 		},
 	})
 
@@ -4368,7 +4424,7 @@ Examples:
 				"path":           path,
 				"correlation_id": auditCorrelationID,
 			}, nil)
-			if err := config.SetProjectsBase(path); err != nil {
+			if err := config.SetProjectsBase(selectedConfigPath(), path); err != nil {
 				_ = audit.LogEvent("", audit.EventTypeCommand, audit.ActorUser, "config.set_projects_base", map[string]interface{}{
 					"phase":          "finish",
 					"path":           path,
@@ -4381,7 +4437,7 @@ Examples:
 			}
 			expanded := config.ExpandHome(path)
 			fmt.Printf("Projects base set to: %s\n", expanded)
-			fmt.Printf("Config saved to: %s\n", config.DefaultPath())
+			fmt.Printf("Config saved to: %s\n", selectedConfigPath())
 			_ = audit.LogEvent("", audit.EventTypeCommand, audit.ActorUser, "config.set_projects_base", map[string]interface{}{
 				"phase":          "finish",
 				"path":           path,
@@ -4400,14 +4456,7 @@ Examples:
 		Use:   "show",
 		Short: "Show current configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			effectiveCfg := cfg
-			if effectiveCfg == nil {
-				loaded, err := config.Load(cfgFile)
-				if err != nil {
-					loaded = config.Default()
-				}
-				effectiveCfg = loaded
-			}
+			effectiveCfg := loadSelectedConfigOrDefault()
 
 			if IsJSONOutput() {
 				palette := make([]map[string]interface{}, 0, len(effectiveCfg.Palette))
@@ -4544,14 +4593,7 @@ Examples:
 		Short: "Show configuration differences from defaults",
 		Long:  `Shows all configuration values that differ from the built-in defaults.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			effectiveCfg := cfg
-			if effectiveCfg == nil {
-				loaded, err := config.Load(cfgFile)
-				if err != nil {
-					loaded = config.Default()
-				}
-				effectiveCfg = loaded
-			}
+			effectiveCfg := loadSelectedConfigOrDefault()
 
 			diffs := config.Diff(effectiveCfg)
 
@@ -4593,14 +4635,7 @@ Examples:
   ntm config get context_rotation.warning_threshold`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			effectiveCfg := cfg
-			if effectiveCfg == nil {
-				loaded, err := config.Load(cfgFile)
-				if err != nil {
-					loaded = config.Default()
-				}
-				effectiveCfg = loaded
-			}
+			effectiveCfg := loadSelectedConfigOrDefault()
 
 			value, err := config.GetValue(effectiveCfg, args[0])
 			if err != nil {
@@ -4625,11 +4660,11 @@ Examples:
 		Short: "Open configuration file in editor",
 		Long:  `Opens the configuration file in your default editor ($EDITOR or vi).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := config.DefaultPath()
+			path := selectedConfigPath()
 
 			// Ensure config exists
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				if _, err := config.CreateDefault(); err != nil {
+				if _, err := config.CreateDefault(path); err != nil {
 					return fmt.Errorf("creating config: %w", err)
 				}
 			}
@@ -4656,11 +4691,11 @@ Examples:
 				return fmt.Errorf("use --confirm to reset configuration (this will delete your current config)")
 			}
 
-			if err := config.Reset(); err != nil {
+			if err := config.Reset(selectedConfigPath()); err != nil {
 				return err
 			}
 
-			fmt.Printf("Configuration reset to defaults: %s\n", config.DefaultPath())
+			fmt.Printf("Configuration reset to defaults: %s\n", selectedConfigPath())
 			return nil
 		},
 	}
@@ -4709,23 +4744,34 @@ Examples:
 }
 
 func buildEditorCommand(path string) (*exec.Cmd, error) {
+	return buildEditorCommandWithFallback(path, "vi")
+}
+
+func buildEditorCommandWithFallback(path, fallback string) (*exec.Cmd, error) {
 	editor := strings.TrimSpace(os.Getenv("EDITOR"))
 	if editor == "" {
-		editor = "vi"
+		editor = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editor == "" {
+		editor = fallback
 	}
 
-	parts := strings.Fields(editor)
-	if len(parts) == 0 || !editorTokensSafe(parts) {
-		parts = []string{"vi"}
+	editorCmd, editorArgs := parseEditorCommand(editor)
+	if editorCmd == "" || !editorTokensSafe(append([]string{editorCmd}, editorArgs...)) {
+		editorCmd, editorArgs = parseEditorCommand(fallback)
+	}
+	if editorCmd == "" {
+		return nil, fmt.Errorf("editor not configured")
 	}
 
-	cmdPath, err := exec.LookPath(parts[0])
+	cmdPath, err := exec.LookPath(editorCmd)
 	if err != nil {
 		return nil, fmt.Errorf("editor not found: %w", err)
 	}
 
-	args := append(parts[1:], path)
-	return exec.Command(cmdPath, args...), nil
+	args := append([]string{cmdPath}, editorArgs...)
+	args = append(args, path)
+	return &exec.Cmd{Path: cmdPath, Args: args}, nil
 }
 
 func editorTokensSafe(tokens []string) bool {

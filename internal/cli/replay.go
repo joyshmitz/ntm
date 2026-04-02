@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -158,13 +157,7 @@ Examples:
 				}
 
 				// Apply specific filters
-				if targetCC && p.Type == tmux.AgentClaude {
-					targets = append(targets, p)
-				}
-				if targetCod && p.Type == tmux.AgentCodex {
-					targets = append(targets, p)
-				}
-				if targetGmi && p.Type == tmux.AgentGemini {
+				if matchesLegacySendTypeFilter(p, targetCC, targetCod, targetGmi) {
 					targets = append(targets, p)
 				}
 			}
@@ -228,19 +221,11 @@ func editPrompt(original string) (string, error) {
 	}
 	f.Close()
 
-	// Get editor from environment
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = os.Getenv("VISUAL")
-	}
-	if editor == "" {
-		editor = "vim"
-	}
-
 	// Run editor
-	editorCmd, editorArgs := parseEditorCommand(editor)
-	args := append(editorArgs, f.Name())
-	cmd := exec.Command(editorCmd, args...)
+	cmd, err := buildEditorCommandWithFallback(f.Name(), "vim")
+	if err != nil {
+		return "", fmt.Errorf("configuring editor: %w", err)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

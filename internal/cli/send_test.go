@@ -1011,6 +1011,23 @@ func TestBuildTargetDescription(t *testing.T) {
 	}
 }
 
+func TestBuildObservedTargetTypes(t *testing.T) {
+	panes := []tmux.Pane{
+		{Type: tmux.AgentUser},
+		{Type: tmux.AgentType("claude_code")},
+		{Type: tmux.AgentType("openai-codex")},
+		{Type: tmux.AgentCodex},
+		{Type: tmux.AgentType("ws")},
+		{Type: tmux.AgentOllama},
+		{Type: tmux.AgentUnknown},
+	}
+
+	got := buildObservedTargetTypes(panes)
+	if got != "claude,codex,windsurf,ollama" {
+		t.Fatalf("buildObservedTargetTypes() = %q, want %q", got, "claude,codex,windsurf,ollama")
+	}
+}
+
 func TestFilterPanesForBatch(t *testing.T) {
 	// Sample panes for testing
 	panes := []tmux.Pane{
@@ -1449,4 +1466,23 @@ func TestParseBatchFile_PriorityAnnotations(t *testing.T) {
 			t.Errorf("prompt 2: want priority 3, got %d", prompts[2].Priority)
 		}
 	})
+}
+
+func TestFilterPanesForBatchCanonicalizesAliasTypes(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{Index: 0, Type: tmux.AgentUser, Title: "user_0"},
+		{Index: 1, Type: tmux.AgentType("openai-codex"), Title: "cod_1"},
+		{Index: 2, Type: tmux.AgentType("google-gemini"), Title: "gmi_2"},
+		{Index: 3, Type: tmux.AgentType("claude_code"), Title: "cc_3"},
+	}
+
+	got := filterPanesForBatch(panes, SendOptions{Targets: SendTargets{{Type: AgentTypeCodex}, {Type: AgentTypeGemini}}})
+	if len(got) != 2 {
+		t.Fatalf("filterPanesForBatch(alias types) len = %d, want 2", len(got))
+	}
+	if got[0].Index != 1 || got[1].Index != 2 {
+		t.Fatalf("filterPanesForBatch(alias types) = %+v, want pane indices [1 2]", got)
+	}
 }

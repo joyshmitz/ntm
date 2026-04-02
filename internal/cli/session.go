@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/cli/suggestions"
 	"github.com/Dicklesworthstone/ntm/internal/config"
@@ -80,6 +81,29 @@ type contextRow struct {
 	Tokens  int
 	Limit   int
 	Model   string
+}
+
+func sessionPanePresentation(pane tmux.Pane, th theme.Theme, ic icons.IconSet) (string, string) {
+	switch agentpkg.AgentType(pane.Type).Canonical() {
+	case agentpkg.AgentTypeClaudeCode:
+		return string(th.Claude), ic.AgentIcon(string(agentpkg.AgentTypeClaudeCode))
+	case agentpkg.AgentTypeCodex:
+		return string(th.Codex), ic.AgentIcon(string(agentpkg.AgentTypeCodex))
+	case agentpkg.AgentTypeGemini:
+		return string(th.Gemini), ic.AgentIcon(string(agentpkg.AgentTypeGemini))
+	case agentpkg.AgentTypeCursor:
+		return string(th.Cursor), ic.AgentIcon(string(agentpkg.AgentTypeCursor))
+	case agentpkg.AgentTypeWindsurf:
+		return string(th.Windsurf), ic.AgentIcon(string(agentpkg.AgentTypeWindsurf))
+	case agentpkg.AgentTypeAider:
+		return string(th.Aider), ic.AgentIcon(string(agentpkg.AgentTypeAider))
+	case agentpkg.AgentTypeOllama:
+		return string(th.Ollama), ic.AgentIcon(string(agentpkg.AgentTypeOllama))
+	case agentpkg.AgentTypeUser:
+		return string(th.User), ic.AgentIcon(string(agentpkg.AgentTypeUser))
+	default:
+		return string(th.Overlay), ic.AgentIcon(string(agentpkg.AgentTypeUnknown))
+	}
 }
 
 func init() {
@@ -435,6 +459,9 @@ func runList(tags []string, project ...string) error {
 				}
 				if s.AgentCounts.User > 0 {
 					parts = append(parts, fmt.Sprintf("%d Usr", s.AgentCounts.User))
+				}
+				if s.AgentCounts.Other > 0 {
+					parts = append(parts, fmt.Sprintf("%d Oth", s.AgentCounts.Other))
 				}
 				if len(parts) > 0 {
 					agents = strings.Join(parts, ", ")
@@ -1025,7 +1052,8 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	cursorCount := counts.Cursor
 	windsurfCount := counts.Windsurf
 	aiderCount := counts.Aider
-	otherCount := counts.User
+	userCount := counts.User
+	otherCount := counts.Other
 
 	// Estimate context usage per pane (best-effort)
 	contextByIndex := make(map[int]paneContextUsage)
@@ -1137,24 +1165,8 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 	errorColor := color(t.Error)
 
 	for i, p := range panes {
-		var typeColor, typeIcon string
-		switch p.Type {
-		case tmux.AgentClaude:
-			typeColor = claude
-			typeIcon = ic.Claude
-		case tmux.AgentCodex:
-			typeColor = codex
-			typeIcon = ic.Codex
-		case tmux.AgentGemini:
-			typeColor = gemini
-			typeIcon = ic.Gemini
-		case tmux.AgentOllama:
-			typeColor = ollama
-			typeIcon = ic.Ollama
-		default:
-			typeColor = success
-			typeIcon = ic.Robot
-		}
+		typeColorKey, typeIcon := sessionPanePresentation(p, t, ic)
+		typeColor := color(typeColorKey)
 
 		// Number for quick selection (1-9)
 		num := ""
@@ -1323,19 +1335,27 @@ func runStatusOnce(w io.Writer, session string, opts statusOptions) error {
 		fmt.Fprintf(w, "    %s%s Ollama%s %s%d instance(s)%s\n", ollama, ic.Ollama, reset, text, ollamaCount, reset)
 	}
 	if cursorCount > 0 {
-		fmt.Fprintf(w, "    %s%s Cursor%s  %s%d instance(s)%s\n", success, ic.Robot, reset, text, cursorCount, reset)
+		cursorColorKey, cursorIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentCursor}, t, ic)
+		fmt.Fprintf(w, "    %s%s Cursor%s  %s%d instance(s)%s\n", color(cursorColorKey), cursorIcon, reset, text, cursorCount, reset)
 	}
 	if windsurfCount > 0 {
-		fmt.Fprintf(w, "    %s%s Windsurf%s %s%d instance(s)%s\n", success, ic.Robot, reset, text, windsurfCount, reset)
+		windsurfColorKey, windsurfIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentWindsurf}, t, ic)
+		fmt.Fprintf(w, "    %s%s Windsurf%s %s%d instance(s)%s\n", color(windsurfColorKey), windsurfIcon, reset, text, windsurfCount, reset)
 	}
 	if aiderCount > 0 {
-		fmt.Fprintf(w, "    %s%s Aider%s   %s%d instance(s)%s\n", success, ic.Robot, reset, text, aiderCount, reset)
+		aiderColorKey, aiderIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentAider}, t, ic)
+		fmt.Fprintf(w, "    %s%s Aider%s   %s%d instance(s)%s\n", color(aiderColorKey), aiderIcon, reset, text, aiderCount, reset)
+	}
+	if userCount > 0 {
+		userColorKey, userIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentUser}, t, ic)
+		fmt.Fprintf(w, "    %s%s User%s    %s%d pane(s)%s\n", color(userColorKey), userIcon, reset, text, userCount, reset)
 	}
 	if otherCount > 0 {
-		fmt.Fprintf(w, "    %s%s User%s    %s%d pane(s)%s\n", success, ic.User, reset, text, otherCount, reset)
+		otherColorKey, otherIcon := sessionPanePresentation(tmux.Pane{Type: tmux.AgentUnknown}, t, ic)
+		fmt.Fprintf(w, "    %s%s Other%s   %s%d pane(s)%s\n", color(otherColorKey), otherIcon, reset, text, otherCount, reset)
 	}
 
-	totalAgents := ccCount + codCount + gmiCount + ollamaCount + cursorCount + windsurfCount + aiderCount
+	totalAgents := ccCount + codCount + gmiCount + ollamaCount + cursorCount + windsurfCount + aiderCount + otherCount
 	if totalAgents == 0 {
 		fmt.Fprintf(w, "    %sNo agents running%s\n", overlay, reset)
 	}

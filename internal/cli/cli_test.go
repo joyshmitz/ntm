@@ -7,8 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"text/template"
@@ -23,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
+	"github.com/Dicklesworthstone/ntm/internal/startup"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
@@ -2187,6 +2191,308 @@ func TestPaletteCmdHelp(t *testing.T) {
 	}
 }
 
+func TestPaletteStatePathUsesSelectedConfigPath(t *testing.T) {
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	if err := os.WriteFile(customPath, []byte(`theme = "nord"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	cfgFile = customPath
+
+	if got := paletteStatePath(t.TempDir()); got != customPath {
+		t.Fatalf("paletteStatePath() = %q, want %q", got, customPath)
+	}
+}
+
+func TestPaletteWatchPathsIncludeProjectConfig(t *testing.T) {
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	base := t.TempDir()
+	globalPath := filepath.Join(base, "global", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(globalPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(global dir) failed: %v", err)
+	}
+	if err := os.WriteFile(globalPath, []byte(`theme = "nord"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(global config) failed: %v", err)
+	}
+	cfgFile = globalPath
+
+	projectDir := filepath.Join(base, "project")
+	projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
+	palettePath := filepath.Join(projectDir, ".ntm", "palette.md")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project .ntm) failed: %v", err)
+	}
+	projectConfigBody := `[palette]
+file = "palette.md"
+`
+	if err := os.WriteFile(projectConfigPath, []byte(projectConfigBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project config) failed: %v", err)
+	}
+	paletteBody := `## Project
+### project_cmd | Project Command
+Use project palette.
+`
+	if err := os.WriteFile(palettePath, []byte(paletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project palette) failed: %v", err)
+	}
+
+	paths, err := loadPaletteWatchPaths(projectDir)
+	if err != nil {
+		t.Fatalf("loadPaletteWatchPaths() failed: %v", err)
+	}
+	want := []string{globalPath, projectConfigPath, palettePath}
+	if len(paths) != len(want) {
+		t.Fatalf("paletteWatchPaths() len = %d, want %d (%v)", len(paths), len(want), paths)
+	}
+	for i, wantPath := range want {
+		if paths[i] != wantPath {
+			t.Fatalf("paletteWatchPaths()[%d] = %q, want %q", i, paths[i], wantPath)
+		}
+	}
+}
+
+func TestPaletteWatchPathsIgnoreUnrelatedCwdPalette(t *testing.T) {
+	oldCfgFile := cfgFile
+	origWd, _ := os.Getwd()
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		_ = os.Chdir(origWd)
+	})
+
+	base := t.TempDir()
+	globalPath := filepath.Join(base, "global", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(globalPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(global dir) failed: %v", err)
+	}
+	if err := os.WriteFile(globalPath, []byte(`theme = "nord"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(global config) failed: %v", err)
+	}
+	cfgFile = globalPath
+
+	projectDir := filepath.Join(base, "project")
+	projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
+	palettePath := filepath.Join(projectDir, ".ntm", "palette.md")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project .ntm) failed: %v", err)
+	}
+	projectConfigBody := `[palette]
+file = "palette.md"
+`
+	if err := os.WriteFile(projectConfigPath, []byte(projectConfigBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project config) failed: %v", err)
+	}
+	paletteBody := `## Project
+### project_cmd | Project Command
+Use project palette.
+`
+	if err := os.WriteFile(palettePath, []byte(paletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project palette) failed: %v", err)
+	}
+
+	unrelatedWd := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(unrelatedWd, 0o755); err != nil {
+		t.Fatalf("MkdirAll(unrelated wd) failed: %v", err)
+	}
+	ambientPalettePath := filepath.Join(unrelatedWd, "command_palette.md")
+	ambientPaletteBody := `## Ambient
+### ambient_cmd | Ambient Command
+Ambient palette.
+`
+	if err := os.WriteFile(ambientPalettePath, []byte(ambientPaletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(ambient palette) failed: %v", err)
+	}
+	if err := os.Chdir(unrelatedWd); err != nil {
+		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
+	}
+
+	paths, err := loadPaletteWatchPaths(projectDir)
+	if err != nil {
+		t.Fatalf("loadPaletteWatchPaths() failed: %v", err)
+	}
+	want := []string{globalPath, projectConfigPath, palettePath}
+	if len(paths) != len(want) {
+		t.Fatalf("loadPaletteWatchPaths() len = %d, want %d (%v)", len(paths), len(want), paths)
+	}
+	for i, wantPath := range want {
+		if paths[i] != wantPath {
+			t.Fatalf("loadPaletteWatchPaths()[%d] = %q, want %q", i, paths[i], wantPath)
+		}
+	}
+}
+
+func TestLoadPaletteWatchConfigUsesMergedConfig(t *testing.T) {
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	base := t.TempDir()
+	globalPath := filepath.Join(base, "global", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(globalPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(global dir) failed: %v", err)
+	}
+	if err := os.WriteFile(globalPath, []byte(`theme = "nord"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(global config) failed: %v", err)
+	}
+	cfgFile = globalPath
+
+	projectDir := filepath.Join(base, "project")
+	projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
+	palettePath := filepath.Join(projectDir, ".ntm", "palette.md")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project .ntm) failed: %v", err)
+	}
+	projectConfigBody := `[palette]
+file = "palette.md"
+`
+	if err := os.WriteFile(projectConfigPath, []byte(projectConfigBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project config) failed: %v", err)
+	}
+	paletteBody := `## Project
+### project_cmd | Project Command
+Use project palette.
+`
+	if err := os.WriteFile(palettePath, []byte(paletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project palette) failed: %v", err)
+	}
+
+	loaded, err := loadPaletteWatchConfig(projectDir)
+	if err != nil {
+		t.Fatalf("loadPaletteWatchConfig() failed: %v", err)
+	}
+	found := false
+	for _, cmd := range loaded.Palette {
+		if cmd.Key == "project_cmd" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected merged palette to include project_cmd, got %#v", loaded.Palette)
+	}
+}
+
+func TestPaletteConfigContextDirPrefersExplicitSessionProject(t *testing.T) {
+	oldCfg := cfg
+	oldCfgFile := cfgFile
+	origWd, _ := os.Getwd()
+	cfgFile = ""
+	cfg = config.Default()
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		_ = os.Chdir(origWd)
+	})
+
+	base := t.TempDir()
+	projectsBase := filepath.Join(base, "projects")
+	projectDir := filepath.Join(projectsBase, "ntm")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(project dir) failed: %v", err)
+	}
+	cfg.ProjectsBase = projectsBase
+
+	unrelatedWd := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(unrelatedWd, 0o755); err != nil {
+		t.Fatalf("MkdirAll(unrelated wd) failed: %v", err)
+	}
+	if err := os.Chdir(unrelatedWd); err != nil {
+		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
+	}
+
+	if got := paletteConfigContextDir("ntm", true); got != projectDir {
+		t.Fatalf("paletteConfigContextDir() = %q, want %q", got, projectDir)
+	}
+}
+
+func TestLoadPaletteRuntimeConfigPrefersExplicitSessionProject(t *testing.T) {
+	oldCfg := cfg
+	oldCfgFile := cfgFile
+	origWd, _ := os.Getwd()
+	cfgFile = ""
+	cfg = config.Default()
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		_ = os.Chdir(origWd)
+	})
+
+	base := t.TempDir()
+	globalPath := filepath.Join(base, "global", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(globalPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(global dir) failed: %v", err)
+	}
+	if err := os.WriteFile(globalPath, []byte(`theme = "nord"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(global config) failed: %v", err)
+	}
+	cfgFile = globalPath
+
+	projectsBase := filepath.Join(base, "projects")
+	projectDir := filepath.Join(projectsBase, "ntm")
+	projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
+	palettePath := filepath.Join(projectDir, ".ntm", "palette.md")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project .ntm) failed: %v", err)
+	}
+	projectConfigBody := `[palette]
+file = "palette.md"
+`
+	if err := os.WriteFile(projectConfigPath, []byte(projectConfigBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project config) failed: %v", err)
+	}
+	paletteBody := `## Project
+### project_cmd | Project Command
+Use project palette.
+`
+	if err := os.WriteFile(palettePath, []byte(paletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(project palette) failed: %v", err)
+	}
+	cfg.ProjectsBase = projectsBase
+
+	unrelatedWd := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(unrelatedWd, 0o755); err != nil {
+		t.Fatalf("MkdirAll(unrelated wd) failed: %v", err)
+	}
+	if err := os.Chdir(unrelatedWd); err != nil {
+		t.Fatalf("Chdir(unrelated wd) failed: %v", err)
+	}
+
+	loaded, err := loadPaletteRuntimeConfig("ntm", true)
+	if err != nil {
+		t.Fatalf("loadPaletteRuntimeConfig() failed: %v", err)
+	}
+	found := false
+	for _, cmd := range loaded.Palette {
+		if cmd.Key == "project_cmd" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected runtime palette to include project_cmd, got %#v", loaded.Palette)
+	}
+}
+
 // TestQuickCmdRequiresName tests quick command requires project name
 func TestQuickCmdRequiresName(t *testing.T) {
 	resetFlags()
@@ -2901,6 +3207,423 @@ func TestGlobalConfigFlag(t *testing.T) {
 	err := rootCmd.Execute()
 	if err != nil {
 		t.Fatalf("Execute() failed: %v", err)
+	}
+}
+
+func TestConfigPathCmdUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom.toml")
+	out, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "path"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != customPath {
+		t.Fatalf("config path output = %q, want %q", got, customPath)
+	}
+}
+
+func TestConfigInitCmdUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	cfgHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom", "ntm.toml")
+	_, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "init"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if _, err := os.Stat(customPath); err != nil {
+		t.Fatalf("custom config path not created: %v", err)
+	}
+	if _, err := os.Stat(config.DefaultPath()); !os.IsNotExist(err) {
+		t.Fatalf("default config path should remain untouched, stat err = %v", err)
+	}
+}
+
+func TestConfigSetProjectsBaseUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	cfgHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom", "ntm.toml")
+	projectsBase := filepath.Join(t.TempDir(), "projects")
+	_, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "set", "projects-base", projectsBase})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	data, err := os.ReadFile(customPath)
+	if err != nil {
+		t.Fatalf("ReadFile(customPath) failed: %v", err)
+	}
+	if !strings.Contains(string(data), projectsBase) {
+		t.Fatalf("custom config missing projects_base %q", projectsBase)
+	}
+	if _, err := os.Stat(config.DefaultPath()); !os.IsNotExist(err) {
+		t.Fatalf("default config path should remain untouched, stat err = %v", err)
+	}
+}
+
+func TestConfigEditCmdUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	cfgHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom", "ntm.toml")
+	capturePath := filepath.Join(tmpDir, "editor-arg.txt")
+	editorPath := filepath.Join(tmpDir, "editor.sh")
+	editorScript := "#!/bin/sh\nprintf '%s' \"$1\" > \"$CAPTURE_FILE\"\n"
+	if err := os.WriteFile(editorPath, []byte(editorScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(editor) failed: %v", err)
+	}
+	t.Setenv("EDITOR", editorPath)
+	t.Setenv("CAPTURE_FILE", capturePath)
+
+	_, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "edit"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	arg, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("ReadFile(capturePath) failed: %v", err)
+	}
+	if got := strings.TrimSpace(string(arg)); got != customPath {
+		t.Fatalf("editor path = %q, want %q", got, customPath)
+	}
+	if _, err := os.Stat(customPath); err != nil {
+		t.Fatalf("custom config path not created: %v", err)
+	}
+	if _, err := os.Stat(config.DefaultPath()); !os.IsNotExist(err) {
+		t.Fatalf("default config path should remain untouched, stat err = %v", err)
+	}
+}
+
+func TestConfigResetCmdUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	cfgHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(custom) failed: %v", err)
+	}
+	if err := os.WriteFile(customPath, []byte("projects_base = \"/custom/path\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(custom) failed: %v", err)
+	}
+	defaultPath := config.DefaultPath()
+	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(default) failed: %v", err)
+	}
+	if err := os.WriteFile(defaultPath, []byte("# default-marker\nprojects_base = \"/default/path\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(default) failed: %v", err)
+	}
+
+	_, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "reset", "--confirm"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	loaded, err := config.Load(customPath)
+	if err != nil {
+		t.Fatalf("Load(customPath) failed after reset: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected custom config to exist after reset")
+	}
+	defaultData, err := os.ReadFile(defaultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(defaultPath) failed: %v", err)
+	}
+	if !strings.Contains(string(defaultData), "default-marker") {
+		t.Fatalf("default config path was unexpectedly modified")
+	}
+}
+
+func TestConfigGetUsesProjectMergedConfig(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+		_ = os.Chdir(origWD)
+	})
+
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	if err := os.WriteFile(customPath, []byte("[alerts]\nenabled = true\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(global config) failed: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project .ntm) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm", "config.toml"), []byte("[alerts]\nenabled = false\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(project config) failed: %v", err)
+	}
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("Chdir(projectDir) failed: %v", err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "config", "get", "alerts.enabled"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "false" {
+		t.Fatalf("config get output = %q, want false", got)
+	}
+}
+
+func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
+	root := repoRoot(t)
+	tmpDir := t.TempDir()
+	binaryPath := filepath.Join(tmpDir, "ntm")
+	if runtime.GOOS == "windows" {
+		binaryPath += ".exe"
+	}
+
+	buildCmd := exec.Command("go", "build", "-trimpath", "-o", binaryPath, "./cmd/ntm")
+	buildCmd.Dir = root
+	buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	buildOut, err := buildCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("CGO-disabled go build failed: %v\n%s", err, strings.TrimSpace(string(buildOut)))
+	}
+
+	homeDir := filepath.Join(tmpDir, "home")
+	configHome := filepath.Join(tmpDir, "xdg")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(homeDir) failed: %v", err)
+	}
+	if err := os.MkdirAll(configHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(configHome) failed: %v", err)
+	}
+
+	commands := []string{"--robot-status", "--robot-snapshot"}
+	for _, flag := range commands {
+		t.Run(flag, func(t *testing.T) {
+			cmd := exec.Command(binaryPath, flag)
+			cmd.Dir = tmpDir
+			cmd.Env = append(os.Environ(), "HOME="+homeDir, "XDG_CONFIG_HOME="+configHome)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if err != nil {
+				t.Fatalf("CGO-disabled release binary %s failed: %v\nstdout=%s\nstderr=%s", flag, err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+			}
+			if strings.Contains(stderr.String(), "requires cgo") || strings.Contains(stdout.String(), "requires cgo") {
+				t.Fatalf("%s output still reports cgo sqlite stub: stdout=%s stderr=%s", flag, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("%s did not return JSON: %v\nstdout=%s\nstderr=%s", flag, err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+			}
+			if success, _ := payload["success"].(bool); !success {
+				t.Fatalf("%s success=false in CGO-disabled build: %v", flag, payload)
+			}
+		})
+	}
+}
+
+func TestConfigPathFromArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default", args: nil, want: config.DefaultPath()},
+		{name: "equals form", args: []string{"--config=/tmp/custom.toml"}, want: "/tmp/custom.toml"},
+		{name: "separate value", args: []string{"--json", "--config", "/tmp/custom.toml", "status"}, want: "/tmp/custom.toml"},
+		{name: "stops at terminator", args: []string{"--", "--config", "/tmp/custom.toml"}, want: config.DefaultPath()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configPathFromArgs(tt.args); got != tt.want {
+				t.Fatalf("configPathFromArgs(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPluginsListUsesGlobalConfigFlag(t *testing.T) {
+	resetFlags()
+	oldCfg, oldCfgFile := cfg, cfgFile
+	cfg = nil
+	cfgFile = ""
+	startup.ResetConfig()
+	cfgHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Cleanup(func() {
+		cfg = oldCfg
+		cfgFile = oldCfgFile
+		startup.ResetConfig()
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom", "ntm.toml")
+	commandsDir := filepath.Join(filepath.Dir(customPath), "commands")
+	if err := os.MkdirAll(commandsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(commandsDir) failed: %v", err)
+	}
+	pluginPath := filepath.Join(commandsDir, "sample-plugin")
+	pluginScript := "#" + "!/bin/sh\n# Description: Sample plugin\necho sample\n"
+	if err := os.WriteFile(pluginPath, []byte(pluginScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(plugin) failed: %v", err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		rootCmd.SetArgs([]string{"--config", customPath, "plugins", "list"})
+		return rootCmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if !strings.Contains(out, "sample-plugin") {
+		t.Fatalf("plugins list output = %q, want sample-plugin", out)
+	}
+}
+
+func TestCommandPluginDiscoveryUsesGlobalConfigFlag(t *testing.T) {
+	root := repoRoot(t)
+	base := t.TempDir()
+	customPath := filepath.Join(base, "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	configBody := "projects_base = \"" + filepath.Join(base, "projects") + "\"\n"
+	if err := os.WriteFile(customPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	commandsDir := filepath.Join(filepath.Dir(customPath), "commands")
+	if err := os.MkdirAll(commandsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(commandsDir) failed: %v", err)
+	}
+	pluginPath := filepath.Join(commandsDir, "print-config-path")
+	pluginScript := "#" + "!/bin/sh\nprintf '%s' \"$NTM_CONFIG_PATH\"\n"
+	if err := os.WriteFile(pluginPath, []byte(pluginScript), 0o755); err != nil {
+		t.Fatalf("WriteFile(plugin) failed: %v", err)
+	}
+
+	stdout, stderr, code := runNTM(t, root, "--config", customPath, "print-config-path")
+	if code != 0 {
+		t.Fatalf("plugin command failed (code=%d): %s", code, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != customPath {
+		t.Fatalf("plugin stdout = %q, want %q", got, customPath)
+	}
+}
+
+func TestSpawnAndAddPluginFlagsUseGlobalConfigFlag(t *testing.T) {
+	root := repoRoot(t)
+	base := t.TempDir()
+	customPath := filepath.Join(base, "custom", "ntm.toml")
+	if err := os.MkdirAll(filepath.Dir(customPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	configBody := fmt.Sprintf("projects_base = %q\n", filepath.Join(base, "projects"))
+	if err := os.WriteFile(customPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	agentsDir := filepath.Join(filepath.Dir(customPath), "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentsDir) failed: %v", err)
+	}
+	pluginBody := "[agent]\nname = \"reviewbot\"\nalias = \"rb\"\ncommand = \"echo reviewbot\"\ndescription = \"Review Bot\"\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, "reviewbot.toml"), []byte(pluginBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent plugin) failed: %v", err)
+	}
+
+	for _, subcommand := range []string{"spawn", "add"} {
+		t.Run(subcommand, func(t *testing.T) {
+			stdout, stderr, code := runNTM(t, root, "--config", customPath, subcommand, "--help")
+			if code != 0 {
+				t.Fatalf("%s --help failed (code=%d): %s", subcommand, code, stderr)
+			}
+			if !strings.Contains(stdout, "--reviewbot") {
+				t.Fatalf("%s --help output missing --reviewbot: %q", subcommand, stdout)
+			}
+			if !strings.Contains(stdout, "--rb") {
+				t.Fatalf("%s --help output missing --rb alias: %q", subcommand, stdout)
+			}
+		})
 	}
 }
 

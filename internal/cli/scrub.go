@@ -47,7 +47,7 @@ func newScrubCmd() *cobra.Command {
 		Long: `Scan files/directories using the built-in redaction engine and report findings.
 
 By default, this scans common NTM artifact locations:
-  - ~/.config/ntm
+  - The directory containing the active config file
   - ~/.ntm
 
 Output is always redacted (placeholders only). Raw secret matches are never printed.
@@ -113,7 +113,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringArrayVar(&paths, "path", nil, "Path to scan (repeatable). Defaults to ~/.config/ntm and ~/.ntm")
+	cmd.Flags().StringArrayVar(&paths, "path", nil, "Path to scan (repeatable). Defaults to the active config directory and ~/.ntm")
 	cmd.Flags().StringVar(&since, "since", "", "Only scan files modified within this duration (e.g. 1h, 7d)")
 	cmd.Flags().StringVar(&format, "format", "", "Output format: text|json (default: text, or json if --json)")
 
@@ -134,8 +134,8 @@ func resolveScrubRoots(paths []string) ([]string, error) {
 		return uniqueStrings(roots), nil
 	}
 
-	// Default roots: user config dir + ~/.ntm
-	roots = append(roots, filepath.Dir(config.DefaultPath()))
+	// Default roots: active config dir + ~/.ntm
+	roots = append(roots, selectedConfigDir())
 	if ntmDir, err := util.NTMDir(); err == nil {
 		roots = append(roots, ntmDir)
 	}

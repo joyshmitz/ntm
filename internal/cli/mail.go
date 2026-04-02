@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -826,15 +825,6 @@ func encodeJSONResult(w io.Writer, v interface{}) error {
 // openEditorForMessage opens $EDITOR for message composition.
 // Returns the body and subject (parsed from first line if it's a heading).
 func openEditorForMessage(existingSubject string) (body string, subject string, err error) {
-	// Get editor
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = os.Getenv("VISUAL")
-	}
-	if editor == "" {
-		editor = "nano" // fallback
-	}
-
 	// Create temp file with template
 	tmpFile, err := os.CreateTemp("", "ntm-mail-*.md")
 	if err != nil {
@@ -855,9 +845,10 @@ func openEditorForMessage(existingSubject string) (body string, subject string, 
 	tmpFile.Close()
 
 	// Open editor
-	editorCmd, editorArgs := parseEditorCommand(editor)
-	args := append(editorArgs, tmpPath)
-	cmd := exec.Command(editorCmd, args...)
+	cmd, err := buildEditorCommandWithFallback(tmpPath, "nano")
+	if err != nil {
+		return "", "", fmt.Errorf("configuring editor: %w", err)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

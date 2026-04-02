@@ -760,12 +760,15 @@ Examples:
 }
 
 func verifySingleCheckpoint(storage *checkpoint.Storage, session, id string) error {
-	cp, err := storage.Load(session, id)
+	exists, err := storage.HasCheckpointPath(session, id)
 	if err != nil {
 		return fmt.Errorf("loading checkpoint: %w", err)
 	}
+	if !exists {
+		return fmt.Errorf("loading checkpoint: checkpoint not found: %s", id)
+	}
 
-	result := cp.Verify(storage)
+	result := checkpoint.VerifyStoredCheckpoint(storage, session, id)
 
 	if jsonOutput {
 		return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
