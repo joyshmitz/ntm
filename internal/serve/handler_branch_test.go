@@ -8762,6 +8762,26 @@ func TestHandleListCheckpoints_WithDetails(t *testing.T) {
 	}
 }
 
+func TestHandleListCheckpoints_InvalidSessionName(t *testing.T) {
+	t.Parallel()
+	s, _ := setupTestServer(t)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionName", "../escape")
+	req := httptest.NewRequest("GET", "/api/v1/sessions/../escape/checkpoints", nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	s.handleListCheckpoints(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid session name") {
+		t.Fatalf("expected invalid session name error, got %s", rec.Body.String())
+	}
+}
+
 // --- handleDeleteCheckpoint exercises storage.Exists → not found path ---
 
 func TestHandleDeleteCheckpoint_NotFound(t *testing.T) {
