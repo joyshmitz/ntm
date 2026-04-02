@@ -174,6 +174,47 @@ scanner:
 	if cfg.Defaults.Timeout != "30s" {
 		t.Errorf("Expected timeout 30s from yaml, got %s", cfg.Defaults.Timeout)
 	}
+
+	// Unknown scanner fields should fail instead of being silently ignored.
+	badContent := `
+scanner:
+  defaults:
+    timeout: 45s
+    legacy: true
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".ntm.yaml"), []byte(badContent), 0644); err != nil {
+		t.Fatalf("Write bad .ntm.yaml failed: %v", err)
+	}
+
+	_, err = LoadProjectScannerConfig(tmpDir)
+	if err == nil {
+		t.Fatal("expected error for unknown scanner field")
+	}
+	if !strings.Contains(err.Error(), "field legacy not found") {
+		t.Fatalf("expected unknown field error, got %v", err)
+	}
+
+	// Other top-level sections should still be ignored when scanner is valid.
+	mixedContent := `
+scanner:
+  defaults:
+    timeout: 50s
+webhooks:
+  - name: test
+    url: https://example.com
+    events: [scan.completed]
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".ntm.yaml"), []byte(mixedContent), 0644); err != nil {
+		t.Fatalf("Write mixed .ntm.yaml failed: %v", err)
+	}
+
+	cfg, err = LoadProjectScannerConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadProjectScannerConfig with mixed sections failed: %v", err)
+	}
+	if cfg.Defaults.Timeout != "50s" {
+		t.Errorf("Expected timeout 50s from mixed yaml, got %s", cfg.Defaults.Timeout)
+	}
 }
 
 func TestInitProjectConfigForce(t *testing.T) {
@@ -522,12 +563,11 @@ func TestLoadMerged(t *testing.T) {
 
 	// Create global config
 	globalConfigPath := filepath.Join(globalDir, "config.toml")
-	globalContent := `[agents]
+	globalContent := `theme = "nord"
+
+[agents]
 claude = "claude --global"
 codex = "codex --global"
-
-[layout]
-default_layout = "global-layout"
 `
 	if err := os.WriteFile(globalConfigPath, []byte(globalContent), 0644); err != nil {
 		t.Fatalf("writing global config: %v", err)
@@ -569,6 +609,10 @@ claude = "claude --project-override"
 			t.Errorf("expected global codex, got=%s", cfg.Agents.Codex)
 		}
 
+		if cfg.Theme != "nord" {
+			t.Errorf("expected global theme nord, got=%s", cfg.Theme)
+		}
+
 		// Project defaults (agent counts) SHOULD still be set - this is safe
 		if cfg.ProjectDefaults["cc"] != 4 {
 			t.Errorf("expected cc=4, got=%d", cfg.ProjectDefaults["cc"])
@@ -606,6 +650,58 @@ claude = "claude --project-override"
 		}
 		if !strings.Contains(err.Error(), "project config") {
 			t.Errorf("expected error to mention project config, got=%v", err)
+		}
+	})
+
+	t.Run("uses merged cwd instead of process cwd for palette autodiscovery", func(t *testing.T) {
+		origWd, _ := os.Getwd()
+		defer os.Chdir(origWd)
+
+		ambientDir := t.TempDir()
+		ambientPaletteBody := `## Ambient
+### ambient_key | Ambient
+Prompt
+`
+		if err := os.WriteFile(filepath.Join(ambientDir, "command_palette.md"), []byte(ambientPaletteBody), 0o644); err != nil {
+			t.Fatalf("writing ambient palette: %v", err)
+		}
+		if err := os.Chdir(ambientDir); err != nil {
+			t.Fatalf("chdir ambient dir: %v", err)
+		}
+
+		projectPalettePath := filepath.Join(projectDir, ".ntm", "palette.md")
+		projectConfigWithPalette := `[palette]
+file = "palette.md"
+`
+		if err := os.WriteFile(projectConfigPath, []byte(projectConfigWithPalette), 0o644); err != nil {
+			t.Fatalf("writing project config with palette: %v", err)
+		}
+		projectPaletteBody := `## Project
+### project_key | Project
+Prompt
+`
+		if err := os.WriteFile(projectPalettePath, []byte(projectPaletteBody), 0o644); err != nil {
+			t.Fatalf("writing project palette: %v", err)
+		}
+
+		cfg, err := LoadMerged(projectDir, globalConfigPath)
+		if err != nil {
+			t.Fatalf("LoadMerged failed: %v", err)
+		}
+		var sawProject, sawAmbient bool
+		for _, cmd := range cfg.Palette {
+			switch cmd.Key {
+			case "project_key":
+				sawProject = true
+			case "ambient_key":
+				sawAmbient = true
+			}
+		}
+		if !sawProject {
+			t.Fatalf("expected merged palette to include project_key, got %#v", cfg.Palette)
+		}
+		if sawAmbient {
+			t.Fatalf("expected ambient cwd palette to be ignored, got %#v", cfg.Palette)
 		}
 	})
 

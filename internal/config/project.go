@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -105,11 +106,28 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 	}
 
 	var cfg ProjectConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing project config: %w", err)
+	}
+	if fields := undecodedProjectConfigFields(md); len(fields) > 0 {
+		return nil, fmt.Errorf("parsing project config: unknown field(s): %s", strings.Join(fields, ", "))
 	}
 
 	return &cfg, nil
+}
+
+func undecodedProjectConfigFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 // ResolveProjectPalettePath resolves a configured project palette file path using

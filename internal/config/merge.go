@@ -10,7 +10,7 @@ import (
 // LoadMerged loads the global config and merges any project-specific config found starting from cwd.
 func LoadMerged(cwd, globalPath string) (*Config, error) {
 	// Load global
-	cfg, err := Load(globalPath)
+	cfg, err := loadWithCWD(globalPath, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("loading global config: %w", err)
 	}

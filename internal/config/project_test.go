@@ -294,6 +294,34 @@ name = "test"
 	t.Logf("TEST: LoadProjectConfig_Invalid | Expected: error | Got: %v", err)
 }
 
+func TestLoadProjectConfig_UnknownField(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "invalid.toml")
+
+	content := []byte(`
+[project]
+name = "test"
+created = "2026-01-01T00:00:00Z"
+legacy = true
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := LoadProjectConfig(configPath)
+	if err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("LoadProjectConfig() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("LoadProjectConfig() error = %v, want legacy field name", err)
+	}
+}
+
 // TestLoadProjectConfig_NotFound verifies error for missing file
 func TestLoadProjectConfig_NotFound(t *testing.T) {
 	t.Parallel()

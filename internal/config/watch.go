@@ -9,10 +9,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 )
 
-// Watch starts watching the config file for changes.
-// It calls onChange with the new config when a change is detected.
-// It returns a close function to stop watching.
-func Watch(onChange func(*Config)) (func(), error) {
+// Watch starts watching the selected global config file and any project config
+// discovered from cwd. It calls onChange with the reloaded merged config when a
+// change is detected and returns a close function to stop watching.
+func Watch(cwd string, onChange func(*Config)) (func(), error) {
 	path := DefaultPath()
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -37,7 +37,7 @@ func Watch(onChange func(*Config)) (func(), error) {
 
 		if shouldReload {
 			// Reload config (merged with project config)
-			cfg, err := LoadMerged("", path)
+			cfg, err := LoadMerged(cwd, path)
 			if err != nil {
 				log.Printf("Error reloading config: %v", err)
 				return
@@ -63,7 +63,7 @@ func Watch(onChange func(*Config)) (func(), error) {
 	}
 
 	// Add project config file to watcher if it exists
-	if projectDir, _, err := FindProjectConfig(""); err == nil && projectDir != "" {
+	if projectDir, _, err := FindProjectConfig(cwd); err == nil && projectDir != "" {
 		projectConfigPath := filepath.Join(projectDir, ".ntm", "config.toml")
 		if err := w.Add(projectConfigPath); err != nil {
 			// Non-fatal, just log

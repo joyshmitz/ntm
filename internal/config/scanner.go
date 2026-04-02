@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -257,31 +258,65 @@ func LoadProjectScannerConfig(projectDir string) (*ScannerConfig, error) {
 	// Try .ntm.yaml first
 	yamlPath := filepath.Join(projectDir, ".ntm.yaml")
 	if data, err := os.ReadFile(yamlPath); err == nil {
-		var projCfg ProjectScannerConfig
-		if err := yaml.Unmarshal(data, &projCfg); err != nil {
+		cfg, err := parseProjectScannerConfig(data)
+		if err != nil {
 			return nil, err
 		}
-		cfg := mergeWithDefaults(projCfg.Scanner)
-		applyEnvOverrides(&cfg)
-		return &cfg, nil
+		applyEnvOverrides(cfg)
+		return cfg, nil
 	}
 
 	// Try .ntm.yml
 	ymlPath := filepath.Join(projectDir, ".ntm.yml")
 	if data, err := os.ReadFile(ymlPath); err == nil {
-		var projCfg ProjectScannerConfig
-		if err := yaml.Unmarshal(data, &projCfg); err != nil {
+		cfg, err := parseProjectScannerConfig(data)
+		if err != nil {
 			return nil, err
 		}
-		cfg := mergeWithDefaults(projCfg.Scanner)
-		applyEnvOverrides(&cfg)
-		return &cfg, nil
+		applyEnvOverrides(cfg)
+		return cfg, nil
 	}
 
 	// Return defaults
 	cfg := DefaultScannerConfig()
 	applyEnvOverrides(&cfg)
 	return &cfg, nil
+}
+
+func parseProjectScannerConfig(data []byte) (*ScannerConfig, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		cfg := DefaultScannerConfig()
+		return &cfg, nil
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+
+	scannerNode := findTopLevelYAMLKey(&root, "scanner")
+	if scannerNode == nil {
+		cfg := DefaultScannerConfig()
+		return &cfg, nil
+	}
+	if scannerNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("scanner: expected a mapping")
+	}
+
+	raw, err := yaml.Marshal(scannerNode)
+	if err != nil {
+		return nil, fmt.Errorf("scanner: marshal: %w", err)
+	}
+
+	var cfg ScannerConfig
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, err
+	}
+
+	merged := mergeWithDefaults(cfg)
+	return &merged, nil
 }
 
 // mergeWithDefaults merges user config with defaults

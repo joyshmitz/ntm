@@ -70,6 +70,7 @@ type Config struct {
 	PaletteState       PaletteState          `toml:"palette_state"`
 	Tmux               TmuxConfig            `toml:"tmux"`
 	Robot              RobotConfig           `toml:"robot"`
+	CommandHooks       []CommandHookConfig   `toml:"command_hooks"`
 	AgentMail          AgentMailConfig       `toml:"agent_mail"`
 	Integrations       IntegrationsConfig    `toml:"integrations"` // External tool integrations (dcg, caam, etc.)
 	Models             ModelsConfig          `toml:"models"`
@@ -130,6 +131,103 @@ type RetryConfig struct {
 type RetryOverride struct {
 	MaxAttempts    int `toml:"max_attempts"`
 	InitialDelayMs int `toml:"initial_delay_ms"`
+}
+
+type CommandHookEvent string
+
+const (
+	ConfigHookPreSpawn     CommandHookEvent = "pre-spawn"
+	ConfigHookPostSpawn    CommandHookEvent = "post-spawn"
+	ConfigHookPreSend      CommandHookEvent = "pre-send"
+	ConfigHookPostSend     CommandHookEvent = "post-send"
+	ConfigHookPreAdd       CommandHookEvent = "pre-add"
+	ConfigHookPostAdd      CommandHookEvent = "post-add"
+	ConfigHookPreCreate    CommandHookEvent = "pre-create"
+	ConfigHookPostCreate   CommandHookEvent = "post-create"
+	ConfigHookPreKill      CommandHookEvent = "pre-kill"
+	ConfigHookPostKill     CommandHookEvent = "post-kill"
+	ConfigHookPreShutdown  CommandHookEvent = "pre-shutdown"
+	ConfigHookPostShutdown CommandHookEvent = "post-shutdown"
+)
+
+func allCommandHookEvents() []CommandHookEvent {
+	return []CommandHookEvent{
+		ConfigHookPreSpawn, ConfigHookPostSpawn,
+		ConfigHookPreSend, ConfigHookPostSend,
+		ConfigHookPreAdd, ConfigHookPostAdd,
+		ConfigHookPreCreate, ConfigHookPostCreate,
+		ConfigHookPreKill, ConfigHookPostKill,
+		ConfigHookPreShutdown, ConfigHookPostShutdown,
+	}
+}
+
+func isValidCommandHookEvent(event string) bool {
+	for _, valid := range allCommandHookEvents() {
+		if CommandHookEvent(event) == valid {
+			return true
+		}
+	}
+	return false
+}
+
+type CommandHookDuration time.Duration
+
+func (d *CommandHookDuration) UnmarshalText(text []byte) error {
+	duration, err := time.ParseDuration(string(text))
+	if err != nil {
+		return fmt.Errorf("invalid duration: %w", err)
+	}
+	*d = CommandHookDuration(duration)
+	return nil
+}
+
+func (d CommandHookDuration) Duration() time.Duration {
+	return time.Duration(d)
+}
+
+type CommandHookConfig struct {
+	Event           CommandHookEvent    `toml:"event"`
+	Command         string              `toml:"command"`
+	Timeout         CommandHookDuration `toml:"timeout"`
+	Enabled         *bool               `toml:"enabled"`
+	WorkDir         string              `toml:"workdir"`
+	Description     string              `toml:"description"`
+	Name            string              `toml:"name"`
+	ContinueOnError bool                `toml:"continue_on_error"`
+	Env             map[string]string   `toml:"env"`
+}
+
+func (h CommandHookConfig) timeoutOrDefault() time.Duration {
+	if h.Timeout.Duration() <= 0 {
+		return 30 * time.Second
+	}
+	return h.Timeout.Duration()
+}
+
+func (h CommandHookConfig) Validate() error {
+	if strings.TrimSpace(h.Command) == "" {
+		return fmt.Errorf("hook command cannot be empty")
+	}
+	if !isValidCommandHookEvent(string(h.Event)) {
+		return fmt.Errorf("invalid hook event: %q (valid: %v)", h.Event, allCommandHookEvents())
+	}
+	timeout := h.timeoutOrDefault()
+	if timeout < 0 {
+		return fmt.Errorf("hook timeout cannot be negative")
+	}
+	if timeout > 10*time.Minute {
+		return fmt.Errorf("hook timeout exceeds maximum (%v)", 10*time.Minute)
+	}
+	return nil
+}
+
+func ValidateCommandHooks(hooks []CommandHookConfig) error {
+	for i, hook := range hooks {
+		if err := hook.Validate(); err != nil {
+			return fmt.Errorf("command_hooks[%d]: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // DefaultRetryConfig returns sensible retry defaults that match current
@@ -1704,37 +1802,72 @@ func DefaultProjectsBase() string {
 	return filepath.Join(home, "ntm_Dev")
 }
 
-// findPaletteMarkdown searches for a command_palette.md file in standard locations
-// Search order: ~/.config/ntm/command_palette.md, then ./command_palette.md
-func findPaletteMarkdown() string {
-	// Check ~/.config/ntm/command_palette.md (user customization)
-	configDir := filepath.Dir(DefaultPath())
+// findPaletteMarkdownForPathAndCWD searches for a command_palette.md file in
+// standard locations for the selected config path and context directory. Search
+// order: sibling of the active config file, then command_palette.md in cwd.
+func findPaletteMarkdownForPathAndCWD(configPath, cwd string) string {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = DefaultPath()
+	}
+
+	// Check the active config directory first (user customization)
+	configDir := filepath.Dir(ExpandHome(configPath))
 	mdPath := filepath.Join(configDir, "command_palette.md")
 	if _, err := os.Stat(mdPath); err == nil {
 		return mdPath
 	}
 
-	// Check current working directory (project-specific)
-	if cwd, err := os.Getwd(); err == nil {
-		cwdPath := filepath.Join(cwd, "command_palette.md")
-		if _, err := os.Stat(cwdPath); err == nil {
-			return cwdPath
+	// Check the selected working directory (project-specific)
+	if strings.TrimSpace(cwd) == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return ""
 		}
+	}
+	cwdPath := filepath.Join(cwd, "command_palette.md")
+	if _, err := os.Stat(cwdPath); err == nil {
+		return cwdPath
 	}
 
 	return ""
 }
 
-// DetectPalettePath returns the palette markdown path to use, if any.
-// Precedence: explicit cfg.PaletteFile, then auto-discovered markdown.
-func DetectPalettePath(cfg *Config) string {
+// findPaletteMarkdownForPath searches for a command_palette.md file in standard
+// locations for the selected config path using the process cwd as fallback.
+func findPaletteMarkdownForPath(configPath string) string {
+	return findPaletteMarkdownForPathAndCWD(configPath, "")
+}
+
+func findPaletteMarkdown() string {
+	return findPaletteMarkdownForPath(DefaultPath())
+}
+
+// DetectPalettePathForConfigPathAndCWD returns the palette markdown path to use
+// for a selected config path and working directory, if any. Precedence:
+// explicit cfg.PaletteFile, then auto-discovered markdown adjacent to that
+// config path or in the provided cwd.
+func DetectPalettePathForConfigPathAndCWD(cfg *Config, configPath, cwd string) string {
 	if cfg == nil {
 		return ""
 	}
 	if cfg.PaletteFile != "" {
 		return cfg.PaletteFile
 	}
-	return findPaletteMarkdown()
+	return findPaletteMarkdownForPathAndCWD(configPath, cwd)
+}
+
+// DetectPalettePathForConfigPath returns the palette markdown path to use for
+// a selected config path, if any. Precedence: explicit cfg.PaletteFile, then
+// auto-discovered markdown adjacent to that config path or in the current cwd.
+func DetectPalettePathForConfigPath(cfg *Config, configPath string) string {
+	return DetectPalettePathForConfigPathAndCWD(cfg, configPath, "")
+}
+
+// DetectPalettePath returns the palette markdown path to use, if any.
+// Precedence: explicit cfg.PaletteFile, then auto-discovered markdown.
+func DetectPalettePath(cfg *Config) string {
+	return DetectPalettePathForConfigPath(cfg, DefaultPath())
 }
 
 // LoadPaletteFromMarkdown parses a command palette from markdown format.
@@ -2233,7 +2366,7 @@ func Default() *Config {
 	applySafetyProfileDefaults(cfg)
 
 	// Try to load palette from markdown file
-	if mdPath := findPaletteMarkdown(); mdPath != "" {
+	if mdPath := findPaletteMarkdownForPath(DefaultPath()); mdPath != "" {
 		if mdCmds, err := LoadPaletteFromMarkdown(mdPath); err == nil && len(mdCmds) > 0 {
 			cfg.Palette = mdCmds
 			return cfg
@@ -2373,6 +2506,10 @@ Report findings with specific file locations and line numbers.`,
 //  3. [[palette]] entries from TOML config
 //  4. Hardcoded defaults
 func Load(path string) (*Config, error) {
+	return loadWithCWD(path, "")
+}
+
+func loadWithCWD(path, cwd string) (*Config, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
@@ -2395,8 +2532,12 @@ func Load(path string) (*Config, error) {
 		}
 		applySafetyProfileDefaults(cfg)
 
-		if err := toml.Unmarshal(data, cfg); err != nil {
+		md, err := toml.Decode(string(data), cfg)
+		if err != nil {
 			return nil, fmt.Errorf("parsing config: %w", err)
+		}
+		if fields := undecodedConfigFields(md); len(fields) > 0 {
+			return nil, fmt.Errorf("parsing config: unknown field(s): %s", strings.Join(fields, ", "))
 		}
 
 		// Canonicalize the profile string for stable downstream outputs (config show, robot status).
@@ -2504,7 +2645,7 @@ func Load(path string) (*Config, error) {
 
 	mdPath := cfg.PaletteFile
 	if mdPath == "" {
-		mdPath = findPaletteMarkdown()
+		mdPath = findPaletteMarkdownForPathAndCWD(path, cwd)
 	} else {
 		mdPath = ExpandHome(mdPath)
 	}
@@ -2523,9 +2664,25 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// CreateDefault creates a default config file
-func CreateDefault() (string, error) {
-	path := DefaultPath()
+func undecodedConfigFields(md toml.MetaData) []string {
+	keys := md.Undecoded()
+	if len(keys) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(keys))
+	for _, key := range keys {
+		fields = append(fields, key.String())
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// CreateDefault creates a default config file at path.
+// If path is empty, the default config path is used.
+func CreateDefault(path string) (string, error) {
+	if path == "" {
+		path = DefaultPath()
+	}
 
 	// Ensure directory exists
 	dir := filepath.Dir(path)
@@ -3687,10 +3844,11 @@ func (c *Config) GetProjectDir(session string) string {
 	return filepath.Join(base, SessionBase(session))
 }
 
-// SetProjectsBase sets the projects_base in the config file.
+// SetProjectsBase sets the projects_base in the config file at configPath.
+// If configPath is empty, the default config path is used.
 // If the config file doesn't exist, it creates one with defaults.
 // The path can use ~ for home directory (which will be preserved in config).
-func SetProjectsBase(path string) error {
+func SetProjectsBase(configPath, path string) error {
 	// Expand ~ in path for validation
 	expandedPath := ExpandHome(path)
 
@@ -3704,7 +3862,9 @@ func SetProjectsBase(path string) error {
 		return fmt.Errorf("cannot create directory %s: %w", expandedPath, err)
 	}
 
-	configPath := DefaultPath()
+	if configPath == "" {
+		configPath = DefaultPath()
+	}
 
 	// Ensure config directory exists
 	configDir := filepath.Dir(configPath)
@@ -4889,9 +5049,12 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 	return nil, fmt.Errorf("unknown config path: %s", path)
 }
 
-// Reset removes the config file and creates a new one with defaults
-func Reset() error {
-	path := DefaultPath()
+// Reset removes the config file at path and creates a new one with defaults.
+// If path is empty, the default config path is used.
+func Reset(path string) error {
+	if path == "" {
+		path = DefaultPath()
+	}
 
 	// Remove existing file
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -4899,7 +5062,7 @@ func Reset() error {
 	}
 
 	// Create new default config
-	_, err := CreateDefault()
+	_, err := CreateDefault(path)
 	return err
 }
 
@@ -5361,6 +5524,10 @@ func Validate(cfg *Config) []error {
 	// Validate xf integration config
 	if err := ValidateXFConfig(&cfg.Integrations.XF); err != nil {
 		errs = append(errs, fmt.Errorf("integrations.xf: %w", err))
+	}
+
+	if err := ValidateCommandHooks(cfg.CommandHooks); err != nil {
+		errs = append(errs, fmt.Errorf("command_hooks: %w", err))
 	}
 
 	// Validate safety profile and preflight configuration

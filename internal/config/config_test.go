@@ -277,6 +277,91 @@ func TestLoadFromFileInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadFromFileUnknownField(t *testing.T) {
+	content := `
+projects_base = "/custom/projects"
+legacy = true
+`
+	path := createTempConfig(t, content)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Expected error for unknown TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Load() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("Load() error = %v, want legacy field name", err)
+	}
+}
+
+func TestLoadFromFileUnknownNestedField(t *testing.T) {
+	content := `
+[safety]
+profile = "safe"
+legacy = true
+`
+	path := createTempConfig(t, content)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Expected error for unknown nested TOML field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Load() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "safety.legacy") {
+		t.Fatalf("Load() error = %v, want nested field path", err)
+	}
+}
+
+func TestLoadFromFileCommandHooksAllowed(t *testing.T) {
+	content := `
+theme = "nord"
+
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo hello"
+`
+	path := createTempConfig(t, content)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Theme != "nord" {
+		t.Fatalf("Theme = %q, want nord", cfg.Theme)
+	}
+	if len(cfg.CommandHooks) != 1 {
+		t.Fatalf("len(CommandHooks) = %d, want 1", len(cfg.CommandHooks))
+	}
+	if string(cfg.CommandHooks[0].Event) != "pre-spawn" {
+		t.Fatalf("CommandHooks[0].Event = %q, want pre-spawn", cfg.CommandHooks[0].Event)
+	}
+}
+
+func TestLoadFromFileUnknownCommandHookField(t *testing.T) {
+	content := `
+[[command_hooks]]
+event = "pre-spawn"
+command = "echo hello"
+legacy = true
+`
+	path := createTempConfig(t, content)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Expected error for unknown command_hooks field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Load() error = %v, want unknown field", err)
+	}
+	if !strings.Contains(err.Error(), "command_hooks.legacy") {
+		t.Fatalf("Load() error = %v, want command_hooks.legacy", err)
+	}
+}
+
 func TestLoadFromFileMissing(t *testing.T) {
 	// When the config file doesn't exist, Load should return defaults (not an error).
 	cfg, err := Load("/definitely/does/not/exist/config.toml")
@@ -737,7 +822,7 @@ func TestCreateDefaultAlreadyExists(t *testing.T) {
 	configPath := filepath.Join(configDir, "config.toml")
 	os.WriteFile(configPath, []byte("# existing"), 0644)
 
-	_, err := CreateDefault()
+	_, err := CreateDefault("")
 	if err == nil {
 		t.Error("Expected error when config already exists")
 	}
@@ -749,7 +834,7 @@ func TestCreateDefaultSuccess(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", tmpDir)
 	defer os.Setenv("XDG_CONFIG_HOME", origXDG)
 
-	path, err := CreateDefault()
+	path, err := CreateDefault("")
 	if err != nil {
 		t.Fatalf("CreateDefault failed: %v", err)
 	}
@@ -774,6 +859,70 @@ func TestFindPaletteMarkdownCwd(t *testing.T) {
 	found := findPaletteMarkdown()
 	if found == "" {
 		t.Error("Expected to find command_palette.md in cwd")
+	}
+}
+
+func TestLoadUsesExplicitConfigDirForPaletteAutodiscovery(t *testing.T) {
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+
+	base := t.TempDir()
+	configDir := filepath.Join(base, "custom")
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) failed: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("theme = \"nord\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) failed: %v", err)
+	}
+	explicitPalette := filepath.Join(configDir, "command_palette.md")
+	explicitPaletteBody := `## Explicit
+### explicit_key | Explicit
+Prompt
+`
+	if err := os.WriteFile(explicitPalette, []byte(explicitPaletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(explicit palette) failed: %v", err)
+	}
+
+	ambientConfigDir := filepath.Join(base, "ambient")
+	if err := os.MkdirAll(ambientConfigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(ambient dir) failed: %v", err)
+	}
+	ambientPalette := filepath.Join(ambientConfigDir, "command_palette.md")
+	ambientPaletteBody := `## Ambient
+### ambient_key | Ambient
+Prompt
+`
+	if err := os.WriteFile(ambientPalette, []byte(ambientPaletteBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(ambient palette) failed: %v", err)
+	}
+
+	origNTMConfig, hadNTMConfig := os.LookupEnv("NTM_CONFIG")
+	if err := os.Setenv("NTM_CONFIG", filepath.Join(ambientConfigDir, "config.toml")); err != nil {
+		t.Fatalf("Setenv(NTM_CONFIG) failed: %v", err)
+	}
+	defer func() {
+		if hadNTMConfig {
+			_ = os.Setenv("NTM_CONFIG", origNTMConfig)
+		} else {
+			_ = os.Unsetenv("NTM_CONFIG")
+		}
+	}()
+
+	neutralCwd := filepath.Join(base, "cwd")
+	if err := os.MkdirAll(neutralCwd, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cwd) failed: %v", err)
+	}
+	if err := os.Chdir(neutralCwd); err != nil {
+		t.Fatalf("Chdir(cwd) failed: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(configPath) failed: %v", err)
+	}
+	if len(cfg.Palette) != 1 || cfg.Palette[0].Key != "explicit_key" {
+		t.Fatalf("expected explicit config dir palette, got %#v", cfg.Palette)
 	}
 }
 
@@ -1027,9 +1176,10 @@ enabled = false
 func TestWatchProjectConfig(t *testing.T) {
 	// Setup dirs
 	tmpDir := t.TempDir()
-	cwd := t.TempDir()
+	projectDir := t.TempDir()
+	unrelatedWd := t.TempDir()
 	origWd, _ := os.Getwd()
-	os.Chdir(cwd)
+	os.Chdir(unrelatedWd)
 	defer os.Chdir(origWd)
 
 	// Set NTM_CONFIG to point to our temp global config
@@ -1045,8 +1195,10 @@ claude = "global-claude"
 
 	// Project config - NOTE: agent commands in project config are ignored
 	// for security (RCE prevention). Test with defaults.agents instead.
-	os.Mkdir(".ntm", 0755)
-	projPath := filepath.Join(cwd, ".ntm", "config.toml")
+	if err := os.Mkdir(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
+		t.Fatalf("mkdir .ntm: %v", err)
+	}
+	projPath := filepath.Join(projectDir, ".ntm", "config.toml")
 	os.WriteFile(projPath, []byte(`
 [defaults]
 agents = { cc = 2 }
@@ -1054,7 +1206,7 @@ agents = { cc = 2 }
 
 	// Setup watcher
 	updated := make(chan *Config, 1)
-	closeWatcher, err := Watch(func(cfg *Config) {
+	closeWatcher, err := Watch(projectDir, func(cfg *Config) {
 		select {
 		case updated <- cfg:
 		default:
@@ -3144,6 +3296,29 @@ func TestValidateRejectsInvalidRobotOutputFormat(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidCommandHook(t *testing.T) {
+	cfg := Default()
+	cfg.CommandHooks = []CommandHookConfig{{
+		Event:   CommandHookEvent("not-valid-event"),
+		Command: "echo hello",
+	}}
+
+	errs := Validate(cfg)
+	if len(errs) == 0 {
+		t.Fatal("expected Validate() to reject invalid command hook")
+	}
+	found := false
+	for _, err := range errs {
+		if strings.Contains(err.Error(), "command_hooks") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected command_hooks validation error, got %v", errs)
+	}
+}
+
 func TestValidateRejectsInvalidRedactionMode(t *testing.T) {
 	cfg := Default()
 	cfg.Redaction.Mode = "invalid"
@@ -4519,7 +4694,7 @@ func TestSetProjectsBase_Valid(t *testing.T) {
 
 	projectsDir := filepath.Join(tmpDir, "projects")
 
-	if err := SetProjectsBase(projectsDir); err != nil {
+	if err := SetProjectsBase("", projectsDir); err != nil {
 		t.Fatalf("SetProjectsBase: %v", err)
 	}
 
@@ -4544,7 +4719,7 @@ func TestSetProjectsBase_Valid(t *testing.T) {
 }
 
 func TestSetProjectsBase_RelativePath(t *testing.T) {
-	err := SetProjectsBase("relative/path")
+	err := SetProjectsBase("", "relative/path")
 	if err == nil {
 		t.Error("expected error for relative path")
 	}
@@ -4570,7 +4745,7 @@ func TestConfigReset(t *testing.T) {
 	}
 
 	// Reset should recreate with defaults
-	if err := Reset(); err != nil {
+	if err := Reset(""); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 
@@ -4595,7 +4770,7 @@ func TestConfigReset_NoExistingFile(t *testing.T) {
 	defer os.Unsetenv("XDG_CONFIG_HOME")
 
 	// Reset without existing file should create defaults
-	if err := Reset(); err != nil {
+	if err := Reset(""); err != nil {
 		t.Fatalf("Reset (no file): %v", err)
 	}
 

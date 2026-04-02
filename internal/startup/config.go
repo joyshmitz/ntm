@@ -1,6 +1,9 @@
 package startup
 
 import (
+	"os"
+	"strings"
+
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/profiler"
 )
@@ -11,7 +14,8 @@ var configLoader = NewLazy[*config.Config]("config", func() (*config.Config, err
 	defer span.End()
 
 	// Use LoadMerged to include project-specific config
-	cfg, err := config.LoadMerged("", configFilePath)
+	cwd, _ := os.Getwd()
+	cfg, err := config.LoadMerged(cwd, configFilePath)
 	if err != nil {
 		// If loading fails (e.g. project config invalid), return error
 		// Note: LoadMerged handles global config missing by using defaults
@@ -23,9 +27,15 @@ var configLoader = NewLazy[*config.Config]("config", func() (*config.Config, err
 // configFilePath stores the custom config path if specified
 var configFilePath string
 
-// SetConfigPath sets the config file path for lazy loading
+// SetConfigPath sets the config file path for lazy loading and propagates the
+// selected path to runtime helpers that consult NTM_CONFIG via DefaultPath().
 func SetConfigPath(path string) {
 	configFilePath = path
+	if strings.TrimSpace(path) == "" {
+		_ = os.Unsetenv("NTM_CONFIG")
+		return
+	}
+	_ = os.Setenv("NTM_CONFIG", path)
 }
 
 // GetConfig returns the configuration, loading it lazily if needed
