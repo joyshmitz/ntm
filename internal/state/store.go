@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
+	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
 )
 
 // Store provides SQLite-backed storage for NTM state.
@@ -37,8 +37,8 @@ func Open(path string) (*Store, error) {
 	}
 
 	// Open with WAL mode and other optimizations
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON", path)
-	db, err := sql.Open("sqlite3", dsn)
+	dsn := sqliteutil.FileDSN(path, "busy_timeout(5000)", "foreign_keys(1)", "journal_mode(WAL)")
+	db, err := sql.Open(sqliteutil.DriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

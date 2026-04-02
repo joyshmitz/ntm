@@ -69,6 +69,54 @@ func TestAuditStore_Record(t *testing.T) {
 	}
 }
 
+func TestAuditStore_QueryParsesSQLiteFormattedTimestamps(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := AuditStoreConfig{
+		DBPath:          filepath.Join(tmpDir, "audit.db"),
+		Retention:       24 * time.Hour,
+		CleanupInterval: time.Hour,
+	}
+
+	store, err := NewAuditStore(cfg)
+	if err != nil {
+		t.Fatalf("NewAuditStore error: %v", err)
+	}
+	defer store.Close()
+
+	ts := time.Date(2026, time.April, 2, 19, 42, 6, 123456789, time.UTC)
+	_, err = store.db.Exec(`
+		INSERT INTO audit_records (
+			timestamp, request_id, user_id, role, action, resource,
+			method, path, status_code, duration_ms, remote_addr
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts,
+		"req-sqlite-format", "user", string(RoleOperator), string(AuditActionExecute), "test",
+		"POST", "/audit", 200, 7, "127.0.0.1",
+	)
+	if err != nil {
+		t.Fatalf("insert sqlite-formatted row error: %v", err)
+	}
+
+	records, err := store.Query(AuditFilter{RequestID: "req-sqlite-format"})
+	if err != nil {
+		t.Fatalf("Query error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if got := records[0].Timestamp.UTC(); !got.Equal(ts) {
+		t.Fatalf("Timestamp = %s, want %s", got.Format(time.RFC3339Nano), ts.Format(time.RFC3339Nano))
+	}
+
+	filtered, err := store.Query(AuditFilter{Since: ts.Add(-time.Minute), Until: ts.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("Query with time bounds error: %v", err)
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("expected bounded query to return record, got %d", len(filtered))
+	}
+}
+
 func TestAuditStore_Query(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := AuditStoreConfig{

@@ -15,7 +15,8 @@ import (
 	"time"
 
 	chimw "github.com/go-chi/chi/v5/middleware"
-	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
 )
 
 // AuditAction represents the type of action being audited.
@@ -83,6 +84,37 @@ type AuditStoreConfig struct {
 	CleanupInterval time.Duration
 }
 
+var auditTimestampLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+}
+
+func formatAuditTimestamp(ts time.Time) string {
+	return ts.UTC().Format(time.RFC3339Nano)
+}
+
+func parseAuditTimestamp(value string) (time.Time, error) {
+	for _, layout := range auditTimestampLayouts {
+		var (
+			parsed time.Time
+			err    error
+		)
+		switch layout {
+		case "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05":
+			parsed, err = time.ParseInLocation(layout, value, time.UTC)
+		default:
+			parsed, err = time.Parse(layout, value)
+		}
+		if err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported timestamp format %q", value)
+}
+
 // DefaultAuditStoreConfig returns sensible defaults for audit storage.
 func DefaultAuditStoreConfig(dataDir string) AuditStoreConfig {
 	return AuditStoreConfig{
@@ -116,7 +148,7 @@ func NewAuditStore(cfg AuditStoreConfig) (*AuditStore, error) {
 
 	// Initialize SQLite database
 	if cfg.DBPath != "" {
-		db, err := sql.Open("sqlite3", cfg.DBPath+"?_journal=WAL&_sync=NORMAL")
+		db, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(cfg.DBPath, "journal_mode(WAL)", "synchronous(NORMAL)"))
 		if err != nil {
 			return nil, fmt.Errorf("open audit db: %w", err)
 		}
@@ -228,7 +260,7 @@ func (s *AuditStore) Record(rec *AuditRecord) error {
 				method, path, status_code, duration_ms, session_id, pane_id, agent_id,
 				details, remote_addr, user_agent, approval_id
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			rec.Timestamp.Format(time.RFC3339Nano),
+			formatAuditTimestamp(rec.Timestamp),
 			rec.RequestID, rec.UserID, string(rec.Role), string(rec.Action),
 			rec.Resource, rec.ResourceID, rec.Method, rec.Path,
 			rec.StatusCode, rec.Duration, rec.SessionID, rec.PaneID, rec.AgentID,
@@ -283,15 +315,15 @@ func (s *AuditStore) Query(filter AuditFilter) ([]AuditRecord, error) {
 		args = append(args, filter.ApprovalID)
 	}
 	if !filter.Since.IsZero() {
-		query += " AND timestamp >= ?"
-		args = append(args, filter.Since.Format(time.RFC3339Nano))
+		query += " AND datetime(timestamp) >= datetime(?)"
+		args = append(args, formatAuditTimestamp(filter.Since))
 	}
 	if !filter.Until.IsZero() {
-		query += " AND timestamp <= ?"
-		args = append(args, filter.Until.Format(time.RFC3339Nano))
+		query += " AND datetime(timestamp) <= datetime(?)"
+		args = append(args, formatAuditTimestamp(filter.Until))
 	}
 
-	query += " ORDER BY timestamp DESC"
+	query += " ORDER BY datetime(timestamp) DESC, id DESC"
 
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -326,7 +358,11 @@ func (s *AuditStore) Query(filter AuditFilter) ([]AuditRecord, error) {
 			return nil, fmt.Errorf("scan audit record: %w", err)
 		}
 
-		rec.Timestamp, _ = time.Parse(time.RFC3339Nano, tsStr)
+		parsedTimestamp, err := parseAuditTimestamp(tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse audit timestamp %q: %w", tsStr, err)
+		}
+		rec.Timestamp = parsedTimestamp
 		rec.ResourceID = resourceID.String
 		rec.SessionID = sessionID.String
 		rec.PaneID = paneID.String
@@ -377,8 +413,8 @@ func (s *AuditStore) cleanup() {
 		return
 	}
 
-	cutoff := time.Now().Add(-s.retention).Format(time.RFC3339Nano)
-	result, err := s.db.Exec("DELETE FROM audit_records WHERE timestamp < ?", cutoff)
+	cutoff := formatAuditTimestamp(time.Now().Add(-s.retention))
+	result, err := s.db.Exec("DELETE FROM audit_records WHERE datetime(timestamp) < datetime(?)", cutoff)
 	if err != nil {
 		log.Printf("audit cleanup error: %v", err)
 		return
