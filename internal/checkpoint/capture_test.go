@@ -299,6 +299,106 @@ func TestCapturer_captureSessionState_UsesSessionSelectedPaneAcrossWindows(t *te
 	}
 }
 
+func TestCapturer_captureSessionState_CapturesPerWindowLayouts(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	sessionName := "cplayout-" + time.Now().Format("150405000000")
+	workDir := t.TempDir()
+
+	if err := tmux.CreateSession(sessionName, workDir); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if tmux.SessionExists(sessionName) {
+			_ = tmux.KillSession(sessionName)
+		}
+	})
+
+	firstWindow, err := tmux.GetFirstWindow(sessionName)
+	if err != nil {
+		t.Fatalf("GetFirstWindow failed: %v", err)
+	}
+	firstTarget := fmt.Sprintf("%s:%d", sessionName, firstWindow)
+	if _, err := tmux.DefaultClient.Run("split-window", "-t", firstTarget, "-c", workDir, "-P", "-F", "#{pane_id}"); err != nil {
+		t.Fatalf("split-window first window failed: %v", err)
+	}
+	if err := tmux.DefaultClient.RunSilent("select-layout", "-t", firstTarget, "even-horizontal"); err != nil {
+		t.Fatalf("select-layout first window failed: %v", err)
+	}
+
+	secondWindowIndex, err := tmux.DefaultClient.Run("new-window", "-d", "-t", sessionName, "-c", workDir, "-P", "-F", "#{window_index}")
+	if err != nil {
+		t.Fatalf("new-window failed: %v", err)
+	}
+	secondTarget := fmt.Sprintf("%s:%s", sessionName, strings.TrimSpace(secondWindowIndex))
+	if _, err := tmux.DefaultClient.Run("split-window", "-t", secondTarget, "-c", workDir, "-P", "-F", "#{pane_id}"); err != nil {
+		t.Fatalf("split-window second window failed: %v", err)
+	}
+	if err := tmux.DefaultClient.RunSilent("select-layout", "-t", secondTarget, "main-vertical"); err != nil {
+		t.Fatalf("select-layout second window failed: %v", err)
+	}
+
+	expectedLayouts, err := getSessionWindowLayouts(sessionName)
+	if err != nil {
+		t.Fatalf("getSessionWindowLayouts failed: %v", err)
+	}
+	if len(expectedLayouts) != 2 {
+		t.Fatalf("len(expectedLayouts) = %d, want 2", len(expectedLayouts))
+	}
+
+	state, err := capturer.captureSessionState(sessionName)
+	if err != nil {
+		t.Fatalf("captureSessionState failed: %v", err)
+	}
+
+	if state.Layout != "" {
+		t.Fatalf("Layout = %q, want empty legacy layout for multi-window capture", state.Layout)
+	}
+	if !windowLayoutsEqual(state.WindowLayouts, expectedLayouts) {
+		t.Fatalf("WindowLayouts = %#v, want %#v", state.WindowLayouts, expectedLayouts)
+	}
+}
+
+func TestCanUseLegacyLayoutFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		panes []PaneState
+		want  bool
+	}{
+		{
+			name: "single window allowed",
+			panes: []PaneState{
+				{WindowIndex: 2, Index: 0},
+				{WindowIndex: 2, Index: 1},
+			},
+			want: true,
+		},
+		{
+			name: "multi window rejected",
+			panes: []PaneState{
+				{WindowIndex: 0, Index: 0},
+				{WindowIndex: 1, Index: 0},
+			},
+			want: false,
+		},
+		{
+			name:  "no panes allowed",
+			panes: nil,
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canUseLegacyLayoutFallback(tt.panes); got != tt.want {
+				t.Fatalf("canUseLegacyLayoutFallback(%#v) = %v, want %v", tt.panes, got, tt.want)
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Capturer.ParseCheckpointRef (bd-9czd7)
 // =============================================================================
@@ -515,6 +615,9 @@ func TestCapturer_CaptureGitState(t *testing.T) {
 	}
 	if state.Branch == "" {
 		t.Error("Expected branch to be captured")
+	}
+	if state.StatusFile != GitStatusFile {
+		t.Errorf("StatusFile = %q, want %q", state.StatusFile, GitStatusFile)
 	}
 
 	// Test failure case: corrupt the repo

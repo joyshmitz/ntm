@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,7 +220,11 @@ func TestStorage_SaveScrollback(t *testing.T) {
 		ID:          checkpointID,
 		SessionName: sessionName,
 		CreatedAt:   time.Now(),
-		Session:     SessionState{Panes: []PaneState{}},
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+			{Index: 1, ID: "%1"},
+			{Index: 2, ID: "%2"},
+		}},
 	}
 	if err := storage.Save(cp); err != nil {
 		t.Fatalf("Save() failed: %v", err)
@@ -247,6 +252,298 @@ func TestStorage_SaveScrollback(t *testing.T) {
 	}
 }
 
+func TestStorage_SaveScrollback_RejectsInvalidIdentifiers(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	tests := []struct {
+		name        string
+		sessionName string
+		checkpoint  string
+		wantErr     string
+	}{
+		{
+			name:        "invalid session",
+			sessionName: "../escape",
+			checkpoint:  "valid-id",
+			wantErr:     "invalid session name",
+		},
+		{
+			name:        "invalid checkpoint",
+			sessionName: "valid_session",
+			checkpoint:  "../escape",
+			wantErr:     "invalid checkpoint ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := storage.SaveScrollback(tt.sessionName, tt.checkpoint, "%0", "content")
+			if err == nil {
+				t.Fatal("SaveScrollback() error = nil, want validation failure")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("SaveScrollback() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStorage_Save_RejectsInvalidArtifactPaths(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	cp := &Checkpoint{
+		ID:          "20251210-120000-invalid-artifacts",
+		SessionName: "testproject",
+		CreatedAt:   time.Now(),
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0", ScrollbackFile: "../../escape.txt"},
+		}},
+	}
+
+	err = storage.Save(cp)
+	if err == nil {
+		t.Fatal("Save() error = nil, want invalid artifact path")
+	}
+	if !strings.Contains(err.Error(), "invalid scrollback path") {
+		t.Fatalf("Save() error = %v, want invalid scrollback path", err)
+	}
+}
+
+func TestStorage_Save_RejectsMissingArtifactReferences(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+
+	tests := []struct {
+		name       string
+		checkpoint *Checkpoint
+		wantErr    string
+	}{
+		{
+			name: "missing scrollback",
+			checkpoint: &Checkpoint{
+				ID:          "20251210-120000-missing-scrollback",
+				SessionName: "testproject",
+				CreatedAt:   time.Now(),
+				Session: SessionState{Panes: []PaneState{
+					{Index: 0, ID: "%0", ScrollbackFile: "panes/pane__0.txt"},
+				}},
+			},
+			wantErr: "artifact file does not exist",
+		},
+		{
+			name: "missing git patch",
+			checkpoint: &Checkpoint{
+				ID:          "20251210-120000-missing-patch",
+				SessionName: "testproject",
+				CreatedAt:   time.Now(),
+				Git:         GitState{PatchFile: GitPatchFile},
+			},
+			wantErr: "artifact file does not exist",
+		},
+		{
+			name: "missing git status",
+			checkpoint: &Checkpoint{
+				ID:          "20251210-120000-missing-status",
+				SessionName: "testproject",
+				CreatedAt:   time.Now(),
+				Git:         GitState{StatusFile: GitStatusFile},
+			},
+			wantErr: "artifact file does not exist",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := storage.Save(tt.checkpoint)
+			if err == nil {
+				t.Fatal("Save() error = nil, want missing artifact error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Save() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestStorage_Save_RejectsSymlinkArtifactReferences(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-symlink"
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	panesDir := filepath.Join(cpDir, PanesDir)
+	if err := os.MkdirAll(panesDir, 0755); err != nil {
+		t.Fatalf("MkdirAll() failed: %v", err)
+	}
+
+	outsidePath := filepath.Join(tmpDir, "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile() failed: %v", err)
+	}
+
+	scrollbackPath := filepath.Join(panesDir, "pane__0.txt")
+	if err := os.Symlink(outsidePath, scrollbackPath); err != nil {
+		t.Fatalf("Symlink() failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0", ScrollbackFile: filepath.Join(PanesDir, "pane__0.txt")},
+		}},
+	}
+
+	err = storage.Save(cp)
+	if err == nil {
+		t.Fatal("Save() error = nil, want symlink artifact rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("Save() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestStorage_Save_PrunesRemovedArtifactReferences(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-prune"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+		}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	scrollbackPath, err := storage.SaveScrollback(sessionName, checkpointID, "%0", "line 1\nline 2\n")
+	if err != nil {
+		t.Fatalf("SaveScrollback() failed: %v", err)
+	}
+	if err := storage.SaveGitPatch(sessionName, checkpointID, "diff --git a/file b/file"); err != nil {
+		t.Fatalf("SaveGitPatch() failed: %v", err)
+	}
+	if err := storage.SaveGitStatus(sessionName, checkpointID, "On branch main\nnothing to commit\n"); err != nil {
+		t.Fatalf("SaveGitStatus() failed: %v", err)
+	}
+
+	cp.Session.Panes[0].ScrollbackFile = scrollbackPath
+	cp.Session.Panes[0].ScrollbackLines = 2
+	cp.Git.PatchFile = GitPatchFile
+	cp.Git.StatusFile = GitStatusFile
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() with artifact references failed: %v", err)
+	}
+
+	scrollbackAbs := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), scrollbackPath)
+	if _, err := os.Stat(scrollbackAbs); err != nil {
+		t.Fatalf("expected scrollback artifact to exist: %v", err)
+	}
+	if _, err := os.Stat(storage.GitPatchPath(sessionName, checkpointID)); err != nil {
+		t.Fatalf("expected git patch artifact to exist: %v", err)
+	}
+	statusAbs := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitStatusFile)
+	if _, err := os.Stat(statusAbs); err != nil {
+		t.Fatalf("expected git status artifact to exist: %v", err)
+	}
+
+	cp.Session.Panes[0].ScrollbackFile = ""
+	cp.Session.Panes[0].ScrollbackLines = 0
+	cp.Git.PatchFile = ""
+	cp.Git.StatusFile = ""
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() clearing artifact references failed: %v", err)
+	}
+
+	if _, err := os.Stat(scrollbackAbs); !os.IsNotExist(err) {
+		t.Fatalf("expected scrollback artifact to be pruned, stat err = %v", err)
+	}
+	if _, err := os.Stat(storage.GitPatchPath(sessionName, checkpointID)); !os.IsNotExist(err) {
+		t.Fatalf("expected git patch artifact to be pruned, stat err = %v", err)
+	}
+	if _, err := os.Stat(statusAbs); !os.IsNotExist(err) {
+		t.Fatalf("expected git status artifact to be pruned, stat err = %v", err)
+	}
+}
+
+func TestStorage_Save_AllowsRepairingExistingInvalidArtifactMetadata(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ntm-checkpoint-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-repair"
+
+	bad := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0", ScrollbackFile: "../../escape.txt"},
+		}},
+	}
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll() failed: %v", err)
+	}
+	if err := writeJSON(filepath.Join(cpDir, MetadataFile), bad); err != nil {
+		t.Fatalf("write metadata failed: %v", err)
+	}
+	if err := writeJSON(filepath.Join(cpDir, SessionFile), bad.Session); err != nil {
+		t.Fatalf("write session failed: %v", err)
+	}
+
+	repaired := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   bad.CreatedAt,
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+		}},
+	}
+	if err := storage.Save(repaired); err != nil {
+		t.Fatalf("Save() repairing invalid artifact metadata failed: %v", err)
+	}
+
+	loaded, err := storage.Load(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("Load() after repair failed: %v", err)
+	}
+	if loaded.Session.Panes[0].ScrollbackFile != "" {
+		t.Fatalf("ScrollbackFile after repair = %q, want empty", loaded.Session.Panes[0].ScrollbackFile)
+	}
+}
+
 func TestStorage_LoadRejectsInvalidIdentifiers(t *testing.T) {
 	storage := NewStorageWithDir(t.TempDir())
 
@@ -259,6 +556,138 @@ func TestStorage_LoadRejectsInvalidIdentifiers(t *testing.T) {
 	if _, err := storage.Load("valid_session", "."); err == nil {
 		t.Fatal("expected dot checkpoint ID to be rejected")
 	}
+}
+
+func TestStorage_Load_RejectsSymlinkCanonicalFiles(t *testing.T) {
+	storage := NewStorageWithDir(t.TempDir())
+	sessionName := "testproject"
+
+	baseCheckpoint := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "20251210-120000-symlink-canonical",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+		}},
+		PaneCount: 1,
+	}
+
+	t.Run("metadata", func(t *testing.T) {
+		checkpointID := "20251210-120000-symlink-metadata"
+		cp := *baseCheckpoint
+		cp.ID = checkpointID
+
+		cpDir := storage.CheckpointDir(sessionName, checkpointID)
+		if err := os.MkdirAll(cpDir, 0755); err != nil {
+			t.Fatalf("MkdirAll() failed: %v", err)
+		}
+
+		outsidePath := filepath.Join(t.TempDir(), "outside-metadata.json")
+		if err := writeJSON(outsidePath, &cp); err != nil {
+			t.Fatalf("writeJSON(outside metadata) failed: %v", err)
+		}
+		if err := os.Symlink(outsidePath, filepath.Join(cpDir, MetadataFile)); err != nil {
+			t.Fatalf("Symlink() failed: %v", err)
+		}
+		if err := writeJSON(filepath.Join(cpDir, SessionFile), cp.Session); err != nil {
+			t.Fatalf("writeJSON(session) failed: %v", err)
+		}
+
+		_, err := storage.Load(sessionName, checkpointID)
+		if err == nil {
+			t.Fatal("Load() error = nil, want symlink rejection")
+		}
+		if !strings.Contains(err.Error(), "must not be a symlink") {
+			t.Fatalf("Load() error = %v, want symlink rejection", err)
+		}
+	})
+
+	t.Run("session", func(t *testing.T) {
+		checkpointID := "20251210-120000-symlink-session"
+		cp := *baseCheckpoint
+		cp.ID = checkpointID
+
+		cpDir := storage.CheckpointDir(sessionName, checkpointID)
+		if err := os.MkdirAll(cpDir, 0755); err != nil {
+			t.Fatalf("MkdirAll() failed: %v", err)
+		}
+
+		outsidePath := filepath.Join(t.TempDir(), "outside-session.json")
+		if err := writeJSON(outsidePath, cp.Session); err != nil {
+			t.Fatalf("writeJSON(outside session) failed: %v", err)
+		}
+		if err := writeJSON(filepath.Join(cpDir, MetadataFile), &cp); err != nil {
+			t.Fatalf("writeJSON(metadata) failed: %v", err)
+		}
+		if err := os.Symlink(outsidePath, filepath.Join(cpDir, SessionFile)); err != nil {
+			t.Fatalf("Symlink() failed: %v", err)
+		}
+
+		_, err := storage.Load(sessionName, checkpointID)
+		if err == nil {
+			t.Fatal("Load() error = nil, want symlink rejection")
+		}
+		if !strings.Contains(err.Error(), "must not be a symlink") {
+			t.Fatalf("Load() error = %v, want symlink rejection", err)
+		}
+	})
+}
+
+func TestStorage_Save_RejectsSymlinkDirectories(t *testing.T) {
+	t.Run("session", func(t *testing.T) {
+		storage := NewStorageWithDir(t.TempDir())
+		sessionName := "testproject"
+		checkpointID := "20251210-120000-symlink-session-dir"
+		outsideDir := t.TempDir()
+
+		if err := os.Symlink(outsideDir, filepath.Join(storage.BaseDir, sessionName)); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+
+		cp := &Checkpoint{
+			ID:          checkpointID,
+			SessionName: sessionName,
+			CreatedAt:   time.Now(),
+			Session:     SessionState{Panes: []PaneState{}},
+		}
+		err := storage.Save(cp)
+		if err == nil {
+			t.Fatal("Save() error = nil, want session symlink rejection")
+		}
+		if !strings.Contains(err.Error(), "session path must not be a symlink") {
+			t.Fatalf("Save() error = %v, want session symlink rejection", err)
+		}
+	})
+
+	t.Run("checkpoint", func(t *testing.T) {
+		storage := NewStorageWithDir(t.TempDir())
+		sessionName := "testproject"
+		checkpointID := "20251210-120000-symlink-checkpoint-dir"
+		sessionDir := filepath.Join(storage.BaseDir, sessionName)
+		if err := os.MkdirAll(sessionDir, 0755); err != nil {
+			t.Fatalf("MkdirAll(session dir) failed: %v", err)
+		}
+
+		outsideDir := t.TempDir()
+		if err := os.Symlink(outsideDir, filepath.Join(sessionDir, checkpointID)); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+
+		cp := &Checkpoint{
+			ID:          checkpointID,
+			SessionName: sessionName,
+			CreatedAt:   time.Now(),
+			Session:     SessionState{Panes: []PaneState{}},
+		}
+		err := storage.Save(cp)
+		if err == nil {
+			t.Fatal("Save() error = nil, want checkpoint symlink rejection")
+		}
+		if !strings.Contains(err.Error(), "checkpoint path must not be a symlink") {
+			t.Fatalf("Save() error = %v, want checkpoint symlink rejection", err)
+		}
+	})
 }
 
 func TestStorage_GetLatest(t *testing.T) {
@@ -283,14 +712,22 @@ func TestStorage_GetLatest(t *testing.T) {
 		Name:        "first",
 		SessionName: sessionName,
 		CreatedAt:   time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC),
-		Session:     SessionState{Panes: []PaneState{}},
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+			{Index: 1, ID: "%1"},
+			{Index: 2, ID: "%2"},
+		}},
 	}
 	cp2 := &Checkpoint{
 		ID:          "20251210-120000-second",
 		Name:        "second",
 		SessionName: sessionName,
 		CreatedAt:   time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC),
-		Session:     SessionState{Panes: []PaneState{}},
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+			{Index: 1, ID: "%1"},
+			{Index: 2, ID: "%2"},
+		}},
 	}
 
 	storage.Save(cp1)
@@ -665,6 +1102,79 @@ func TestStorage_LoadGitPatch(t *testing.T) {
 	}
 }
 
+func TestStorage_LoadGitPatch_RejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-patch-symlink"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "outside.patch")
+	if err := os.WriteFile(outsidePath, []byte("diff --git a/file.go b/file.go\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside patch) failed: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitPatchFile)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err := storage.LoadGitPatch(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("LoadGitPatch() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("LoadGitPatch() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestStorage_LoadGitPatch_UsesRecordedPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-patch-custom"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(filepath.Join(cpDir, "git"), 0755); err != nil {
+		t.Fatalf("MkdirAll(git) failed: %v", err)
+	}
+	cp.Git.PatchFile = "git/custom.patch"
+	expectedPatch := "diff --git a/custom.go b/custom.go\n"
+	if err := os.WriteFile(filepath.Join(cpDir, cp.Git.PatchFile), []byte(expectedPatch), 0600); err != nil {
+		t.Fatalf("WriteFile(custom patch) failed: %v", err)
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() with custom patch path failed: %v", err)
+	}
+
+	loaded, err := storage.LoadGitPatch(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitPatch() failed: %v", err)
+	}
+	if loaded != expectedPatch {
+		t.Fatalf("LoadGitPatch() = %q, want %q", loaded, expectedPatch)
+	}
+}
+
 func TestStorage_SaveGitPatch_CreatesCheckpointDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	storage := NewStorageWithDir(tmpDir)
@@ -743,6 +1253,118 @@ func TestStorage_SaveGitStatus_CreatesCheckpointDir(t *testing.T) {
 	}
 	if string(data) != status {
 		t.Errorf("Status content mismatch: got %q, want %q", string(data), status)
+	}
+}
+
+func TestStorage_LoadGitStatus(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-status"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	status, err := storage.LoadGitStatus(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitStatus() missing file error = %v", err)
+	}
+	if status != "" {
+		t.Fatalf("LoadGitStatus() missing file = %q, want empty string", status)
+	}
+
+	expectedStatus := "M  file.go\n?? newfile.go\n"
+	if err := storage.SaveGitStatus(sessionName, checkpointID, expectedStatus); err != nil {
+		t.Fatalf("SaveGitStatus() failed: %v", err)
+	}
+
+	loaded, err := storage.LoadGitStatus(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitStatus() failed: %v", err)
+	}
+	if loaded != expectedStatus {
+		t.Fatalf("LoadGitStatus() = %q, want %q", loaded, expectedStatus)
+	}
+}
+
+func TestStorage_LoadGitStatus_RejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-status-symlink"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "outside.status")
+	if err := os.WriteFile(outsidePath, []byte("M  file.go\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside status) failed: %v", err)
+	}
+	if err := os.Symlink(outsidePath, filepath.Join(storage.CheckpointDir(sessionName, checkpointID), GitStatusFile)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err := storage.LoadGitStatus(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("LoadGitStatus() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("LoadGitStatus() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestStorage_LoadGitStatus_UsesRecordedPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-status-custom"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		Name:        "test",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(filepath.Join(cpDir, "git"), 0755); err != nil {
+		t.Fatalf("MkdirAll(git) failed: %v", err)
+	}
+	cp.Git.StatusFile = "git/custom.status"
+	expectedStatus := "M  custom.go\n"
+	if err := os.WriteFile(filepath.Join(cpDir, cp.Git.StatusFile), []byte(expectedStatus), 0600); err != nil {
+		t.Fatalf("WriteFile(custom status) failed: %v", err)
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() with custom status path failed: %v", err)
+	}
+
+	loaded, err := storage.LoadGitStatus(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("LoadGitStatus() failed: %v", err)
+	}
+	if loaded != expectedStatus {
+		t.Fatalf("LoadGitStatus() = %q, want %q", loaded, expectedStatus)
 	}
 }
 
@@ -1318,7 +1940,11 @@ func TestCheckpoint_WithBothAssignmentsAndBVSnapshot(t *testing.T) {
 		SessionName: "myproject",
 		WorkingDir:  "/tmp/myproject",
 		CreatedAt:   now,
-		Session:     SessionState{Panes: []PaneState{}},
+		Session: SessionState{Panes: []PaneState{
+			{Index: 0, ID: "%0"},
+			{Index: 1, ID: "%1"},
+			{Index: 2, ID: "%2"},
+		}},
 		Git: GitState{
 			Branch:  "feature/test",
 			Commit:  "def456",

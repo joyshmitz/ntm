@@ -1,10 +1,12 @@
 package checkpoint
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGzipCompressDecompress(t *testing.T) {
@@ -119,6 +121,48 @@ func TestStorage_SaveCompressedScrollback(t *testing.T) {
 	}
 }
 
+func TestStorage_SaveCompressedScrollback_RejectsInvalidIdentifiers(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	compressed, err := gzipCompress([]byte("content"))
+	if err != nil {
+		t.Fatalf("gzipCompress failed: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		sessionName string
+		checkpoint  string
+		wantErr     string
+	}{
+		{
+			name:        "invalid session",
+			sessionName: "../escape",
+			checkpoint:  "valid-id",
+			wantErr:     "invalid session name",
+		},
+		{
+			name:        "invalid checkpoint",
+			sessionName: "valid_session",
+			checkpoint:  "../escape",
+			wantErr:     "invalid checkpoint ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := storage.SaveCompressedScrollback(tt.sessionName, tt.checkpoint, "%0", compressed)
+			if err == nil {
+				t.Fatal("SaveCompressedScrollback() error = nil, want validation failure")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("SaveCompressedScrollback() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestStorage_LoadCompressedScrollback_FallbackToUncompressed(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ntm-scrollback-fallback-test")
 	if err != nil {
@@ -153,6 +197,120 @@ func TestStorage_LoadCompressedScrollback_FallbackToUncompressed(t *testing.T) {
 
 	if loaded != content {
 		t.Errorf("Fallback content mismatch: got %q, want %q", loaded, content)
+	}
+}
+
+func TestStorage_LoadScrollback_RejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "test-session"
+	checkpointID := "test-checkpoint"
+	paneID := "%0"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "outside-scrollback.txt")
+	if err := os.WriteFile(outsidePath, []byte("secret"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside scrollback) failed: %v", err)
+	}
+
+	relPath := filepath.Join(PanesDir, fmt.Sprintf("pane_%s.txt", sanitizeName(paneID)))
+	if err := os.Symlink(outsidePath, filepath.Join(storage.CheckpointDir(sessionName, checkpointID), relPath)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err := storage.LoadScrollback(sessionName, checkpointID, paneID)
+	if err == nil {
+		t.Fatal("LoadScrollback() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("LoadScrollback() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestStorage_LoadCompressedScrollback_RejectsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "test-session"
+	checkpointID := "test-checkpoint"
+	paneID := "%0"
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "outside-scrollback.txt.gz")
+	if err := os.WriteFile(outsidePath, []byte("not really gzip"), 0600); err != nil {
+		t.Fatalf("WriteFile(outside compressed scrollback) failed: %v", err)
+	}
+
+	relPath := filepath.Join(PanesDir, fmt.Sprintf("pane_%s.txt.gz", sanitizeName(paneID)))
+	if err := os.Symlink(outsidePath, filepath.Join(storage.CheckpointDir(sessionName, checkpointID), relPath)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err := storage.LoadCompressedScrollback(sessionName, checkpointID, paneID)
+	if err == nil {
+		t.Fatal("LoadCompressedScrollback() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("LoadCompressedScrollback() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestStorage_LoadPaneScrollback_RejectsInvalidIdentifiers(t *testing.T) {
+	storage := NewStorageWithDir(t.TempDir())
+	pane := PaneState{
+		ID:             "%0",
+		ScrollbackFile: filepath.Join(PanesDir, "pane__0.txt"),
+	}
+
+	tests := []struct {
+		name        string
+		sessionName string
+		checkpoint  string
+		wantErr     string
+	}{
+		{
+			name:        "invalid session",
+			sessionName: "../escape",
+			checkpoint:  "valid-id",
+			wantErr:     "invalid session name",
+		},
+		{
+			name:        "invalid checkpoint",
+			sessionName: "valid_session",
+			checkpoint:  "../escape",
+			wantErr:     "invalid checkpoint ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := storage.LoadPaneScrollback(tt.sessionName, tt.checkpoint, pane)
+			if err == nil {
+				t.Fatal("LoadPaneScrollback() error = nil, want validation failure")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("LoadPaneScrollback() error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -214,6 +214,9 @@ func TestStorage_Load_NullValues(t *testing.T) {
 	if err := os.WriteFile(metaPath, []byte(nullCP), 0600); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(cpDir, SessionFile), []byte("null"), 0600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
 
 	cp, err := storage.Load(sessionName, checkpointID)
 	if err != nil {
@@ -227,6 +230,206 @@ func TestStorage_Load_NullValues(t *testing.T) {
 	// Session and Git should be zero values
 	if len(cp.Session.Panes) != 0 {
 		t.Error("Session.Panes should be empty for null session")
+	}
+}
+
+func TestStorage_Load_RejectsCorruptSessionState(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-corrupt-session"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	data, _ := json.Marshal(cp)
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), data, 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cpDir, SessionFile), []byte("{invalid json"), 0600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail for corrupt session state")
+	}
+	if !containsSubstr(err.Error(), "parsing session state") {
+		t.Fatalf("expected session parse error, got %v", err)
+	}
+}
+
+func TestStorage_Load_RejectsMissingSessionState(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-missing-session"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		PaneCount:   1,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	data, _ := json.Marshal(cp)
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), data, 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail when session.json is missing")
+	}
+	if !containsSubstr(err.Error(), "reading session state") {
+		t.Fatalf("expected session state read error, got %v", err)
+	}
+}
+
+func TestStorage_List_SkipsMetadataOnlyCheckpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "metadata-only-session"
+	checkpointID := "cp-metadata-only"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	metadata := `{"version":1,"id":"cp-metadata-only","name":"meta-only","session_name":"metadata-only-session","working_dir":"/tmp","created_at":"2025-01-01T00:00:00Z","pane_count":2}`
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), []byte(metadata), 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+
+	list, err := storage.List(sessionName)
+	if err != nil {
+		t.Fatalf("List() failed: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("len(list) = %d, want 0", len(list))
+	}
+}
+
+func TestStorage_Load_RejectsSessionStateMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-session-mismatch"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0", Title: "metadata"}}},
+	}
+	data, _ := json.Marshal(cp)
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), data, 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+	sessionData, _ := json.Marshal(SessionState{
+		Panes: []PaneState{{Index: 0, ID: "%0", Title: "session-file"}},
+	})
+	if err := os.WriteFile(filepath.Join(cpDir, SessionFile), sessionData, 0600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail for mismatched session state")
+	}
+	if !containsSubstr(err.Error(), "session state mismatch") {
+		t.Fatalf("expected session mismatch error, got %v", err)
+	}
+}
+
+func TestStorage_Load_RejectsPaneCountMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-pane-count-mismatch"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+		PaneCount:   2,
+	}
+	data, _ := json.Marshal(cp)
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), data, 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+	sessionData, _ := json.Marshal(cp.Session)
+	if err := os.WriteFile(filepath.Join(cpDir, SessionFile), sessionData, 0600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
+
+	_, err := storage.Load(sessionName, checkpointID)
+	if err == nil {
+		t.Fatal("Load() should fail for pane count mismatch")
+	}
+	if !containsSubstr(err.Error(), "pane count mismatch") {
+		t.Fatalf("expected pane count mismatch error, got %v", err)
+	}
+}
+
+func TestStorage_Load_NormalizesZeroPaneCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+	checkpointID := "20251210-120000-zero-pane-count"
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(cpDir, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	cp := &Checkpoint{
+		ID:          checkpointID,
+		SessionName: sessionName,
+		WorkingDir:  tmpDir,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+		PaneCount:   0,
+	}
+	data, _ := json.Marshal(cp)
+	if err := os.WriteFile(filepath.Join(cpDir, MetadataFile), data, 0600); err != nil {
+		t.Fatalf("WriteFile metadata failed: %v", err)
+	}
+	sessionData, _ := json.Marshal(cp.Session)
+	if err := os.WriteFile(filepath.Join(cpDir, SessionFile), sessionData, 0600); err != nil {
+		t.Fatalf("WriteFile session failed: %v", err)
+	}
+
+	loaded, err := storage.Load(sessionName, checkpointID)
+	if err != nil {
+		t.Fatalf("Load() should succeed for zero pane count: %v", err)
+	}
+	if loaded.PaneCount != 1 {
+		t.Fatalf("PaneCount = %d, want 1", loaded.PaneCount)
 	}
 }
 
@@ -729,9 +932,9 @@ func TestRestorer_MultiplePanes_PartialScrollbackAvailable(t *testing.T) {
 		CreatedAt:   time.Now(),
 		Session: SessionState{
 			Panes: []PaneState{
-				{Index: 0, ID: "%0", Title: "pane1", ScrollbackFile: "panes/pane__0.txt"},
-				{Index: 1, ID: "%1", Title: "pane2", ScrollbackFile: "panes/pane__1.txt"},
-				{Index: 2, ID: "%2", Title: "pane3", ScrollbackFile: "panes/pane__2.txt"},
+				{Index: 0, ID: "%0", Title: "pane1"},
+				{Index: 1, ID: "%1", Title: "pane2"},
+				{Index: 2, ID: "%2", Title: "pane3"},
 			},
 		},
 	}
@@ -743,6 +946,9 @@ func TestRestorer_MultiplePanes_PartialScrollbackAvailable(t *testing.T) {
 	// Only save scrollback for pane 0 and 2
 	storage.SaveScrollback(cp.SessionName, cp.ID, "%0", "content 0")
 	storage.SaveScrollback(cp.SessionName, cp.ID, "%2", "content 2")
+	cp.Session.Panes[0].ScrollbackFile = "panes/pane__0.txt"
+	cp.Session.Panes[1].ScrollbackFile = "panes/pane__1.txt"
+	cp.Session.Panes[2].ScrollbackFile = "panes/pane__2.txt"
 
 	r := NewRestorerWithStorage(storage)
 

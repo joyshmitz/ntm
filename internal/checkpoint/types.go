@@ -4,6 +4,7 @@
 package checkpoint
 
 import (
+	"sort"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -80,10 +81,21 @@ type BVSnapshot struct {
 type SessionState struct {
 	// Panes contains info about each pane in the session
 	Panes []PaneState `json:"panes"`
-	// Layout is the tmux layout string for restoration
+	// Layout is the legacy single-window tmux layout string.
+	// Multi-window checkpoints should use WindowLayouts instead.
 	Layout string `json:"layout,omitempty"`
+	// WindowLayouts captures per-window tmux layout strings for restoration.
+	WindowLayouts []WindowLayoutState `json:"window_layouts,omitempty"`
 	// ActivePaneIndex is the currently selected pane
 	ActivePaneIndex int `json:"active_pane_index"`
+}
+
+// WindowLayoutState captures the layout string for a specific tmux window.
+type WindowLayoutState struct {
+	// WindowIndex is the tmux window index.
+	WindowIndex int `json:"window_index"`
+	// Layout is the tmux layout string for this window.
+	Layout string `json:"layout"`
 }
 
 // PaneState captures the state of a single pane.
@@ -118,6 +130,8 @@ type GitState struct {
 	Commit string `json:"commit"`
 	// IsDirty indicates uncommitted changes exist
 	IsDirty bool `json:"is_dirty"`
+	// StatusFile is the relative path to the captured git status text
+	StatusFile string `json:"status_file,omitempty"`
 	// PatchFile is the relative path to the git diff patch
 	PatchFile string `json:"patch_file,omitempty"`
 	// StagedCount is the number of staged files
@@ -155,6 +169,65 @@ func FromTmuxPane(p tmux.Pane) PaneState {
 		Width:       p.Width,
 		Height:      p.Height,
 	}
+}
+
+func cloneWindowLayouts(layouts []WindowLayoutState) []WindowLayoutState {
+	if len(layouts) == 0 {
+		return nil
+	}
+
+	cloned := make([]WindowLayoutState, len(layouts))
+	copy(cloned, layouts)
+	sortWindowLayouts(cloned)
+	return cloned
+}
+
+func sortWindowLayouts(layouts []WindowLayoutState) {
+	sort.Slice(layouts, func(i, j int) bool {
+		if layouts[i].WindowIndex != layouts[j].WindowIndex {
+			return layouts[i].WindowIndex < layouts[j].WindowIndex
+		}
+		return layouts[i].Layout < layouts[j].Layout
+	})
+}
+
+func windowLayoutsEqual(a, b []WindowLayoutState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	left := cloneWindowLayouts(a)
+	right := cloneWindowLayouts(b)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func legacyLayoutFromWindowLayouts(layouts []WindowLayoutState) string {
+	if len(layouts) != 1 {
+		return ""
+	}
+	return layouts[0].Layout
+}
+
+func sessionWindowIndexesFromPanes(panes []PaneState) []int {
+	if len(panes) == 0 {
+		return nil
+	}
+
+	seen := make(map[int]struct{}, len(panes))
+	var indexes []int
+	for _, pane := range panes {
+		if _, ok := seen[pane.WindowIndex]; ok {
+			continue
+		}
+		seen[pane.WindowIndex] = struct{}{}
+		indexes = append(indexes, pane.WindowIndex)
+	}
+	sort.Ints(indexes)
+	return indexes
 }
 
 // CheckpointOption configures checkpoint creation.

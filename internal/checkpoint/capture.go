@@ -169,15 +169,26 @@ func (c *Capturer) captureSessionState(sessionName string) (SessionState, error)
 		}
 	}
 
-	// Get layout string
-	layout, err := getSessionLayout(sessionName)
+	windowLayouts, err := getSessionWindowLayouts(sessionName)
+	layout := legacyLayoutFromWindowLayouts(windowLayouts)
 	if err != nil {
-		slog.Warn("failed to capture session layout", "error", err)
+		slog.Warn("failed to capture per-window session layouts", "session", sessionName, "error", err)
+		if canUseLegacyLayoutFallback(paneStates) {
+			layout, err = getSessionLayout(sessionName)
+			if err != nil {
+				slog.Warn("failed to capture legacy session layout fallback", "session", sessionName, "error", err)
+				layout = ""
+			}
+		} else {
+			slog.Warn("skipping legacy layout fallback for multi-window session", "session", sessionName)
+			layout = ""
+		}
 	}
 
 	return SessionState{
 		Panes:           paneStates,
 		Layout:          layout,
+		WindowLayouts:   windowLayouts,
 		ActivePaneIndex: activeIndex,
 	}, nil
 }
@@ -218,6 +229,8 @@ func (c *Capturer) captureGitState(workingDir, sessionName, checkpointID string)
 	if statusText != "" {
 		if err := c.storage.SaveGitStatus(sessionName, checkpointID, statusText); err != nil {
 			slog.Warn("failed to save git status text", "error", err)
+		} else {
+			state.StatusFile = GitStatusFile
 		}
 	}
 
@@ -263,6 +276,44 @@ func getSessionLayout(sessionName string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+func getSessionWindowLayouts(sessionName string) ([]WindowLayoutState, error) {
+	cmd := exec.Command(tmux.BinaryPath(), "list-windows", "-t", sessionName, "-F", "#{window_index}\t#{window_layout}")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+
+	var layouts []WindowLayoutState
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("unexpected window layout format: %q", line)
+		}
+		windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, fmt.Errorf("parsing window index %q: %w", parts[0], err)
+		}
+		layout := strings.TrimSpace(parts[1])
+		if layout == "" {
+			continue
+		}
+		layouts = append(layouts, WindowLayoutState{
+			WindowIndex: windowIndex,
+			Layout:      layout,
+		})
+	}
+	sortWindowLayouts(layouts)
+	return layouts, nil
+}
+
+func canUseLegacyLayoutFallback(panes []PaneState) bool {
+	return len(sessionWindowIndexesFromPanes(panes)) <= 1
 }
 
 func getSessionActivePaneID(sessionName string) (string, error) {

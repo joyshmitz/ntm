@@ -2,9 +2,11 @@ package checkpoint
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +351,150 @@ func TestRestorer_ValidateCheckpoint_MissingScrollback(t *testing.T) {
 	}
 }
 
+func TestRestorer_ValidateCheckpoint_WindowLayoutReferencesMissingWindow(t *testing.T) {
+	r := NewRestorer()
+
+	cp := &Checkpoint{
+		WorkingDir: t.TempDir(),
+		Session: SessionState{
+			Panes: []PaneState{
+				{Index: 0, WindowIndex: 0},
+				{Index: 0, WindowIndex: 1},
+			},
+			WindowLayouts: []WindowLayoutState{
+				{WindowIndex: 0, Layout: "even-horizontal"},
+				{WindowIndex: 9, Layout: "main-vertical"},
+			},
+		},
+	}
+
+	issues := r.ValidateCheckpoint(cp, RestoreOptions{})
+
+	found := false
+	for _, issue := range issues {
+		if containsSubstr(issue, "references missing window 9") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected missing-window layout issue, got %v", issues)
+	}
+}
+
+func TestRestorer_ValidateCheckpoint_WindowLayoutMissingForExistingWindow(t *testing.T) {
+	r := NewRestorer()
+
+	cp := &Checkpoint{
+		WorkingDir: t.TempDir(),
+		Session: SessionState{
+			Panes: []PaneState{
+				{Index: 0, WindowIndex: 0},
+				{Index: 0, WindowIndex: 1},
+			},
+			WindowLayouts: []WindowLayoutState{
+				{WindowIndex: 0, Layout: "even-horizontal"},
+			},
+		},
+	}
+
+	issues := r.ValidateCheckpoint(cp, RestoreOptions{})
+
+	found := false
+	for _, issue := range issues {
+		if containsSubstr(issue, "window layout missing for window 1") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected missing-layout issue, got %v", issues)
+	}
+}
+
+func TestRestorer_ValidateCheckpoint_LegacyLayoutWarnsForMultiWindowSession(t *testing.T) {
+	r := NewRestorer()
+
+	cp := &Checkpoint{
+		WorkingDir: t.TempDir(),
+		Session: SessionState{
+			Panes: []PaneState{
+				{Index: 0, WindowIndex: 0},
+				{Index: 0, WindowIndex: 1},
+			},
+			Layout: "even-horizontal",
+		},
+	}
+
+	issues := r.ValidateCheckpoint(cp, RestoreOptions{})
+
+	found := false
+	for _, issue := range issues {
+		if containsSubstr(issue, "legacy single layout string") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected legacy-layout warning, got %v", issues)
+	}
+}
+
+func TestRestorer_RestoreFromCheckpoint_SkipsLegacyLayoutForMultiWindowSession(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	workDir := t.TempDir()
+	r := NewRestorerWithStorage(NewStorageWithDir(t.TempDir()))
+	sessionName := "cplegacy-layout-" + time.Now().Format("150405000000")
+
+	cp := &Checkpoint{
+		ID:          "legacy-layout-checkpoint",
+		SessionName: sessionName,
+		WorkingDir:  workDir,
+		Session: SessionState{
+			Panes: []PaneState{
+				{
+					Index:       0,
+					WindowIndex: 0,
+					Title:       sessionName + "__cc_1",
+					AgentType:   "cc",
+					Command:     "sleep 30",
+				},
+				{
+					Index:       0,
+					WindowIndex: 1,
+					Title:       sessionName + "__cod_1",
+					AgentType:   "cod",
+					Command:     "sleep 30",
+				},
+			},
+			Layout: "even-horizontal",
+		},
+	}
+
+	t.Cleanup(func() {
+		if tmux.SessionExists(sessionName) {
+			_ = tmux.KillSession(sessionName)
+		}
+	})
+
+	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	if err != nil {
+		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+	}
+
+	found := false
+	for _, warning := range result.Warnings {
+		if containsSubstr(warning, "skipping legacy single layout for multi-window checkpoint") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected legacy-layout skip warning, got %v", result.Warnings)
+	}
+}
+
 func TestRestorer_loadPaneScrollback_Compressed(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ntm-restore-test")
 	if err != nil {
@@ -380,6 +526,72 @@ func TestRestorer_loadPaneScrollback_Compressed(t *testing.T) {
 	}
 	if got != content {
 		t.Fatalf("loadPaneScrollback = %q, want %q", got, content)
+	}
+}
+
+func TestRestorer_loadPaneScrollbackForPane_UsesRecordedScrollbackFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	r := NewRestorerWithStorage(storage)
+
+	const (
+		sessionName  = "test-session"
+		checkpointID = "test-checkpoint"
+		content      = "recorded scrollback\nline 2\n"
+	)
+
+	cpDir := storage.CheckpointDir(sessionName, checkpointID)
+	if err := os.MkdirAll(filepath.Join(cpDir, PanesDir), 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	compressed, err := gzipCompress([]byte(content))
+	if err != nil {
+		t.Fatalf("gzipCompress failed: %v", err)
+	}
+	scrollbackRelPath := filepath.Join(PanesDir, "pane_from_file.txt.gz")
+	scrollbackAbsPath := filepath.Join(cpDir, scrollbackRelPath)
+	if err := os.WriteFile(scrollbackAbsPath, compressed, 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	got, err := r.loadPaneScrollbackForPane(sessionName, checkpointID, PaneState{
+		ID:             "%stale",
+		ScrollbackFile: scrollbackRelPath,
+	})
+	if err != nil {
+		t.Fatalf("loadPaneScrollbackForPane failed: %v", err)
+	}
+	if got != content {
+		t.Fatalf("loadPaneScrollbackForPane = %q, want %q", got, content)
+	}
+}
+
+func TestRestorer_loadPaneScrollbackForPane_FallsBackToPaneID(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	r := NewRestorerWithStorage(storage)
+
+	const (
+		sessionName  = "test-session"
+		checkpointID = "test-checkpoint"
+		paneID       = "%0"
+		content      = "fallback scrollback\nline 2\n"
+	)
+
+	compressed, err := gzipCompress([]byte(content))
+	if err != nil {
+		t.Fatalf("gzipCompress failed: %v", err)
+	}
+	if _, err := storage.SaveCompressedScrollback(sessionName, checkpointID, paneID, compressed); err != nil {
+		t.Fatalf("SaveCompressedScrollback failed: %v", err)
+	}
+
+	got, err := r.loadPaneScrollbackForPane(sessionName, checkpointID, PaneState{ID: paneID})
+	if err != nil {
+		t.Fatalf("loadPaneScrollbackForPane failed: %v", err)
+	}
+	if got != content {
+		t.Fatalf("loadPaneScrollbackForPane = %q, want %q", got, content)
 	}
 }
 
@@ -993,6 +1205,202 @@ func TestRestorer_RestoreFromCheckpoint_RelaunchesCommandsAcrossWindows(t *testi
 	if activePaneID != sorted[1].ID {
 		t.Fatalf("active pane id = %q, want %q", activePaneID, sorted[1].ID)
 	}
+}
+
+func TestRestorer_RestoreFromCheckpoint_PreservesSparseWindowIndexes(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	workDir := t.TempDir()
+	r := NewRestorerWithStorage(NewStorageWithDir(t.TempDir()))
+	sessionName := "cprestore-sparse-" + time.Now().Format("150405000000")
+
+	cp := &Checkpoint{
+		ID:          "test-checkpoint-sparse",
+		SessionName: sessionName,
+		WorkingDir:  workDir,
+		Session: SessionState{
+			Panes: []PaneState{
+				{
+					Index:       0,
+					WindowIndex: 5,
+					Title:       sessionName + "__cod_1",
+					AgentType:   "cod",
+					Command:     "sleep 30",
+					ID:          "%old-5",
+				},
+				{
+					Index:       0,
+					WindowIndex: 2,
+					Title:       sessionName + "__cc_1",
+					AgentType:   "cc",
+					Command:     "sleep 30",
+					ID:          "%old-2",
+				},
+				{
+					Index:       1,
+					WindowIndex: 5,
+					Title:       sessionName + "__cod_2",
+					AgentType:   "cod",
+					Command:     "sleep 30",
+					ID:          "%old-6",
+				},
+			},
+			ActivePaneIndex: 0,
+		},
+	}
+
+	t.Cleanup(func() {
+		if tmux.SessionExists(sessionName) {
+			_ = tmux.KillSession(sessionName)
+		}
+	})
+
+	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	if err != nil {
+		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+	}
+	if result.PanesRestored != 3 {
+		t.Fatalf("PanesRestored = %d, want 3 (warnings=%v)", result.PanesRestored, result.Warnings)
+	}
+
+	var sorted []tmux.Pane
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		panes, err := tmux.GetPanes(sessionName)
+		if err != nil {
+			t.Fatalf("GetPanes failed: %v", err)
+		}
+		if len(panes) != 3 {
+			t.Fatalf("len(panes) = %d, want 3", len(panes))
+		}
+
+		sorted = sortedTmuxPanes(panes)
+		if sorted[0].Command == "sleep" && sorted[1].Command == "sleep" && sorted[2].Command == "sleep" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"timed out waiting for restored commands; commands=[%q %q %q] window_indexes=[%d %d %d]",
+				sorted[0].Command,
+				sorted[1].Command,
+				sorted[2].Command,
+				sorted[0].WindowIndex,
+				sorted[1].WindowIndex,
+				sorted[2].WindowIndex,
+			)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	gotWindowIndexes := []int{sorted[0].WindowIndex, sorted[1].WindowIndex, sorted[2].WindowIndex}
+	wantWindowIndexes := []int{2, 5, 5}
+	for i := range wantWindowIndexes {
+		if gotWindowIndexes[i] != wantWindowIndexes[i] {
+			t.Fatalf("window indexes = %v, want %v", gotWindowIndexes, wantWindowIndexes)
+		}
+	}
+
+	activePaneID, err := tmux.DefaultClient.Run("display-message", "-p", "-t", sessionName, "#{pane_id}")
+	if err != nil {
+		t.Fatalf("display-message active pane failed: %v", err)
+	}
+	if activePaneID != sorted[1].ID {
+		t.Fatalf("active pane id = %q, want %q", activePaneID, sorted[1].ID)
+	}
+}
+
+func TestRestorer_RestoreFromCheckpoint_PreservesPerWindowLayouts(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	workDir := t.TempDir()
+	templateSession := "cplayout-src-" + time.Now().Format("150405000000")
+	restoreSession := "cplayout-dst-" + time.Now().Format("150405000000")
+
+	if err := tmux.CreateSession(templateSession, workDir); err != nil {
+		t.Fatalf("CreateSession(template) failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if tmux.SessionExists(templateSession) {
+			_ = tmux.KillSession(templateSession)
+		}
+		if tmux.SessionExists(restoreSession) {
+			_ = tmux.KillSession(restoreSession)
+		}
+	})
+
+	firstWindow, err := tmux.GetFirstWindow(templateSession)
+	if err != nil {
+		t.Fatalf("GetFirstWindow(template) failed: %v", err)
+	}
+	firstTarget := fmt.Sprintf("%s:%d", templateSession, firstWindow)
+	if _, err := tmux.DefaultClient.Run("split-window", "-t", firstTarget, "-c", workDir, "-P", "-F", "#{pane_id}"); err != nil {
+		t.Fatalf("split-window first template window failed: %v", err)
+	}
+	if err := tmux.DefaultClient.RunSilent("select-layout", "-t", firstTarget, "even-horizontal"); err != nil {
+		t.Fatalf("select-layout first template window failed: %v", err)
+	}
+
+	secondWindowIndex, err := tmux.DefaultClient.Run("new-window", "-d", "-t", templateSession, "-c", workDir, "-P", "-F", "#{window_index}")
+	if err != nil {
+		t.Fatalf("new-window template failed: %v", err)
+	}
+	secondTarget := fmt.Sprintf("%s:%s", templateSession, strings.TrimSpace(secondWindowIndex))
+	if _, err := tmux.DefaultClient.Run("split-window", "-t", secondTarget, "-c", workDir, "-P", "-F", "#{pane_id}"); err != nil {
+		t.Fatalf("split-window second template window failed: %v", err)
+	}
+	if err := tmux.DefaultClient.RunSilent("select-layout", "-t", secondTarget, "main-vertical"); err != nil {
+		t.Fatalf("select-layout second template window failed: %v", err)
+	}
+
+	capturer := NewCapturerWithStorage(NewStorageWithDir(t.TempDir()))
+	sessionState, err := capturer.captureSessionState(templateSession)
+	if err != nil {
+		t.Fatalf("captureSessionState(template) failed: %v", err)
+	}
+	if len(sessionState.WindowLayouts) != 2 {
+		t.Fatalf("len(sessionState.WindowLayouts) = %d, want 2", len(sessionState.WindowLayouts))
+	}
+
+	r := NewRestorerWithStorage(NewStorageWithDir(t.TempDir()))
+	cp := &Checkpoint{
+		ID:          "layout-checkpoint",
+		SessionName: restoreSession,
+		WorkingDir:  workDir,
+		Session:     sessionState,
+	}
+
+	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	if err != nil {
+		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+	}
+	if result.PanesRestored != len(sessionState.Panes) {
+		t.Fatalf("PanesRestored = %d, want %d (warnings=%v)", result.PanesRestored, len(sessionState.Panes), result.Warnings)
+	}
+
+	restoredLayouts, err := getSessionWindowLayouts(restoreSession)
+	if err != nil {
+		t.Fatalf("getSessionWindowLayouts(restore) failed: %v", err)
+	}
+	if !windowLayoutsEqual(normalizeWindowLayouts(restoredLayouts), normalizeWindowLayouts(sessionState.WindowLayouts)) {
+		t.Fatalf("restored layouts = %#v, want %#v", restoredLayouts, sessionState.WindowLayouts)
+	}
+}
+
+var paneLayoutIDPattern = regexp.MustCompile(`(\d+x\d+,\d+,\d+),\d+`)
+
+func normalizeWindowLayouts(layouts []WindowLayoutState) []WindowLayoutState {
+	normalized := cloneWindowLayouts(layouts)
+	for i := range normalized {
+		normalized[i].Layout = normalizeWindowLayoutString(normalized[i].Layout)
+	}
+	return normalized
+}
+
+func normalizeWindowLayoutString(layout string) string {
+	if comma := strings.IndexByte(layout, ','); comma >= 0 {
+		layout = layout[comma+1:]
+	}
+	return paneLayoutIDPattern.ReplaceAllString(layout, `${1},pane`)
 }
 
 // containsSubstr checks if s contains substr (case-insensitive).

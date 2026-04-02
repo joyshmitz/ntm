@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -147,7 +148,11 @@ func gzipDecompress(data []byte) ([]byte, error) {
 
 // SaveCompressedScrollback saves compressed scrollback to a file.
 func (s *Storage) SaveCompressedScrollback(sessionName, checkpointID, paneID string, data []byte) (string, error) {
-	panesDir := s.PanesDirPath(sessionName, checkpointID)
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return "", err
+	}
+	panesDir := filepath.Join(dir, PanesDir)
 	if err := os.MkdirAll(panesDir, 0755); err != nil {
 		return "", fmt.Errorf("creating panes directory: %w", err)
 	}
@@ -167,14 +172,21 @@ func (s *Storage) SaveCompressedScrollback(sessionName, checkpointID, paneID str
 func (s *Storage) LoadCompressedScrollback(sessionName, checkpointID, paneID string) (string, error) {
 	// Try compressed file first
 	filename := fmt.Sprintf("pane_%s.txt.gz", sanitizeName(paneID))
-	fullPath := filepath.Join(s.PanesDirPath(sessionName, checkpointID), filename)
-
-	data, err := os.ReadFile(fullPath)
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return "", err
+	}
+	fullPath, err := resolveExistingCheckpointArtifactPath(dir, filepath.Join(PanesDir, filename))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			// Fall back to uncompressed file
 			return s.LoadScrollback(sessionName, checkpointID, paneID)
 		}
+		return "", fmt.Errorf("resolving compressed scrollback path: %w", err)
+	}
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
 		return "", fmt.Errorf("reading compressed scrollback: %w", err)
 	}
 
@@ -184,6 +196,35 @@ func (s *Storage) LoadCompressedScrollback(sessionName, checkpointID, paneID str
 	}
 
 	return string(decompressed), nil
+}
+
+// LoadPaneScrollback reads pane scrollback using the pane's recorded artifact path
+// when present, falling back to the canonical pane-ID location otherwise.
+func (s *Storage) LoadPaneScrollback(sessionName, checkpointID string, pane PaneState) (string, error) {
+	if pane.ScrollbackFile != "" {
+		baseDir, err := s.safeCheckpointDir(sessionName, checkpointID)
+		if err != nil {
+			return "", err
+		}
+		scrollbackPath, err := resolveExistingCheckpointArtifactPath(baseDir, pane.ScrollbackFile)
+		if err != nil {
+			return "", fmt.Errorf("resolving scrollback path: %w", err)
+		}
+		data, err := os.ReadFile(scrollbackPath)
+		if err != nil {
+			return "", fmt.Errorf("reading scrollback: %w", err)
+		}
+		if filepath.Ext(scrollbackPath) == ".gz" {
+			decompressed, err := gzipDecompress(data)
+			if err != nil {
+				return "", fmt.Errorf("decompressing scrollback: %w", err)
+			}
+			return string(decompressed), nil
+		}
+		return string(data), nil
+	}
+
+	return s.LoadCompressedScrollback(sessionName, checkpointID, pane.ID)
 }
 
 // captureScrollbackEnhanced captures scrollback with compression support.

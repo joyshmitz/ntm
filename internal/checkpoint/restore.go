@@ -223,6 +223,9 @@ func (r *Restorer) createSession(cp *Checkpoint, workDir string) error {
 	// Set the title of the first pane if we have pane info
 	panes := sortedCheckpointPanes(cp.Session.Panes)
 	if len(panes) > 0 {
+		if err := moveInitialWindow(cp.SessionName, panes[0].WindowIndex); err != nil {
+			return err
+		}
 		firstPane := panes[0]
 		if firstPane.Title != "" {
 			panes, err := tmux.GetPanes(cp.SessionName)
@@ -248,6 +251,7 @@ func (r *Restorer) restoreLayout(cp *Checkpoint, workDir string) (int, error) {
 
 	for i := 1; i < len(paneStates); i++ {
 		paneState := paneStates[i]
+		windowTarget := fmt.Sprintf("%s:%d", cp.SessionName, paneState.WindowIndex)
 
 		var (
 			paneID string
@@ -261,7 +265,7 @@ func (r *Restorer) restoreLayout(cp *Checkpoint, workDir string) (int, error) {
 				"-F",
 				"#{pane_id}",
 				"-t",
-				cp.SessionName,
+				windowTarget,
 				"-c",
 				workDir,
 			)
@@ -270,7 +274,7 @@ func (r *Restorer) restoreLayout(cp *Checkpoint, workDir string) (int, error) {
 			paneID, err = tmux.DefaultClient.Run(
 				"split-window",
 				"-t",
-				cp.SessionName,
+				windowTarget,
 				"-c",
 				workDir,
 				"-P",
@@ -293,8 +297,16 @@ func (r *Restorer) restoreLayout(cp *Checkpoint, workDir string) (int, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Apply layout string if available
-	if cp.Session.Layout != "" {
+	// Apply captured layouts after panes exist.
+	if len(cp.Session.WindowLayouts) > 0 {
+		if err := r.applyWindowLayouts(cp.SessionName, cp.Session.WindowLayouts); err != nil {
+			// Non-fatal - layout is a best-effort feature
+			return panesCreated, fmt.Errorf("applying window layouts: %w", err)
+		}
+	} else if cp.Session.Layout != "" {
+		if !canRestoreLegacySessionLayout(cp.Session) {
+			return panesCreated, fmt.Errorf("skipping legacy single layout for multi-window checkpoint; per-window layouts are missing")
+		}
 		if err := r.applyLayout(cp.SessionName, cp.Session.Layout); err != nil {
 			// Non-fatal - layout is a best-effort feature
 			return panesCreated, fmt.Errorf("applying layout: %w", err)
@@ -359,6 +371,27 @@ func (r *Restorer) restoreAgents(cp *Checkpoint, workDir string) error {
 	return nil
 }
 
+func moveInitialWindow(sessionName string, targetWindowIndex int) error {
+	if targetWindowIndex < 0 {
+		return nil
+	}
+
+	currentWindowIndex, err := tmux.GetFirstWindow(sessionName)
+	if err != nil {
+		return fmt.Errorf("getting initial window index: %w", err)
+	}
+	if currentWindowIndex == targetWindowIndex {
+		return nil
+	}
+
+	source := fmt.Sprintf("%s:%d", sessionName, currentWindowIndex)
+	target := fmt.Sprintf("%s:%d", sessionName, targetWindowIndex)
+	if err := tmux.DefaultClient.RunSilent("move-window", "-s", source, "-t", target); err != nil {
+		return fmt.Errorf("moving initial window from %s to %s: %w", source, target, err)
+	}
+	return nil
+}
+
 func (r *Restorer) restoreActivePane(cp *Checkpoint) error {
 	if cp.Session.ActivePaneIndex < 0 || cp.Session.ActivePaneIndex >= len(cp.Session.Panes) {
 		return nil
@@ -399,6 +432,20 @@ func (r *Restorer) applyLayout(sessionName, layout string) error {
 	return nil
 }
 
+func (r *Restorer) applyWindowLayouts(sessionName string, windowLayouts []WindowLayoutState) error {
+	for _, windowLayout := range cloneWindowLayouts(windowLayouts) {
+		layout := strings.TrimSpace(windowLayout.Layout)
+		if layout == "" {
+			layout = "tiled"
+		}
+		target := fmt.Sprintf("%s:%d", sessionName, windowLayout.WindowIndex)
+		if err := tmux.DefaultClient.RunSilent("select-layout", "-t", target, layout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // injectContext sends scrollback content to restored agents.
 func (r *Restorer) injectContext(cp *Checkpoint, maxLines int) error {
 	panes, err := tmux.GetPanes(cp.SessionName)
@@ -418,7 +465,7 @@ func (r *Restorer) injectContext(cp *Checkpoint, maxLines int) error {
 		}
 
 		// Load scrollback content
-		content, err := r.loadPaneScrollback(cp.SessionName, cp.ID, paneState.ID)
+		content, err := r.loadPaneScrollbackForPane(cp.SessionName, cp.ID, paneState)
 		if err != nil {
 			lastErr = err
 			continue
@@ -441,6 +488,10 @@ func (r *Restorer) injectContext(cp *Checkpoint, maxLines int) error {
 
 func (r *Restorer) loadPaneScrollback(sessionName, checkpointID, paneID string) (string, error) {
 	return r.storage.LoadCompressedScrollback(sessionName, checkpointID, paneID)
+}
+
+func (r *Restorer) loadPaneScrollbackForPane(sessionName, checkpointID string, pane PaneState) (string, error) {
+	return r.storage.LoadPaneScrollback(sessionName, checkpointID, pane)
 }
 
 // checkGitState compares current git state with checkpoint and returns a warning if different.
@@ -577,6 +628,53 @@ func effectiveRestoreDir(workDir string) string {
 		return os.TempDir()
 	}
 	return workDir
+}
+
+func canRestoreLegacySessionLayout(session SessionState) bool {
+	return len(sessionWindowIndexesFromPanes(session.Panes)) <= 1
+}
+
+func validateSessionWindowLayouts(session SessionState) ([]string, []string) {
+	windowIndexes := sessionWindowIndexesFromPanes(session.Panes)
+	if len(windowIndexes) == 0 {
+		return nil, nil
+	}
+
+	if len(session.WindowLayouts) == 0 {
+		if session.Layout != "" && len(windowIndexes) > 1 {
+			return nil, []string{"multi-window checkpoint only has a legacy single layout string; per-window layout fidelity will be lost"}
+		}
+		return nil, nil
+	}
+
+	validWindows := make(map[int]struct{}, len(windowIndexes))
+	for _, windowIndex := range windowIndexes {
+		validWindows[windowIndex] = struct{}{}
+	}
+
+	seen := make(map[int]struct{}, len(session.WindowLayouts))
+	var issues []string
+	for _, windowLayout := range session.WindowLayouts {
+		if _, ok := seen[windowLayout.WindowIndex]; ok {
+			issues = append(issues, fmt.Sprintf("duplicate window layout entry for window %d", windowLayout.WindowIndex))
+			continue
+		}
+		seen[windowLayout.WindowIndex] = struct{}{}
+		if _, ok := validWindows[windowLayout.WindowIndex]; !ok {
+			issues = append(issues, fmt.Sprintf("window layout references missing window %d", windowLayout.WindowIndex))
+		}
+	}
+
+	if len(windowIndexes) <= 1 {
+		return issues, nil
+	}
+	for _, windowIndex := range windowIndexes {
+		if _, ok := seen[windowIndex]; !ok {
+			issues = append(issues, fmt.Sprintf("window layout missing for window %d", windowIndex))
+		}
+	}
+
+	return issues, nil
 }
 
 func sortedCheckpointPanes(panes []PaneState) []PaneState {
@@ -728,6 +826,9 @@ func (r *Restorer) ValidateCheckpoint(cp *Checkpoint, opts RestoreOptions) []str
 	if len(cp.Session.Panes) == 0 {
 		issues = append(issues, "checkpoint contains no panes")
 	}
+	layoutErrors, layoutWarnings := validateSessionWindowLayouts(cp.Session)
+	issues = append(issues, layoutErrors...)
+	issues = append(issues, layoutWarnings...)
 
 	// Check git state
 	if !opts.SkipGitCheck && cp.Git.Commit != "" && workDir != "" {
@@ -738,13 +839,23 @@ func (r *Restorer) ValidateCheckpoint(cp *Checkpoint, opts RestoreOptions) []str
 
 	// Check scrollback files if context injection is requested
 	if opts.InjectContext {
-		for _, pane := range cp.Session.Panes {
-			if pane.ScrollbackFile != "" {
-				baseDir := r.storage.CheckpointDir(cp.SessionName, cp.ID)
-				scrollbackPath, err := resolveCheckpointRelativePath(baseDir, pane.ScrollbackFile)
+		baseDir, err := r.storage.safeCheckpointDir(cp.SessionName, cp.ID)
+		if err != nil {
+			issues = append(issues, fmt.Sprintf("invalid checkpoint path: %v", err))
+		} else {
+			for _, pane := range cp.Session.Panes {
+				if pane.ScrollbackFile == "" {
+					continue
+				}
+				scrollbackPath, err := resolveExistingCheckpointArtifactPath(baseDir, pane.ScrollbackFile)
 				if err != nil {
-					issues = append(issues,
-						fmt.Sprintf("invalid scrollback path for pane %s: %v", pane.ID, err))
+					if errors.Is(err, os.ErrNotExist) {
+						issues = append(issues,
+							fmt.Sprintf("scrollback file missing for pane %s", pane.ID))
+					} else {
+						issues = append(issues,
+							fmt.Sprintf("invalid scrollback path for pane %s: %v", pane.ID, err))
+					}
 					continue
 				}
 				if _, err := os.Stat(scrollbackPath); os.IsNotExist(err) {

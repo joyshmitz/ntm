@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -86,7 +88,7 @@ type GitChange struct {
 	// ToCommit is the current commit
 	ToCommit string `json:"to_commit"`
 	// Branch may have changed
-	Branch string `json:"branch,omitempty"`
+	Branch *string `json:"branch,omitempty"`
 	// PatchFile is the relative path to the incremental patch
 	PatchFile string `json:"patch_file,omitempty"`
 	// IsDirty indicates uncommitted changes
@@ -103,8 +105,12 @@ type GitChange struct {
 type SessionChange struct {
 	// Layout changed
 	Layout *string `json:"layout,omitempty"`
+	// WindowLayouts changed
+	WindowLayouts []WindowLayoutState `json:"window_layouts,omitempty"`
 	// ActivePaneIndex changed
 	ActivePaneIndex *int `json:"active_pane_index,omitempty"`
+	// ActivePaneID identifies the selected pane independent of slice order
+	ActivePaneID *string `json:"active_pane_id,omitempty"`
 	// PaneCount changed
 	PaneCount *int `json:"pane_count,omitempty"`
 }
@@ -137,12 +143,15 @@ func (ic *IncrementalCreator) Create(sessionName, name string, baseCheckpointID 
 		return nil, fmt.Errorf("loading base checkpoint: %w", err)
 	}
 
-	// Capture current state
-	capturer := NewCapturer()
+	// Capture current state into the same storage backend used for diffs and cleanup.
+	capturer := NewCapturerWithStorage(ic.storage)
 	current, err := capturer.Create(sessionName, "temp-incremental")
 	if err != nil {
 		return nil, fmt.Errorf("capturing current state: %w", err)
 	}
+	defer func() {
+		_ = ic.storage.Delete(sessionName, current.ID)
+	}()
 
 	// Create the incremental checkpoint
 	inc := &IncrementalCheckpoint{
@@ -162,8 +171,12 @@ func (ic *IncrementalCreator) Create(sessionName, name string, baseCheckpointID 
 		return nil, fmt.Errorf("computing pane changes: %w", err)
 	}
 
-	// Compute git changes
-	inc.Changes.GitChange = ic.computeGitChange(base.Git, current.Git)
+	// Compute git changes, including artifact-only drift that would otherwise
+	// leave resolved incrementals pointing at stale base git files.
+	inc.Changes.GitChange, err = ic.computeGitChangeForCheckpoints(sessionName, base, current)
+	if err != nil {
+		return nil, fmt.Errorf("computing git changes: %w", err)
+	}
 
 	// Compute session changes
 	inc.Changes.SessionChange = ic.computeSessionChange(base.Session, current.Session)
@@ -172,9 +185,6 @@ func (ic *IncrementalCreator) Create(sessionName, name string, baseCheckpointID 
 	if err := ic.save(inc, base.WorkingDir); err != nil {
 		return nil, fmt.Errorf("saving incremental checkpoint: %w", err)
 	}
-
-	// Clean up temp checkpoint
-	_ = ic.storage.Delete(sessionName, current.ID)
 
 	return inc, nil
 }
@@ -239,8 +249,14 @@ func (ic *IncrementalCreator) computePaneChanges(sessionName string, base, curre
 			}
 
 			// Compute scrollback diff
-			baseScrollback, _ := ic.storage.LoadCompressedScrollback(sessionName, base.ID, paneID)
-			currentScrollback, _ := ic.storage.LoadCompressedScrollback(sessionName, current.ID, paneID)
+			baseScrollback, err := ic.loadPaneScrollback(sessionName, base.ID, basePane)
+			if err != nil {
+				return nil, fmt.Errorf("loading base scrollback for pane %s: %w", paneID, err)
+			}
+			currentScrollback, err := ic.loadPaneScrollback(sessionName, current.ID, currentPane)
+			if err != nil {
+				return nil, fmt.Errorf("loading current scrollback for pane %s: %w", paneID, err)
+			}
 
 			if baseScrollback != currentScrollback {
 				diff := computeScrollbackDiff(baseScrollback, currentScrollback)
@@ -264,7 +280,10 @@ func (ic *IncrementalCreator) computePaneChanges(sessionName string, base, curre
 	for paneID := range currentPanes {
 		if _, exists := basePanes[paneID]; !exists {
 			// New pane
-			currentScrollback, _ := ic.storage.LoadCompressedScrollback(sessionName, current.ID, paneID)
+			currentScrollback, err := ic.loadPaneScrollback(sessionName, current.ID, currentPanes[paneID])
+			if err != nil {
+				return nil, fmt.Errorf("loading current scrollback for added pane %s: %w", paneID, err)
+			}
 			changes[paneID] = PaneChange{
 				Added:       true,
 				NewLines:    countLines(currentScrollback),
@@ -277,8 +296,20 @@ func (ic *IncrementalCreator) computePaneChanges(sessionName string, base, curre
 	return changes, nil
 }
 
+func (ic *IncrementalCreator) loadPaneScrollback(sessionName, checkpointID string, pane PaneState) (string, error) {
+	scrollback, err := ic.storage.LoadPaneScrollback(sessionName, checkpointID, pane)
+	if err == nil {
+		return scrollback, nil
+	}
+	if pane.ScrollbackFile == "" && pane.ScrollbackLines == 0 && errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	return "", err
+}
+
 // computeScrollbackDiff returns the new lines in current that aren't in base.
-// This is a simple approach that assumes scrollback only appends new lines.
+// It prefers the largest suffix/prefix overlap so rollover-truncated scrollback
+// still preserves newly appended lines after older lines are dropped.
 func computeScrollbackDiff(base, current string) string {
 	if base == "" {
 		return current
@@ -286,21 +317,57 @@ func computeScrollbackDiff(base, current string) string {
 	if current == "" {
 		return ""
 	}
-
-	// Find where current diverges from base
-	// Try to find the end of base content in current
-	baseLines := strings.Split(base, "\n")
-	currentLines := strings.Split(current, "\n")
-
-	if len(currentLines) <= len(baseLines) {
-		// No new lines (or fewer lines due to truncation)
+	if base == current {
 		return ""
 	}
 
-	// Simple heuristic: assume new lines are appended at the end
-	// This works for typical scrollback where new content appears at bottom
-	newLines := currentLines[len(baseLines):]
-	return strings.Join(newLines, "\n")
+	baseLines := strings.Split(base, "\n")
+	currentLines := strings.Split(current, "\n")
+
+	if len(currentLines) <= len(baseLines) && containsContiguousSlice(baseLines, currentLines) {
+		return ""
+	}
+
+	maxOverlap := min(len(baseLines), len(currentLines))
+
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		if !equalStringSlices(baseLines[len(baseLines)-overlap:], currentLines[:overlap]) {
+			continue
+		}
+		if overlap == len(currentLines) {
+			return ""
+		}
+		return strings.Join(currentLines[overlap:], "\n")
+	}
+
+	return current
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsContiguousSlice(haystack, needle []string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(haystack) {
+		return false
+	}
+	for start := 0; start+len(needle) <= len(haystack); start++ {
+		if equalStringSlices(haystack[start:start+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // computeGitChange computes changes between base and current git state.
@@ -310,7 +377,8 @@ func (ic *IncrementalCreator) computeGitChange(base, current GitState) *GitChang
 		base.Branch == current.Branch &&
 		base.IsDirty == current.IsDirty &&
 		base.StagedCount == current.StagedCount &&
-		base.UnstagedCount == current.UnstagedCount {
+		base.UnstagedCount == current.UnstagedCount &&
+		base.UntrackedCount == current.UntrackedCount {
 		return nil
 	}
 
@@ -325,7 +393,69 @@ func (ic *IncrementalCreator) computeGitChange(base, current GitState) *GitChang
 
 	// Only include branch if it changed
 	if base.Branch != current.Branch {
-		change.Branch = current.Branch
+		branch := current.Branch
+		change.Branch = &branch
+	}
+
+	return change
+}
+
+func (ic *IncrementalCreator) computeGitChangeForCheckpoints(sessionName string, base, current *Checkpoint) (*GitChange, error) {
+	change := ic.computeGitChange(base.Git, current.Git)
+
+	patchChanged, err := ic.storedGitArtifactChanged(sessionName, base.ID, base.Git, current.ID, current.Git, (*Storage).loadGitPatchForState)
+	if err != nil {
+		return nil, err
+	}
+
+	statusChanged, err := ic.storedGitArtifactChanged(sessionName, base.ID, base.Git, current.ID, current.Git, (*Storage).loadGitStatusForState)
+	if err != nil {
+		return nil, err
+	}
+
+	if change == nil && !patchChanged && !statusChanged {
+		return nil, nil
+	}
+	if change != nil {
+		return change, nil
+	}
+
+	return newGitChangeFromCurrent(base.Git, current.Git), nil
+}
+
+func (ic *IncrementalCreator) storedGitArtifactChanged(
+	sessionName, baseCheckpointID string,
+	baseGit GitState,
+	currentCheckpointID string,
+	currentGit GitState,
+	load func(*Storage, string, string, GitState) (string, error),
+) (bool, error) {
+	baseContent, err := load(ic.storage, sessionName, baseCheckpointID, baseGit)
+	if err != nil {
+		return false, err
+	}
+
+	currentContent, err := load(ic.storage, sessionName, currentCheckpointID, currentGit)
+	if err != nil {
+		return false, err
+	}
+
+	return baseContent != currentContent, nil
+}
+
+func newGitChangeFromCurrent(base, current GitState) *GitChange {
+	change := &GitChange{
+		FromCommit:     base.Commit,
+		ToCommit:       current.Commit,
+		IsDirty:        current.IsDirty,
+		StagedCount:    current.StagedCount,
+		UnstagedCount:  current.UnstagedCount,
+		UntrackedCount: current.UntrackedCount,
+	}
+
+	if base.Branch != current.Branch {
+		branch := current.Branch
+		change.Branch = &branch
 	}
 
 	return change
@@ -342,9 +472,20 @@ func (ic *IncrementalCreator) computeSessionChange(base, current SessionState) *
 		hasChanges = true
 	}
 
-	if base.ActivePaneIndex != current.ActivePaneIndex {
+	baseWindowLayouts := effectiveSessionWindowLayouts(base)
+	currentWindowLayouts := effectiveSessionWindowLayouts(current)
+	if !windowLayoutsEqual(baseWindowLayouts, currentWindowLayouts) {
+		change.WindowLayouts = cloneWindowLayouts(currentWindowLayouts)
+		hasChanges = true
+	}
+
+	baseActivePaneID := sessionActivePaneID(base)
+	currentActivePaneID := sessionActivePaneID(current)
+	if baseActivePaneID != currentActivePaneID {
 		activePaneIndex := current.ActivePaneIndex
+		activePaneID := currentActivePaneID
 		change.ActivePaneIndex = &activePaneIndex
+		change.ActivePaneID = &activePaneID
 		hasChanges = true
 	}
 
@@ -488,12 +629,21 @@ func (ir *IncrementalResolver) Resolve(sessionName, incrementalID string) (*Chec
 	resolved.CreatedAt = inc.CreatedAt
 	resolved.Description = fmt.Sprintf("Resolved from incremental %s (base: %s)", incrementalID, inc.BaseCheckpointID)
 
-	var desiredActivePaneIndex *int
+	var (
+		desiredActivePaneID    *string
+		desiredActivePaneIndex *int
+	)
 
 	// Apply session changes
 	if inc.Changes.SessionChange != nil {
 		if inc.Changes.SessionChange.Layout != nil {
 			resolved.Session.Layout = *inc.Changes.SessionChange.Layout
+		}
+		if inc.Changes.SessionChange.WindowLayouts != nil {
+			resolved.Session.WindowLayouts = cloneWindowLayouts(inc.Changes.SessionChange.WindowLayouts)
+		}
+		if inc.Changes.SessionChange.ActivePaneID != nil {
+			desiredActivePaneID = inc.Changes.SessionChange.ActivePaneID
 		}
 		if inc.Changes.SessionChange.ActivePaneIndex != nil {
 			desiredActivePaneIndex = inc.Changes.SessionChange.ActivePaneIndex
@@ -519,38 +669,33 @@ func (ir *IncrementalResolver) Resolve(sessionName, incrementalID string) (*Chec
 		// Update existing pane
 		for i := range resolved.Session.Panes {
 			if resolved.Session.Panes[i].ID == paneID {
-				if change.AgentType != nil {
-					resolved.Session.Panes[i].AgentType = *change.AgentType
-				}
-				if change.Title != nil {
-					resolved.Session.Panes[i].Title = *change.Title
-				}
-				if change.Command != nil {
-					resolved.Session.Panes[i].Command = *change.Command
-				}
-				if change.Pane != nil {
-					applyPaneMetadata(&resolved.Session.Panes[i], *change.Pane)
-				}
-				if change.NewLines > 0 {
-					resolved.Session.Panes[i].ScrollbackLines += change.NewLines
-				}
+				applyPaneChange(&resolved.Session.Panes[i], change)
 				break
 			}
 		}
 	}
 
 	sortCheckpointPanes(resolved.Session.Panes)
-	resolved.Session.ActivePaneIndex = resolvedActivePaneIndex(resolved.Session.Panes, activePaneID, desiredActivePaneIndex)
+	resolved.Session.ActivePaneIndex = resolvedActivePaneIndex(
+		resolved.Session.Panes,
+		activePaneID,
+		desiredActivePaneID,
+		desiredActivePaneIndex,
+	)
 
 	// Apply git changes
 	if inc.Changes.GitChange != nil {
+		// Incrementals do not currently carry checkpoint-local git artifacts, so
+		// any git change must clear inherited base pointers instead of lying.
+		resolved.Git.PatchFile = ""
+		resolved.Git.StatusFile = ""
 		resolved.Git.Commit = inc.Changes.GitChange.ToCommit
 		resolved.Git.IsDirty = inc.Changes.GitChange.IsDirty
 		resolved.Git.StagedCount = inc.Changes.GitChange.StagedCount
 		resolved.Git.UnstagedCount = inc.Changes.GitChange.UnstagedCount
 		resolved.Git.UntrackedCount = inc.Changes.GitChange.UntrackedCount
-		if inc.Changes.GitChange.Branch != "" {
-			resolved.Git.Branch = inc.Changes.GitChange.Branch
+		if inc.Changes.GitChange.Branch != nil {
+			resolved.Git.Branch = *inc.Changes.GitChange.Branch
 		}
 	}
 
@@ -561,8 +706,10 @@ func (ir *IncrementalResolver) Resolve(sessionName, incrementalID string) (*Chec
 
 // loadIncremental loads an incremental checkpoint from disk.
 func (ir *IncrementalResolver) loadIncremental(sessionName, incrementalID string) (*IncrementalCheckpoint, error) {
-	dir := filepath.Join(ir.storage.BaseDir, sessionName, "incremental", incrementalID)
-	metaPath := filepath.Join(dir, IncrementalMetadataFile)
+	metaPath, err := ir.resolveExistingIncrementalMetadataPath(sessionName, incrementalID)
+	if err != nil {
+		return nil, fmt.Errorf("reading incremental metadata: %w", err)
+	}
 
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -573,8 +720,68 @@ func (ir *IncrementalResolver) loadIncremental(sessionName, incrementalID string
 	if err := json.Unmarshal(data, &inc); err != nil {
 		return nil, fmt.Errorf("parsing incremental metadata: %w", err)
 	}
+	if err := validateLoadedIncrementalMetadata(&inc, sessionName, incrementalID); err != nil {
+		return nil, err
+	}
 
 	return &inc, nil
+}
+
+func (ir *IncrementalResolver) incrementalMetadataPath(sessionName, incrementalID string) (string, error) {
+	sessionDir, err := ir.storage.safeSessionDir(sessionName)
+	if err != nil {
+		return "", err
+	}
+	if err := validateCheckpointID(incrementalID); err != nil {
+		return "", err
+	}
+	return filepath.Join(sessionDir, "incremental", incrementalID, IncrementalMetadataFile), nil
+}
+
+func (ir *IncrementalResolver) resolveExistingIncrementalMetadataPath(sessionName, incrementalID string) (string, error) {
+	metaPath, err := ir.incrementalMetadataPath(sessionName, incrementalID)
+	if err != nil {
+		return "", err
+	}
+
+	return resolveExistingCheckpointArtifactPath(filepath.Dir(metaPath), IncrementalMetadataFile)
+}
+
+func (ir *IncrementalResolver) incrementalExists(sessionName, incrementalID string) (bool, error) {
+	metaPath, err := ir.incrementalMetadataPath(sessionName, incrementalID)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Lstat(metaPath)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stating incremental metadata: %w", err)
+}
+
+func validateLoadedIncrementalMetadata(inc *IncrementalCheckpoint, sessionName, incrementalID string) error {
+	if inc == nil {
+		return fmt.Errorf("incremental metadata is nil")
+	}
+	if err := tmux.ValidateSessionName(inc.SessionName); err != nil {
+		return fmt.Errorf("invalid incremental metadata: invalid session name: %w", err)
+	}
+	if inc.ID != incrementalID {
+		return fmt.Errorf("incremental metadata ID mismatch: expected %q, got %q", incrementalID, inc.ID)
+	}
+	if inc.SessionName != sessionName {
+		return fmt.Errorf("incremental metadata session mismatch: expected %q, got %q", sessionName, inc.SessionName)
+	}
+	if inc.BaseCheckpointID == "" {
+		return fmt.Errorf("incremental metadata missing base checkpoint ID")
+	}
+	if err := validateCheckpointID(inc.BaseCheckpointID); err != nil {
+		return fmt.Errorf("invalid incremental metadata base checkpoint ID: %w", err)
+	}
+	return nil
 }
 
 // removePaneByID removes a pane from a slice by ID.
@@ -590,7 +797,11 @@ func removePaneByID(panes []PaneState, paneID string) []PaneState {
 
 // ListIncrementals returns all incremental checkpoints for a session.
 func (ir *IncrementalResolver) ListIncrementals(sessionName string) ([]*IncrementalCheckpoint, error) {
-	incDir := filepath.Join(ir.storage.BaseDir, sessionName, "incremental")
+	sessionDir, err := ir.storage.safeSessionDir(sessionName)
+	if err != nil {
+		return nil, err
+	}
+	incDir := filepath.Join(sessionDir, "incremental")
 
 	entries, err := os.ReadDir(incDir)
 	if err != nil {
@@ -613,6 +824,10 @@ func (ir *IncrementalResolver) ListIncrementals(sessionName string) ([]*Incremen
 		incrementals = append(incrementals, inc)
 	}
 
+	sort.Slice(incrementals, func(i, j int) bool {
+		return incrementals[i].CreatedAt.After(incrementals[j].CreatedAt)
+	})
+
 	return incrementals, nil
 }
 
@@ -626,6 +841,13 @@ func (ir *IncrementalResolver) ChainResolve(sessionName, incrementalID string) (
 	visited := make(map[string]bool)
 
 	currentID := incrementalID
+	exists, err := ir.incrementalExists(sessionName, currentID)
+	if err != nil {
+		return nil, fmt.Errorf("checking incremental checkpoint %s: %w", currentID, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("incremental checkpoint not found: %s", currentID)
+	}
 	for {
 		if visited[currentID] {
 			return nil, fmt.Errorf("cycle detected in incremental chain at %s", currentID)
@@ -633,15 +855,17 @@ func (ir *IncrementalResolver) ChainResolve(sessionName, incrementalID string) (
 		visited[currentID] = true
 		inc, err := ir.loadIncremental(sessionName, currentID)
 		if err != nil {
-			// Not an incremental - might be the base checkpoint
-			break
+			return nil, fmt.Errorf("loading incremental checkpoint %s: %w", currentID, err)
 		}
 
 		chain = append([]*IncrementalCheckpoint{inc}, chain...) // Prepend
 
 		// Check if base is another incremental or a full checkpoint
-		_, loadErr := ir.loadIncremental(sessionName, inc.BaseCheckpointID)
-		if loadErr != nil {
+		exists, err := ir.incrementalExists(sessionName, inc.BaseCheckpointID)
+		if err != nil {
+			return nil, fmt.Errorf("checking base incremental %s: %w", inc.BaseCheckpointID, err)
+		}
+		if !exists {
 			// Base is a full checkpoint, stop here
 			break
 		}
@@ -678,12 +902,21 @@ func (ir *IncrementalResolver) applyIncremental(base *Checkpoint, inc *Increment
 	resolved.CreatedAt = inc.CreatedAt
 	resolved.Description = fmt.Sprintf("Applied incremental %s", inc.ID)
 
-	var desiredActivePaneIndex *int
+	var (
+		desiredActivePaneID    *string
+		desiredActivePaneIndex *int
+	)
 
 	// Apply session changes
 	if inc.Changes.SessionChange != nil {
 		if inc.Changes.SessionChange.Layout != nil {
 			resolved.Session.Layout = *inc.Changes.SessionChange.Layout
+		}
+		if inc.Changes.SessionChange.WindowLayouts != nil {
+			resolved.Session.WindowLayouts = cloneWindowLayouts(inc.Changes.SessionChange.WindowLayouts)
+		}
+		if inc.Changes.SessionChange.ActivePaneID != nil {
+			desiredActivePaneID = inc.Changes.SessionChange.ActivePaneID
 		}
 		if inc.Changes.SessionChange.ActivePaneIndex != nil {
 			desiredActivePaneIndex = inc.Changes.SessionChange.ActivePaneIndex
@@ -707,38 +940,33 @@ func (ir *IncrementalResolver) applyIncremental(base *Checkpoint, inc *Increment
 
 		for i := range resolved.Session.Panes {
 			if resolved.Session.Panes[i].ID == paneID {
-				if change.AgentType != nil {
-					resolved.Session.Panes[i].AgentType = *change.AgentType
-				}
-				if change.Title != nil {
-					resolved.Session.Panes[i].Title = *change.Title
-				}
-				if change.Command != nil {
-					resolved.Session.Panes[i].Command = *change.Command
-				}
-				if change.Pane != nil {
-					applyPaneMetadata(&resolved.Session.Panes[i], *change.Pane)
-				}
-				if change.NewLines > 0 {
-					resolved.Session.Panes[i].ScrollbackLines += change.NewLines
-				}
+				applyPaneChange(&resolved.Session.Panes[i], change)
 				break
 			}
 		}
 	}
 
 	sortCheckpointPanes(resolved.Session.Panes)
-	resolved.Session.ActivePaneIndex = resolvedActivePaneIndex(resolved.Session.Panes, activePaneID, desiredActivePaneIndex)
+	resolved.Session.ActivePaneIndex = resolvedActivePaneIndex(
+		resolved.Session.Panes,
+		activePaneID,
+		desiredActivePaneID,
+		desiredActivePaneIndex,
+	)
 
 	// Apply git changes
 	if inc.Changes.GitChange != nil {
+		// Incrementals do not currently carry checkpoint-local git artifacts, so
+		// any git change must clear inherited base pointers instead of lying.
+		resolved.Git.PatchFile = ""
+		resolved.Git.StatusFile = ""
 		resolved.Git.Commit = inc.Changes.GitChange.ToCommit
 		resolved.Git.IsDirty = inc.Changes.GitChange.IsDirty
 		resolved.Git.StagedCount = inc.Changes.GitChange.StagedCount
 		resolved.Git.UnstagedCount = inc.Changes.GitChange.UnstagedCount
 		resolved.Git.UntrackedCount = inc.Changes.GitChange.UntrackedCount
-		if inc.Changes.GitChange.Branch != "" {
-			resolved.Git.Branch = inc.Changes.GitChange.Branch
+		if inc.Changes.GitChange.Branch != nil {
+			resolved.Git.Branch = *inc.Changes.GitChange.Branch
 		}
 	}
 
@@ -753,8 +981,28 @@ func cloneCheckpointForMutation(base *Checkpoint) Checkpoint {
 		cloned.Session.Panes = make([]PaneState, len(base.Session.Panes))
 		copy(cloned.Session.Panes, base.Session.Panes)
 	}
+	cloned.Session.WindowLayouts = cloneWindowLayouts(base.Session.WindowLayouts)
 	normalizeSessionPaneOrder(&cloned.Session)
 	return cloned
+}
+
+func effectiveSessionWindowLayouts(state SessionState) []WindowLayoutState {
+	if len(state.WindowLayouts) > 0 {
+		return cloneWindowLayouts(state.WindowLayouts)
+	}
+	if state.Layout == "" {
+		return nil
+	}
+
+	windowIndexes := sessionWindowIndexesFromPanes(state.Panes)
+	switch len(windowIndexes) {
+	case 0:
+		return []WindowLayoutState{{WindowIndex: 0, Layout: state.Layout}}
+	case 1:
+		return []WindowLayoutState{{WindowIndex: windowIndexes[0], Layout: state.Layout}}
+	default:
+		return nil
+	}
 }
 
 func paneStateFromAddedChange(paneID string, change PaneChange) PaneState {
@@ -792,13 +1040,37 @@ func applyPaneMetadata(target *PaneState, source PaneState) {
 	target.Height = source.Height
 }
 
+func applyPaneChange(target *PaneState, change PaneChange) {
+	if change.AgentType != nil {
+		target.AgentType = *change.AgentType
+	}
+	if change.Title != nil {
+		target.Title = *change.Title
+	}
+	if change.Command != nil {
+		target.Command = *change.Command
+	}
+	if change.Pane != nil {
+		applyPaneMetadata(target, *change.Pane)
+	}
+	if change.NewLines > 0 {
+		target.ScrollbackLines += change.NewLines
+	}
+	if change.NewLines > 0 || change.DiffFile != "" {
+		// Resolved incrementals do not materialize a merged scrollback artifact,
+		// so retaining the base path would point at stale content.
+		target.ScrollbackFile = ""
+	}
+}
+
 func normalizeSessionPaneOrder(session *SessionState) {
 	if session == nil {
 		return
 	}
 	activePaneID := sessionActivePaneID(*session)
 	sortCheckpointPanes(session.Panes)
-	session.ActivePaneIndex = resolvedActivePaneIndex(session.Panes, activePaneID, nil)
+	sortWindowLayouts(session.WindowLayouts)
+	session.ActivePaneIndex = resolvedActivePaneIndex(session.Panes, activePaneID, nil, nil)
 }
 
 func sortCheckpointPanes(panes []PaneState) {
@@ -820,15 +1092,22 @@ func sessionActivePaneID(session SessionState) string {
 	return session.Panes[session.ActivePaneIndex].ID
 }
 
-func resolvedActivePaneIndex(panes []PaneState, activePaneID string, desired *int) int {
-	if desired != nil {
-		if *desired < 0 || *desired >= len(panes) {
+func resolvedActivePaneIndex(panes []PaneState, activePaneID string, desiredID *string, desiredIndex *int) int {
+	if desiredID != nil && *desiredID != "" {
+		for i := range panes {
+			if panes[i].ID == *desiredID {
+				return i
+			}
+		}
+	}
+	if desiredIndex != nil {
+		if *desiredIndex < 0 || *desiredIndex >= len(panes) {
 			if len(panes) == 0 {
 				return 0
 			}
 			return 0
 		}
-		return *desired
+		return *desiredIndex
 	}
 	if activePaneID != "" {
 		for i := range panes {
@@ -853,8 +1132,11 @@ func (inc *IncrementalCheckpoint) StorageSavings(storage *Storage) (savedBytes i
 
 	var fullSize int64
 	for _, pane := range base.Session.Panes {
-		if pane.ScrollbackFile != "" {
-			scrollback, _ := storage.LoadCompressedScrollback(inc.SessionName, inc.BaseCheckpointID, pane.ID)
+		if pane.ScrollbackFile != "" || pane.ScrollbackLines > 0 {
+			scrollback, err := storage.LoadPaneScrollback(inc.SessionName, inc.BaseCheckpointID, pane)
+			if err != nil {
+				return 0, 0, err
+			}
 			fullSize += int64(len(scrollback))
 		}
 	}

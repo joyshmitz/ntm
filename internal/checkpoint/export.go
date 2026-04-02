@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // ExportFormat specifies the archive format for export.
@@ -25,6 +27,8 @@ const (
 	FormatTarGz ExportFormat = "tar.gz"
 	FormatZip   ExportFormat = "zip"
 )
+
+var maxImportEntrySize int64 = 100 << 20
 
 // ExportOptions configures checkpoint export.
 type ExportOptions struct {
@@ -121,6 +125,10 @@ func GetRedactionConfig() *redaction.Config {
 
 // Export creates a portable archive of a checkpoint.
 func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts ExportOptions) (*ExportManifest, error) {
+	if opts.Format == "" {
+		opts.Format = FormatTarGz
+	}
+
 	// Load the checkpoint
 	cp, err := s.Load(sessionName, checkpointID)
 	if err != nil {
@@ -128,7 +136,10 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 	}
 
 	// Build the checkpoint directory path
-	cpDir := s.CheckpointDir(sessionName, checkpointID)
+	cpDir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Determine output path
 	if destPath == "" {
@@ -142,6 +153,7 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 	// Collect files to export
 	var files []string
 	files = append(files, MetadataFile)
+	files = append(files, SessionFile)
 
 	if opts.IncludeScrollback {
 		for _, pane := range cp.Session.Panes {
@@ -153,6 +165,9 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 
 	if opts.IncludeGitPatch && cp.Git.PatchFile != "" {
 		files = append(files, cp.Git.PatchFile)
+	}
+	if cp.Git.StatusFile != "" {
+		files = append(files, cp.Git.StatusFile)
 	}
 
 	// Create manifest
@@ -167,10 +182,7 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 	}
 
 	// Prepare checkpoint data (potentially with path rewriting)
-	cpData := cp
-	if opts.RewritePaths {
-		cpData = rewriteCheckpointPaths(cp)
-	}
+	cpData := rewriteCheckpointForExport(cp, opts)
 
 	// Create the archive
 	switch opts.Format {
@@ -220,19 +232,36 @@ func (s *Storage) exportTarGz(destPath, cpDir string, cp *Checkpoint, files []st
 		return err
 	}
 
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %w", err)
+	}
+
+	checksum = sha256sum(sessionJSON)
+	manifest.Checksums[SessionFile] = checksum
+	manifest.Files = append(manifest.Files, ManifestEntry{
+		Path:     SessionFile,
+		Size:     int64(len(sessionJSON)),
+		Checksum: checksum,
+	})
+
+	if err := writeTarEntry(tw, SessionFile, sessionJSON); err != nil {
+		return err
+	}
+
 	// Write other files
 	for _, file := range files {
-		if file == MetadataFile {
+		if file == MetadataFile || file == SessionFile {
 			continue
 		}
 
-		srcPath, err := resolveCheckpointRelativePath(cpDir, file)
+		srcPath, err := resolveExistingCheckpointArtifactPath(cpDir, file)
 		if err != nil {
 			return fmt.Errorf("invalid checkpoint file path %s: %w", file, err)
 		}
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to read checkpoint file %s: %w", file, err)
 		}
 
 		// Redact secrets from scrollback files
@@ -293,19 +322,36 @@ func (s *Storage) exportZip(destPath, cpDir string, cp *Checkpoint, files []stri
 		return err
 	}
 
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %w", err)
+	}
+
+	checksum = sha256sum(sessionJSON)
+	manifest.Checksums[SessionFile] = checksum
+	manifest.Files = append(manifest.Files, ManifestEntry{
+		Path:     SessionFile,
+		Size:     int64(len(sessionJSON)),
+		Checksum: checksum,
+	})
+
+	if err := writeZipEntry(zw, SessionFile, sessionJSON); err != nil {
+		return err
+	}
+
 	// Write other files
 	for _, file := range files {
-		if file == MetadataFile {
+		if file == MetadataFile || file == SessionFile {
 			continue
 		}
 
-		srcPath, err := resolveCheckpointRelativePath(cpDir, file)
+		srcPath, err := resolveExistingCheckpointArtifactPath(cpDir, file)
 		if err != nil {
 			return fmt.Errorf("invalid checkpoint file path %s: %w", file, err)
 		}
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to read checkpoint file %s: %w", file, err)
 		}
 
 		if opts.RedactSecrets && strings.HasPrefix(file, PanesDir+"/") {
@@ -387,12 +433,14 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 			return nil, fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		// Prevent zip slip / tar bomb OOM by limiting read size (100MB per file)
-		data, err := io.ReadAll(io.LimitReader(tr, 100<<20))
+		data, err := readImportEntryLimited(tr, header.Name, maxImportEntrySize)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read file %s: %w", header.Name, err)
+			return nil, err
 		}
 
+		if _, exists := fileContents[header.Name]; exists {
+			return nil, fmt.Errorf("archive contains duplicate entry: %s", header.Name)
+		}
 		fileContents[header.Name] = data
 
 		switch header.Name {
@@ -414,24 +462,22 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 	}
 
 	// Verify checksums if requested
-	if opts.VerifyChecksums && manifest != nil {
-		for file, expectedSum := range manifest.Checksums {
-			data, ok := fileContents[file]
-			if !ok {
-				return nil, fmt.Errorf("manifest lists missing file: %s", file)
-			}
-			actualSum := sha256sum(data)
-			if actualSum != expectedSum {
-				return nil, fmt.Errorf("checksum mismatch for %s: expected %s, got %s", file, expectedSum, actualSum)
-			}
+	if opts.VerifyChecksums {
+		if err := verifyImportChecksums(fileContents, manifest); err != nil {
+			return nil, err
 		}
 	}
-
-	// Use session name from manifest if available, or from checkpoint
-	sessionName := cp.SessionName
-	if manifest != nil && manifest.SessionName != "" {
-		sessionName = manifest.SessionName
+	if err := validateImportedSessionState(fileContents, cp); err != nil {
+		return nil, err
 	}
+	if err := validateImportedManifestMetadata(manifest, cp); err != nil {
+		return nil, err
+	}
+	if err := validateImportedArchiveFiles(fileContents, cp); err != nil {
+		return nil, err
+	}
+
+	sessionName := cp.SessionName
 
 	// Apply overrides
 	if opts.TargetSession != "" {
@@ -458,6 +504,12 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 	}
 	fileContents[MetadataFile] = cpJSON
 
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal imported session state: %w", err)
+	}
+	fileContents[SessionFile] = sessionJSON
+
 	// Check for existing checkpoint
 	cpDir, err := s.safeCheckpointDir(sessionName, cp.ID)
 	if err != nil {
@@ -465,6 +517,11 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 	}
 	if _, err := os.Stat(cpDir); err == nil && !opts.AllowOverwrite {
 		return nil, fmt.Errorf("checkpoint %s already exists (use AllowOverwrite to replace)", cp.ID)
+	}
+	if opts.AllowOverwrite {
+		if err := validateImportOverwrite(cpDir, fileContents); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create checkpoint directory
@@ -495,7 +552,7 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (*Checkpoi
 			return nil, fmt.Errorf("invalid path in archive (symlink escape): %s", name)
 		}
 
-		if err := os.WriteFile(resolvedPath, data, 0644); err != nil {
+		if err := util.AtomicWriteFile(resolvedPath, data, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", name, err)
 		}
 	}
@@ -520,13 +577,18 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 			return nil, fmt.Errorf("failed to open %s: %w", f.Name, err)
 		}
 
-		// Prevent zip bomb OOM by limiting read size (100MB per file)
-		data, err := io.ReadAll(io.LimitReader(rc, 100<<20))
-		rc.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read %s: %w", f.Name, err)
+		data, readErr := readImportEntryLimited(rc, f.Name, maxImportEntrySize)
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("failed to close %s: %w", f.Name, closeErr)
 		}
 
+		if _, exists := fileContents[f.Name]; exists {
+			return nil, fmt.Errorf("archive contains duplicate entry: %s", f.Name)
+		}
 		fileContents[f.Name] = data
 
 		switch f.Name {
@@ -548,24 +610,22 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 	}
 
 	// Verify checksums
-	if opts.VerifyChecksums && manifest != nil {
-		for file, expectedSum := range manifest.Checksums {
-			data, ok := fileContents[file]
-			if !ok {
-				return nil, fmt.Errorf("manifest lists missing file: %s", file)
-			}
-			actualSum := sha256sum(data)
-			if actualSum != expectedSum {
-				return nil, fmt.Errorf("checksum mismatch for %s", file)
-			}
+	if opts.VerifyChecksums {
+		if err := verifyImportChecksums(fileContents, manifest); err != nil {
+			return nil, err
 		}
 	}
-
-	// Use session name from manifest if available, or from checkpoint
-	sessionName := cp.SessionName
-	if manifest != nil && manifest.SessionName != "" {
-		sessionName = manifest.SessionName
+	if err := validateImportedSessionState(fileContents, cp); err != nil {
+		return nil, err
 	}
+	if err := validateImportedManifestMetadata(manifest, cp); err != nil {
+		return nil, err
+	}
+	if err := validateImportedArchiveFiles(fileContents, cp); err != nil {
+		return nil, err
+	}
+
+	sessionName := cp.SessionName
 
 	// Apply overrides
 	if opts.TargetSession != "" {
@@ -592,6 +652,12 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 	}
 	fileContents[MetadataFile] = cpJSON
 
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal imported session state: %w", err)
+	}
+	fileContents[SessionFile] = sessionJSON
+
 	// Check for existing
 	cpDir, err := s.safeCheckpointDir(sessionName, cp.ID)
 	if err != nil {
@@ -599,6 +665,11 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 	}
 	if _, err := os.Stat(cpDir); err == nil && !opts.AllowOverwrite {
 		return nil, fmt.Errorf("checkpoint %s already exists", cp.ID)
+	}
+	if opts.AllowOverwrite {
+		if err := validateImportOverwrite(cpDir, fileContents); err != nil {
+			return nil, err
+		}
 	}
 
 	// Create checkpoint directory
@@ -629,7 +700,7 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (*Checkpoint
 			return nil, fmt.Errorf("invalid path in archive (symlink escape): %s", name)
 		}
 
-		if err := os.WriteFile(resolvedPath, data, 0644); err != nil {
+		if err := util.AtomicWriteFile(resolvedPath, data, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write %s: %w", name, err)
 		}
 	}
@@ -666,6 +737,22 @@ func writeZipEntry(zw *zip.Writer, name string, data []byte) error {
 	return nil
 }
 
+func readImportEntryLimited(r io.Reader, name string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("invalid import size limit for %s: %d", name, limit)
+	}
+
+	reader := &io.LimitedReader{R: r, N: limit + 1}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", name, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("archive entry too large: %s exceeds %d bytes", name, limit)
+	}
+	return data, nil
+}
+
 func sha256sum(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
@@ -689,12 +776,182 @@ func redactSecrets(data []byte) []byte {
 	return []byte(result.Output)
 }
 
-func rewriteCheckpointPaths(cp *Checkpoint) *Checkpoint {
+func rewriteCheckpointForExport(cp *Checkpoint, opts ExportOptions) *Checkpoint {
 	result := *cp
-	if result.WorkingDir != "" {
+	result.Session.WindowLayouts = cloneWindowLayouts(cp.Session.WindowLayouts)
+	if opts.RewritePaths && result.WorkingDir != "" {
 		result.WorkingDir = "${WORKING_DIR}"
 	}
+	if !opts.IncludeScrollback && result.Session.Panes != nil {
+		result.Session.Panes = make([]PaneState, len(cp.Session.Panes))
+		copy(result.Session.Panes, cp.Session.Panes)
+		for i := range result.Session.Panes {
+			result.Session.Panes[i].ScrollbackFile = ""
+			result.Session.Panes[i].ScrollbackLines = 0
+		}
+	}
+	if !opts.IncludeGitPatch {
+		result.Git.PatchFile = ""
+	}
 	return &result
+}
+
+func validateImportOverwrite(cpDir string, fileContents map[string][]byte) error {
+	if _, err := os.Stat(cpDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to inspect existing checkpoint directory: %w", err)
+	}
+
+	incomingFiles := make(map[string]struct{}, len(fileContents))
+	for name := range fileContents {
+		if name == "MANIFEST.json" {
+			continue
+		}
+		incomingFiles[name] = struct{}{}
+	}
+
+	var staleFiles []string
+	err := filepath.WalkDir(cpDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == cpDir || d.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(cpDir, path)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+		if _, ok := incomingFiles[relPath]; !ok {
+			staleFiles = append(staleFiles, relPath)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to inspect existing checkpoint directory: %w", err)
+	}
+
+	if len(staleFiles) == 0 {
+		return nil
+	}
+	if len(staleFiles) == 1 {
+		return fmt.Errorf("overwrite would leave stale checkpoint artifact behind: %s", staleFiles[0])
+	}
+	return fmt.Errorf("overwrite would leave stale checkpoint artifacts behind: %s", strings.Join(staleFiles, ", "))
+}
+
+func verifyImportChecksums(fileContents map[string][]byte, manifest *ExportManifest) error {
+	if manifest == nil {
+		return fmt.Errorf("checksum verification requested but archive missing MANIFEST.json")
+	}
+
+	for file, data := range fileContents {
+		if file == "MANIFEST.json" {
+			continue
+		}
+		expectedSum, ok := manifest.Checksums[file]
+		if !ok {
+			return fmt.Errorf("manifest missing checksum for %s", file)
+		}
+		actualSum := sha256sum(data)
+		if actualSum != expectedSum {
+			return fmt.Errorf("checksum mismatch for %s: expected %s, got %s", file, expectedSum, actualSum)
+		}
+	}
+
+	for file := range manifest.Checksums {
+		if file == "MANIFEST.json" {
+			continue
+		}
+		if _, ok := fileContents[file]; !ok {
+			return fmt.Errorf("manifest lists missing file: %s", file)
+		}
+	}
+
+	return nil
+}
+
+func validateImportedSessionState(fileContents map[string][]byte, cp *Checkpoint) error {
+	sessionData, ok := fileContents[SessionFile]
+	if !ok {
+		return fmt.Errorf("archive missing %s", SessionFile)
+	}
+
+	var session SessionState
+	if err := json.Unmarshal(sessionData, &session); err != nil {
+		return fmt.Errorf("failed to parse session state: %w", err)
+	}
+
+	metadataJSON, err := json.Marshal(cp.Session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal checkpoint session state: %w", err)
+	}
+	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal imported session state: %w", err)
+	}
+	if !bytes.Equal(metadataJSON, sessionJSON) {
+		return fmt.Errorf("archive %s does not match %s session state", SessionFile, MetadataFile)
+	}
+
+	return nil
+}
+
+func validateImportedManifestMetadata(manifest *ExportManifest, cp *Checkpoint) error {
+	if manifest == nil {
+		return nil
+	}
+	if manifest.SessionName != "" && manifest.SessionName != cp.SessionName {
+		return fmt.Errorf("manifest session name %q does not match %s session name %q", manifest.SessionName, MetadataFile, cp.SessionName)
+	}
+	if manifest.CheckpointID != "" && manifest.CheckpointID != cp.ID {
+		return fmt.Errorf("manifest checkpoint id %q does not match %s checkpoint id %q", manifest.CheckpointID, MetadataFile, cp.ID)
+	}
+	if manifest.CheckpointName != "" && manifest.CheckpointName != cp.Name {
+		return fmt.Errorf("manifest checkpoint name %q does not match %s checkpoint name %q", manifest.CheckpointName, MetadataFile, cp.Name)
+	}
+
+	return nil
+}
+
+func validateImportedArchiveFiles(fileContents map[string][]byte, cp *Checkpoint) error {
+	expectedFiles := expectedManifestFiles(cp)
+	for name := range fileContents {
+		if name == "MANIFEST.json" {
+			continue
+		}
+		if !isPathWithinDir(".", name) {
+			return fmt.Errorf("invalid path in archive (path traversal attempt): %s", name)
+		}
+		if _, ok := expectedFiles[name]; !ok {
+			return fmt.Errorf("archive contains unexpected file: %s", name)
+		}
+	}
+
+	for _, pane := range cp.Session.Panes {
+		if pane.ScrollbackFile == "" {
+			continue
+		}
+		if _, ok := fileContents[pane.ScrollbackFile]; !ok {
+			return fmt.Errorf("archive missing scrollback referenced by metadata: %s", pane.ScrollbackFile)
+		}
+	}
+	if cp.Git.PatchFile != "" {
+		if _, ok := fileContents[cp.Git.PatchFile]; !ok {
+			return fmt.Errorf("archive missing git patch referenced by metadata: %s", cp.Git.PatchFile)
+		}
+	}
+	if cp.Git.StatusFile != "" {
+		if _, ok := fileContents[cp.Git.StatusFile]; !ok {
+			return fmt.Errorf("archive missing git status referenced by metadata: %s", cp.Git.StatusFile)
+		}
+	}
+
+	return nil
 }
 
 // isPathWithinDir checks if a path (after cleaning) stays within the base directory.

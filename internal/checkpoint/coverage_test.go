@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"os"
@@ -70,6 +71,64 @@ func buildZip(t *testing.T, destPath string, files map[string][]byte) {
 	}
 }
 
+func buildTarGzEntries(t *testing.T, destPath string, entries []struct {
+	name string
+	data []byte
+}) {
+	t.Helper()
+	f, err := os.Create(destPath)
+	if err != nil {
+		t.Fatalf("create tar.gz: %v", err)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	for _, entry := range entries {
+		hdr := &tar.Header{
+			Name:    entry.name,
+			Mode:    0644,
+			Size:    int64(len(entry.data)),
+			ModTime: time.Now(),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write tar header %s: %v", entry.name, err)
+		}
+		if _, err := tw.Write(entry.data); err != nil {
+			t.Fatalf("write tar body %s: %v", entry.name, err)
+		}
+	}
+}
+
+func buildZipEntries(t *testing.T, destPath string, entries []struct {
+	name string
+	data []byte
+}) {
+	t.Helper()
+	f, err := os.Create(destPath)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	defer zw.Close()
+
+	for _, entry := range entries {
+		w, err := zw.Create(entry.name)
+		if err != nil {
+			t.Fatalf("create zip entry %s: %v", entry.name, err)
+		}
+		if _, err := w.Write(entry.data); err != nil {
+			t.Fatalf("write zip entry %s: %v", entry.name, err)
+		}
+	}
+}
+
 // validCheckpointJSON returns a minimal valid checkpoint JSON blob.
 func validCheckpointJSON(t *testing.T, sessionName, cpID string) []byte {
 	t.Helper()
@@ -83,6 +142,15 @@ func validCheckpointJSON(t *testing.T, sessionName, cpID string) []byte {
 	data, err := json.MarshalIndent(cp, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal checkpoint: %v", err)
+	}
+	return data
+}
+
+func validSessionJSON(t *testing.T, session SessionState) []byte {
+	t.Helper()
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal session: %v", err)
 	}
 	return data
 }
@@ -178,6 +246,49 @@ func TestExport_AutoDestPath_TarGz(t *testing.T) {
 	autoPath := filepath.Join(tmpDir, sessionName+"_"+cpID+".tar.gz")
 	if _, err := os.Stat(autoPath); err != nil {
 		t.Errorf("auto-generated archive not found at %s: %v", autoPath, err)
+	}
+}
+
+func TestExport_EmptyFormatDefaultsToTarGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "empty-format-session"
+	cpID := "empty-format-cp"
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          cpID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("failed to restore working directory: %v", err)
+		}
+	}()
+
+	manifest, err := storage.Export(sessionName, cpID, "", ExportOptions{})
+	if err != nil {
+		t.Fatalf("Export with zero-value options failed: %v", err)
+	}
+	if manifest == nil {
+		t.Fatal("manifest is nil")
+	}
+
+	autoPath := filepath.Join(tmpDir, sessionName+"_"+cpID+".tar.gz")
+	if _, err := os.Stat(autoPath); err != nil {
+		t.Fatalf("default tar.gz export not found at %s: %v", autoPath, err)
 	}
 }
 
@@ -336,6 +447,64 @@ func TestImportZip_ChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestImportTarGz_VerifyChecksumsRequiresManifest(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "manifest-required-session", "manifest-required-cp")
+	archive := filepath.Join(tmpDir, "manifest-required.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: true})
+	if err == nil {
+		t.Fatal("expected error when checksum verification is requested without a manifest")
+	}
+	if !strings.Contains(err.Error(), "missing MANIFEST.json") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_VerifyChecksumsRejectsUncheckedArchiveFiles(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "unchecked-session", "unchecked-cp")
+	sessionJSON, err := json.Marshal(SessionState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &ExportManifest{
+		Version:     1,
+		SessionName: "unchecked-session",
+		Checksums: map[string]string{
+			MetadataFile: sha256sum(cpJSON),
+		},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "unchecked.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile:    cpJSON,
+		SessionFile:     sessionJSON,
+		"MANIFEST.json": manifestJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: true})
+	if err == nil {
+		t.Fatal("expected error for archive file missing from manifest checksum set")
+	}
+	if !strings.Contains(err.Error(), "manifest missing checksum for "+SessionFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // =============================================================================
 // Import: manifest lists file not in archive
 // =============================================================================
@@ -397,9 +566,11 @@ func TestImportTarGz_OverwriteProtection(t *testing.T) {
 
 	// Build an archive for the same checkpoint
 	cpJSON := validCheckpointJSON(t, sessionName, cpID)
+	sessionJSON := validSessionJSON(t, SessionState{})
 	archive := filepath.Join(tmpDir, "overwrite.tar.gz")
 	buildTarGz(t, archive, map[string][]byte{
 		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
 	})
 
 	// Import without AllowOverwrite should fail
@@ -421,6 +592,59 @@ func TestImportTarGz_OverwriteProtection(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("import with AllowOverwrite failed: %v", err)
+	}
+}
+
+func TestImportTarGz_AllowOverwriteRejectsStaleArtifacts(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "ow-stale-session"
+	cpID := "ow-stale-cp-id"
+
+	existing := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          cpID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Session: SessionState{
+			Panes: []PaneState{
+				{ID: "%0", Index: 0},
+			},
+		},
+	}
+	if err := storage.Save(existing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storage.PanesDirPath(sessionName, cpID), "pane__0.txt"), []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existing.Session.Panes[0].ScrollbackFile = "panes/pane__0.txt"
+	if err := storage.Save(existing); err != nil {
+		t.Fatal(err)
+	}
+
+	cpJSON := validCheckpointJSON(t, sessionName, cpID)
+	sessionJSON := validSessionJSON(t, SessionState{})
+	archive := filepath.Join(tmpDir, "overwrite-stale.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{
+		VerifyChecksums: false,
+		AllowOverwrite:  true,
+	})
+	if err == nil {
+		t.Fatal("expected stale-artifact error on overwrite import")
+	}
+	if !strings.Contains(err.Error(), "stale checkpoint artifact") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "panes/pane__0.txt") {
+		t.Fatalf("expected stale pane artifact in error, got: %v", err)
 	}
 }
 
@@ -447,9 +671,11 @@ func TestImportZip_OverwriteProtection(t *testing.T) {
 	}
 
 	cpJSON := validCheckpointJSON(t, sessionName, cpID)
+	sessionJSON := validSessionJSON(t, SessionState{})
 	archive := filepath.Join(tmpDir, "overwrite.zip")
 	buildZip(t, archive, map[string][]byte{
 		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
 	})
 
 	// Without AllowOverwrite
@@ -474,6 +700,54 @@ func TestImportZip_OverwriteProtection(t *testing.T) {
 	}
 }
 
+func TestImportZip_AllowOverwriteRejectsStaleArtifacts(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "ow-zip-stale-session"
+	cpID := "ow-zip-stale-cp"
+
+	existing := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          cpID,
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(existing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storage.GitPatchPath(sessionName, cpID), []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	existing.Git.PatchFile = GitPatchFile
+	if err := storage.Save(existing); err != nil {
+		t.Fatal(err)
+	}
+
+	cpJSON := validCheckpointJSON(t, sessionName, cpID)
+	sessionJSON := validSessionJSON(t, SessionState{})
+	archive := filepath.Join(tmpDir, "overwrite-stale.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{
+		VerifyChecksums: false,
+		AllowOverwrite:  true,
+	})
+	if err == nil {
+		t.Fatal("expected stale-artifact error on overwrite zip import")
+	}
+	if !strings.Contains(err.Error(), "stale checkpoint artifact") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), GitPatchFile) {
+		t.Fatalf("expected stale patch artifact in error, got: %v", err)
+	}
+}
+
 // =============================================================================
 // Import tar.gz: path traversal protection
 // =============================================================================
@@ -484,10 +758,12 @@ func TestImportTarGz_PathTraversal(t *testing.T) {
 	storage := NewStorageWithDir(tmpDir)
 
 	cpJSON := validCheckpointJSON(t, "trav-session", "trav-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
 
 	archive := filepath.Join(tmpDir, "traversal.tar.gz")
 	buildTarGz(t, archive, map[string][]byte{
 		MetadataFile:                  cpJSON,
+		SessionFile:                   sessionJSON,
 		"../../../etc/evil-file.conf": []byte("pwned"),
 	})
 
@@ -510,10 +786,12 @@ func TestImportZip_PathTraversal(t *testing.T) {
 	storage := NewStorageWithDir(tmpDir)
 
 	cpJSON := validCheckpointJSON(t, "ztrav-session", "ztrav-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
 
 	archive := filepath.Join(tmpDir, "traversal.zip")
 	buildZip(t, archive, map[string][]byte{
 		MetadataFile:                  cpJSON,
+		SessionFile:                   sessionJSON,
 		"../../../etc/evil-file.conf": []byte("pwned"),
 	})
 
@@ -549,6 +827,27 @@ func TestImportTarGz_CorruptCheckpointJSON(t *testing.T) {
 	}
 }
 
+func TestImportTarGz_CorruptSessionJSON(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "corrupt-session-state", "corrupt-session-state-cp")
+	archive := filepath.Join(tmpDir, "corrupt-session-state.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  []byte("{invalid json"),
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for corrupt session state JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse session state") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // =============================================================================
 // Import zip: corrupt checkpoint JSON
 // =============================================================================
@@ -568,6 +867,408 @@ func TestImportZip_CorruptCheckpointJSON(t *testing.T) {
 		t.Fatal("expected error for corrupt JSON")
 	}
 	if !strings.Contains(err.Error(), "failed to parse checkpoint") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_MismatchedSessionState(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "mismatch-session-state-cp",
+		SessionName: "mismatch-session-state",
+		CreatedAt:   time.Now(),
+		Session: SessionState{
+			Panes: []PaneState{{ID: "%0", Index: 0, Title: "metadata"}},
+		},
+		PaneCount: 1,
+	}
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionJSON, err := json.MarshalIndent(SessionState{
+		Panes: []PaneState{{ID: "%0", Index: 0, Title: "session-file"}},
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "mismatched-session-state.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for mismatched session state")
+	}
+	if !strings.Contains(err.Error(), "session.json does not match metadata.json") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_MissingSessionState(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "missing-session-state", "missing-session-state-cp")
+	archive := filepath.Join(tmpDir, "missing-session-state.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected missing session state to fail import")
+	}
+	if !strings.Contains(err.Error(), "archive missing "+SessionFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_MissingSessionState(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "missing-session-state-zip", "missing-session-state-cp-zip")
+	archive := filepath.Join(tmpDir, "missing-session-state.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected missing session state to fail import")
+	}
+	if !strings.Contains(err.Error(), "archive missing "+SessionFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_MissingReferencedScrollback(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "missing-scrollback-cp",
+		SessionName: "missing-scrollback-session",
+		CreatedAt:   time.Now(),
+		Session: SessionState{
+			Panes: []PaneState{{
+				ID:              "%0",
+				Index:           0,
+				ScrollbackFile:  "panes/pane__0.txt",
+				ScrollbackLines: 12,
+			}},
+		},
+		PaneCount: 1,
+	}
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "missing-scrollback.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for missing referenced scrollback")
+	}
+	if !strings.Contains(err.Error(), "archive missing scrollback referenced by metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_MissingReferencedGitPatch(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "missing-git-patch-cp",
+		SessionName: "missing-git-patch-session",
+		CreatedAt:   time.Now(),
+		Session:     SessionState{},
+		Git: GitState{
+			PatchFile: "git.patch",
+		},
+	}
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "missing-git-patch.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for missing referenced git patch")
+	}
+	if !strings.Contains(err.Error(), "archive missing git patch referenced by metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_MissingReferencedGitStatus(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "missing-git-status-cp",
+		SessionName: "missing-git-status-session",
+		CreatedAt:   time.Now(),
+		Session:     SessionState{},
+		Git: GitState{
+			StatusFile: GitStatusFile,
+		},
+	}
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "missing-git-status.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for missing referenced git status")
+	}
+	if !strings.Contains(err.Error(), "archive missing git status referenced by metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_MissingReferencedGitStatus(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "missing-git-status-cp-zip",
+		SessionName: "missing-git-status-session-zip",
+		CreatedAt:   time.Now(),
+		Session:     SessionState{},
+		Git: GitState{
+			StatusFile: GitStatusFile,
+		},
+	}
+	cpJSON, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionJSON, err := json.MarshalIndent(cp.Session, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "missing-git-status.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for missing referenced git status")
+	}
+	if !strings.Contains(err.Error(), "archive missing git status referenced by metadata") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_RejectsOversizedEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "oversized-tar-session", "oversized-tar-cp")
+	limit := int64(len(cpJSON) + 8)
+	oldLimit := maxImportEntrySize
+	maxImportEntrySize = limit
+	t.Cleanup(func() {
+		maxImportEntrySize = oldLimit
+	})
+
+	sessionJSON := append(bytes.Repeat([]byte(" "), len(cpJSON)+32), validSessionJSON(t, SessionState{})...)
+
+	archive := filepath.Join(tmpDir, "oversized.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected oversized archive entry to fail import")
+	}
+	if !strings.Contains(err.Error(), "archive entry too large: "+SessionFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_RejectsOversizedEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "oversized-zip-session", "oversized-zip-cp")
+	limit := int64(len(cpJSON) + 8)
+	oldLimit := maxImportEntrySize
+	maxImportEntrySize = limit
+	t.Cleanup(func() {
+		maxImportEntrySize = oldLimit
+	})
+
+	sessionJSON := append(bytes.Repeat([]byte(" "), len(cpJSON)+32), validSessionJSON(t, SessionState{})...)
+
+	archive := filepath.Join(tmpDir, "oversized.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected oversized archive entry to fail import")
+	}
+	if !strings.Contains(err.Error(), "archive entry too large: "+SessionFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_RejectsUnexpectedArchiveFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "unexpected-file-session", "unexpected-file-cp")
+	sessionJSON, err := json.MarshalIndent(SessionState{}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "unexpected-file.tar.gz")
+	buildTarGz(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+		"junk.txt":   []byte("surprise"),
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for unexpected archive file")
+	}
+	if !strings.Contains(err.Error(), "archive contains unexpected file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_RejectsUnexpectedArchiveFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "unexpected-file-session-zip", "unexpected-file-cp-zip")
+	sessionJSON, err := json.MarshalIndent(SessionState{}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "unexpected-file.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
+		"junk.txt":   []byte("surprise"),
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected error for unexpected archive file")
+	}
+	if !strings.Contains(err.Error(), "archive contains unexpected file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportTarGz_RejectsDuplicateEntry(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "duplicate-entry-session", "duplicate-entry-cp")
+	archive := filepath.Join(tmpDir, "duplicate-entry.tar.gz")
+	buildTarGzEntries(t, archive, []struct {
+		name string
+		data []byte
+	}{
+		{name: MetadataFile, data: cpJSON},
+		{name: MetadataFile, data: cpJSON},
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected duplicate entry import to fail")
+	}
+	if !strings.Contains(err.Error(), "archive contains duplicate entry") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_RejectsDuplicateEntry(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "duplicate-entry-session-zip", "duplicate-entry-cp-zip")
+	archive := filepath.Join(tmpDir, "duplicate-entry.zip")
+	buildZipEntries(t, archive, []struct {
+		name string
+		data []byte
+	}{
+		{name: MetadataFile, data: cpJSON},
+		{name: MetadataFile, data: cpJSON},
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected duplicate entry import to fail")
+	}
+	if !strings.Contains(err.Error(), "archive contains duplicate entry") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -615,10 +1316,12 @@ func TestImportTarGz_WorkingDirPlaceholder(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 	cpJSON, _ := json.MarshalIndent(cp, "", "  ")
+	sessionJSON := validSessionJSON(t, cp.Session)
 
 	archive := filepath.Join(tmpDir, "working-dir.tar.gz")
 	buildTarGz(t, archive, map[string][]byte{
 		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
 	})
 
 	imported, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
@@ -642,10 +1345,12 @@ func TestImportTarGz_TargetSession(t *testing.T) {
 	storage := NewStorageWithDir(tmpDir)
 
 	cpJSON := validCheckpointJSON(t, "orig-session", "ts-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
 
 	archive := filepath.Join(tmpDir, "target-session.tar.gz")
 	buildTarGz(t, archive, map[string][]byte{
 		MetadataFile: cpJSON,
+		SessionFile:  sessionJSON,
 	})
 
 	imported, err := storage.Import(archive, ImportOptions{
@@ -666,48 +1371,40 @@ func TestImportTarGz_TargetSession(t *testing.T) {
 }
 
 // =============================================================================
-// Import: session name from manifest takes precedence
+// Import: manifest metadata must match metadata.json
 // =============================================================================
 
-func TestImportTarGz_SessionNameFromManifest(t *testing.T) {
+func TestImportTarGz_RejectsManifestSessionMismatch(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	storage := NewStorageWithDir(tmpDir)
 
 	cpJSON := validCheckpointJSON(t, "cp-session", "mn-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
 
 	manifest := &ExportManifest{
 		Version:     1,
 		SessionName: "manifest-session",
-		Checksums:   map[string]string{MetadataFile: sha256sum(cpJSON)},
+		Checksums: map[string]string{
+			MetadataFile: sha256sum(cpJSON),
+			SessionFile:  sha256sum(sessionJSON),
+		},
 	}
 	manifestJSON, _ := json.Marshal(manifest)
 
 	archive := filepath.Join(tmpDir, "manifest-name.tar.gz")
 	buildTarGz(t, archive, map[string][]byte{
 		MetadataFile:    cpJSON,
+		SessionFile:     sessionJSON,
 		"MANIFEST.json": manifestJSON,
 	})
 
-	imported, err := storage.Import(archive, ImportOptions{VerifyChecksums: true})
-	if err != nil {
-		t.Fatalf("Import failed: %v", err)
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: true})
+	if err == nil {
+		t.Fatal("expected manifest/session mismatch to fail import")
 	}
-	if imported.SessionName != "manifest-session" {
-		t.Fatalf("imported.SessionName = %q, want manifest-session", imported.SessionName)
-	}
-
-	// The checkpoint dir should use the manifest session name
-	cpDir := storage.CheckpointDir("manifest-session", "mn-cp")
-	if _, err := os.Stat(cpDir); err != nil {
-		t.Errorf("checkpoint not stored under manifest session name: %v", err)
-	}
-	loaded, err := storage.Load("manifest-session", "mn-cp")
-	if err != nil {
-		t.Fatalf("Load after import failed: %v", err)
-	}
-	if loaded.SessionName != "manifest-session" {
-		t.Fatalf("loaded.SessionName = %q, want manifest-session", loaded.SessionName)
+	if !strings.Contains(err.Error(), "manifest session name") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -781,14 +1478,12 @@ func TestCheckFiles_MissingGitPatch(t *testing.T) {
 		ID:          cpID,
 		SessionName: sessionName,
 		CreatedAt:   time.Now(),
-		Git: GitState{
-			PatchFile: "changes.patch",
-		},
 	}
 
 	if err := storage.Save(cp); err != nil {
 		t.Fatal(err)
 	}
+	cp.Git.PatchFile = "changes.patch"
 
 	result := &IntegrityResult{
 		FilesPresent: true,
@@ -952,10 +1647,17 @@ func TestVerifyManifest_MissingFileOnDisk(t *testing.T) {
 		ID:          "miss-disk-cp",
 		SessionName: "miss-disk-session",
 	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(storage.CheckpointDir(cp.SessionName, cp.ID), SessionFile)); err != nil {
+		t.Fatal(err)
+	}
 
 	manifest := &FileManifest{
 		Files: map[string]string{
-			"nonexistent.json": "abcdef1234567890",
+			MetadataFile: strings.Repeat("a", 64),
+			SessionFile:  strings.Repeat("b", 64),
 		},
 	}
 
@@ -969,12 +1671,170 @@ func TestVerifyManifest_MissingFileOnDisk(t *testing.T) {
 
 	foundMissing := false
 	for _, e := range result.Errors {
-		if strings.Contains(e, "file missing") {
+		if strings.Contains(e, "file missing: "+SessionFile) {
 			foundMissing = true
+			break
 		}
 	}
 	if !foundMissing {
-		t.Errorf("expected 'file missing' error, got: %v", result.Errors)
+		t.Errorf("expected missing session file error, got: %v", result.Errors)
+	}
+}
+
+func TestGenerateManifest_MissingReferencedScrollbackFails(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "manifest-missing-scrollback",
+		SessionName: "manifest-missing-scrollback-session",
+		CreatedAt:   time.Now(),
+		Session: SessionState{
+			Panes: []PaneState{
+				{ID: "%0", Index: 0},
+			},
+		},
+		PaneCount: 1,
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+	cp.Session.Panes[0].ScrollbackFile = "panes/pane__0.txt"
+
+	_, err := cp.GenerateManifest(storage)
+	if err == nil {
+		t.Fatal("expected GenerateManifest to fail when referenced scrollback is missing")
+	}
+	if !strings.Contains(err.Error(), "missing scrollback") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifyManifest_MissingExpectedCoverageFails(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "partial-manifest-cp",
+		SessionName: "partial-manifest-session",
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	metaHash, err := hashFile(filepath.Join(storage.CheckpointDir(cp.SessionName, cp.ID), MetadataFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := &FileManifest{
+		Files: map[string]string{
+			MetadataFile: metaHash,
+		},
+	}
+
+	result := cp.VerifyManifest(storage, manifest)
+	if result.Valid {
+		t.Fatal("expected partial manifest to be invalid")
+	}
+	foundMissing := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "manifest missing file: "+SessionFile) {
+			foundMissing = true
+			break
+		}
+	}
+	if !foundMissing {
+		t.Fatalf("expected missing session file coverage error, got: %v", result.Errors)
+	}
+}
+
+func TestVerifyManifest_UnexpectedManifestFileFails(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "unexpected-manifest-cp",
+		SessionName: "unexpected-manifest-session",
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cp.GenerateManifest(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Files["extra.txt"] = strings.Repeat("a", 64)
+
+	result := cp.VerifyManifest(storage, manifest)
+	if result.Valid {
+		t.Fatal("expected manifest with unexpected file to be invalid")
+	}
+	foundUnexpected := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "manifest contains unexpected file: extra.txt") {
+			foundUnexpected = true
+			break
+		}
+	}
+	if !foundUnexpected {
+		t.Fatalf("expected unexpected-file error, got: %v", result.Errors)
+	}
+}
+
+func TestVerifyManifest_UnexpectedPathDoesNotAffectVerifiedCount(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "unexpected-manifest-path-cp",
+		SessionName: "unexpected-manifest-path-session",
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cp.GenerateManifest(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(tmpDir, "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outsideHash, err := hashFile(outsidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Files["../outside.txt"] = outsideHash
+
+	result := cp.VerifyManifest(storage, manifest)
+	if result.Valid {
+		t.Fatal("expected manifest with unexpected path to be invalid")
+	}
+	if got := result.Details["verified"]; got != "2" {
+		t.Fatalf("verified count = %q, want 2", got)
+	}
+	foundUnexpected := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "manifest contains unexpected file: ../outside.txt") {
+			foundUnexpected = true
+			break
+		}
+	}
+	if !foundUnexpected {
+		t.Fatalf("expected unexpected-path error, got: %v", result.Errors)
 	}
 }
 

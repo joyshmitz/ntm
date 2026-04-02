@@ -1,7 +1,9 @@
 package checkpoint
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,7 +73,11 @@ func (s *Storage) safeSessionDir(sessionName string) (string, error) {
 	if err := tmux.ValidateSessionName(sessionName); err != nil {
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
-	return filepath.Join(s.BaseDir, sessionName), nil
+	sessionDir := filepath.Join(s.BaseDir, sessionName)
+	if err := validateExistingDirectoryPath(sessionDir, "session"); err != nil {
+		return "", err
+	}
+	return sessionDir, nil
 }
 
 func validateCheckpointID(checkpointID string) error {
@@ -98,6 +104,23 @@ func safePathFallbackComponent(value string) string {
 	return safe
 }
 
+func validateExistingDirectoryPath(path, kind string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat %s path: %w", kind, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s path must not be a symlink: %s", kind, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s path is not a directory: %s", kind, path)
+	}
+	return nil
+}
+
 func (s *Storage) safeCheckpointDir(sessionName, checkpointID string) (string, error) {
 	sessionDir, err := s.safeSessionDir(sessionName)
 	if err != nil {
@@ -106,7 +129,21 @@ func (s *Storage) safeCheckpointDir(sessionName, checkpointID string) (string, e
 	if err := validateCheckpointID(checkpointID); err != nil {
 		return "", err
 	}
-	return filepath.Join(sessionDir, checkpointID), nil
+	checkpointDir := filepath.Join(sessionDir, checkpointID)
+	if err := validateExistingDirectoryPath(checkpointDir, "checkpoint"); err != nil {
+		return "", err
+	}
+	return checkpointDir, nil
+}
+
+func (s *Storage) checkpointDirForLookup(sessionName, checkpointID string) (string, error) {
+	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		return "", fmt.Errorf("invalid session name: %w", err)
+	}
+	if err := validateCheckpointID(checkpointID); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.BaseDir, sessionName, checkpointID), nil
 }
 
 func resolveCheckpointRelativePath(baseDir, relPath string) (string, error) {
@@ -129,6 +166,45 @@ func resolveCheckpointRelativePath(baseDir, relPath string) (string, error) {
 	}
 
 	return fullPath, nil
+}
+
+func resolveExistingCheckpointArtifactPath(baseDir, relPath string) (string, error) {
+	resolvedPath, err := isPathWithinDirResolved(baseDir, relPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid artifact path %q: %w", relPath, err)
+	}
+
+	info, err := os.Lstat(resolvedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("artifact file does not exist: %s: %w", relPath, err)
+		}
+		return "", fmt.Errorf("stat artifact path %q: %w", relPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("artifact path must not be a symlink: %s", relPath)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("artifact path is not a regular file: %s", relPath)
+	}
+
+	return resolvedPath, nil
+}
+
+func resolveExistingCheckpointArtifactPathBestEffort(baseDir, relPath string) (string, bool) {
+	resolvedPath, err := isPathWithinDirResolved(baseDir, relPath)
+	if err != nil {
+		return "", false
+	}
+
+	info, err := os.Lstat(resolvedPath)
+	if err != nil {
+		return "", false
+	}
+	if info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return resolvedPath, true
+	}
+	return "", false
 }
 
 // GitPatchPath returns the file path for the git patch.
@@ -213,6 +289,16 @@ func (s *Storage) Save(cp *Checkpoint) error {
 		return fmt.Errorf("creating panes directory: %w", err)
 	}
 
+	currentArtifacts, err := resolveCheckpointArtifactPathSet(dir, cp)
+	if err != nil {
+		return fmt.Errorf("validating checkpoint artifact paths: %w", err)
+	}
+
+	var previousArtifacts map[string]struct{}
+	if existing, err := s.Load(cp.SessionName, cp.ID); err == nil {
+		previousArtifacts = resolveCheckpointArtifactPathSetBestEffort(dir, existing)
+	}
+
 	// Save metadata
 	metaPath := filepath.Join(dir, MetadataFile)
 	if err := writeJSON(metaPath, cp); err != nil {
@@ -225,6 +311,89 @@ func (s *Storage) Save(cp *Checkpoint) error {
 		return fmt.Errorf("saving session state: %w", err)
 	}
 
+	if err := pruneCheckpointArtifactPaths(previousArtifacts, currentArtifacts); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func resolveCheckpointArtifactPathSet(baseDir string, cp *Checkpoint) (map[string]struct{}, error) {
+	paths := make(map[string]struct{})
+	if cp == nil {
+		return paths, nil
+	}
+
+	for _, pane := range cp.Session.Panes {
+		if pane.ScrollbackFile == "" {
+			continue
+		}
+		resolvedPath, err := resolveExistingCheckpointArtifactPath(baseDir, pane.ScrollbackFile)
+		if err != nil {
+			return nil, fmt.Errorf("invalid scrollback path %q: %w", pane.ScrollbackFile, err)
+		}
+		paths[resolvedPath] = struct{}{}
+	}
+	if cp.Git.PatchFile != "" {
+		resolvedPath, err := resolveExistingCheckpointArtifactPath(baseDir, cp.Git.PatchFile)
+		if err != nil {
+			return nil, fmt.Errorf("invalid git patch path %q: %w", cp.Git.PatchFile, err)
+		}
+		paths[resolvedPath] = struct{}{}
+	}
+	if cp.Git.StatusFile != "" {
+		resolvedPath, err := resolveExistingCheckpointArtifactPath(baseDir, cp.Git.StatusFile)
+		if err != nil {
+			return nil, fmt.Errorf("invalid git status path %q: %w", cp.Git.StatusFile, err)
+		}
+		paths[resolvedPath] = struct{}{}
+	}
+
+	return paths, nil
+}
+
+func resolveCheckpointArtifactPathSetBestEffort(baseDir string, cp *Checkpoint) map[string]struct{} {
+	paths := make(map[string]struct{})
+	if cp == nil {
+		return paths
+	}
+
+	for _, pane := range cp.Session.Panes {
+		if pane.ScrollbackFile == "" {
+			continue
+		}
+		if resolvedPath, ok := resolveExistingCheckpointArtifactPathBestEffort(baseDir, pane.ScrollbackFile); ok {
+			paths[resolvedPath] = struct{}{}
+		}
+	}
+	if cp.Git.PatchFile != "" {
+		if resolvedPath, ok := resolveExistingCheckpointArtifactPathBestEffort(baseDir, cp.Git.PatchFile); ok {
+			paths[resolvedPath] = struct{}{}
+		}
+	}
+	if cp.Git.StatusFile != "" {
+		if resolvedPath, ok := resolveExistingCheckpointArtifactPathBestEffort(baseDir, cp.Git.StatusFile); ok {
+			paths[resolvedPath] = struct{}{}
+		}
+	}
+
+	return paths
+}
+
+func pruneCheckpointArtifactPaths(previous, current map[string]struct{}) error {
+	if len(previous) == 0 {
+		return nil
+	}
+
+	for path := range previous {
+		if _, ok := current[path]; ok {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale checkpoint artifact %s: %w", path, err)
+		}
+	}
+
 	return nil
 }
 
@@ -234,7 +403,10 @@ func (s *Storage) Load(sessionName, checkpointID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	metaPath := filepath.Join(dir, MetadataFile)
+	metaPath, err := resolveExistingCheckpointArtifactPath(dir, MetadataFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading checkpoint metadata: %w", err)
+	}
 
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -248,8 +420,55 @@ func (s *Storage) Load(sessionName, checkpointID string) (*Checkpoint, error) {
 	if err := validateLoadedCheckpointMetadata(&cp, sessionName, checkpointID); err != nil {
 		return nil, err
 	}
+	if err := loadCheckpointSessionState(dir, &cp); err != nil {
+		return nil, err
+	}
+	if err := normalizeLoadedCheckpoint(&cp); err != nil {
+		return nil, err
+	}
 
 	return &cp, nil
+}
+
+func loadCheckpointSessionState(dir string, cp *Checkpoint) error {
+	sessionPath, err := resolveExistingCheckpointArtifactPath(dir, SessionFile)
+	if err != nil {
+		return fmt.Errorf("reading session state: %w", err)
+	}
+
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		return fmt.Errorf("reading session state: %w", err)
+	}
+
+	var session SessionState
+	if err := json.Unmarshal(data, &session); err != nil {
+		return fmt.Errorf("parsing session state: %w", err)
+	}
+
+	metadataJSON, err := json.Marshal(cp.Session)
+	if err != nil {
+		return fmt.Errorf("marshaling checkpoint session metadata: %w", err)
+	}
+	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("marshaling checkpoint session state: %w", err)
+	}
+	if !bytes.Equal(metadataJSON, sessionJSON) {
+		return fmt.Errorf("checkpoint session state mismatch between %s and %s", MetadataFile, SessionFile)
+	}
+
+	cp.Session = session
+	return nil
+}
+
+func normalizeLoadedCheckpoint(cp *Checkpoint) error {
+	actualPaneCount := len(cp.Session.Panes)
+	if cp.PaneCount != 0 && cp.PaneCount != actualPaneCount {
+		return fmt.Errorf("checkpoint pane count mismatch: metadata says %d, session contains %d panes", cp.PaneCount, actualPaneCount)
+	}
+	cp.PaneCount = actualPaneCount
+	return nil
 }
 
 func validateLoadedCheckpointMetadata(cp *Checkpoint, sessionName, checkpointID string) error {
@@ -361,7 +580,11 @@ func (s *Storage) GetLatest(sessionName string) (*Checkpoint, error) {
 
 // SaveScrollback writes pane scrollback to a file.
 func (s *Storage) SaveScrollback(sessionName, checkpointID string, paneID string, content string) (string, error) {
-	panesDir := s.PanesDirPath(sessionName, checkpointID)
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return "", err
+	}
+	panesDir := filepath.Join(dir, PanesDir)
 	if err := os.MkdirAll(panesDir, 0755); err != nil {
 		return "", fmt.Errorf("creating panes directory: %w", err)
 	}
@@ -380,7 +603,14 @@ func (s *Storage) SaveScrollback(sessionName, checkpointID string, paneID string
 // LoadScrollback reads pane scrollback from a file.
 func (s *Storage) LoadScrollback(sessionName, checkpointID string, paneID string) (string, error) {
 	filename := fmt.Sprintf("pane_%s.txt", sanitizeName(paneID))
-	fullPath := filepath.Join(s.PanesDirPath(sessionName, checkpointID), filename)
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return "", err
+	}
+	fullPath, err := resolveExistingCheckpointArtifactPath(dir, filepath.Join(PanesDir, filename))
+	if err != nil {
+		return "", fmt.Errorf("resolving scrollback path: %w", err)
+	}
 
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
@@ -406,23 +636,74 @@ func (s *Storage) SaveGitPatch(sessionName, checkpointID, patch string) error {
 	return util.AtomicWriteFile(path, []byte(patch), 0600)
 }
 
+func (s *Storage) loadGitArtifact(sessionName, checkpointID, relPath, defaultName, kind string) (string, error) {
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return "", err
+	}
+
+	target := defaultName
+	if relPath != "" {
+		target = relPath
+	}
+
+	path, err := resolveExistingCheckpointArtifactPath(dir, target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && relPath == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("resolving %s path: %w", kind, err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && relPath == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading %s: %w", kind, err)
+	}
+
+	return string(data), nil
+}
+
+func (s *Storage) loadGitPatchForState(sessionName, checkpointID string, git GitState) (string, error) {
+	return s.loadGitArtifact(sessionName, checkpointID, git.PatchFile, GitPatchFile, "git patch")
+}
+
+func (s *Storage) loadGitStatusForState(sessionName, checkpointID string, git GitState) (string, error) {
+	return s.loadGitArtifact(sessionName, checkpointID, git.StatusFile, GitStatusFile, "git status")
+}
+
 // LoadGitPatch reads the git diff patch from the checkpoint.
 func (s *Storage) LoadGitPatch(sessionName, checkpointID string) (string, error) {
 	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, GitPatchFile)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	if checkpointStateExists(dir) {
+		cp, err := s.Load(sessionName, checkpointID)
+		if err != nil {
+			return "", err
 		}
-		return "", fmt.Errorf("reading git patch: %w", err)
+		return s.loadGitPatchForState(sessionName, checkpointID, cp.Git)
 	}
+	return s.loadGitArtifact(sessionName, checkpointID, "", GitPatchFile, "git patch")
+}
 
-	return string(data), nil
+// LoadGitStatus reads the git status text from the checkpoint.
+func (s *Storage) LoadGitStatus(sessionName, checkpointID string) (string, error) {
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return "", err
+	}
+	if checkpointStateExists(dir) {
+		cp, err := s.Load(sessionName, checkpointID)
+		if err != nil {
+			return "", err
+		}
+		return s.loadGitStatusForState(sessionName, checkpointID, cp.Git)
+	}
+	return s.loadGitArtifact(sessionName, checkpointID, "", GitStatusFile, "git status")
 }
 
 // SaveGitStatus writes the git status output to the checkpoint.
@@ -436,6 +717,19 @@ func (s *Storage) SaveGitStatus(sessionName, checkpointID, status string) error 
 	}
 	path := filepath.Join(dir, GitStatusFile)
 	return util.AtomicWriteFile(path, []byte(status), 0600)
+}
+
+func checkpointStateExists(dir string) bool {
+	for _, name := range []string{MetadataFile, SessionFile} {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err == nil {
+			return true
+		}
+		if !os.IsNotExist(err) && info != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // writeJSON writes data as formatted JSON to a file atomically.
@@ -456,4 +750,21 @@ func (s *Storage) Exists(sessionName, checkpointID string) bool {
 	}
 	info, err := os.Stat(dir)
 	return err == nil && info.IsDir()
+}
+
+// HasCheckpointPath reports whether a checkpoint path exists at all, even if the
+// on-disk entry is corrupted or symlink-backed and would later fail validation.
+func (s *Storage) HasCheckpointPath(sessionName, checkpointID string) (bool, error) {
+	dir, err := s.checkpointDirForLookup(sessionName, checkpointID)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat checkpoint path: %w", err)
+	}
+	return true, nil
 }
