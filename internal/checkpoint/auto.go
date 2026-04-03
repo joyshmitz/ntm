@@ -119,18 +119,9 @@ func (a *AutoCheckpointer) Create(opts AutoCheckpointOptions) (*Checkpoint, erro
 // rotateAutoCheckpoints ensures we don't exceed the max auto-checkpoints
 // by deleting the oldest auto-checkpoints
 func (a *AutoCheckpointer) rotateAutoCheckpoints(sessionName string, maxCount int) error {
-	// List all checkpoints for the session
-	checkpoints, err := a.storage.List(sessionName)
+	autoCheckpoints, err := a.autoCheckpointCandidates(sessionName)
 	if err != nil {
 		return err
-	}
-
-	// Filter to auto-checkpoints only
-	var autoCheckpoints []*Checkpoint
-	for _, cp := range checkpoints {
-		if isAutoCheckpoint(cp) {
-			autoCheckpoints = append(autoCheckpoints, cp)
-		}
 	}
 
 	// If under limit, nothing to do
@@ -138,12 +129,21 @@ func (a *AutoCheckpointer) rotateAutoCheckpoints(sessionName string, maxCount in
 		return nil
 	}
 
-	// Delete oldest auto-checkpoints (list is sorted newest first)
-	toDelete := autoCheckpoints[maxCount:]
-	for _, cp := range toDelete {
-		if err := a.storage.Delete(sessionName, cp.ID); err != nil {
-			// Log but continue
-			log.Printf("Warning: failed to delete old auto-checkpoint %s: %v", cp.ID, err)
+	// Validate the checkpoints we intend to keep before deleting anything older.
+	for _, candidate := range autoCheckpoints[:maxCount] {
+		cp, err := a.storage.Load(sessionName, candidate.name)
+		if err != nil {
+			return fmt.Errorf("auto-checkpoint rotation blocked by invalid retained checkpoint %q: %w", candidate.name, err)
+		}
+		if !isAutoCheckpoint(cp) {
+			return fmt.Errorf("auto-checkpoint rotation blocked by inconsistent retained checkpoint %q", candidate.name)
+		}
+	}
+
+	// Delete oldest auto-checkpoints (candidates are sorted newest first).
+	for _, candidate := range autoCheckpoints[maxCount:] {
+		if err := a.storage.Delete(sessionName, candidate.name); err != nil {
+			return fmt.Errorf("deleting old auto-checkpoint %q: %w", candidate.name, err)
 		}
 	}
 
@@ -163,14 +163,55 @@ func isAutoCheckpoint(cp *Checkpoint) bool {
 	return false
 }
 
-// GetLastAutoCheckpoint returns the most recent auto-checkpoint for a session
-func (a *AutoCheckpointer) GetLastAutoCheckpoint(sessionName string) (*Checkpoint, error) {
-	checkpoints, err := a.storage.List(sessionName)
+func autoCheckpointNameFromID(checkpointID string) string {
+	parts := strings.SplitN(checkpointID, "-", 4)
+	if len(parts) < 4 {
+		return ""
+	}
+	return parts[3]
+}
+
+func isAutoCheckpointID(checkpointID string) bool {
+	return strings.HasPrefix(strings.ToLower(autoCheckpointNameFromID(checkpointID)), AutoCheckpointPrefix+"-")
+}
+
+func (a *AutoCheckpointer) autoCheckpointCandidates(sessionName string) ([]checkpointSelectionEntry, error) {
+	candidates, err := a.storage.selectionEntries(sessionName)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, cp := range checkpoints {
+	var autoCandidates []checkpointSelectionEntry
+	for _, candidate := range candidates {
+		if isAutoCheckpointID(candidate.name) {
+			autoCandidates = append(autoCandidates, candidate)
+			continue
+		}
+
+		cp, err := a.storage.Load(sessionName, candidate.name)
+		if err != nil {
+			continue
+		}
+		if isAutoCheckpoint(cp) {
+			autoCandidates = append(autoCandidates, candidate)
+		}
+	}
+
+	return autoCandidates, nil
+}
+
+// GetLastAutoCheckpoint returns the most recent auto-checkpoint for a session
+func (a *AutoCheckpointer) GetLastAutoCheckpoint(sessionName string) (*Checkpoint, error) {
+	candidates, err := a.autoCheckpointCandidates(sessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, candidate := range candidates {
+		cp, err := a.storage.Load(sessionName, candidate.name)
+		if err != nil {
+			return nil, fmt.Errorf("latest auto-checkpoint blocked by invalid checkpoint %q: %w", candidate.name, err)
+		}
 		if isAutoCheckpoint(cp) {
 			return cp, nil
 		}
@@ -254,11 +295,15 @@ func (w *BackgroundWorker) Start(ctx context.Context) {
 	}
 
 	drainAutoEvents(w.events)
-	ctx, w.cancel = context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+	w.cancel = cancel
 	w.started = true
 	w.wg.Add(1)
 	w.mu.Unlock()
-	go w.run(ctx)
+	go func() {
+		defer cancel()
+		w.run(ctx)
+	}()
 
 	log.Printf("Started auto-checkpoint worker for session %s (interval: %dm)",
 		w.sessionName, w.config.IntervalMinutes)

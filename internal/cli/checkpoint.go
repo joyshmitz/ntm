@@ -244,15 +244,24 @@ Examples:
 
 			if jsonOutput {
 				type sessionInfo struct {
-					Session     string                   `json:"session"`
-					Checkpoints []*checkpoint.Checkpoint `json:"checkpoints"`
+					Session                   string                   `json:"session"`
+					Checkpoints               []*checkpoint.Checkpoint `json:"checkpoints"`
+					InvalidCheckpointsPresent bool                     `json:"invalid_checkpoints_present,omitempty"`
 				}
 				var result []sessionInfo
 				for _, sess := range sessions {
-					cps, _ := storage.List(sess)
+					cps, err := storage.List(sess)
+					if err != nil {
+						return fmt.Errorf("listing checkpoints for session %q: %w", sess, err)
+					}
+					hasCandidates, err := storage.HasCheckpointCandidates(sess)
+					if err != nil {
+						return fmt.Errorf("checking checkpoint candidates for session %q: %w", sess, err)
+					}
 					result = append(result, sessionInfo{
-						Session:     sess,
-						Checkpoints: cps,
+						Session:                   sess,
+						Checkpoints:               cps,
+						InvalidCheckpointsPresent: hasCandidates && len(cps) == 0,
 					})
 				}
 				return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
@@ -267,7 +276,17 @@ Examples:
 
 			for _, sess := range sessions {
 				cps, err := storage.List(sess)
-				if err != nil || len(cps) == 0 {
+				if err != nil {
+					return fmt.Errorf("listing checkpoints for session %q: %w", sess, err)
+				}
+				hasCandidates, err := storage.HasCheckpointCandidates(sess)
+				if err != nil {
+					return fmt.Errorf("checking checkpoint candidates for session %q: %w", sess, err)
+				}
+				if len(cps) == 0 {
+					if hasCandidates {
+						fmt.Printf("  %s%s%s (%s)\n\n", colorize(t.Primary), sess, "\033[0m", "invalid checkpoints present")
+					}
 					continue
 				}
 
@@ -306,8 +325,8 @@ func listCheckpointSessions(storage *checkpoint.Storage) ([]string, error) {
 
 	var sessions []string
 	for _, entry := range entries {
-		checkpoints, err := storage.List(entry.Name())
-		if err != nil || len(checkpoints) == 0 {
+		hasCandidates, err := storage.HasCheckpointCandidates(entry.Name())
+		if err != nil || !hasCandidates {
 			continue
 		}
 		sessions = append(sessions, entry.Name())
@@ -323,12 +342,21 @@ func listSessionCheckpoints(storage *checkpoint.Storage, session string) error {
 	}
 
 	if len(cps) == 0 {
+		hasCandidates, err := storage.HasCheckpointCandidates(session)
+		if err != nil {
+			return fmt.Errorf("checking checkpoint candidates: %w", err)
+		}
 		if jsonOutput {
 			return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-				"session":     session,
-				"checkpoints": []interface{}{},
-				"count":       0,
+				"session":                     session,
+				"checkpoints":                 []interface{}{},
+				"count":                       0,
+				"invalid_checkpoints_present": hasCandidates,
 			})
+		}
+		if hasCandidates {
+			fmt.Printf("Session %q has checkpoint entries on disk, but none could be loaded.\n", session)
+			return nil
 		}
 		fmt.Printf("No checkpoints for session %q.\n", session)
 		return nil

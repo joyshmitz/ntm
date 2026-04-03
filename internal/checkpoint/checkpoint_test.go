@@ -785,6 +785,46 @@ func TestStorage_GetLatest_RejectsInvalidNewestCheckpoint(t *testing.T) {
 	}
 }
 
+func TestStorage_GetLatest_IgnoresIncrementalNamespaceDirectory(t *testing.T) {
+	t.Parallel()
+
+	storage := NewStorageWithDir(t.TempDir())
+	sessionName := "selection-incremental-session"
+
+	valid := &Checkpoint{
+		ID:          "20251210-100000-valid",
+		Name:        "valid",
+		SessionName: sessionName,
+		CreatedAt:   time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC),
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Save(valid) failed: %v", err)
+	}
+	validDir := storage.CheckpointDir(sessionName, valid.ID)
+	validTime := time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(validDir) failed: %v", err)
+	}
+
+	incrementalDir := filepath.Join(storage.BaseDir, sessionName, "incremental")
+	if err := os.MkdirAll(incrementalDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) failed: %v", incrementalDir, err)
+	}
+	newestTime := time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(incrementalDir, newestTime, newestTime); err != nil {
+		t.Fatalf("Chtimes(incrementalDir) failed: %v", err)
+	}
+
+	latest, err := storage.GetLatest(sessionName)
+	if err != nil {
+		t.Fatalf("GetLatest() failed: %v", err)
+	}
+	if latest.ID != valid.ID {
+		t.Fatalf("GetLatest() ID = %q, want %q", latest.ID, valid.ID)
+	}
+}
+
 func TestCheckpoint_Age(t *testing.T) {
 	cp := &Checkpoint{
 		CreatedAt: time.Now().Add(-1 * time.Hour),
@@ -1094,6 +1134,32 @@ func TestStorage_SaveGitPatch(t *testing.T) {
 	}
 	if string(data) != patch {
 		t.Errorf("Patch content mismatch: got %q, want %q", string(data), patch)
+	}
+}
+
+func TestStorage_Delete_RemovesNonDirectoryCheckpointPath(t *testing.T) {
+	t.Parallel()
+
+	storage := NewStorageWithDir(t.TempDir())
+	sessionName := "delete-broken-session"
+	checkpointID := "20251210-120000-broken"
+
+	sessionDir := filepath.Join(storage.BaseDir, sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", sessionDir, err)
+	}
+
+	checkpointPath := filepath.Join(sessionDir, checkpointID)
+	if err := os.WriteFile(checkpointPath, []byte("not a checkpoint directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", checkpointPath, err)
+	}
+
+	if err := storage.Delete(sessionName, checkpointID); err != nil {
+		t.Fatalf("Delete() failed: %v", err)
+	}
+
+	if _, err := os.Lstat(checkpointPath); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint path still exists after Delete(): err=%v", err)
 	}
 }
 

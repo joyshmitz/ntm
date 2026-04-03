@@ -130,6 +130,13 @@ func directoryLikeEntry(entry os.DirEntry) bool {
 	return entry.IsDir() || entry.Type()&os.ModeSymlink != 0
 }
 
+func selectionCandidateEntry(entry os.DirEntry) bool {
+	if entry.Name() == "incremental" {
+		return false
+	}
+	return validateCheckpointID(entry.Name()) == nil
+}
+
 func (s *Storage) safeCheckpointDir(sessionName, checkpointID string) (string, error) {
 	sessionDir, err := s.safeSessionDir(sessionName)
 	if err != nil {
@@ -582,7 +589,7 @@ func (s *Storage) selectionEntries(sessionName string) ([]checkpointSelectionEnt
 
 	var candidates []checkpointSelectionEntry
 	for _, entry := range entries {
-		if !directoryLikeEntry(entry) {
+		if !selectionCandidateEntry(entry) {
 			continue
 		}
 		info, err := entry.Info()
@@ -603,6 +610,16 @@ func (s *Storage) selectionEntries(sessionName string) ([]checkpointSelectionEnt
 	})
 
 	return candidates, nil
+}
+
+// HasCheckpointCandidates reports whether a session has any checkpoint-shaped
+// on-disk entries, even if they are corrupted and would fail to load.
+func (s *Storage) HasCheckpointCandidates(sessionName string) (bool, error) {
+	candidates, err := s.selectionEntries(sessionName)
+	if err != nil {
+		return false, err
+	}
+	return len(candidates) > 0, nil
 }
 
 func (s *Storage) getByRecentIndex(sessionName string, index int) (*Checkpoint, error) {
@@ -636,13 +653,35 @@ func (s *Storage) getByRecentIndex(sessionName string, index int) (*Checkpoint, 
 	return nil, fmt.Errorf("checkpoint index %d out of range (1-%d valid checkpoints)", index, validSeen)
 }
 
-// Delete removes a checkpoint from disk.
-func (s *Storage) Delete(sessionName, checkpointID string) error {
-	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
-	if err != nil {
+func (s *Storage) deleteCheckpointPath(sessionName, checkpointID string) error {
+	if err := tmux.ValidateSessionName(sessionName); err != nil {
+		return fmt.Errorf("invalid session name: %w", err)
+	}
+	if err := validateCheckpointID(checkpointID); err != nil {
 		return err
 	}
-	return os.RemoveAll(dir)
+
+	sessionDir := filepath.Join(s.BaseDir, sessionName)
+	info, err := os.Lstat(sessionDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat session path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("session path must not be a symlink: %s", sessionDir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("session path is not a directory: %s", sessionDir)
+	}
+
+	return os.RemoveAll(filepath.Join(sessionDir, checkpointID))
+}
+
+// Delete removes a checkpoint from disk.
+func (s *Storage) Delete(sessionName, checkpointID string) error {
+	return s.deleteCheckpointPath(sessionName, checkpointID)
 }
 
 // GetLatest returns the most recent checkpoint for a session.

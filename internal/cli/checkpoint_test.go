@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,81 @@ func TestListCheckpointSessions_SkipsSymlinkSessionDir(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("expected symlink-backed session dir to be skipped, got %v", sessions)
+	}
+}
+
+func TestListCheckpointSessions_IncludesSessionWithOnlyInvalidCheckpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := checkpoint.NewStorageWithDir(tmpDir)
+
+	sessionName := "broken-session"
+	cpDir := filepath.Join(tmpDir, sessionName, "20251210-120000-broken")
+	if err := os.MkdirAll(cpDir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cpDir, checkpoint.MetadataFile), []byte("{"), 0o600); err != nil {
+		t.Fatalf("failed to write invalid metadata: %v", err)
+	}
+
+	sessions, err := listCheckpointSessions(storage)
+	if err != nil {
+		t.Fatalf("listCheckpointSessions error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0] != sessionName {
+		t.Fatalf("expected [%s], got %v", sessionName, sessions)
+	}
+}
+
+func TestListSessionCheckpoints_JSONMarksInvalidOnlySession(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := checkpoint.NewStorageWithDir(tmpDir)
+
+	sessionName := "broken-session"
+	cpDir := filepath.Join(tmpDir, sessionName, "20251210-120000-broken")
+	if err := os.MkdirAll(cpDir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cpDir, checkpoint.MetadataFile), []byte("{"), 0o600); err != nil {
+		t.Fatalf("failed to write invalid metadata: %v", err)
+	}
+
+	oldJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSONOutput })
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(): %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	callErr := listSessionCheckpoints(storage, sessionName)
+	if err := w.Close(); err != nil {
+		t.Fatalf("stdout close: %v", err)
+	}
+	if callErr != nil {
+		t.Fatalf("listSessionCheckpoints error: %v", callErr)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading stdout: %v", err)
+	}
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("decoding JSON output: %v\noutput=%s", err, out)
+	}
+	if decoded["session"] != sessionName {
+		t.Fatalf("session = %v, want %s", decoded["session"], sessionName)
+	}
+	if decoded["count"] != float64(0) {
+		t.Fatalf("count = %v, want 0", decoded["count"])
+	}
+	if decoded["invalid_checkpoints_present"] != true {
+		t.Fatalf("invalid_checkpoints_present = %v, want true", decoded["invalid_checkpoints_present"])
 	}
 }
 

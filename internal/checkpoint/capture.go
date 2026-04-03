@@ -501,9 +501,17 @@ func (c *Capturer) ParseCheckpointRef(sessionName, ref string) (*Checkpoint, err
 		return c.GetByIndex(sessionName, index)
 	}
 
-	// Try exact match by ID
-	if c.storage.Exists(sessionName, ref) {
-		return c.storage.Load(sessionName, ref)
+	// For syntactically valid checkpoint IDs, prefer exact on-disk resolution.
+	// This fails closed for broken paths like symlinks or files instead of
+	// silently dropping into tolerant pattern matching.
+	if err := validateCheckpointID(ref); err == nil {
+		exists, err := c.storage.HasCheckpointPath(sessionName, ref)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return c.storage.Load(sessionName, ref)
+		}
 	}
 
 	// Try pattern match

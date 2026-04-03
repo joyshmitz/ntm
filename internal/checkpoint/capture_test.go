@@ -573,6 +573,66 @@ func TestCapturer_ParseCheckpointRef_ExactID(t *testing.T) {
 	}
 }
 
+func TestCapturer_ParseCheckpointRef_ExactID_RejectsNonDirectoryPath(t *testing.T) {
+	t.Parallel()
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	session := "exact-nondir-session"
+
+	exactID := "20260101-120000-0001-exact"
+	fallbackID := exactID + "-other"
+	cp := &Checkpoint{
+		ID: fallbackID, Name: "other", SessionName: session,
+		CreatedAt: time.Now(), Session: SessionState{},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save(%s): %v", fallbackID, err)
+	}
+
+	exactPath := filepath.Join(storage.BaseDir, session, exactID)
+	if err := os.WriteFile(exactPath, []byte("not a checkpoint directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", exactPath, err)
+	}
+
+	_, err := capturer.ParseCheckpointRef(session, exactID)
+	if err == nil {
+		t.Fatal("ParseCheckpointRef(exactID) error = nil, want non-directory path rejection")
+	}
+	if !strings.Contains(err.Error(), "checkpoint path is not a directory") {
+		t.Fatalf("ParseCheckpointRef(exactID) error = %v, want non-directory path context", err)
+	}
+}
+
+func TestCapturer_ParseCheckpointRef_ExactID_RejectsSymlinkPath(t *testing.T) {
+	t.Parallel()
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	session := "exact-symlink-session"
+
+	exactID := "20260101-120000-0001-symlink"
+	fallbackID := exactID + "-other"
+	cp := &Checkpoint{
+		ID: fallbackID, Name: "other", SessionName: session,
+		CreatedAt: time.Now(), Session: SessionState{},
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save(%s): %v", fallbackID, err)
+	}
+
+	exactPath := filepath.Join(storage.BaseDir, session, exactID)
+	if err := os.Symlink(t.TempDir(), exactPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err := capturer.ParseCheckpointRef(session, exactID)
+	if err == nil {
+		t.Fatal("ParseCheckpointRef(exactID) error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "checkpoint path must not be a symlink") {
+		t.Fatalf("ParseCheckpointRef(exactID) error = %v, want symlink rejection", err)
+	}
+}
+
 func TestCapturer_ParseCheckpointRef_NamePattern(t *testing.T) {
 	t.Parallel()
 	storage := NewStorageWithDir(t.TempDir())
