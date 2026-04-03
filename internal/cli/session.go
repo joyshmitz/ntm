@@ -1593,7 +1593,7 @@ func runStatusWatch(w io.Writer, session string, opts statusOptions) error {
 // updateSessionActivity updates the Agent Mail activity for a session.
 // This is non-blocking and silently ignores errors.
 func updateSessionActivity(sessionName string) {
-	projectKey := resolveProjectDirForSession(sessionName, true)
+	projectKey := refineAgentMailProjectKey(sessionName, resolveProjectDirForSession(sessionName, true))
 	if projectKey == "" {
 		return
 	}

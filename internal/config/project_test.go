@@ -591,10 +591,13 @@ func TestProjectIntegrations(t *testing.T) {
 	tVal := true
 	fVal := false
 	integrations := ProjectIntegrations{
-		AgentMail: &tVal,
-		Beads:     &tVal,
-		CASS:      &fVal,
-		CM:        &tVal,
+		AgentMail:             &tVal,
+		AgentMailProjectKey:   "/tmp/project",
+		AgentMailRegistered:   &tVal,
+		AgentMailRegisteredAt: "2026-04-03T00:00:00Z",
+		Beads:                 &tVal,
+		CASS:                  &fVal,
+		CM:                    &tVal,
 	}
 
 	if integrations.AgentMail == nil || !*integrations.AgentMail {
@@ -608,6 +611,15 @@ func TestProjectIntegrations(t *testing.T) {
 	}
 	if integrations.CM == nil || !*integrations.CM {
 		t.Error("CM should be true")
+	}
+	if integrations.AgentMailProjectKey != "/tmp/project" {
+		t.Errorf("AgentMailProjectKey = %q, want /tmp/project", integrations.AgentMailProjectKey)
+	}
+	if integrations.AgentMailRegistered == nil || !*integrations.AgentMailRegistered {
+		t.Error("AgentMailRegistered should be true")
+	}
+	if integrations.AgentMailRegisteredAt != "2026-04-03T00:00:00Z" {
+		t.Errorf("AgentMailRegisteredAt = %q, want 2026-04-03T00:00:00Z", integrations.AgentMailRegisteredAt)
 	}
 }
 

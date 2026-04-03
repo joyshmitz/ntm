@@ -428,6 +428,7 @@ func runGitStatus(session string, allAgents bool) error {
 	if err != nil {
 		return err
 	}
+	agentMailProjectKey := resolveGitAgentMailProjectKey(session, workDir)
 
 	result := GitStatusResult{
 		Success:    true,
@@ -445,20 +446,20 @@ func runGitStatus(session string, allAgents bool) error {
 
 	// Get Agent Mail status
 	result.AgentMail = &AgentMailStatus{}
-	client := newAgentMailClient(workDir)
+	client := newAgentMailClient(agentMailProjectKey)
 
 	if client.IsAvailable() {
 		result.AgentMail.Available = true
 
 		// Try to get session agent info
 		if session != "" {
-			sessionAgent, err := agentmail.LoadSessionAgent(session, result.WorkingDir)
+			sessionAgent, err := agentmail.LoadBestSessionAgent(session, agentMailProjectKey)
 			if err == nil && sessionAgent != nil {
 				result.AgentMail.RegisteredAgent = sessionAgent.AgentName
 
 				// Fetch file reservations for this agent
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				locks, err := fetchAgentLocks(ctx, client, workDir, sessionAgent.AgentName, allAgents)
+				locks, err := fetchAgentLocks(ctx, client, agentMailProjectKey, sessionAgent.AgentName, allAgents)
 				cancel()
 				if err == nil {
 					result.Locks = locks
@@ -478,6 +479,13 @@ func runGitStatus(session string, allAgents bool) error {
 	return printGitStatus(result)
 }
 
+func resolveGitAgentMailProjectKey(session, workDir string) string {
+	if strings.TrimSpace(session) == "" {
+		return workDir
+	}
+	return refineAgentMailProjectKey(session, workDir)
+}
+
 func resolveGitProjectDir(session string) (string, string, error) {
 	session, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
 	if err != nil {
@@ -485,6 +493,7 @@ func resolveGitProjectDir(session string) (string, string, error) {
 	}
 
 	workDir := resolveProjectDirForSession(session, true)
+	workDir = resolveGitAgentMailProjectKey(session, workDir)
 	if workDir == "" {
 		return "", "", fmt.Errorf("getting project root failed")
 	}

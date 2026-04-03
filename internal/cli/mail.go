@@ -19,6 +19,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	utilpkg "github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 func newMailCmd() *cobra.Command {
@@ -200,6 +201,7 @@ func resolveAgentMailScopeWithPreference(session string, preferSession bool) (st
 		}
 		session = resolved
 		projectKey := resolveProjectDirForSession(session, preferSession)
+		projectKey = refineAgentMailProjectKey(session, projectKey)
 		if projectKey == "" {
 			return "", "", fmt.Errorf("getting project root failed")
 		}
@@ -211,6 +213,19 @@ func resolveAgentMailScopeWithPreference(session string, preferSession bool) (st
 		return "", "", fmt.Errorf("getting project root failed")
 	}
 	return "", projectKey, nil
+}
+
+func refineAgentMailProjectKey(sessionName, projectKey string) string {
+	if strings.TrimSpace(sessionName) == "" {
+		return projectKey
+	}
+	if registry, err := agentmail.LoadBestSessionAgentRegistry(sessionName, projectKey); err == nil && registry != nil {
+		projectKey = utilpkg.BestProjectDir(projectKey, registry.ProjectKey)
+	}
+	if info, err := agentmail.LoadBestSessionAgent(sessionName, projectKey); err == nil && info != nil {
+		projectKey = utilpkg.BestProjectDir(projectKey, info.ProjectKey)
+	}
+	return projectKey
 }
 
 // runMailInbox aggregates messages across agents and writes to cmd output.

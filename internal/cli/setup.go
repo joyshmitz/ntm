@@ -518,20 +518,26 @@ func registerAgentMailProject(projectPath, configPath string) (bool, string, err
 		}
 	}
 
-	updates := map[string]string{
-		"agent_mail":             "true",
-		"agent_mail_project_key": strconv.Quote(absPath),
-		"agent_mail_registered":  strconv.FormatBool(registered),
-	}
-	if registered {
-		updates["agent_mail_registered_at"] = strconv.Quote(time.Now().UTC().Format(time.RFC3339))
-	}
+	updates := buildAgentMailProjectUpdates(absPath, registered, time.Now().UTC())
 
 	if err := updateTomlSection(configPath, "integrations", updates); err != nil {
 		return registered, warning, err
 	}
 
 	return registered, warning, nil
+}
+
+func buildAgentMailProjectUpdates(projectKey string, registered bool, now time.Time) map[string]string {
+	registeredAt := `""`
+	if registered {
+		registeredAt = strconv.Quote(now.Format(time.RFC3339))
+	}
+	return map[string]string{
+		"agent_mail":               "true",
+		"agent_mail_project_key":   strconv.Quote(projectKey),
+		"agent_mail_registered":    strconv.FormatBool(registered),
+		"agent_mail_registered_at": registeredAt,
+	}
 }
 
 func updateTomlSection(path, section string, updates map[string]string) error {

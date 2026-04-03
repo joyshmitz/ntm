@@ -14,6 +14,7 @@ import (
 const (
 	defaultTransferTTLSeconds   = 15 * 60 // 15 minutes
 	defaultTransferGraceSeconds = 2
+	defaultTransferCleanupTime  = 10 * time.Second
 )
 
 // ReservationTransferClient is the subset of Agent Mail client methods needed for transfers.
@@ -163,9 +164,21 @@ func TransferReservations(ctx context.Context, client ReservationTransferClient,
 	grant, conflicts, err := reserveAll(ctx, client, opts.ProjectKey, opts.ToAgent, ttlSeconds, opts.FromAgent, exclusivePaths, sharedPaths)
 	if agentmail.IsReservationConflict(err) && grace > 0 {
 		// Release any partial grants before retrying to keep atomic semantics.
-		_, _ = client.ReleaseReservations(ctx, opts.ProjectKey, opts.ToAgent, grant, nil)
+		cleanupCtx, cleanupCancel := newCleanupContext()
+		if releaseErr := releaseGrantedReservations(cleanupCtx, client, opts.ProjectKey, opts.ToAgent, grant); releaseErr != nil {
+			logger.Warn("failed to release partial transfer grants before retry", "error", releaseErr)
+		}
+		cleanupCancel()
+		grant = nil
 		if waitErr := waitWithContext(ctx, grace); waitErr != nil {
 			result.Error = waitErr.Error()
+			rollbackCtx, rollbackCancel := newCleanupContext()
+			if rollbackErr := rollbackTransfer(rollbackCtx, client, opts.ProjectKey, opts.FromAgent, opts.ToAgent, ttlSeconds, exclusivePaths, sharedPaths, nil); rollbackErr != nil {
+				logger.Warn("reservation rollback failed after retry wait", "error", rollbackErr)
+			} else {
+				result.RolledBack = true
+			}
+			rollbackCancel()
 			return result, waitErr
 		}
 		grant, conflicts, err = reserveAll(ctx, client, opts.ProjectKey, opts.ToAgent, ttlSeconds, opts.FromAgent, exclusivePaths, sharedPaths)
@@ -176,9 +189,11 @@ func TransferReservations(ctx context.Context, client ReservationTransferClient,
 		result.Conflicts = conflicts
 		result.Error = err.Error()
 
-		// Roll back to old agent when conflicts happen.
-		if agentmail.IsReservationConflict(err) && len(requested) > 0 {
-			rollbackErr := rollbackReservations(ctx, client, opts.ProjectKey, opts.FromAgent, ttlSeconds, exclusivePaths, sharedPaths)
+		// Roll back to old agent for any failure after the old reservations were released.
+		if len(requested) > 0 {
+			rollbackCtx, rollbackCancel := newCleanupContext()
+			rollbackErr := rollbackTransfer(rollbackCtx, client, opts.ProjectKey, opts.FromAgent, opts.ToAgent, ttlSeconds, exclusivePaths, sharedPaths, grant)
+			rollbackCancel()
 			if rollbackErr != nil {
 				logger.Warn("reservation rollback failed", "error", rollbackErr)
 			} else {
@@ -288,6 +303,35 @@ func rollbackReservations(ctx context.Context, client ReservationTransferClient,
 		return err
 	}
 	return nil
+}
+
+func releaseGrantedReservations(ctx context.Context, client ReservationTransferClient, projectKey, agentName string, granted []string) error {
+	if len(granted) == 0 {
+		return nil
+	}
+	res, err := client.ReleaseReservations(ctx, projectKey, agentName, granted, nil)
+	if err != nil {
+		return err
+	}
+	released := 0
+	if res != nil {
+		released = res.Released
+	}
+	if released < len(granted) {
+		return fmt.Errorf("released %d of %d partial grants for %s", released, len(granted), agentName)
+	}
+	return nil
+}
+
+func rollbackTransfer(ctx context.Context, client ReservationTransferClient, projectKey, fromAgent, toAgent string, ttlSeconds int, exclusive, shared, granted []string) error {
+	if err := releaseGrantedReservations(ctx, client, projectKey, toAgent, granted); err != nil {
+		return err
+	}
+	return rollbackReservations(ctx, client, projectKey, fromAgent, ttlSeconds, exclusive, shared)
+}
+
+func newCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), defaultTransferCleanupTime)
 }
 
 func waitWithContext(ctx context.Context, d time.Duration) error {

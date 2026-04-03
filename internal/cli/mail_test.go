@@ -1004,6 +1004,92 @@ func TestResolveAgentMailProjectKeyWithPreferenceUsesCWDForInferredSession(t *te
 	}
 }
 
+func TestResolveAgentMailProjectKeyUsesSavedSessionAgentProjectKey(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	cwdDir := t.TempDir()
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("chdir cwd: %v", err)
+	}
+
+	session := "mysession"
+	actualProject := filepath.Join(t.TempDir(), "actual-project")
+	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir actual project git dir: %v", err)
+	}
+	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
+
+	projectKey, err := resolveAgentMailProjectKeyWithPreference(session, true)
+	if err != nil {
+		t.Fatalf("resolveAgentMailProjectKeyWithPreference() error = %v", err)
+	}
+	if projectKey != actualProject {
+		t.Fatalf("resolveAgentMailProjectKeyWithPreference() = %q, want saved session agent project %q", projectKey, actualProject)
+	}
+}
+
+func TestUpdateSessionActivityUsesSavedSessionAgentProjectKey(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
+
+	cfg = &config.Config{ProjectsBase: filepath.Join(t.TempDir(), "projects")}
+
+	cwdDir := t.TempDir()
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("chdir cwd: %v", err)
+	}
+
+	session := "mysession"
+	actualProject := filepath.Join(t.TempDir(), "actual-project")
+	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir actual project git dir: %v", err)
+	}
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	info := &agentmail.SessionAgentInfo{
+		AgentName:    "GreenCastle",
+		ProjectKey:   actualProject,
+		RegisteredAt: oldTime,
+		LastActiveAt: oldTime,
+	}
+	if err := agentmail.SaveSessionAgent(session, actualProject, info); err != nil {
+		t.Fatalf("save session agent: %v", err)
+	}
+
+	updateSessionActivity(session)
+
+	updated, err := agentmail.LoadSessionAgent(session, actualProject)
+	if err != nil {
+		t.Fatalf("load updated session agent: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("expected updated session agent")
+	}
+	if time.Since(updated.LastActiveAt) > time.Minute {
+		t.Fatalf("expected saved-session-agent project to be updated, last active at %v", updated.LastActiveAt)
+	}
+}
+
 func TestResolveAgentMailScopeWithPreferenceNormalizesExplicitPrefix(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 

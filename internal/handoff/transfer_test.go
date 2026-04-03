@@ -31,6 +31,31 @@ type fakeTransferClient struct {
 	renewFn      func(opts agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error)
 }
 
+type contextAwareTransferClient struct {
+	*fakeTransferClient
+}
+
+func (c *contextAwareTransferClient) ReservePaths(ctx context.Context, opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.fakeTransferClient.ReservePaths(ctx, opts)
+}
+
+func (c *contextAwareTransferClient) ReleaseReservations(ctx context.Context, projectKey, agentName string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.fakeTransferClient.ReleaseReservations(ctx, projectKey, agentName, paths, ids)
+}
+
+func (c *contextAwareTransferClient) RenewReservations(ctx context.Context, opts agentmail.RenewReservationsOptions) (*agentmail.RenewReservationsResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.fakeTransferClient.RenewReservations(ctx, opts)
+}
+
 func (f *fakeTransferClient) ReservePaths(ctx context.Context, opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
 	f.reserveCalls = append(f.reserveCalls, opts)
 	if f.reserveFn != nil {
@@ -139,8 +164,177 @@ func TestTransferReservationsConflictRollback(t *testing.T) {
 	if len(client.releaseCalls) < 2 {
 		t.Fatalf("expected release calls for old and partial grants")
 	}
+	if client.releaseCalls[1].agentName != "new" {
+		t.Fatalf("expected second release call to clear partial new-agent grants, got %#v", client.releaseCalls[1])
+	}
 	if !result.RolledBack {
 		t.Fatalf("expected rollback to succeed")
+	}
+}
+
+func TestTransferReservationsReserveErrorRollsBackAfterPartialGrant(t *testing.T) {
+	client := &fakeTransferClient{}
+	client.reserveFn = func(opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+		if opts.AgentName == "new" {
+			return &agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+			}, errors.New("reserve failed")
+		}
+		return &agentmail.ReservationResult{
+			Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+		}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "old",
+		ToAgent:    "new",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+		GracePeriod: 0,
+	}
+
+	result, err := TransferReservations(context.Background(), client, opts)
+	if err == nil {
+		t.Fatal("expected reserve failure")
+	}
+	if !result.RolledBack {
+		t.Fatal("expected rollback after reserve failure")
+	}
+	if len(client.releaseCalls) < 2 {
+		t.Fatalf("expected release of old reservation and partial new grant, got %d calls", len(client.releaseCalls))
+	}
+	if client.releaseCalls[1].agentName != "new" {
+		t.Fatalf("expected second release call to target new agent, got %#v", client.releaseCalls[1])
+	}
+}
+
+func TestTransferReservationsRetryWaitFailureRollsBackOldReservations(t *testing.T) {
+	client := &fakeTransferClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	client.reserveFn = func(opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+		if opts.AgentName == "new" {
+			cancel()
+			return &agentmail.ReservationResult{
+				Granted:   []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+				Conflicts: []agentmail.ReservationConflict{{Path: "internal/a.go", Holders: []string{"other"}}},
+			}, agentmail.ErrReservationConflict
+		}
+		return &agentmail.ReservationResult{
+			Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+		}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "old",
+		ToAgent:    "new",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+		GracePeriod: 50 * time.Millisecond,
+	}
+
+	result, err := TransferReservations(ctx, client, opts)
+	if err == nil {
+		t.Fatal("expected context cancellation during retry wait")
+	}
+	if !result.RolledBack {
+		t.Fatal("expected rollback after retry wait cancellation")
+	}
+	if len(client.releaseCalls) < 2 {
+		t.Fatalf("expected old release and partial-grant cleanup, got %d", len(client.releaseCalls))
+	}
+}
+
+func TestTransferReservationsRollbackUsesCleanupContextAfterCancellation(t *testing.T) {
+	base := &fakeTransferClient{}
+	client := &contextAwareTransferClient{fakeTransferClient: base}
+	base.reserveFn = func(opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+		if opts.AgentName == "new" {
+			return &agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+			}, errors.New("reserve failed")
+		}
+		return &agentmail.ReservationResult{
+			Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	base.releaseFn = func(projectKey, agentName string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+		if agentName == "old" {
+			cancel()
+		}
+		return &agentmail.ReleaseReservationsResult{Released: len(paths) + len(ids)}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "old",
+		ToAgent:    "new",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+	}
+
+	result, err := TransferReservations(ctx, client, opts)
+	if err == nil {
+		t.Fatal("expected reserve failure")
+	}
+	if !result.RolledBack {
+		t.Fatal("expected rollback to succeed with cleanup context after cancellation")
+	}
+	if len(base.releaseCalls) != 1 || base.releaseCalls[0].agentName != "old" {
+		t.Fatalf("expected only the original old-agent release before cancellation, got %#v", base.releaseCalls)
+	}
+	if len(base.reserveCalls) != 1 || base.reserveCalls[0].AgentName != "old" {
+		t.Fatalf("expected cleanup rollback to re-reserve for old agent, got %#v", base.reserveCalls)
+	}
+}
+
+func TestTransferReservationsRollbackReleasesPartialGrantOnlyOnce(t *testing.T) {
+	client := &fakeTransferClient{}
+	newReleaseCalls := 0
+	client.reserveFn = func(opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+		if opts.AgentName == "new" {
+			return &agentmail.ReservationResult{
+				Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+			}, errors.New("reserve failed")
+		}
+		return &agentmail.ReservationResult{
+			Granted: []agentmail.FileReservation{{PathPattern: "internal/a.go"}},
+		}, nil
+	}
+	client.releaseFn = func(projectKey, agentName string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+		if agentName == "new" {
+			newReleaseCalls++
+			if newReleaseCalls > 1 {
+				return nil, errors.New("partial grant released twice")
+			}
+		}
+		return &agentmail.ReleaseReservationsResult{Released: len(paths) + len(ids)}, nil
+	}
+
+	opts := TransferReservationsOptions{
+		ProjectKey: "proj",
+		FromAgent:  "old",
+		ToAgent:    "new",
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+	}
+
+	result, err := TransferReservations(context.Background(), client, opts)
+	if err == nil {
+		t.Fatal("expected reserve failure")
+	}
+	if !result.RolledBack {
+		t.Fatal("expected rollback to succeed without double-releasing partial grants")
+	}
+	if newReleaseCalls != 1 {
+		t.Fatalf("expected exactly one partial-grant release, got %d", newReleaseCalls)
 	}
 }
 

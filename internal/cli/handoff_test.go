@@ -1095,6 +1095,40 @@ func TestResolveHandoffProjectDirRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
+func TestResolveHandoffProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	cwdDir := t.TempDir()
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("chdir cwd: %v", err)
+	}
+
+	session := "testsession"
+	actualProject := filepath.Join(t.TempDir(), "actual-project")
+	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir actual project git dir: %v", err)
+	}
+	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
+
+	projectDir, err := resolveHandoffProjectDir(session)
+	if err != nil {
+		t.Fatalf("resolveHandoffProjectDir() error = %v", err)
+	}
+	if projectDir != actualProject {
+		t.Fatalf("resolveHandoffProjectDir() = %q, want saved session agent project %q", projectDir, actualProject)
+	}
+}
+
 func TestRunHandoffListNoHandoffs(t *testing.T) {
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "handoff-test-*")

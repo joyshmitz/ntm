@@ -3199,6 +3199,11 @@ func loadRecoveryBeads(workingDir string) (inProgress, completed, blocked []Reco
 	return inProgress, completed, blocked, nil
 }
 
+type recoveryMailClient interface {
+	FetchInbox(ctx context.Context, opts agentmail.FetchInboxOptions) ([]agentmail.InboxMessage, error)
+	ListReservations(ctx context.Context, projectKey, agentName string, allAgents bool) ([]agentmail.FileReservation, error)
+}
+
 // loadRecoveryMessages loads recent Agent Mail messages and file reservations.
 func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) ([]RecoveryMessage, []string, *handoff.ReservationTransferResult, error) {
 	client := newAgentMailClient(workingDir)
@@ -3216,22 +3221,7 @@ func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) (
 
 	agentName := resolveRecoveryAgentName(sessionName, workingDir)
 
-	// Fetch inbox
-	inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
-		ProjectKey:    workingDir,
-		AgentName:     agentName,
-		Limit:         10,
-		IncludeBodies: true,
-	})
-	if err != nil && agentName != sessionName {
-		// Fallback to session name if registry agent fails
-		inbox, err = client.FetchInbox(ctx, agentmail.FetchInboxOptions{
-			ProjectKey:    workingDir,
-			AgentName:     sessionName,
-			Limit:         10,
-			IncludeBodies: true,
-		})
-	}
+	inbox, effectiveAgentName, err := fetchRecoveryInbox(ctx, client, workingDir, sessionName, agentName)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("fetch inbox: %w", err)
 	}
@@ -3249,17 +3239,12 @@ func loadRecoveryMessages(ctx context.Context, sessionName, workingDir string) (
 	}
 
 	// Attempt reservation transfer using latest handoff, if available.
-	transferResult, transferErr := attemptReservationTransfer(ctx, client, sessionName, workingDir)
+	transferResult, transferErr := attemptReservationTransfer(ctx, client, sessionName, effectiveAgentName, workingDir)
 	if transferErr != nil && !IsJSONOutput() {
 		output.PrintWarningf("Reservation transfer: %v", transferErr)
 	}
 
-	// Fetch file reservations
-	reservations, err := client.ListReservations(ctx, workingDir, agentName, false)
-	if err != nil && agentName != sessionName {
-		// Fallback to session name for reservation lookup
-		reservations, err = client.ListReservations(ctx, workingDir, sessionName, false)
-	}
+	reservations, _, err := listRecoveryReservations(ctx, client, workingDir, sessionName, effectiveAgentName)
 	if err != nil {
 		// Non-fatal, return messages only
 		return msgs, nil, transferResult, nil
@@ -3281,6 +3266,42 @@ func resolveRecoveryAgentName(sessionName, workingDir string) string {
 	return sessionName
 }
 
+func recoveryAgentCandidates(sessionName, agentName string) []string {
+	if agentName == "" || agentName == sessionName {
+		return []string{sessionName}
+	}
+	return []string{agentName, sessionName}
+}
+
+func fetchRecoveryInbox(ctx context.Context, client recoveryMailClient, projectKey, sessionName, agentName string) ([]agentmail.InboxMessage, string, error) {
+	var lastErr error
+	for _, candidate := range recoveryAgentCandidates(sessionName, agentName) {
+		inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+			ProjectKey:    projectKey,
+			AgentName:     candidate,
+			Limit:         10,
+			IncludeBodies: true,
+		})
+		if err == nil {
+			return inbox, candidate, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+func listRecoveryReservations(ctx context.Context, client recoveryMailClient, projectKey, sessionName, agentName string) ([]agentmail.FileReservation, string, error) {
+	var lastErr error
+	for _, candidate := range recoveryAgentCandidates(sessionName, agentName) {
+		reservations, err := client.ListReservations(ctx, projectKey, candidate, false)
+		if err == nil {
+			return reservations, candidate, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
 func reservationPaths(reservations []agentmail.FileReservation) []string {
 	var paths []string
 	for _, r := range reservations {
@@ -3291,18 +3312,7 @@ func reservationPaths(reservations []agentmail.FileReservation) []string {
 	return paths
 }
 
-func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, sessionName, workingDir string) (*handoff.ReservationTransferResult, error) {
-	reader := handoff.NewReader(workingDir)
-	h, _, err := reader.FindLatest(sessionName)
-	if err != nil || h == nil || h.ReservationTransfer == nil {
-		return nil, nil
-	}
-
-	transfer := h.ReservationTransfer
-	if transfer.FromAgent == "" || len(transfer.Reservations) == 0 {
-		return nil, nil
-	}
-
+func buildRecoveryReservationTransferOptions(transfer *handoff.ReservationTransfer, targetAgentName, workingDir string) handoff.TransferReservationsOptions {
 	projectKey := transfer.ProjectKey
 	if projectKey == "" {
 		projectKey = workingDir
@@ -3314,14 +3324,29 @@ func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, s
 	}
 
 	grace := time.Duration(transfer.GracePeriodSeconds) * time.Second
-	opts := handoff.TransferReservationsOptions{
+	return handoff.TransferReservationsOptions{
 		ProjectKey:   projectKey,
 		FromAgent:    transfer.FromAgent,
-		ToAgent:      sessionName,
+		ToAgent:      targetAgentName,
 		Reservations: transfer.Reservations,
 		TTLSeconds:   ttlSeconds,
 		GracePeriod:  grace,
 	}
+}
+
+func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, sessionName, targetAgentName, workingDir string) (*handoff.ReservationTransferResult, error) {
+	reader := handoff.NewReader(workingDir)
+	h, _, err := reader.FindLatest(sessionName)
+	if err != nil || h == nil || h.ReservationTransfer == nil {
+		return nil, nil
+	}
+
+	transfer := h.ReservationTransfer
+	if transfer.FromAgent == "" || len(transfer.Reservations) == 0 {
+		return nil, nil
+	}
+
+	opts := buildRecoveryReservationTransferOptions(transfer, targetAgentName, workingDir)
 
 	result, err := handoff.TransferReservations(ctx, client, opts)
 	if err != nil {

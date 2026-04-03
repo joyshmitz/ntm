@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSetupCmd(t *testing.T) {
@@ -196,5 +197,55 @@ func TestSetupResponse(t *testing.T) {
 	}
 	if len(resp.CreatedDirs) != 2 {
 		t.Errorf("expected 2 created dirs, got %d", len(resp.CreatedDirs))
+	}
+}
+
+func TestBuildAgentMailProjectUpdates_ClearsRegisteredAtWhenUnregistered(t *testing.T) {
+	now := time.Date(2026, time.April, 3, 2, 20, 0, 0, time.UTC)
+
+	updates := buildAgentMailProjectUpdates("/tmp/project", false, now)
+	if updates["agent_mail_registered"] != "false" {
+		t.Fatalf("expected registered=false, got %q", updates["agent_mail_registered"])
+	}
+	if updates["agent_mail_registered_at"] != `""` {
+		t.Fatalf("expected registered_at to be cleared, got %q", updates["agent_mail_registered_at"])
+	}
+
+	updates = buildAgentMailProjectUpdates("/tmp/project", true, now)
+	if updates["agent_mail_registered"] != "true" {
+		t.Fatalf("expected registered=true, got %q", updates["agent_mail_registered"])
+	}
+	if updates["agent_mail_registered_at"] != `"2026-04-03T02:20:00Z"` {
+		t.Fatalf("expected registered_at timestamp, got %q", updates["agent_mail_registered_at"])
+	}
+}
+
+func TestUpdateTomlSection_OverwritesStaleAgentMailRegistrationTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	initial := `[integrations]
+agent_mail = true
+agent_mail_project_key = "/tmp/project"
+agent_mail_registered = true
+agent_mail_registered_at = "2026-04-01T00:00:00Z"
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	updates := buildAgentMailProjectUpdates("/tmp/project", false, time.Date(2026, time.April, 3, 2, 20, 0, 0, time.UTC))
+	if err := updateTomlSection(configPath, "integrations", updates); err != nil {
+		t.Fatalf("updateTomlSection failed: %v", err)
+	}
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Contains(content, []byte(`agent_mail_registered = false`)) {
+		t.Fatalf("expected agent_mail_registered to be false, got:\n%s", content)
+	}
+	if !bytes.Contains(content, []byte(`agent_mail_registered_at = ""`)) {
+		t.Fatalf("expected stale registered_at to be cleared, got:\n%s", content)
 	}
 }

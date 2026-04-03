@@ -34,10 +34,13 @@ type ProjectMeta struct {
 
 // ProjectIntegrations declares optional integrations for the project.
 type ProjectIntegrations struct {
-	AgentMail *bool `toml:"agent_mail"`
-	Beads     *bool `toml:"beads"`
-	CASS      *bool `toml:"cass"`
-	CM        *bool `toml:"cm"`
+	AgentMail             *bool  `toml:"agent_mail"`
+	AgentMailProjectKey   string `toml:"agent_mail_project_key"`
+	AgentMailRegistered   *bool  `toml:"agent_mail_registered"`
+	AgentMailRegisteredAt string `toml:"agent_mail_registered_at"`
+	Beads                 *bool  `toml:"beads"`
+	CASS                  *bool  `toml:"cass"`
+	CM                    *bool  `toml:"cm"`
 }
 
 // ProjectDefaults holds default settings for the project

@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 func TestParseConflicts(t *testing.T) {
@@ -89,5 +93,81 @@ More text after conflict.`,
 				}
 			}
 		})
+	}
+}
+
+func TestResolveGitAgentMailProjectKeyUsesSavedSessionAgentProjectKey(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	workDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+
+	cwdDir := t.TempDir()
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("chdir cwd: %v", err)
+	}
+
+	actualProject := filepath.Join(t.TempDir(), "actual-project")
+	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir actual project git dir: %v", err)
+	}
+	saveSessionAgentForTest(t, "mysession", actualProject, "GreenCastle")
+
+	projectKey := resolveGitAgentMailProjectKey("mysession", workDir)
+	if projectKey != actualProject {
+		t.Fatalf("resolveGitAgentMailProjectKey() = %q, want saved session agent project %q", projectKey, actualProject)
+	}
+}
+
+func TestResolveGitProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
+	origCfg := cfg
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	configuredDir := filepath.Join(projectsBase, "mysession")
+	if err := os.MkdirAll(configuredDir, 0o755); err != nil {
+		t.Fatalf("mkdir configured dir: %v", err)
+	}
+
+	cwdDir := t.TempDir()
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("chdir cwd: %v", err)
+	}
+
+	actualProject := filepath.Join(t.TempDir(), "actual-project")
+	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir actual project git dir: %v", err)
+	}
+	saveSessionAgentForTest(t, "mysession", actualProject, "GreenCastle")
+
+	session, workDir, err := resolveGitProjectDir("mysession")
+	if err != nil {
+		t.Fatalf("resolveGitProjectDir() error = %v", err)
+	}
+	if session != "mysession" {
+		t.Fatalf("resolveGitProjectDir() session = %q, want mysession", session)
+	}
+	if workDir != actualProject {
+		t.Fatalf("resolveGitProjectDir() workDir = %q, want saved session agent project %q", workDir, actualProject)
 	}
 }

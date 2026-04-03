@@ -2,12 +2,141 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/handoff"
 )
+
+type recoveryMailStub struct {
+	inboxByAgent      map[string][]agentmail.InboxMessage
+	inboxErrByAgent   map[string]error
+	resByAgent        map[string][]agentmail.FileReservation
+	resErrByAgent     map[string]error
+	fetchInboxAgents  []string
+	listReserveAgents []string
+}
+
+func (s *recoveryMailStub) FetchInbox(_ context.Context, opts agentmail.FetchInboxOptions) ([]agentmail.InboxMessage, error) {
+	s.fetchInboxAgents = append(s.fetchInboxAgents, opts.AgentName)
+	if err := s.inboxErrByAgent[opts.AgentName]; err != nil {
+		return nil, err
+	}
+	return s.inboxByAgent[opts.AgentName], nil
+}
+
+func (s *recoveryMailStub) ListReservations(_ context.Context, projectKey, agentName string, allAgents bool) ([]agentmail.FileReservation, error) {
+	_ = projectKey
+	_ = allAgents
+	s.listReserveAgents = append(s.listReserveAgents, agentName)
+	if err := s.resErrByAgent[agentName]; err != nil {
+		return nil, err
+	}
+	return s.resByAgent[agentName], nil
+}
+
+func TestRecoveryAgentCandidates_DeduplicatesSessionName(t *testing.T) {
+	candidates := recoveryAgentCandidates("session-1", "session-1")
+	if len(candidates) != 1 || candidates[0] != "session-1" {
+		t.Fatalf("expected only session name candidate, got %#v", candidates)
+	}
+
+	candidates = recoveryAgentCandidates("session-1", "GreenCastle")
+	if len(candidates) != 2 || candidates[0] != "GreenCastle" || candidates[1] != "session-1" {
+		t.Fatalf("expected resolved agent then session fallback, got %#v", candidates)
+	}
+}
+
+func TestFetchRecoveryInbox_ReturnsEffectiveFallbackAgentName(t *testing.T) {
+	stub := &recoveryMailStub{
+		inboxByAgent: map[string][]agentmail.InboxMessage{
+			"session-1": {{Subject: "fallback worked"}},
+		},
+		inboxErrByAgent: map[string]error{
+			"GreenCastle": errors.New("agent not registered"),
+		},
+	}
+
+	inbox, effectiveAgentName, err := fetchRecoveryInbox(context.Background(), stub, "/tmp/project", "session-1", "GreenCastle")
+	if err != nil {
+		t.Fatalf("expected fallback inbox fetch to succeed, got %v", err)
+	}
+	if effectiveAgentName != "session-1" {
+		t.Fatalf("expected effective agent to fall back to session name, got %q", effectiveAgentName)
+	}
+	if len(inbox) != 1 || inbox[0].Subject != "fallback worked" {
+		t.Fatalf("expected fallback inbox contents, got %#v", inbox)
+	}
+	if got := strings.Join(stub.fetchInboxAgents, ","); got != "GreenCastle,session-1" {
+		t.Fatalf("expected fetch order GreenCastle then session-1, got %q", got)
+	}
+}
+
+func TestListRecoveryReservations_FollowsEffectiveFallbackAgentName(t *testing.T) {
+	stub := &recoveryMailStub{
+		resByAgent: map[string][]agentmail.FileReservation{
+			"session-1": {{PathPattern: "internal/cli/spawn.go"}},
+		},
+		resErrByAgent: map[string]error{
+			"GreenCastle": errors.New("agent not found"),
+		},
+	}
+
+	reservations, effectiveAgentName, err := listRecoveryReservations(context.Background(), stub, "/tmp/project", "session-1", "GreenCastle")
+	if err != nil {
+		t.Fatalf("expected fallback reservation lookup to succeed, got %v", err)
+	}
+	if effectiveAgentName != "session-1" {
+		t.Fatalf("expected effective reservation agent to fall back to session name, got %q", effectiveAgentName)
+	}
+	if len(reservations) != 1 || reservations[0].PathPattern != "internal/cli/spawn.go" {
+		t.Fatalf("expected fallback reservations, got %#v", reservations)
+	}
+	if got := strings.Join(stub.listReserveAgents, ","); got != "GreenCastle,session-1" {
+		t.Fatalf("expected reservation lookup order GreenCastle then session-1, got %q", got)
+	}
+}
+
+func TestBuildRecoveryReservationTransferOptions_UsesResolvedAgentName(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+
+	cfg = config.Default()
+	cfg.FileReservation.DefaultTTLMin = 45
+
+	transfer := &handoff.ReservationTransfer{
+		FromAgent:          "BlueLake",
+		GracePeriodSeconds: 7,
+		Reservations: []handoff.ReservationSnapshot{
+			{PathPattern: "internal/a.go", Exclusive: true},
+		},
+	}
+
+	opts := buildRecoveryReservationTransferOptions(transfer, "GreenCastle", "/tmp/project")
+
+	if opts.ProjectKey != "/tmp/project" {
+		t.Fatalf("expected project key fallback to working dir, got %q", opts.ProjectKey)
+	}
+	if opts.FromAgent != "BlueLake" {
+		t.Fatalf("expected from agent BlueLake, got %q", opts.FromAgent)
+	}
+	if opts.ToAgent != "GreenCastle" {
+		t.Fatalf("expected resolved target agent GreenCastle, got %q", opts.ToAgent)
+	}
+	if opts.TTLSeconds != 45*60 {
+		t.Fatalf("expected TTL from config fallback, got %d", opts.TTLSeconds)
+	}
+	if opts.GracePeriod != 7*time.Second {
+		t.Fatalf("expected grace period of 7s, got %v", opts.GracePeriod)
+	}
+	if len(opts.Reservations) != 1 || opts.Reservations[0].PathPattern != "internal/a.go" {
+		t.Fatalf("expected reservations to be preserved, got %#v", opts.Reservations)
+	}
+}
 
 // TestRecoveryContext_EstimateTokens tests the token estimation function
 // NOTE: This test uses the current RecoveryContext struct fields. If the struct

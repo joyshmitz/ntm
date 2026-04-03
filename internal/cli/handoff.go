@@ -242,7 +242,7 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 
 		agentName := ""
 		if sessionName != "" && sessionName != "general" {
-			if info, err := agentmail.LoadSessionAgent(sessionName, projectDir); err == nil && info != nil {
+			if info, err := agentmail.LoadBestSessionAgent(sessionName, projectDir); err == nil && info != nil {
 				agentName = info.AgentName
 			} else {
 				// Fallback to session name for reservation lookups when no registry exists.
@@ -844,6 +844,7 @@ func resolveHandoffProjectDir(sessionName string) (string, error) {
 		return "", fmt.Errorf("invalid session name: %w", err)
 	}
 	projectDir := resolveProjectDirForSession(sessionName, true)
+	projectDir = refineAgentMailProjectKey(sessionName, projectDir)
 	if projectDir == "" {
 		return "", fmt.Errorf("getting project root failed")
 	}
