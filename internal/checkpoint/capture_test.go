@@ -232,6 +232,49 @@ func TestCapturer_GetByIndex(t *testing.T) {
 	}
 }
 
+func TestCapturer_GetByIndex_RejectsInvalidNewerCheckpoint(t *testing.T) {
+	t.Parallel()
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	session := "idx-invalid-session"
+
+	valid := &Checkpoint{
+		ID:          "20260101-100000-0001-valid",
+		Name:        "valid",
+		SessionName: session,
+		CreatedAt:   time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		Session:     SessionState{},
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Save(valid) failed: %v", err)
+	}
+	validDir := storage.CheckpointDir(session, valid.ID)
+	validTime := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(validDir) failed: %v", err)
+	}
+
+	invalidDir := storage.CheckpointDir(session, "20260101-120000-0002-invalid")
+	if err := os.MkdirAll(invalidDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(invalidDir) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, MetadataFile), []byte("not valid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(metadata) failed: %v", err)
+	}
+	newestTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, newestTime, newestTime); err != nil {
+		t.Fatalf("Chtimes(invalidDir) failed: %v", err)
+	}
+
+	_, err := capturer.GetByIndex(session, 1)
+	if err == nil {
+		t.Fatal("GetByIndex(1) error = nil, want invalid newer checkpoint error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint selection blocked by invalid checkpoint") {
+		t.Fatalf("GetByIndex(1) error = %v, want invalid newer checkpoint context", err)
+	}
+}
+
 func TestCapturer_captureSessionState_UsesSessionSelectedPaneAcrossWindows(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
@@ -461,6 +504,50 @@ func TestCapturer_ParseCheckpointRef_TildeN(t *testing.T) {
 	}
 	if got.Name != "cp0" {
 		t.Errorf("~3 got Name=%q, want cp0", got.Name)
+	}
+}
+
+func TestCapturer_ParseCheckpointRef_TildeN_RejectsInvalidMoreRecentCheckpoint(t *testing.T) {
+	t.Parallel()
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	session := "tilde-invalid-session"
+
+	for i := 0; i < 2; i++ {
+		cp := &Checkpoint{
+			ID:          fmt.Sprintf("20260101-%02d0000-000%d-cp%d", 10+i, i, i),
+			Name:        fmt.Sprintf("cp%d", i),
+			SessionName: session,
+			CreatedAt:   time.Date(2026, 1, 1, 10+i, 0, 0, 0, time.UTC),
+			Session:     SessionState{},
+		}
+		if err := storage.Save(cp); err != nil {
+			t.Fatalf("Save(%s) failed: %v", cp.ID, err)
+		}
+		validTime := time.Date(2026, 1, 1, 10+i, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(storage.CheckpointDir(session, cp.ID), validTime, validTime); err != nil {
+			t.Fatalf("Chtimes(%s) failed: %v", cp.ID, err)
+		}
+	}
+
+	invalidDir := storage.CheckpointDir(session, "20260101-120000-0009-invalid")
+	if err := os.MkdirAll(invalidDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(invalidDir) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, MetadataFile), []byte("not valid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(metadata) failed: %v", err)
+	}
+	newestTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, newestTime, newestTime); err != nil {
+		t.Fatalf("Chtimes(invalidDir) failed: %v", err)
+	}
+
+	_, err := capturer.ParseCheckpointRef(session, "~2")
+	if err == nil {
+		t.Fatal("ParseCheckpointRef(~2) error = nil, want invalid newer checkpoint error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint selection blocked by invalid checkpoint") {
+		t.Fatalf("ParseCheckpointRef(~2) error = %v, want invalid newer checkpoint context", err)
 	}
 }
 

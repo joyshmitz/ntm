@@ -40,6 +40,11 @@ type Storage struct {
 	BaseDir string
 }
 
+type checkpointSelectionEntry struct {
+	name    string
+	modTime time.Time
+}
+
 // NewStorage creates a new Storage with the default directory.
 // Falls back to /tmp if the user's home directory cannot be determined.
 func NewStorage() *Storage {
@@ -561,6 +566,76 @@ func (s *Storage) ListAll() ([]*Checkpoint, error) {
 	return all, nil
 }
 
+func (s *Storage) selectionEntries(sessionName string) ([]checkpointSelectionEntry, error) {
+	sessionDir, err := s.safeSessionDir(sessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading session directory: %w", err)
+	}
+
+	var candidates []checkpointSelectionEntry
+	for _, entry := range entries {
+		if !directoryLikeEntry(entry) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat checkpoint entry %s: %w", entry.Name(), err)
+		}
+		candidates = append(candidates, checkpointSelectionEntry{
+			name:    entry.Name(),
+			modTime: info.ModTime(),
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].modTime.Equal(candidates[j].modTime) {
+			return candidates[i].name > candidates[j].name
+		}
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+
+	return candidates, nil
+}
+
+func (s *Storage) getByRecentIndex(sessionName string, index int) (*Checkpoint, error) {
+	if index < 1 {
+		return nil, fmt.Errorf("checkpoint index %d out of range", index)
+	}
+
+	candidates, err := s.selectionEntries(sessionName)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no checkpoints found for session: %s", sessionName)
+	}
+
+	validSeen := 0
+	for _, candidate := range candidates {
+		cp, err := s.Load(sessionName, candidate.name)
+		if err != nil {
+			if validSeen < index {
+				return nil, fmt.Errorf("checkpoint selection blocked by invalid checkpoint %q: %w", candidate.name, err)
+			}
+			continue
+		}
+		validSeen++
+		if validSeen == index {
+			return cp, nil
+		}
+	}
+
+	return nil, fmt.Errorf("checkpoint index %d out of range (1-%d valid checkpoints)", index, validSeen)
+}
+
 // Delete removes a checkpoint from disk.
 func (s *Storage) Delete(sessionName, checkpointID string) error {
 	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
@@ -572,14 +647,7 @@ func (s *Storage) Delete(sessionName, checkpointID string) error {
 
 // GetLatest returns the most recent checkpoint for a session.
 func (s *Storage) GetLatest(sessionName string) (*Checkpoint, error) {
-	checkpoints, err := s.List(sessionName)
-	if err != nil {
-		return nil, err
-	}
-	if len(checkpoints) == 0 {
-		return nil, fmt.Errorf("no checkpoints found for session: %s", sessionName)
-	}
-	return checkpoints[0], nil
+	return s.getByRecentIndex(sessionName, 1)
 }
 
 // SaveScrollback writes pane scrollback to a file.

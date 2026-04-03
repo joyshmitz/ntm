@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/archive"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
 )
@@ -391,5 +392,76 @@ func TestOutputSummaryFromFile_InvalidJSON(t *testing.T) {
 
 	if err := outputSummaryFromFile(path, summary.FormatBrief, false); err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestRegenerateSummaryFromArchive_NormalizesProjectScopedPrefix(t *testing.T) {
+	origCfg := cfg
+	origWD, _ := os.Getwd()
+	t.Cleanup(func() {
+		cfg = origCfg
+		_ = os.Chdir(origWD)
+	})
+
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "myproject")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
+		t.Fatalf("mkdir project .ntm: %v", err)
+	}
+	cfg = &config.Config{ProjectsBase: projectsBase}
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	archiveDir := filepath.Join(homeDir, ".ntm", "archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatalf("mkdir archive dir: %v", err)
+	}
+
+	archivePath := filepath.Join(archiveDir, "myproject_2026-01-28.jsonl")
+	record := archive.ArchiveRecord{
+		Session:   "myproject",
+		Pane:      "%1",
+		PaneIndex: 1,
+		Agent:     "claude",
+		Timestamp: time.Now(),
+		Content:   "Implemented the auth fix and updated tests.",
+		Lines:     1,
+		Sequence:  1,
+	}
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("create archive file: %v", err)
+	}
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		file.Close()
+		t.Fatalf("encode archive record: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close archive file: %v", err)
+	}
+
+	otherWD := t.TempDir()
+	if err := os.Chdir(otherWD); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	if _, err := captureStdout(t, func() error {
+		return regenerateSummaryFromArchive("mypro", summary.FormatBrief, false, projectDir, otherWD)
+	}); err != nil {
+		t.Fatalf("regenerateSummaryFromArchive() error = %v", err)
+	}
+
+	summaryFiles, err := listSummaryFiles(projectDir)
+	if err != nil {
+		t.Fatalf("listSummaryFiles() error = %v", err)
+	}
+	if len(summaryFiles) != 1 {
+		t.Fatalf("expected 1 summary file, got %d", len(summaryFiles))
+	}
+	if summaryFiles[0].Session != "myproject" {
+		t.Fatalf("summary session = %q, want %q", summaryFiles[0].Session, "myproject")
 	}
 }

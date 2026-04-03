@@ -743,6 +743,48 @@ func TestStorage_GetLatest(t *testing.T) {
 	}
 }
 
+func TestStorage_GetLatest_RejectsInvalidNewestCheckpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "testproject"
+
+	valid := &Checkpoint{
+		ID:          "20251210-100000-valid",
+		Name:        "valid",
+		SessionName: sessionName,
+		CreatedAt:   time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC),
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Save(valid) failed: %v", err)
+	}
+	validDir := storage.CheckpointDir(sessionName, valid.ID)
+	validTime := time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(validDir) failed: %v", err)
+	}
+
+	invalidDir := storage.CheckpointDir(sessionName, "20251210-120000-invalid")
+	if err := os.MkdirAll(invalidDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(invalidDir) failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, MetadataFile), []byte("not valid json"), 0600); err != nil {
+		t.Fatalf("WriteFile(metadata) failed: %v", err)
+	}
+	newestTime := time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, newestTime, newestTime); err != nil {
+		t.Fatalf("Chtimes(invalidDir) failed: %v", err)
+	}
+
+	_, err := storage.GetLatest(sessionName)
+	if err == nil {
+		t.Fatal("GetLatest() error = nil, want invalid newest checkpoint error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint selection blocked by invalid checkpoint") {
+		t.Fatalf("GetLatest() error = %v, want invalid newest checkpoint context", err)
+	}
+}
+
 func TestCheckpoint_Age(t *testing.T) {
 	cp := &Checkpoint{
 		CreatedAt: time.Now().Add(-1 * time.Hour),

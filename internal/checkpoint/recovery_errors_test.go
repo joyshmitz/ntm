@@ -737,7 +737,7 @@ func TestRestorer_RestoreLatest_SessionDirExists_NoCheckpoints(t *testing.T) {
 	}
 }
 
-func TestRestorer_RestoreLatest_InvalidCheckpointsSkipped(t *testing.T) {
+func TestStorage_GetLatest_RejectsInvalidNewestCheckpointAfterTolerantList(t *testing.T) {
 	tmpDir := t.TempDir()
 	storage := NewStorageWithDir(tmpDir)
 	sessionName := "testproject"
@@ -754,6 +754,11 @@ func TestRestorer_RestoreLatest_InvalidCheckpointsSkipped(t *testing.T) {
 	if err := storage.Save(validCP); err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
+	validDir := storage.CheckpointDir(sessionName, validCP.ID)
+	validTime := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(validDir) failed: %v", err)
+	}
 
 	// Create an invalid checkpoint (corrupted JSON)
 	invalidDir := storage.CheckpointDir(sessionName, "invalid-checkpoint")
@@ -763,6 +768,10 @@ func TestRestorer_RestoreLatest_InvalidCheckpointsSkipped(t *testing.T) {
 	metaPath := filepath.Join(invalidDir, MetadataFile)
 	if err := os.WriteFile(metaPath, []byte("not valid json"), 0600); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
+	}
+	invalidTime := time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, invalidTime, invalidTime); err != nil {
+		t.Fatalf("Chtimes(invalidDir) failed: %v", err)
 	}
 
 	// List should still work, skipping invalid checkpoints
@@ -775,13 +784,13 @@ func TestRestorer_RestoreLatest_InvalidCheckpointsSkipped(t *testing.T) {
 		t.Errorf("List should have 1 valid checkpoint, got %d", len(list))
 	}
 
-	// GetLatest should return the valid checkpoint
-	cp, err := storage.GetLatest(sessionName)
-	if err != nil {
-		t.Fatalf("GetLatest() failed: %v", err)
+	// GetLatest should fail closed instead of silently returning the older valid checkpoint.
+	_, err = storage.GetLatest(sessionName)
+	if err == nil {
+		t.Fatal("GetLatest() error = nil, want invalid newest checkpoint error")
 	}
-	if cp.ID != "valid-checkpoint" {
-		t.Errorf("Latest checkpoint should be 'valid-checkpoint', got %q", cp.ID)
+	if !containsSubstr(err.Error(), "checkpoint selection blocked by invalid checkpoint") {
+		t.Fatalf("GetLatest() error = %v, want invalid newest checkpoint context", err)
 	}
 }
 

@@ -191,17 +191,29 @@ type HistoryListEntry struct {
 	DurationMs int       `json:"duration_ms,omitempty"`
 }
 
+func resolveHistorySessionFilter(session string) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", nil
+	}
+	return normalizeProjectScopedSessionName(session, !IsJSONOutput())
+}
+
 func runHistoryList(limit int, session, since, until, search, source string, searchRegex bool) error {
 	if limit <= 0 {
 		return fmt.Errorf("--limit must be greater than 0")
 	}
 
+	resolvedSession, err := resolveHistorySessionFilter(session)
+	if err != nil {
+		return err
+	}
+
 	var entries []history.HistoryEntry
-	var err error
 
 	// Get entries based on filters
-	if session != "" {
-		entries, err = history.ReadForSession(session)
+	if resolvedSession != "" {
+		entries, err = history.ReadForSession(resolvedSession)
 	} else if search != "" {
 		if searchRegex {
 			entries, err = history.SearchRegex(search)
@@ -377,6 +389,20 @@ func (r *HistoryShowResult) JSON() interface{} {
 	return r.Entry
 }
 
+func historyEntryByIDPrefix(entries []history.HistoryEntry, prefix string) (*history.HistoryEntry, int) {
+	var entry *history.HistoryEntry
+	matchCount := 0
+	for i := range entries {
+		if strings.HasPrefix(entries[i].ID, prefix) {
+			matchCount++
+			if entry == nil {
+				entry = &entries[i]
+			}
+		}
+	}
+	return entry, matchCount
+}
+
 func runHistoryShow(idOrIndex string) error {
 	entries, err := history.ReadAll()
 	if err != nil {
@@ -395,15 +421,20 @@ func runHistoryShow(idOrIndex string) error {
 		if idx > 0 && idx <= len(entries) {
 			entry = &entries[len(entries)-idx]
 		} else {
-			return fmt.Errorf("index %d out of range (1-%d)", idx, len(entries))
+			prefixMatch, matchCount := historyEntryByIDPrefix(entries, idOrIndex)
+			switch {
+			case matchCount == 1:
+				entry = prefixMatch
+			case matchCount > 1:
+				return fmt.Errorf("entry prefix %q is ambiguous (%d matches)", idOrIndex, matchCount)
+			default:
+				return fmt.Errorf("index %d out of range (1-%d)", idx, len(entries))
+			}
 		}
 	} else {
-		// Try to find by ID prefix
-		for i := range entries {
-			if strings.HasPrefix(entries[i].ID, idOrIndex) {
-				entry = &entries[i]
-				break
-			}
+		entry, matchCount := historyEntryByIDPrefix(entries, idOrIndex)
+		if matchCount > 1 {
+			return fmt.Errorf("entry prefix %q is ambiguous (%d matches)", idOrIndex, matchCount)
 		}
 		if entry == nil {
 			return fmt.Errorf("entry not found: %s", idOrIndex)

@@ -474,16 +474,7 @@ func (c *Capturer) List(sessionName string) ([]*Checkpoint, error) {
 
 // GetByIndex returns the Nth most recent checkpoint (1-indexed, 1 = latest).
 func (c *Capturer) GetByIndex(sessionName string, index int) (*Checkpoint, error) {
-	checkpoints, err := c.storage.List(sessionName)
-	if err != nil {
-		return nil, err
-	}
-
-	if index < 1 || index > len(checkpoints) {
-		return nil, fmt.Errorf("checkpoint index %d out of range (1-%d)", index, len(checkpoints))
-	}
-
-	return checkpoints[index-1], nil
+	return c.storage.getByRecentIndex(sessionName, index)
 }
 
 // ParseCheckpointRef parses a checkpoint reference which can be:

@@ -503,7 +503,10 @@ func (ic *IncrementalCreator) computeSessionChange(base, current SessionState) *
 
 // save persists the incremental checkpoint to disk.
 func (ic *IncrementalCreator) save(inc *IncrementalCheckpoint, repoDir string) error {
-	dir := ic.incrementalDir(inc.SessionName, inc.ID)
+	dir, err := ic.incrementalDir(inc.SessionName, inc.ID)
+	if err != nil {
+		return err
+	}
 
 	// Create directory
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -565,8 +568,31 @@ func (ic *IncrementalCreator) save(inc *IncrementalCheckpoint, repoDir string) e
 }
 
 // incrementalDir returns the directory path for an incremental checkpoint.
-func (ic *IncrementalCreator) incrementalDir(sessionName, incrementalID string) string {
-	return filepath.Join(ic.storage.BaseDir, sessionName, "incremental", incrementalID)
+func (ic *IncrementalCreator) incrementalBaseDir(sessionName string) (string, error) {
+	sessionDir, err := ic.storage.safeSessionDir(sessionName)
+	if err != nil {
+		return "", err
+	}
+	baseDir := filepath.Join(sessionDir, "incremental")
+	if err := validateExistingDirectoryPath(baseDir, "incremental"); err != nil {
+		return "", err
+	}
+	return baseDir, nil
+}
+
+func (ic *IncrementalCreator) incrementalDir(sessionName, incrementalID string) (string, error) {
+	baseDir, err := ic.incrementalBaseDir(sessionName)
+	if err != nil {
+		return "", err
+	}
+	if err := validateCheckpointID(incrementalID); err != nil {
+		return "", err
+	}
+	incDir := filepath.Join(baseDir, incrementalID)
+	if err := validateExistingDirectoryPath(incDir, "incremental"); err != nil {
+		return "", err
+	}
+	return incDir, nil
 }
 
 // generateGitPatch generates a git diff patch between two commits.
@@ -727,15 +753,39 @@ func (ir *IncrementalResolver) loadIncremental(sessionName, incrementalID string
 	return &inc, nil
 }
 
-func (ir *IncrementalResolver) incrementalMetadataPath(sessionName, incrementalID string) (string, error) {
+func (ir *IncrementalResolver) incrementalBaseDir(sessionName string) (string, error) {
 	sessionDir, err := ir.storage.safeSessionDir(sessionName)
+	if err != nil {
+		return "", err
+	}
+	baseDir := filepath.Join(sessionDir, "incremental")
+	if err := validateExistingDirectoryPath(baseDir, "incremental"); err != nil {
+		return "", err
+	}
+	return baseDir, nil
+}
+
+func (ir *IncrementalResolver) incrementalDir(sessionName, incrementalID string) (string, error) {
+	baseDir, err := ir.incrementalBaseDir(sessionName)
 	if err != nil {
 		return "", err
 	}
 	if err := validateCheckpointID(incrementalID); err != nil {
 		return "", err
 	}
-	return filepath.Join(sessionDir, "incremental", incrementalID, IncrementalMetadataFile), nil
+	incDir := filepath.Join(baseDir, incrementalID)
+	if err := validateExistingDirectoryPath(incDir, "incremental"); err != nil {
+		return "", err
+	}
+	return incDir, nil
+}
+
+func (ir *IncrementalResolver) incrementalMetadataPath(sessionName, incrementalID string) (string, error) {
+	incDir, err := ir.incrementalDir(sessionName, incrementalID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(incDir, IncrementalMetadataFile), nil
 }
 
 func (ir *IncrementalResolver) resolveExistingIncrementalMetadataPath(sessionName, incrementalID string) (string, error) {

@@ -2001,11 +2001,46 @@ func TestIncrementalCreator_incrementalDir(t *testing.T) {
 	storage := NewStorageWithDir(tmpDir)
 	ic := NewIncrementalCreatorWithStorage(storage)
 
-	dir := ic.incrementalDir("my-session", "inc-123")
+	dir, err := ic.incrementalDir("my-session", "inc-123")
+	if err != nil {
+		t.Fatalf("incrementalDir() error = %v", err)
+	}
 	expected := filepath.Join(tmpDir, "my-session", "incremental", "inc-123")
 
 	if dir != expected {
 		t.Errorf("incrementalDir() = %q, want %q", dir, expected)
+	}
+}
+
+func TestIncrementalCreator_save_RejectsSymlinkIncrementalBaseDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	ic := NewIncrementalCreatorWithStorage(storage)
+
+	sessionName := "test-session"
+	sessionDir := filepath.Join(tmpDir, sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(session dir) failed: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(sessionDir, "incremental")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	inc := &IncrementalCheckpoint{
+		ID:          "inc-creator-symlink-base",
+		SessionName: sessionName,
+		CreatedAt:   time.Now(),
+		Changes: IncrementalChanges{
+			PaneChanges: map[string]PaneChange{},
+		},
+	}
+
+	err := ic.save(inc, "")
+	if err == nil {
+		t.Fatal("save() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "incremental path must not be a symlink") {
+		t.Fatalf("save() error = %v, want incremental base symlink rejection", err)
 	}
 }
 
@@ -2171,6 +2206,53 @@ func TestIncrementalResolver_loadIncremental_RejectsSymlinkMetadata(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "must not be a symlink") {
 		t.Fatalf("loadIncremental() error = %v, want symlink rejection", err)
+	}
+}
+
+func TestIncrementalResolver_loadIncremental_RejectsSymlinkIncrementalDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "test-session"
+	incID := "inc-test-symlink-dir"
+	incBaseDir := filepath.Join(tmpDir, sessionName, "incremental")
+	if err := os.MkdirAll(incBaseDir, 0755); err != nil {
+		t.Fatalf("Failed to create incremental base directory: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(incBaseDir, incID)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	ir := NewIncrementalResolverWithStorage(storage)
+	_, err := ir.loadIncremental(sessionName, incID)
+	if err == nil {
+		t.Fatal("loadIncremental() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "incremental path must not be a symlink") {
+		t.Fatalf("loadIncremental() error = %v, want incremental dir symlink rejection", err)
+	}
+}
+
+func TestIncrementalResolver_loadIncremental_RejectsSymlinkIncrementalBaseDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "test-session"
+	sessionDir := filepath.Join(tmpDir, sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(session dir) failed: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(sessionDir, "incremental")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	ir := NewIncrementalResolverWithStorage(storage)
+	_, err := ir.loadIncremental(sessionName, "inc-test-symlink-base")
+	if err == nil {
+		t.Fatal("loadIncremental() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "incremental path must not be a symlink") {
+		t.Fatalf("loadIncremental() error = %v, want incremental base symlink rejection", err)
 	}
 }
 
@@ -2360,6 +2442,46 @@ func TestIncrementalResolver_ChainResolve_RejectsBrokenSymlinkBaseIncremental(t 
 	}
 	if !strings.Contains(err.Error(), "loading incremental checkpoint inc-base") || !strings.Contains(err.Error(), IncrementalMetadataFile) {
 		t.Fatalf("ChainResolve() error = %v, want invalid base incremental metadata context", err)
+	}
+}
+
+func TestIncrementalResolver_ChainResolve_RejectsSymlinkBaseIncrementalDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+	sessionName := "test-session"
+
+	writeIncremental := func(id, metadata string) {
+		t.Helper()
+		incDir := filepath.Join(tmpDir, sessionName, "incremental", id)
+		if err := os.MkdirAll(incDir, 0755); err != nil {
+			t.Fatalf("MkdirAll(%s) failed: %v", id, err)
+		}
+		if err := os.WriteFile(filepath.Join(incDir, IncrementalMetadataFile), []byte(metadata), 0600); err != nil {
+			t.Fatalf("WriteFile(%s) failed: %v", id, err)
+		}
+	}
+
+	writeIncremental("inc-top", `{
+		"version": 1,
+		"id": "inc-top",
+		"session_name": "test-session",
+		"base_checkpoint_id": "inc-base",
+		"created_at": "2025-01-06T12:00:00Z",
+		"changes": {}
+	}`)
+
+	incBaseRoot := filepath.Join(tmpDir, sessionName, "incremental")
+	if err := os.Symlink(t.TempDir(), filepath.Join(incBaseRoot, "inc-base")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	ir := NewIncrementalResolverWithStorage(storage)
+	_, err := ir.ChainResolve(sessionName, "inc-top")
+	if err == nil {
+		t.Fatal("ChainResolve() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "checking base incremental inc-base") || !strings.Contains(err.Error(), "incremental path must not be a symlink") {
+		t.Fatalf("ChainResolve() error = %v, want incremental dir symlink rejection", err)
 	}
 }
 

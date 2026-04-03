@@ -412,7 +412,18 @@ type archiveFileInfo struct {
 }
 
 func regenerateSummaryFromArchive(sessionArg string, format summary.SummaryFormat, jsonOut bool, projectDir, wd string) error {
-	archiveFile, sessionName, err := findArchiveFile(sessionArg)
+	searchSession := strings.TrimSpace(sessionArg)
+	if searchSession != "" {
+		resolved, err := normalizeProjectScopedSessionName(searchSession, !IsJSONOutput())
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(resolved) != "" {
+			searchSession = resolved
+		}
+	}
+
+	archiveFile, sessionName, err := findArchiveFile(searchSession)
 	if err != nil {
 		return err
 	}
@@ -421,7 +432,7 @@ func regenerateSummaryFromArchive(sessionArg string, format summary.SummaryForma
 	}
 
 	if sessionName == "" {
-		sessionName = sessionArg
+		sessionName = searchSession
 	}
 	if projectDir == "" {
 		projectDir, err = resolveProjectDir(sessionName, wd, strings.TrimSpace(sessionArg) != "")
