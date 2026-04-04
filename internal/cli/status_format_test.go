@@ -83,14 +83,15 @@ func TestModelNameForPane(t *testing.T) {
 
 	cfg = nil
 
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentClaude}); got != "claude-sonnet-4-6" {
-		t.Errorf("default claude model = %q", got)
+	defaults := config.DefaultModels()
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentClaude}); got != defaults.DefaultClaude {
+		t.Errorf("default claude model = %q, want %q", got, defaults.DefaultClaude)
 	}
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentCodex}); got != "gpt-4" {
-		t.Errorf("default codex model = %q", got)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentCodex}); got != defaults.DefaultCodex {
+		t.Errorf("default codex model = %q, want %q", got, defaults.DefaultCodex)
 	}
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGemini}); got != "gemini-2.0-flash" {
-		t.Errorf("default gemini model = %q", got)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGemini}); got != defaults.DefaultGemini {
+		t.Errorf("default gemini model = %q, want %q", got, defaults.DefaultGemini)
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentOllama}); got != "llama3" {
 		t.Errorf("default ollama model = %q", got)
@@ -171,14 +172,15 @@ func TestModelNameForPaneCanonicalizesAliases(t *testing.T) {
 	cfg = nil
 	t.Cleanup(func() { cfg = oldCfg })
 
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("claude_code")}); got != "claude-sonnet-4-6" {
-		t.Fatalf("claude alias model = %q", got)
+	aliasDefaults := config.DefaultModels()
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("claude_code")}); got != aliasDefaults.DefaultClaude {
+		t.Fatalf("claude alias model = %q, want %q", got, aliasDefaults.DefaultClaude)
 	}
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("openai-codex")}); got != "gpt-4" {
-		t.Fatalf("codex alias model = %q", got)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("openai-codex")}); got != aliasDefaults.DefaultCodex {
+		t.Fatalf("codex alias model = %q, want %q", got, aliasDefaults.DefaultCodex)
 	}
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("google-gemini")}); got != "gemini-2.0-flash" {
-		t.Fatalf("gemini alias model = %q", got)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("google-gemini")}); got != aliasDefaults.DefaultGemini {
+		t.Fatalf("gemini alias model = %q, want %q", got, aliasDefaults.DefaultGemini)
 	}
 }
 

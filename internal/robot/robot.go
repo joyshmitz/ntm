@@ -3821,6 +3821,10 @@ type TailOptions struct {
 // GetTail returns recent pane output for AI consumption.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetTail(opts TailOptions) (*TailOutput, error) {
+	// Resolve labeled session names (e.g. "myproject" -> "myproject--frontend")
+	// so callers don't need to know the exact tmux session name. (ntm#104)
+	opts.Session = resolveSessionName(opts.Session)
+
 	if !tmux.SessionExists(opts.Session) {
 		return &TailOutput{
 			RobotResponse: NewErrorResponse(
@@ -5661,13 +5665,16 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 			}
 		}
 	}
+	// Fall back to compiled-in defaults from config.DefaultModels() so the
+	// values stay in sync with the canonical defaults. (ntm#105)
+	defaults := config.DefaultModels()
 	switch pane.Type {
 	case tmux.AgentClaude:
-		return "claude-sonnet-4-6"
+		return defaults.DefaultClaude
 	case tmux.AgentCodex:
-		return "gpt-4"
+		return defaults.DefaultCodex
 	case tmux.AgentGemini:
-		return "gemini-2.0-flash"
+		return defaults.DefaultGemini
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -5675,7 +5682,7 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 	case tmux.AgentAider:
 		return "aider"
 	case tmux.AgentOllama:
-		return "llama3"
+		return defaults.DefaultOllama
 	default:
 		return ""
 	}
@@ -9623,6 +9630,10 @@ type ActivityAgentHints struct {
 // GetActivity returns agent activity state for a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
+	// Resolve labeled session names (e.g. "myproject" -> "myproject--frontend")
+	// so callers don't need to know the exact tmux session name. (ntm#104)
+	opts.Session = resolveSessionName(opts.Session)
+
 	output := &ActivityOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,

@@ -1709,15 +1709,18 @@ func modelNameForPane(p tmux.Pane) string {
 			}
 		}
 	}
+	// Fall back to compiled-in defaults from config.DefaultModels() so the
+	// values stay in sync with the canonical defaults. (ntm#105)
+	defaults := config.DefaultModels()
 	switch agentType {
 	case tmux.AgentClaude:
-		return "claude-sonnet-4-6"
+		return defaults.DefaultClaude
 	case tmux.AgentCodex:
-		return "gpt-4"
+		return defaults.DefaultCodex
 	case tmux.AgentGemini:
-		return "gemini-2.0-flash"
+		return defaults.DefaultGemini
 	case tmux.AgentOllama:
-		return "llama3"
+		return defaults.DefaultOllama
 	default:
 		return ""
 	}
