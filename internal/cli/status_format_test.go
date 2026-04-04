@@ -93,8 +93,8 @@ func TestModelNameForPane(t *testing.T) {
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentGemini}); got != defaults.DefaultGemini {
 		t.Errorf("default gemini model = %q, want %q", got, defaults.DefaultGemini)
 	}
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentOllama}); got != "llama3" {
-		t.Errorf("default ollama model = %q", got)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentOllama}); got != defaults.DefaultOllama {
+		t.Errorf("default ollama model = %q, want %q", got, defaults.DefaultOllama)
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentUser}); got != "" {
 		t.Errorf("default user model = %q, want empty", got)
