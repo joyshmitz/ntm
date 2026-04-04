@@ -471,7 +471,7 @@ func TestAutoCheckpointer_GetLastAutoCheckpoint_RejectsInvalidNewestAutoCheckpoi
 		ID:          "20260101-120000-0001-auto-interval",
 		Name:        "auto-interval",
 		SessionName: session,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		Session:     SessionState{},
 	}
 	if err := storage.Save(valid); err != nil {
@@ -506,6 +506,55 @@ func TestAutoCheckpointer_GetLastAutoCheckpoint_RejectsInvalidNewestAutoCheckpoi
 	}
 }
 
+func TestAutoCheckpointer_ListAutoCheckpoints_RejectsInvalidNewestAutoCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	storage := NewStorageWithDir(t.TempDir())
+	checkpointer := &AutoCheckpointer{
+		capturer: NewCapturerWithStorage(storage),
+		storage:  storage,
+	}
+	session := "auto-list-selection-session"
+
+	valid := &Checkpoint{
+		ID:          "20260101-120000-0001-auto-interval",
+		Name:        "auto-interval",
+		SessionName: session,
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Session:     SessionState{},
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Save(%s): %v", valid.ID, err)
+	}
+	validDir := storage.CheckpointDir(session, valid.ID)
+	validTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(%s): %v", validDir, err)
+	}
+
+	sessionDir := filepath.Join(storage.BaseDir, session)
+	invalidID := "20260101-130000-0002-auto-error"
+	invalidDir := filepath.Join(sessionDir, invalidID)
+	if err := os.MkdirAll(invalidDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", invalidDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, MetadataFile), []byte("{"), 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata): %v", err)
+	}
+	invalidTime := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, invalidTime, invalidTime); err != nil {
+		t.Fatalf("Chtimes(%s): %v", invalidDir, err)
+	}
+
+	_, err := checkpointer.ListAutoCheckpoints(session)
+	if err == nil {
+		t.Fatal("ListAutoCheckpoints() error = nil, want invalid newer auto-checkpoint rejection")
+	}
+	if !strings.Contains(err.Error(), "listing auto-checkpoints blocked by invalid checkpoint") {
+		t.Fatalf("ListAutoCheckpoints() error = %v, want invalid newer auto-checkpoint context", err)
+	}
+}
+
 func TestAutoCheckpointer_GetLastAutoCheckpoint_IgnoresInvalidNewerManualCheckpoint(t *testing.T) {
 	t.Parallel()
 
@@ -520,7 +569,7 @@ func TestAutoCheckpointer_GetLastAutoCheckpoint_IgnoresInvalidNewerManualCheckpo
 		ID:          "20260101-120000-0001-auto-interval",
 		Name:        "auto-interval",
 		SessionName: session,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		Session:     SessionState{},
 	}
 	if err := storage.Save(valid); err != nil {
@@ -555,6 +604,58 @@ func TestAutoCheckpointer_GetLastAutoCheckpoint_IgnoresInvalidNewerManualCheckpo
 	}
 }
 
+func TestAutoCheckpointer_ListAutoCheckpoints_IgnoresInvalidNewerManualCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	storage := NewStorageWithDir(t.TempDir())
+	checkpointer := &AutoCheckpointer{
+		capturer: NewCapturerWithStorage(storage),
+		storage:  storage,
+	}
+	session := "auto-list-selection-manual-session"
+
+	valid := &Checkpoint{
+		ID:          "20260101-120000-0001-auto-interval",
+		Name:        "auto-interval",
+		SessionName: session,
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Session:     SessionState{},
+	}
+	if err := storage.Save(valid); err != nil {
+		t.Fatalf("Save(%s): %v", valid.ID, err)
+	}
+	validDir := storage.CheckpointDir(session, valid.ID)
+	validTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(validDir, validTime, validTime); err != nil {
+		t.Fatalf("Chtimes(%s): %v", validDir, err)
+	}
+
+	sessionDir := filepath.Join(storage.BaseDir, session)
+	invalidID := "20260101-130000-0002-manual-latest"
+	invalidDir := filepath.Join(sessionDir, invalidID)
+	if err := os.MkdirAll(invalidDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", invalidDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, MetadataFile), []byte("{"), 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata): %v", err)
+	}
+	invalidTime := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(invalidDir, invalidTime, invalidTime); err != nil {
+		t.Fatalf("Chtimes(%s): %v", invalidDir, err)
+	}
+
+	got, err := checkpointer.ListAutoCheckpoints(session)
+	if err != nil {
+		t.Fatalf("ListAutoCheckpoints(): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListAutoCheckpoints() len = %d, want 1", len(got))
+	}
+	if got[0].ID != valid.ID {
+		t.Fatalf("ListAutoCheckpoints()[0].ID = %q, want %q", got[0].ID, valid.ID)
+	}
+}
+
 func TestAutoCheckpointer_RotateAutoCheckpoints_RejectsInvalidRetainedAutoCheckpoint(t *testing.T) {
 	t.Parallel()
 
@@ -569,7 +670,7 @@ func TestAutoCheckpointer_RotateAutoCheckpoints_RejectsInvalidRetainedAutoCheckp
 		ID:          "20260101-120000-0001-auto-interval",
 		Name:        "auto-interval",
 		SessionName: session,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		Session:     SessionState{},
 	}
 	if err := storage.Save(valid); err != nil {
@@ -621,7 +722,7 @@ func TestAutoCheckpointer_RotateAutoCheckpoints_DeletesInvalidOverflowAutoCheckp
 		ID:          "20260101-140000-0001-auto-interval",
 		Name:        "auto-interval",
 		SessionName: session,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2026, 1, 1, 14, 0, 0, 0, time.UTC),
 		Session:     SessionState{},
 	}
 	if err := storage.Save(newest); err != nil {
@@ -637,7 +738,7 @@ func TestAutoCheckpointer_RotateAutoCheckpoints_DeletesInvalidOverflowAutoCheckp
 		ID:          "20260101-130000-0002-auto-error",
 		Name:        "auto-error",
 		SessionName: session,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC),
 		Session:     SessionState{},
 	}
 	if err := storage.Save(mid); err != nil {

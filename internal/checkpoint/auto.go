@@ -222,13 +222,17 @@ func (a *AutoCheckpointer) GetLastAutoCheckpoint(sessionName string) (*Checkpoin
 
 // ListAutoCheckpoints returns all auto-checkpoints for a session
 func (a *AutoCheckpointer) ListAutoCheckpoints(sessionName string) ([]*Checkpoint, error) {
-	checkpoints, err := a.storage.List(sessionName)
+	candidates, err := a.autoCheckpointCandidates(sessionName)
 	if err != nil {
 		return nil, err
 	}
 
 	var autoCheckpoints []*Checkpoint
-	for _, cp := range checkpoints {
+	for _, candidate := range candidates {
+		cp, err := a.storage.Load(sessionName, candidate.name)
+		if err != nil {
+			return nil, fmt.Errorf("listing auto-checkpoints blocked by invalid checkpoint %q: %w", candidate.name, err)
+		}
 		if isAutoCheckpoint(cp) {
 			autoCheckpoints = append(autoCheckpoints, cp)
 		}

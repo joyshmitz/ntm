@@ -747,7 +747,7 @@ func TestStorage_GetLatest_RejectsInvalidNewestCheckpointAfterTolerantList(t *te
 		ID:          "valid-checkpoint",
 		Name:        "valid",
 		SessionName: sessionName,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 		WorkingDir:  tmpDir,
 		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
 	}

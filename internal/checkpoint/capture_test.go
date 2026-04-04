@@ -232,6 +232,53 @@ func TestCapturer_GetByIndex(t *testing.T) {
 	}
 }
 
+func TestCapturer_GetByIndex_PrefersCreatedAtOverDirectoryModTime(t *testing.T) {
+	t.Parallel()
+	storage := NewStorageWithDir(t.TempDir())
+	capturer := NewCapturerWithStorage(storage)
+	session := "idx-created-at-session"
+
+	older := &Checkpoint{
+		ID:          "20260101-100000-0001-older",
+		Name:        "older",
+		SessionName: session,
+		CreatedAt:   time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		Session:     SessionState{},
+	}
+	newer := &Checkpoint{
+		ID:          "20260101-120000-0002-newer",
+		Name:        "newer",
+		SessionName: session,
+		CreatedAt:   time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Session:     SessionState{},
+	}
+	if err := storage.Save(older); err != nil {
+		t.Fatalf("Save(older) failed: %v", err)
+	}
+	if err := storage.Save(newer); err != nil {
+		t.Fatalf("Save(newer) failed: %v", err)
+	}
+
+	olderDir := storage.CheckpointDir(session, older.ID)
+	newerDir := storage.CheckpointDir(session, newer.ID)
+	olderModTime := time.Date(2026, 1, 1, 15, 0, 0, 0, time.UTC)
+	newerModTime := time.Date(2026, 1, 1, 11, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(olderDir, olderModTime, olderModTime); err != nil {
+		t.Fatalf("Chtimes(olderDir) failed: %v", err)
+	}
+	if err := os.Chtimes(newerDir, newerModTime, newerModTime); err != nil {
+		t.Fatalf("Chtimes(newerDir) failed: %v", err)
+	}
+
+	cp, err := capturer.GetByIndex(session, 1)
+	if err != nil {
+		t.Fatalf("GetByIndex(1): %v", err)
+	}
+	if cp.ID != newer.ID {
+		t.Fatalf("GetByIndex(1).ID = %q, want %q", cp.ID, newer.ID)
+	}
+}
+
 func TestCapturer_GetByIndex_RejectsInvalidNewerCheckpoint(t *testing.T) {
 	t.Parallel()
 	storage := NewStorageWithDir(t.TempDir())

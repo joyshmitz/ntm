@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +123,115 @@ func TestCheckpointStore_SaveAndLoadMetadata(t *testing.T) {
 	t.Logf("TEST: %s - assertion: metadata save/load works", t.Name())
 }
 
+func TestCheckpointStore_LoadMetadata_RejectsRunIDMismatch(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "expected-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	data, err := json.Marshal(CheckpointMetadata{RunID: "other-run"})
+	if err != nil {
+		t.Fatalf("marshal metadata failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, checkpointMetaFile), data, 0o644); err != nil {
+		t.Fatalf("write metadata failed: %v", err)
+	}
+
+	_, err = store.LoadMetadata(runID)
+	if err == nil {
+		t.Fatal("LoadMetadata() error = nil, want run ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "metadata run ID mismatch") {
+		t.Fatalf("LoadMetadata() error = %v, want run ID mismatch", err)
+	}
+}
+
+func TestCheckpointStore_RejectsInvalidRunID(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	err = store.SaveMetadata(CheckpointMetadata{
+		RunID:       "../escape",
+		SessionName: "test-session",
+		Question:    "bad run id",
+	})
+	if err == nil {
+		t.Fatal("SaveMetadata() error = nil, want invalid run ID")
+	}
+	if !strings.Contains(err.Error(), "invalid run ID") {
+		t.Fatalf("SaveMetadata() error = %v, want invalid run ID", err)
+	}
+
+	if _, err := store.LoadMetadata("../escape"); err == nil {
+		t.Fatal("LoadMetadata() error = nil, want invalid run ID")
+	} else if !strings.Contains(err.Error(), "invalid run ID") {
+		t.Fatalf("LoadMetadata() error = %v, want invalid run ID", err)
+	}
+}
+
+func TestCheckpointStore_RejectsInvalidModeID(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	err = store.SaveCheckpoint("valid-run", ModeCheckpoint{
+		ModeID: "../escape",
+		Status: string(AssignmentDone),
+	})
+	if err == nil {
+		t.Fatal("SaveCheckpoint() error = nil, want invalid mode ID")
+	}
+	if !strings.Contains(err.Error(), "invalid mode ID") {
+		t.Fatalf("SaveCheckpoint() error = %v, want invalid mode ID", err)
+	}
+
+	if _, err := store.LoadCheckpoint("valid-run", "../escape"); err == nil {
+		t.Fatal("LoadCheckpoint() error = nil, want invalid mode ID")
+	} else if !strings.Contains(err.Error(), "invalid mode ID") {
+		t.Fatalf("LoadCheckpoint() error = %v, want invalid mode ID", err)
+	}
+}
+
+func TestCheckpointStore_SaveCheckpoint_RejectsOutputModeIDMismatch(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	err = store.SaveCheckpoint("valid-run", ModeCheckpoint{
+		ModeID: "deductive",
+		Output: &ModeOutput{ModeID: "other-mode"},
+		Status: string(AssignmentDone),
+	})
+	if err == nil {
+		t.Fatal("SaveCheckpoint() error = nil, want output mode ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint output mode ID mismatch") {
+		t.Fatalf("SaveCheckpoint() error = %v, want output mode ID mismatch", err)
+	}
+}
+
 func TestCheckpointStore_SaveAndLoadSynthesisCheckpoint(t *testing.T) {
 	t.Logf("TEST: %s - starting", t.Name())
 
@@ -160,6 +270,203 @@ func TestCheckpointStore_SaveAndLoadSynthesisCheckpoint(t *testing.T) {
 	}
 
 	t.Logf("TEST: %s - assertion: synthesis checkpoint save/load works", t.Name())
+}
+
+func TestCheckpointStore_LoadSynthesisCheckpoint_RejectsRunIDMismatch(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "expected-synth-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	data, err := json.Marshal(SynthesisCheckpoint{RunID: "other-run"})
+	if err != nil {
+		t.Fatalf("marshal synthesis checkpoint failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, checkpointSynthesisFile), data, 0o644); err != nil {
+		t.Fatalf("write synthesis checkpoint failed: %v", err)
+	}
+
+	_, err = store.LoadSynthesisCheckpoint(runID)
+	if err == nil {
+		t.Fatal("LoadSynthesisCheckpoint() error = nil, want run ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "synthesis checkpoint run ID mismatch") {
+		t.Fatalf("LoadSynthesisCheckpoint() error = %v, want run ID mismatch", err)
+	}
+}
+
+func TestCheckpointStore_SaveMetadata_RejectsSymlinkedRunDir(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "outside-run")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir failed: %v", err)
+	}
+
+	runID := "symlink-run"
+	runPath := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.Symlink(targetDir, runPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	err = store.SaveMetadata(CheckpointMetadata{RunID: runID})
+	if err == nil {
+		t.Fatal("SaveMetadata() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "checkpoint run path must not be a symlink") {
+		t.Fatalf("SaveMetadata() error = %v, want run dir symlink rejection", err)
+	}
+}
+
+func TestCheckpointStore_LoadMetadata_RejectsSymlinkedMetadataFile(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "symlink-meta-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	target := filepath.Join(tmpDir, "outside-meta.json")
+	if err := os.WriteFile(target, []byte(`{"run_id":"outside"}`), 0o644); err != nil {
+		t.Fatalf("write target metadata failed: %v", err)
+	}
+
+	metaPath := filepath.Join(runDir, checkpointMetaFile)
+	if err := os.Symlink(target, metaPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err = store.LoadMetadata(runID)
+	if err == nil {
+		t.Fatal("LoadMetadata() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "metadata file must not be a symlink") {
+		t.Fatalf("LoadMetadata() error = %v, want metadata symlink rejection", err)
+	}
+}
+
+func TestCheckpointStore_LoadCheckpoint_RejectsSymlinkedCheckpointFile(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "symlink-checkpoint-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	target := filepath.Join(tmpDir, "outside-checkpoint.json")
+	if err := os.WriteFile(target, []byte(`{"mode_id":"deductive","status":"done"}`), 0o644); err != nil {
+		t.Fatalf("write target checkpoint failed: %v", err)
+	}
+
+	cpPath := filepath.Join(runDir, "deductive.json")
+	if err := os.Symlink(target, cpPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err = store.LoadCheckpoint(runID, "deductive")
+	if err == nil {
+		t.Fatal("LoadCheckpoint() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "checkpoint file must not be a symlink") {
+		t.Fatalf("LoadCheckpoint() error = %v, want checkpoint symlink rejection", err)
+	}
+}
+
+func TestCheckpointStore_LoadCheckpoint_RejectsModeIDMismatch(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "mode-mismatch-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	data, err := json.Marshal(ModeCheckpoint{ModeID: "other-mode", Status: string(AssignmentDone)})
+	if err != nil {
+		t.Fatalf("marshal checkpoint failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "expected-mode.json"), data, 0o644); err != nil {
+		t.Fatalf("write checkpoint failed: %v", err)
+	}
+
+	_, err = store.LoadCheckpoint(runID, "expected-mode")
+	if err == nil {
+		t.Fatal("LoadCheckpoint() error = nil, want mode ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint mode ID mismatch") {
+		t.Fatalf("LoadCheckpoint() error = %v, want mode ID mismatch", err)
+	}
+}
+
+func TestCheckpointStore_LoadCheckpoint_RejectsOutputModeIDMismatch(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "output-mode-mismatch-run"
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir failed: %v", err)
+	}
+
+	data, err := json.Marshal(ModeCheckpoint{
+		ModeID: "expected-mode",
+		Output: &ModeOutput{ModeID: "other-mode"},
+		Status: string(AssignmentDone),
+	})
+	if err != nil {
+		t.Fatalf("marshal checkpoint failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "expected-mode.json"), data, 0o644); err != nil {
+		t.Fatalf("write checkpoint failed: %v", err)
+	}
+
+	_, err = store.LoadCheckpoint(runID, "expected-mode")
+	if err == nil {
+		t.Fatal("LoadCheckpoint() error = nil, want output mode ID mismatch")
+	}
+	if !strings.Contains(err.Error(), "checkpoint output mode ID mismatch") {
+		t.Fatalf("LoadCheckpoint() error = %v, want output mode ID mismatch", err)
+	}
 }
 
 func TestCheckpoint_SaveRestore(t *testing.T) {
@@ -377,6 +684,41 @@ func TestCheckpointStore_LoadAllCheckpoints_SkipsSynthesis(t *testing.T) {
 	t.Logf("TEST: %s - assertion: synthesis checkpoint correctly skipped", t.Name())
 }
 
+func TestCheckpointStore_LoadAllCheckpoints_FailsOnInvalidCheckpointFile(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	runID := "invalid-checkpoint-run"
+	if err := store.SaveCheckpoint(runID, ModeCheckpoint{
+		ModeID: "good-mode",
+		Status: string(AssignmentDone),
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint failed: %v", err)
+	}
+
+	runDir := filepath.Join(tmpDir, checkpointDirName, runID)
+	target := filepath.Join(tmpDir, "outside-invalid-checkpoint.json")
+	if err := os.WriteFile(target, []byte(`{"mode_id":"bad-mode","status":"done"}`), 0o644); err != nil {
+		t.Fatalf("write target checkpoint failed: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(runDir, "bad-mode.json")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	_, err = store.LoadAllCheckpoints(runID)
+	if err == nil {
+		t.Fatal("LoadAllCheckpoints() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), `load checkpoint "bad-mode"`) || !strings.Contains(err.Error(), "checkpoint file must not be a symlink") {
+		t.Fatalf("LoadAllCheckpoints() error = %v, want invalid checkpoint file rejection", err)
+	}
+}
+
 func TestCheckpointStore_ListRuns(t *testing.T) {
 	t.Logf("TEST: %s - starting", t.Name())
 
@@ -471,6 +813,31 @@ func TestCheckpointStore_RunExists(t *testing.T) {
 	}
 
 	t.Logf("TEST: %s - assertion: RunExists works correctly", t.Name())
+}
+
+func TestCheckpointStore_RunExists_RejectsSymlinkedRunDir(t *testing.T) {
+	t.Logf("TEST: %s - starting", t.Name())
+
+	tmpDir := t.TempDir()
+	store, err := NewCheckpointStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewCheckpointStore failed: %v", err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "outside-run")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir failed: %v", err)
+	}
+
+	runID := "symlink-run"
+	runPath := filepath.Join(tmpDir, checkpointDirName, runID)
+	if err := os.Symlink(targetDir, runPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	if store.RunExists(runID) {
+		t.Fatal("RunExists() = true, want false for symlinked run dir")
+	}
 }
 
 func TestCheckpointStore_UpdateModeStatus(t *testing.T) {

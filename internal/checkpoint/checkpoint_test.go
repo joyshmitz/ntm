@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -705,6 +706,9 @@ func TestStorage_GetLatest(t *testing.T) {
 	if err == nil {
 		t.Error("GetLatest() should fail with no checkpoints")
 	}
+	if !errors.Is(err, ErrNoCheckpoints) {
+		t.Fatalf("GetLatest() error = %v, want ErrNoCheckpoints", err)
+	}
 
 	// Create checkpoints
 	cp1 := &Checkpoint{
@@ -740,6 +744,97 @@ func TestStorage_GetLatest(t *testing.T) {
 
 	if latest.Name != "second" {
 		t.Errorf("GetLatest().Name = %q, want %q", latest.Name, "second")
+	}
+}
+
+func TestStorage_GetLatest_PrefersCreatedAtOverDirectoryModTime(t *testing.T) {
+	storage := NewStorageWithDir(t.TempDir())
+	sessionName := "testproject"
+
+	older := &Checkpoint{
+		ID:          "20251210-100000-older",
+		Name:        "older",
+		SessionName: sessionName,
+		CreatedAt:   time.Date(2025, 12, 10, 10, 0, 0, 0, time.UTC),
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	newer := &Checkpoint{
+		ID:          "20251210-120000-newer",
+		Name:        "newer",
+		SessionName: sessionName,
+		CreatedAt:   time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC),
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%1"}}},
+	}
+	if err := storage.Save(older); err != nil {
+		t.Fatalf("Save(older) failed: %v", err)
+	}
+	if err := storage.Save(newer); err != nil {
+		t.Fatalf("Save(newer) failed: %v", err)
+	}
+
+	olderDir := storage.CheckpointDir(sessionName, older.ID)
+	newerDir := storage.CheckpointDir(sessionName, newer.ID)
+	olderModTime := time.Date(2025, 12, 10, 14, 0, 0, 0, time.UTC)
+	newerModTime := time.Date(2025, 12, 10, 11, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(olderDir, olderModTime, olderModTime); err != nil {
+		t.Fatalf("Chtimes(olderDir) failed: %v", err)
+	}
+	if err := os.Chtimes(newerDir, newerModTime, newerModTime); err != nil {
+		t.Fatalf("Chtimes(newerDir) failed: %v", err)
+	}
+
+	latest, err := storage.GetLatest(sessionName)
+	if err != nil {
+		t.Fatalf("GetLatest() failed: %v", err)
+	}
+	if latest.ID != newer.ID {
+		t.Fatalf("GetLatest() ID = %q, want %q", latest.ID, newer.ID)
+	}
+}
+
+func TestStorage_ListAndGetLatest_AgreeWhenCreatedAtEqual(t *testing.T) {
+	storage := NewStorageWithDir(t.TempDir())
+	sessionName := "testproject"
+	createdAt := time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC)
+
+	first := &Checkpoint{
+		ID:          "20251210-120000-alpha",
+		Name:        "alpha",
+		SessionName: sessionName,
+		CreatedAt:   createdAt,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%0"}}},
+	}
+	second := &Checkpoint{
+		ID:          "20251210-120000-zulu",
+		Name:        "zulu",
+		SessionName: sessionName,
+		CreatedAt:   createdAt,
+		Session:     SessionState{Panes: []PaneState{{Index: 0, ID: "%1"}}},
+	}
+	if err := storage.Save(first); err != nil {
+		t.Fatalf("Save(first) failed: %v", err)
+	}
+	if err := storage.Save(second); err != nil {
+		t.Fatalf("Save(second) failed: %v", err)
+	}
+
+	list, err := storage.List(sessionName)
+	if err != nil {
+		t.Fatalf("List() failed: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len(List()) = %d, want 2", len(list))
+	}
+	if list[0].ID != second.ID {
+		t.Fatalf("List()[0].ID = %q, want %q", list[0].ID, second.ID)
+	}
+
+	latest, err := storage.GetLatest(sessionName)
+	if err != nil {
+		t.Fatalf("GetLatest() failed: %v", err)
+	}
+	if latest.ID != second.ID {
+		t.Fatalf("GetLatest() ID = %q, want %q", latest.ID, second.ID)
 	}
 }
 
@@ -1004,6 +1099,43 @@ func TestStorage_ListAll(t *testing.T) {
 		if all[i].CreatedAt.After(all[i-1].CreatedAt) {
 			t.Errorf("ListAll not sorted by newest first")
 		}
+	}
+}
+
+func TestStorage_ListAll_TieBreaksEqualCreatedAtDeterministically(t *testing.T) {
+	storage := NewStorageWithDir(t.TempDir())
+	createdAt := time.Date(2025, 12, 10, 12, 0, 0, 0, time.UTC)
+
+	cpB := &Checkpoint{
+		ID:          "20251210-120000-same",
+		Name:        "same",
+		SessionName: "project-b",
+		CreatedAt:   createdAt,
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	cpA := &Checkpoint{
+		ID:          "20251210-120000-same",
+		Name:        "same",
+		SessionName: "project-a",
+		CreatedAt:   createdAt,
+		Session:     SessionState{Panes: []PaneState{}},
+	}
+	if err := storage.Save(cpB); err != nil {
+		t.Fatalf("Save(cpB) failed: %v", err)
+	}
+	if err := storage.Save(cpA); err != nil {
+		t.Fatalf("Save(cpA) failed: %v", err)
+	}
+
+	all, err := storage.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("len(ListAll()) = %d, want 2", len(all))
+	}
+	if all[0].SessionName != "project-a" || all[1].SessionName != "project-b" {
+		t.Fatalf("ListAll() session order = [%s %s], want [project-a project-b]", all[0].SessionName, all[1].SessionName)
 	}
 }
 

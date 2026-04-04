@@ -34,6 +34,10 @@ const (
 
 var checkpointIDRegex = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+var (
+	ErrNoCheckpoints = errors.New("no checkpoints found")
+)
+
 // Storage manages checkpoint storage on disk.
 type Storage struct {
 	// BaseDir is the base directory for all checkpoints
@@ -41,8 +45,9 @@ type Storage struct {
 }
 
 type checkpointSelectionEntry struct {
-	name    string
-	modTime time.Time
+	name     string
+	modTime  time.Time
+	sortTime time.Time
 }
 
 // NewStorage creates a new Storage with the default directory.
@@ -99,6 +104,11 @@ func validateCheckpointID(checkpointID string) error {
 		return fmt.Errorf("invalid checkpoint ID: %q", checkpointID)
 	}
 	return nil
+}
+
+// IsValidCheckpointID reports whether checkpointID is valid for exact checkpoint lookup.
+func IsValidCheckpointID(checkpointID string) bool {
+	return validateCheckpointID(checkpointID) == nil
 }
 
 func safePathFallbackComponent(value string) string {
@@ -537,7 +547,7 @@ func (s *Storage) List(sessionName string) ([]*Checkpoint, error) {
 
 	// Sort by creation time, newest first
 	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].CreatedAt.After(checkpoints[j].CreatedAt)
+		return checkpointNewerFirst(checkpoints[i], checkpoints[j])
 	})
 
 	return checkpoints, nil
@@ -567,10 +577,20 @@ func (s *Storage) ListAll() ([]*Checkpoint, error) {
 
 	// Sort by creation time, newest first
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].CreatedAt.After(all[j].CreatedAt)
+		return checkpointNewerFirst(all[i], all[j])
 	})
 
 	return all, nil
+}
+
+func checkpointNewerFirst(a, b *Checkpoint) bool {
+	if a.CreatedAt.Equal(b.CreatedAt) {
+		if a.SessionName != b.SessionName {
+			return a.SessionName < b.SessionName
+		}
+		return a.ID > b.ID
+	}
+	return a.CreatedAt.After(b.CreatedAt)
 }
 
 func (s *Storage) selectionEntries(sessionName string) ([]checkpointSelectionEntry, error) {
@@ -592,24 +612,55 @@ func (s *Storage) selectionEntries(sessionName string) ([]checkpointSelectionEnt
 		if !selectionCandidateEntry(entry) {
 			continue
 		}
-		info, err := entry.Info()
+		entryPath := filepath.Join(sessionDir, entry.Name())
+		info, err := os.Lstat(entryPath)
 		if err != nil {
 			return nil, fmt.Errorf("stat checkpoint entry %s: %w", entry.Name(), err)
 		}
+		modTime := info.ModTime()
 		candidates = append(candidates, checkpointSelectionEntry{
-			name:    entry.Name(),
-			modTime: info.ModTime(),
+			name:     entry.Name(),
+			modTime:  modTime,
+			sortTime: s.selectionSortTime(sessionName, entry.Name(), modTime),
 		})
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].modTime.Equal(candidates[j].modTime) {
+		if candidates[i].sortTime.Equal(candidates[j].sortTime) {
 			return candidates[i].name > candidates[j].name
 		}
-		return candidates[i].modTime.After(candidates[j].modTime)
+		return candidates[i].sortTime.After(candidates[j].sortTime)
 	})
 
 	return candidates, nil
+}
+
+func (s *Storage) selectionSortTime(sessionName, checkpointID string, fallback time.Time) time.Time {
+	dir, err := s.safeCheckpointDir(sessionName, checkpointID)
+	if err != nil {
+		return fallback
+	}
+	metaPath, err := resolveExistingCheckpointArtifactPath(dir, MetadataFile)
+	if err != nil {
+		return fallback
+	}
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return fallback
+	}
+
+	var meta struct {
+		ID          string    `json:"id"`
+		SessionName string    `json:"session_name"`
+		CreatedAt   time.Time `json:"created_at"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return fallback
+	}
+	if meta.ID != checkpointID || meta.SessionName != sessionName || meta.CreatedAt.IsZero() {
+		return fallback
+	}
+	return meta.CreatedAt
 }
 
 // HasCheckpointCandidates reports whether a session has any checkpoint-shaped
@@ -622,6 +673,24 @@ func (s *Storage) HasCheckpointCandidates(sessionName string) (bool, error) {
 	return len(candidates) > 0, nil
 }
 
+// InvalidCheckpointIDs reports checkpoint-shaped entries that exist on disk but
+// cannot be loaded successfully.
+func (s *Storage) InvalidCheckpointIDs(sessionName string) ([]string, error) {
+	candidates, err := s.selectionEntries(sessionName)
+	if err != nil {
+		return nil, err
+	}
+
+	var invalid []string
+	for _, candidate := range candidates {
+		if _, err := s.Load(sessionName, candidate.name); err != nil {
+			invalid = append(invalid, candidate.name)
+		}
+	}
+
+	return invalid, nil
+}
+
 func (s *Storage) getByRecentIndex(sessionName string, index int) (*Checkpoint, error) {
 	if index < 1 {
 		return nil, fmt.Errorf("checkpoint index %d out of range", index)
@@ -632,7 +701,7 @@ func (s *Storage) getByRecentIndex(sessionName string, index int) (*Checkpoint, 
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no checkpoints found for session: %s", sessionName)
+		return nil, fmt.Errorf("%w for session: %s", ErrNoCheckpoints, sessionName)
 	}
 
 	validSeen := 0

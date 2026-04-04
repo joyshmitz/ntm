@@ -25,6 +25,83 @@ const (
 	checkpointSynthesisFile = "synthesis.json"
 )
 
+// NormalizeCheckpointRunID trims and validates a run ID before it is used as a
+// filesystem path segment.
+func NormalizeCheckpointRunID(runID string) (string, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return "", errors.New("run ID is required")
+	}
+	if filepath.IsAbs(runID) || runID == "." || runID == ".." {
+		return "", fmt.Errorf("invalid run ID %q", runID)
+	}
+	if strings.Contains(runID, "/") || strings.Contains(runID, "\\") || strings.ContainsRune(runID, 0) {
+		return "", fmt.Errorf("invalid run ID %q", runID)
+	}
+	if filepath.Clean(runID) != runID {
+		return "", fmt.Errorf("invalid run ID %q", runID)
+	}
+	return runID, nil
+}
+
+func normalizeCheckpointModeID(modeID string) (string, error) {
+	modeID = strings.TrimSpace(modeID)
+	if modeID == "" {
+		return "", errors.New("mode ID is required")
+	}
+	if filepath.IsAbs(modeID) || modeID == "." || modeID == ".." {
+		return "", fmt.Errorf("invalid mode ID %q", modeID)
+	}
+	if strings.Contains(modeID, "/") || strings.Contains(modeID, "\\") || strings.ContainsRune(modeID, 0) {
+		return "", fmt.Errorf("invalid mode ID %q", modeID)
+	}
+	if filepath.Clean(modeID) != modeID {
+		return "", fmt.Errorf("invalid mode ID %q", modeID)
+	}
+	return modeID, nil
+}
+
+func validateExistingCheckpointDirectory(path, kind string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.ErrNotExist
+		}
+		return fmt.Errorf("stat %s: %w", kind, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink: %s", kind, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", kind, path)
+	}
+	return nil
+}
+
+func readRegularCheckpointFile(path, kind string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("stat %s: %w", kind, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s must not be a symlink: %s", kind, path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file: %s", kind, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("read %s: %w", kind, err)
+	}
+	return data, nil
+}
+
 // CheckpointMetadata holds metadata about a checkpoint.
 type CheckpointMetadata struct {
 	SessionName  string         `json:"session_name"`
@@ -97,21 +174,47 @@ func (s *CheckpointStore) WithLogger(logger *slog.Logger) *CheckpointStore {
 	return s
 }
 
+func (s *CheckpointStore) ensureRunDir(runID string) (string, error) {
+	runDir := filepath.Join(s.baseDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return "", fmt.Errorf("create run directory: %w", err)
+	}
+	if err := validateExistingCheckpointDirectory(runDir, "checkpoint run path"); err != nil {
+		return "", err
+	}
+	return runDir, nil
+}
+
+func (s *CheckpointStore) safeRunDir(runID string) (string, error) {
+	runDir := filepath.Join(s.baseDir, runID)
+	if err := validateExistingCheckpointDirectory(runDir, "checkpoint run path"); err != nil {
+		return "", err
+	}
+	return runDir, nil
+}
+
 // SaveCheckpoint saves a mode's output as a checkpoint.
 func (s *CheckpointStore) SaveCheckpoint(runID string, checkpoint ModeCheckpoint) error {
 	if s == nil {
 		return errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return err
 	}
-	if checkpoint.ModeID == "" {
-		return errors.New("mode ID is required")
+	normalizedModeID, err := normalizeCheckpointModeID(checkpoint.ModeID)
+	if err != nil {
+		return err
+	}
+	runID = normalizedRunID
+	checkpoint.ModeID = normalizedModeID
+	if checkpoint.Output != nil && checkpoint.Output.ModeID != checkpoint.ModeID {
+		return fmt.Errorf("checkpoint output mode ID mismatch: got %q, want %q", checkpoint.Output.ModeID, checkpoint.ModeID)
 	}
 
-	runDir := filepath.Join(s.baseDir, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return fmt.Errorf("create run directory: %w", err)
+	runDir, err := s.ensureRunDir(runID)
+	if err != nil {
+		return err
 	}
 
 	if checkpoint.CapturedAt.IsZero() {
@@ -143,13 +246,15 @@ func (s *CheckpointStore) SaveMetadata(meta CheckpointMetadata) error {
 	if s == nil {
 		return errors.New("checkpoint store is nil")
 	}
-	if meta.RunID == "" {
-		return errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(meta.RunID)
+	if err != nil {
+		return err
 	}
+	meta.RunID = normalizedRunID
 
-	runDir := filepath.Join(s.baseDir, meta.RunID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return fmt.Errorf("create run directory: %w", err)
+	runDir, err := s.ensureRunDir(meta.RunID)
+	if err != nil {
+		return err
 	}
 
 	if meta.CreatedAt.IsZero() {
@@ -182,13 +287,15 @@ func (s *CheckpointStore) SaveSynthesisCheckpoint(runID string, checkpoint Synth
 	if s == nil {
 		return errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return err
 	}
+	runID = normalizedRunID
 
-	runDir := filepath.Join(s.baseDir, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return fmt.Errorf("create run directory: %w", err)
+	runDir, err := s.ensureRunDir(runID)
+	if err != nil {
+		return err
 	}
 
 	if checkpoint.CreatedAt.IsZero() {
@@ -220,22 +327,32 @@ func (s *CheckpointStore) LoadSynthesisCheckpoint(runID string) (*SynthesisCheck
 	if s == nil {
 		return nil, errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return nil, errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return nil, err
+	}
+	runID = normalizedRunID
+
+	runDir, err := s.safeRunDir(runID)
+	if err != nil {
+		return nil, err
 	}
 
-	filename := filepath.Join(s.baseDir, runID, checkpointSynthesisFile)
-	data, err := os.ReadFile(filename)
+	filename := filepath.Join(runDir, checkpointSynthesisFile)
+	data, err := readRegularCheckpointFile(filename, "synthesis checkpoint file")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, os.ErrNotExist
 		}
-		return nil, fmt.Errorf("read synthesis checkpoint: %w", err)
+		return nil, err
 	}
 
 	var checkpoint SynthesisCheckpoint
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
 		return nil, fmt.Errorf("unmarshal synthesis checkpoint: %w", err)
+	}
+	if checkpoint.RunID != runID {
+		return nil, fmt.Errorf("synthesis checkpoint run ID mismatch: got %q, want %q", checkpoint.RunID, runID)
 	}
 
 	return &checkpoint, nil
@@ -246,22 +363,40 @@ func (s *CheckpointStore) LoadCheckpoint(runID, modeID string) (*ModeCheckpoint,
 	if s == nil {
 		return nil, errors.New("checkpoint store is nil")
 	}
-	if runID == "" || modeID == "" {
-		return nil, errors.New("run ID and mode ID are required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return nil, err
+	}
+	normalizedModeID, err := normalizeCheckpointModeID(modeID)
+	if err != nil {
+		return nil, err
+	}
+	runID = normalizedRunID
+	modeID = normalizedModeID
+
+	runDir, err := s.safeRunDir(runID)
+	if err != nil {
+		return nil, err
 	}
 
-	filename := filepath.Join(s.baseDir, runID, modeID+".json")
-	data, err := os.ReadFile(filename)
+	filename := filepath.Join(runDir, modeID+".json")
+	data, err := readRegularCheckpointFile(filename, "checkpoint file")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, os.ErrNotExist
 		}
-		return nil, fmt.Errorf("read checkpoint: %w", err)
+		return nil, err
 	}
 
 	var checkpoint ModeCheckpoint
 	if err := json.Unmarshal(data, &checkpoint); err != nil {
 		return nil, fmt.Errorf("unmarshal checkpoint: %w", err)
+	}
+	if checkpoint.ModeID != modeID {
+		return nil, fmt.Errorf("checkpoint mode ID mismatch: got %q, want %q", checkpoint.ModeID, modeID)
+	}
+	if checkpoint.Output != nil && checkpoint.Output.ModeID != modeID {
+		return nil, fmt.Errorf("checkpoint output mode ID mismatch: got %q, want %q", checkpoint.Output.ModeID, modeID)
 	}
 
 	return &checkpoint, nil
@@ -272,22 +407,32 @@ func (s *CheckpointStore) LoadMetadata(runID string) (*CheckpointMetadata, error
 	if s == nil {
 		return nil, errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return nil, errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return nil, err
+	}
+	runID = normalizedRunID
+
+	runDir, err := s.safeRunDir(runID)
+	if err != nil {
+		return nil, err
 	}
 
-	filename := filepath.Join(s.baseDir, runID, checkpointMetaFile)
-	data, err := os.ReadFile(filename)
+	filename := filepath.Join(runDir, checkpointMetaFile)
+	data, err := readRegularCheckpointFile(filename, "metadata file")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, os.ErrNotExist
 		}
-		return nil, fmt.Errorf("read metadata: %w", err)
+		return nil, err
 	}
 
 	var meta CheckpointMetadata
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil, fmt.Errorf("unmarshal metadata: %w", err)
+	}
+	if meta.RunID != runID {
+		return nil, fmt.Errorf("metadata run ID mismatch: got %q, want %q", meta.RunID, runID)
 	}
 
 	return &meta, nil
@@ -298,11 +443,17 @@ func (s *CheckpointStore) LoadAllCheckpoints(runID string) ([]ModeCheckpoint, er
 	if s == nil {
 		return nil, errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return nil, errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return nil, err
+	}
+	runID = normalizedRunID
+
+	runDir, err := s.safeRunDir(runID)
+	if err != nil {
+		return nil, err
 	}
 
-	runDir := filepath.Join(s.baseDir, runID)
 	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -324,12 +475,7 @@ func (s *CheckpointStore) LoadAllCheckpoints(runID string) ([]ModeCheckpoint, er
 		modeID := strings.TrimSuffix(entry.Name(), ".json")
 		checkpoint, err := s.LoadCheckpoint(runID, modeID)
 		if err != nil {
-			s.logger.Warn("failed to load checkpoint",
-				"run_id", runID,
-				"mode_id", modeID,
-				"error", err,
-			)
-			continue
+			return nil, fmt.Errorf("load checkpoint %q: %w", modeID, err)
 		}
 		checkpoints = append(checkpoints, *checkpoint)
 	}
@@ -389,9 +535,11 @@ func (s *CheckpointStore) DeleteRun(runID string) error {
 	if s == nil {
 		return errors.New("checkpoint store is nil")
 	}
-	if runID == "" {
-		return errors.New("run ID is required")
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return err
 	}
+	runID = normalizedRunID
 
 	runDir := filepath.Join(s.baseDir, runID)
 	if err := os.RemoveAll(runDir); err != nil {
@@ -435,12 +583,16 @@ func (s *CheckpointStore) CleanOld(maxAge time.Duration) (int, error) {
 
 // RunExists checks if a checkpoint run exists.
 func (s *CheckpointStore) RunExists(runID string) bool {
-	if s == nil || runID == "" {
+	if s == nil {
 		return false
 	}
-	runDir := filepath.Join(s.baseDir, runID)
-	info, err := os.Stat(runDir)
-	return err == nil && info.IsDir()
+	normalizedRunID, err := NormalizeCheckpointRunID(runID)
+	if err != nil {
+		return false
+	}
+	runID = normalizedRunID
+	_, err = s.safeRunDir(runID)
+	return err == nil
 }
 
 // GetCompletedOutputs returns all successfully completed mode outputs for a run.
