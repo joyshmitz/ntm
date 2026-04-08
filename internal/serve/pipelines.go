@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // Pipeline-specific error codes
@@ -151,6 +153,11 @@ func (s *Server) handleRunPipeline(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeMissingSession, "session is required", nil, reqID)
 		return
 	}
+	if err := tmux.ValidateSessionName(req.Session); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid session name: %s", err.Error()), nil, reqID)
+		return
+	}
 
 	slog.Info("pipeline run",
 		"request_id", reqID,
@@ -200,6 +207,11 @@ func (s *Server) handleExecPipeline(w http.ResponseWriter, r *http.Request) {
 
 	if req.Session == "" {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeMissingSession, "session is required", nil, reqID)
+		return
+	}
+	if err := tmux.ValidateSessionName(req.Session); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid session name: %s", err.Error()), nil, reqID)
 		return
 	}
 
@@ -354,6 +366,11 @@ func (s *Server) handleResumePipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	if session == "" {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeMissingSession, "session is required for resume", nil, reqID)
+		return
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid session name: %s", err.Error()), nil, reqID)
 		return
 	}
 

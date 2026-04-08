@@ -824,11 +824,6 @@ func GetDashboardAlertsSection(limits SectionLimits) ProjectedSection {
 	hints := DefaultSectionFormatHints(SectionAlerts)
 
 	tracker := alerts.GetGlobalTracker()
-	if tracker == nil {
-		section := NewProjectedSection(SectionAlerts, DashboardAlertsData{}).WithFormatHints(hints)
-		return section.WithOmission("unavailable", "alert tracker not initialized")
-	}
-
 	activeAlerts := tracker.GetActive()
 
 	// Convert to AlertInfo
@@ -857,15 +852,12 @@ func GetDashboardAlertsSection(limits SectionLimits) ProjectedSection {
 	}
 
 	// Build summary
-	var summary *AlertSummaryInfo
-	if tracker != nil {
-		summary = &AlertSummaryInfo{
-			TotalActive: original,
-			BySeverity:  make(map[string]int),
-		}
-		for _, a := range activeAlerts {
-			summary.BySeverity[string(a.Severity)]++
-		}
+	summary := &AlertSummaryInfo{
+		TotalActive: original,
+		BySeverity:  make(map[string]int),
+	}
+	for _, a := range activeAlerts {
+		summary.BySeverity[string(a.Severity)]++
 	}
 
 	data := DashboardAlertsData{

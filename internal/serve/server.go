@@ -87,7 +87,7 @@ type Server struct {
 	// Agent Mail client (lazy-init)
 	mailClient *agentmail.Client
 	projectDir string
-	mu         sync.Mutex
+	mu         sync.RWMutex
 
 	// Redaction configuration for REST API
 	redactionCfg *RedactionConfig
@@ -1322,7 +1322,10 @@ func (s *Server) corsMiddlewareFunc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			if !originAllowed(origin, s.corsAllowedOrigins) {
+			s.mu.RLock()
+			allowed := originAllowed(origin, s.corsAllowedOrigins)
+			s.mu.RUnlock()
+			if !allowed {
 				reqID := requestIDFromContext(r.Context())
 				writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden, "origin not allowed", nil, reqID)
 				return
@@ -1520,7 +1523,10 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			if !originAllowed(origin, s.corsAllowedOrigins) {
+			s.mu.RLock()
+			allowed := originAllowed(origin, s.corsAllowedOrigins)
+			s.mu.RUnlock()
+			if !allowed {
 				writeError(w, http.StatusForbidden, "origin not allowed")
 				return
 			}
@@ -2416,14 +2422,20 @@ func (s *Server) handleGetConfigV1(w http.ResponseWriter, r *http.Request) {
 	reqID := requestIDFromContext(r.Context())
 	slog.Info("config get", "request_id", reqID)
 
+	// Snapshot mutable fields under the lock.
+	s.mu.RLock()
+	origins := s.corsAllowedOrigins
+	projDir := s.projectDir
+	s.mu.RUnlock()
+
 	// Return safe configuration fields only (no secrets)
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"host":            s.host,
 		"port":            s.port,
 		"auth_mode":       string(s.auth.Mode),
-		"allowed_origins": s.corsAllowedOrigins,
+		"allowed_origins": origins,
 		"public_base_url": s.publicBaseURL,
-		"project_dir":     s.projectDir,
+		"project_dir":     projDir,
 	}, reqID)
 }
 
@@ -2442,7 +2454,8 @@ func (s *Server) handlePatchConfigV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply updates
+	// Apply updates and snapshot the result under the lock so the log
+	// and response body see a consistent view.
 	s.mu.Lock()
 	if req.AllowedOrigins != nil {
 		s.corsAllowedOrigins = req.AllowedOrigins
@@ -2452,15 +2465,17 @@ func (s *Server) handlePatchConfigV1(w http.ResponseWriter, r *http.Request) {
 		// Reset mail client so it picks up new project dir
 		s.mailClient = nil
 	}
+	currentOrigins := s.corsAllowedOrigins
+	currentProjectDir := s.projectDir
 	s.mu.Unlock()
 
-	slog.Info("config updated", "request_id", reqID, "allowed_origins", len(s.corsAllowedOrigins), "project_dir", s.projectDir)
+	slog.Info("config updated", "request_id", reqID, "allowed_origins", len(currentOrigins), "project_dir", currentProjectDir)
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"updated": true,
 		"config": map[string]interface{}{
-			"allowed_origins": s.corsAllowedOrigins,
-			"project_dir":     s.projectDir,
+			"allowed_origins": currentOrigins,
+			"project_dir":     currentProjectDir,
 		},
 	}, reqID)
 }
@@ -2993,6 +3008,12 @@ func (s *Server) handleCreateSessionV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := tmux.ValidateSessionName(req.Session); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			fmt.Sprintf("invalid session name: %s", err.Error()), nil, reqID)
+		return
+	}
+
 	result, err := kernel.Run(r.Context(), "sessions.create", map[string]interface{}{
 		"session": req.Session,
 		"panes":   req.Panes,
@@ -3246,16 +3267,17 @@ func (s *Server) handlePaneInputV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Policy check: reject text that matches a blocked safety pattern.
-	// Graceful degradation: if policy cannot be loaded, allow through.
-	if p, err := policy.LoadOrDefault(); err == nil {
-		if match := p.Check(req.Text); match != nil && match.Action == policy.ActionBlock {
-			slog.Warn("pane input blocked by policy",
-				"session", sessionID, "pane", paneIdx,
-				"pattern", match.Pattern, "request_id", reqID)
-			writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden,
-				fmt.Sprintf("blocked by safety policy: %s", match.Reason), nil, reqID)
-			return
-		}
+	// Graceful degradation: if policy cannot be loaded, allow through but log.
+	if p, policyErr := policy.LoadOrDefault(); policyErr != nil {
+		slog.Warn("pane input policy check skipped: failed to load policy",
+			"error", policyErr, "request_id", reqID)
+	} else if match := p.Check(req.Text); match != nil && match.Action == policy.ActionBlock {
+		slog.Warn("pane input blocked by policy",
+			"session", sessionID, "pane", paneIdx,
+			"pattern", match.Pattern, "request_id", reqID)
+		writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden,
+			fmt.Sprintf("blocked by safety policy: %s", match.Reason), nil, reqID)
+		return
 	}
 
 	// Build pane target
@@ -3630,14 +3652,15 @@ func (s *Server) handleAgentSendV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Policy check: reject messages that match a blocked safety pattern.
-	if p, err := policy.LoadOrDefault(); err == nil {
-		if match := p.Check(req.Message); match != nil && match.Action == policy.ActionBlock {
-			slog.Warn("agent send blocked by policy",
-				"session", sessionID, "pattern", match.Pattern, "request_id", reqID)
-			writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden,
-				fmt.Sprintf("blocked by safety policy: %s", match.Reason), nil, reqID)
-			return
-		}
+	if p, policyErr := policy.LoadOrDefault(); policyErr != nil {
+		slog.Warn("agent send policy check skipped: failed to load policy",
+			"error", policyErr, "request_id", reqID)
+	} else if match := p.Check(req.Message); match != nil && match.Action == policy.ActionBlock {
+		slog.Warn("agent send blocked by policy",
+			"session", sessionID, "pattern", match.Pattern, "request_id", reqID)
+		writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden,
+			fmt.Sprintf("blocked by safety policy: %s", match.Reason), nil, reqID)
+		return
 	}
 
 	opts := robot.SendOptions{
@@ -3687,6 +3710,20 @@ func (s *Server) handleAgentInterruptV1(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body", nil, reqID)
 		return
+	}
+
+	// Policy check on the follow-up message (if any).
+	if req.Message != "" {
+		if p, policyErr := policy.LoadOrDefault(); policyErr != nil {
+			slog.Warn("agent interrupt policy check skipped: failed to load policy",
+				"error", policyErr, "request_id", reqID)
+		} else if match := p.Check(req.Message); match != nil && match.Action == policy.ActionBlock {
+			slog.Warn("agent interrupt message blocked by policy",
+				"session", sessionID, "pattern", match.Pattern, "request_id", reqID)
+			writeErrorResponse(w, http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("blocked by safety policy: %s", match.Reason), nil, reqID)
+			return
+		}
 	}
 
 	opts := robot.InterruptOptions{
@@ -3960,7 +3997,10 @@ func (s *Server) checkWSOrigin(r *http.Request) bool {
 
 	// Check against configured allowed origins using full URL comparison
 	// (not prefix matching, which would allow https://evil.com to match https://e)
-	for _, allowed := range s.corsAllowedOrigins {
+	s.mu.RLock()
+	origins := s.corsAllowedOrigins
+	s.mu.RUnlock()
+	for _, allowed := range origins {
 		allowedURL, err := url.Parse(allowed)
 		if err != nil {
 			continue
@@ -3975,7 +4015,7 @@ func (s *Server) checkWSOrigin(r *http.Request) bool {
 		}
 	}
 
-	log.Printf("ws: rejected origin %q (allowed: %v)", origin, s.corsAllowedOrigins)
+	log.Printf("ws: rejected origin %q (allowed: %v)", origin, origins)
 	return false
 }
 
