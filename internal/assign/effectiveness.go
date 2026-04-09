@@ -253,7 +253,10 @@ func (ei *EffectivenessIntegrator) RankAgentsForTask(taskType string) (*Effectiv
 		Mode:     ei.GetMode(),
 	}
 
-	agentTypes := []tmux.AgentType{tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini}
+	agentTypes := []tmux.AgentType{
+		tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini,
+		tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama,
+	}
 
 	for _, agent := range agentTypes {
 		baseScore := ei.matrix.GetScore(agent, task)
