@@ -21,7 +21,8 @@ var (
 	triageCacheDir  string
 	triageCacheTime time.Time
 	triageCacheTTL  = TriageCacheTTL
-	triageCacheMu   sync.Mutex
+	triageCacheMu   sync.RWMutex
+	triageRunMu     sync.Mutex
 )
 
 func normalizeTriageDir(dir string) (string, error) {
@@ -52,13 +53,27 @@ func GetTriage(dir string) (*TriageResponse, error) {
 		return nil, err
 	}
 
-	triageCacheMu.Lock()
-	defer triageCacheMu.Unlock()
-
+	triageCacheMu.RLock()
 	// Return cached result if still valid and for the same directory
 	if triageCache != nil && triageCacheDir == normalizedDir && time.Since(triageCacheTime) < triageCacheTTL {
-		return triageCache, nil
+		cached := triageCache
+		triageCacheMu.RUnlock()
+		return cached, nil
 	}
+	triageCacheMu.RUnlock()
+
+	// Ensure only one runner fetches triage concurrently
+	triageRunMu.Lock()
+	defer triageRunMu.Unlock()
+
+	// Double-check cache after acquiring run lock
+	triageCacheMu.RLock()
+	if triageCache != nil && triageCacheDir == normalizedDir && time.Since(triageCacheTime) < triageCacheTTL {
+		cached := triageCache
+		triageCacheMu.RUnlock()
+		return cached, nil
+	}
+	triageCacheMu.RUnlock()
 
 	output, err := run(normalizedDir, "--robot-triage")
 	if err != nil {
@@ -71,9 +86,11 @@ func GetTriage(dir string) (*TriageResponse, error) {
 	}
 
 	// Update cache
+	triageCacheMu.Lock()
 	triageCache = &resp
 	triageCacheDir = normalizedDir
 	triageCacheTime = time.Now()
+	triageCacheMu.Unlock()
 
 	return &resp, nil
 }
@@ -223,15 +240,15 @@ func GetTriageDataHash(dir string) (string, error) {
 
 // IsCacheValid checks if the cache is still valid
 func IsCacheValid() bool {
-	triageCacheMu.Lock()
-	defer triageCacheMu.Unlock()
+	triageCacheMu.RLock()
+	defer triageCacheMu.RUnlock()
 	return triageCache != nil && time.Since(triageCacheTime) < triageCacheTTL
 }
 
 // GetCacheAge returns how long the cache has been in place
 func GetCacheAge() time.Duration {
-	triageCacheMu.Lock()
-	defer triageCacheMu.Unlock()
+	triageCacheMu.RLock()
+	defer triageCacheMu.RUnlock()
 	if triageCache == nil {
 		return 0
 	}
