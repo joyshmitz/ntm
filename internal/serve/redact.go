@@ -38,9 +38,9 @@ type RedactionSummary struct {
 func (s *Server) redactionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Snapshot config under lock to avoid races with SetRedactionConfig
-		s.mu.Lock()
+		s.mu.RLock()
 		rcfg := s.redactionCfg
-		s.mu.Unlock()
+		s.mu.RUnlock()
 
 		// Skip if redaction not enabled
 		if rcfg == nil || !rcfg.Enabled || rcfg.Config.Mode == redaction.ModeOff {
@@ -344,8 +344,8 @@ func (s *Server) SetRedactionConfig(cfg *RedactionConfig) {
 
 // GetRedactionConfig returns a copy of the current redaction configuration.
 func (s *Server) GetRedactionConfig() *RedactionConfig {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.redactionCfg == nil {
 		return nil
 	}

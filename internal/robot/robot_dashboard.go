@@ -138,6 +138,7 @@ func GetDashboard() (*DashboardOutput, error) {
 	for _, a := range activeAlerts {
 		output.Alerts = append(output.Alerts, AlertInfo{
 			ID:         a.ID,
+			Source:     a.Source,
 			Type:       string(a.Type),
 			Severity:   string(a.Severity),
 			Message:    a.Message,

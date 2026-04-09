@@ -4272,6 +4272,7 @@ type SnapshotReplayWindowInfo struct {
 // AlertInfo provides detailed alert information for robot output
 type AlertInfo struct {
 	ID         string                 `json:"id"`
+	Source     string                 `json:"source,omitempty"`
 	Type       string                 `json:"type"`
 	Severity   string                 `json:"severity"`
 	Message    string                 `json:"message"`
@@ -4575,6 +4576,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 		for i, a := range activeAlerts {
 			output.AlertsDetailed[i] = AlertInfo{
 				ID:         a.ID,
+				Source:     a.Source,
 				Type:       string(a.Type),
 				Severity:   string(a.Severity),
 				Message:    a.Message,
@@ -4708,6 +4710,7 @@ func buildProjectionBackedSnapshot(
 		for i, a := range activeAlerts {
 			output.AlertsDetailed[i] = AlertInfo{
 				ID:         a.ID,
+				Source:     a.Source,
 				Type:       string(a.Type),
 				Severity:   string(a.Severity),
 				Message:    a.Message,
@@ -8729,6 +8732,7 @@ func GetAlertsDetailed(includeResolved bool) (*AlertsOutput, error) {
 		for i, a := range resolved {
 			output.Resolved[i] = AlertInfo{
 				ID:         a.ID,
+				Source:     a.Source,
 				Type:       string(a.Type),
 				Severity:   string(a.Severity),
 				Message:    a.Message,

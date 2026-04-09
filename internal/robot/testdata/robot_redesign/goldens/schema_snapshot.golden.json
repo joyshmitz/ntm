@@ -157,6 +157,10 @@
             "description": "Severity",
             "type": "string"
           },
+          "source": {
+            "description": "Source",
+            "type": "string"
+          },
           "type": {
             "description": "Type",
             "type": "string"

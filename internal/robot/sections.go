@@ -831,6 +831,7 @@ func GetDashboardAlertsSection(limits SectionLimits) ProjectedSection {
 	for _, a := range activeAlerts {
 		alertInfos = append(alertInfos, AlertInfo{
 			ID:        a.ID,
+			Source:    a.Source,
 			Type:      string(a.Type),
 			Severity:  string(a.Severity),
 			Message:   a.Message,
