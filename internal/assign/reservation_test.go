@@ -133,6 +133,13 @@ the authentication bug.`,
 			wantMin:     2,
 		},
 		{
+			name:        "consecutive paths overlap bug",
+			title:       "Fix paths",
+			description: `Modify src/main.go src/util.go`,
+			wantPaths:   []string{"src/main.go", "src/util.go"},
+			wantMin:     2,
+		},
+		{
 			name:  "url should be excluded",
 			title: "Check documentation",
 			description: `See https://example.com/docs/api.html for details.
