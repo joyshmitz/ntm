@@ -1348,16 +1348,22 @@ func (s *Server) corsMiddlewareFunc(next http.Handler) http.Handler {
 // authMiddlewareFunc is the chi middleware version.
 func (s *Server) authMiddlewareFunc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth.Mode == AuthModeLocal || s.auth.Mode == "" || r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if err := s.authenticateRequest(r); err != nil {
+		claims, err := s.authenticateRequest(r)
+		if err != nil {
 			reqID := requestIDFromContext(r.Context())
 			log.Printf("auth failed mode=%s path=%s remote=%s request_id=%s err=%v", s.auth.Mode, r.URL.Path, r.RemoteAddr, reqID, err)
 			writeErrorResponse(w, http.StatusUnauthorized, ErrCodeUnauthorized, "unauthorized", nil, reqID)
 			return
+		}
+
+		if claims != nil {
+			ctx := context.WithValue(r.Context(), authContextKey, claims)
+			r = r.WithContext(ctx)
 		}
 
 		next.ServeHTTP(w, r)
@@ -1548,34 +1554,40 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 // authMiddleware enforces configured authentication for all routes.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth.Mode == AuthModeLocal || s.auth.Mode == "" || r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if err := s.authenticateRequest(r); err != nil {
+		claims, err := s.authenticateRequest(r)
+		if err != nil {
 			reqID := requestIDFromContext(r.Context())
 			log.Printf("auth failed mode=%s path=%s remote=%s request_id=%s err=%v", s.auth.Mode, r.URL.Path, r.RemoteAddr, reqID, err)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 
+		if claims != nil {
+			ctx := context.WithValue(r.Context(), authContextKey, claims)
+			r = r.WithContext(ctx)
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) authenticateRequest(r *http.Request) error {
+func (s *Server) authenticateRequest(r *http.Request) (map[string]interface{}, error) {
 	switch s.auth.Mode {
 	case AuthModeAPIKey:
-		return s.authenticateAPIKey(r)
+		return nil, s.authenticateAPIKey(r)
 	case AuthModeOIDC:
 		return s.authenticateOIDC(r)
 	case AuthModeMTLS:
-		return s.authenticateMTLS(r)
+		return nil, s.authenticateMTLS(r)
 	case AuthModeLocal, "":
-		return nil
+		return map[string]interface{}{"role": string(RoleAdmin)}, nil
 	default:
-		return fmt.Errorf("unsupported auth mode %q", s.auth.Mode)
+		return nil, fmt.Errorf("unsupported auth mode %q", s.auth.Mode)
 	}
 }
 
@@ -1593,10 +1605,10 @@ func (s *Server) authenticateAPIKey(r *http.Request) error {
 	return nil
 }
 
-func (s *Server) authenticateOIDC(r *http.Request) error {
+func (s *Server) authenticateOIDC(r *http.Request) (map[string]interface{}, error) {
 	token := extractBearerToken(r)
 	if token == "" {
-		return errors.New("missing bearer token")
+		return nil, errors.New("missing bearer token")
 	}
 	return s.validateOIDCToken(r.Context(), token)
 }
@@ -2061,42 +2073,42 @@ func isLoopbackHost(host string) bool {
 	return ip.IsLoopback()
 }
 
-func (s *Server) validateOIDCToken(ctx context.Context, token string) error {
+func (s *Server) validateOIDCToken(ctx context.Context, token string) (map[string]interface{}, error) {
 	if s.auth.OIDC.JWKSURL == "" || s.auth.OIDC.Issuer == "" {
-		return errors.New("oidc config incomplete")
+		return nil, errors.New("oidc config incomplete")
 	}
 	header, claims, signingInput, signature, err := parseJWT(token)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if header.Alg != "RS256" {
-		return fmt.Errorf("unsupported jwt alg %q", header.Alg)
+		return nil, fmt.Errorf("unsupported jwt alg %q", header.Alg)
 	}
 	if iss, ok := claimString(claims, "iss"); !ok || iss != s.auth.OIDC.Issuer {
-		return fmt.Errorf("invalid issuer")
+		return nil, fmt.Errorf("invalid issuer")
 	}
 	if s.auth.OIDC.Audience != "" && !claimAudienceContains(claims, s.auth.OIDC.Audience) {
-		return fmt.Errorf("invalid audience")
+		return nil, fmt.Errorf("invalid audience")
 	}
 	if exp, ok := claimInt64(claims, "exp"); ok {
 		if time.Now().After(time.Unix(exp, 0).Add(30 * time.Second)) {
-			return fmt.Errorf("token expired")
+			return nil, fmt.Errorf("token expired")
 		}
 	}
 	if nbf, ok := claimInt64(claims, "nbf"); ok {
 		if time.Now().Before(time.Unix(nbf, 0).Add(-30 * time.Second)) {
-			return fmt.Errorf("token not yet valid")
+			return nil, fmt.Errorf("token not yet valid")
 		}
 	}
 	key, err := s.jwksCache.getKey(ctx, s.auth.OIDC.JWKSURL, header.Kid)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hash := sha256.Sum256([]byte(signingInput))
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], signature); err != nil {
-		return fmt.Errorf("invalid token signature")
+		return nil, fmt.Errorf("invalid token signature")
 	}
-	return nil
+	return claims, nil
 }
 
 type jwtHeader struct {

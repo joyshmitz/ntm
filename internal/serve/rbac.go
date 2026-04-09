@@ -255,16 +255,17 @@ func (s *Server) extractRoleFromClaims(claims map[string]interface{}) Role {
 	// 4. Check realm_access.roles (Keycloak format)
 	if realmAccess, ok := claims["realm_access"].(map[string]interface{}); ok {
 		if roles, ok := realmAccess["roles"].([]interface{}); ok {
+			maxRole := RoleViewer
 			for _, r := range roles {
 				if roleStr, ok := r.(string); ok {
 					parsed := ParseRole(roleStr)
-					if parsed == RoleAdmin {
-						return RoleAdmin
-					}
-					if parsed == RoleOperator {
-						return RoleOperator
+					if roleHierarchy(parsed) > roleHierarchy(maxRole) {
+						maxRole = parsed
 					}
 				}
+			}
+			if maxRole != RoleViewer {
+				return maxRole
 			}
 		}
 	}
