@@ -630,6 +630,9 @@ func (s *Scheduler) worker(id int) {
 
 	slog.Debug("worker started", "worker_id", id)
 
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -637,7 +640,7 @@ func (s *Scheduler) worker(id int) {
 			return
 		case <-s.jobNotify:
 			s.processJobs(id)
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
 			// Periodic check
 			s.processJobs(id)
 		}
