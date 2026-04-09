@@ -166,7 +166,11 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		}
 
 		if shouldBreak {
-			result.BreakReason = "break statement"
+			if len(iterResult) > 0 && iterResult[len(iterResult)-1].Status == StatusFailed {
+				result.Error = iterResult[len(iterResult)-1].Error
+			} else {
+				result.BreakReason = "break statement"
+			}
 			break
 		}
 
@@ -194,7 +198,11 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 
 	le.clearLoopVars(varName)
 
-	result.Status = StatusCompleted
+	if result.Error != nil {
+		result.Status = StatusFailed
+	} else {
+		result.Status = StatusCompleted
+	}
 	result.FinishedAt = time.Now()
 
 	le.executor.emitProgress("loop_complete", step.ID,
@@ -278,7 +286,11 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 		}
 
 		if shouldBreak {
-			result.BreakReason = "break statement"
+			if len(iterResult) > 0 && iterResult[len(iterResult)-1].Status == StatusFailed {
+				result.Error = iterResult[len(iterResult)-1].Error
+			} else {
+				result.BreakReason = "break statement"
+			}
 			break
 		}
 
@@ -320,7 +332,11 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 
 	le.clearLoopVars(varName)
 
-	result.Status = StatusCompleted
+	if result.Error != nil {
+		result.Status = StatusFailed
+	} else {
+		result.Status = StatusCompleted
+	}
 	result.FinishedAt = time.Now()
 
 	le.executor.emitProgress("loop_complete", step.ID,
@@ -401,7 +417,11 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 		}
 
 		if shouldBreak {
-			result.BreakReason = "break statement"
+			if len(iterResult) > 0 && iterResult[len(iterResult)-1].Status == StatusFailed {
+				result.Error = iterResult[len(iterResult)-1].Error
+			} else {
+				result.BreakReason = "break statement"
+			}
 			break
 		}
 
@@ -429,7 +449,11 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 
 	le.clearLoopVars(varName)
 
-	result.Status = StatusCompleted
+	if result.Error != nil {
+		result.Status = StatusFailed
+	} else {
+		result.Status = StatusCompleted
+	}
 	result.FinishedAt = time.Now()
 
 	le.executor.emitProgress("loop_complete", step.ID,
