@@ -418,9 +418,10 @@ func parseNvidiaSMIMemoryMB(raw string) float64 {
 	return maxMB
 }
 
+var darwinVRAMGBRegex = regexp.MustCompile(`(?i)VRAM[^:]*:\s*([0-9]+(?:\.[0-9]+)?)\s*(GB|MB)`)
+
 func parseDarwinVRAMGB(raw string) float64 {
-	re := regexp.MustCompile(`(?i)VRAM[^:]*:\s*([0-9]+(?:\.[0-9]+)?)\s*(GB|MB)`)
-	matches := re.FindAllStringSubmatch(raw, -1)
+	matches := darwinVRAMGBRegex.FindAllStringSubmatch(raw, -1)
 	var maxGB float64
 	for _, m := range matches {
 		if len(m) < 3 {

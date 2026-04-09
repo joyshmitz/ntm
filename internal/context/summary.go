@@ -282,21 +282,19 @@ func extractListSection(response, header string) []string {
 	return items
 }
 
+var filePathRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?m)(?:^|\s)([a-zA-Z0-9_./\-]+\.[a-zA-Z]{1,10})(?:\s|$|:|,)`),        // file.ext
+	regexp.MustCompile(`(?m)(?:^|\s)((?:[a-zA-Z0-9_\-]+/)+[a-zA-Z0-9_\-]+\.[a-zA-Z]{1,10})`), // path/to/file.ext
+	regexp.MustCompile(`(?m)(?:^|\s)(internal/[a-zA-Z0-9_./\-]+)`),                           // internal/...
+	regexp.MustCompile(`(?m)(?:^|\s)(cmd/[a-zA-Z0-9_./\-]+)`),                                // cmd/...
+}
+
 // extractFilePaths extracts file paths from text using common patterns.
 func extractFilePaths(text string) []string {
-	// Match common file path patterns
-	patterns := []string{
-		`(?m)(?:^|\s)([a-zA-Z0-9_./\-]+\.[a-zA-Z]{1,10})(?:\s|$|:|,)`,        // file.ext
-		`(?m)(?:^|\s)((?:[a-zA-Z0-9_\-]+/)+[a-zA-Z0-9_\-]+\.[a-zA-Z]{1,10})`, // path/to/file.ext
-		`(?m)(?:^|\s)(internal/[a-zA-Z0-9_./\-]+)`,                           // internal/...
-		`(?m)(?:^|\s)(cmd/[a-zA-Z0-9_./\-]+)`,                                // cmd/...
-	}
-
 	seen := make(map[string]bool)
 	var files []string
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range filePathRegexes {
 		matches := re.FindAllStringSubmatch(text, -1)
 		for _, match := range matches {
 			if len(match) > 1 {
@@ -344,17 +342,15 @@ func isLikelyFilePath(s string) bool {
 	return strings.Contains(s, "/")
 }
 
+var lastTaskRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:working on|implementing|fixing|adding|creating|updating)\s+(.+?)(?:\.|$)`),
+	regexp.MustCompile(`(?i)(?:task|issue|feature|bug):\s*(.+?)(?:\n|$)`),
+	regexp.MustCompile(`(?i)(?:TODO|DOING):\s*(.+?)(?:\n|$)`),
+}
+
 // extractLastTask attempts to extract the last task from recent output.
 func extractLastTask(text string) string {
-	// Look for common task indicators
-	patterns := []string{
-		`(?i)(?:working on|implementing|fixing|adding|creating|updating)\s+(.+?)(?:\.|$)`,
-		`(?i)(?:task|issue|feature|bug):\s*(.+?)(?:\n|$)`,
-		`(?i)(?:TODO|DOING):\s*(.+?)(?:\n|$)`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range lastTaskRegexes {
 		if matches := re.FindStringSubmatch(text); len(matches) > 1 {
 			task := strings.TrimSpace(matches[1])
 			if len(task) > 200 {

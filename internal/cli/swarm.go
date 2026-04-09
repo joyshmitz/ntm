@@ -524,9 +524,10 @@ func newSwarmPlanCmd() *cobra.Command {
 	return cmd
 }
 
+var swarmSessionRE = regexp.MustCompile(`^(cc|cod|gmi)_agents_[0-9]+$`)
+
 // Subcommand: swarm status
 func newSwarmStatusCmd() *cobra.Command {
-	swarmSessionRE := regexp.MustCompile(`^(cc|cod|gmi)_agents_[0-9]+$`)
 
 	cmd := &cobra.Command{
 		Use:   "status",
