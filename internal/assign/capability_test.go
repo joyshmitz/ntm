@@ -9,7 +9,10 @@ import (
 
 func TestDefaultCapabilities(t *testing.T) {
 	// Verify all agent types have capabilities
-	agents := []tmux.AgentType{tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini}
+	agents := []tmux.AgentType{
+		tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini,
+		tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama,
+	}
 	for _, agent := range agents {
 		if _, ok := DefaultCapabilities[agent]; !ok {
 			t.Errorf("DefaultCapabilities missing agent %s", agent)
