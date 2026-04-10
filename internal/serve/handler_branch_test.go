@@ -8384,7 +8384,7 @@ func TestValidateOIDCToken_IncompleteConfig(t *testing.T) {
 	// Empty OIDC config → "oidc config incomplete"
 	s.auth = AuthConfig{Mode: AuthModeOIDC}
 
-	err := s.validateOIDCToken(context.Background(), "any-token")
+	_, err := s.validateOIDCToken(context.Background(), "any-token")
 	if err == nil || !strings.Contains(err.Error(), "oidc config incomplete") {
 		t.Fatalf("expected oidc config incomplete error, got: %v", err)
 	}
@@ -8409,7 +8409,7 @@ func TestValidateOIDCToken_UnsupportedAlg(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "unsupported jwt alg") {
 		t.Fatalf("expected unsupported jwt alg error, got: %v", err)
 	}
@@ -8433,7 +8433,7 @@ func TestValidateOIDCToken_InvalidIssuer(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "invalid issuer") {
 		t.Fatalf("expected invalid issuer error, got: %v", err)
 	}
@@ -8458,7 +8458,7 @@ func TestValidateOIDCToken_InvalidAudience(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "invalid audience") {
 		t.Fatalf("expected invalid audience error, got: %v", err)
 	}
@@ -8483,7 +8483,7 @@ func TestValidateOIDCToken_ExpiredToken(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "token expired") {
 		t.Fatalf("expected token expired error, got: %v", err)
 	}
@@ -8508,7 +8508,7 @@ func TestValidateOIDCToken_NotYetValid(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "token not yet valid") {
 		t.Fatalf("expected token not yet valid error, got: %v", err)
 	}
@@ -8537,7 +8537,7 @@ func TestValidateOIDCToken_JWKSFetchError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := s.validateOIDCToken(ctx, token)
+	_, err := s.validateOIDCToken(ctx, token)
 	// Should fail on JWKS fetch
 	if err == nil {
 		t.Fatal("expected JWKS fetch error")
@@ -8584,7 +8584,7 @@ func TestValidateOIDCToken_JWKSKidNotFound(t *testing.T) {
 	sig := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
 	token := header + "." + payload + "." + sig
 
-	err := s.validateOIDCToken(context.Background(), token)
+	_, err := s.validateOIDCToken(context.Background(), token)
 	if err == nil || !strings.Contains(err.Error(), "kid not found") {
 		t.Fatalf("expected kid not found error, got: %v", err)
 	}
