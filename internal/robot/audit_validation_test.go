@@ -72,7 +72,6 @@ type AuditEvent struct {
 }
 
 func TestAuditEventStructure(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_1711082700000000123",
@@ -112,7 +111,6 @@ func TestAuditEventStructure(t *testing.T) {
 // =============================================================================
 
 func TestActorIDFormats(t *testing.T) {
-	t.Parallel()
 
 	testCases := []struct {
 		name    string
@@ -160,7 +158,6 @@ func validateActorID(actorID string) bool {
 // =============================================================================
 
 func TestAuditAttentionAcknowledge(t *testing.T) {
-	t.Parallel()
 
 	// Simulate an acknowledge action
 	event := AuditEvent{
@@ -188,7 +185,6 @@ func TestAuditAttentionAcknowledge(t *testing.T) {
 }
 
 func TestAuditAttentionSnooze(t *testing.T) {
-	t.Parallel()
 
 	snoozedUntil := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
 
@@ -216,7 +212,6 @@ func TestAuditAttentionSnooze(t *testing.T) {
 // =============================================================================
 
 func TestAuditActuationSend(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_send_001",
@@ -243,7 +238,6 @@ func TestAuditActuationSend(t *testing.T) {
 }
 
 func TestAuditActuationInterrupt(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_interrupt_001",
@@ -266,7 +260,6 @@ func TestAuditActuationInterrupt(t *testing.T) {
 // =============================================================================
 
 func TestAuditIncidentCreate(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_inc_create_001",
@@ -290,7 +283,6 @@ func TestAuditIncidentCreate(t *testing.T) {
 }
 
 func TestAuditIncidentEscalate(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_inc_escalate_001",
@@ -312,7 +304,6 @@ func TestAuditIncidentEscalate(t *testing.T) {
 }
 
 func TestAuditIncidentResolve(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:          "audit_inc_resolve_001",
@@ -338,7 +329,6 @@ func TestAuditIncidentResolve(t *testing.T) {
 // =============================================================================
 
 func TestAuditDisclosureRedact(t *testing.T) {
-	t.Parallel()
 
 	event := AuditEvent{
 		ID:              "audit_disclosure_001",
@@ -374,7 +364,6 @@ type AuditQuery struct {
 }
 
 func TestAuditQueryByActor(t *testing.T) {
-	t.Parallel()
 
 	query := AuditQuery{
 		ActorID: "agent:SilentCanyon",
@@ -398,7 +387,6 @@ func TestAuditQueryByActor(t *testing.T) {
 }
 
 func TestAuditQueryByTargetRef(t *testing.T) {
-	t.Parallel()
 
 	query := AuditQuery{
 		TargetRef: "incident:inc_1711082700_abc",
@@ -416,7 +404,6 @@ func TestAuditQueryByTargetRef(t *testing.T) {
 // =============================================================================
 
 func TestAuditRetentionPolicy(t *testing.T) {
-	t.Parallel()
 
 	// Audit events should be retained per policy (default: 30 days)
 	retentionDays := 30
@@ -440,7 +427,6 @@ func TestAuditRetentionPolicy(t *testing.T) {
 // =============================================================================
 
 func TestAuditRedactionDoesNotObscureActor(t *testing.T) {
-	t.Parallel()
 
 	// Even when content is redacted, the audit trail should preserve
 	// who performed the action and what entity was affected

@@ -15,7 +15,6 @@ import (
 )
 
 func TestFixedClock_Determinism(t *testing.T) {
-	t.Parallel()
 
 	clock1 := NewFixedClock(42)
 	clock2 := NewFixedClock(42)
@@ -35,7 +34,6 @@ func TestFixedClock_Determinism(t *testing.T) {
 }
 
 func TestFixedClock_DifferentSeeds(t *testing.T) {
-	t.Parallel()
 
 	clock1 := NewFixedClock(1)
 	clock2 := NewFixedClock(2)
@@ -46,7 +44,6 @@ func TestFixedClock_DifferentSeeds(t *testing.T) {
 }
 
 func TestCursorFixture_Monotonic(t *testing.T) {
-	t.Parallel()
 
 	cursor := NewCursorFixture(0)
 	prev := cursor.Next()
@@ -61,7 +58,6 @@ func TestCursorFixture_Monotonic(t *testing.T) {
 }
 
 func TestCursorFixture_Determinism(t *testing.T) {
-	t.Parallel()
 
 	cursor1 := NewCursorFixture(42)
 	cursor2 := NewCursorFixture(42)
@@ -74,7 +70,6 @@ func TestCursorFixture_Determinism(t *testing.T) {
 }
 
 func TestRuntimeSessionFixture_Valid(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultSessionFixtureOptions()
 	session := RuntimeSessionFixture(opts)
@@ -95,7 +90,6 @@ func TestRuntimeSessionFixture_Valid(t *testing.T) {
 }
 
 func TestRuntimeAgentFixture_Valid(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultAgentFixtureOptions()
 	agent := RuntimeAgentFixture(opts)
@@ -113,7 +107,6 @@ func TestRuntimeAgentFixture_Valid(t *testing.T) {
 }
 
 func TestAttentionEventFixture_Valid(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultAttentionEventFixtureOptions()
 	event := AttentionEventFixture(opts)
@@ -139,7 +132,6 @@ func TestAttentionEventFixture_Valid(t *testing.T) {
 }
 
 func TestIncidentFixture_Valid(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultIncidentFixtureOptions()
 	incident := IncidentFixture(opts)
@@ -159,7 +151,6 @@ func TestIncidentFixture_Valid(t *testing.T) {
 }
 
 func TestSourceHealthFixture_DegradedSources(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultSourceHealthFixtureOptions()
 	opts.TmuxStatus = state.SourceStatusUnavailable
@@ -175,7 +166,6 @@ func TestSourceHealthFixture_DegradedSources(t *testing.T) {
 }
 
 func TestQuotaFixture_Exhausted(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultQuotaFixtureOptions()
 	opts.Exhausted = true
@@ -192,7 +182,6 @@ func TestQuotaFixture_Exhausted(t *testing.T) {
 }
 
 func TestScenarioFixture_Complete(t *testing.T) {
-	t.Parallel()
 
 	scenario := NewScenarioFixture("TestScenarioFixture_Complete", 0)
 
@@ -214,7 +203,6 @@ func TestScenarioFixture_Complete(t *testing.T) {
 }
 
 func TestFaultInjector_DegradedSource(t *testing.T) {
-	t.Parallel()
 
 	injector := NewFaultInjector()
 	injector.Enable(FaultDegradedSource, FaultConfig{
@@ -236,7 +224,6 @@ func TestFaultInjector_DegradedSource(t *testing.T) {
 }
 
 func TestFaultInjector_DisableAll(t *testing.T) {
-	t.Parallel()
 
 	injector := NewFaultInjector()
 	injector.Enable(FaultDegradedSource, FaultConfig{Probability: 1.0})
@@ -253,7 +240,6 @@ func TestFaultInjector_DisableAll(t *testing.T) {
 }
 
 func TestDuplicateRequestDetector(t *testing.T) {
-	t.Parallel()
 
 	detector := NewDuplicateRequestDetector()
 	key := "test-key-123"
@@ -270,7 +256,6 @@ func TestDuplicateRequestDetector(t *testing.T) {
 }
 
 func TestTestRecorder_Observations(t *testing.T) {
-	t.Parallel()
 
 	scenario := NewScenarioID("TestRecorder", 0)
 	recorder := NewTestRecorder(t, scenario, false)
@@ -296,14 +281,12 @@ func TestTestRecorder_Observations(t *testing.T) {
 }
 
 func TestAssertCursorMonotonic_Valid(t *testing.T) {
-	t.Parallel()
 
 	cursors := []int64{1, 2, 3, 5, 10, 100}
 	AssertCursorMonotonic(t, cursors) // Should not fail
 }
 
 func TestDiffResponses_NoDifference(t *testing.T) {
-	t.Parallel()
 
 	json1 := []byte(`{"success": true, "count": 42}`)
 	json2 := []byte(`{"success": true, "count": 42}`)
@@ -318,7 +301,6 @@ func TestDiffResponses_NoDifference(t *testing.T) {
 }
 
 func TestDiffResponses_WithDifferences(t *testing.T) {
-	t.Parallel()
 
 	json1 := []byte(`{"success": true, "count": 42}`)
 	json2 := []byte(`{"success": false, "count": 42, "extra": "field"}`)
@@ -336,7 +318,6 @@ func TestDiffResponses_WithDifferences(t *testing.T) {
 }
 
 func TestBenchmarkRecorder_Time(t *testing.T) {
-	t.Parallel()
 
 	recorder := NewBenchmarkRecorder()
 
@@ -358,7 +339,6 @@ func TestBenchmarkRecorder_Time(t *testing.T) {
 }
 
 func TestValidateSchemaFields_Valid(t *testing.T) {
-	t.Parallel()
 
 	data := []byte(`{"success": true, "timestamp": "2026-01-01T00:00:00Z", "count": 42}`)
 	required := []string{"success", "timestamp"}
@@ -374,7 +354,6 @@ func TestValidateSchemaFields_Valid(t *testing.T) {
 }
 
 func TestValidateSchemaFields_Missing(t *testing.T) {
-	t.Parallel()
 
 	data := []byte(`{"success": true}`)
 	required := []string{"success", "timestamp", "version"}
@@ -390,7 +369,6 @@ func TestValidateSchemaFields_Missing(t *testing.T) {
 }
 
 func TestApplyDegradedSources(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultSourceHealthFixtureOptions()
 	fixture := NewSourceHealthFixture(opts)
@@ -413,7 +391,6 @@ func TestApplyDegradedSources(t *testing.T) {
 }
 
 func TestOperatorStateFixture_Acknowledged(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultOperatorStateFixtureOptions()
 	opts.Acknowledged = true
@@ -433,7 +410,6 @@ func TestOperatorStateFixture_Acknowledged(t *testing.T) {
 }
 
 func TestOperatorStateFixture_Snoozed(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultOperatorStateFixtureOptions()
 	opts.Snoozed = true
@@ -450,7 +426,6 @@ func TestOperatorStateFixture_Snoozed(t *testing.T) {
 }
 
 func TestOutcomeFixture_Success(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultOutcomeFixtureOptions()
 	outcome := NewOutcomeFixture(opts)
@@ -467,7 +442,6 @@ func TestOutcomeFixture_Success(t *testing.T) {
 }
 
 func TestOutcomeFixture_Error(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultOutcomeFixtureOptions()
 	opts.Success = false
@@ -489,7 +463,6 @@ func TestOutcomeFixture_Error(t *testing.T) {
 }
 
 func TestScenarioID_Determinism(t *testing.T) {
-	t.Parallel()
 
 	id1 := NewScenarioID("TestName", 42)
 	id2 := NewScenarioID("TestName", 42)
@@ -505,7 +478,6 @@ func TestScenarioID_Determinism(t *testing.T) {
 }
 
 func TestCoordinationFixture_Valid(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultCoordinationFixtureOptions()
 	opts.Conflicts = 2
@@ -521,7 +493,6 @@ func TestCoordinationFixture_Valid(t *testing.T) {
 }
 
 func TestFixtureJSONSerialization(t *testing.T) {
-	t.Parallel()
 
 	scenario := NewScenarioFixture("TestJSON", 0)
 
@@ -536,7 +507,6 @@ func TestFixtureJSONSerialization(t *testing.T) {
 }
 
 func TestRequestIdentity_Uniqueness(t *testing.T) {
-	t.Parallel()
 
 	clock := NewFixedClock(0)
 	id1 := NewRequestIdentity(clock)

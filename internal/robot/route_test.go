@@ -99,7 +99,6 @@ func TestRouteOptions(t *testing.T) {
 }
 
 func TestRoutePaneAgentTypePrefersParsedPaneType(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{
 		Title:   "custom title",
@@ -113,7 +112,6 @@ func TestRoutePaneAgentTypePrefersParsedPaneType(t *testing.T) {
 }
 
 func TestRoutePaneAgentTypeFallsBackToTitle(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{
 		Title:   "myproj__cod_2",

@@ -7,7 +7,6 @@ import (
 )
 
 func TestNewDependencyGraph(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -37,7 +36,6 @@ func TestNewDependencyGraph(t *testing.T) {
 }
 
 func TestDependencyGraph_Validate_Valid(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -55,7 +53,6 @@ func TestDependencyGraph_Validate_Valid(t *testing.T) {
 }
 
 func TestDependencyGraph_Validate_MissingDep(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -83,7 +80,6 @@ func TestDependencyGraph_Validate_MissingDep(t *testing.T) {
 }
 
 func TestDependencyGraph_Validate_Cycle(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -113,7 +109,6 @@ func TestDependencyGraph_Validate_Cycle(t *testing.T) {
 }
 
 func TestDependencyGraph_Resolve_Linear(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -156,7 +151,6 @@ func TestDependencyGraph_Resolve_Linear(t *testing.T) {
 }
 
 func TestDependencyGraph_Resolve_Parallel(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -196,7 +190,6 @@ func TestDependencyGraph_Resolve_Parallel(t *testing.T) {
 }
 
 func TestDependencyGraph_Resolve_Diamond(t *testing.T) {
-	t.Parallel()
 
 	// Diamond dependency: a -> b, a -> c, b -> d, c -> d
 	w := &Workflow{
@@ -229,7 +222,6 @@ func TestDependencyGraph_Resolve_Diamond(t *testing.T) {
 }
 
 func TestDependencyGraph_Resolve_WithCycle(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -247,7 +239,6 @@ func TestDependencyGraph_Resolve_WithCycle(t *testing.T) {
 }
 
 func TestDependencyGraph_GetReadySteps(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -289,7 +280,6 @@ func TestDependencyGraph_GetReadySteps(t *testing.T) {
 }
 
 func TestDependencyGraph_MarkExecuted_NotFound(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -306,7 +296,6 @@ func TestDependencyGraph_MarkExecuted_NotFound(t *testing.T) {
 }
 
 func TestDependencyGraph_IsExecuted(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -328,7 +317,6 @@ func TestDependencyGraph_IsExecuted(t *testing.T) {
 }
 
 func TestDependencyGraph_GetStep(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -353,7 +341,6 @@ func TestDependencyGraph_GetStep(t *testing.T) {
 }
 
 func TestDependencyGraph_ParallelSubsteps(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -382,7 +369,6 @@ func TestDependencyGraph_ParallelSubsteps(t *testing.T) {
 }
 
 func TestResolveWorkflow(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -403,7 +389,6 @@ func TestResolveWorkflow(t *testing.T) {
 }
 
 func TestDependencyGraph_ComplexGraph(t *testing.T) {
-	t.Parallel()
 
 	// More complex graph with multiple paths
 	w := &Workflow{
@@ -439,7 +424,6 @@ func TestDependencyGraph_ComplexGraph(t *testing.T) {
 }
 
 func TestDependencyGraph_SelfCycle(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -456,7 +440,6 @@ func TestDependencyGraph_SelfCycle(t *testing.T) {
 }
 
 func TestDependencyError_Error(t *testing.T) {
-	t.Parallel()
 
 	e := DependencyError{
 		Type:    "cycle",
@@ -471,7 +454,6 @@ func TestDependencyError_Error(t *testing.T) {
 }
 
 func TestDependencyGraph_MarkFailed(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -503,7 +485,6 @@ func TestDependencyGraph_MarkFailed(t *testing.T) {
 }
 
 func TestDependencyGraph_HasFailedDependency(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -541,7 +522,6 @@ func TestDependencyGraph_HasFailedDependency(t *testing.T) {
 }
 
 func TestDependencyGraph_GetFailedDependencies(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -580,7 +560,6 @@ func TestDependencyGraph_GetFailedDependencies(t *testing.T) {
 }
 
 func TestDependencyGraph_TransitiveFailure(t *testing.T) {
-	t.Parallel()
 
 	// Test transitive failure propagation: A -> B -> C
 	// When A fails and B is marked as failed (skipped due to A), C should also detect failed dependency
@@ -631,7 +610,6 @@ func TestDependencyGraph_TransitiveFailure(t *testing.T) {
 }
 
 func TestDependencyGraph_ExecutedCount(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -663,7 +641,6 @@ func TestDependencyGraph_ExecutedCount(t *testing.T) {
 }
 
 func TestDependencyGraph_MarkExecuted_OutOfOrderReplay(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -693,7 +670,6 @@ func TestDependencyGraph_MarkExecuted_OutOfOrderReplay(t *testing.T) {
 }
 
 func TestDependencyGraph_MarkExecuted_Idempotent(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -722,7 +698,6 @@ func TestDependencyGraph_MarkExecuted_Idempotent(t *testing.T) {
 }
 
 func TestFindUnreachable(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -748,7 +723,6 @@ func TestFindUnreachable(t *testing.T) {
 }
 
 func TestFindUnreachable_AllExist(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -770,7 +744,6 @@ func TestFindUnreachable_AllExist(t *testing.T) {
 }
 
 func TestResolve_WithCycle(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{
@@ -804,7 +777,6 @@ func TestResolve_WithCycle(t *testing.T) {
 }
 
 func TestResolve_WithLevels(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Steps: []Step{

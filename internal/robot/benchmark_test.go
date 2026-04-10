@@ -733,7 +733,6 @@ func buildTestProjection(sessionCount, agentCount, eventCount int) *SectionProje
 
 // TestPayloadSize_AttentionDigest measures JSON payload sizes for attention digest.
 func TestPayloadSize_AttentionDigest(t *testing.T) {
-	t.Parallel()
 
 	scenarios := []struct {
 		name     string
@@ -750,7 +749,6 @@ func TestPayloadSize_AttentionDigest(t *testing.T) {
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
-			t.Parallel()
 
 			fixture := newBenchmarkFixture(sc.sessions, sc.agents, sc.events)
 			opts := DefaultAttentionDigestOptions()
@@ -772,7 +770,6 @@ func TestPayloadSize_AttentionDigest(t *testing.T) {
 
 // TestPayloadSize_Projection measures JSON payload sizes for section projections.
 func TestPayloadSize_Projection(t *testing.T) {
-	t.Parallel()
 
 	scenarios := []struct {
 		name     string
@@ -789,7 +786,6 @@ func TestPayloadSize_Projection(t *testing.T) {
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
-			t.Parallel()
 
 			proj := buildTestProjection(sc.sessions, sc.agents, sc.events)
 
@@ -809,7 +805,6 @@ func TestPayloadSize_Projection(t *testing.T) {
 
 // TestPayloadSize_MarkdownRendering measures markdown output sizes.
 func TestPayloadSize_MarkdownRendering(t *testing.T) {
-	t.Parallel()
 
 	scenarios := []struct {
 		name     string
@@ -828,7 +823,6 @@ func TestPayloadSize_MarkdownRendering(t *testing.T) {
 	for _, sc := range scenarios {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
-			t.Parallel()
 
 			proj := buildTestProjection(sc.sessions, sc.agents, sc.events)
 			md := RenderMarkdownFromProjection(proj, sc.compact)
@@ -848,7 +842,6 @@ func TestPayloadSize_MarkdownRendering(t *testing.T) {
 
 // TestDeduplicationEffectiveness measures how well digest compacts raw events.
 func TestDeduplicationEffectiveness(t *testing.T) {
-	t.Parallel()
 
 	// Create events with high duplication potential
 	events := make([]AttentionEvent, 0, 1000)
@@ -904,7 +897,6 @@ func TestLatencyRegression_BuildDigest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping latency regression test in short mode")
 	}
-	t.Parallel()
 
 	fixture := newBenchmarkFixture(scenarioLargeSessions, scenarioLargeAgents, scenarioLargeEvents)
 	opts := DefaultAttentionDigestOptions()
@@ -934,7 +926,6 @@ func TestLatencyRegression_Replay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping latency regression test in short mode")
 	}
-	t.Parallel()
 
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       100000,
@@ -979,7 +970,6 @@ func TestLatencyRegression_Filter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping latency regression test in short mode")
 	}
-	t.Parallel()
 
 	fixture := newBenchmarkFixture(scenarioLargeSessions, scenarioLargeAgents, scenarioLargeEvents)
 	opts := EventsOptions{
@@ -1012,7 +1002,6 @@ func TestLatencyRegression_Filter(t *testing.T) {
 
 // TestAllocRegression_BuildDigest verifies digest building doesn't allocate excessively.
 func TestAllocRegression_BuildDigest(t *testing.T) {
-	t.Parallel()
 
 	fixture := newBenchmarkFixture(scenarioMediumSessions, scenarioMediumAgents, scenarioMediumEvents)
 	opts := DefaultAttentionDigestOptions()

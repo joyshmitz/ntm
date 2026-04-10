@@ -239,7 +239,6 @@ func TestEncodeJSON_RespectsVerbosityDebug(t *testing.T) {
 // ============== Edge Case Tests ==============
 
 func TestPayloadTypeName_Nil(t *testing.T) {
-	t.Parallel()
 	got := payloadTypeName(nil)
 	if got != "nil" {
 		t.Errorf("payloadTypeName(nil) = %q, want %q", got, "nil")
@@ -247,7 +246,6 @@ func TestPayloadTypeName_Nil(t *testing.T) {
 }
 
 func TestPayloadTypeName_VariousTypes(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		payload any
@@ -272,7 +270,6 @@ func TestPayloadTypeName_VariousTypes(t *testing.T) {
 }
 
 func TestApplyDebugProfile_PrimitiveTypes(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		payload any
@@ -301,7 +298,6 @@ func TestApplyDebugProfile_PrimitiveTypes(t *testing.T) {
 }
 
 func TestApplyTerseProfile_UnmarshalablePayload(t *testing.T) {
-	t.Parallel()
 	// A channel cannot be marshaled to JSON
 	payload := make(chan int)
 	result := applyTerseProfile(payload)
@@ -312,7 +308,6 @@ func TestApplyTerseProfile_UnmarshalablePayload(t *testing.T) {
 }
 
 func TestApplyDebugProfile_UnmarshalablePayload(t *testing.T) {
-	t.Parallel()
 	// A function cannot be marshaled to JSON
 	payload := func() {}
 	result := applyDebugProfile(payload)
@@ -324,7 +319,6 @@ func TestApplyDebugProfile_UnmarshalablePayload(t *testing.T) {
 }
 
 func TestNormalizePayload_ValidData(t *testing.T) {
-	t.Parallel()
 	payload := map[string]any{"key": "value", "num": 42}
 	result, err := normalizePayload(payload)
 	if err != nil {

@@ -29,7 +29,6 @@ var knownGatedCommands = map[string]string{
 // command whose Note contains "experimental" or "build tag" is not presented
 // as fully available in the default build.
 func TestCapabilitiesSnapshot_GatedCommandsNotFullyAvailable(t *testing.T) {
-	t.Parallel()
 
 	caps, err := GetCapabilities()
 	if err != nil {
@@ -74,7 +73,6 @@ func TestCapabilitiesSnapshot_GatedCommandsNotFullyAvailable(t *testing.T) {
 // in knownGatedCommands still exists in the capabilities output. If a gated
 // command is removed, the snapshot must be updated.
 func TestCapabilitiesSnapshot_KnownGatedStillPresent(t *testing.T) {
-	t.Parallel()
 
 	caps, err := GetCapabilities()
 	if err != nil {
@@ -99,7 +97,6 @@ func TestCapabilitiesSnapshot_KnownGatedStillPresent(t *testing.T) {
 // TestCapabilitiesSnapshot_AllowlistDocumented ensures every knownGatedCommands
 // entry has a justification.
 func TestCapabilitiesSnapshot_AllowlistDocumented(t *testing.T) {
-	t.Parallel()
 
 	for name, justification := range knownGatedCommands {
 		if strings.TrimSpace(justification) == "" {
@@ -111,7 +108,6 @@ func TestCapabilitiesSnapshot_AllowlistDocumented(t *testing.T) {
 // TestCapabilitiesSnapshot_CommandCountBaseline acts as a change detector.
 // If the total command count changes significantly, it prompts review.
 func TestCapabilitiesSnapshot_CommandCountBaseline(t *testing.T) {
-	t.Parallel()
 
 	caps, err := GetCapabilities()
 	if err != nil {
@@ -135,7 +131,6 @@ func TestCapabilitiesSnapshot_CommandCountBaseline(t *testing.T) {
 // TestCapabilitiesSnapshot_CategoriesAreSorted verifies commands come back
 // sorted by category then name, as the capabilities builder promises.
 func TestCapabilitiesSnapshot_CategoriesAreSorted(t *testing.T) {
-	t.Parallel()
 
 	caps, err := GetCapabilities()
 	if err != nil {

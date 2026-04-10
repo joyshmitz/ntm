@@ -142,7 +142,6 @@ func TestOverlayDimensionDefaults(t *testing.T) {
 }
 
 func TestPopupEscapeQuitsDashboard(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.popupMode = true
@@ -164,7 +163,6 @@ func TestPopupEscapeQuitsDashboard(t *testing.T) {
 }
 
 func TestRequestedAttentionCursorSelectsExactItem(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.requestAttentionCursor(42)
@@ -187,7 +185,6 @@ func TestRequestedAttentionCursorSelectsExactItem(t *testing.T) {
 }
 
 func TestRequestedAttentionCursorFallsBackToNearestItem(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.requestAttentionCursor(42)
@@ -210,7 +207,6 @@ func TestRequestedAttentionCursorFallsBackToNearestItem(t *testing.T) {
 }
 
 func TestPopupEscapeClosesHelpBeforeQuitting(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.popupMode = true
@@ -231,7 +227,6 @@ func TestPopupEscapeClosesHelpBeforeQuitting(t *testing.T) {
 }
 
 func TestPopupQuitClearsPostQuitAction(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.popupMode = true
@@ -252,7 +247,6 @@ func TestPopupQuitClearsPostQuitAction(t *testing.T) {
 }
 
 func TestPopupStatsBarShowsOverlayBadge(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.popupMode = true
@@ -267,7 +261,6 @@ func TestPopupStatsBarShowsOverlayBadge(t *testing.T) {
 }
 
 func TestNonPopupStatsBarOmitsOverlayBadge(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.popupMode = false
@@ -279,7 +272,6 @@ func TestNonPopupStatsBarOmitsOverlayBadge(t *testing.T) {
 }
 
 func TestPopupHelpHintsPreferEscClose(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.popupMode = true
@@ -307,7 +299,6 @@ func TestPopupHelpHintsPreferEscClose(t *testing.T) {
 }
 
 func TestOverlayZoomHintIncludesCursorWhenAvailable(t *testing.T) {
-	t.Parallel()
 
 	hint := overlayZoomHint(42135)
 	if !strings.Contains(hint, "cursor:42135") {
@@ -316,7 +307,6 @@ func TestOverlayZoomHintIncludesCursorWhenAvailable(t *testing.T) {
 }
 
 func TestOverlayZoomHintOmitsCursorWhenUnavailable(t *testing.T) {
-	t.Parallel()
 
 	hint := overlayZoomHint(0)
 	if strings.Contains(hint, "cursor:") {
@@ -325,7 +315,6 @@ func TestOverlayZoomHintOmitsCursorWhenUnavailable(t *testing.T) {
 }
 
 func TestActivatePopupModeSetsOverlayOpenedAt(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	if m.popupMode {

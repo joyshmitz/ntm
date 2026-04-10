@@ -690,7 +690,6 @@ func TestFormatProviderUsageMessage(t *testing.T) {
 // =============================================================================
 
 func TestGetWarningMessage(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		level     WarningLevel
 		threshold float64
@@ -719,7 +718,6 @@ func TestGetWarningMessage(t *testing.T) {
 }
 
 func TestFormatWarningMessage(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name      string
 		threshold float64

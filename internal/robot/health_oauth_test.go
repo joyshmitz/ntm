@@ -255,7 +255,6 @@ func TestDetectRateLimitStatusFromOutput(t *testing.T) {
 }
 
 func TestDetectRateLimitStatusFromOutput_RespectsAgentContext(t *testing.T) {
-	t.Parallel()
 
 	status, count := detectRateLimitStatusFromOutput("error: insufficient_quota", "cc")
 	if status != RateLimitOK || count != 0 {

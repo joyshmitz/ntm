@@ -9,7 +9,6 @@ import (
 )
 
 func TestFormatTokenDisplay(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -52,7 +51,6 @@ func TestFormatTokenDisplay(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := formatTokenDisplay(tc.used, tc.limit)
 			if result != tc.expected {
 				t.Errorf("formatTokenDisplay(%d, %d) = %q, want %q", tc.used, tc.limit, result, tc.expected)
@@ -62,7 +60,6 @@ func TestFormatTokenDisplay(t *testing.T) {
 }
 
 func TestFormatDuration(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -109,7 +106,6 @@ func TestFormatDuration(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := formatDuration(tc.duration)
 			if result != tc.expected {
 				t.Errorf("formatDuration(%v) = %q, want %q", tc.duration, result, tc.expected)
@@ -119,7 +115,6 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestPaneStatusRotationFields(t *testing.T) {
-	t.Parallel()
 
 	// Test that PaneStatus has the rotation fields
 	ps := PaneStatus{
@@ -142,7 +137,6 @@ func TestPaneStatusRotationFields(t *testing.T) {
 }
 
 func TestRenderContextBar(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.width = 120
@@ -179,7 +173,6 @@ func TestRenderContextBar(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := m.renderContextBar(tc.percent, tc.width)
 			// Just verify it returns a non-empty string
 			if result == "" {
@@ -190,7 +183,6 @@ func TestRenderContextBar(t *testing.T) {
 }
 
 func TestPaneStatusWithContextData(t *testing.T) {
-	t.Parallel()
 
 	// Test that PaneStatus correctly stores context data
 	ps := PaneStatus{
@@ -220,7 +212,6 @@ func TestPaneStatusWithContextData(t *testing.T) {
 }
 
 func TestPaneStatusRotationState(t *testing.T) {
-	t.Parallel()
 
 	// Test rotation in progress
 	psRotating := PaneStatus{

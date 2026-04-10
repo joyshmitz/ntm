@@ -118,7 +118,6 @@ func TestTruncateStr(t *testing.T) {
 
 // TestTruncateStr_EdgeCases tests uncovered branches of truncateStr.
 func TestTruncateStr_EdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -137,7 +136,6 @@ func TestTruncateStr_EdgeCases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := truncateStr(tc.input, tc.maxLen)
 			if got != tc.want {
 				t.Errorf("truncateStr(%q, %d) = %q, want %q", tc.input, tc.maxLen, got, tc.want)
@@ -185,7 +183,6 @@ func TestAlertSeverityIcon(t *testing.T) {
 }
 
 func TestAlertConfigForProject_UsesExplicitProjectDir(t *testing.T) {
-	t.Parallel()
 
 	cfg := &config.Config{
 		Alerts: config.AlertsConfig{
@@ -255,7 +252,6 @@ func TestAlertConfigForProject_ResolvesCurrentProjectDirWhenUnset(t *testing.T) 
 // =============================================================================
 
 func TestCountAgentsByType(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -310,7 +306,6 @@ func TestCountAgentsByType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			result := countAgentsByType(tt.panes)
 			for k, want := range tt.expect {
 				if result[k] != want {
@@ -322,7 +317,6 @@ func TestCountAgentsByType(t *testing.T) {
 }
 
 func TestSnapshotSessionCountsCanonicalizesAndKeepsNewerTypes(t *testing.T) {
-	t.Parallel()
 
 	counts, states := snapshotSessionCounts([]SnapshotAgent{
 		{Type: "openai-codex", State: "idle"},
@@ -347,7 +341,6 @@ func TestSnapshotSessionCountsCanonicalizesAndKeepsNewerTypes(t *testing.T) {
 }
 
 func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
-	t.Parallel()
 
 	got := formatMarkdownAgentTypeCounts(map[string]int{
 		"claude":   1,
@@ -371,10 +364,8 @@ func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
 // =============================================================================
 
 func TestAgentTable(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
 		out := AgentTable(nil)
 		if !strings.Contains(out, "| Session | Pane | Type | Variant | State |") {
 			t.Error("expected table header even for empty input")
@@ -382,7 +373,6 @@ func TestAgentTable(t *testing.T) {
 	})
 
 	t.Run("with agents", func(t *testing.T) {
-		t.Parallel()
 		sessions := []SnapshotSession{
 			{
 				Name: "myproj",
@@ -418,10 +408,8 @@ func TestAgentTable(t *testing.T) {
 // =============================================================================
 
 func TestAlertsList(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
 		out := AlertsList(nil)
 		if out != "_No active alerts._" {
 			t.Errorf("expected no-alerts message, got %q", out)
@@ -429,7 +417,6 @@ func TestAlertsList(t *testing.T) {
 	})
 
 	t.Run("with session and pane", func(t *testing.T) {
-		t.Parallel()
 		alerts := []AlertInfo{
 			{Severity: "critical", Message: "Agent crashed", Session: "proj1", Pane: "%0"},
 		}
@@ -443,7 +430,6 @@ func TestAlertsList(t *testing.T) {
 	})
 
 	t.Run("with bead ID", func(t *testing.T) {
-		t.Parallel()
 		alerts := []AlertInfo{
 			{Severity: "warning", Message: "Stale bead", BeadID: "br-42"},
 		}
@@ -454,7 +440,6 @@ func TestAlertsList(t *testing.T) {
 	})
 
 	t.Run("session without pane", func(t *testing.T) {
-		t.Parallel()
 		alerts := []AlertInfo{
 			{Severity: "info", Message: "Check disk", Session: "s1"},
 		}
@@ -473,10 +458,8 @@ func TestAlertsList(t *testing.T) {
 // =============================================================================
 
 func TestBeadsSummary(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil", func(t *testing.T) {
-		t.Parallel()
 		out := BeadsSummary(nil)
 		if out != "_Beads summary unavailable._" {
 			t.Errorf("expected unavailable message for nil, got %q", out)
@@ -484,7 +467,6 @@ func TestBeadsSummary(t *testing.T) {
 	})
 
 	t.Run("not available", func(t *testing.T) {
-		t.Parallel()
 		out := BeadsSummary(&bv.BeadsSummary{Available: false})
 		if out != "_Beads summary unavailable._" {
 			t.Errorf("expected unavailable message, got %q", out)
@@ -492,7 +474,6 @@ func TestBeadsSummary(t *testing.T) {
 	})
 
 	t.Run("available with counts", func(t *testing.T) {
-		t.Parallel()
 		out := BeadsSummary(&bv.BeadsSummary{
 			Available:  true,
 			Total:      20,
@@ -522,10 +503,8 @@ func TestBeadsSummary(t *testing.T) {
 // =============================================================================
 
 func TestSuggestedActions(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
 		out := SuggestedActions(nil)
 		if out != "_No suggested actions._" {
 			t.Errorf("expected no-actions message, got %q", out)
@@ -533,7 +512,6 @@ func TestSuggestedActions(t *testing.T) {
 	})
 
 	t.Run("with actions", func(t *testing.T) {
-		t.Parallel()
 		actions := []BeadAction{
 			{BeadID: "br-1", Title: "Fix auth", Command: "br update br-1 --status in_progress"},
 			{BeadID: "br-2", Title: "Add tests", BlockedBy: []string{"br-1", "br-3"}},
@@ -561,7 +539,6 @@ func TestSuggestedActions(t *testing.T) {
 // =============================================================================
 
 func TestRenderMarkdownFromProjection_BasicStructure(t *testing.T) {
-	t.Parallel()
 
 	snapshot := &SnapshotOutput{
 		Summary: StatusSummary{
@@ -592,7 +569,6 @@ func TestRenderMarkdownFromProjection_BasicStructure(t *testing.T) {
 }
 
 func TestRenderMarkdownFromProjection_CompactMode(t *testing.T) {
-	t.Parallel()
 
 	snapshot := &SnapshotOutput{
 		Summary: StatusSummary{
@@ -621,7 +597,6 @@ func TestRenderMarkdownFromProjection_CompactMode(t *testing.T) {
 }
 
 func TestRenderMarkdownFromProjection_SessionsKeepModernAgentTypes(t *testing.T) {
-	t.Parallel()
 
 	snapshot := &SnapshotOutput{
 		Sessions: []SnapshotSession{
@@ -655,7 +630,6 @@ func TestRenderMarkdownFromProjection_SessionsKeepModernAgentTypes(t *testing.T)
 }
 
 func TestRenderMarkdownFromProjection_WithTruncation(t *testing.T) {
-	t.Parallel()
 
 	// Create more sessions than limit
 	sessions := make([]SnapshotSession, 25)
@@ -683,7 +657,6 @@ func TestRenderMarkdownFromProjection_WithTruncation(t *testing.T) {
 }
 
 func TestRenderMarkdownFromProjection_EmptySections(t *testing.T) {
-	t.Parallel()
 
 	snapshot := &SnapshotOutput{
 		Sessions:       []SnapshotSession{},

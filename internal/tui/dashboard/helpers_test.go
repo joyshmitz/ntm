@@ -8,7 +8,6 @@ import (
 )
 
 func TestFormatAgeShort(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -40,7 +39,6 @@ func TestFormatAgeShort(t *testing.T) {
 }
 
 func TestCopyTimeMap(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil map", func(t *testing.T) {
 		got := copyTimeMap(nil)
@@ -86,7 +84,6 @@ func TestCopyTimeMap(t *testing.T) {
 }
 
 func TestRefreshDue(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -114,7 +111,6 @@ func TestRefreshDue(t *testing.T) {
 }
 
 func TestActivityLabelAndColor(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -151,7 +147,6 @@ func TestActivityLabelAndColor(t *testing.T) {
 // TestTruncate already exists in dashboard_layout_test.go
 
 func TestActivityBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -177,7 +172,6 @@ func TestActivityBadge(t *testing.T) {
 }
 
 func TestActivityCountBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 

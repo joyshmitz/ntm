@@ -121,7 +121,6 @@ func TestPatternLibrary_Match(t *testing.T) {
 // cannot span whitespace, but it's easy to break when tweaking — keep
 // this test as an anti-regression tripwire.
 func TestCodexEscInterruptDoesNotMatchProse(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -134,7 +133,6 @@ func TestCodexEscInterruptDoesNotMatchProse(t *testing.T) {
 	for _, content := range falsePositives {
 		content := content
 		t.Run(content, func(t *testing.T) {
-			t.Parallel()
 			for _, m := range lib.Match(content, "codex") {
 				if m.Pattern == "codex_esc_interrupt" {
 					t.Errorf("codex_esc_interrupt matched false positive %q", content)
@@ -149,7 +147,6 @@ func TestCodexEscInterruptDoesNotMatchProse(t *testing.T) {
 // fire on claude / gemini panes whose scrollback happens to contain
 // words like "Working" or "Waiting".
 func TestCodexWorkingPatternsDoNotLeakToOtherAgents(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -157,7 +154,6 @@ func TestCodexWorkingPatternsDoNotLeakToOtherAgents(t *testing.T) {
 	for _, agent := range []string{"claude", "gemini"} {
 		agent := agent
 		t.Run(agent, func(t *testing.T) {
-			t.Parallel()
 			for _, m := range lib.Match(content, agent) {
 				if m.Pattern == "codex_working" || m.Pattern == "codex_esc_interrupt" || m.Pattern == "codex_waiting_background" {
 					t.Errorf("%s leaked to %s agent on content %q", m.Pattern, agent, content)
@@ -527,7 +523,6 @@ func TestPatternPriority(t *testing.T) {
 // =============================================================================
 
 func TestPatternStruct(t *testing.T) {
-	t.Parallel()
 
 	p := Pattern{
 		Name:        "test_pattern",
@@ -554,7 +549,6 @@ func TestPatternStruct(t *testing.T) {
 }
 
 func TestPatternMatchStruct(t *testing.T) {
-	t.Parallel()
 
 	pm := PatternMatch{
 		Pattern:  "claude_prompt",
@@ -575,7 +569,6 @@ func TestPatternMatchStruct(t *testing.T) {
 }
 
 func TestPatternLibraryVersion(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -588,7 +581,6 @@ func TestPatternLibraryVersion(t *testing.T) {
 }
 
 func TestPatternLibraryCompileIdempotent(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 	initialCount := lib.PatternCount()
@@ -605,7 +597,6 @@ func TestPatternLibraryCompileIdempotent(t *testing.T) {
 }
 
 func TestPatternLibraryMatchEmptyContent(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -616,7 +607,6 @@ func TestPatternLibraryMatchEmptyContent(t *testing.T) {
 }
 
 func TestPatternLibraryMatchEmptyAgentType(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -628,7 +618,6 @@ func TestPatternLibraryMatchEmptyAgentType(t *testing.T) {
 }
 
 func TestPatternLibraryMatchAllWildcardPatterns(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -647,7 +636,6 @@ func TestPatternLibraryMatchAllWildcardPatterns(t *testing.T) {
 }
 
 func TestPatternLibraryAllAgentTypes(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -661,7 +649,6 @@ func TestPatternLibraryAllAgentTypes(t *testing.T) {
 }
 
 func TestPatternLibraryAllCategories(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -675,7 +662,6 @@ func TestPatternLibraryAllCategories(t *testing.T) {
 }
 
 func TestPatternLibraryBrailleSpinner(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -689,7 +675,6 @@ func TestPatternLibraryBrailleSpinner(t *testing.T) {
 }
 
 func TestPatternLibraryCheckmarkSymbols(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -703,7 +688,6 @@ func TestPatternLibraryCheckmarkSymbols(t *testing.T) {
 }
 
 func TestPatternLibraryErrorPatternVariants(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -740,7 +724,6 @@ func TestPatternLibraryErrorPatternVariants(t *testing.T) {
 }
 
 func TestPatternLibraryIdlePromptVariants(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -783,7 +766,6 @@ func TestPatternLibraryIdlePromptVariants(t *testing.T) {
 }
 
 func TestPatternLibraryThinkingVariants(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -811,7 +793,6 @@ func TestPatternLibraryThinkingVariants(t *testing.T) {
 }
 
 func TestPatternLibraryCompletionVariants(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -835,7 +816,6 @@ func TestPatternLibraryCompletionVariants(t *testing.T) {
 }
 
 func TestPatternLibraryAddPatternSorting(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -860,7 +840,6 @@ func TestPatternLibraryAddPatternSorting(t *testing.T) {
 }
 
 func TestPatternLibraryAddPatternUncompiled(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 	initialCount := lib.PatternCount()
@@ -886,7 +865,6 @@ func TestPatternLibraryAddPatternUncompiled(t *testing.T) {
 }
 
 func TestPatternLibraryMatchFirstNoMatch(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -897,7 +875,6 @@ func TestPatternLibraryMatchFirstNoMatch(t *testing.T) {
 }
 
 func TestPatternLibraryMatchByCategoryNoMatch(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -908,7 +885,6 @@ func TestPatternLibraryMatchByCategoryNoMatch(t *testing.T) {
 }
 
 func TestPatternLibraryMultipleMatches(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -929,7 +905,6 @@ func TestPatternLibraryMultipleMatches(t *testing.T) {
 }
 
 func TestPatternLibraryPriorityOrdering(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -948,7 +923,6 @@ func TestPatternLibraryPriorityOrdering(t *testing.T) {
 }
 
 func TestDefaultLibraryNotNil(t *testing.T) {
-	t.Parallel()
 
 	if DefaultLibrary == nil {
 		t.Fatal("DefaultLibrary should not be nil")
@@ -959,7 +933,6 @@ func TestDefaultLibraryNotNil(t *testing.T) {
 }
 
 func TestPatternLibraryConcurrentAccess(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -980,7 +953,6 @@ func TestPatternLibraryConcurrentAccess(t *testing.T) {
 }
 
 func TestPatternLibraryAddPatternConcurrent(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -1016,7 +988,6 @@ func TestPatternLibraryAddPatternConcurrent(t *testing.T) {
 }
 
 func TestPatternLibraryEmptyRegex(t *testing.T) {
-	t.Parallel()
 
 	lib := &PatternLibrary{
 		Patterns: []Pattern{
@@ -1037,7 +1008,6 @@ func TestPatternLibraryEmptyRegex(t *testing.T) {
 }
 
 func TestPatternLibraryGetPatternsByAgentEmpty(t *testing.T) {
-	t.Parallel()
 
 	lib := NewPatternLibrary()
 
@@ -1055,7 +1025,6 @@ func TestPatternLibraryGetPatternsByAgentEmpty(t *testing.T) {
 }
 
 func TestMatchFirstPattern_NormalizesAgentAliases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name        string
@@ -1072,7 +1041,6 @@ func TestMatchFirstPattern_NormalizesAgentAliases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			match := MatchFirstPattern(tt.content, tt.agentType)
 			if match == nil {
 				t.Fatalf("MatchFirstPattern(%q, %q) = nil, want %q", tt.content, tt.agentType, tt.wantPattern)
@@ -1085,7 +1053,6 @@ func TestMatchFirstPattern_NormalizesAgentAliases(t *testing.T) {
 }
 
 func TestGetPatternsByAgent_NormalizesAlias(t *testing.T) {
-	t.Parallel()
 
 	patterns := DefaultLibrary.GetPatternsByAgent("cc")
 	for _, pattern := range patterns {

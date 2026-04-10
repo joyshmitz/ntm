@@ -452,7 +452,6 @@ func (m *mockAlertChannel) Send(ctx context.Context, alert *Alert) error {
 // =============================================================================
 
 func TestEscapeAppleScript(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -481,7 +480,6 @@ func TestEscapeAppleScript(t *testing.T) {
 }
 
 func TestGetSuggestion(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		alertType    AlertType
 		wantNonEmpty bool
@@ -515,7 +513,6 @@ func TestGetSuggestion(t *testing.T) {
 }
 
 func TestGetSuggestionContent(t *testing.T) {
-	t.Parallel()
 	// Verify specific suggestions contain expected keywords
 	tests := []struct {
 		alertType    AlertType

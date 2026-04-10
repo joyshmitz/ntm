@@ -7,7 +7,6 @@ import "testing"
 // =============================================================================
 
 func TestToonIsIdentifierStart(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -30,7 +29,6 @@ func TestToonIsIdentifierStart(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := toonIsIdentifierStart(tc.c)
 			if got != tc.want {
 				t.Errorf("toonIsIdentifierStart(%q) = %v, want %v", tc.c, got, tc.want)
@@ -44,7 +42,6 @@ func TestToonIsIdentifierStart(t *testing.T) {
 // =============================================================================
 
 func TestToonIsIdentifierChar(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -65,7 +62,6 @@ func TestToonIsIdentifierChar(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := toonIsIdentifierChar(tc.c)
 			if got != tc.want {
 				t.Errorf("toonIsIdentifierChar(%q) = %v, want %v", tc.c, got, tc.want)

@@ -44,7 +44,6 @@ func createTestExecutor() (*Executor, *Workflow) {
 }
 
 func TestExecuteParallel_BasicExecution(t *testing.T) {
-	t.Parallel()
 
 	e, workflow := createTestExecutor()
 
@@ -78,7 +77,6 @@ func TestExecuteParallel_BasicExecution(t *testing.T) {
 }
 
 func TestExecuteParallel_ErrorModes(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name         string
@@ -104,7 +102,6 @@ func TestExecuteParallel_ErrorModes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 
 			e, workflow := createTestExecutor()
 			workflow.Settings.OnError = tt.onError
@@ -127,7 +124,6 @@ func TestExecuteParallel_ErrorModes(t *testing.T) {
 }
 
 func TestExecuteParallel_UsesWorkflowRetryPolicyForSubsteps(t *testing.T) {
-	t.Parallel()
 
 	e, workflow := createTestExecutor()
 	workflow.Settings.OnError = ErrorActionRetry
@@ -162,7 +158,6 @@ func TestExecuteParallel_UsesWorkflowRetryPolicyForSubsteps(t *testing.T) {
 }
 
 func TestExecuteParallel_GroupTimeout(t *testing.T) {
-	t.Parallel()
 
 	e, workflow := createTestExecutor()
 
@@ -187,7 +182,6 @@ func TestExecuteParallel_GroupTimeout(t *testing.T) {
 }
 
 func TestExecuteParallel_ContextCancellation(t *testing.T) {
-	t.Parallel()
 
 	e, workflow := createTestExecutor()
 
@@ -212,7 +206,6 @@ func TestExecuteParallel_ContextCancellation(t *testing.T) {
 }
 
 func TestExecuteParallel_ResultAggregation(t *testing.T) {
-	t.Parallel()
 
 	e, _ := createTestExecutor()
 
@@ -273,7 +266,6 @@ func TestExecuteParallel_ResultAggregation(t *testing.T) {
 }
 
 func TestExecuteParallel_Concurrency(t *testing.T) {
-	t.Parallel()
 
 	// Create many parallel steps to test concurrent execution
 	parallelSteps := make([]Step, 10)
@@ -330,7 +322,6 @@ func TestExecuteParallel_Concurrency(t *testing.T) {
 }
 
 func TestSelectPaneExcluding_BasicExclusion(t *testing.T) {
-	t.Parallel()
 
 	// This test verifies the exclusion logic without requiring a real tmux session
 	// We test the exclusion map behavior
@@ -363,7 +354,6 @@ func TestSelectPaneExcluding_BasicExclusion(t *testing.T) {
 }
 
 func TestErrorActionFailFast_Constant(t *testing.T) {
-	t.Parallel()
 
 	// Verify the constant value
 	if ErrorActionFailFast != "fail_fast" {
@@ -373,7 +363,6 @@ func TestErrorActionFailFast_Constant(t *testing.T) {
 
 // Test that parallel steps with conditions are evaluated correctly
 func TestExecuteParallelStep_WithCondition(t *testing.T) {
-	t.Parallel()
 
 	// Create workflow with the conditional step
 	workflow := &Workflow{

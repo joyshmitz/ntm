@@ -16,7 +16,6 @@ import (
 )
 
 func TestStatusUpdateSetsPaneStateAndTimestamp(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -59,7 +58,6 @@ func TestStatusUpdateSetsPaneStateAndTimestamp(t *testing.T) {
 }
 
 func TestStatusUpdateBatchesOllamaRefreshCmd(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -98,7 +96,6 @@ func TestStatusUpdateBatchesOllamaRefreshCmd(t *testing.T) {
 }
 
 func TestStatusUpdateErrorClearsStaleLiveStatus(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -155,7 +152,6 @@ func TestStatusUpdateErrorClearsStaleLiveStatus(t *testing.T) {
 }
 
 func TestStatusUpdateSuccessClearsMissingPaneSnapshots(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -205,7 +201,6 @@ func TestStatusUpdateSuccessClearsMissingPaneSnapshots(t *testing.T) {
 }
 
 func TestSessionDataUpdateBatchesOllamaRefreshCmd(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.startupWarmupDone = true
@@ -253,7 +248,6 @@ func TestSessionDataUpdateBatchesOllamaRefreshCmd(t *testing.T) {
 }
 
 func TestPendingRotationsUpdateErrorClearsStalePendingData(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	stale := []*ctxmon.PendingRotation{
@@ -285,7 +279,6 @@ func TestPendingRotationsUpdateErrorClearsStalePendingData(t *testing.T) {
 }
 
 func TestHealthUpdateErrorClearsStalePaneHealthDetails(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -326,7 +319,6 @@ func TestHealthUpdateErrorClearsStalePaneHealthDetails(t *testing.T) {
 }
 
 func TestHealthUpdateSuccessClearsMissingPaneHealthDetails(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -377,7 +369,6 @@ func TestHealthUpdateSuccessClearsMissingPaneHealthDetails(t *testing.T) {
 }
 
 func TestPTHealthStatesNilClearsStaleClassification(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -409,7 +400,6 @@ func TestPTHealthStatesNilClearsStaleClassification(t *testing.T) {
 }
 
 func TestViewShowsLoadingWhenSessionFetchInFlight(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.width = 80
@@ -432,7 +422,6 @@ func TestViewShowsLoadingWhenSessionFetchInFlight(t *testing.T) {
 }
 
 func TestViewRendersPanesEvenWhenLastSessionFetchErrored(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.width = 120
@@ -454,7 +443,6 @@ func TestViewRendersPanesEvenWhenLastSessionFetchErrored(t *testing.T) {
 }
 
 func TestPlanPaneCaptures_PrioritizesSelectedAndNewActivity(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	panes := []tmux.PaneActivity{
@@ -483,7 +471,6 @@ func TestPlanPaneCaptures_PrioritizesSelectedAndNewActivity(t *testing.T) {
 }
 
 func TestPlanPaneCaptures_RoundRobinAdvancesCursor(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	panes := []tmux.PaneActivity{
@@ -511,7 +498,6 @@ func TestPlanPaneCaptures_RoundRobinAdvancesCursor(t *testing.T) {
 }
 
 func TestSessionDataUpdate_SortsPanesAndKeepsSelection(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{
@@ -546,7 +532,6 @@ func TestSessionDataUpdate_SortsPanesAndKeepsSelection(t *testing.T) {
 }
 
 func TestSeedInitialPanes_SortsAndMarksSnapshotComplete(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.seedInitialPanes([]tmux.PaneActivity{

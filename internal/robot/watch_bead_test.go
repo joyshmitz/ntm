@@ -3,7 +3,6 @@ package robot
 import "testing"
 
 func TestCompileBeadMentionPattern(t *testing.T) {
-	t.Parallel()
 
 	if _, err := compileBeadMentionPattern(""); err == nil {
 		t.Fatal("expected error for empty bead ID")
@@ -22,7 +21,6 @@ func TestCompileBeadMentionPattern(t *testing.T) {
 }
 
 func TestFindBeadMentionMatches(t *testing.T) {
-	t.Parallel()
 
 	re, err := compileBeadMentionPattern("bd-77")
 	if err != nil {
@@ -50,7 +48,6 @@ func TestFindBeadMentionMatches(t *testing.T) {
 }
 
 func TestGetWatchBeadValidation(t *testing.T) {
-	t.Parallel()
 
 	out, err := GetWatchBead(WatchBeadOptions{
 		Session: "any",

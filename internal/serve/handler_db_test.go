@@ -34,7 +34,6 @@ func createTestSessionForServe(t *testing.T, store *state.Store, id string) {
 // =============================================================================
 
 func TestHandleSessionAgents_Empty(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "test-session")
 
@@ -65,7 +64,6 @@ func TestHandleSessionAgents_Empty(t *testing.T) {
 }
 
 func TestHandleSessionAgents_WithAgents(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "agent-session")
 
@@ -103,7 +101,6 @@ func TestHandleSessionAgents_WithAgents(t *testing.T) {
 }
 
 func TestHandleSessionAgents_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rr := httptest.NewRecorder()
@@ -121,7 +118,6 @@ func TestHandleSessionAgents_NilStore(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionAgentsV1_Empty(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "v1-session")
 
@@ -153,7 +149,6 @@ func TestHandleSessionAgentsV1_Empty(t *testing.T) {
 }
 
 func TestHandleSessionAgentsV1_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rr := httptest.NewRecorder()
@@ -180,7 +175,6 @@ func (f *flushRecorder) Flush() {
 }
 
 func TestRedactingResponseWriter_Flush(t *testing.T) {
-	t.Parallel()
 
 	inner := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	rw := &redactingResponseWriter{
@@ -201,7 +195,6 @@ func TestRedactingResponseWriter_Flush(t *testing.T) {
 // =============================================================================
 
 func TestHandleScannerStatus_NilScannerStore(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rr := httptest.NewRecorder()

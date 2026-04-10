@@ -3,7 +3,6 @@ package serve
 import "testing"
 
 func TestSafetyEscapeYAMLSingleQuote(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -19,7 +18,6 @@ func TestSafetyEscapeYAMLSingleQuote(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := safetyEscapeYAMLSingleQuote(tc.input)
 			if got != tc.want {
 				t.Errorf("safetyEscapeYAMLSingleQuote(%q) = %q, want %q", tc.input, got, tc.want)
@@ -29,7 +27,6 @@ func TestSafetyEscapeYAMLSingleQuote(t *testing.T) {
 }
 
 func TestSafetyEscapeYAMLDoubleQuote(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -48,7 +45,6 @@ func TestSafetyEscapeYAMLDoubleQuote(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := safetyEscapeYAMLDoubleQuote(tc.input)
 			if got != tc.want {
 				t.Errorf("safetyEscapeYAMLDoubleQuote(%q) = %q, want %q", tc.input, got, tc.want)

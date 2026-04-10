@@ -7,17 +7,14 @@ import (
 )
 
 func TestComputeProgress(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil beads returns nil", func(t *testing.T) {
-		t.Parallel()
 		if got := ComputeProgress(nil); got != nil {
 			t.Fatalf("expected nil, got %+v", got)
 		}
 	})
 
 	t.Run("unavailable beads returns nil", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{Available: false, Total: 10})
 		if got != nil {
 			t.Fatalf("expected nil, got %+v", got)
@@ -25,7 +22,6 @@ func TestComputeProgress(t *testing.T) {
 	})
 
 	t.Run("zero total returns nil", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{Available: true, Total: 0})
 		if got != nil {
 			t.Fatalf("expected nil, got %+v", got)
@@ -33,7 +29,6 @@ func TestComputeProgress(t *testing.T) {
 	})
 
 	t.Run("basic progress computation", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{
 			Available:  true,
 			Total:      100,
@@ -62,7 +57,6 @@ func TestComputeProgress(t *testing.T) {
 	})
 
 	t.Run("all closed", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{
 			Available: true,
 			Total:     50,
@@ -80,7 +74,6 @@ func TestComputeProgress(t *testing.T) {
 	})
 
 	t.Run("none closed", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{
 			Available:  true,
 			Total:      10,
@@ -99,7 +92,6 @@ func TestComputeProgress(t *testing.T) {
 	})
 
 	t.Run("ratio rounds to 4 decimals", func(t *testing.T) {
-		t.Parallel()
 		got := ComputeProgress(&bv.BeadsSummary{
 			Available: true,
 			Total:     3,

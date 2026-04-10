@@ -12,7 +12,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestHintForSessionFetchError(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -32,7 +31,6 @@ func TestHintForSessionFetchError(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := hintForSessionFetchError(tc.err)
 			if tc.want == "" {
 				if got != "" {
@@ -65,14 +63,12 @@ func findSubstring(s, sub string) bool {
 // ---------------------------------------------------------------------------
 
 func TestFormatDuration_Zero(t *testing.T) {
-	t.Parallel()
 	if got := formatDuration(0); got != "now" {
 		t.Errorf("formatDuration(0) = %q, want %q", got, "now")
 	}
 }
 
 func TestFormatDuration_Negative(t *testing.T) {
-	t.Parallel()
 	if got := formatDuration(-5 * time.Second); got != "now" {
 		t.Errorf("formatDuration(-5s) = %q, want %q", got, "now")
 	}

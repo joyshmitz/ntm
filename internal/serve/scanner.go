@@ -74,6 +74,47 @@ type ScannerStore struct {
 	scanList []string // Ordered list of scan IDs
 }
 
+// cloneScan returns a deep copy of a ScanRecord
+func cloneScan(s *ScanRecord) *ScanRecord {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	if s.Options != nil {
+		opts := *s.Options
+		if s.Options.Languages != nil {
+			opts.Languages = append([]string(nil), s.Options.Languages...)
+		}
+		if s.Options.Exclude != nil {
+			opts.Exclude = append([]string(nil), s.Options.Exclude...)
+		}
+		clone.Options = &opts
+	}
+	if s.CompletedAt != nil {
+		t := *s.CompletedAt
+		clone.CompletedAt = &t
+	}
+	// Result is complex, but we only use it locally and it shouldn't be mutated after creation.
+	// For full safety we could deep copy Result, but assigning it once is usually fine.
+	if s.FindingIDs != nil {
+		clone.FindingIDs = append([]string(nil), s.FindingIDs...)
+	}
+	return &clone
+}
+
+// cloneFinding returns a deep copy of a FindingRecord
+func cloneFinding(f *FindingRecord) *FindingRecord {
+	if f == nil {
+		return nil
+	}
+	clone := *f
+	if f.DismissedAt != nil {
+		t := *f.DismissedAt
+		clone.DismissedAt = &t
+	}
+	return &clone
+}
+
 // NewScannerStore creates a new scanner store
 func NewScannerStore() *ScannerStore {
 	return &ScannerStore{
@@ -87,7 +128,7 @@ func NewScannerStore() *ScannerStore {
 func (s *ScannerStore) AddScan(scan *ScanRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.scans[scan.ID] = scan
+	s.scans[scan.ID] = cloneScan(scan)
 	s.scanList = append(s.scanList, scan.ID)
 }
 
@@ -103,11 +144,11 @@ func (s *ScannerStore) TryStartScan(scan *ScanRecord) (*ScanRecord, bool) {
 			continue
 		}
 		if existing.State == ScanStatePending || existing.State == ScanStateRunning {
-			return existing, false
+			return cloneScan(existing), false
 		}
 	}
 
-	s.scans[scan.ID] = scan
+	s.scans[scan.ID] = cloneScan(scan)
 	s.scanList = append(s.scanList, scan.ID)
 	return nil, true
 }
@@ -117,14 +158,16 @@ func (s *ScannerStore) GetScan(id string) (*ScanRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	scan, ok := s.scans[id]
-	return scan, ok
+	return cloneScan(scan), ok
 }
 
-// UpdateScan updates a scan record
-func (s *ScannerStore) UpdateScan(scan *ScanRecord) {
+// UpdateScan mutates an existing scan safely using a callback
+func (s *ScannerStore) UpdateScan(id string, fn func(*ScanRecord)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.scans[scan.ID] = scan
+	if scan, ok := s.scans[id]; ok {
+		fn(scan)
+	}
 }
 
 // GetScans returns scans in reverse chronological order
@@ -147,7 +190,7 @@ func (s *ScannerStore) GetScans(limit, offset int) []*ScanRecord {
 	result := make([]*ScanRecord, 0, end-start)
 	for i := end - 1; i >= start; i-- {
 		if scan, ok := s.scans[s.scanList[i]]; ok {
-			result = append(result, scan)
+			result = append(result, cloneScan(scan))
 		}
 	}
 	return result
@@ -159,7 +202,7 @@ func (s *ScannerStore) GetRunningScan() *ScanRecord {
 	defer s.mu.RUnlock()
 	for _, scan := range s.scans {
 		if scan.State == ScanStateRunning {
-			return scan
+			return cloneScan(scan)
 		}
 	}
 	return nil
@@ -176,7 +219,7 @@ func (s *ScannerStore) GetActiveScan() *ScanRecord {
 			continue
 		}
 		if scan.State == ScanStatePending || scan.State == ScanStateRunning {
-			return scan
+			return cloneScan(scan)
 		}
 	}
 
@@ -187,7 +230,7 @@ func (s *ScannerStore) GetActiveScan() *ScanRecord {
 func (s *ScannerStore) AddFinding(finding *FindingRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.findings[finding.ID] = finding
+	s.findings[finding.ID] = cloneFinding(finding)
 }
 
 // GetFinding retrieves a finding by ID
@@ -195,14 +238,16 @@ func (s *ScannerStore) GetFinding(id string) (*FindingRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	finding, ok := s.findings[id]
-	return finding, ok
+	return cloneFinding(finding), ok
 }
 
-// UpdateFinding updates a finding record
-func (s *ScannerStore) UpdateFinding(finding *FindingRecord) {
+// UpdateFinding mutates an existing finding safely using a callback
+func (s *ScannerStore) UpdateFinding(id string, fn func(*FindingRecord)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.findings[finding.ID] = finding
+	if finding, ok := s.findings[id]; ok {
+		fn(finding)
+	}
 }
 
 // GetFindings returns findings with optional filtering
@@ -221,7 +266,7 @@ func (s *ScannerStore) GetFindings(scanID string, includeDismissed bool, severit
 		if severity != "" && string(f.Finding.Severity) != severity {
 			continue
 		}
-		filtered = append(filtered, f)
+		filtered = append(filtered, cloneFinding(f))
 	}
 
 	// Sort by created_at descending
@@ -248,7 +293,7 @@ func (s *ScannerStore) GetFindingsByScan(scanID string) []*FindingRecord {
 	var result []*FindingRecord
 	for _, f := range s.findings {
 		if f.ScanID == scanID {
-			result = append(result, f)
+			result = append(result, cloneFinding(f))
 		}
 	}
 	return result
@@ -451,17 +496,19 @@ func (s *Server) handleRunScan(w http.ResponseWriter, r *http.Request) {
 // runScanAsync runs the scan in the background
 func (s *Server) runScanAsync(scan *ScanRecord, opts ScanOptionsRequest) {
 	// Update state to running
-	scan.State = ScanStateRunning
-	scannerStore.UpdateScan(scan)
+	scannerStore.UpdateScan(scan.ID, func(sr *ScanRecord) {
+		sr.State = ScanStateRunning
+	})
 
 	// Create scanner
 	sc, err := scanner.New()
 	if err != nil {
-		scan.State = ScanStateFailed
-		scan.Error = err.Error()
 		now := time.Now()
-		scan.CompletedAt = &now
-		scannerStore.UpdateScan(scan)
+		scannerStore.UpdateScan(scan.ID, func(sr *ScanRecord) {
+			sr.State = ScanStateFailed
+			sr.Error = err.Error()
+			sr.CompletedAt = &now
+		})
 		s.publishScannerEvent("scanner.failed", map[string]interface{}{
 			"scan_id": scan.ID,
 			"error":   err.Error(),
@@ -488,12 +535,13 @@ func (s *Server) runScanAsync(scan *ScanRecord, opts ScanOptionsRequest) {
 	ctx := context.Background()
 	result, err := sc.Scan(ctx, scan.Path, scanOpts)
 	now := time.Now()
-	scan.CompletedAt = &now
 
 	if err != nil {
-		scan.State = ScanStateFailed
-		scan.Error = err.Error()
-		scannerStore.UpdateScan(scan)
+		scannerStore.UpdateScan(scan.ID, func(sr *ScanRecord) {
+			sr.State = ScanStateFailed
+			sr.Error = err.Error()
+			sr.CompletedAt = &now
+		})
 		slog.Error("scan failed", "scan_id", scan.ID, "error", err)
 		s.publishScannerEvent("scanner.failed", map[string]interface{}{
 			"scan_id": scan.ID,
@@ -501,10 +549,6 @@ func (s *Server) runScanAsync(scan *ScanRecord, opts ScanOptionsRequest) {
 		})
 		return
 	}
-
-	// Store result
-	scan.State = ScanStateCompleted
-	scan.Result = result
 
 	// Create finding records
 	findingIDs := make([]string, 0, len(result.Findings))
@@ -528,8 +572,14 @@ func (s *Server) runScanAsync(scan *ScanRecord, opts ScanOptionsRequest) {
 			"line":       f.Line,
 		})
 	}
-	scan.FindingIDs = findingIDs
-	scannerStore.UpdateScan(scan)
+
+	// Store result
+	scannerStore.UpdateScan(scan.ID, func(sr *ScanRecord) {
+		sr.State = ScanStateCompleted
+		sr.Result = result
+		sr.CompletedAt = &now
+		sr.FindingIDs = findingIDs
+	})
 
 	slog.Info("scan completed", "scan_id", scan.ID, "findings", len(result.Findings),
 		"critical", result.Totals.Critical, "warning", result.Totals.Warning)
@@ -658,10 +708,14 @@ func (s *Server) handleDismissFinding(w http.ResponseWriter, r *http.Request) {
 
 	// Update finding
 	now := time.Now()
+	scannerStore.UpdateFinding(findingID, func(fr *FindingRecord) {
+		fr.Dismissed = true
+		fr.DismissedAt = &now
+		fr.DismissedBy = dismissedBy
+	})
 	finding.Dismissed = true
 	finding.DismissedAt = &now
 	finding.DismissedBy = dismissedBy
-	scannerStore.UpdateFinding(finding)
 
 	slog.Info("finding dismissed", "request_id", reqID, "finding_id", findingID,
 		"dismissed_by", dismissedBy)
@@ -770,8 +824,10 @@ func (s *Server) handleCreateBeadFromFinding(w http.ResponseWriter, r *http.Requ
 	_, _ = bv.RunBd(s.projectDir, "update", beadID, "--description", description)
 
 	// Update finding with bead ID
+	scannerStore.UpdateFinding(findingID, func(fr *FindingRecord) {
+		fr.BeadID = beadID
+	})
 	finding.BeadID = beadID
-	scannerStore.UpdateFinding(finding)
 
 	slog.Info("bead created from finding", "request_id", reqID,
 		"finding_id", findingID, "bead_id", beadID)

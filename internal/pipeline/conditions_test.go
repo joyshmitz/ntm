@@ -471,7 +471,6 @@ func TestConditionEvaluator_WithStepOutputs(t *testing.T) {
 }
 
 func TestFindLogicalOpFlexible(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -490,7 +489,6 @@ func TestFindLogicalOpFlexible(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := findLogicalOpFlexible(tt.expr, tt.op)
 			if tt.wantN < 0 && got >= 0 {
 				t.Errorf("findLogicalOpFlexible(%q, %q) = %d, want not found", tt.expr, tt.op, got)
@@ -502,7 +500,6 @@ func TestFindLogicalOpFlexible(t *testing.T) {
 }
 
 func TestFindLogicalOp_EdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -521,7 +518,6 @@ func TestFindLogicalOp_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := findLogicalOp(tt.expr, tt.op)
 			if got != tt.want {
 				t.Errorf("findLogicalOp(%q, %q) = %d, want %d", tt.expr, tt.op, got, tt.want)
@@ -531,7 +527,6 @@ func TestFindLogicalOp_EdgeCases(t *testing.T) {
 }
 
 func TestConditionEvaluator_ErrorCases(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -552,7 +547,6 @@ func TestConditionEvaluator_ErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			_, err := evaluator.Evaluate(tt.condition)
 			if err == nil {
 				t.Error("expected error for invalid comparison")
@@ -562,7 +556,6 @@ func TestConditionEvaluator_ErrorCases(t *testing.T) {
 }
 
 func TestConditionEvaluator_ContainsWithVariables(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -584,7 +577,6 @@ func TestConditionEvaluator_ContainsWithVariables(t *testing.T) {
 }
 
 func TestConditionEvaluator_ShortCircuitAND(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -607,7 +599,6 @@ func TestConditionEvaluator_ShortCircuitAND(t *testing.T) {
 }
 
 func TestConditionEvaluator_ShortCircuitOR(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -630,7 +621,6 @@ func TestConditionEvaluator_ShortCircuitOR(t *testing.T) {
 }
 
 func TestConditionEvaluator_ORWithBothFalse(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -652,7 +642,6 @@ func TestConditionEvaluator_ORWithBothFalse(t *testing.T) {
 }
 
 func TestConditionEvaluator_ANDWithBothTrue(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -674,7 +663,6 @@ func TestConditionEvaluator_ANDWithBothTrue(t *testing.T) {
 }
 
 func TestConditionEvaluator_NestedParentheses(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -696,7 +684,6 @@ func TestConditionEvaluator_NestedParentheses(t *testing.T) {
 }
 
 func TestConditionEvaluator_NotWithExpression(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -717,7 +704,6 @@ func TestConditionEvaluator_NotWithExpression(t *testing.T) {
 }
 
 func TestEvaluateCondition_ErrorPath(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: make(map[string]interface{}),
@@ -733,7 +719,6 @@ func TestEvaluateCondition_ErrorPath(t *testing.T) {
 }
 
 func TestConditionEvaluator_SubstitutionError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: make(map[string]interface{}),
@@ -750,7 +735,6 @@ func TestConditionEvaluator_SubstitutionError(t *testing.T) {
 }
 
 func TestConditionEvaluator_ORLeftError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: make(map[string]interface{}),
@@ -772,7 +756,6 @@ func TestConditionEvaluator_ORLeftError(t *testing.T) {
 }
 
 func TestConditionEvaluator_ANDLeftError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: make(map[string]interface{}),
@@ -792,7 +775,6 @@ func TestConditionEvaluator_ANDLeftError(t *testing.T) {
 }
 
 func TestConditionEvaluator_NotFalse(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -813,7 +795,6 @@ func TestConditionEvaluator_NotFalse(t *testing.T) {
 }
 
 func TestConditionEvaluator_ExclamationFalse(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -834,7 +815,6 @@ func TestConditionEvaluator_ExclamationFalse(t *testing.T) {
 }
 
 func TestConditionEvaluator_ORRightSideEvaluated(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -857,7 +837,6 @@ func TestConditionEvaluator_ORRightSideEvaluated(t *testing.T) {
 }
 
 func TestConditionEvaluator_ANDRightSideEvaluated(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -880,7 +859,6 @@ func TestConditionEvaluator_ANDRightSideEvaluated(t *testing.T) {
 }
 
 func TestConditionEvaluator_ORAtEndOfExpression(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -900,7 +878,6 @@ func TestConditionEvaluator_ORAtEndOfExpression(t *testing.T) {
 }
 
 func TestConditionEvaluator_ANDAtEndOfExpression(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -920,7 +897,6 @@ func TestConditionEvaluator_ANDAtEndOfExpression(t *testing.T) {
 }
 
 func TestConditionEvaluator_NOTError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -938,7 +914,6 @@ func TestConditionEvaluator_NOTError(t *testing.T) {
 }
 
 func TestConditionEvaluator_ExclamationError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -956,7 +931,6 @@ func TestConditionEvaluator_ExclamationError(t *testing.T) {
 }
 
 func TestConditionEvaluator_ORLeftEvalError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -974,7 +948,6 @@ func TestConditionEvaluator_ORLeftEvalError(t *testing.T) {
 }
 
 func TestConditionEvaluator_ANDLeftEvalError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},

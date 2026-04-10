@@ -12,7 +12,6 @@ import (
 // =============================================================================
 
 func TestScannerStore_GetScans_ReverseOrder(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 
 	for i := 0; i < 5; i++ {
@@ -30,7 +29,6 @@ func TestScannerStore_GetScans_ReverseOrder(t *testing.T) {
 }
 
 func TestScannerStore_GetScans_Pagination(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 
 	for i := 0; i < 10; i++ {
@@ -65,7 +63,6 @@ func TestScannerStore_GetScans_Pagination(t *testing.T) {
 // =============================================================================
 
 func TestScannerStore_GetRunningScan(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 
 	// No running scan
@@ -98,7 +95,6 @@ func TestScannerStore_GetRunningScan(t *testing.T) {
 // =============================================================================
 
 func TestScannerStore_FindingCRUD(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 
 	finding := &FindingRecord{
@@ -128,8 +124,9 @@ func TestScannerStore_FindingCRUD(t *testing.T) {
 	}
 
 	// Update finding
-	finding.Dismissed = true
-	store.UpdateFinding(finding)
+	store.UpdateFinding(finding.ID, func(fr *FindingRecord) {
+		fr.Dismissed = true
+	})
 
 	got, _ = store.GetFinding("finding-1")
 	if !got.Dismissed {
@@ -142,7 +139,6 @@ func TestScannerStore_FindingCRUD(t *testing.T) {
 // =============================================================================
 
 func TestScannerStore_GetFindings_Filtering(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 
 	now := time.Now()
@@ -199,7 +195,6 @@ func TestScannerStore_GetFindings_Filtering(t *testing.T) {
 // =============================================================================
 
 func TestJobStore_List(t *testing.T) {
-	t.Parallel()
 	store := NewJobStore()
 
 	// Empty list
@@ -224,7 +219,6 @@ func TestJobStore_List(t *testing.T) {
 // =============================================================================
 
 func TestWSClient_CanSubscribe(t *testing.T) {
-	t.Parallel()
 
 	client := &WSClient{
 		id:     "auth-client",

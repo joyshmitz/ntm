@@ -1576,11 +1576,12 @@ func (e *Executor) clearStepVariables(stepID string) {
 }
 
 func (e *Executor) snapshotState() *ExecutionState {
+	e.stateMu.RLock()
 	if e.state == nil {
+		e.stateMu.RUnlock()
 		return nil
 	}
 
-	e.stateMu.RLock()
 	snapshot := *e.state
 
 	if e.state.Steps != nil {

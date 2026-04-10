@@ -294,12 +294,10 @@ var coreSchemaGoldens = []schemaGoldenTest{
 }
 
 func TestGolden_CoreSchemas(t *testing.T) {
-	t.Parallel()
 
 	for _, tc := range coreSchemaGoldens {
 		tc := tc // capture
 		t.Run(tc.Name, func(t *testing.T) {
-			t.Parallel()
 
 			output, err := GetSchema(tc.SchemaType)
 			if err != nil {
@@ -396,7 +394,6 @@ type SurfaceGoldenEntry struct {
 }
 
 func TestGolden_Registry(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if registry == nil {
@@ -526,12 +523,10 @@ var canonicalErrorGoldens = []errorGoldenTest{
 }
 
 func TestGolden_ErrorResponses(t *testing.T) {
-	t.Parallel()
 
 	for _, tc := range canonicalErrorGoldens {
 		tc := tc
 		t.Run(tc.Code, func(t *testing.T) {
-			t.Parallel()
 
 			// Create canonical error response
 			resp := NewErrorResponse(
@@ -605,12 +600,10 @@ var scenarioGoldens = []scenarioGoldenTest{
 }
 
 func TestGolden_ScenarioPayloads(t *testing.T) {
-	t.Parallel()
 
 	for _, tc := range scenarioGoldens {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
-			t.Parallel()
 
 			path := filepath.Join("testdata/robot_redesign", tc.SourceFile)
 			data, err := os.ReadFile(path)
@@ -692,7 +685,6 @@ func validateScenarioStructure(t *testing.T, name string, scenario map[string]in
 // =============================================================================
 
 func TestContract_RequiredSchemaFields(t *testing.T) {
-	t.Parallel()
 
 	// Core surfaces must have these response fields (from RobotResponse)
 	requiredResponseFields := []string{"success", "timestamp"}
@@ -710,7 +702,6 @@ func TestContract_RequiredSchemaFields(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.schemaType, func(t *testing.T) {
-			t.Parallel()
 
 			output, err := GetSchema(tc.schemaType)
 			if err != nil {
@@ -730,7 +721,6 @@ func TestContract_RequiredSchemaFields(t *testing.T) {
 }
 
 func TestContract_ErrorCodeStability(t *testing.T) {
-	t.Parallel()
 
 	// These error codes must remain stable
 	stableErrorCodes := map[string]string{
@@ -760,7 +750,6 @@ func TestContract_ErrorCodeStability(t *testing.T) {
 }
 
 func TestContract_RegistrySurfaceStability(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if registry == nil {
@@ -787,7 +776,6 @@ func TestContract_RegistrySurfaceStability(t *testing.T) {
 }
 
 func TestContract_IdempotencySupport(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if registry == nil {

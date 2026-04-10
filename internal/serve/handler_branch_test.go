@@ -235,7 +235,6 @@ func writeCheckpointFixtureFromMetadataJSON(t *testing.T, cpDir string, metadata
 // =============================================================================
 
 func TestRequirePermission_NilRoleContext(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -263,7 +262,6 @@ func TestRequirePermission_NilRoleContext(t *testing.T) {
 }
 
 func TestRequireRole_NilRoleContext(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -295,7 +293,6 @@ func TestRequireRole_NilRoleContext(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionsV1_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -310,7 +307,6 @@ func TestHandleSessionsV1_NilStore(t *testing.T) {
 
 // handleSessionsV1 — success with sessions present
 func TestHandleSessionsV1_WithSessions(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "sess-a")
 	createTestSessionForServe(t, store, "sess-b")
@@ -339,7 +335,6 @@ func TestHandleSessionsV1_WithSessions(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionV1_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -356,7 +351,6 @@ func TestHandleSessionV1_NilStore(t *testing.T) {
 }
 
 func TestHandleSessionV1_Success(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "found-session")
 
@@ -386,7 +380,6 @@ func TestHandleSessionV1_Success(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionEventsV1_NilEventBus(t *testing.T) {
-	t.Parallel()
 	// Create server with nil eventBus
 	srv := New(Config{})
 
@@ -402,7 +395,6 @@ func TestHandleSessionEventsV1_NilEventBus(t *testing.T) {
 
 // handleSessionEventsV1 — success with empty events
 func TestHandleSessionEventsV1_EmptyFiltered(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -433,7 +425,6 @@ func TestHandleSessionEventsV1_EmptyFiltered(t *testing.T) {
 // =============================================================================
 
 func TestIdempotencyStore_CleanupExpiry(t *testing.T) {
-	t.Parallel()
 
 	// Very short TTL so cleanup actually deletes entries
 	store := NewIdempotencyStore(50 * time.Millisecond)
@@ -463,7 +454,6 @@ func TestIdempotencyStore_CleanupExpiry(t *testing.T) {
 // =============================================================================
 
 func TestWSHubPublish_BufferFull(t *testing.T) {
-	t.Parallel()
 
 	hub := NewWSHub()
 	// Do NOT start hub.Run() so broadcast channel has no consumer
@@ -497,7 +487,6 @@ func TestWSHubPublish_BufferFull(t *testing.T) {
 // =============================================================================
 
 func TestWSHub_BroadcastEvent_MarshalError(t *testing.T) {
-	t.Parallel()
 
 	hub := NewWSHub()
 	go hub.Run()
@@ -520,7 +509,6 @@ func TestWSHub_BroadcastEvent_MarshalError(t *testing.T) {
 // =============================================================================
 
 func TestWSHub_BroadcastEvent_WithRedaction(t *testing.T) {
-	t.Parallel()
 
 	hub := NewWSHub()
 	go hub.Run()
@@ -553,7 +541,6 @@ func TestWSHub_BroadcastEvent_WithRedaction(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionsV1_EmptyDB(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -584,7 +571,6 @@ func TestHandleSessionsV1_EmptyDB(t *testing.T) {
 // =============================================================================
 
 func TestHandleCreateSessionV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -604,7 +590,6 @@ func TestHandleCreateSessionV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionStatusV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -622,7 +607,6 @@ func TestHandleSessionStatusV1_KernelError(t *testing.T) {
 }
 
 func TestHandleSessionAttachV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -643,7 +627,6 @@ func TestHandleSessionAttachV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestWSHubPublish_WithClient(t *testing.T) {
-	t.Parallel()
 
 	hub := NewWSHub()
 	go hub.Run()
@@ -684,7 +667,6 @@ func TestWSHubPublish_WithClient(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionEventsV1_WithEvents(t *testing.T) {
-	t.Parallel()
 
 	bus := events.NewEventBus(100)
 	srv := New(Config{EventBus: bus})
@@ -721,7 +703,6 @@ func TestHandleSessionEventsV1_WithEvents(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionEvents_NilEventBus(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -736,7 +717,6 @@ func TestHandleSessionEvents_NilEventBus(t *testing.T) {
 
 // handleSessions (legacy) — nil stateStore
 func TestHandleSessions_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -751,7 +731,6 @@ func TestHandleSessions_NilStore(t *testing.T) {
 
 // handleSessions — method not allowed
 func TestHandleSessions_MethodNotAllowed(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -766,7 +745,6 @@ func TestHandleSessions_MethodNotAllowed(t *testing.T) {
 
 // handleSession — method not allowed
 func TestHandleSession_MethodNotAllowed(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -781,7 +759,6 @@ func TestHandleSession_MethodNotAllowed(t *testing.T) {
 
 // handleSession — nil stateStore
 func TestHandleSession_NilStore(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -796,7 +773,6 @@ func TestHandleSession_NilStore(t *testing.T) {
 
 // handleSession — success path with session found
 func TestHandleSession_Success(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "legacy-session")
 
@@ -820,7 +796,6 @@ func TestHandleSession_Success(t *testing.T) {
 
 // handleSession — sub-resource routing (agents)
 func TestHandleSession_SubResourceAgents(t *testing.T) {
-	t.Parallel()
 	srv, store := setupTestServer(t)
 	createTestSessionForServe(t, store, "sub-agents")
 
@@ -839,7 +814,6 @@ func TestHandleSession_SubResourceAgents(t *testing.T) {
 // =============================================================================
 
 func TestHandlePaneOutputV1_InvalidIndex(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -857,7 +831,6 @@ func TestHandlePaneOutputV1_InvalidIndex(t *testing.T) {
 }
 
 func TestHandlePaneOutputV1_InvalidLines(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -875,7 +848,6 @@ func TestHandlePaneOutputV1_InvalidLines(t *testing.T) {
 }
 
 func TestHandlePaneOutputV1_LinesOutOfRange(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -893,7 +865,6 @@ func TestHandlePaneOutputV1_LinesOutOfRange(t *testing.T) {
 }
 
 func TestHandlePaneOutputV1_TmuxError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -912,7 +883,6 @@ func TestHandlePaneOutputV1_TmuxError(t *testing.T) {
 }
 
 func TestHandlePaneInputV1_InvalidIndex(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -931,7 +901,6 @@ func TestHandlePaneInputV1_InvalidIndex(t *testing.T) {
 }
 
 func TestHandlePaneInputV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -949,7 +918,6 @@ func TestHandlePaneInputV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandlePaneInputV1_EmptyText(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -971,7 +939,6 @@ func TestHandlePaneInputV1_EmptyText(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionViewV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -992,7 +959,6 @@ func TestHandleSessionViewV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandleListPanesV1_EmptyResult(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1014,7 +980,6 @@ func TestHandleListPanesV1_EmptyResult(t *testing.T) {
 // =============================================================================
 
 func TestHandleListAgentsV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1031,7 +996,6 @@ func TestHandleListAgentsV1_KernelError(t *testing.T) {
 }
 
 func TestHandleAgentSendV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1048,7 +1012,6 @@ func TestHandleAgentSendV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandleAgentInterruptV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1065,7 +1028,6 @@ func TestHandleAgentInterruptV1_KernelError(t *testing.T) {
 }
 
 func TestHandleAgentWaitV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1086,7 +1048,6 @@ func TestHandleAgentWaitV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandlePolicyUpdateV1_InvalidYAML(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1101,7 +1062,6 @@ func TestHandlePolicyUpdateV1_InvalidYAML(t *testing.T) {
 }
 
 func TestHandlePolicyUpdateV1_InvalidPolicy(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	// Valid YAML but invalid policy (bad force_release value)
@@ -1117,7 +1077,6 @@ func TestHandlePolicyUpdateV1_InvalidPolicy(t *testing.T) {
 }
 
 func TestHandlePolicyUpdateV1_ValidPolicy(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	// Valid YAML with valid policy
@@ -1138,7 +1097,6 @@ func TestHandlePolicyUpdateV1_ValidPolicy(t *testing.T) {
 // =============================================================================
 
 func TestHandlePolicyAutomationUpdateV1_ValidUpdate(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1156,7 +1114,6 @@ func TestHandlePolicyAutomationUpdateV1_ValidUpdate(t *testing.T) {
 }
 
 func TestHandlePolicyAutomationUpdateV1_ForceReleaseApproval(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1175,7 +1132,6 @@ func TestHandlePolicyAutomationUpdateV1_ForceReleaseApproval(t *testing.T) {
 // =============================================================================
 
 func TestHandlePolicyValidateV1_InvalidYAML(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1199,7 +1155,6 @@ func TestHandlePolicyValidateV1_InvalidYAML(t *testing.T) {
 }
 
 func TestHandlePolicyValidateV1_BadJSON(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1217,7 +1172,6 @@ func TestHandlePolicyValidateV1_BadJSON(t *testing.T) {
 // =============================================================================
 
 func TestHandlePolicyResetV1_Success(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1236,7 +1190,6 @@ func TestHandlePolicyResetV1_Success(t *testing.T) {
 // =============================================================================
 
 func TestHandleSafetyInstallV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1250,7 +1203,6 @@ func TestHandleSafetyInstallV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandleSafetyUninstallV1_NothingInstalled(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1269,7 +1221,6 @@ func TestHandleSafetyUninstallV1_NothingInstalled(t *testing.T) {
 // =============================================================================
 
 func TestHandleSafetyCheckV1_ValidCommand_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1288,7 +1239,6 @@ func TestHandleSafetyCheckV1_ValidCommand_Branch(t *testing.T) {
 // =============================================================================
 
 func TestHandleApprovalsListV1_WithStatusFilter(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1302,7 +1252,6 @@ func TestHandleApprovalsListV1_WithStatusFilter(t *testing.T) {
 }
 
 func TestHandleApprovalsListV1_NoFilter(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1320,7 +1269,6 @@ func TestHandleApprovalsListV1_NoFilter(t *testing.T) {
 // =============================================================================
 
 func TestHandleGetPaneTitleV1_InvalidIndex(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1338,7 +1286,6 @@ func TestHandleGetPaneTitleV1_InvalidIndex(t *testing.T) {
 }
 
 func TestHandleSetPaneTitleV1_InvalidIndex(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1357,7 +1304,6 @@ func TestHandleSetPaneTitleV1_InvalidIndex(t *testing.T) {
 }
 
 func TestHandleSetPaneTitleV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1380,7 +1326,6 @@ func TestHandleSetPaneTitleV1_InvalidBody(t *testing.T) {
 // =============================================================================
 
 func TestHandlePaneInterruptV1_InvalidIndex(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1402,7 +1347,6 @@ func TestHandlePaneInterruptV1_InvalidIndex(t *testing.T) {
 // =============================================================================
 
 func TestHandleAgentSendV1_EmptyMessage(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1424,7 +1368,6 @@ func TestHandleAgentSendV1_EmptyMessage(t *testing.T) {
 // =============================================================================
 
 func TestHandleAgentWaitV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1441,7 +1384,6 @@ func TestHandleAgentWaitV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandleAgentWaitV1_EmptyCondition(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1463,7 +1405,6 @@ func TestHandleAgentWaitV1_EmptyCondition(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionZoomV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1485,7 +1426,6 @@ func TestHandleSessionZoomV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandleGetPaneV1_PaneNotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1508,7 +1448,6 @@ func TestHandleGetPaneV1_PaneNotFound(t *testing.T) {
 // =============================================================================
 
 func TestHandleCreateBead_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1522,7 +1461,6 @@ func TestHandleCreateBead_InvalidBody(t *testing.T) {
 }
 
 func TestHandleCreateBead_EmptyTitle(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1541,7 +1479,6 @@ func TestHandleCreateBead_EmptyTitle(t *testing.T) {
 // =============================================================================
 
 func TestHandleClaimBead_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1558,7 +1495,6 @@ func TestHandleClaimBead_InvalidBody(t *testing.T) {
 }
 
 func TestHandleClaimBead_EmptyAssignee(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1580,7 +1516,6 @@ func TestHandleClaimBead_EmptyAssignee(t *testing.T) {
 // =============================================================================
 
 func TestHandleUpdateBead_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1601,7 +1536,6 @@ func TestHandleUpdateBead_InvalidBody(t *testing.T) {
 // =============================================================================
 
 func TestHandleAddBeadDep_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1622,7 +1556,6 @@ func TestHandleAddBeadDep_InvalidBody(t *testing.T) {
 // =============================================================================
 
 func TestHandleGetConfigV1_Success(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{Host: "127.0.0.1", Port: 8080})
 
 	rec := httptest.NewRecorder()
@@ -1652,7 +1585,6 @@ func TestHandleGetConfigV1_Success(t *testing.T) {
 // =============================================================================
 
 func TestHandleRobotHealth_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1671,7 +1603,6 @@ func TestHandleRobotHealth_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandleAgentSpawnV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1694,7 +1625,6 @@ func TestHandleAgentSpawnV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandleDepsV1_KernelError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1713,7 +1643,6 @@ func TestHandleDepsV1_KernelError(t *testing.T) {
 // =============================================================================
 
 func TestHandlePaneInputV1_TmuxError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1737,7 +1666,6 @@ func TestHandlePaneInputV1_TmuxError(t *testing.T) {
 // =============================================================================
 
 func TestHandleListAgentsV1_EmptySession_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1758,7 +1686,6 @@ func TestHandleListAgentsV1_EmptySession_Branch(t *testing.T) {
 // =============================================================================
 
 func TestHandleSessionAgentsV1_NilStore_Branch(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rec := httptest.NewRecorder()
@@ -1776,7 +1703,6 @@ func TestHandleSessionAgentsV1_NilStore_Branch(t *testing.T) {
 // =============================================================================
 
 func TestHandlePaneOutputV1_DefaultLines(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1799,7 +1725,6 @@ func TestHandlePaneOutputV1_DefaultLines(t *testing.T) {
 // =============================================================================
 
 func TestHandlePaneInterruptV1_TmuxError(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1824,7 +1749,6 @@ func TestHandlePaneInterruptV1_TmuxError(t *testing.T) {
 // handleValidatePipeline — inline content branches
 
 func TestHandleValidatePipeline_InvalidYAMLContent(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1848,7 +1772,6 @@ func TestHandleValidatePipeline_InvalidYAMLContent(t *testing.T) {
 }
 
 func TestHandleValidatePipeline_ValidInlineContent(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1872,7 +1795,6 @@ func TestHandleValidatePipeline_ValidInlineContent(t *testing.T) {
 }
 
 func TestHandleValidatePipeline_WorkflowFileNotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1889,7 +1811,6 @@ func TestHandleValidatePipeline_WorkflowFileNotFound(t *testing.T) {
 // handleExecPipeline — invalid workflow validation
 
 func TestHandleExecPipeline_InvalidWorkflow(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1907,7 +1828,6 @@ func TestHandleExecPipeline_InvalidWorkflow(t *testing.T) {
 // handleRunPipeline — non-existent workflow file
 
 func TestHandleRunPipeline_WorkflowFileNotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1925,7 +1845,6 @@ func TestHandleRunPipeline_WorkflowFileNotFound(t *testing.T) {
 // handleResumePipeline — invalid JSON body
 
 func TestHandleResumePipeline_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1948,7 +1867,6 @@ func TestHandleResumePipeline_InvalidBody(t *testing.T) {
 // handleCleanupPipelines — invalid JSON body
 
 func TestHandleCleanupPipelines_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1966,7 +1884,6 @@ func TestHandleCleanupPipelines_InvalidBody(t *testing.T) {
 // =============================================================================
 
 func TestHandleListJobs_Empty(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -1989,7 +1906,6 @@ func TestHandleListJobs_Empty(t *testing.T) {
 }
 
 func TestHandleCreateJob_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2003,7 +1919,6 @@ func TestHandleCreateJob_InvalidBody(t *testing.T) {
 }
 
 func TestHandleCreateJob_MissingType(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2018,7 +1933,6 @@ func TestHandleCreateJob_MissingType(t *testing.T) {
 }
 
 func TestHandleCreateJob_InvalidType(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2042,7 +1956,6 @@ func TestHandleCreateJob_InvalidType(t *testing.T) {
 }
 
 func TestHandleCreateJob_ValidType(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2066,7 +1979,6 @@ func TestHandleCreateJob_ValidType(t *testing.T) {
 }
 
 func TestHandleGetJob_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2083,7 +1995,6 @@ func TestHandleGetJob_NotFound(t *testing.T) {
 }
 
 func TestHandleCancelJob_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2104,7 +2015,6 @@ func TestHandleCancelJob_NotFound(t *testing.T) {
 // =============================================================================
 
 func TestCheckMemoryDaemon_NoPidsDir(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	srv := New(Config{})
 	srv.projectDir = tmpDir
@@ -2117,7 +2027,6 @@ func TestCheckMemoryDaemon_NoPidsDir(t *testing.T) {
 }
 
 func TestCheckMemoryDaemon_EmptyPidsDir(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -2134,7 +2043,6 @@ func TestCheckMemoryDaemon_EmptyPidsDir(t *testing.T) {
 }
 
 func TestCheckMemoryDaemon_NonMatchingFiles(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -2155,7 +2063,6 @@ func TestCheckMemoryDaemon_NonMatchingFiles(t *testing.T) {
 }
 
 func TestCheckMemoryDaemon_InvalidJSON(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -2176,7 +2083,6 @@ func TestCheckMemoryDaemon_InvalidJSON(t *testing.T) {
 }
 
 func TestCheckMemoryDaemon_ValidPIDFile(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -2213,7 +2119,6 @@ func TestCheckMemoryDaemon_ValidPIDFile(t *testing.T) {
 // handleCreateCheckpoint — session not found (tmux check)
 
 func TestHandleCreateCheckpoint_SessionNotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2231,7 +2136,6 @@ func TestHandleCreateCheckpoint_SessionNotFound(t *testing.T) {
 }
 
 func TestHandleCreateCheckpoint_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2251,7 +2155,6 @@ func TestHandleCreateCheckpoint_InvalidBody(t *testing.T) {
 // handleRestoreCheckpoint — invalid body
 
 func TestHandleRestoreCheckpoint_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2269,7 +2172,6 @@ func TestHandleRestoreCheckpoint_InvalidBody(t *testing.T) {
 }
 
 func TestHandleRestoreCheckpoint_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2291,7 +2193,6 @@ func TestHandleRestoreCheckpoint_NotFound(t *testing.T) {
 // handleVerifyCheckpoint — checkpoint not found
 
 func TestHandleVerifyCheckpoint_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2311,7 +2212,6 @@ func TestHandleVerifyCheckpoint_NotFound(t *testing.T) {
 // handleExportCheckpoint — invalid format + not found
 
 func TestHandleExportCheckpoint_InvalidFormat(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2330,7 +2230,6 @@ func TestHandleExportCheckpoint_InvalidFormat(t *testing.T) {
 }
 
 func TestHandleExportCheckpoint_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2349,7 +2248,6 @@ func TestHandleExportCheckpoint_NotFound(t *testing.T) {
 }
 
 func TestHandleExportCheckpoint_GetDefaultFormat(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2404,7 +2302,6 @@ func TestHandleExportCheckpoint_InvalidCheckpointReturnsBadRequest(t *testing.T)
 }
 
 func TestHandleExportCheckpoint_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2424,7 +2321,6 @@ func TestHandleExportCheckpoint_InvalidBody(t *testing.T) {
 // handleImportCheckpoint — validation branches
 
 func TestHandleImportCheckpoint_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2441,7 +2337,6 @@ func TestHandleImportCheckpoint_InvalidBody(t *testing.T) {
 }
 
 func TestHandleImportCheckpoint_MissingData(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2459,7 +2354,6 @@ func TestHandleImportCheckpoint_MissingData(t *testing.T) {
 }
 
 func TestHandleImportCheckpoint_InvalidBase64(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2479,7 +2373,6 @@ func TestHandleImportCheckpoint_InvalidBase64(t *testing.T) {
 // handleRollback — validation branches
 
 func TestHandleRollback_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2496,7 +2389,6 @@ func TestHandleRollback_InvalidBody(t *testing.T) {
 }
 
 func TestHandleRollback_CheckpointNotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2514,7 +2406,6 @@ func TestHandleRollback_CheckpointNotFound(t *testing.T) {
 }
 
 func TestHandleRollback_DefaultRef(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2536,7 +2427,6 @@ func TestHandleRollback_DefaultRef(t *testing.T) {
 // handleGetCheckpoint — not found (different name from extra tests)
 
 func TestHandleGetCheckpoint_Branch_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2616,7 +2506,6 @@ func TestHandleGetCheckpoint_InvalidSessionNameReturnsBadRequest(t *testing.T) {
 // handleListPipelineTemplates — should return 200 with templates list
 
 func TestHandleListPipelineTemplates_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2640,7 +2529,6 @@ func TestHandleListPipelineTemplates_Branch(t *testing.T) {
 // handleListPipelines — should return 200 with empty list
 
 func TestHandleListPipelines_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2660,7 +2548,6 @@ func TestHandleListPipelines_Branch(t *testing.T) {
 // handleListAccountsV1 — exercises robot.GetAccountsList
 
 func TestHandleListAccountsV1_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2677,7 +2564,6 @@ func TestHandleListAccountsV1_Branch(t *testing.T) {
 // handleAccountStatusV1 — exercises robot.GetAccountStatus
 
 func TestHandleAccountStatusV1_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2693,7 +2579,6 @@ func TestHandleAccountStatusV1_Branch(t *testing.T) {
 // handleActiveAccountsV1 — exercises active account filtering
 
 func TestHandleActiveAccountsV1_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2709,7 +2594,6 @@ func TestHandleActiveAccountsV1_Branch(t *testing.T) {
 // handleAccountQuotaV1 — exercises quota extraction
 
 func TestHandleAccountQuotaV1_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2725,7 +2609,6 @@ func TestHandleAccountQuotaV1_Branch(t *testing.T) {
 // handleAccountHistoryV1 — exercises history retrieval + limit param
 
 func TestHandleAccountHistoryV1_Empty(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2748,7 +2631,6 @@ func TestHandleAccountHistoryV1_Empty(t *testing.T) {
 }
 
 func TestHandleAccountHistoryV1_WithLimit(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2762,7 +2644,6 @@ func TestHandleAccountHistoryV1_WithLimit(t *testing.T) {
 }
 
 func TestHandleAccountHistoryV1_InvalidLimit(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2779,7 +2660,6 @@ func TestHandleAccountHistoryV1_InvalidLimit(t *testing.T) {
 // handlePatchAutoRotateConfigV1 — config update branches
 
 func TestHandlePatchAutoRotateConfigV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2793,7 +2673,6 @@ func TestHandlePatchAutoRotateConfigV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandlePatchAutoRotateConfigV1_CooldownTooLow(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2808,7 +2687,6 @@ func TestHandlePatchAutoRotateConfigV1_CooldownTooLow(t *testing.T) {
 }
 
 func TestHandlePatchAutoRotateConfigV1_ValidUpdate(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2825,7 +2703,6 @@ func TestHandlePatchAutoRotateConfigV1_ValidUpdate(t *testing.T) {
 // handleRotateAccountV1 — validation branches
 
 func TestHandleRotateAccountV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2839,7 +2716,6 @@ func TestHandleRotateAccountV1_InvalidBody(t *testing.T) {
 }
 
 func TestHandleRotateAccountV1_MissingProvider(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2856,7 +2732,6 @@ func TestHandleRotateAccountV1_MissingProvider(t *testing.T) {
 // handleListAccountsByProviderV1 — validation + exercise
 
 func TestHandleListAccountsByProviderV1_EmptyProvider(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2873,7 +2748,6 @@ func TestHandleListAccountsByProviderV1_EmptyProvider(t *testing.T) {
 }
 
 func TestHandleListAccountsByProviderV1_WithProvider(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2893,7 +2767,6 @@ func TestHandleListAccountsByProviderV1_WithProvider(t *testing.T) {
 // handleRotateProviderAccountV1 — validation branches
 
 func TestHandleRotateProviderAccountV1_EmptyProvider(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2910,7 +2783,6 @@ func TestHandleRotateProviderAccountV1_EmptyProvider(t *testing.T) {
 }
 
 func TestHandleRotateProviderAccountV1_InvalidBody(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2930,7 +2802,6 @@ func TestHandleRotateProviderAccountV1_InvalidBody(t *testing.T) {
 // handleGetAutoRotateConfigV1 — always returns 200
 
 func TestHandleGetAutoRotateConfigV1_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2946,7 +2817,6 @@ func TestHandleGetAutoRotateConfigV1_Branch(t *testing.T) {
 // handleCASSSearch — query validation (already have BadRequest test, add empty query)
 
 func TestHandleCASSSearch_EmptyQuery(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2964,7 +2834,6 @@ func TestHandleCASSSearch_EmptyQuery(t *testing.T) {
 // handleMemoryContext — validation
 
 func TestHandleMemoryContext_EmptySession(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -2982,7 +2851,6 @@ func TestHandleMemoryContext_EmptySession(t *testing.T) {
 // handleDeleteCheckpoint — not found (deeper branch exercise)
 
 func TestHandleDeleteCheckpoint_Branch_NotFound(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -3006,7 +2874,6 @@ func TestHandleDeleteCheckpoint_Branch_NotFound(t *testing.T) {
 // --- WSEventStore cleanup (16.7% → higher) ---
 
 func TestWSEventStore_CleanupRemovesOldEvents(t *testing.T) {
-	t.Parallel()
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -3046,7 +2913,6 @@ func TestWSEventStore_CleanupRemovesOldEvents(t *testing.T) {
 }
 
 func TestWSEventStore_CleanupNilDB(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{db: nil}
 	if err := store.cleanup(); err != nil {
 		t.Errorf("cleanup with nil db should return nil, got %v", err)
@@ -3054,7 +2920,6 @@ func TestWSEventStore_CleanupNilDB(t *testing.T) {
 }
 
 func TestWSEventStore_CleanupDroppedEvents(t *testing.T) {
-	t.Parallel()
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -3084,7 +2949,6 @@ func TestWSEventStore_CleanupDroppedEvents(t *testing.T) {
 }
 
 func TestWSEventStore_RecordDroppedNilDB(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{db: nil}
 	if err := store.RecordDropped("c1", "t", "r", 1, 5); err != nil {
 		t.Errorf("RecordDropped with nil db should return nil, got %v", err)
@@ -3092,7 +2956,6 @@ func TestWSEventStore_RecordDroppedNilDB(t *testing.T) {
 }
 
 func TestWSEventStore_GetDroppedStatsNilDB(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{db: nil}
 	stats, err := store.GetDroppedStats("c1", time.Now())
 	if err != nil {
@@ -3104,7 +2967,6 @@ func TestWSEventStore_GetDroppedStatsNilDB(t *testing.T) {
 }
 
 func TestWSEventStore_CurrentSeqBranch(t *testing.T) {
-	t.Parallel()
 	store := NewWSEventStore(nil, WSEventStoreConfig{BufferSize: 10, CleanupInterval: time.Hour})
 	defer store.Stop()
 
@@ -3118,7 +2980,6 @@ func TestWSEventStore_CurrentSeqBranch(t *testing.T) {
 }
 
 func TestWSEventStore_GetSinceDBFallback_CursorTooOld(t *testing.T) {
-	t.Parallel()
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -3152,7 +3013,6 @@ func TestWSEventStore_GetSinceDBFallback_CursorTooOld(t *testing.T) {
 }
 
 func TestWSEventStore_GetSinceDBWithTopicFilter(t *testing.T) {
-	t.Parallel()
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -3182,7 +3042,6 @@ func TestWSEventStore_GetSinceDBWithTopicFilter(t *testing.T) {
 }
 
 func TestWSEventStore_GetSinceDefaultLimit(t *testing.T) {
-	t.Parallel()
 	store := NewWSEventStore(nil, WSEventStoreConfig{BufferSize: 100, CleanupInterval: time.Hour})
 	defer store.Stop()
 
@@ -3203,14 +3062,12 @@ func TestWSEventStore_GetSinceDefaultLimit(t *testing.T) {
 // --- matchTopic direct tests ---
 
 func TestMatchTopic_Wildcard(t *testing.T) {
-	t.Parallel()
 	if !matchTopic("*", "anything") {
 		t.Error("* should match anything")
 	}
 }
 
 func TestMatchTopic_PrefixWildcard(t *testing.T) {
-	t.Parallel()
 	if !matchTopic("sessions:*", "sessions:proj1") {
 		t.Error("sessions:* should match sessions:proj1")
 	}
@@ -3220,7 +3077,6 @@ func TestMatchTopic_PrefixWildcard(t *testing.T) {
 }
 
 func TestMatchTopic_ExactMatch(t *testing.T) {
-	t.Parallel()
 	if !matchTopic("global", "global") {
 		t.Error("exact match should work")
 	}
@@ -3232,7 +3088,6 @@ func TestMatchTopic_ExactMatch(t *testing.T) {
 // --- handleMemoryOutcome — daemon not running (deeper branch) ---
 
 func TestHandleMemoryOutcome_DaemonNotRunning(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	srv := New(Config{})
 	srv.projectDir = tmpDir
@@ -3249,7 +3104,6 @@ func TestHandleMemoryOutcome_DaemonNotRunning(t *testing.T) {
 // --- NewMemoryStore / MemoryStore methods ---
 
 func TestNewMemoryStoreBranch(t *testing.T) {
-	t.Parallel()
 	store := NewMemoryStore()
 	info := store.GetDaemonInfo()
 	if info.State != DaemonStateStopped {
@@ -3258,7 +3112,6 @@ func TestNewMemoryStoreBranch(t *testing.T) {
 }
 
 func TestMemoryStore_SetGetDaemonInfo(t *testing.T) {
-	t.Parallel()
 	store := NewMemoryStore()
 	now := time.Now()
 	store.SetDaemonInfo(&MemoryDaemonInfo{
@@ -3280,7 +3133,6 @@ func TestMemoryStore_SetGetDaemonInfo(t *testing.T) {
 // --- DefaultWSEventStoreConfig ---
 
 func TestDefaultWSEventStoreConfigBranch(t *testing.T) {
-	t.Parallel()
 	cfg := DefaultWSEventStoreConfig()
 	if cfg.BufferSize != 10000 {
 		t.Errorf("BufferSize = %d, want 10000", cfg.BufferSize)
@@ -3296,32 +3148,27 @@ func TestDefaultWSEventStoreConfigBranch(t *testing.T) {
 // --- publishMemoryEvent / publishMailEvent / publishReservationEvent nil hub ---
 
 func TestPublishMemoryEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	// Should not panic
 	srv.publishMemoryEvent("test.event", map[string]interface{}{"key": "val"})
 }
 
 func TestPublishMailEvent_NilHubBranch(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	srv.publishMailEvent("agent1", "mail.sent", map[string]interface{}{"key": "val"})
 }
 
 func TestPublishReservationEvent_NilHubBranch(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	srv.publishReservationEvent("agent1", "reservation.granted", map[string]interface{}{})
 }
 
 func TestPublishMailEvent_EmptyAgentName(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	srv.publishMailEvent("", "mail.sent", map[string]interface{}{"key": "val"})
 }
 
 func TestPublishReservationEvent_EmptyAgentName(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	srv.publishReservationEvent("", "reservation.granted", map[string]interface{}{})
 }
@@ -3329,7 +3176,6 @@ func TestPublishReservationEvent_EmptyAgentName(t *testing.T) {
 // --- checkMemoryDaemon with invalid PID file JSON ---
 
 func TestCheckMemoryDaemon_InvalidPIDJSON(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -3347,7 +3193,6 @@ func TestCheckMemoryDaemon_InvalidPIDJSON(t *testing.T) {
 }
 
 func TestCheckMemoryDaemon_NonCMPidFile(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -3367,7 +3212,6 @@ func TestCheckMemoryDaemon_NonCMPidFile(t *testing.T) {
 // --- WSEventStore Stop idempotency ---
 
 func TestWSEventStore_StopMemoryOnly(t *testing.T) {
-	t.Parallel()
 	store := NewWSEventStore(nil, WSEventStoreConfig{BufferSize: 10, CleanupInterval: time.Hour})
 	// Stop should not panic even without cleanup ticker
 	store.Stop()
@@ -3376,7 +3220,6 @@ func TestWSEventStore_StopMemoryOnly(t *testing.T) {
 // --- NewWSEventStore config defaults ---
 
 func TestNewWSEventStore_ZeroConfig(t *testing.T) {
-	t.Parallel()
 	store := NewWSEventStore(nil, WSEventStoreConfig{})
 	defer store.Stop()
 
@@ -3593,7 +3436,6 @@ func TestHandleCreateBeadFromFinding_NotFound(t *testing.T) {
 }
 
 func TestPublishScannerEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	srv := &Server{} // no wsHub
 	// Should not panic
 	srv.publishScannerEvent("test.event", map[string]interface{}{"key": "val"})
@@ -3618,7 +3460,6 @@ func TestHandleMemoryDaemonStart_CMNotInstalled(t *testing.T) {
 }
 
 func TestHandleMemoryDaemonStop_RunningDaemon(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	pidsDir := filepath.Join(tmpDir, ".ntm", "pids")
 	if err := os.MkdirAll(pidsDir, 0o755); err != nil {
@@ -3777,7 +3618,6 @@ func TestHandleMemoryRules_CLINotInstalled(t *testing.T) {
 // --- Audit store config defaults ---
 
 func TestNewAuditStore_DefaultRetention(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 
 	store, err := NewAuditStore(AuditStoreConfig{
@@ -3796,7 +3636,6 @@ func TestNewAuditStore_DefaultRetention(t *testing.T) {
 }
 
 func TestNewAuditStore_NoPaths(t *testing.T) {
-	t.Parallel()
 	// No DBPath or JSONLPath → minimal store
 	store, err := NewAuditStore(AuditStoreConfig{
 		Retention:       time.Hour,
@@ -4174,10 +4013,8 @@ func TestHandleMemoryDaemonStatus_ReportsStartingState(t *testing.T) {
 // --- Memory outcome: valid status values reach daemon check ---
 
 func TestHandleMemoryOutcome_ValidStatuses(t *testing.T) {
-	t.Parallel()
 	for _, status := range []string{"success", "failure", "partial"} {
 		t.Run(status, func(t *testing.T) {
-			t.Parallel()
 			srv := New(Config{})
 			srv.projectDir = t.TempDir()
 
@@ -4197,7 +4034,6 @@ func TestHandleMemoryOutcome_ValidStatuses(t *testing.T) {
 // --- Memory privacy update: bad JSON ---
 
 func TestHandleMemoryPrivacyUpdate_BadJSON(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/memory/privacy", strings.NewReader("not json"))
@@ -4211,7 +4047,6 @@ func TestHandleMemoryPrivacyUpdate_BadJSON(t *testing.T) {
 // --- Memory context: empty task ---
 
 func TestHandleMemoryContext_EmptyTaskBranch(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 	srv.projectDir = t.TempDir()
 
@@ -4233,7 +4068,6 @@ func TestHandleMemoryContext_EmptyTaskBranch(t *testing.T) {
 // --- handleRobotHealth: method not allowed ---
 
 func TestHandleRobotHealth_MethodNotAllowed(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -4246,7 +4080,6 @@ func TestHandleRobotHealth_MethodNotAllowed(t *testing.T) {
 // --- JWKS fetchJWKSKeys with mock server ---
 
 func TestFetchJWKSKeys_EmptyURL(t *testing.T) {
-	t.Parallel()
 	_, err := fetchJWKSKeys(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "jwks url missing") {
 		t.Fatalf("expected 'jwks url missing' error, got: %v", err)
@@ -4254,7 +4087,6 @@ func TestFetchJWKSKeys_EmptyURL(t *testing.T) {
 }
 
 func TestFetchJWKSKeys_ServerError(t *testing.T) {
-	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("internal error"))
@@ -4268,7 +4100,6 @@ func TestFetchJWKSKeys_ServerError(t *testing.T) {
 }
 
 func TestFetchJWKSKeys_InvalidJSON(t *testing.T) {
-	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("not json"))
 	}))
@@ -4281,7 +4112,6 @@ func TestFetchJWKSKeys_InvalidJSON(t *testing.T) {
 }
 
 func TestFetchJWKSKeys_NoValidKeys(t *testing.T) {
-	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return JWKS with non-RSA key type
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4299,7 +4129,6 @@ func TestFetchJWKSKeys_NoValidKeys(t *testing.T) {
 }
 
 func TestFetchJWKSKeys_ValidKey(t *testing.T) {
-	t.Parallel()
 	// Generate a real RSA key for testing
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -4333,7 +4162,6 @@ func TestFetchJWKSKeys_ValidKey(t *testing.T) {
 // --- jwksCache getKey with mock server ---
 
 func TestJWKSCache_GetKey_CacheHit(t *testing.T) {
-	t.Parallel()
 	// Generate RSA key
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
@@ -4376,7 +4204,6 @@ func TestJWKSCache_GetKey_CacheHit(t *testing.T) {
 }
 
 func TestJWKSCache_GetKey_KidNotFound(t *testing.T) {
-	t.Parallel()
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
 	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
@@ -4398,7 +4225,6 @@ func TestJWKSCache_GetKey_KidNotFound(t *testing.T) {
 }
 
 func TestJWKSCache_GetKey_EmptyKidSingleKey(t *testing.T) {
-	t.Parallel()
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
 	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
@@ -4424,7 +4250,6 @@ func TestJWKSCache_GetKey_EmptyKidSingleKey(t *testing.T) {
 }
 
 func TestJWKSCache_GetKey_CachedEmptyKid(t *testing.T) {
-	t.Parallel()
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
 	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
@@ -4462,7 +4287,6 @@ func TestJWKSCache_GetKey_CachedEmptyKid(t *testing.T) {
 // --- parseRSAPublicKey branches ---
 
 func TestParseRSAPublicKey_ValidKey_Branch(t *testing.T) {
-	t.Parallel()
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
 	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
@@ -4477,7 +4301,6 @@ func TestParseRSAPublicKey_ValidKey_Branch(t *testing.T) {
 }
 
 func TestParseRSAPublicKey_BadN_Branch(t *testing.T) {
-	t.Parallel()
 	_, err := parseRSAPublicKey("not-valid-base64!!!", "AQAB")
 	if err == nil || !strings.Contains(err.Error(), "decode jwk n") {
 		t.Fatalf("expected decode n error, got: %v", err)
@@ -4485,7 +4308,6 @@ func TestParseRSAPublicKey_BadN_Branch(t *testing.T) {
 }
 
 func TestParseRSAPublicKey_BadE_Branch(t *testing.T) {
-	t.Parallel()
 	nB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(12345).Bytes())
 	_, err := parseRSAPublicKey(nB64, "not-valid-base64!!!")
 	if err == nil || !strings.Contains(err.Error(), "decode jwk e") {
@@ -4496,7 +4318,6 @@ func TestParseRSAPublicKey_BadE_Branch(t *testing.T) {
 // --- JWKS key with no kid → default kid ---
 
 func TestFetchJWKSKeys_DefaultKid(t *testing.T) {
-	t.Parallel()
 	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
 	nB64 := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
 	eB64 := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privKey.E)).Bytes())
@@ -4524,7 +4345,6 @@ func TestFetchJWKSKeys_DefaultKid(t *testing.T) {
 // =============================================================================
 
 func TestHandleExportCheckpoint_GetBadFormat(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("sessionName", "test-session")
@@ -4540,7 +4360,6 @@ func TestHandleExportCheckpoint_GetBadFormat(t *testing.T) {
 }
 
 func TestHandleExportCheckpoint_PostBadJSON(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("sessionName", "test-session")
@@ -4557,7 +4376,6 @@ func TestHandleExportCheckpoint_PostBadJSON(t *testing.T) {
 }
 
 func TestHandleExportCheckpoint_ZipFormatNotFound(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("sessionName", "test-session")
@@ -4576,7 +4394,6 @@ func TestHandleExportCheckpoint_ZipFormatNotFound(t *testing.T) {
 // --- checkWSOrigin branches ---
 
 func TestCheckWSOrigin_Localhost(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
@@ -4587,7 +4404,6 @@ func TestCheckWSOrigin_Localhost(t *testing.T) {
 }
 
 func TestCheckWSOrigin_LoopbackIP(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:8080")
@@ -4598,7 +4414,6 @@ func TestCheckWSOrigin_LoopbackIP(t *testing.T) {
 }
 
 func TestCheckWSOrigin_NoOriginNonLocal(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	s.auth.Mode = AuthModeAPIKey
 	req := httptest.NewRequest("GET", "/ws", nil)
@@ -4610,7 +4425,6 @@ func TestCheckWSOrigin_NoOriginNonLocal(t *testing.T) {
 }
 
 func TestCheckWSOrigin_ExternalDomain(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	s.auth.Mode = AuthModeAPIKey // non-local mode to enable origin checking
 	req := httptest.NewRequest("GET", "/ws", nil)
@@ -4624,7 +4438,6 @@ func TestCheckWSOrigin_ExternalDomain(t *testing.T) {
 // --- AuditStore record + query with data ---
 
 func TestAuditStore_RecordAndQuery(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	store, err := NewAuditStore(AuditStoreConfig{
 		DBPath:    filepath.Join(tmpDir, "audit.db"),
@@ -4664,7 +4477,6 @@ func TestAuditStore_RecordAndQuery(t *testing.T) {
 }
 
 func TestAuditStore_QueryNoDb(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	// Create store with only JSONL, no DB
 	store, err := NewAuditStore(AuditStoreConfig{
@@ -4685,7 +4497,6 @@ func TestAuditStore_QueryNoDb(t *testing.T) {
 // --- handleSetPaneTitleV1 bad JSON ---
 
 func TestHandleSetPaneTitleV1_BadJSON(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("sessionId", "test-session")
@@ -4703,7 +4514,6 @@ func TestHandleSetPaneTitleV1_BadJSON(t *testing.T) {
 // --- handleStartPaneStreamV1 empty session ---
 
 func TestHandleStartPaneStreamV1_EmptySession(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	req := httptest.NewRequest("POST", "/api/v1/sessions//panes/0/stream/start", nil)
@@ -4718,7 +4528,6 @@ func TestHandleStartPaneStreamV1_EmptySession(t *testing.T) {
 // --- handleStopPaneStreamV1 empty session ---
 
 func TestHandleStopPaneStreamV1_EmptySession(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	rctx := chi.NewRouteContext()
 	req := httptest.NewRequest("POST", "/api/v1/sessions//panes/0/stream/stop", nil)
@@ -4839,7 +4648,6 @@ func TestHandleScannerStatus_Available(t *testing.T) {
 // --- AuditStore Query: exercise all filter branches ---
 
 func TestAuditStore_QueryFilterBranches(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "audit.db")
 	jsonlPath := filepath.Join(dir, "audit.jsonl")
@@ -4959,7 +4767,6 @@ func TestAuditStore_QueryFilterBranches(t *testing.T) {
 // --- AuditStore.cleanup: actually removes old records ---
 
 func TestAuditStore_CleanupRemovesOldRecords(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "audit.db")
 
@@ -5014,7 +4821,6 @@ func TestAuditStore_CleanupRemovesOldRecords(t *testing.T) {
 // --- handleAgentWaitV1: custom timeout_ms and poll_ms ---
 
 func TestHandleAgentWaitV1_CustomTimeoutAndPoll(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -5038,7 +4844,6 @@ func TestHandleAgentWaitV1_CustomTimeoutAndPoll(t *testing.T) {
 // --- ScannerStore.GetScans offset beyond range ---
 
 func TestScannerStore_GetScans_OffsetBeyondRange(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 	store.AddScan(&ScanRecord{ID: "scan-1", State: ScanStateCompleted, StartedAt: time.Now()})
 
@@ -5051,7 +4856,6 @@ func TestScannerStore_GetScans_OffsetBeyondRange(t *testing.T) {
 // --- ScannerStore.GetFindings: severity filter + dismissed filter + pagination ---
 
 func TestScannerStore_GetFindings_FilterAndPaginate(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 	now := time.Now()
 
@@ -5107,7 +4911,6 @@ func TestScannerStore_GetFindings_FilterAndPaginate(t *testing.T) {
 // --- ScannerStore.GetFindingsByScan ---
 
 func TestScannerStore_GetFindingsByScan(t *testing.T) {
-	t.Parallel()
 	store := NewScannerStore()
 	store.AddFinding(&FindingRecord{
 		ID: "f1", ScanID: "scan-x",
@@ -5129,7 +4932,6 @@ func TestScannerStore_GetFindingsByScan(t *testing.T) {
 // --- NewIdempotencyStore: default TTL for zero/negative ---
 
 func TestNewIdempotencyStore_DefaultTTL(t *testing.T) {
-	t.Parallel()
 	store := NewIdempotencyStore(0)
 	defer store.Stop()
 
@@ -5150,7 +4952,6 @@ func TestNewIdempotencyStore_DefaultTTL(t *testing.T) {
 // --- NewIdempotencyStore: negative TTL defaults to 24h ---
 
 func TestNewIdempotencyStore_NegativeTTL(t *testing.T) {
-	t.Parallel()
 	store := NewIdempotencyStore(-5 * time.Second)
 	defer store.Stop()
 
@@ -5164,7 +4965,6 @@ func TestNewIdempotencyStore_NegativeTTL(t *testing.T) {
 // --- IdempotencyStore.Get: expired entry returns not found ---
 
 func TestIdempotencyStore_Get_Expired(t *testing.T) {
-	t.Parallel()
 	store := NewIdempotencyStore(1 * time.Millisecond)
 	defer store.Stop()
 
@@ -5899,7 +5699,6 @@ func cassSearchOperational(t *testing.T) bool {
 // --- handlePolicyValidateV1: content-based branches ---
 
 func TestHandlePolicyValidateV1_ContentNoVersion(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// YAML with rules but no version → warning "no version specified"
@@ -5933,7 +5732,6 @@ func TestHandlePolicyValidateV1_ContentNoVersion(t *testing.T) {
 }
 
 func TestHandlePolicyValidateV1_ContentNoRules(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// YAML with version but no rules → warning "policy has no rules defined"
@@ -5968,7 +5766,6 @@ func TestHandlePolicyValidateV1_ContentNoRules(t *testing.T) {
 // --- handleSafetyCheckV1: blocked command exercises match != nil branch ---
 
 func TestHandleSafetyCheckV1_BlockedCommand(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -6113,7 +5910,6 @@ func TestHandleAccountHistoryV1_LimitTruncation(t *testing.T) {
 // If not, they test the client==nil → 503 branch.
 
 func TestHandleListMailProjects_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6130,7 +5926,6 @@ func TestHandleListMailProjects_Branch(t *testing.T) {
 }
 
 func TestHandleListMailAgents_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6146,7 +5941,6 @@ func TestHandleListMailAgents_Branch(t *testing.T) {
 }
 
 func TestHandleMailInbox_WithAgent_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6163,7 +5957,6 @@ func TestHandleMailInbox_WithAgent_Branch(t *testing.T) {
 }
 
 func TestHandleSearchMessages_WithQuery_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6179,7 +5972,6 @@ func TestHandleSearchMessages_WithQuery_Branch(t *testing.T) {
 }
 
 func TestHandleGetMessage_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6198,7 +5990,6 @@ func TestHandleGetMessage_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleGetMailAgent_ValidName_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6217,7 +6008,6 @@ func TestHandleGetMailAgent_ValidName_Branch(t *testing.T) {
 }
 
 func TestHandleListContacts_WithAgent_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6233,7 +6023,6 @@ func TestHandleListContacts_WithAgent_Branch(t *testing.T) {
 }
 
 func TestHandleThreadSummary_WithID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6252,7 +6041,6 @@ func TestHandleThreadSummary_WithID_Branch(t *testing.T) {
 }
 
 func TestHandleSendMessage_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6269,7 +6057,6 @@ func TestHandleSendMessage_ValidBody_Branch(t *testing.T) {
 }
 
 func TestHandleReplyMessage_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6289,7 +6076,6 @@ func TestHandleReplyMessage_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6308,7 +6094,6 @@ func TestHandleMarkMessageRead_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleAckMessage_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6326,7 +6111,6 @@ func TestHandleAckMessage_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleRequestContact_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6342,7 +6126,6 @@ func TestHandleRequestContact_ValidBody_Branch(t *testing.T) {
 }
 
 func TestHandleRespondContact_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6358,7 +6141,6 @@ func TestHandleRespondContact_ValidBody_Branch(t *testing.T) {
 }
 
 func TestHandleSetContactPolicy_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6377,7 +6159,6 @@ func TestHandleSetContactPolicy_ValidBody_Branch(t *testing.T) {
 // --- Reservation handler branches: exercise getMailClient path ---
 
 func TestHandleListReservations_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6392,7 +6173,6 @@ func TestHandleListReservations_Branch(t *testing.T) {
 }
 
 func TestHandleReservePaths_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6408,7 +6188,6 @@ func TestHandleReservePaths_ValidBody_Branch(t *testing.T) {
 }
 
 func TestHandleReleaseReservations_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6424,7 +6203,6 @@ func TestHandleReleaseReservations_ValidBody_Branch(t *testing.T) {
 }
 
 func TestHandleReservationConflicts_WithPaths_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6439,7 +6217,6 @@ func TestHandleReservationConflicts_WithPaths_Branch(t *testing.T) {
 }
 
 func TestHandleGetReservation_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6458,7 +6235,6 @@ func TestHandleGetReservation_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleReleaseReservationByID_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6476,7 +6252,6 @@ func TestHandleReleaseReservationByID_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleRenewReservation_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6516,7 +6291,6 @@ func TestHandleMemoryRules_CmInstalled_Branch(t *testing.T) {
 // --- handleDepsV1: success path ---
 
 func TestHandleDepsV1_Success_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -6667,7 +6441,6 @@ func TestHandleRotateProviderAccountV1_DependencyMissing(t *testing.T) {
 // --- handleForceReleaseReservation: valid body exercises getMailClient ---
 
 func TestHandleForceReleaseReservation_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6689,7 +6462,6 @@ func TestHandleForceReleaseReservation_ValidBody_Branch(t *testing.T) {
 // --- handleCreateMailAgent: valid body exercises getMailClient ---
 
 func TestHandleCreateMailAgent_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6770,7 +6542,6 @@ func TestHandleMemoryContext_CmInstalledValidTask(t *testing.T) {
 // --- handleMailHealth: exercises getMailClient branches ---
 
 func TestHandleMailHealth_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6797,7 +6568,6 @@ func TestHandleMailHealth_WithProjectDir(t *testing.T) {
 // --- handleListReservations: no agent_name exercises allAgents=true path ---
 
 func TestHandleListReservations_AllAgents_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6815,7 +6585,6 @@ func TestHandleListReservations_AllAgents_Branch(t *testing.T) {
 // --- handleReservePaths: zero TTL defaults to 3600 ---
 
 func TestHandleReservePaths_DefaultTTL_Branch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.projectDir = t.TempDir()
 
@@ -6839,7 +6608,6 @@ func TestHandleReservePaths_DefaultTTL_Branch(t *testing.T) {
 // --- Bead handlers with real project dir (success paths) ---
 
 func TestHandleListBeads_WithProjectDir_Filters(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6857,7 +6625,6 @@ func TestHandleListBeads_WithProjectDir_Filters(t *testing.T) {
 }
 
 func TestHandleBeadsStats_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6881,7 +6648,6 @@ func TestHandleBeadsStats_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsReady_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6898,7 +6664,6 @@ func TestHandleBeadsReady_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsBlocked_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6915,7 +6680,6 @@ func TestHandleBeadsBlocked_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsInProgress_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6932,7 +6696,6 @@ func TestHandleBeadsInProgress_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleListBeadDeps_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6953,7 +6716,6 @@ func TestHandleListBeadDeps_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleClaimBead_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -6975,7 +6737,6 @@ func TestHandleClaimBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsInsights_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -6992,7 +6753,6 @@ func TestHandleBeadsInsights_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsPlan_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -7009,7 +6769,6 @@ func TestHandleBeadsPlan_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsPriority_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -7026,7 +6785,6 @@ func TestHandleBeadsPriority_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleBeadsRecipes_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsInstalled() {
 		t.Skip("bv not installed")
 	}
@@ -7043,7 +6801,6 @@ func TestHandleBeadsRecipes_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleRemoveBeadDep_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7067,7 +6824,6 @@ func TestHandleRemoveBeadDep_WithProjectDir(t *testing.T) {
 // --- Session handlers with valid ID (exercises kernel.Run error path) ---
 
 func TestHandleSessionStatusV1_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/test-session/status", nil)
@@ -7084,7 +6840,6 @@ func TestHandleSessionStatusV1_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleSessionAttachV1_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/test-session/attach", nil)
@@ -7100,7 +6855,6 @@ func TestHandleSessionAttachV1_ValidID_Branch(t *testing.T) {
 }
 
 func TestHandleSessionViewV1_ValidID_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/test-session/view", nil)
@@ -7118,7 +6872,6 @@ func TestHandleSessionViewV1_ValidID_Branch(t *testing.T) {
 // --- Agent handlers with valid session/body (exercises robot.Get* error path) ---
 
 func TestHandleAgentSendV1_ValidSession_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"message":"hello","panes":["0"],"all":false}`
@@ -7136,7 +6889,6 @@ func TestHandleAgentSendV1_ValidSession_Branch(t *testing.T) {
 }
 
 func TestHandleAgentInterruptV1_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"panes":["0"],"message":"stop","force":true,"no_wait":true}`
@@ -7155,7 +6907,6 @@ func TestHandleAgentInterruptV1_ValidBody_Branch(t *testing.T) {
 // --- Memory outcome status branches ---
 
 func TestHandleMemoryOutcome_SuccessStatus(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"status":"success","rule_ids":["r1"],"sentiment":"positive","notes":"worked"}`
@@ -7170,7 +6921,6 @@ func TestHandleMemoryOutcome_SuccessStatus(t *testing.T) {
 }
 
 func TestHandleMemoryOutcome_FailureStatus(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"status":"failure","notes":"broke"}`
@@ -7184,7 +6934,6 @@ func TestHandleMemoryOutcome_FailureStatus(t *testing.T) {
 }
 
 func TestHandleMemoryOutcome_PartialStatus(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"status":"partial","notes":"half done"}`
@@ -7200,7 +6949,6 @@ func TestHandleMemoryOutcome_PartialStatus(t *testing.T) {
 // --- Memory privacy with project dir ---
 
 func TestHandleMemoryPrivacyGet_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7217,7 +6965,6 @@ func TestHandleMemoryPrivacyGet_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyUpdate_EnabledWithAgents(t *testing.T) {
-	t.Parallel()
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7236,7 +6983,6 @@ func TestHandleMemoryPrivacyUpdate_EnabledWithAgents(t *testing.T) {
 }
 
 func TestHandleMemoryPrivacyUpdate_Disabled(t *testing.T) {
-	t.Parallel()
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -7256,7 +7002,6 @@ func TestHandleMemoryPrivacyUpdate_Disabled(t *testing.T) {
 // --- CASS handlers with project dir ---
 
 func TestHandleCASSCapabilities_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -7273,7 +7018,6 @@ func TestHandleCASSCapabilities_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleCASSTimeline_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !cassInstalled() {
 		t.Skip("cass not installed")
 	}
@@ -7292,7 +7036,6 @@ func TestHandleCASSTimeline_WithProjectDir(t *testing.T) {
 // --- Policy handler deeper branches ---
 
 func TestHandlePolicyResetV1_SuccessPath(t *testing.T) {
-	// Don't use t.Parallel() - writes to ~/.ntm/policy.yaml
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/policy/reset", nil)
@@ -7313,7 +7056,6 @@ func TestHandlePolicyResetV1_SuccessPath(t *testing.T) {
 }
 
 func TestHandlePolicyAutomationGetV1_SuccessPath(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/policy/automation", nil)
@@ -7335,7 +7077,6 @@ func TestHandlePolicyAutomationGetV1_SuccessPath(t *testing.T) {
 // --- handleMailInbox with since_ts time.Parse branch ---
 
 func TestHandleMailInbox_WithSinceTS(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
 
@@ -7357,7 +7098,6 @@ func TestHandleMailInbox_WithSinceTS(t *testing.T) {
 // --- Pane title handlers with valid params ---
 
 func TestHandleGetPaneTitleV1_ValidParams(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/test-session/panes/0/title", nil)
@@ -7375,7 +7115,6 @@ func TestHandleGetPaneTitleV1_ValidParams(t *testing.T) {
 }
 
 func TestHandleSetPaneTitleV1_ValidParams(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"title":"My Pane"}`
@@ -7396,7 +7135,6 @@ func TestHandleSetPaneTitleV1_ValidParams(t *testing.T) {
 // --- Safety blocked with params ---
 
 func TestHandleSafetyBlockedV1_WithHoursAndLimit(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/safety/blocked?hours=1&limit=5", nil)
@@ -7411,7 +7149,6 @@ func TestHandleSafetyBlockedV1_WithHoursAndLimit(t *testing.T) {
 // --- Create session with valid body ---
 
 func TestHandleCreateSessionV1_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"session":"test-new-session","panes":3}`
@@ -7428,7 +7165,6 @@ func TestHandleCreateSessionV1_ValidBody_Branch(t *testing.T) {
 // --- Session zoom with valid body ---
 
 func TestHandleSessionZoomV1_ValidBody_Branch(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"pane":0}`
@@ -7447,7 +7183,6 @@ func TestHandleSessionZoomV1_ValidBody_Branch(t *testing.T) {
 // --- Policy automation update with auto_commit/auto_push branches ---
 
 func TestHandlePolicyAutomationUpdateV1_AutoCommitToggle(t *testing.T) {
-	// Don't use t.Parallel() - modifies ~/.ntm/policy.yaml
 	srv, _ := setupTestServer(t)
 
 	trueVal := true
@@ -7469,7 +7204,6 @@ func TestHandlePolicyAutomationUpdateV1_AutoCommitToggle(t *testing.T) {
 }
 
 func TestHandlePolicyAutomationUpdateV1_AutoPushToggle(t *testing.T) {
-	// Don't use t.Parallel() - modifies ~/.ntm/policy.yaml
 	srv, _ := setupTestServer(t)
 
 	body := `{"auto_push":true}`
@@ -7485,7 +7219,6 @@ func TestHandlePolicyAutomationUpdateV1_AutoPushToggle(t *testing.T) {
 // --- handlePolicyValidateV1 with file-based path ---
 
 func TestHandlePolicyValidateV1_FileBased(t *testing.T) {
-	// Don't use t.Parallel() - writes temp policy file
 	srv, _ := setupTestServer(t)
 
 	// Create a temp policy file
@@ -7507,7 +7240,6 @@ func TestHandlePolicyValidateV1_FileBased(t *testing.T) {
 // --- handleSafetyInstallV1 with force=true ---
 
 func TestHandleSafetyInstallV1_Force(t *testing.T) {
-	// Don't use t.Parallel() - modifies ~/.ntm/bin and ~/.claude/hooks
 	srv, _ := setupTestServer(t)
 
 	body := `{"force":true}`
@@ -7523,7 +7255,6 @@ func TestHandleSafetyInstallV1_Force(t *testing.T) {
 // --- handleSafetyUninstallV1 exercises remove paths ---
 
 func TestHandleSafetyUninstallV1_Branch(t *testing.T) {
-	// Don't use t.Parallel() - removes files from ~/.ntm/bin
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/uninstall", nil)
@@ -7543,7 +7274,6 @@ func TestHandleSafetyUninstallV1_Branch(t *testing.T) {
 // --- Bead CRUD with real project dir ---
 
 func TestHandleGetBead_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7575,7 +7305,6 @@ func TestHandleGetBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleUpdateBead_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7598,7 +7327,6 @@ func TestHandleUpdateBead_WithProjectDir(t *testing.T) {
 }
 
 func TestHandleCloseBead_WithProjectDir(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7621,7 +7349,6 @@ func TestHandleCloseBead_WithProjectDir(t *testing.T) {
 // --- Policy GET with rules=true ---
 
 func TestHandlePolicyGetV1_WithRulesTrue(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/policy?rules=true", nil)
@@ -7643,7 +7370,6 @@ func TestHandlePolicyGetV1_WithRulesTrue(t *testing.T) {
 // --- Policy UPDATE with valid YAML content ---
 
 func TestHandlePolicyUpdateV1_ValidContent(t *testing.T) {
-	// Don't use t.Parallel() - writes to ~/.ntm/policy.yaml
 	srv, _ := setupTestServer(t)
 
 	yamlContent := "version: 1\nblocked:\n  - pattern: \"rm -rf /\"\n    reason: dangerous\n"
@@ -7660,7 +7386,6 @@ func TestHandlePolicyUpdateV1_ValidContent(t *testing.T) {
 // --- OpenAPI with TLS ---
 
 func TestHandleOpenAPISpec_WithTLS(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 	srv.host = "localhost"
 	srv.port = 9443
@@ -7682,7 +7407,6 @@ func TestHandleOpenAPISpec_WithTLS(t *testing.T) {
 // --- Safety check with allowed command ---
 
 func TestHandleSafetyCheckV1_AllowedCommand(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"command":"ls -la"}`
@@ -7706,7 +7430,6 @@ func TestHandleSafetyCheckV1_AllowedCommand(t *testing.T) {
 // --- Safety check with approval-required command ---
 
 func TestHandleSafetyCheckV1_ApprovalCommand(t *testing.T) {
-	t.Parallel()
 	srv, _ := setupTestServer(t)
 
 	body := `{"command":"git push --force"}`
@@ -7722,7 +7445,6 @@ func TestHandleSafetyCheckV1_ApprovalCommand(t *testing.T) {
 // --- redactingResponseWriter Write branch ---
 
 func TestRedactingResponseWriter_WriteWithoutHeader(t *testing.T) {
-	t.Parallel()
 	rec := httptest.NewRecorder()
 	rw := &redactingResponseWriter{
 		ResponseWriter: rec,
@@ -7745,7 +7467,6 @@ func TestRedactingResponseWriter_WriteWithoutHeader(t *testing.T) {
 // --- logRedactionSummary branches ---
 
 func TestLogRedactionSummary_ValidSummary(t *testing.T) {
-	t.Parallel()
 	// Just exercises the JSON marshal path — no panic
 	summary := &RedactionSummary{
 		RequestID:     "test-123",
@@ -7764,7 +7485,6 @@ func TestLogRedactionSummary_ValidSummary(t *testing.T) {
 // --- handleListBeadDeps deeper success path (JSON parse branch) ---
 
 func TestHandleListBeadDeps_JSONParse(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7788,7 +7508,6 @@ func TestHandleListBeadDeps_JSONParse(t *testing.T) {
 // --- handleRemoveBeadDep deeper path with different bead ---
 
 func TestHandleRemoveBeadDep_UnlinkPath(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7812,7 +7531,6 @@ func TestHandleRemoveBeadDep_UnlinkPath(t *testing.T) {
 // --- handleListBeads with status filter ---
 
 func TestHandleListBeads_WithStatusFilter(t *testing.T) {
-	t.Parallel()
 	if !bv.IsBdInstalled() {
 		t.Skip("br not installed")
 	}
@@ -7835,7 +7553,6 @@ func TestHandleListBeads_WithStatusFilter(t *testing.T) {
 // --- handlePolicyValidateV1 content-based with invalid YAML ---
 
 func TestHandlePolicyValidateV1_InvalidContent(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	body := strings.NewReader(`{"content":"not: [valid: yaml: !!!"}`)
@@ -7864,7 +7581,6 @@ func TestHandlePolicyValidateV1_InvalidContent(t *testing.T) {
 // --- handlePolicyValidateV1 content-based with valid but empty rules ---
 
 func TestHandlePolicyValidateV1_EmptyRulesWarning(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// Valid YAML but no rules — triggers "no rules defined" warning
@@ -7883,7 +7599,6 @@ func TestHandlePolicyValidateV1_EmptyRulesWarning(t *testing.T) {
 // --- handlePolicyValidateV1 content with no version (triggers warning) ---
 
 func TestHandlePolicyValidateV1_NoVersion(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	body := strings.NewReader(`{"content":"rules:\n- action: block\n  pattern: rm -rf /\n"}`)
@@ -7901,7 +7616,6 @@ func TestHandlePolicyValidateV1_NoVersion(t *testing.T) {
 // --- WSClient sendAck exercises JSON marshal + channel send ---
 
 func TestWSClient_SendAck(t *testing.T) {
-	t.Parallel()
 	c := &WSClient{
 		id:   "test-client",
 		send: make(chan []byte, 10),
@@ -7931,7 +7645,6 @@ func TestWSClient_SendAck(t *testing.T) {
 // --- WSClient sendError exercises JSON marshal + channel send ---
 
 func TestWSClient_SendError(t *testing.T) {
-	t.Parallel()
 	c := &WSClient{
 		id:   "test-client",
 		send: make(chan []byte, 10),
@@ -7956,7 +7669,6 @@ func TestWSClient_SendError(t *testing.T) {
 // --- WSClient sendPong exercises JSON marshal + channel send ---
 
 func TestWSClient_SendPong(t *testing.T) {
-	t.Parallel()
 	c := &WSClient{
 		id:   "test-client",
 		send: make(chan []byte, 10),
@@ -7981,7 +7693,6 @@ func TestWSClient_SendPong(t *testing.T) {
 // --- WSClient sendAck with full buffer (exercises default drop path) ---
 
 func TestWSClient_SendAck_FullBuffer(t *testing.T) {
-	t.Parallel()
 	c := &WSClient{
 		id:   "test-client",
 		send: make(chan []byte), // unbuffered — will be full
@@ -7994,7 +7705,6 @@ func TestWSClient_SendAck_FullBuffer(t *testing.T) {
 // --- handleSessionAgents exercises stateStore success path ---
 
 func TestHandleSessionAgents_Success(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -8011,7 +7721,6 @@ func TestHandleSessionAgents_Success(t *testing.T) {
 // --- handleCheckpointList exercises storage.List success path ---
 
 func TestHandleListCheckpoints_Success(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8031,7 +7740,6 @@ func TestHandleListCheckpoints_Success(t *testing.T) {
 // --- handleCheckpointList with details=true ---
 
 func TestHandleListCheckpoints_WithDetails(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8049,7 +7757,6 @@ func TestHandleListCheckpoints_WithDetails(t *testing.T) {
 }
 
 func TestHandleListCheckpoints_InvalidSessionName(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8071,7 +7778,6 @@ func TestHandleListCheckpoints_InvalidSessionName(t *testing.T) {
 // --- handleDeleteCheckpoint exercises storage.Exists → not found path ---
 
 func TestHandleDeleteCheckpoint_NotFound(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8132,7 +7838,6 @@ func TestHandleDeleteCheckpoint_DeletesInvalidCheckpointEntry(t *testing.T) {
 // --- logRedactionSummary fallback path (JSON marshal error) ---
 
 func TestLogRedactionSummary_MarshalError(t *testing.T) {
-	t.Parallel()
 	// Categories with non-marshalable value to trigger json.Marshal error
 	summary := &RedactionSummary{
 		RequestID:    "test-err",
@@ -8148,7 +7853,6 @@ func TestLogRedactionSummary_MarshalError(t *testing.T) {
 // --- writeJSON exercises JSON encode error branch ---
 
 func TestWriteJSON_Success(t *testing.T) {
-	t.Parallel()
 	rec := httptest.NewRecorder()
 	writeJSON(rec, http.StatusOK, map[string]interface{}{
 		"key": "value",
@@ -8165,7 +7869,6 @@ func TestWriteJSON_Success(t *testing.T) {
 // --- toJSONMap exercises successful round-trip ---
 
 func TestToJSONMap_Success(t *testing.T) {
-	t.Parallel()
 	type sample struct {
 		Name  string `json:"name"`
 		Count int    `json:"count"`
@@ -8182,7 +7885,6 @@ func TestToJSONMap_Success(t *testing.T) {
 // --- toJSONMap error path (unmarshalable input) ---
 
 func TestToJSONMap_MarshalError(t *testing.T) {
-	t.Parallel()
 	// channels can't be marshaled to JSON
 	_, err := toJSONMap(make(chan int))
 	if err == nil {
@@ -8291,7 +7993,6 @@ func TestApprovalFlow_RequestThenDeny(t *testing.T) {
 // --- Approval approve not found ---
 
 func TestApprovalApproveV1_NotFound(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8310,7 +8011,6 @@ func TestApprovalApproveV1_NotFound(t *testing.T) {
 // --- Approval deny not found ---
 
 func TestApprovalDenyV1_NotFound(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8346,7 +8046,6 @@ func TestApprovalRequestV1_WithTTL(t *testing.T) {
 // --- Pipeline list (exercises empty list path) ---
 
 func TestHandleListPipelines_Empty(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/api/v1/pipelines", nil)
@@ -8362,7 +8061,6 @@ func TestHandleListPipelines_Empty(t *testing.T) {
 // --- publishApprovalEvent with nil wsHub (exercises nil guard) ---
 
 func TestPublishApprovalEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.wsHub = nil
 
@@ -8379,7 +8077,6 @@ func TestPublishApprovalEvent_NilHub(t *testing.T) {
 // --- validateOIDCToken: incomplete config ---
 
 func TestValidateOIDCToken_IncompleteConfig(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	// Empty OIDC config → "oidc config incomplete"
 	s.auth = AuthConfig{Mode: AuthModeOIDC}
@@ -8393,7 +8090,6 @@ func TestValidateOIDCToken_IncompleteConfig(t *testing.T) {
 // --- validateOIDCToken: unsupported algorithm ---
 
 func TestValidateOIDCToken_UnsupportedAlg(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8418,7 +8114,6 @@ func TestValidateOIDCToken_UnsupportedAlg(t *testing.T) {
 // --- validateOIDCToken: invalid issuer ---
 
 func TestValidateOIDCToken_InvalidIssuer(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8442,7 +8137,6 @@ func TestValidateOIDCToken_InvalidIssuer(t *testing.T) {
 // --- validateOIDCToken: invalid audience ---
 
 func TestValidateOIDCToken_InvalidAudience(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8467,7 +8161,6 @@ func TestValidateOIDCToken_InvalidAudience(t *testing.T) {
 // --- validateOIDCToken: expired token ---
 
 func TestValidateOIDCToken_ExpiredToken(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8492,7 +8185,6 @@ func TestValidateOIDCToken_ExpiredToken(t *testing.T) {
 // --- validateOIDCToken: not yet valid (nbf in future) ---
 
 func TestValidateOIDCToken_NotYetValid(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8517,7 +8209,6 @@ func TestValidateOIDCToken_NotYetValid(t *testing.T) {
 // --- validateOIDCToken: valid claims but JWKS fetch fails ---
 
 func TestValidateOIDCToken_JWKSFetchError(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{
 		Mode: AuthModeOIDC,
@@ -8547,7 +8238,6 @@ func TestValidateOIDCToken_JWKSFetchError(t *testing.T) {
 // --- validateOIDCToken: valid claims + JWKS served but wrong kid ---
 
 func TestValidateOIDCToken_JWKSKidNotFound(t *testing.T) {
-	t.Parallel()
 
 	// Generate RSA key
 	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
@@ -8593,7 +8283,6 @@ func TestValidateOIDCToken_JWKSKidNotFound(t *testing.T) {
 // --- newJWKSCache with zero TTL (uses default) ---
 
 func TestNewJWKSCache_DefaultTTL(t *testing.T) {
-	t.Parallel()
 	cache := newJWKSCache(0)
 	if cache == nil {
 		t.Fatal("expected non-nil cache")
@@ -8606,7 +8295,6 @@ func TestNewJWKSCache_DefaultTTL(t *testing.T) {
 // --- newJWKSCache with custom TTL ---
 
 func TestNewJWKSCache_CustomTTL(t *testing.T) {
-	t.Parallel()
 	cache := newJWKSCache(5 * time.Minute)
 	if cache.ttl != 5*time.Minute {
 		t.Errorf("ttl = %v, want 5m", cache.ttl)
@@ -8616,7 +8304,6 @@ func TestNewJWKSCache_CustomTTL(t *testing.T) {
 // --- handleCASSCapabilities with real cass ---
 
 func TestHandleCASSCapabilities_WithRealCass(t *testing.T) {
-	t.Parallel()
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8640,7 +8327,6 @@ func TestHandleCASSCapabilities_WithRealCass(t *testing.T) {
 // --- handleCASSInsights with real cass ---
 
 func TestHandleCASSInsights_WithRealCass(t *testing.T) {
-	t.Parallel()
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8660,7 +8346,6 @@ func TestHandleCASSInsights_WithRealCass(t *testing.T) {
 // --- handleCASSTimeline with real cass ---
 
 func TestHandleCASSTimeline_WithRealCass(t *testing.T) {
-	t.Parallel()
 	client := cass.NewClient()
 	if !client.IsInstalled() {
 		t.Skip("cass not installed")
@@ -8680,7 +8365,6 @@ func TestHandleCASSTimeline_WithRealCass(t *testing.T) {
 // --- handleMemoryRules with real cm ---
 
 func TestHandleMemoryRules_WithRealCM(t *testing.T) {
-	t.Parallel()
 	if _, err := exec.LookPath("cm"); err != nil {
 		t.Skip("cm not installed")
 	}
@@ -8735,7 +8419,6 @@ func TestApprovalApproveV1_Expired(t *testing.T) {
 // --- checkWSOrigin: non-local mode with valid origin ---
 
 func TestCheckWSOrigin_ValidOrigin(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{Mode: AuthModeOIDC}
 	s.corsAllowedOrigins = []string{"https://app.example.com"}
@@ -8751,7 +8434,6 @@ func TestCheckWSOrigin_ValidOrigin(t *testing.T) {
 // --- checkWSOrigin: non-local mode with invalid origin ---
 
 func TestCheckWSOrigin_InvalidOrigin(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{Mode: AuthModeOIDC}
 	s.corsAllowedOrigins = []string{"https://app.example.com"}
@@ -8767,7 +8449,6 @@ func TestCheckWSOrigin_InvalidOrigin(t *testing.T) {
 // --- checkWSOrigin: origin missing host ---
 
 func TestCheckWSOrigin_OriginMissingHost(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 	s.auth = AuthConfig{Mode: AuthModeOIDC}
 
@@ -8782,7 +8463,6 @@ func TestCheckWSOrigin_OriginMissingHost(t *testing.T) {
 // --- handleAccountQuotaV1 with real caam ---
 
 func TestHandleAccountQuotaV1_WithCAAM(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/api/v1/accounts/quota", nil)
@@ -8816,7 +8496,6 @@ func TestHandleAccountQuotaV1_NoCAAM(t *testing.T) {
 // --- handleSafetyBlockedV1 success with default params ---
 
 func TestHandleSafetyBlockedV1_DefaultParams(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/api/v1/safety/blocked", nil)
@@ -8833,7 +8512,6 @@ func TestHandleSafetyBlockedV1_DefaultParams(t *testing.T) {
 // --- handleAgentInterruptV1 with valid session exercises past validation ---
 
 func TestHandleAgentInterruptV1_ValidSession(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -8857,7 +8535,6 @@ func TestHandleAgentInterruptV1_ValidSession(t *testing.T) {
 // --- writeErrorResponse hint only (details empty after removal) ---
 
 func TestWriteErrorResponse_HintOnly(t *testing.T) {
-	t.Parallel()
 	rec := httptest.NewRecorder()
 	writeErrorResponse(rec, http.StatusBadRequest, "BAD_REQUEST", "test error",
 		map[string]interface{}{"hint": "only hint"}, "req-456")
@@ -8875,7 +8552,6 @@ func TestWriteErrorResponse_HintOnly(t *testing.T) {
 // --- handlePolicyValidateV1: valid content with version + blocked rules (no warnings, valid=true) ---
 
 func TestHandlePolicyValidateV1_ValidContentNoWarnings(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	validPolicy := "version: 1\nblocked:\n  - pattern: \"rm -rf /\"\n    reason: \"dangerous\"\n"
@@ -8899,7 +8575,6 @@ func TestHandlePolicyValidateV1_ValidContentNoWarnings(t *testing.T) {
 // --- handlePolicyValidateV1: valid content with validate error (bad force_release) ---
 
 func TestHandlePolicyValidateV1_ContentValidateError(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	badPolicy := "version: 1\nautomation:\n  force_release: invalid_value\n"
@@ -9159,7 +8834,6 @@ func TestHandlePolicyAutomationUpdateV1_NoExistingFile(t *testing.T) {
 // --- handleImportCheckpoint: zip magic bytes detection ---
 
 func TestHandleImportCheckpoint_ZipDetection(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -9184,7 +8858,6 @@ func TestHandleImportCheckpoint_ZipDetection(t *testing.T) {
 // --- handleExportCheckpoint: GET with all query params ---
 
 func TestHandleExportCheckpoint_GetWithQueryParams(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -9206,7 +8879,6 @@ func TestHandleExportCheckpoint_GetWithQueryParams(t *testing.T) {
 // --- installWrapperFile: write to nonexistent directory ---
 
 func TestInstallWrapperFile_WriteError(t *testing.T) {
-	t.Parallel()
 
 	badPath := filepath.Join(t.TempDir(), "nonexistent", "subdir", "wrapper.sh")
 	err := installWrapperFile(badPath, "#!/bin/sh\necho hello", false)
@@ -9218,7 +8890,6 @@ func TestInstallWrapperFile_WriteError(t *testing.T) {
 // --- installWrapperFile: already exists without force ---
 
 func TestInstallWrapperFile_ExistsNoForce(t *testing.T) {
-	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "existing.sh")
 	os.WriteFile(path, []byte("existing"), 0755)
@@ -9235,7 +8906,6 @@ func TestInstallWrapperFile_ExistsNoForce(t *testing.T) {
 // --- installWrapperFile: force overwrite ---
 
 func TestInstallWrapperFile_ForceOverwrite(t *testing.T) {
-	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "wrapper.sh")
 	os.WriteFile(path, []byte("old"), 0755)
@@ -9467,7 +9137,6 @@ func TestHandleSafetyBlockedV1_WithLimitParam(t *testing.T) {
 // --- handleSafetyBlockedV1: with invalid hours/limit ---
 
 func TestHandleSafetyBlockedV1_InvalidParams(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/api/v1/safety/blocked?hours=abc&limit=-1", nil)
@@ -10751,7 +10420,6 @@ func TestHandleEventStream_NoFlusher(t *testing.T) {
 // --- RedactJSON: ModeOff early return ---
 
 func TestRedactJSON_ModeOff(t *testing.T) {
-	t.Parallel()
 
 	cfg := redaction.Config{Mode: redaction.ModeOff}
 	input := map[string]interface{}{
@@ -11256,7 +10924,6 @@ func TestAuditStore_RecordZeroTimestamp(t *testing.T) {
 // --- WSEventStore: Store with nil DB (memory-only) ---
 
 func TestWSEventStore_StoreNilDB(t *testing.T) {
-	t.Parallel()
 
 	store := NewWSEventStore(nil, WSEventStoreConfig{
 		BufferSize:       10,
@@ -11740,7 +11407,6 @@ func TestAuditStore_CloseWithErrors(t *testing.T) {
 // TestHandleOpenAPISpec_TLS exercises the HTTPS branch in handleOpenAPISpec
 // (line 386 of openapi.go) when r.TLS is non-nil.
 func TestHandleOpenAPISpec_TLS(t *testing.T) {
-	t.Parallel()
 	s := &Server{host: "localhost", port: 8080}
 
 	req := httptest.NewRequest("GET", "/api/v1/openapi.json", nil)
@@ -11761,7 +11427,6 @@ func TestHandleOpenAPISpec_TLS(t *testing.T) {
 // TestHandleSwaggerUI_TLS exercises the HTTPS branch in handleSwaggerUI
 // (line 402 of openapi.go) when r.TLS is non-nil.
 func TestHandleSwaggerUI_TLS(t *testing.T) {
-	t.Parallel()
 	s := &Server{host: "localhost", port: 8080}
 
 	req := httptest.NewRequest("GET", "/api/v1/docs", nil)
@@ -11782,7 +11447,6 @@ func TestHandleSwaggerUI_TLS(t *testing.T) {
 // TestHandleListPipelines_WithFinishedAt exercises the FinishedAt != nil branch
 // in handleListPipelines (line 115-117 of pipelines.go).
 func TestHandleListPipelines_WithFinishedAt(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// Register a pipeline with FinishedAt set
@@ -11924,7 +11588,6 @@ func TestNewAuditStore_DBOpenError(t *testing.T) {
 // TestRoleHierarchy_UnknownRole exercises the default case in roleHierarchy
 // (line 296-297 of rbac.go).
 func TestRoleHierarchy_UnknownRole(t *testing.T) {
-	t.Parallel()
 	if got := roleHierarchy("nonexistent"); got != 0 {
 		t.Errorf("roleHierarchy(nonexistent) = %d, want 0", got)
 	}
@@ -11942,7 +11605,6 @@ func TestRoleHierarchy_UnknownRole(t *testing.T) {
 // TestWriteApprovalRequired_FullResponse exercises the writeApprovalRequired function
 // output format including approval_id and error_code (lines 388-410 of rbac.go).
 func TestWriteApprovalRequired_FullResponse(t *testing.T) {
-	t.Parallel()
 	rec := httptest.NewRecorder()
 
 	ar := &ApprovalRequired{
@@ -11981,7 +11643,6 @@ func TestWriteApprovalRequired_FullResponse(t *testing.T) {
 // TestHandleGetPipeline_FoundWithFinishedAt exercises the success path
 // with FinishedAt and Error fields populated (lines 258-276 of pipelines.go).
 func TestHandleGetPipeline_FoundWithFinishedAt(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
@@ -12027,7 +11688,6 @@ func TestHandleGetPipeline_FoundWithFinishedAt(t *testing.T) {
 // TestHandleGetPipeline_NotFoundBranch exercises the 404 path in handleGetPipeline
 // (line 252-256 of pipelines.go).
 func TestHandleGetPipeline_NotFoundBranch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -12046,7 +11706,6 @@ func TestHandleGetPipeline_NotFoundBranch(t *testing.T) {
 // TestHandleCancelPipeline_CompletedConflict exercises the conflict path
 // in handleCancelPipeline (lines 300-306 of pipelines.go) — can't cancel completed.
 func TestHandleCancelPipeline_CompletedConflict(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
@@ -12076,7 +11735,6 @@ func TestHandleCancelPipeline_CompletedConflict(t *testing.T) {
 // TestHandleCancelPipeline_RunningSuccess exercises the success path
 // in handleCancelPipeline (lines 308-315 of pipelines.go) — cancel a running pipeline.
 func TestHandleCancelPipeline_RunningSuccess(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
@@ -12111,7 +11769,6 @@ func TestHandleCancelPipeline_RunningSuccess(t *testing.T) {
 // TestHandleResumePipeline_NoState exercises the 404 path when
 // pipeline state file doesn't exist (lines 339-345 of pipelines.go).
 func TestHandleResumePipeline_NoState(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -12235,7 +11892,6 @@ func TestHandleSafetyInstallV1_ExistingWrapperConflict(t *testing.T) {
 // TestHandleExecPipeline_EmptySession exercises the missing session path
 // in handleExecPipeline (lines 197-200 of pipelines.go).
 func TestHandleExecPipeline_EmptySession(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	body := bytes.NewBufferString(`{"workflow":{"name":"test","steps":[]},"session":""}`)
@@ -12253,7 +11909,6 @@ func TestHandleExecPipeline_EmptySession(t *testing.T) {
 // TestHandleExecPipeline_InvalidBody exercises the invalid body path
 // in handleExecPipeline (lines 192-195 of pipelines.go).
 func TestHandleExecPipeline_InvalidBody(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	body := bytes.NewBufferString(`not json`)
@@ -12275,7 +11930,6 @@ func TestHandleExecPipeline_InvalidBody(t *testing.T) {
 // TestHandleResumePipeline_BadJSON exercises the decode error path
 // in handleResumePipeline (lines 329-332 of pipelines.go).
 func TestHandleResumePipeline_BadJSON(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -12296,7 +11950,6 @@ func TestHandleResumePipeline_BadJSON(t *testing.T) {
 // TestHandleResumePipeline_MissingRunID exercises the missing ID path
 // in handleResumePipeline (lines 323-326 of pipelines.go).
 func TestHandleResumePipeline_MissingRunID(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -12317,7 +11970,6 @@ func TestHandleResumePipeline_MissingRunID(t *testing.T) {
 // TestHandleExecPipeline_ValidationFailure exercises the workflow validation
 // failure path in handleExecPipeline (lines 209-219 of pipelines.go).
 func TestHandleExecPipeline_ValidationFailure(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// Workflow with name but no steps and missing required fields
@@ -12344,7 +11996,6 @@ func TestHandleExecPipeline_ValidationFailure(t *testing.T) {
 // TestHandleListJobs_WithJobs exercises handleListJobs when jobs exist
 // in the store, including the nil-safety path (lines 4319-4321 of server.go).
 func TestHandleListJobs_WithJobs(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	// Create some jobs in the store
@@ -12370,7 +12021,6 @@ func TestHandleListJobs_WithJobs(t *testing.T) {
 // TestHandleCancelJob_CompletedConflict exercises the conflict path
 // in handleCancelJob when the job is already completed (lines 4420-4425 of server.go).
 func TestHandleCancelJob_CompletedConflict(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	job := s.jobStore.Create("scan")
@@ -12392,7 +12042,6 @@ func TestHandleCancelJob_CompletedConflict(t *testing.T) {
 // TestHandleCancelJob_RunningSuccess exercises the success path
 // in handleCancelJob for a running job (lines 4427-4431 of server.go).
 func TestHandleCancelJob_RunningSuccess(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	job := s.jobStore.Create("scan")
@@ -12486,7 +12135,6 @@ func TestHandleSafetyStatusV1_FullPath(t *testing.T) {
 // TestHandleGetPipeline_MissingRunID exercises the empty ID path
 // in handleGetPipeline (lines 243-246 of pipelines.go).
 func TestHandleGetPipeline_MissingRunID(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -12505,7 +12153,6 @@ func TestHandleGetPipeline_MissingRunID(t *testing.T) {
 // TestHandleCancelPipeline_MissingRunID exercises the empty ID path
 // in handleCancelPipeline (lines 284-287 of pipelines.go).
 func TestHandleCancelPipeline_MissingRunID(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	rctx := chi.NewRouteContext()
@@ -13334,7 +12981,6 @@ func TestHandleSafetyInstallV1_PolicyWriteOnForce(t *testing.T) {
 // TestJobStore_UpdateUnknownID exercises the early-return when Update is called
 // with an ID that does not exist in the store (lines 327-329 of server.go).
 func TestJobStore_UpdateUnknownID(t *testing.T) {
-	t.Parallel()
 	store := NewJobStore()
 
 	// Should be a no-op (no panic, no error)
@@ -13449,7 +13095,6 @@ func TestHandlePolicyAutomationGetV1_LoadOrDefaultError(t *testing.T) {
 // TestHandlePolicyAutomationUpdateV1_InvalidForceReleaseBranch exercises the default
 // switch case in handlePolicyAutomationUpdateV1 (lines 860-863 of safety.go).
 func TestHandlePolicyAutomationUpdateV1_InvalidForceReleaseBranch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	badValue := "bogus"
@@ -13498,7 +13143,6 @@ func TestHandlePolicyAutomationUpdateV1_WriteFileError(t *testing.T) {
 // TestHandlePolicyUpdateV1_EmptyContentBranch exercises the "content is required"
 // validation branch in handlePolicyUpdateV1 (lines 518-522 of safety.go).
 func TestHandlePolicyUpdateV1_EmptyContentBranch(t *testing.T) {
-	t.Parallel()
 	s, _ := setupTestServer(t)
 
 	body := `{"content":""}`
@@ -13571,7 +13215,6 @@ func TestHandleSafetyInstallV1_HookDirCreateError(t *testing.T) {
 // TestNewAuditStore_DBPathMkdirAllError exercises the MkdirAll error for DBPath
 // in NewAuditStore (lines 104-106 of audit.go).
 func TestNewAuditStore_DBPathMkdirAllError(t *testing.T) {
-	t.Parallel()
 
 	// Create a file where the directory should be so MkdirAll fails
 	tmpDir := t.TempDir()
@@ -13592,7 +13235,6 @@ func TestNewAuditStore_DBPathMkdirAllError(t *testing.T) {
 // TestNewAuditStore_JSONLOpenFileError exercises the OpenFile error for JSONL
 // in NewAuditStore (lines 136-141 of audit.go) by using a directory as the JSONL path.
 func TestNewAuditStore_JSONLOpenFileError(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	// Create JSONL path as a directory so OpenFile fails
@@ -13613,7 +13255,6 @@ func TestNewAuditStore_JSONLOpenFileError(t *testing.T) {
 // TestAuditStore_RecordDBExecError exercises the db.Exec error path
 // in Record (lines 223-225 of audit.go) by using a closed database.
 func TestAuditStore_RecordDBExecError(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "audit_exec.db")
@@ -13654,7 +13295,6 @@ func TestAuditStore_RecordDBExecError(t *testing.T) {
 // TestAuditMiddleware_WithRBACContext exercises the rc != nil branch
 // in AuditMiddleware (lines 565-568 of audit.go) to extract non-anonymous user.
 func TestAuditMiddleware_WithRBACContext(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "audit_rbac.db")
@@ -13706,7 +13346,6 @@ func TestAuditMiddleware_WithRBACContext(t *testing.T) {
 // TestAuditMiddleware_RecordError exercises the store.Record error log path
 // in AuditMiddleware (lines 595-597 of audit.go) by using a closed-DB store.
 func TestAuditMiddleware_RecordError(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "audit_recerr.db")
@@ -13824,7 +13463,6 @@ func TestHandleSafetyInstallV1_RmWrapperConflictAfterGit(t *testing.T) {
 // TestNewAuditStore_JSONLMkdirAllErrorClosesDB exercises the combined DB+JSONL init path
 // where the JSONL MkdirAll error closes the already-opened DB (lines 131-133).
 func TestNewAuditStore_JSONLMkdirAllErrorClosesDB(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "audit_combo.db")
@@ -14004,7 +13642,6 @@ func TestWSEventStore_GetDroppedStatsQueryError(t *testing.T) {
 // --- redactingResponseWriter.finalize — double-call early return (94.7%) ---
 
 func TestRedactingResponseWriter_FinalizeDouble(t *testing.T) {
-	t.Parallel()
 
 	rr := httptest.NewRecorder()
 	rw := &redactingResponseWriter{
@@ -14032,7 +13669,6 @@ func TestRedactingResponseWriter_FinalizeDouble(t *testing.T) {
 // --- WSClient.sendPong — buffer full (80% → ~100%) ---
 
 func TestWSClient_SendPong_FullBuffer(t *testing.T) {
-	t.Parallel()
 	c := &WSClient{
 		id:   "test-pong-full",
 		send: make(chan []byte), // unbuffered — will be full
@@ -14045,7 +13681,6 @@ func TestWSClient_SendPong_FullBuffer(t *testing.T) {
 // --- Role.HasPermission — unknown role (85.7% → 100%) ---
 
 func TestHasPermission_UnknownRole(t *testing.T) {
-	t.Parallel()
 	unknown := Role("nonexistent_role")
 	if unknown.HasPermission(PermReadSessions) {
 		t.Error("unknown role should not have any permissions")
@@ -14058,7 +13693,6 @@ func TestHasPermission_UnknownRole(t *testing.T) {
 // --- checkWSOrigin — allowed origin with empty scheme triggers continue (86.4%) ---
 
 func TestCheckWSOrigin_AllowedOriginEmptyScheme(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		// First origin has no scheme (url.Parse returns empty Scheme/Host)

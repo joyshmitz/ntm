@@ -11,7 +11,6 @@ import (
 // =============================================================================
 
 func TestBuildAttentionHintFromSummary_NilCase(t *testing.T) {
-	t.Parallel()
 
 	got := buildAttentionHintFromSummary(nil)
 	if got != "clear" {
@@ -20,7 +19,6 @@ func TestBuildAttentionHintFromSummary_NilCase(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_ZeroEvents(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         0,
@@ -34,7 +32,6 @@ func TestBuildAttentionHintFromSummary_ZeroEvents(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_OnlyActionRequired(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         3,
@@ -49,7 +46,6 @@ func TestBuildAttentionHintFromSummary_OnlyActionRequired(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_OnlyInteresting(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         5,
@@ -64,7 +60,6 @@ func TestBuildAttentionHintFromSummary_OnlyInteresting(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_MixedCounts(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         10,
@@ -79,7 +74,6 @@ func TestBuildAttentionHintFromSummary_MixedCounts(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_AllBackground(t *testing.T) {
-	t.Parallel()
 
 	// Events exist but none are action_required or interesting (all background)
 	summary := &SnapshotAttentionSummary{
@@ -94,7 +88,6 @@ func TestBuildAttentionHintFromSummary_AllBackground(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary_LargeCounts(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         1000,
@@ -169,7 +162,6 @@ func TestBuildAttentionHint_NilFeed(t *testing.T) {
 // =============================================================================
 
 func TestCursorChaining_BasicLoop(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 
@@ -221,7 +213,6 @@ func TestCursorChaining_BasicLoop(t *testing.T) {
 // =============================================================================
 
 func TestWaitOptions_ProfileFieldPresent(t *testing.T) {
-	t.Parallel()
 
 	opts := WaitOptions{
 		Session:   "test",
@@ -235,7 +226,6 @@ func TestWaitOptions_ProfileFieldPresent(t *testing.T) {
 }
 
 func TestEventsOptions_ProfileFieldPresent(t *testing.T) {
-	t.Parallel()
 
 	opts := EventsOptions{
 		Profile: "debug",
@@ -248,7 +238,6 @@ func TestEventsOptions_ProfileFieldPresent(t *testing.T) {
 }
 
 func TestDigestOptions_ProfileFieldPresent(t *testing.T) {
-	t.Parallel()
 
 	opts := DigestOptions{
 		Profile: "minimal",
@@ -260,7 +249,6 @@ func TestDigestOptions_ProfileFieldPresent(t *testing.T) {
 }
 
 func TestAttentionOptions_ProfileFieldPresent(t *testing.T) {
-	t.Parallel()
 
 	opts := AttentionOptions{
 		Profile: "alerts",
@@ -276,7 +264,6 @@ func TestAttentionOptions_ProfileFieldPresent(t *testing.T) {
 // =============================================================================
 
 func TestBuildSnapshotAttentionSummary_CategoryBreakdown(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 
@@ -307,7 +294,6 @@ func TestBuildSnapshotAttentionSummary_CategoryBreakdown(t *testing.T) {
 // =============================================================================
 
 func TestSnapshotAttentionItem_JSONSerialization(t *testing.T) {
-	t.Parallel()
 
 	item := SnapshotAttentionItem{
 		Cursor:        42,
@@ -339,7 +325,6 @@ func TestSnapshotAttentionItem_JSONSerialization(t *testing.T) {
 }
 
 func TestSnapshotAttentionSummary_JSONRoundTrip(t *testing.T) {
-	t.Parallel()
 
 	summary := &SnapshotAttentionSummary{
 		TotalEvents:         10,
@@ -381,7 +366,6 @@ func TestSnapshotAttentionSummary_JSONRoundTrip(t *testing.T) {
 // =============================================================================
 
 func TestDashboardAttentionSummary_FromFeed(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 

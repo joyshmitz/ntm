@@ -151,7 +151,6 @@ func TestCheckExclusion(t *testing.T) {
 }
 
 func TestDetectRoutingRateLimit_UsesAgentContext(t *testing.T) {
-	t.Parallel()
 
 	const output = "billing limit reached"
 

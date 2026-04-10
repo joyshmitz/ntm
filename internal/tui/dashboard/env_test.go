@@ -138,7 +138,6 @@ func TestEnvNonNegativeFloat(t *testing.T) {
 // =============================================================================
 
 func TestLayoutForWidth(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -161,7 +160,6 @@ func TestLayoutForWidth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := LayoutForWidth(tc.width)
 			if got != tc.want {
 				t.Errorf("LayoutForWidth(%d) = %v, want %v", tc.width, got, tc.want)
@@ -175,10 +173,8 @@ func TestLayoutForWidth(t *testing.T) {
 // =============================================================================
 
 func TestCalculateLayout(t *testing.T) {
-	t.Parallel()
 
 	t.Run("mobile layout", func(t *testing.T) {
-		t.Parallel()
 		dims := CalculateLayout(50, 30)
 		if dims.Mode != LayoutMobile {
 			t.Errorf("Mode = %v, want LayoutMobile", dims.Mode)
@@ -192,7 +188,6 @@ func TestCalculateLayout(t *testing.T) {
 	})
 
 	t.Run("compact layout", func(t *testing.T) {
-		t.Parallel()
 		dims := CalculateLayout(80, 30)
 		if dims.Mode != LayoutCompact {
 			t.Errorf("Mode = %v, want LayoutCompact", dims.Mode)
@@ -203,7 +198,6 @@ func TestCalculateLayout(t *testing.T) {
 	})
 
 	t.Run("split layout proportions", func(t *testing.T) {
-		t.Parallel()
 		dims := CalculateLayout(120, 30)
 		if dims.Mode != LayoutSplit {
 			t.Errorf("Mode = %v, want LayoutSplit", dims.Mode)
@@ -218,7 +212,6 @@ func TestCalculateLayout(t *testing.T) {
 	})
 
 	t.Run("body height calculation", func(t *testing.T) {
-		t.Parallel()
 		dims := CalculateLayout(120, 40)
 		if dims.BodyHeight != 30 { // height - 10
 			t.Errorf("BodyHeight = %d, want 30", dims.BodyHeight)
@@ -291,7 +284,6 @@ func TestHandleWindowSizeOnlyClearsRenderCacheOnWidthChange(t *testing.T) {
 // =============================================================================
 
 func TestWorkingSpinnerFrame(t *testing.T) {
-	t.Parallel()
 
 	expected := []string{"◐", "◓", "◑", "◒"}
 	for i, want := range expected {
@@ -315,10 +307,8 @@ func TestWorkingSpinnerFrame(t *testing.T) {
 // =============================================================================
 
 func TestEnsureVisibleEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	t.Run("visible larger than total", func(t *testing.T) {
-		t.Parallel()
 		vp := &ViewportPosition{
 			Offset:   5,
 			Visible:  20,
@@ -332,7 +322,6 @@ func TestEnsureVisibleEdgeCases(t *testing.T) {
 	})
 
 	t.Run("selected at boundary", func(t *testing.T) {
-		t.Parallel()
 		vp := &ViewportPosition{
 			Offset:   0,
 			Visible:  5,
@@ -346,7 +335,6 @@ func TestEnsureVisibleEdgeCases(t *testing.T) {
 	})
 
 	t.Run("selected just past visible", func(t *testing.T) {
-		t.Parallel()
 		vp := &ViewportPosition{
 			Offset:   0,
 			Visible:  5,

@@ -342,6 +342,20 @@ func (ps *PaneStreamer) runFIFOReader() {
 			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
 				log.Printf("pipe-pane: read error for %s: %v", ps.target, err)
 			}
+			
+			// Check if we are actually stopping
+			select {
+			case <-stopCh:
+				return
+			case <-ctx.Done():
+				return
+			default:
+				// Unexpected stream termination, fallback to polling
+				log.Printf("pipe-pane: stream ended unexpectedly for %s, switching to fallback", ps.target)
+				ps.useFallback.Store(true)
+				ps.wg.Add(1)
+				go ps.runPollingLoop()
+			}
 			return
 		case line := <-lineCh:
 			lineBuf = append(lineBuf, strings.TrimSuffix(line, "\n"))

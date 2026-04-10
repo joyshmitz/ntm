@@ -11,7 +11,6 @@ import (
 // =============================================================================
 
 func TestEncodeValue_Primitives(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	tests := []struct {
@@ -43,7 +42,6 @@ func TestEncodeValue_Primitives(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := enc.encodeValue(reflect.ValueOf(tc.val))
 			if err != nil {
 				t.Fatalf("encodeValue(%v) error: %v", tc.val, err)
@@ -56,7 +54,6 @@ func TestEncodeValue_Primitives(t *testing.T) {
 }
 
 func TestEncodeValue_Invalid(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.encodeValue(reflect.Value{})
@@ -69,7 +66,6 @@ func TestEncodeValue_Invalid(t *testing.T) {
 }
 
 func TestEncodeValue_NilPointer(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	var p *int
@@ -83,7 +79,6 @@ func TestEncodeValue_NilPointer(t *testing.T) {
 }
 
 func TestEncodeValue_NonNilPointer(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	val := 42
@@ -97,7 +92,6 @@ func TestEncodeValue_NonNilPointer(t *testing.T) {
 }
 
 func TestEncodeValue_UnsupportedType(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	ch := make(chan int)
@@ -115,7 +109,6 @@ func TestEncodeValue_UnsupportedType(t *testing.T) {
 // =============================================================================
 
 func TestEncodeString(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	tests := []struct {
@@ -143,7 +136,6 @@ func TestEncodeString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := enc.encodeString(tc.input)
 			if got != tc.want {
 				t.Errorf("encodeString(%q) = %q, want %q", tc.input, got, tc.want)
@@ -157,7 +149,6 @@ func TestEncodeString(t *testing.T) {
 // =============================================================================
 
 func TestToonFormatFloat(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	tests := []struct {
@@ -179,7 +170,6 @@ func TestToonFormatFloat(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := enc.formatFloat(tc.input)
 			if got != tc.want {
 				t.Errorf("formatFloat(%v) = %q, want %q", tc.input, got, tc.want)
@@ -193,7 +183,6 @@ func TestToonFormatFloat(t *testing.T) {
 // =============================================================================
 
 func TestExtractFields_Map(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{"beta": 2, "alpha": 1, "gamma": 3}
@@ -208,7 +197,6 @@ func TestExtractFields_Map(t *testing.T) {
 }
 
 func TestExtractFields_Struct(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Sample struct {
@@ -231,7 +219,6 @@ func TestExtractFields_Struct(t *testing.T) {
 }
 
 func TestExtractFields_EmptyMap(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{}
@@ -245,7 +232,6 @@ func TestExtractFields_EmptyMap(t *testing.T) {
 }
 
 func TestExtractFields_NilPointer(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	var p *map[string]int
@@ -259,7 +245,6 @@ func TestExtractFields_NilPointer(t *testing.T) {
 }
 
 func TestExtractFields_NonStringMapKey(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[int]string{1: "a", 2: "b"}
@@ -273,7 +258,6 @@ func TestExtractFields_NonStringMapKey(t *testing.T) {
 }
 
 func TestExtractFields_InvalidKind(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	_, err := enc.extractFields(reflect.ValueOf(42))
@@ -290,7 +274,6 @@ func TestExtractFields_InvalidKind(t *testing.T) {
 // =============================================================================
 
 func TestGetFieldValue_Map(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{"alpha": 1, "beta": 2}
@@ -304,7 +287,6 @@ func TestGetFieldValue_Map(t *testing.T) {
 }
 
 func TestGetFieldValue_MapMissingKey(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{"alpha": 1}
@@ -318,7 +300,6 @@ func TestGetFieldValue_MapMissingKey(t *testing.T) {
 }
 
 func TestGetFieldValue_Struct(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Item struct {
@@ -337,7 +318,6 @@ func TestGetFieldValue_Struct(t *testing.T) {
 }
 
 func TestGetFieldValue_StructFallbackToFieldName(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Item struct {
@@ -355,7 +335,6 @@ func TestGetFieldValue_StructFallbackToFieldName(t *testing.T) {
 }
 
 func TestGetFieldValue_StructMissingField(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Item struct {
@@ -373,7 +352,6 @@ func TestGetFieldValue_StructMissingField(t *testing.T) {
 }
 
 func TestGetFieldValue_NilPointer(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	var p *map[string]int
@@ -391,7 +369,6 @@ func TestGetFieldValue_NilPointer(t *testing.T) {
 // =============================================================================
 
 func TestIsTabSafe_SafeValues(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -407,7 +384,6 @@ func TestIsTabSafe_SafeValues(t *testing.T) {
 }
 
 func TestIsTabSafe_UnsafeTab(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -423,7 +399,6 @@ func TestIsTabSafe_UnsafeTab(t *testing.T) {
 }
 
 func TestIsTabSafe_UnsafeNewline(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -438,7 +413,6 @@ func TestIsTabSafe_UnsafeNewline(t *testing.T) {
 }
 
 func TestIsTabSafe_UnsafeCarriageReturn(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -453,7 +427,6 @@ func TestIsTabSafe_UnsafeCarriageReturn(t *testing.T) {
 }
 
 func TestIsTabSafe_NonStringFieldsIgnored(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]int{
@@ -473,7 +446,6 @@ func TestIsTabSafe_NonStringFieldsIgnored(t *testing.T) {
 // =============================================================================
 
 func TestRenderArray_EmptySlice(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]int{}))
@@ -486,7 +458,6 @@ func TestRenderArray_EmptySlice(t *testing.T) {
 }
 
 func TestRenderArray_PrimitiveInts(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]int{1, 2, 3}))
@@ -499,7 +470,6 @@ func TestRenderArray_PrimitiveInts(t *testing.T) {
 }
 
 func TestRenderArray_PrimitiveStrings(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]string{"hello", "world"}))
@@ -512,7 +482,6 @@ func TestRenderArray_PrimitiveStrings(t *testing.T) {
 }
 
 func TestRenderArray_PrimitiveStringWithSpaces(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]string{"hello world", "foo"}))
@@ -525,7 +494,6 @@ func TestRenderArray_PrimitiveStringWithSpaces(t *testing.T) {
 }
 
 func TestRenderArray_PrimitiveBools(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]bool{true, false, true}))
@@ -538,7 +506,6 @@ func TestRenderArray_PrimitiveBools(t *testing.T) {
 }
 
 func TestRenderArray_SingleElement(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderArray(reflect.ValueOf([]int{42}))
@@ -551,7 +518,6 @@ func TestRenderArray_SingleElement(t *testing.T) {
 }
 
 func TestRenderArray_ObjectsDelegatesToTabular(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []map[string]int{
@@ -569,7 +535,6 @@ func TestRenderArray_ObjectsDelegatesToTabular(t *testing.T) {
 }
 
 func TestRenderArray_TabDelimiter(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	got, err := enc.renderArray(reflect.ValueOf([]int{10, 20, 30}))
@@ -586,7 +551,6 @@ func TestRenderArray_TabDelimiter(t *testing.T) {
 // =============================================================================
 
 func TestRenderTabular_EmptySlice(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	got, err := enc.renderTabular(reflect.ValueOf([]map[string]int{}))
@@ -599,7 +563,6 @@ func TestRenderTabular_EmptySlice(t *testing.T) {
 }
 
 func TestRenderTabular_UniformMaps(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []map[string]any{
@@ -633,7 +596,6 @@ func TestRenderTabular_UniformMaps(t *testing.T) {
 }
 
 func TestRenderTabular_UniformStructs(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Agent struct {
@@ -670,7 +632,6 @@ func TestRenderTabular_UniformStructs(t *testing.T) {
 }
 
 func TestRenderTabular_SingleRow(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []map[string]string{
@@ -690,7 +651,6 @@ func TestRenderTabular_SingleRow(t *testing.T) {
 }
 
 func TestRenderTabular_TabDelimiterSafeFallback(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -713,7 +673,6 @@ func TestRenderTabular_TabDelimiterSafeFallback(t *testing.T) {
 }
 
 func TestRenderTabular_TabDelimiterSafe(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{
@@ -739,7 +698,6 @@ func TestRenderTabular_TabDelimiterSafe(t *testing.T) {
 // =============================================================================
 
 func TestRenderObject_SimpleMap(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{"count": 42, "value": 100}
@@ -758,7 +716,6 @@ func TestRenderObject_SimpleMap(t *testing.T) {
 }
 
 func TestRenderObject_SimpleStruct(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Config struct {
@@ -785,7 +742,6 @@ func TestRenderObject_SimpleStruct(t *testing.T) {
 }
 
 func TestRenderObject_PreservesProjectionSectionOrder(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Projection struct {
@@ -815,7 +771,6 @@ func TestRenderObject_PreservesProjectionSectionOrder(t *testing.T) {
 }
 
 func TestRenderObject_EmptyMap(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]int{}
@@ -829,7 +784,6 @@ func TestRenderObject_EmptyMap(t *testing.T) {
 }
 
 func TestRenderObject_WithIndent(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]string{"name": "test"}
@@ -844,7 +798,6 @@ func TestRenderObject_WithIndent(t *testing.T) {
 }
 
 func TestRenderObject_NilMapValue(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{"key": nil}
@@ -858,7 +811,6 @@ func TestRenderObject_NilMapValue(t *testing.T) {
 }
 
 func TestRenderObject_NestedMap(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{
@@ -884,7 +836,6 @@ func TestRenderObject_NestedMap(t *testing.T) {
 }
 
 func TestRenderObject_WithArrayField(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{
@@ -901,7 +852,6 @@ func TestRenderObject_WithArrayField(t *testing.T) {
 }
 
 func TestRenderObject_PointerField(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	val := "hello"
@@ -918,7 +868,6 @@ func TestRenderObject_PointerField(t *testing.T) {
 }
 
 func TestRenderObject_NilPointerField(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	var p *string
@@ -939,7 +888,6 @@ func TestRenderObject_NilPointerField(t *testing.T) {
 // =============================================================================
 
 func TestRenderObject_RobotResponseShape(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	resp := map[string]any{
@@ -968,7 +916,6 @@ func TestRenderObject_RobotResponseShape(t *testing.T) {
 }
 
 func TestRenderTabular_MultipleFieldTypes(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []map[string]any{
@@ -999,7 +946,6 @@ func TestRenderTabular_MultipleFieldTypes(t *testing.T) {
 }
 
 func TestRenderArray_LargeSlice(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := make([]int, 100)
@@ -1021,7 +967,6 @@ func TestRenderArray_LargeSlice(t *testing.T) {
 }
 
 func TestEncodeValue_NestedComplexFallsBackToJSON(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	nested := map[string]int{"a": 1}
@@ -1040,7 +985,6 @@ func TestEncodeValue_NestedComplexFallsBackToJSON(t *testing.T) {
 // =============================================================================
 
 func TestRenderArray_StructElements(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Item struct {
@@ -1058,7 +1002,6 @@ func TestRenderArray_StructElements(t *testing.T) {
 }
 
 func TestRenderArray_PointerElements(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	a, b := 10, 20
@@ -1073,7 +1016,6 @@ func TestRenderArray_PointerElements(t *testing.T) {
 }
 
 func TestRenderArray_InterfaceElements(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []any{1, 2, 3}
@@ -1087,7 +1029,6 @@ func TestRenderArray_InterfaceElements(t *testing.T) {
 }
 
 func TestRenderTabular_PointerElements(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Row struct {
@@ -1108,7 +1049,6 @@ func TestRenderTabular_PointerElements(t *testing.T) {
 }
 
 func TestRenderTabular_ManyFields(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	data := []map[string]any{
@@ -1125,7 +1065,6 @@ func TestRenderTabular_ManyFields(t *testing.T) {
 }
 
 func TestRenderObject_DeeplyNested(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{
@@ -1151,7 +1090,6 @@ func TestRenderObject_DeeplyNested(t *testing.T) {
 }
 
 func TestRenderObject_EmptyArrayField(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{
@@ -1167,7 +1105,6 @@ func TestRenderObject_EmptyArrayField(t *testing.T) {
 }
 
 func TestGetFieldValue_StructWithOmitempty(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	type Item struct {
@@ -1186,7 +1123,6 @@ func TestGetFieldValue_StructWithOmitempty(t *testing.T) {
 }
 
 func TestGetFieldValue_InvalidKind(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	_, err := enc.getFieldValue(reflect.ValueOf(42), "key")
@@ -1199,7 +1135,6 @@ func TestGetFieldValue_InvalidKind(t *testing.T) {
 }
 
 func TestIsTabSafe_EmptySlice(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: "\t"}
 
 	data := []map[string]string{}
@@ -1212,7 +1147,6 @@ func TestIsTabSafe_EmptySlice(t *testing.T) {
 }
 
 func TestEncodeValue_AllIntTypes(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	tests := []struct {
@@ -1233,7 +1167,6 @@ func TestEncodeValue_AllIntTypes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := enc.encodeValue(reflect.ValueOf(tc.val))
 			if err != nil {
 				t.Fatalf("encodeValue error: %v", err)
@@ -1246,7 +1179,6 @@ func TestEncodeValue_AllIntTypes(t *testing.T) {
 }
 
 func TestRenderObject_MixedScalarAndComplex(t *testing.T) {
-	t.Parallel()
 	enc := &toonEncoder{delimiter: ","}
 
 	m := map[string]any{

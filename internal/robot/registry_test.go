@@ -7,7 +7,6 @@ import (
 )
 
 func TestGetRobotRegistry_SurfaceCoverage(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	commands := buildCommandRegistry()
@@ -46,7 +45,6 @@ func TestGetRobotRegistry_SurfaceCoverage(t *testing.T) {
 }
 
 func TestGetRobotRegistry_SectionReferencesResolve(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if len(registry.Sections) == 0 {
@@ -67,7 +65,6 @@ func TestGetRobotRegistry_SectionReferencesResolve(t *testing.T) {
 }
 
 func TestGetRobotRegistry_SchemaBindingsCoverSchemaCommand(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if len(registry.SchemaTypes) != len(SchemaCommand) {
@@ -86,7 +83,6 @@ func TestGetRobotRegistry_SchemaBindingsCoverSchemaCommand(t *testing.T) {
 }
 
 func TestGetRobotRegistry_KeySurfaceMetadata(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -178,7 +174,6 @@ func TestGetRobotRegistry_KeySurfaceMetadata(t *testing.T) {
 }
 
 func TestGetRobotRegistry_SurfacesSortedByCategoryThenName(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	for i := 1; i < len(registry.Surfaces); i++ {
@@ -194,7 +189,6 @@ func TestGetRobotRegistry_SurfacesSortedByCategoryThenName(t *testing.T) {
 }
 
 func TestGetRobotRegistry_SurfaceReturnsDetachedSlices(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	first, ok := registry.Surface("status")
@@ -229,7 +223,6 @@ func TestGetRobotRegistry_SurfaceReturnsDetachedSlices(t *testing.T) {
 }
 
 func TestGetRobotRegistry_ReturnsDetachedRegistrySnapshots(t *testing.T) {
-	t.Parallel()
 
 	first := GetRobotRegistry()
 	second := GetRobotRegistry()
@@ -258,7 +251,6 @@ func TestGetRobotRegistry_ReturnsDetachedRegistrySnapshots(t *testing.T) {
 }
 
 func TestGetRobotRegistry_ConsumerMetadataPopulated(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -349,7 +341,6 @@ func TestGetRobotRegistry_ConsumerMetadataPopulated(t *testing.T) {
 }
 
 func TestGetRobotRegistry_SectionConsumerMetadataPopulated(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -407,7 +398,6 @@ func TestGetRobotRegistry_SectionConsumerMetadataPopulated(t *testing.T) {
 }
 
 func TestGetRobotRegistry_ConsumerMetadataClonedOnLookup(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -440,7 +430,6 @@ func TestGetRobotRegistry_ConsumerMetadataClonedOnLookup(t *testing.T) {
 // =============================================================================
 
 func TestSchemaID_FormatConsistency(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -486,7 +475,6 @@ func TestSchemaID_FormatConsistency(t *testing.T) {
 }
 
 func TestSchemaID_Uniqueness(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -512,7 +500,6 @@ func TestSchemaID_Uniqueness(t *testing.T) {
 }
 
 func TestEnvelopeVersion_StableFormat(t *testing.T) {
-	t.Parallel()
 
 	// EnvelopeVersion must be semver format
 	parts := strings.Split(EnvelopeVersion, ".")
@@ -534,7 +521,6 @@ func TestEnvelopeVersion_StableFormat(t *testing.T) {
 // =============================================================================
 
 func TestRegistry_DeterministicSurfaceOrder(t *testing.T) {
-	t.Parallel()
 
 	// Get registry multiple times and verify consistent ordering
 	first := GetRobotRegistry()
@@ -553,7 +539,6 @@ func TestRegistry_DeterministicSurfaceOrder(t *testing.T) {
 }
 
 func TestRegistry_DeterministicSectionOrder(t *testing.T) {
-	t.Parallel()
 
 	first := GetRobotRegistry()
 	second := GetRobotRegistry()
@@ -571,7 +556,6 @@ func TestRegistry_DeterministicSectionOrder(t *testing.T) {
 }
 
 func TestRegistry_DeterministicCategoryOrder(t *testing.T) {
-	t.Parallel()
 
 	first := GetRobotRegistry()
 	second := GetRobotRegistry()
@@ -589,7 +573,6 @@ func TestRegistry_DeterministicCategoryOrder(t *testing.T) {
 }
 
 func TestRegistry_DeterministicSchemaTypeOrder(t *testing.T) {
-	t.Parallel()
 
 	first := GetRobotRegistry()
 	second := GetRobotRegistry()
@@ -611,7 +594,6 @@ func TestRegistry_DeterministicSchemaTypeOrder(t *testing.T) {
 // =============================================================================
 
 func TestBoundedness_WellFormed(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -650,7 +632,6 @@ func TestBoundedness_WellFormed(t *testing.T) {
 }
 
 func TestSectionBoundedness_WellFormed(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -682,7 +663,6 @@ func TestSectionBoundedness_WellFormed(t *testing.T) {
 // =============================================================================
 
 func TestActionHandoff_WellFormed(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -733,7 +713,6 @@ func TestActionHandoff_WellFormed(t *testing.T) {
 // =============================================================================
 
 func TestRequestSemantics_IdempotencyConfig(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -766,7 +745,6 @@ func TestRequestSemantics_IdempotencyConfig(t *testing.T) {
 }
 
 func TestRequestSemantics_ReadOnlySurfacesNoIdempotency(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -791,7 +769,6 @@ func TestRequestSemantics_ReadOnlySurfacesNoIdempotency(t *testing.T) {
 // =============================================================================
 
 func TestAttentionOps_WellFormed(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -826,7 +803,6 @@ func TestAttentionOps_WellFormed(t *testing.T) {
 }
 
 func TestAttentionOps_OnlyAttentionSurfaces(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -851,7 +827,6 @@ func TestAttentionOps_OnlyAttentionSurfaces(t *testing.T) {
 // =============================================================================
 
 func TestGetCapabilities_OutputStructure(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -877,7 +852,6 @@ func TestGetCapabilities_OutputStructure(t *testing.T) {
 }
 
 func TestGetCapabilities_DeterministicOutput(t *testing.T) {
-	t.Parallel()
 
 	first, err := GetCapabilities()
 	if err != nil {
@@ -919,7 +893,6 @@ func TestGetCapabilities_DeterministicOutput(t *testing.T) {
 }
 
 func TestGetCapabilities_CommandsMatchRegistry(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -943,7 +916,6 @@ func TestGetCapabilities_CommandsMatchRegistry(t *testing.T) {
 }
 
 func TestGetCapabilities_AttentionCapabilitiesPopulated(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -971,7 +943,6 @@ func TestGetCapabilities_AttentionCapabilitiesPopulated(t *testing.T) {
 // =============================================================================
 
 func TestGetSchema_DiscoveryConsistency(t *testing.T) {
-	t.Parallel()
 
 	// Get all schema types
 	allOutput, err := GetSchema("all")
@@ -1008,7 +979,6 @@ func TestGetSchema_DiscoveryConsistency(t *testing.T) {
 }
 
 func TestGetSchema_AllTypesMatchRegistry(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	allOutput, err := GetSchema("all")
@@ -1024,7 +994,6 @@ func TestGetSchema_AllTypesMatchRegistry(t *testing.T) {
 }
 
 func TestGetSchema_InvalidTypeError(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetSchema("nonexistent_schema_type_xyz")
 	if err != nil {

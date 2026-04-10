@@ -12,7 +12,6 @@ import (
 )
 
 func TestDetectedConflict_ConfidenceLevel(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name       string
@@ -33,7 +32,6 @@ func TestDetectedConflict_ConfidenceLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dc := &DetectedConflict{Confidence: tt.confidence}
 			if got := dc.ConfidenceLevel(); got != tt.want {
 				t.Errorf("ConfidenceLevel() = %v, want %v", got, tt.want)
@@ -43,7 +41,6 @@ func TestDetectedConflict_ConfidenceLevel(t *testing.T) {
 }
 
 func TestActivityWindow_Overlaps(t *testing.T) {
-	t.Parallel()
 
 	base := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 
@@ -93,7 +90,6 @@ func TestActivityWindow_Overlaps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			if got := tt.a.Overlaps(&tt.b); got != tt.want {
 				t.Errorf("Overlaps() = %v, want %v", got, tt.want)
 			}
@@ -102,7 +98,6 @@ func TestActivityWindow_Overlaps(t *testing.T) {
 }
 
 func TestActivityWindow_Contains(t *testing.T) {
-	t.Parallel()
 
 	base := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	window := ActivityWindow{
@@ -124,7 +119,6 @@ func TestActivityWindow_Contains(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			if got := window.Contains(tt.time); got != tt.want {
 				t.Errorf("Contains() = %v, want %v", got, tt.want)
 			}
@@ -133,10 +127,8 @@ func TestActivityWindow_Contains(t *testing.T) {
 }
 
 func TestNewConflictDetector(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil config uses defaults", func(t *testing.T) {
-		t.Parallel()
 		cd := NewConflictDetector(nil)
 		if cd.activityWindows == nil {
 			t.Error("activityWindows not initialized")
@@ -144,7 +136,6 @@ func TestNewConflictDetector(t *testing.T) {
 	})
 
 	t.Run("with custom config", func(t *testing.T) {
-		t.Parallel()
 		cfg := &ConflictDetectorConfig{
 			RepoPath:   "/custom/path",
 			ProjectKey: "test-project",
@@ -160,7 +151,6 @@ func TestNewConflictDetector(t *testing.T) {
 }
 
 func TestConflictDetector_RecordActivity(t *testing.T) {
-	t.Parallel()
 
 	cd := NewConflictDetector(nil)
 	now := time.Now()
@@ -180,7 +170,6 @@ func TestConflictDetector_RecordActivity(t *testing.T) {
 }
 
 func TestConflictDetector_ClearActivityWindows(t *testing.T) {
-	t.Parallel()
 
 	cd := NewConflictDetector(nil)
 	now := time.Now()
@@ -197,7 +186,6 @@ func TestConflictDetector_ClearActivityWindows(t *testing.T) {
 }
 
 func TestParseGitStatusPorcelain(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -250,7 +238,6 @@ func TestParseGitStatusPorcelain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := parseGitStatusPorcelain(tt.output, "/nonexistent")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -269,7 +256,6 @@ func TestParseGitStatusPorcelain(t *testing.T) {
 }
 
 func TestMatchesPattern(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		filePath string
@@ -306,7 +292,6 @@ func TestMatchesPattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.filePath+"_vs_"+tt.pattern, func(t *testing.T) {
-			t.Parallel()
 			if got := matchesPattern(tt.filePath, tt.pattern); got != tt.want {
 				t.Errorf("matchesPattern(%q, %q) = %v, want %v", tt.filePath, tt.pattern, got, tt.want)
 			}
@@ -315,7 +300,6 @@ func TestMatchesPattern(t *testing.T) {
 }
 
 func TestContainsAny(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -333,7 +317,6 @@ func TestContainsAny(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			if got := containsAny(tt.a, tt.b); got != tt.want {
 				t.Errorf("containsAny() = %v, want %v", got, tt.want)
 			}
@@ -342,7 +325,6 @@ func TestContainsAny(t *testing.T) {
 }
 
 func TestConflictDetector_ScoreConflict(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name           string
@@ -390,7 +372,6 @@ func TestConflictDetector_ScoreConflict(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			cd := NewConflictDetector(nil)
 			conflict := &DetectedConflict{
 				LikelyModifiers:    tt.modifiers,
@@ -409,7 +390,6 @@ func TestConflictDetector_ScoreConflict(t *testing.T) {
 }
 
 func TestConflictDetector_FindLikelyModifiers(t *testing.T) {
-	t.Parallel()
 
 	cd := NewConflictDetector(nil)
 	now := time.Now()
@@ -457,7 +437,6 @@ func TestConflictDetector_FindLikelyModifiers(t *testing.T) {
 }
 
 func TestConflictDetector_FindReservationHolders(t *testing.T) {
-	t.Parallel()
 
 	cd := NewConflictDetector(nil)
 	now := time.Now()
@@ -509,7 +488,6 @@ func TestConflictDetector_FindReservationHolders(t *testing.T) {
 }
 
 func TestSummarizeConflicts(t *testing.T) {
-	t.Parallel()
 
 	conflicts := []DetectedConflict{
 		{Path: "file1.go", Confidence: 0.95, Reason: ReasonConcurrentActivity},
@@ -538,10 +516,8 @@ func TestSummarizeConflicts(t *testing.T) {
 }
 
 func TestNewConflictDetectionResponse(t *testing.T) {
-	t.Parallel()
 
 	t.Run("no conflicts", func(t *testing.T) {
-		t.Parallel()
 		resp := NewConflictDetectionResponse(nil)
 		if !resp.Success {
 			t.Error("Success should be true")
@@ -552,7 +528,6 @@ func TestNewConflictDetectionResponse(t *testing.T) {
 	})
 
 	t.Run("with conflicts", func(t *testing.T) {
-		t.Parallel()
 		conflicts := []DetectedConflict{
 			{Path: "file.go", Confidence: 0.9},
 		}
@@ -603,7 +578,6 @@ func TestConflictDetector_DetectConflicts_Integration(t *testing.T) {
 }
 
 func TestConflictDetector_PruneOldWindows(t *testing.T) {
-	t.Parallel()
 
 	cd := NewConflictDetector(nil)
 	now := time.Now()
@@ -637,7 +611,6 @@ func TestConflictDetector_PruneOldWindows(t *testing.T) {
 // ============================================================================
 
 func TestExtractCodeBlocks(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -687,7 +660,6 @@ func TestExtractCodeBlocks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := ExtractCodeBlocks(tt.content)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d blocks, want %d", len(got), len(tt.want))
@@ -712,7 +684,6 @@ func TestExtractCodeBlocks(t *testing.T) {
 }
 
 func TestExtractJSONOutputs(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -769,7 +740,6 @@ func TestExtractJSONOutputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := ExtractJSONOutputs(tt.content)
 			if len(got) != tt.want {
 				t.Fatalf("got %d JSON outputs, want %d", len(got), tt.want)
@@ -784,7 +754,6 @@ func TestExtractJSONOutputs(t *testing.T) {
 }
 
 func TestIsValidJSON(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input string
@@ -803,7 +772,6 @@ func TestIsValidJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
 			if got := isValidJSON(tt.input); got != tt.want {
 				t.Errorf("isValidJSON(%q) = %v, want %v", tt.input, got, tt.want)
 			}
@@ -812,7 +780,6 @@ func TestIsValidJSON(t *testing.T) {
 }
 
 func TestExtractFileMentions(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -853,7 +820,6 @@ func TestExtractFileMentions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := ExtractFileMentions(tt.content)
 			if len(got) != tt.wantCount {
 				t.Errorf("got %d mentions, want %d: %+v", len(got), tt.wantCount, got)
@@ -863,7 +829,6 @@ func TestExtractFileMentions(t *testing.T) {
 }
 
 func TestInferFileAction(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line       string
@@ -882,7 +847,6 @@ func TestInferFileAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-			t.Parallel()
 			action, conf := inferFileAction(tt.line, tt.path)
 			if action != tt.wantAction {
 				t.Errorf("action = %q, want %q", action, tt.wantAction)
@@ -895,7 +859,6 @@ func TestInferFileAction(t *testing.T) {
 }
 
 func TestExtractCommands(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -936,7 +899,6 @@ func TestExtractCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := ExtractCommands(tt.content)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d commands, want %d", len(got), len(tt.want))
@@ -951,7 +913,6 @@ func TestExtractCommands(t *testing.T) {
 }
 
 func TestParseExitCode(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line string
@@ -969,7 +930,6 @@ func TestParseExitCode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-			t.Parallel()
 			got := parseExitCode(tt.line)
 			if tt.want == nil && got != nil {
 				t.Errorf("got %d, want nil", *got)
@@ -987,10 +947,8 @@ func intPtr(i int) *int {
 }
 
 func TestNewOutputCapture(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil config uses defaults", func(t *testing.T) {
-		t.Parallel()
 		oc := NewOutputCapture(nil)
 		if oc.config == nil {
 			t.Fatal("config should not be nil")
@@ -1001,7 +959,6 @@ func TestNewOutputCapture(t *testing.T) {
 	})
 
 	t.Run("custom config", func(t *testing.T) {
-		t.Parallel()
 		cfg := &OutputCaptureConfig{MaxCapturesPerPane: 50}
 		oc := NewOutputCapture(cfg)
 		if oc.config.MaxCapturesPerPane != 50 {
@@ -1011,7 +968,6 @@ func TestNewOutputCapture(t *testing.T) {
 }
 
 func TestOutputCapture_CaptureAndExtract(t *testing.T) {
-	t.Parallel()
 
 	oc := NewOutputCapture(nil)
 
@@ -1039,7 +995,6 @@ func TestOutputCapture_CaptureAndExtract(t *testing.T) {
 }
 
 func TestOutputCapture_RingBuffer(t *testing.T) {
-	t.Parallel()
 
 	cfg := &OutputCaptureConfig{
 		MaxCapturesPerPane: 3,
@@ -1060,7 +1015,6 @@ func TestOutputCapture_RingBuffer(t *testing.T) {
 }
 
 func TestOutputCapture_GetCaptures(t *testing.T) {
-	t.Parallel()
 
 	oc := NewOutputCapture(nil)
 
@@ -1070,7 +1024,6 @@ func TestOutputCapture_GetCaptures(t *testing.T) {
 	oc.CaptureAndExtract("%1", "claude", "content2", "prompt2")
 
 	t.Run("no limit", func(t *testing.T) {
-		t.Parallel()
 		captures := oc.GetCaptures("%1", 0, nil)
 		if len(captures) != 2 {
 			t.Errorf("got %d captures, want 2", len(captures))
@@ -1078,7 +1031,6 @@ func TestOutputCapture_GetCaptures(t *testing.T) {
 	})
 
 	t.Run("with limit", func(t *testing.T) {
-		t.Parallel()
 		captures := oc.GetCaptures("%1", 1, nil)
 		if len(captures) != 1 {
 			t.Errorf("got %d captures, want 1", len(captures))
@@ -1086,7 +1038,6 @@ func TestOutputCapture_GetCaptures(t *testing.T) {
 	})
 
 	t.Run("unknown pane", func(t *testing.T) {
-		t.Parallel()
 		captures := oc.GetCaptures("%unknown", 0, nil)
 		if len(captures) != 0 {
 			t.Errorf("got %d captures, want 0", len(captures))
@@ -1095,10 +1046,8 @@ func TestOutputCapture_GetCaptures(t *testing.T) {
 }
 
 func TestOutputCapture_GetLatestCapture(t *testing.T) {
-	t.Parallel()
 
 	t.Run("no captures", func(t *testing.T) {
-		t.Parallel()
 		oc := NewOutputCapture(nil)
 		latest := oc.GetLatestCapture("%empty")
 		if latest != nil {
@@ -1107,7 +1056,6 @@ func TestOutputCapture_GetLatestCapture(t *testing.T) {
 	})
 
 	t.Run("returns latest", func(t *testing.T) {
-		t.Parallel()
 		oc := NewOutputCapture(nil)
 		oc.CaptureAndExtract("%1", "claude", "first", "")
 		oc.CaptureAndExtract("%1", "claude", "second", "")
@@ -1120,7 +1068,6 @@ func TestOutputCapture_GetLatestCapture(t *testing.T) {
 }
 
 func TestOutputCapture_ClearCaptures(t *testing.T) {
-	t.Parallel()
 
 	oc := NewOutputCapture(nil)
 	oc.CaptureAndExtract("%1", "claude", "content", "")
@@ -1137,7 +1084,6 @@ func TestOutputCapture_ClearCaptures(t *testing.T) {
 }
 
 func TestOutputCapture_Stats(t *testing.T) {
-	t.Parallel()
 
 	oc := NewOutputCapture(nil)
 	oc.CaptureAndExtract("%1", "claude", "content", "")
@@ -1159,7 +1105,6 @@ func TestOutputCapture_Stats(t *testing.T) {
 // =============================================================================
 
 func TestCountErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -1184,7 +1129,6 @@ func TestCountErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := countErrors(tt.lines)
 			if got != tt.want {
 				t.Errorf("countErrors() = %d, want %d", got, tt.want)
@@ -1198,10 +1142,8 @@ func TestCountErrors(t *testing.T) {
 // =============================================================================
 
 func TestExtractKeyActions(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
 		actions := extractKeyActions(nil, 5)
 		if len(actions) != 0 {
 			t.Errorf("expected empty, got %v", actions)
@@ -1209,7 +1151,6 @@ func TestExtractKeyActions(t *testing.T) {
 	})
 
 	t.Run("summary prefix", func(t *testing.T) {
-		t.Parallel()
 		lines := []string{
 			"some output",
 			"Summary: Added authentication middleware",
@@ -1229,7 +1170,6 @@ func TestExtractKeyActions(t *testing.T) {
 	})
 
 	t.Run("action verbs", func(t *testing.T) {
-		t.Parallel()
 		lines := []string{
 			"Created new handler for /api/users",
 			"Fixed authentication bug in middleware",
@@ -1243,7 +1183,6 @@ func TestExtractKeyActions(t *testing.T) {
 	})
 
 	t.Run("respects max", func(t *testing.T) {
-		t.Parallel()
 		lines := []string{
 			"Created file1",
 			"Created file2",
@@ -1258,7 +1197,6 @@ func TestExtractKeyActions(t *testing.T) {
 	})
 
 	t.Run("skips short lines", func(t *testing.T) {
-		t.Parallel()
 		lines := []string{
 			"ok",       // too short
 			"Created.", // too short
@@ -1271,7 +1209,6 @@ func TestExtractKeyActions(t *testing.T) {
 	})
 
 	t.Run("priority ordering", func(t *testing.T) {
-		t.Parallel()
 		// Priority 1 items should come before priority 2/3
 		lines := []string{
 			"Testing the new feature now",     // testing = priority 3
@@ -1300,7 +1237,6 @@ func TestExtractKeyActions(t *testing.T) {
 // =============================================================================
 
 func TestCleanActionLine(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input string
@@ -1318,7 +1254,6 @@ func TestCleanActionLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
 			got := cleanActionLine(tt.input)
 			if got != tt.want {
 				t.Errorf("cleanActionLine(%q) = %q, want %q", tt.input, got, tt.want)
@@ -1328,7 +1263,6 @@ func TestCleanActionLine(t *testing.T) {
 }
 
 func TestCleanActionLine_Truncation(t *testing.T) {
-	t.Parallel()
 
 	longLine := strings.Repeat("a", 100)
 	result := cleanActionLine(longLine)
@@ -1345,7 +1279,6 @@ func TestCleanActionLine_Truncation(t *testing.T) {
 // =============================================================================
 
 func TestFormatDuration(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		d    time.Duration
@@ -1363,7 +1296,6 @@ func TestFormatDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			t.Parallel()
 			got := formatDuration(tt.d)
 			if got != tt.want {
 				t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
@@ -1377,10 +1309,8 @@ func TestFormatDuration(t *testing.T) {
 // =============================================================================
 
 func TestFormatSessionSummaryText(t *testing.T) {
-	t.Parallel()
 
 	t.Run("basic summary", func(t *testing.T) {
-		t.Parallel()
 		summary := &SessionSummary{
 			Session: "myproject",
 			TimeRange: SummaryTimeRange{
@@ -1424,7 +1354,6 @@ func TestFormatSessionSummaryText(t *testing.T) {
 	})
 
 	t.Run("with conflicts", func(t *testing.T) {
-		t.Parallel()
 		summary := &SessionSummary{
 			Session: "proj",
 			TimeRange: SummaryTimeRange{
@@ -1445,7 +1374,6 @@ func TestFormatSessionSummaryText(t *testing.T) {
 	})
 
 	t.Run("no files or actions", func(t *testing.T) {
-		t.Parallel()
 		summary := &SessionSummary{
 			Session: "empty",
 			TimeRange: SummaryTimeRange{

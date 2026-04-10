@@ -14,7 +14,6 @@ import (
 )
 
 func TestTruncate(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		input string
 		n     int
@@ -42,7 +41,6 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestTruncate_EdgeCases(t *testing.T) {
-	t.Parallel()
 	// Test truncation at boundary conditions
 	t.Run("n equals string length", func(t *testing.T) {
 		result := util.Truncate("test", 4)
@@ -90,7 +88,6 @@ func TestFindPaneForStage_NoSession(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
-	t.Parallel()
 
 	// Non-existent session should fail
 	_, err := findPaneForStage("nonexistent-session-xyz", "cc", "")
@@ -114,7 +111,6 @@ func TestFindPaneForStage_EmptySession(t *testing.T) {
 }
 
 func TestStage_Fields(t *testing.T) {
-	t.Parallel()
 	// Test Stage struct can be created with all fields
 	s := Stage{
 		AgentType: "cc",
@@ -133,7 +129,6 @@ func TestStage_Fields(t *testing.T) {
 }
 
 func TestPipeline_Fields(t *testing.T) {
-	t.Parallel()
 	// Test Pipeline struct can be created with stages
 	p := Pipeline{
 		Session: "test-session",
@@ -199,7 +194,6 @@ func TestWaitForIdle_Timeout(t *testing.T) {
 }
 
 func TestExecute_EmptyPipeline(t *testing.T) {
-	t.Parallel()
 	// Empty pipeline should succeed (no stages to run)
 	p := Pipeline{
 		Session: "test",
@@ -215,7 +209,6 @@ func TestExecute_NonExistentSession(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")
 	}
-	t.Parallel()
 
 	p := Pipeline{
 		Session: "nonexistent-session-for-testing-xyz",

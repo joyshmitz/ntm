@@ -9,7 +9,6 @@ import (
 // TestClassifyWithOutput_IdlePrompt verifies that ClassifyWithOutput detects idle/waiting
 // state when a Claude prompt is present with no output velocity.
 func TestClassifyWithOutput_IdlePrompt(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -41,7 +40,6 @@ func TestClassifyWithOutput_IdlePrompt(t *testing.T) {
 
 // TestClassifyWithOutput_ErrorPattern verifies that error patterns take immediate priority.
 func TestClassifyWithOutput_ErrorPattern(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -67,7 +65,6 @@ func TestClassifyWithOutput_ErrorPattern(t *testing.T) {
 
 // TestClassifyWithOutput_ThinkingPattern verifies thinking state detection.
 func TestClassifyWithOutput_ThinkingPattern(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -90,7 +87,6 @@ func TestClassifyWithOutput_ThinkingPattern(t *testing.T) {
 
 // TestClassifyWithOutput_HighVelocity verifies generating state with high output velocity.
 func TestClassifyWithOutput_HighVelocity(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -118,7 +114,6 @@ func TestClassifyWithOutput_HighVelocity(t *testing.T) {
 
 // TestClassifyWithOutput_StateTransitionHistory verifies that state transitions are recorded.
 func TestClassifyWithOutput_StateTransitionHistory(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -139,7 +134,6 @@ func TestClassifyWithOutput_StateTransitionHistory(t *testing.T) {
 
 // TestClassifyWithOutput_PaneIDPreserved verifies pane ID is carried through.
 func TestClassifyWithOutput_PaneIDPreserved(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("my-pane-42", &ClassifierConfig{
 		AgentType: "codex",
@@ -159,7 +153,6 @@ func TestClassifyWithOutput_PaneIDPreserved(t *testing.T) {
 
 // TestClassifyWithOutput_DetectedPatternsReported verifies pattern names are in result.
 func TestClassifyWithOutput_DetectedPatternsReported(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -181,7 +174,6 @@ func TestClassifyWithOutput_DetectedPatternsReported(t *testing.T) {
 
 // TestClassifyWithOutput_MultipleErrors verifies multiple error patterns.
 func TestClassifyWithOutput_MultipleErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -197,7 +189,6 @@ func TestClassifyWithOutput_MultipleErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 
 			sc := NewStateClassifier("pane", &ClassifierConfig{
 				AgentType:          "claude",
@@ -217,7 +208,6 @@ func TestClassifyWithOutput_MultipleErrors(t *testing.T) {
 
 // TestClassifyWithOutput_CodexIdlePrompt verifies codex-specific idle detection.
 func TestClassifyWithOutput_CodexIdlePrompt(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "codex",
@@ -237,7 +227,6 @@ func TestClassifyWithOutput_CodexIdlePrompt(t *testing.T) {
 
 // TestClassifyWithOutput_GeminiIdlePrompt verifies gemini-specific idle detection.
 func TestClassifyWithOutput_GeminiIdlePrompt(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "gemini",
@@ -257,7 +246,6 @@ func TestClassifyWithOutput_GeminiIdlePrompt(t *testing.T) {
 
 // TestClassifyWithOutput_EmptyInput verifies behavior with empty output.
 func TestClassifyWithOutput_EmptyInput(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		HysteresisDuration: 0,
@@ -276,7 +264,6 @@ func TestClassifyWithOutput_EmptyInput(t *testing.T) {
 
 // TestClassifyWithOutput_Hysteresis verifies that hysteresis prevents rapid state flapping.
 func TestClassifyWithOutput_Hysteresis(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -299,7 +286,6 @@ func TestClassifyWithOutput_Hysteresis(t *testing.T) {
 
 // TestClassifyWithOutput_ErrorBypassesHysteresis verifies ERROR transitions are immediate.
 func TestClassifyWithOutput_ErrorBypassesHysteresis(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test-pane", &ClassifierConfig{
 		AgentType:          "claude",
@@ -319,7 +305,6 @@ func TestClassifyWithOutput_ErrorBypassesHysteresis(t *testing.T) {
 
 // TestNewStateClassifier_Defaults verifies default configuration values.
 func TestNewStateClassifier_Defaults(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("pane-1", nil)
 
@@ -339,7 +324,6 @@ func TestNewStateClassifier_Defaults(t *testing.T) {
 
 // TestNewStateClassifier_CustomConfig verifies custom config is respected.
 func TestNewStateClassifier_CustomConfig(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("pane-1", &ClassifierConfig{
 		AgentType:          "gemini",

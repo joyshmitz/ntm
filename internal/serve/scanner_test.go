@@ -18,7 +18,6 @@ import (
 )
 
 func TestExtractBeadID_JSONAndLegacyFormats(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -35,7 +34,6 @@ func TestExtractBeadID_JSONAndLegacyFormats(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := extractBeadID(tc.input)
 			if got != tc.want {
 				t.Errorf("extractBeadID(%q) = %q, want %q", tc.input, got, tc.want)
@@ -45,7 +43,6 @@ func TestExtractBeadID_JSONAndLegacyFormats(t *testing.T) {
 }
 
 func TestGenerateScanID(t *testing.T) {
-	t.Parallel()
 
 	id := generateScanID()
 
@@ -63,7 +60,6 @@ func TestGenerateScanID(t *testing.T) {
 }
 
 func TestGenerateFindingID(t *testing.T) {
-	t.Parallel()
 
 	f := scanner.Finding{
 		File:     "main.go",
@@ -97,12 +93,10 @@ func TestGenerateFindingID(t *testing.T) {
 }
 
 func TestFindingToMap(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 
 	t.Run("basic fields", func(t *testing.T) {
-		t.Parallel()
 		f := &FindingRecord{
 			ID:        "finding-abc",
 			ScanID:    "scan-123",
@@ -129,7 +123,6 @@ func TestFindingToMap(t *testing.T) {
 	})
 
 	t.Run("with optional fields", func(t *testing.T) {
-		t.Parallel()
 		dismissedAt := time.Now()
 		f := &FindingRecord{
 			ID:          "finding-abc",
@@ -559,7 +552,6 @@ func TestHandleRunScanAlreadyRunning(t *testing.T) {
 }
 
 func TestScannerStoreTryStartScanRejectsActiveScan(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	first := &ScanRecord{ID: "scan-pending", State: ScanStatePending, StartedAt: time.Now()}

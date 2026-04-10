@@ -21,7 +21,6 @@ import (
 // =============================================================================
 
 func TestContract_SchemaIDFormat(t *testing.T) {
-	t.Parallel()
 
 	// Schema IDs must follow the format: ntm:robot:<surface>:v<n>
 	schemaIDPattern := regexp.MustCompile(`^ntm:robot:[a-z][a-z0-9_-]*:v\d+$`)
@@ -54,7 +53,6 @@ func TestContract_SchemaIDFormat(t *testing.T) {
 }
 
 func TestContract_AttentionContractVersion(t *testing.T) {
-	t.Parallel()
 
 	// Version must be semver format
 	semverPattern := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
@@ -68,7 +66,6 @@ func TestContract_AttentionContractVersion(t *testing.T) {
 // =============================================================================
 
 func TestContract_EventCategories(t *testing.T) {
-	t.Parallel()
 
 	// All event categories must be non-empty lowercase strings
 	categories := []EventCategory{
@@ -101,7 +98,6 @@ func TestContract_EventCategories(t *testing.T) {
 }
 
 func TestContract_EventTypes(t *testing.T) {
-	t.Parallel()
 
 	// Event types must follow format: category.action
 	eventTypePattern := regexp.MustCompile(`^[a-z]+\.[a-z_]+$`)
@@ -165,7 +161,6 @@ func TestContract_EventTypes(t *testing.T) {
 // =============================================================================
 
 func TestContract_SeverityValues(t *testing.T) {
-	t.Parallel()
 
 	severities := []Severity{
 		SeverityDebug, SeverityInfo, SeverityWarning,
@@ -188,7 +183,6 @@ func TestContract_SeverityValues(t *testing.T) {
 }
 
 func TestContract_ActionabilityValues(t *testing.T) {
-	t.Parallel()
 
 	actionabilities := []Actionability{
 		ActionabilityBackground,
@@ -216,7 +210,6 @@ func TestContract_ActionabilityValues(t *testing.T) {
 // =============================================================================
 
 func TestContract_ErrorCodeValues(t *testing.T) {
-	t.Parallel()
 
 	// Error codes must be uppercase with underscores
 	errCodePattern := regexp.MustCompile(`^[A-Z][A-Z0-9_]+$`)
@@ -254,7 +247,6 @@ func TestContract_ErrorCodeValues(t *testing.T) {
 // =============================================================================
 
 func TestContract_RobotResponse_SuccessFields(t *testing.T) {
-	t.Parallel()
 
 	resp := NewRobotResponse(true)
 
@@ -279,7 +271,6 @@ func TestContract_RobotResponse_SuccessFields(t *testing.T) {
 }
 
 func TestContract_RobotResponse_ErrorFields(t *testing.T) {
-	t.Parallel()
 
 	resp := NewErrorResponse(
 		testError("test error"),
@@ -306,7 +297,6 @@ func TestContract_RobotResponse_ErrorFields(t *testing.T) {
 }
 
 func TestContract_RobotResponse_JSONSerialization(t *testing.T) {
-	t.Parallel()
 
 	resp := NewRobotResponse(true)
 
@@ -339,7 +329,6 @@ func (e testError) Error() string { return string(e) }
 // =============================================================================
 
 func TestContract_AttentionEvent_RequiredFields(t *testing.T) {
-	t.Parallel()
 
 	event := AttentionEvent{
 		Cursor:        100,
@@ -377,7 +366,6 @@ func TestContract_AttentionEvent_RequiredFields(t *testing.T) {
 // =============================================================================
 
 func TestContract_SurfaceDescriptor_RequiredFields(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	for _, surface := range registry.Surfaces {
@@ -416,7 +404,6 @@ func TestContract_SurfaceDescriptor_RequiredFields(t *testing.T) {
 }
 
 func TestContract_SurfaceDescriptor_CategoryOrder(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -444,7 +431,6 @@ func TestContract_SurfaceDescriptor_CategoryOrder(t *testing.T) {
 // =============================================================================
 
 func TestContract_PaginationInfo_Fields(t *testing.T) {
-	t.Parallel()
 
 	info := &PaginationInfo{
 		Total:   100,
@@ -477,7 +463,6 @@ func TestContract_PaginationInfo_Fields(t *testing.T) {
 // =============================================================================
 
 func TestContract_NextAction_Structure(t *testing.T) {
-	t.Parallel()
 
 	action := NextAction{
 		Action: "robot-send",
@@ -513,7 +498,6 @@ func TestContract_NextAction_Structure(t *testing.T) {
 }
 
 func TestContract_NextAction_ReasonOptional(t *testing.T) {
-	t.Parallel()
 
 	// Reason is optional but recommended
 	action := NextAction{
@@ -543,7 +527,6 @@ func TestContract_NextAction_ReasonOptional(t *testing.T) {
 // =============================================================================
 
 func TestContract_Registry_CategoriesExist(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	if len(registry.Categories) == 0 {
@@ -576,7 +559,6 @@ func TestContract_Registry_CategoriesExist(t *testing.T) {
 }
 
 func TestContract_Registry_SchemaTypesMatchSchemaCommand(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -601,7 +583,6 @@ func TestContract_Registry_SchemaTypesMatchSchemaCommand(t *testing.T) {
 }
 
 func TestContract_Registry_SectionsMatchSurfaces(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -626,7 +607,6 @@ func TestContract_Registry_SectionsMatchSurfaces(t *testing.T) {
 // =============================================================================
 
 func TestContract_CoreSurfaces_HaveConsumerMetadata(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -644,7 +624,6 @@ func TestContract_CoreSurfaces_HaveConsumerMetadata(t *testing.T) {
 }
 
 func TestContract_InspectSurfaces_HaveFollowUp(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 
@@ -670,7 +649,6 @@ func TestContract_InspectSurfaces_HaveFollowUp(t *testing.T) {
 // =============================================================================
 
 func TestContract_SchemaTypesAreSorted(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	types := registry.SchemaTypes
@@ -689,7 +667,6 @@ func TestContract_SchemaTypesAreSorted(t *testing.T) {
 }
 
 func TestContract_CategoriesAreSorted(t *testing.T) {
-	t.Parallel()
 
 	registry := GetRobotRegistry()
 	cats := registry.Categories

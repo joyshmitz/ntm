@@ -9,7 +9,6 @@ import (
 // =============================================================================
 
 func TestFindUnreachableMultipleMissing(t *testing.T) {
-	t.Parallel()
 
 	// Create a graph where multiple steps depend on non-existent steps
 	workflow := &Workflow{
@@ -42,7 +41,6 @@ func TestFindUnreachableMultipleMissing(t *testing.T) {
 }
 
 func TestFindUnreachableNoDeps(t *testing.T) {
-	t.Parallel()
 
 	// All independent steps - none unreachable
 	workflow := &Workflow{
@@ -66,7 +64,6 @@ func TestFindUnreachableNoDeps(t *testing.T) {
 // =============================================================================
 
 func TestResolveLevelsParallelism(t *testing.T) {
-	t.Parallel()
 
 	// a and b are independent, c depends on both
 	workflow := &Workflow{
@@ -105,7 +102,6 @@ func TestResolveLevelsParallelism(t *testing.T) {
 }
 
 func TestResolveSingleStep(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{
 		Steps: []Step{{ID: "only"}},
@@ -127,7 +123,6 @@ func TestResolveSingleStep(t *testing.T) {
 }
 
 func TestResolveEmpty(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{Steps: []Step{}}
 
@@ -146,7 +141,6 @@ func TestResolveEmpty(t *testing.T) {
 // =============================================================================
 
 func TestValidateMissingDepAndCycle(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{
 		Steps: []Step{
@@ -184,7 +178,6 @@ func TestValidateMissingDepAndCycle(t *testing.T) {
 // =============================================================================
 
 func TestGetReadyStepsWithFailedDeps(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{
 		Steps: []Step{
@@ -225,7 +218,6 @@ func TestGetReadyStepsWithFailedDeps(t *testing.T) {
 // =============================================================================
 
 func TestGetDependenciesAndDependents(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{
 		Steps: []Step{
@@ -273,7 +265,6 @@ func TestGetDependenciesAndDependents(t *testing.T) {
 // =============================================================================
 
 func TestNewDependencyGraphWithLoopSteps(t *testing.T) {
-	t.Parallel()
 
 	workflow := &Workflow{
 		Steps: []Step{

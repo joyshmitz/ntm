@@ -10,7 +10,6 @@ import (
 // =============================================================================
 
 func TestNormalizeBulkAssignStrategy(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -31,7 +30,6 @@ func TestNormalizeBulkAssignStrategy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := normalizeBulkAssignStrategy(tc.input)
 			if got != tc.want {
 				t.Errorf("normalizeBulkAssignStrategy(%q) = %q, want %q", tc.input, got, tc.want)
@@ -45,7 +43,6 @@ func TestNormalizeBulkAssignStrategy(t *testing.T) {
 // =============================================================================
 
 func TestFormatBulkAssignDeps(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -60,7 +57,6 @@ func TestFormatBulkAssignDeps(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatBulkAssignDeps(tc.deps)
 			if got != tc.want {
 				t.Errorf("formatBulkAssignDeps(%v) = %q, want %q", tc.deps, got, tc.want)
@@ -74,10 +70,8 @@ func TestFormatBulkAssignDeps(t *testing.T) {
 // =============================================================================
 
 func TestBulkAssignReason(t *testing.T) {
-	t.Parallel()
 
 	t.Run("impact source", func(t *testing.T) {
-		t.Parallel()
 		bead := bulkBead{Source: bulkSourceImpact, UnblocksCount: 5}
 		got := bulkAssignReason(bead)
 		want := "highest_unblocks (5 items)"
@@ -87,7 +81,6 @@ func TestBulkAssignReason(t *testing.T) {
 	})
 
 	t.Run("stale source with time", func(t *testing.T) {
-		t.Parallel()
 		ts := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
 		bead := bulkBead{Source: bulkSourceStale, UpdatedAt: ts}
 		got := bulkAssignReason(bead)
@@ -98,7 +91,6 @@ func TestBulkAssignReason(t *testing.T) {
 	})
 
 	t.Run("stale source zero time", func(t *testing.T) {
-		t.Parallel()
 		bead := bulkBead{Source: bulkSourceStale}
 		got := bulkAssignReason(bead)
 		want := "stale_in_progress (unknown)"
@@ -108,7 +100,6 @@ func TestBulkAssignReason(t *testing.T) {
 	})
 
 	t.Run("ready source with priority", func(t *testing.T) {
-		t.Parallel()
 		bead := bulkBead{Source: bulkSourceReady, Priority: 2}
 		got := bulkAssignReason(bead)
 		want := "ready_priority P2"
@@ -118,7 +109,6 @@ func TestBulkAssignReason(t *testing.T) {
 	})
 
 	t.Run("ready source zero priority", func(t *testing.T) {
-		t.Parallel()
 		bead := bulkBead{Source: bulkSourceReady, Priority: 0}
 		got := bulkAssignReason(bead)
 		want := "ready_priority"
@@ -133,10 +123,8 @@ func TestBulkAssignReason(t *testing.T) {
 // =============================================================================
 
 func TestParseBulkAssignAllocation(t *testing.T) {
-	t.Parallel()
 
 	t.Run("valid allocation", func(t *testing.T) {
-		t.Parallel()
 		result, err := parseBulkAssignAllocation(`{"1": "bd-abc", "2": "bd-def"}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -150,7 +138,6 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 	})
 
 	t.Run("empty string", func(t *testing.T) {
-		t.Parallel()
 		_, err := parseBulkAssignAllocation("")
 		if err == nil {
 			t.Error("expected error for empty string")
@@ -158,7 +145,6 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 	})
 
 	t.Run("whitespace only", func(t *testing.T) {
-		t.Parallel()
 		_, err := parseBulkAssignAllocation("   ")
 		if err == nil {
 			t.Error("expected error for whitespace-only input")
@@ -166,7 +152,6 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 	})
 
 	t.Run("invalid JSON", func(t *testing.T) {
-		t.Parallel()
 		_, err := parseBulkAssignAllocation("{invalid}")
 		if err == nil {
 			t.Error("expected error for invalid JSON")
@@ -174,7 +159,6 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 	})
 
 	t.Run("non-integer key", func(t *testing.T) {
-		t.Parallel()
 		_, err := parseBulkAssignAllocation(`{"abc": "bd-xyz"}`)
 		if err == nil {
 			t.Error("expected error for non-integer pane index")
@@ -182,7 +166,6 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 	})
 
 	t.Run("trims whitespace in keys and values", func(t *testing.T) {
-		t.Parallel()
 		result, err := parseBulkAssignAllocation(`{" 3 ": " bd-trimmed "}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)

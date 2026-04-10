@@ -211,7 +211,6 @@ func TestValidateConfigPublicBaseURL(t *testing.T) {
 }
 
 func TestHandleGetMessage_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -245,7 +244,6 @@ func TestHandleGetMessage_NotImplemented(t *testing.T) {
 }
 
 func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
-	t.Parallel()
 
 	secret := strings.Repeat("s", 20)
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -310,7 +308,6 @@ func TestHandleMailInbox_SanitizesDisclosureFields(t *testing.T) {
 }
 
 func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
-	t.Parallel()
 
 	secret := strings.Repeat("s", 20)
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -375,7 +372,6 @@ func TestHandleGetMessage_SanitizesDisclosureFields(t *testing.T) {
 }
 
 func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"reply_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -410,7 +406,6 @@ func TestHandleReplyMessage_MessageNotFound(t *testing.T) {
 }
 
 func TestHandleSendMessage_ContactBlocked(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"send_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -445,7 +440,6 @@ func TestHandleSendMessage_ContactBlocked(t *testing.T) {
 }
 
 func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"reply_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -483,7 +477,6 @@ func TestHandleReplyMessage_ContactBlocked(t *testing.T) {
 }
 
 func TestHandleReservePaths_ConflictReturnsStructured409(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -532,7 +525,6 @@ func TestHandleReservePaths_ConflictReturnsStructured409(t *testing.T) {
 }
 
 func TestHandleGetReservation_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -563,7 +555,6 @@ func TestHandleGetReservation_NotImplemented(t *testing.T) {
 }
 
 func TestHandleGetReservation_NotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"list_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -598,7 +589,6 @@ func TestHandleGetReservation_NotFound(t *testing.T) {
 }
 
 func TestHandleRenewReservation_ReturnsRenewedReservations(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"renew_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -654,7 +644,6 @@ func TestHandleRenewReservation_ReturnsRenewedReservations(t *testing.T) {
 }
 
 func TestHandleReleaseReservations_ReturnsReleaseCount(t *testing.T) {
-	t.Parallel()
 
 	releasedAt := "2026-03-23T02:03:04Z"
 	releasedTime, err := time.Parse(time.RFC3339, releasedAt)
@@ -702,7 +691,6 @@ func TestHandleReleaseReservations_ReturnsReleaseCount(t *testing.T) {
 }
 
 func TestHandleReleaseReservationByID_NotFoundOnZeroRelease(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"release_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -737,7 +725,6 @@ func TestHandleReleaseReservationByID_NotFoundOnZeroRelease(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_AgentNotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -772,7 +759,6 @@ func TestHandleMarkMessageRead_AgentNotFound(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -819,7 +805,6 @@ func TestHandleMarkMessageRead_ReturnsReadMetadata(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -861,7 +846,6 @@ func TestHandleMarkMessageRead_DefaultsMessageIDWhenToolReturnsNull(t *testing.T
 }
 
 func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -910,7 +894,6 @@ func TestHandleAckMessage_ReturnsAckMetadata(t *testing.T) {
 }
 
 func TestHandleAckMessage_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -952,7 +935,6 @@ func TestHandleAckMessage_DefaultsMessageIDWhenToolReturnsNull(t *testing.T) {
 }
 
 func TestHandleSearchMessages_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -980,7 +962,6 @@ func TestHandleSearchMessages_NotImplemented(t *testing.T) {
 }
 
 func TestHandleMailInbox_InvalidSinceTS(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -997,7 +978,6 @@ func TestHandleMailInbox_InvalidSinceTS(t *testing.T) {
 }
 
 func TestHandleMailInbox_InvalidLimit(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1014,7 +994,6 @@ func TestHandleMailInbox_InvalidLimit(t *testing.T) {
 }
 
 func TestHandleMailInbox_InvalidUrgentOnly(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1031,7 +1010,6 @@ func TestHandleMailInbox_InvalidUrgentOnly(t *testing.T) {
 }
 
 func TestHandleMailInbox_InvalidIncludeBodies(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1048,7 +1026,6 @@ func TestHandleMailInbox_InvalidIncludeBodies(t *testing.T) {
 }
 
 func TestHandleSearchMessages_InvalidLimit(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1065,7 +1042,6 @@ func TestHandleSearchMessages_InvalidLimit(t *testing.T) {
 }
 
 func TestHandleThreadSummary_InvalidLLMMode(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1085,7 +1061,6 @@ func TestHandleThreadSummary_InvalidLLMMode(t *testing.T) {
 }
 
 func TestHandleThreadSummary_InvalidIncludeExamples(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 	srv.projectDir = t.TempDir()
@@ -1105,7 +1080,6 @@ func TestHandleThreadSummary_InvalidIncludeExamples(t *testing.T) {
 }
 
 func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
-	t.Parallel()
 
 	var receivedArgs map[string]interface{}
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -1144,7 +1118,6 @@ func TestHandleThreadSummary_ForwardsExplicitLLMModeFalse(t *testing.T) {
 }
 
 func TestHandleThreadSummary_OmitsIncludeExamplesWhenUnset(t *testing.T) {
-	t.Parallel()
 
 	var receivedArgs map[string]interface{}
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -1181,7 +1154,6 @@ func TestHandleThreadSummary_OmitsIncludeExamplesWhenUnset(t *testing.T) {
 }
 
 func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"summarize_thread": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1235,7 +1207,6 @@ func TestHandleThreadSummary_ReturnsExamplesWhenRequested(t *testing.T) {
 }
 
 func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"mark_message_read": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1286,7 +1257,6 @@ func TestHandleMarkMessageRead_DoesNotPublishEventWhenReadFalse(t *testing.T) {
 }
 
 func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"acknowledge_message": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1337,7 +1307,6 @@ func TestHandleAckMessage_DoesNotPublishEventWhenAckFalse(t *testing.T) {
 }
 
 func TestHandleListMailProjects_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -1365,7 +1334,6 @@ func TestHandleListMailProjects_NotImplemented(t *testing.T) {
 }
 
 func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1400,7 +1368,6 @@ func TestHandleCreateMailAgent_InvalidRequest(t *testing.T) {
 }
 
 func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"register_agent": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1435,7 +1402,6 @@ func TestHandleCreateMailAgent_TransientBusy(t *testing.T) {
 }
 
 func TestHandleMailInbox_AgentNotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1470,7 +1436,6 @@ func TestHandleMailInbox_AgentNotFound(t *testing.T) {
 }
 
 func TestHandleMailInbox_DoesNotEmitMailReceivedEvent(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"fetch_inbox": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1500,7 +1465,6 @@ func TestHandleMailInbox_DoesNotEmitMailReceivedEvent(t *testing.T) {
 }
 
 func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
-	t.Parallel()
 
 	expiresAt := "2026-03-22T12:34:56Z"
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -1551,7 +1515,6 @@ func TestHandleRequestContact_ReturnsLinkAndExpiry(t *testing.T) {
 }
 
 func TestHandleRequestContact_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -1579,7 +1542,6 @@ func TestHandleRequestContact_NotImplemented(t *testing.T) {
 }
 
 func TestHandleRequestContact_AgentNotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"request_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1614,7 +1576,6 @@ func TestHandleRequestContact_AgentNotFound(t *testing.T) {
 }
 
 func TestHandleRespondContact_NotImplemented(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){})
 	defer mcpServer.Close()
@@ -1642,7 +1603,6 @@ func TestHandleRespondContact_NotImplemented(t *testing.T) {
 }
 
 func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
-	t.Parallel()
 
 	expiresAt := "2026-03-23T00:00:00Z"
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
@@ -1693,7 +1653,6 @@ func TestHandleRespondContact_ReturnsStatus(t *testing.T) {
 }
 
 func TestHandleRespondContact_NotFound(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"respond_contact": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1728,7 +1687,6 @@ func TestHandleRespondContact_NotFound(t *testing.T) {
 }
 
 func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
-	t.Parallel()
 
 	releasedAt := "2026-03-23T01:02:03Z"
 	releasedTime, err := time.Parse(time.RFC3339, releasedAt)
@@ -1787,7 +1745,6 @@ func TestHandleForceReleaseReservation_ReturnsMCPResultFields(t *testing.T) {
 }
 
 func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"force_release_file_reservation": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1833,7 +1790,6 @@ func TestHandleForceReleaseReservation_DeniedReturnsConflict(t *testing.T) {
 }
 
 func TestHandleRenewReservation_NotFoundOnZeroRenew(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"renew_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -1868,7 +1824,6 @@ func TestHandleRenewReservation_NotFoundOnZeroRenew(t *testing.T) {
 }
 
 func TestHandleSetContactPolicy_ReturnsMCPResultFields(t *testing.T) {
-	t.Parallel()
 
 	mcpServer := newMockAgentMailMCPServer(t, map[string]func(map[string]interface{}) (interface{}, *agentmail.JSONRPCError){
 		"set_contact_policy": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
@@ -4367,7 +4322,6 @@ func TestIsValidTopic(t *testing.T) {
 }
 
 func TestPipelineEventTypeFromProgressType(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		progressType string
@@ -4386,7 +4340,6 @@ func TestPipelineEventTypeFromProgressType(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.progressType, func(t *testing.T) {
-			t.Parallel()
 			got, ok := pipelineEventTypeFromProgressType(tc.progressType)
 			if ok != tc.wantOK {
 				t.Fatalf("ok=%v, want %v", ok, tc.wantOK)
@@ -4666,7 +4619,6 @@ func TestApprovals_WebSocketEvents(t *testing.T) {
 }
 
 func TestHandleWebSocket_StartsHubWithoutStart(t *testing.T) {
-	t.Parallel()
 
 	srv := New(Config{})
 	defer srv.Stop()
@@ -4983,7 +4935,6 @@ done:
 }
 
 func TestMatchTopic(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -5005,7 +4956,6 @@ func TestMatchTopic(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := matchTopic(tc.pattern, tc.topic)
 			if got != tc.want {
 				t.Errorf("matchTopic(%q, %q) = %v, want %v", tc.pattern, tc.topic, got, tc.want)
@@ -5015,7 +4965,6 @@ func TestMatchTopic(t *testing.T) {
 }
 
 func TestSanitizeRequestID(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -5036,7 +4985,6 @@ func TestSanitizeRequestID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := sanitizeRequestID(tc.input)
 			if got != tc.want {
 				t.Errorf("sanitizeRequestID(%q) = %q, want %q", tc.input, got, tc.want)
@@ -5046,7 +4994,6 @@ func TestSanitizeRequestID(t *testing.T) {
 }
 
 func TestIsLoopbackHost(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -5065,7 +5012,6 @@ func TestIsLoopbackHost(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := isLoopbackHost(tc.host)
 			if got != tc.want {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
@@ -5075,7 +5021,6 @@ func TestIsLoopbackHost(t *testing.T) {
 }
 
 func TestOriginAllowed(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -5096,7 +5041,6 @@ func TestOriginAllowed(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := originAllowed(tc.origin, tc.allowlist)
 			if got != tc.want {
 				t.Errorf("originAllowed(%q, %v) = %v, want %v", tc.origin, tc.allowlist, got, tc.want)
@@ -5106,7 +5050,6 @@ func TestOriginAllowed(t *testing.T) {
 }
 
 func TestFormatAge(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -5121,7 +5064,6 @@ func TestFormatAge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatAge(tc.d)
 			if got != tc.want {
 				t.Errorf("formatAge(%v) = %q, want %q", tc.d, got, tc.want)
@@ -5131,7 +5073,6 @@ func TestFormatAge(t *testing.T) {
 }
 
 func TestAttentionHeartbeatInterval(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -5177,7 +5118,6 @@ func TestAttentionHeartbeatInterval(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := attentionHeartbeatInterval(
 				tc.streamAge,
 				tc.delivered,
@@ -5194,7 +5134,6 @@ func TestAttentionHeartbeatInterval(t *testing.T) {
 }
 
 func TestClaimString(t *testing.T) {
-	t.Parallel()
 
 	claims := map[string]interface{}{
 		"iss":    "https://auth.example.com",
@@ -5216,7 +5155,6 @@ func TestClaimString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			v, ok := claimString(claims, tc.key)
 			if ok != tc.wantOK || v != tc.wantV {
 				t.Errorf("claimString(claims, %q) = (%q, %v), want (%q, %v)", tc.key, v, ok, tc.wantV, tc.wantOK)
@@ -5226,7 +5164,6 @@ func TestClaimString(t *testing.T) {
 }
 
 func TestClaimInt64(t *testing.T) {
-	t.Parallel()
 
 	claims := map[string]interface{}{
 		"exp":    float64(1700000000),
@@ -5248,7 +5185,6 @@ func TestClaimInt64(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			v, ok := claimInt64(claims, tc.key)
 			if ok != tc.wantOK || v != tc.wantV {
 				t.Errorf("claimInt64(claims, %q) = (%d, %v), want (%d, %v)", tc.key, v, ok, tc.wantV, tc.wantOK)
@@ -5258,7 +5194,6 @@ func TestClaimInt64(t *testing.T) {
 }
 
 func TestClaimAudienceContains(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -5276,7 +5211,6 @@ func TestClaimAudienceContains(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := claimAudienceContains(tc.claims, tc.expected)
 			if got != tc.want {
 				t.Errorf("claimAudienceContains(%v, %q) = %v, want %v", tc.claims, tc.expected, got, tc.want)
@@ -5286,7 +5220,6 @@ func TestClaimAudienceContains(t *testing.T) {
 }
 
 func TestExtractBearerToken(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -5304,7 +5237,6 @@ func TestExtractBearerToken(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			r, _ := http.NewRequest("GET", "/", nil)
 			if tc.auth != "" {
 				r.Header.Set("Authorization", tc.auth)
@@ -5318,10 +5250,8 @@ func TestExtractBearerToken(t *testing.T) {
 }
 
 func TestExtractAPIKey(t *testing.T) {
-	t.Parallel()
 
 	t.Run("from X-API-Key header", func(t *testing.T) {
-		t.Parallel()
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.Header.Set("X-API-Key", "api-key-123")
 		got := extractAPIKey(r)
@@ -5331,7 +5261,6 @@ func TestExtractAPIKey(t *testing.T) {
 	})
 
 	t.Run("falls back to bearer token", func(t *testing.T) {
-		t.Parallel()
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.Header.Set("Authorization", "Bearer fallback-token")
 		got := extractAPIKey(r)
@@ -5341,7 +5270,6 @@ func TestExtractAPIKey(t *testing.T) {
 	})
 
 	t.Run("X-API-Key takes priority", func(t *testing.T) {
-		t.Parallel()
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.Header.Set("X-API-Key", "api-key")
 		r.Header.Set("Authorization", "Bearer bearer-token")
@@ -5352,7 +5280,6 @@ func TestExtractAPIKey(t *testing.T) {
 	})
 
 	t.Run("no key", func(t *testing.T) {
-		t.Parallel()
 		r, _ := http.NewRequest("GET", "/", nil)
 		got := extractAPIKey(r)
 		if got != "" {
@@ -5362,7 +5289,6 @@ func TestExtractAPIKey(t *testing.T) {
 }
 
 func TestIsWebSocketUpgrade(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name       string
@@ -5381,7 +5307,6 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			r, _ := http.NewRequest("GET", "/ws", nil)
 			if tc.upgrade != "" {
 				r.Header.Set("Upgrade", tc.upgrade)
@@ -5398,7 +5323,6 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 }
 
 func TestParseJWT(t *testing.T) {
-	t.Parallel()
 
 	// Build a valid JWT: header.payload.signature (base64url encoded)
 	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"key1"}`))
@@ -5407,7 +5331,6 @@ func TestParseJWT(t *testing.T) {
 	validToken := headerB64 + "." + payloadB64 + "." + sigB64
 
 	t.Run("valid JWT", func(t *testing.T) {
-		t.Parallel()
 		header, claims, sigInput, sig, err := parseJWT(validToken)
 		if err != nil {
 			t.Fatalf("parseJWT() error: %v", err)
@@ -5430,7 +5353,6 @@ func TestParseJWT(t *testing.T) {
 	})
 
 	t.Run("invalid format", func(t *testing.T) {
-		t.Parallel()
 		_, _, _, _, err := parseJWT("not.a.jwt.token")
 		if err == nil {
 			t.Error("expected error for invalid JWT format")
@@ -5438,7 +5360,6 @@ func TestParseJWT(t *testing.T) {
 	})
 
 	t.Run("only two parts", func(t *testing.T) {
-		t.Parallel()
 		_, _, _, _, err := parseJWT("two.parts")
 		if err == nil {
 			t.Error("expected error for two-part token")
@@ -5446,7 +5367,6 @@ func TestParseJWT(t *testing.T) {
 	})
 
 	t.Run("invalid base64 header", func(t *testing.T) {
-		t.Parallel()
 		_, _, _, _, err := parseJWT("!!!invalid." + payloadB64 + "." + sigB64)
 		if err == nil {
 			t.Error("expected error for invalid base64 header")
@@ -5456,10 +5376,8 @@ func TestParseJWT(t *testing.T) {
 
 // TestToJSONMap tests the toJSONMap function for converting values to maps via JSON round-trip.
 func TestToJSONMap(t *testing.T) {
-	t.Parallel()
 
 	t.Run("struct to map", func(t *testing.T) {
-		t.Parallel()
 		type sample struct {
 			Name  string `json:"name"`
 			Count int    `json:"count"`
@@ -5477,7 +5395,6 @@ func TestToJSONMap(t *testing.T) {
 	})
 
 	t.Run("map passthrough", func(t *testing.T) {
-		t.Parallel()
 		input := map[string]interface{}{"key": "value", "nested": map[string]interface{}{"inner": 123}}
 		m, err := toJSONMap(input)
 		if err != nil {
@@ -5489,7 +5406,6 @@ func TestToJSONMap(t *testing.T) {
 	})
 
 	t.Run("nil input", func(t *testing.T) {
-		t.Parallel()
 		m, err := toJSONMap(nil)
 		if err != nil {
 			t.Fatalf("toJSONMap(nil) error: %v", err)
@@ -5503,7 +5419,6 @@ func TestToJSONMap(t *testing.T) {
 	})
 
 	t.Run("empty struct", func(t *testing.T) {
-		t.Parallel()
 		type empty struct{}
 		m, err := toJSONMap(empty{})
 		if err != nil {
@@ -5515,7 +5430,6 @@ func TestToJSONMap(t *testing.T) {
 	})
 
 	t.Run("unmarshalable type returns error", func(t *testing.T) {
-		t.Parallel()
 		// Channels cannot be marshaled to JSON
 		ch := make(chan int)
 		_, err := toJSONMap(ch)
@@ -5525,7 +5439,6 @@ func TestToJSONMap(t *testing.T) {
 	})
 
 	t.Run("non-object JSON returns error", func(t *testing.T) {
-		t.Parallel()
 		// A slice marshals to JSON array, which cannot unmarshal to map
 		slice := []string{"a", "b", "c"}
 		_, err := toJSONMap(slice)
@@ -5537,7 +5450,6 @@ func TestToJSONMap(t *testing.T) {
 
 // TestIsLoopbackHostExtended adds edge cases for isLoopbackHost.
 func TestIsLoopbackHostExtended(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -5561,7 +5473,6 @@ func TestIsLoopbackHostExtended(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := isLoopbackHost(tc.host)
 			if got != tc.want {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
@@ -5572,7 +5483,6 @@ func TestIsLoopbackHostExtended(t *testing.T) {
 
 // TestOriginAllowedExtended adds edge cases for originAllowed.
 func TestOriginAllowedExtended(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -5595,7 +5505,6 @@ func TestOriginAllowedExtended(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := originAllowed(tc.origin, tc.allowlist)
 			if got != tc.want {
 				t.Errorf("originAllowed(%q, %v) = %v, want %v", tc.origin, tc.allowlist, got, tc.want)
@@ -5606,10 +5515,8 @@ func TestOriginAllowedExtended(t *testing.T) {
 
 // TestGenerateRequestID tests the generateRequestID function.
 func TestGenerateRequestID(t *testing.T) {
-	t.Parallel()
 
 	t.Run("returns non-empty string", func(t *testing.T) {
-		t.Parallel()
 		id := generateRequestID()
 		if id == "" {
 			t.Error("generateRequestID() returned empty string")
@@ -5617,7 +5524,6 @@ func TestGenerateRequestID(t *testing.T) {
 	})
 
 	t.Run("returns 24 character hex string", func(t *testing.T) {
-		t.Parallel()
 		id := generateRequestID()
 		if len(id) != 24 { // 12 bytes = 24 hex chars
 			t.Errorf("len(generateRequestID()) = %d, want 24", len(id))
@@ -5631,7 +5537,6 @@ func TestGenerateRequestID(t *testing.T) {
 	})
 
 	t.Run("generates unique IDs", func(t *testing.T) {
-		t.Parallel()
 		seen := make(map[string]bool)
 		for i := 0; i < 100; i++ {
 			id := generateRequestID()
@@ -5645,10 +5550,8 @@ func TestGenerateRequestID(t *testing.T) {
 
 // TestRequestIDFromContext tests the requestIDFromContext function.
 func TestRequestIDFromContext(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil context returns empty", func(t *testing.T) {
-		t.Parallel()
 		id := requestIDFromContext(nil)
 		if id != "" {
 			t.Errorf("requestIDFromContext(nil) = %q, want empty", id)
@@ -5656,7 +5559,6 @@ func TestRequestIDFromContext(t *testing.T) {
 	})
 
 	t.Run("context without request ID returns empty", func(t *testing.T) {
-		t.Parallel()
 		ctx := context.Background()
 		id := requestIDFromContext(ctx)
 		if id != "" {
@@ -5665,7 +5567,6 @@ func TestRequestIDFromContext(t *testing.T) {
 	})
 
 	t.Run("context with request ID returns value", func(t *testing.T) {
-		t.Parallel()
 		ctx := context.WithValue(context.Background(), requestIDKey, "test-request-123")
 		id := requestIDFromContext(ctx)
 		if id != "test-request-123" {
@@ -5674,7 +5575,6 @@ func TestRequestIDFromContext(t *testing.T) {
 	})
 
 	t.Run("context with wrong type returns empty", func(t *testing.T) {
-		t.Parallel()
 		ctx := context.WithValue(context.Background(), requestIDKey, 12345) // wrong type
 		id := requestIDFromContext(ctx)
 		if id != "" {
@@ -5688,7 +5588,6 @@ func TestRequestIDFromContext(t *testing.T) {
 // =============================================================================
 
 func TestCheckWSOrigin_LocalMode(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeLocal}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://evil.com")
@@ -5698,7 +5597,6 @@ func TestCheckWSOrigin_LocalMode(t *testing.T) {
 }
 
 func TestCheckWSOrigin_EmptyMode(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: ""}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Origin", "https://evil.com")
@@ -5708,7 +5606,6 @@ func TestCheckWSOrigin_EmptyMode(t *testing.T) {
 }
 
 func TestCheckWSOrigin_NoOriginHeader(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth:               AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		corsAllowedOrigins: []string{"https://example.com"},
@@ -5721,7 +5618,6 @@ func TestCheckWSOrigin_NoOriginHeader(t *testing.T) {
 }
 
 func TestCheckWSOrigin_AllowedOrigin(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth:               AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		corsAllowedOrigins: []string{"https://example.com", "https://app.example.com:8080"},
@@ -5741,7 +5637,6 @@ func TestCheckWSOrigin_AllowedOrigin(t *testing.T) {
 }
 
 func TestCheckWSOrigin_RejectedOrigin(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth:               AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		corsAllowedOrigins: []string{"https://example.com"},
@@ -5754,7 +5649,6 @@ func TestCheckWSOrigin_RejectedOrigin(t *testing.T) {
 }
 
 func TestCheckWSOrigin_MalformedOrigin(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth:               AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		corsAllowedOrigins: []string{"https://example.com"},
@@ -5769,7 +5663,6 @@ func TestCheckWSOrigin_MalformedOrigin(t *testing.T) {
 }
 
 func TestCheckWSOrigin_MalformedAllowedOrigin(t *testing.T) {
-	t.Parallel()
 	srv := &Server{
 		auth:               AuthConfig{Mode: AuthModeAPIKey, APIKey: "key"},
 		corsAllowedOrigins: []string{"not-a-url", "https://good.com"},
@@ -5786,7 +5679,6 @@ func TestCheckWSOrigin_MalformedAllowedOrigin(t *testing.T) {
 // =============================================================================
 
 func TestExtractAuthClaims_NoClaims(t *testing.T) {
-	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	claims := extractAuthClaims(req)
 	if len(claims) != 0 {
@@ -5795,7 +5687,6 @@ func TestExtractAuthClaims_NoClaims(t *testing.T) {
 }
 
 func TestExtractAuthClaims_WithClaims(t *testing.T) {
-	t.Parallel()
 	authData := map[string]interface{}{
 		"sub":   "user-123",
 		"email": "user@example.com",
@@ -5814,7 +5705,6 @@ func TestExtractAuthClaims_WithClaims(t *testing.T) {
 }
 
 func TestExtractAuthClaims_WrongType(t *testing.T) {
-	t.Parallel()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	ctx := context.WithValue(req.Context(), authContextKey, "not-a-map")
 	req = req.WithContext(ctx)
@@ -5830,7 +5720,6 @@ func TestExtractAuthClaims_WrongType(t *testing.T) {
 // =============================================================================
 
 func TestValidateConfig_APIKeyNoKey(t *testing.T) {
-	t.Parallel()
 	cfg := Config{
 		Auth: AuthConfig{Mode: AuthModeAPIKey}, // No APIKey
 	}
@@ -5841,7 +5730,6 @@ func TestValidateConfig_APIKeyNoKey(t *testing.T) {
 }
 
 func TestValidateConfig_OIDCMissingIssuer(t *testing.T) {
-	t.Parallel()
 	cfg := Config{
 		Host: "0.0.0.0",
 		Auth: AuthConfig{
@@ -5856,7 +5744,6 @@ func TestValidateConfig_OIDCMissingIssuer(t *testing.T) {
 }
 
 func TestValidateConfig_OIDCMissingJWKS(t *testing.T) {
-	t.Parallel()
 	cfg := Config{
 		Host: "0.0.0.0",
 		Auth: AuthConfig{
@@ -5871,7 +5758,6 @@ func TestValidateConfig_OIDCMissingJWKS(t *testing.T) {
 }
 
 func TestValidateConfig_MTLSMissing(t *testing.T) {
-	t.Parallel()
 	cfg := Config{
 		Host: "0.0.0.0",
 		Auth: AuthConfig{Mode: AuthModeMTLS},
@@ -5883,7 +5769,6 @@ func TestValidateConfig_MTLSMissing(t *testing.T) {
 }
 
 func TestValidateConfig_InvalidAuthMode(t *testing.T) {
-	t.Parallel()
 	cfg := Config{
 		Auth: AuthConfig{Mode: "bogus_mode"},
 	}
@@ -5898,7 +5783,6 @@ func TestValidateConfig_InvalidAuthMode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCorsMiddlewareFunc_ForbiddenOrigin(t *testing.T) {
-	t.Parallel()
 	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
 	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next handler should not be called for forbidden origin")
@@ -5913,7 +5797,6 @@ func TestCorsMiddlewareFunc_ForbiddenOrigin(t *testing.T) {
 }
 
 func TestCorsMiddlewareFunc_AllowedOriginSetsHeaders(t *testing.T) {
-	t.Parallel()
 	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
 	called := false
 	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5935,7 +5818,6 @@ func TestCorsMiddlewareFunc_AllowedOriginSetsHeaders(t *testing.T) {
 }
 
 func TestCorsMiddlewareFunc_OptionsRequest(t *testing.T) {
-	t.Parallel()
 	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
 	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next handler should not be called on options")
@@ -5956,7 +5838,6 @@ func TestCorsMiddlewareFunc_OptionsRequest(t *testing.T) {
 }
 
 func TestCorsMiddlewareFunc_NoOriginPassesThrough(t *testing.T) {
-	t.Parallel()
 	srv := &Server{corsAllowedOrigins: []string{"https://good.com"}}
 	called := false
 	handler := srv.corsMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5976,7 +5857,6 @@ func TestCorsMiddlewareFunc_NoOriginPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAuthMiddlewareFunc_LocalMode(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeLocal}}
 	called := false
 	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5991,7 +5871,6 @@ func TestAuthMiddlewareFunc_LocalMode(t *testing.T) {
 }
 
 func TestAuthMiddlewareFunc_EmptyMode(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: ""}}
 	called := false
 	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6006,7 +5885,6 @@ func TestAuthMiddlewareFunc_EmptyMode(t *testing.T) {
 }
 
 func TestAuthMiddlewareFunc_OptionsPassthrough(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
 	called := false
 	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6021,7 +5899,6 @@ func TestAuthMiddlewareFunc_OptionsPassthrough(t *testing.T) {
 }
 
 func TestAuthMiddlewareFunc_FailedAuth(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
 	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next handler should not be called on auth failure")
@@ -6036,7 +5913,6 @@ func TestAuthMiddlewareFunc_FailedAuth(t *testing.T) {
 }
 
 func TestAuthMiddlewareFunc_SuccessfulAuth(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "secret"}}
 	called := false
 	handler := srv.authMiddlewareFunc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6056,7 +5932,6 @@ func TestAuthMiddlewareFunc_SuccessfulAuth(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAuthenticateRequest_UnsupportedMode(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: "foobar"}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	_, err := srv.authenticateRequest(req)
@@ -6069,7 +5944,6 @@ func TestAuthenticateRequest_UnsupportedMode(t *testing.T) {
 }
 
 func TestAuthenticateRequest_APIKeyPath(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "key123"}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-API-Key", "key123")
@@ -6079,7 +5953,6 @@ func TestAuthenticateRequest_APIKeyPath(t *testing.T) {
 }
 
 func TestAuthenticateRequest_MTLSPath(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeMTLS}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.TLS = &tls.ConnectionState{
@@ -6095,7 +5968,6 @@ func TestAuthenticateRequest_MTLSPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAuthenticateAPIKey_InvalidKey(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "correct-key"}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-API-Key", "wrong-key")
@@ -6106,7 +5978,6 @@ func TestAuthenticateAPIKey_InvalidKey(t *testing.T) {
 }
 
 func TestAuthenticateAPIKey_MissingKey(t *testing.T) {
-	t.Parallel()
 	srv := &Server{auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "correct-key"}}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	err := srv.authenticateAPIKey(req)
@@ -6120,7 +5991,6 @@ func TestAuthenticateAPIKey_MissingKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseJWT_InvalidFormat(t *testing.T) {
-	t.Parallel()
 	_, _, _, _, err := parseJWT("not.a.valid.jwt.too.many.parts")
 	if err == nil || !strings.Contains(err.Error(), "invalid jwt format") {
 		t.Errorf("expected 'invalid jwt format' error, got: %v", err)
@@ -6128,7 +5998,6 @@ func TestParseJWT_InvalidFormat(t *testing.T) {
 }
 
 func TestParseJWT_BadHeaderBase64(t *testing.T) {
-	t.Parallel()
 	_, _, _, _, err := parseJWT("!!!bad-base64.eyJ0ZXN0IjoxfQ.sig")
 	if err == nil || !strings.Contains(err.Error(), "decode jwt header") {
 		t.Errorf("expected header decode error, got: %v", err)
@@ -6136,7 +6005,6 @@ func TestParseJWT_BadHeaderBase64(t *testing.T) {
 }
 
 func TestParseJWT_BadPayloadBase64(t *testing.T) {
-	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	_, _, _, _, err := parseJWT(header + ".!!!bad.sig")
 	if err == nil || !strings.Contains(err.Error(), "decode jwt payload") {
@@ -6145,7 +6013,6 @@ func TestParseJWT_BadPayloadBase64(t *testing.T) {
 }
 
 func TestParseJWT_BadSignatureBase64(t *testing.T) {
-	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
 	_, _, _, _, err := parseJWT(header + "." + payload + ".!!!bad")
@@ -6155,7 +6022,6 @@ func TestParseJWT_BadSignatureBase64(t *testing.T) {
 }
 
 func TestParseJWT_InvalidHeaderJSON(t *testing.T) {
-	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
@@ -6166,7 +6032,6 @@ func TestParseJWT_InvalidHeaderJSON(t *testing.T) {
 }
 
 func TestParseJWT_InvalidPayloadJSON(t *testing.T) {
-	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
@@ -6177,7 +6042,6 @@ func TestParseJWT_InvalidPayloadJSON(t *testing.T) {
 }
 
 func TestParseJWT_ValidToken(t *testing.T) {
-	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"key1"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-123","iss":"https://example.com"}`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte(`fakesig`))
@@ -6207,7 +6071,6 @@ func TestParseJWT_ValidToken(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseRSAPublicKey_Valid(t *testing.T) {
-	t.Parallel()
 	// Generate a real RSA key and extract n/e
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -6228,7 +6091,6 @@ func TestParseRSAPublicKey_Valid(t *testing.T) {
 }
 
 func TestParseRSAPublicKey_BadN(t *testing.T) {
-	t.Parallel()
 	_, err := parseRSAPublicKey("!!!bad-base64", base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1}))
 	if err == nil || !strings.Contains(err.Error(), "decode jwk n") {
 		t.Errorf("expected n decode error, got: %v", err)
@@ -6236,7 +6098,6 @@ func TestParseRSAPublicKey_BadN(t *testing.T) {
 }
 
 func TestParseRSAPublicKey_BadE(t *testing.T) {
-	t.Parallel()
 	nStr := base64.RawURLEncoding.EncodeToString([]byte{0x01})
 	_, err := parseRSAPublicKey(nStr, "!!!bad-base64")
 	if err == nil || !strings.Contains(err.Error(), "decode jwk e") {
@@ -6245,7 +6106,6 @@ func TestParseRSAPublicKey_BadE(t *testing.T) {
 }
 
 func TestParseRSAPublicKey_ZeroExponent(t *testing.T) {
-	t.Parallel()
 	nStr := base64.RawURLEncoding.EncodeToString([]byte{0x01})
 	eStr := base64.RawURLEncoding.EncodeToString([]byte{}) // empty = zero exponent
 	_, err := parseRSAPublicKey(nStr, eStr)
@@ -6259,7 +6119,6 @@ func TestParseRSAPublicKey_ZeroExponent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClaimInt64_JsonNumberError(t *testing.T) {
-	t.Parallel()
 	claims := map[string]interface{}{
 		"val": json.Number("not-a-number"),
 	}
@@ -6270,7 +6129,6 @@ func TestClaimInt64_JsonNumberError(t *testing.T) {
 }
 
 func TestClaimInt64_UnsupportedType(t *testing.T) {
-	t.Parallel()
 	claims := map[string]interface{}{
 		"val": "string-value",
 	}
@@ -6285,7 +6143,6 @@ func TestClaimInt64_UnsupportedType(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWriteSuccessResponse_NilData(t *testing.T) {
-	t.Parallel()
 	w := httptest.NewRecorder()
 	writeSuccessResponse(w, http.StatusOK, nil, "")
 	if w.Code != http.StatusOK {
@@ -6304,7 +6161,6 @@ func TestWriteSuccessResponse_NilData(t *testing.T) {
 }
 
 func TestWriteSuccessResponse_WithRequestID(t *testing.T) {
-	t.Parallel()
 	w := httptest.NewRecorder()
 	writeSuccessResponse(w, http.StatusCreated, map[string]interface{}{"foo": "bar"}, "req-123")
 	if w.Code != http.StatusCreated {
@@ -6327,7 +6183,6 @@ func TestWriteSuccessResponse_WithRequestID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWriteErrorResponse_WithHint(t *testing.T) {
-	t.Parallel()
 	w := httptest.NewRecorder()
 	details := map[string]interface{}{
 		"hint":  "try using a different key",
@@ -6347,7 +6202,6 @@ func TestWriteErrorResponse_WithHint(t *testing.T) {
 }
 
 func TestWriteErrorResponse_HintOnlyDetail(t *testing.T) {
-	t.Parallel()
 	w := httptest.NewRecorder()
 	details := map[string]interface{}{
 		"hint": "only hint, no other details",
@@ -6371,7 +6225,6 @@ func TestWriteErrorResponse_HintOnlyDetail(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoggingMiddleware_WithRequestID(t *testing.T) {
-	t.Parallel()
 	called := false
 	handler := loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -6387,7 +6240,6 @@ func TestLoggingMiddleware_WithRequestID(t *testing.T) {
 }
 
 func TestLoggingMiddleware_WithoutRequestID(t *testing.T) {
-	t.Parallel()
 	called := false
 	handler := loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -6435,7 +6287,6 @@ func (f *fakeAttentionStreamFeed) emit(event robot.AttentionEvent) {
 }
 
 func TestPrepareAttentionStream_ReplayBoundaryPreservesLiveEvents(t *testing.T) {
-	t.Parallel()
 
 	liveEvent := robot.AttentionEvent{Cursor: 2, Summary: "live"}
 	feed := &fakeAttentionStreamFeed{
@@ -6479,7 +6330,6 @@ func TestPrepareAttentionStream_ReplayBoundaryPreservesLiveEvents(t *testing.T) 
 }
 
 func TestWriteAttentionReplay_AdvancesCursorToLastDeliveredEvent(t *testing.T) {
-	t.Parallel()
 
 	rec := httptest.NewRecorder()
 	events := []robot.AttentionEvent{
@@ -6508,7 +6358,6 @@ func TestWriteAttentionReplay_AdvancesCursorToLastDeliveredEvent(t *testing.T) {
 }
 
 func TestWriteAttentionReplay_SuppressesReplayHeartbeatEventsAndPreservesCursor(t *testing.T) {
-	t.Parallel()
 
 	rec := httptest.NewRecorder()
 	events := []robot.AttentionEvent{
@@ -6537,7 +6386,6 @@ func TestWriteAttentionReplay_SuppressesReplayHeartbeatEventsAndPreservesCursor(
 }
 
 func TestPrepareAttentionStream_CursorExpired(t *testing.T) {
-	t.Parallel()
 
 	feed := &fakeAttentionStreamFeed{
 		stats: robot.JournalStats{
@@ -6570,7 +6418,6 @@ func TestPrepareAttentionStream_CursorExpired(t *testing.T) {
 
 // TestWSAttentionSubscription tests WebSocket attention subscription with durable semantics.
 func TestWSAttentionSubscription(t *testing.T) {
-	t.Parallel()
 
 	// Install test attention feed
 	feed, stats := installServeTestAttentionFeed(t)
@@ -6656,7 +6503,6 @@ func TestWSAttentionSubscription(t *testing.T) {
 
 // TestWSAttentionSubscriptionCursorExpired tests cursor expiration handling.
 func TestWSAttentionSubscriptionCursorExpired(t *testing.T) {
-	t.Parallel()
 
 	// Install test attention feed with known state
 	feed := robot.NewAttentionFeed(robot.AttentionFeedConfig{
@@ -6722,7 +6568,6 @@ func TestWSAttentionSubscriptionCursorExpired(t *testing.T) {
 
 // TestPartitionAttentionTopics tests topic partitioning.
 func TestPartitionAttentionTopics(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name          string
@@ -6758,7 +6603,6 @@ func TestPartitionAttentionTopics(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			attention, regular := partitionAttentionTopics(tc.topics)
 			if len(attention) != len(tc.wantAttention) {
 				t.Errorf("attention topics = %v, want %v", attention, tc.wantAttention)
@@ -6772,7 +6616,6 @@ func TestPartitionAttentionTopics(t *testing.T) {
 
 // TestIsAttentionTopic tests attention topic detection.
 func TestIsAttentionTopic(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		topic string
@@ -6789,7 +6632,6 @@ func TestIsAttentionTopic(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.topic, func(t *testing.T) {
-			t.Parallel()
 			got := isAttentionTopic(tc.topic)
 			if got != tc.want {
 				t.Errorf("isAttentionTopic(%q) = %v, want %v", tc.topic, got, tc.want)

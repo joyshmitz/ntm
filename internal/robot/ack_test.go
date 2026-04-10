@@ -230,7 +230,6 @@ func TestIsPromptLine(t *testing.T) {
 }
 
 func TestAckPaneAgentTypePrefersParsedPaneType(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{
 		Title:   "custom title",
@@ -244,7 +243,6 @@ func TestAckPaneAgentTypePrefersParsedPaneType(t *testing.T) {
 }
 
 func TestSelectAckTargetsSkipsUserPaneByDefault(t *testing.T) {
-	t.Parallel()
 
 	panes := []tmux.Pane{
 		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
@@ -261,7 +259,6 @@ func TestSelectAckTargetsSkipsUserPaneByDefault(t *testing.T) {
 }
 
 func TestSelectSendAndAckTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
-	t.Parallel()
 
 	panes := []tmux.Pane{
 		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
@@ -288,7 +285,6 @@ func TestSelectSendAndAckTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
 }
 
 func TestSendAndAckToPaneUsesDerivedAgentAwareSender(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{
 		ID:      "%2",
@@ -327,7 +323,6 @@ func TestSendAndAckToPaneUsesDerivedAgentAwareSender(t *testing.T) {
 }
 
 func TestDetectAcknowledgmentForAgentIgnoresAgentPrompts(t *testing.T) {
-	t.Parallel()
 
 	ackType, detected := detectAcknowledgmentForAgent(
 		"ready\n",

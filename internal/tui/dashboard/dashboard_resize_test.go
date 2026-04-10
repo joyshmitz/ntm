@@ -9,7 +9,6 @@ import (
 )
 
 func TestWindowSizeMsg_UpdatesDimensionsAndPanels(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.focusedPanel = PanelBeads
@@ -73,7 +72,6 @@ func TestWindowSizeMsg_UpdatesDimensionsAndPanels(t *testing.T) {
 }
 
 func TestWindowSizeMsg_NormalizesFocusWhenPanelHidden(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.focusedPanel = PanelBeads
@@ -92,7 +90,6 @@ func TestWindowSizeMsg_NormalizesFocusWhenPanelHidden(t *testing.T) {
 }
 
 func TestWindowSizeMsg_MinimumSize(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 
@@ -139,7 +136,6 @@ func TestWindowSizeMsg_MinimumSize(t *testing.T) {
 }
 
 func TestWindowSizeMsg_TierTransition(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		width        int
@@ -182,7 +178,6 @@ func TestWindowSizeMsg_TierTransition(t *testing.T) {
 }
 
 func TestWindowSizeMsg_ContentHeightCalculation(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		height         int

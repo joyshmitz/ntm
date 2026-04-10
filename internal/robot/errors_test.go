@@ -7,7 +7,6 @@ import (
 )
 
 func TestIsRobotErrorLine_PythonErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -45,7 +44,6 @@ func TestIsRobotErrorLine_PythonErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_GoErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -71,7 +69,6 @@ func TestIsRobotErrorLine_GoErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_JSErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -99,7 +96,6 @@ func TestIsRobotErrorLine_JSErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_RustErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -124,7 +120,6 @@ func TestIsRobotErrorLine_RustErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_GenericPatterns(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -155,7 +150,6 @@ func TestIsRobotErrorLine_GenericPatterns(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_BuildTestFailures(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -183,7 +177,6 @@ func TestIsRobotErrorLine_BuildTestFailures(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_ExitCodes(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -213,7 +206,6 @@ func TestIsRobotErrorLine_ExitCodes(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_AgentErrors(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		line      string
@@ -242,7 +234,6 @@ func TestIsRobotErrorLine_AgentErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_NonErrors(t *testing.T) {
-	t.Parallel()
 
 	nonErrors := []string{
 		"",
@@ -268,7 +259,6 @@ func TestIsRobotErrorLine_NonErrors(t *testing.T) {
 }
 
 func TestIsRobotErrorLine_StackTrace(t *testing.T) {
-	t.Parallel()
 
 	// The stacktrace pattern requires leading whitespace (^\s+at\s+...),
 	// but isRobotErrorLine trims the input first, so trimmed stack trace
@@ -282,7 +272,6 @@ func TestIsRobotErrorLine_StackTrace(t *testing.T) {
 }
 
 func TestParseErrorsIndex(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -321,7 +310,6 @@ func TestParseErrorsIndex(t *testing.T) {
 }
 
 func TestAgentTypeFromPaneType(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input    tmux.AgentType
@@ -351,7 +339,6 @@ func TestAgentTypeFromPaneType(t *testing.T) {
 }
 
 func TestDetectErrorsPaneAgentTypeUsesEnhancedDetection(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{ID: "%1", Type: tmux.AgentUser, Title: "notes", Command: ""}
 	got := detectErrorsPaneAgentType(pane, "Claude Code > working on task")
@@ -361,7 +348,6 @@ func TestDetectErrorsPaneAgentTypeUsesEnhancedDetection(t *testing.T) {
 }
 
 func TestDetectErrorsPaneAgentTypePrefersPaneMetadata(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{ID: "%2", Type: tmux.AgentCodex, Title: "notes", Command: ""}
 	got := detectErrorsPaneAgentType(pane, "Claude Code > working on task")
@@ -371,7 +357,6 @@ func TestDetectErrorsPaneAgentTypePrefersPaneMetadata(t *testing.T) {
 }
 
 func TestDetectErrorsPaneAgentTypeLeavesShellUnknown(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{ID: "%3", Type: tmux.AgentUser, Title: "shell", Command: "bash"}
 	got := detectErrorsPaneAgentType(pane, "$ ")
@@ -381,7 +366,6 @@ func TestDetectErrorsPaneAgentTypeLeavesShellUnknown(t *testing.T) {
 }
 
 func TestDefaultErrorsOptions(t *testing.T) {
-	t.Parallel()
 
 	opts := DefaultErrorsOptions()
 	if opts.Lines != 1000 {
@@ -405,7 +389,6 @@ func TestDefaultErrorsOptions(t *testing.T) {
 }
 
 func TestRobotErrorPatterns_NotEmpty(t *testing.T) {
-	t.Parallel()
 
 	if len(robotErrorPatterns) == 0 {
 		t.Error("robotErrorPatterns should not be empty")

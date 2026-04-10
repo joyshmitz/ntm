@@ -529,7 +529,6 @@ func TestNavigateNested(t *testing.T) {
 }
 
 func TestNavigateNested_EdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -625,7 +624,6 @@ func TestNavigateNested_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := navigateNested(tt.value, tt.parts)
 			if tt.wantErr {
 				if err == nil {
@@ -645,7 +643,6 @@ func TestNavigateNested_EdgeCases(t *testing.T) {
 }
 
 func TestFormatValue(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -721,7 +718,6 @@ func TestFormatValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatValue(tt.value)
 			if got != tt.want {
 				t.Errorf("formatValue(%v) = %q, want %q", tt.value, got, tt.want)
@@ -751,7 +747,6 @@ func TestFormatValue_TimeTypes(t *testing.T) {
 }
 
 func TestFormatValue_JSONMarshalFailure(t *testing.T) {
-	t.Parallel()
 
 	// Create a channel, which cannot be JSON marshaled
 	ch := make(chan int)
@@ -857,7 +852,6 @@ func TestExtractJSONBlock(t *testing.T) {
 }
 
 func TestResolveSteps_AllFields(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	state := &ExecutionState{
@@ -911,7 +905,6 @@ func TestResolveSteps_AllFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := sub.Substitute(tt.template)
 			if tt.wantErr {
 				if err == nil {
@@ -936,7 +929,6 @@ func TestResolveSteps_AllFields(t *testing.T) {
 }
 
 func TestResolveSteps_FlatKeyLookup(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -956,7 +948,6 @@ func TestResolveSteps_FlatKeyLookup(t *testing.T) {
 }
 
 func TestResolveLoop_Nested(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -978,7 +969,6 @@ func TestResolveLoop_Nested(t *testing.T) {
 }
 
 func TestResolveVar_UnknownNamespace(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -992,7 +982,6 @@ func TestResolveVar_UnknownNamespace(t *testing.T) {
 }
 
 func TestResolveVar_EmptyReference(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1010,7 +999,6 @@ func TestResolveVar_EmptyReference(t *testing.T) {
 }
 
 func TestResolveVars_NilState(t *testing.T) {
-	t.Parallel()
 
 	sub := NewSubstitutor(nil, "sess", "wf")
 	got, _ := sub.Substitute("Run: ${run_id}")
@@ -1020,7 +1008,6 @@ func TestResolveVars_NilState(t *testing.T) {
 }
 
 func TestResolveVars_NilVariables(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: nil,
@@ -1033,7 +1020,6 @@ func TestResolveVars_NilVariables(t *testing.T) {
 }
 
 func TestResolveLoop_NoParts(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1046,7 +1032,6 @@ func TestResolveLoop_NoParts(t *testing.T) {
 }
 
 func TestResolveVars_RequiresName(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1059,7 +1044,6 @@ func TestResolveVars_RequiresName(t *testing.T) {
 }
 
 func TestResolveEnv_NoParts(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1072,7 +1056,6 @@ func TestResolveEnv_NoParts(t *testing.T) {
 }
 
 func TestSubstituteStrict_RemainingUnsubstituted(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1088,7 +1071,6 @@ func TestSubstituteStrict_RemainingUnsubstituted(t *testing.T) {
 }
 
 func TestSubstituteStrict_SubstituteError(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1103,7 +1085,6 @@ func TestSubstituteStrict_SubstituteError(t *testing.T) {
 }
 
 func TestSubstituteStrict_ValueContainsUnresolvedRef(t *testing.T) {
-	t.Parallel()
 
 	// A variable whose value contains an unresolved variable reference
 	// This tests the path where Substitute succeeds but leaves ${...} in result
@@ -1123,7 +1104,6 @@ func TestSubstituteStrict_ValueContainsUnresolvedRef(t *testing.T) {
 }
 
 func TestParseYAML_InvalidSyntax(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	_, err := parser.Parse("invalid: yaml: [[[", OutputParse{Type: "yaml"})
@@ -1133,7 +1113,6 @@ func TestParseYAML_InvalidSyntax(t *testing.T) {
 }
 
 func TestOutputParser_ParseUnknownType(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	_, err := parser.Parse("output", OutputParse{Type: "unknown_type"})
@@ -1143,7 +1122,6 @@ func TestOutputParser_ParseUnknownType(t *testing.T) {
 }
 
 func TestOutputParser_ParseNone(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	got, err := parser.Parse("  hello  ", OutputParse{Type: ""})
@@ -1156,7 +1134,6 @@ func TestOutputParser_ParseNone(t *testing.T) {
 }
 
 func TestOutputParser_ParseJSON_NoJSON(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	_, err := parser.Parse("no json here", OutputParse{Type: "json"})
@@ -1166,7 +1143,6 @@ func TestOutputParser_ParseJSON_NoJSON(t *testing.T) {
 }
 
 func TestOutputParser_ParseRegex_EmptyPattern(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	_, err := parser.Parse("output", OutputParse{Type: "regex", Pattern: ""})
@@ -1176,7 +1152,6 @@ func TestOutputParser_ParseRegex_EmptyPattern(t *testing.T) {
 }
 
 func TestOutputParser_ParseRegex_InvalidPattern(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	_, err := parser.Parse("output", OutputParse{Type: "regex", Pattern: "[invalid"})
@@ -1186,7 +1161,6 @@ func TestOutputParser_ParseRegex_InvalidPattern(t *testing.T) {
 }
 
 func TestOutputParser_ParseRegex_FullMatchNoGroups(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 	got, err := parser.Parse("abc 123 def", OutputParse{Type: "regex", Pattern: `\d+`})
@@ -1199,7 +1173,6 @@ func TestOutputParser_ParseRegex_FullMatchNoGroups(t *testing.T) {
 }
 
 func TestClearLoopVars_NilVariables(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{Variables: nil}
 	// Should not panic
@@ -1207,7 +1180,6 @@ func TestClearLoopVars_NilVariables(t *testing.T) {
 }
 
 func TestStoreStepOutput_NoParsedData(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{}
 	StoreStepOutput(state, "s1", "raw output", nil)
@@ -1221,7 +1193,6 @@ func TestStoreStepOutput_NoParsedData(t *testing.T) {
 }
 
 func TestSubstitutionError_Error(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -1256,7 +1227,6 @@ func TestSubstitutionError_Error(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := tt.err.Error()
 			if got != tt.wantMsg {
 				t.Errorf("SubstitutionError.Error() = %q, want %q", got, tt.wantMsg)
@@ -1266,7 +1236,6 @@ func TestSubstitutionError_Error(t *testing.T) {
 }
 
 func TestExtractJSONBlock_EdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -1287,7 +1256,6 @@ func TestExtractJSONBlock_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := extractJSONBlock(tt.input)
 			if got != tt.want {
 				t.Errorf("extractJSONBlock(%q) = %q, want %q", tt.input, got, tt.want)
@@ -1297,7 +1265,6 @@ func TestExtractJSONBlock_EdgeCases(t *testing.T) {
 }
 
 func TestResolveSteps_Agent(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1323,7 +1290,6 @@ func TestResolveSteps_Agent(t *testing.T) {
 }
 
 func TestSetLoopVars_NilVariables(t *testing.T) {
-	t.Parallel()
 
 	// State with nil Variables map
 	state := &ExecutionState{
@@ -1348,7 +1314,6 @@ func TestSetLoopVars_NilVariables(t *testing.T) {
 }
 
 func TestStoreStepOutput_NilVariables(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: nil,
@@ -1368,7 +1333,6 @@ func TestStoreStepOutput_NilVariables(t *testing.T) {
 }
 
 func TestResolveVar_NestedLoop(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{
@@ -1389,7 +1353,6 @@ func TestResolveVar_NestedLoop(t *testing.T) {
 }
 
 func TestResolveSteps_OutputNestedField(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1420,7 +1383,6 @@ func TestResolveSteps_OutputNestedField(t *testing.T) {
 }
 
 func TestResolveSteps_OutputNestedNoParsedData(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1444,7 +1406,6 @@ func TestResolveSteps_OutputNestedNoParsedData(t *testing.T) {
 }
 
 func TestResolveSteps_DataNoParsedData(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1468,7 +1429,6 @@ func TestResolveSteps_DataNoParsedData(t *testing.T) {
 }
 
 func TestResolveSteps_DataNestedField(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1497,7 +1457,6 @@ func TestResolveSteps_DataNestedField(t *testing.T) {
 }
 
 func TestResolveSteps_DataWithoutNesting(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1524,7 +1483,6 @@ func TestResolveSteps_DataWithoutNesting(t *testing.T) {
 }
 
 func TestResolveSteps_NilState(t *testing.T) {
-	t.Parallel()
 
 	sub := NewSubstitutor(nil, "test-session", "test-workflow")
 
@@ -1538,7 +1496,6 @@ func TestResolveSteps_NilState(t *testing.T) {
 }
 
 func TestResolveSteps_DurationZero(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1563,7 +1520,6 @@ func TestResolveSteps_DurationZero(t *testing.T) {
 }
 
 func TestResolveSteps_UnknownField(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1584,7 +1540,6 @@ func TestResolveSteps_UnknownField(t *testing.T) {
 }
 
 func TestResolveSteps_MissingStepID(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1603,7 +1558,6 @@ func TestResolveSteps_MissingStepID(t *testing.T) {
 }
 
 func TestResolveSteps_NilStepsMap(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1620,7 +1574,6 @@ func TestResolveSteps_NilStepsMap(t *testing.T) {
 }
 
 func TestResolveVar_EmptyPath(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -1639,7 +1592,6 @@ func TestResolveVar_EmptyPath(t *testing.T) {
 }
 
 func TestOutputParser_ParseJSON_ExtractJSONBlock(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 
@@ -1673,7 +1625,6 @@ func TestOutputParser_ParseJSON_ExtractJSONBlock(t *testing.T) {
 }
 
 func TestOutputParser_ParseJSON_BothUnmarshalsFail(t *testing.T) {
-	t.Parallel()
 
 	parser := NewOutputParser()
 
@@ -1691,7 +1642,6 @@ func TestOutputParser_ParseJSON_BothUnmarshalsFail(t *testing.T) {
 }
 
 func TestResolveLoop_NilVariables(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: nil, // explicitly nil
@@ -1708,7 +1658,6 @@ func TestResolveLoop_NilVariables(t *testing.T) {
 }
 
 func TestResolveSteps_FlatKeyNestedNavigation(t *testing.T) {
-	t.Parallel()
 
 	// Test flat key lookup with nested navigation (parts > 2)
 	state := &ExecutionState{
@@ -1735,7 +1684,6 @@ func TestResolveSteps_FlatKeyNestedNavigation(t *testing.T) {
 }
 
 func TestResolveSteps_FlatKeySimple(t *testing.T) {
-	t.Parallel()
 
 	// Test flat key lookup without nested navigation
 	state := &ExecutionState{
@@ -1756,7 +1704,6 @@ func TestResolveSteps_FlatKeySimple(t *testing.T) {
 }
 
 func TestResolveLoop_NestedAccess(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{

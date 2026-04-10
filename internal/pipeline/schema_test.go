@@ -6,7 +6,6 @@ import (
 )
 
 func TestDuration_UnmarshalText(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -63,7 +62,6 @@ func TestDuration_UnmarshalText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			var d Duration
 			err := d.UnmarshalText([]byte(tt.input))
 			if tt.wantErr {
@@ -84,7 +82,6 @@ func TestDuration_UnmarshalText(t *testing.T) {
 }
 
 func TestDuration_MarshalText(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -125,7 +122,6 @@ func TestDuration_MarshalText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := tt.d.MarshalText()
 			if err != nil {
 				t.Errorf("MarshalText() unexpected error: %v", err)
@@ -139,7 +135,6 @@ func TestDuration_MarshalText(t *testing.T) {
 }
 
 func TestDuration_RoundTrip(t *testing.T) {
-	t.Parallel()
 
 	durations := []time.Duration{
 		0,
@@ -170,7 +165,6 @@ func TestDuration_RoundTrip(t *testing.T) {
 }
 
 func TestOutputParse_UnmarshalText(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -216,7 +210,6 @@ func TestOutputParse_UnmarshalText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			var o OutputParse
 			err := o.UnmarshalText([]byte(tt.input))
 			if err != nil {
@@ -231,7 +224,6 @@ func TestOutputParse_UnmarshalText(t *testing.T) {
 }
 
 func TestDefaultStepTimeout(t *testing.T) {
-	t.Parallel()
 
 	d := DefaultStepTimeout()
 	expected := 5 * time.Minute
@@ -242,7 +234,6 @@ func TestDefaultStepTimeout(t *testing.T) {
 }
 
 func TestDefaultWorkflowSettings(t *testing.T) {
-	t.Parallel()
 
 	s := DefaultWorkflowSettings()
 

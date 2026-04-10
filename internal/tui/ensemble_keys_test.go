@@ -7,7 +7,6 @@ import (
 )
 
 func TestDefaultEnsembleKeyMap_AllBindingsNonEmpty(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 
@@ -41,7 +40,6 @@ func TestDefaultEnsembleKeyMap_AllBindingsNonEmpty(t *testing.T) {
 }
 
 func TestDefaultEnsembleKeyMap_SpecificKeys(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 
@@ -80,7 +78,6 @@ func TestDefaultEnsembleKeyMap_SpecificKeys(t *testing.T) {
 }
 
 func TestDefaultEnsembleKeyMap_JumpWindowBindings(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 
@@ -109,7 +106,6 @@ func TestDefaultEnsembleKeyMap_JumpWindowBindings(t *testing.T) {
 }
 
 func TestEnsembleKeyMap_ShortHelp(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 	short := km.ShortHelp()
@@ -129,7 +125,6 @@ func TestEnsembleKeyMap_ShortHelp(t *testing.T) {
 }
 
 func TestEnsembleKeyMap_FullHelp(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 	full := km.FullHelp()
@@ -155,7 +150,6 @@ func TestEnsembleKeyMap_FullHelp(t *testing.T) {
 }
 
 func TestEnsembleKeyMap_FullHelp_GroupContents(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 	full := km.FullHelp()
@@ -210,7 +204,6 @@ func TestEnsembleKeyMap_FullHelp_GroupContents(t *testing.T) {
 }
 
 func TestJumpWindowBindings_Count(t *testing.T) {
-	t.Parallel()
 
 	bindings := jumpWindowBindings()
 	if len(bindings) != 9 {
@@ -219,7 +212,6 @@ func TestJumpWindowBindings_Count(t *testing.T) {
 }
 
 func TestEnsembleKeyMap_NoDuplicateKeys(t *testing.T) {
-	t.Parallel()
 
 	km := DefaultEnsembleKeyMap()
 

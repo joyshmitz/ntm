@@ -23,7 +23,6 @@ import (
 // =============================================================================
 
 func TestIntegration_SourceOutageAndRecovery(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("source_outage_recovery", 1)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -94,7 +93,6 @@ func TestIntegration_SourceOutageAndRecovery(t *testing.T) {
 }
 
 func TestIntegration_MultipleSourceFlapping(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("source_flapping", 2)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -174,7 +172,6 @@ func TestIntegration_MultipleSourceFlapping(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_AttentionFeedCursorContinuity(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("cursor_continuity", 3)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -228,7 +225,6 @@ func TestIntegration_AttentionFeedCursorContinuity(t *testing.T) {
 }
 
 func TestIntegration_AttentionFeedSubscriptionDelivery(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("subscription_delivery", 4)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -279,7 +275,6 @@ func TestIntegration_AttentionFeedSubscriptionDelivery(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_IncidentPromotionFromRepeatedEvidence(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("incident_promotion", 5)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -327,7 +322,6 @@ func TestIntegration_IncidentPromotionFromRepeatedEvidence(t *testing.T) {
 }
 
 func TestIntegration_IncidentPromotionFromCriticalType(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("critical_type_promotion", 6)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -363,7 +357,6 @@ func TestIntegration_IncidentPromotionFromCriticalType(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_DuplicateEventSuppression(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("duplicate_suppression", 7)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -418,7 +411,6 @@ func TestIntegration_DuplicateEventSuppression(t *testing.T) {
 }
 
 func TestIntegration_CooldownResurfacing(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("cooldown_resurfacing", 8)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -485,7 +477,6 @@ func TestIntegration_CooldownResurfacing(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_OperatorAcknowledgmentPersists(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("operator_ack", 9)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -526,7 +517,6 @@ func TestIntegration_OperatorAcknowledgmentPersists(t *testing.T) {
 }
 
 func TestIntegration_OperatorSnoozeAndExpiry(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("operator_snooze", 10)
 	recorder := NewTestRecorder(t, scenarioID, true)
@@ -574,7 +564,6 @@ func TestIntegration_OperatorSnoozeAndExpiry(t *testing.T) {
 // =============================================================================
 
 func TestIntegration_ConcurrentFeedAccess(t *testing.T) {
-	t.Parallel()
 
 	scenarioID := NewScenarioID("concurrent_access", 11)
 	recorder := NewTestRecorder(t, scenarioID, true)

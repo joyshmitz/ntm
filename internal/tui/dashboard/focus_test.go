@@ -7,7 +7,6 @@ import (
 )
 
 func TestFocusRingNext(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -32,7 +31,6 @@ func TestFocusRingNext(t *testing.T) {
 }
 
 func TestFocusRingSkipsHidden(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -47,7 +45,6 @@ func TestFocusRingSkipsHidden(t *testing.T) {
 }
 
 func TestFocusRingPrevWraps(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -61,7 +58,6 @@ func TestFocusRingPrevWraps(t *testing.T) {
 }
 
 func TestFocusRingAllHiddenNoInfiniteLoop(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return false }},
@@ -73,7 +69,6 @@ func TestFocusRingAllHiddenNoInfiniteLoop(t *testing.T) {
 }
 
 func TestFocusRingSetByID(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -92,7 +87,6 @@ func TestFocusRingSetByID(t *testing.T) {
 }
 
 func TestFocusRingRebuildPreservesFocus(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -115,7 +109,6 @@ func TestFocusRingRebuildPreservesFocus(t *testing.T) {
 }
 
 func TestFocusRingRebuildCurrentRemoved(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing([]FocusTarget{
 		{ID: "a", Visible: func() bool { return true }},
@@ -137,7 +130,6 @@ func TestFocusRingRebuildCurrentRemoved(t *testing.T) {
 }
 
 func TestFocusRingEmpty(t *testing.T) {
-	t.Parallel()
 
 	fr := NewFocusRing(nil)
 	fr.Next()
@@ -148,7 +140,6 @@ func TestFocusRingEmpty(t *testing.T) {
 }
 
 func TestMouseClickPaneListSetsFocus(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.focusedPanel = PanelDetail

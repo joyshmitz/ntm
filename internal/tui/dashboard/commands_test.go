@@ -32,7 +32,6 @@ import (
 )
 
 func TestFetchBeadsCmd_NoBv(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	cmd := m.fetchBeadsCmd()
@@ -54,7 +53,6 @@ func TestFetchBeadsCmd_NoBv(t *testing.T) {
 }
 
 func TestFetchAlertsCmd(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	cmd := m.fetchAlertsCmd()
@@ -71,7 +69,6 @@ func TestFetchAlertsCmd(t *testing.T) {
 }
 
 func TestFetchAlertsCmd_WithConfig(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	// Set a minimal config
@@ -189,7 +186,6 @@ func TestFetchAttentionCmd_SortsAndLimitsItems(t *testing.T) {
 }
 
 func TestFetchMetricsCmd_NoPanes(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.panes = nil // No panes
@@ -208,7 +204,6 @@ func TestFetchMetricsCmd_NoPanes(t *testing.T) {
 }
 
 func TestLoadSpawnState_ExpiresCompletedStateAfterGracePeriod(t *testing.T) {
-	t.Parallel()
 
 	projectDir := t.TempDir()
 	path := filepath.Join(projectDir, ".ntm", "spawn-state.json")
@@ -244,7 +239,6 @@ func TestLoadSpawnState_ExpiresCompletedStateAfterGracePeriod(t *testing.T) {
 }
 
 func TestNewDashboardAddAgentsCommand_ValidatesSession(t *testing.T) {
-	t.Parallel()
 
 	cmd, err := newDashboardAddAgentsCommand(context.Background(), "/tmp/project", "proj", panels.SpawnWizardResult{
 		CCCount: 1,
@@ -266,7 +260,6 @@ func TestNewDashboardAddAgentsCommand_ValidatesSession(t *testing.T) {
 }
 
 func TestDashboardEditorTokensSafe_RejectsPositionalArgs(t *testing.T) {
-	t.Parallel()
 
 	if !dashboardEditorTokensSafe([]string{"code", "-w"}) {
 		t.Fatal("expected simple editor tokens to be allowed")
@@ -277,7 +270,6 @@ func TestDashboardEditorTokensSafe_RejectsPositionalArgs(t *testing.T) {
 }
 
 func TestResolveDashboardEditorPreset_FallsBackForUnknownOrUnsafeEditor(t *testing.T) {
-	t.Parallel()
 
 	if got := resolveDashboardEditorPreset("code --wait"); got != dashboardEditorPresetVSCode {
 		t.Fatalf("resolveDashboardEditorPreset(code) = %v, want %v", got, dashboardEditorPresetVSCode)
@@ -293,7 +285,6 @@ func TestResolveDashboardEditorPreset_FallsBackForUnknownOrUnsafeEditor(t *testi
 }
 
 func TestFetchMetricsCmd_SkipsUserPanes(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.panes = []tmux.Pane{
@@ -314,7 +305,6 @@ func TestFetchMetricsCmd_SkipsUserPanes(t *testing.T) {
 }
 
 func TestFetchHistoryCmd(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	cmd := m.fetchHistoryCmd()
@@ -369,7 +359,6 @@ func TestFetchFileChangesCmd(t *testing.T) {
 }
 
 func TestFetchCASSContextCmd_NoCass(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.session = "test-session"
@@ -662,7 +651,6 @@ func TestHandleConflictAction_ForceRegistersDashboardAgent(t *testing.T) {
 
 // Test that commands return tea.Cmd (not nil)
 func TestCommandsReturnTeaCmd(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -682,7 +670,6 @@ func TestCommandsReturnTeaCmd(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			cmd := tc.cmd()
 			if cmd == nil {
 				t.Errorf("%s returned nil tea.Cmd", tc.name)
@@ -693,7 +680,6 @@ func TestCommandsReturnTeaCmd(t *testing.T) {
 
 // Test message types are correct
 func TestMessageTypes(t *testing.T) {
-	t.Parallel()
 
 	// Verify message types can be created and have expected fields
 	t.Run("BeadsUpdateMsg", func(t *testing.T) {
@@ -767,7 +753,6 @@ func TestMessageTypes(t *testing.T) {
 
 // Test error handling in messages
 func TestMessageErrorHandling(t *testing.T) {
-	t.Parallel()
 
 	t.Run("BeadsUpdateMsg_WithError", func(t *testing.T) {
 		msg := BeadsUpdateMsg{

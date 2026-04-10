@@ -11,7 +11,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestParseStringSlice(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -30,7 +29,6 @@ func TestParseStringSlice(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := parseStringSlice(tt.value)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseStringSlice(%v) = %v, want %v", tt.value, got, tt.want)
@@ -44,7 +42,6 @@ func TestParseStringSlice(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAppendUniqueStrings(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -63,7 +60,6 @@ func TestAppendUniqueStrings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := appendUniqueStrings(tt.dst, tt.src...)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("appendUniqueStrings(%v, %v...) = %v, want %v", tt.dst, tt.src, got, tt.want)
@@ -77,7 +73,6 @@ func TestAppendUniqueStrings(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStringValue(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -93,7 +88,6 @@ func TestStringValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := stringValue(tt.value)
 			if got != tt.want {
 				t.Errorf("stringValue(%v) = %q, want %q", tt.value, got, tt.want)
@@ -107,7 +101,6 @@ func TestStringValue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFirstNonEmpty(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -124,7 +117,6 @@ func TestFirstNonEmpty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := firstNonEmpty(tt.values...)
 			if got != tt.want {
 				t.Errorf("firstNonEmpty(%v) = %q, want %q", tt.values, got, tt.want)
@@ -138,7 +130,6 @@ func TestFirstNonEmpty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCountJSONArray(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -156,7 +147,6 @@ func TestCountJSONArray(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := countJSONArray(tt.raw)
 			if got != tt.want {
 				t.Errorf("countJSONArray(%s) = %d, want %d", tt.raw, got, tt.want)
@@ -170,7 +160,6 @@ func TestCountJSONArray(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAgentTypeFromProgram(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -190,7 +179,6 @@ func TestAgentTypeFromProgram(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := agentTypeFromProgram(tt.program)
 			if got != tt.want {
 				t.Errorf("agentTypeFromProgram(%q) = %q, want %q", tt.program, got, tt.want)

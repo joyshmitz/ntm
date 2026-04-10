@@ -68,7 +68,6 @@ func maxRenderedLineWidth(s string) int {
 }
 
 func TestTimelineAgentIDUsesFinalSeparator(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{Title: "my__project__cc_2"}
 	if got := timelineAgentID(pane, "", ""); got != "cc_2" {
@@ -110,7 +109,6 @@ func firstNonEmptyLines(s string, limit int) []string {
 }
 
 func TestViewFitsHeightAndFooterOnce(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.height = 30
@@ -133,7 +131,6 @@ func TestViewFitsHeightAndFooterOnce(t *testing.T) {
 }
 
 func TestRenderHeaderHandoffLine(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.handoffGoal = "Implemented auth tokens"
@@ -159,7 +156,6 @@ func TestRenderHeaderHandoffLine(t *testing.T) {
 }
 
 func TestRenderHeaderContextWarningLine(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.panes = []tmux.Pane{
@@ -210,7 +206,6 @@ func TestRenderHeaderContextWarningLine(t *testing.T) {
 // when there are many panes (e.g., 17) that would otherwise overflow the terminal height.
 // This is the scenario from bd-1xoe where the status bar was being duplicated.
 func TestViewFitsHeightWithManyPanes(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.width = 140
@@ -255,7 +250,6 @@ func TestViewFitsHeightWithManyPanes(t *testing.T) {
 }
 
 func TestPaneListColumnsByWidthTiers(t *testing.T) {
-	t.Parallel()
 
 	// Test that renderPaneList produces output for various widths without panicking.
 	// The layout dimensions affect column visibility (ShowContextCol, ShowModelCol, etc.)
@@ -273,7 +267,6 @@ func TestPaneListColumnsByWidthTiers(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			// Use the same width for layout calculations
@@ -305,13 +298,11 @@ func TestPaneListColumnsByWidthTiers(t *testing.T) {
 }
 
 func TestPaneRowSelectionStyling_NoWrapAcrossWidths(t *testing.T) {
-	t.Parallel()
 
 	widths := []int{80, 120, 160, 200}
 	for _, w := range widths {
 		w := w
 		t.Run(fmt.Sprintf("width_%d", w), func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(w)
 			m.cursor = 0 // selected row
@@ -345,7 +336,6 @@ func TestPaneRowSelectionStyling_NoWrapAcrossWidths(t *testing.T) {
 }
 
 func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
-	t.Parallel()
 
 	cases := []struct {
 		width        int
@@ -360,7 +350,6 @@ func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(fmt.Sprintf("width_%d", tc.width), func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			m.height = 30
@@ -390,7 +379,6 @@ func TestSplitViewLayouts_ByWidthTiers(t *testing.T) {
 }
 
 func TestVisiblePanelsForHelpVerbosity_AttentionByTier(t *testing.T) {
-	t.Parallel()
 
 	cases := []struct {
 		width           int
@@ -405,7 +393,6 @@ func TestVisiblePanelsForHelpVerbosity_AttentionByTier(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(fmt.Sprintf("width_%d", tc.width), func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			visible := m.visiblePanelsForHelpVerbosity()
@@ -426,7 +413,6 @@ func TestVisiblePanelsForHelpVerbosity_AttentionByTier(t *testing.T) {
 }
 
 func TestCycleFocusIncludesAttentionAtSplitAndSkipsAtNarrow(t *testing.T) {
-	t.Parallel()
 
 	split := newTestModel(120)
 	split.focusedPanel = PanelDetail
@@ -446,7 +432,6 @@ func TestCycleFocusIncludesAttentionAtSplitAndSkipsAtNarrow(t *testing.T) {
 }
 
 func TestRenderSplitViewUsesAttentionPanelWhenFocused(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.attentionPanel.SetData([]panels.AttentionItem{
@@ -473,7 +458,6 @@ func TestRenderSplitViewUsesAttentionPanelWhenFocused(t *testing.T) {
 }
 
 func TestMegaLayoutRendersAttentionPanelWhenFocused(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.MegaWideViewThreshold)
 	m.height = 30
@@ -508,7 +492,6 @@ func containsPanelID(ids []PanelID, want PanelID) bool {
 }
 
 func TestUltraLayout_DoesNotOverflowWidth(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.height = 30
@@ -520,7 +503,6 @@ func TestUltraLayout_DoesNotOverflowWidth(t *testing.T) {
 }
 
 func TestMegaLayout_DoesNotOverflowWidth(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.MegaWideViewThreshold)
 	m.height = 30
@@ -532,7 +514,6 @@ func TestMegaLayout_DoesNotOverflowWidth(t *testing.T) {
 }
 
 func TestLayouts_IndentAllLinesConsistently(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -565,7 +546,6 @@ func TestLayouts_IndentAllLinesConsistently(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			m.height = 30
@@ -590,7 +570,6 @@ func TestLayouts_IndentAllLinesConsistently(t *testing.T) {
 }
 
 func TestSplitProportionsAcrossThresholds(t *testing.T) {
-	t.Parallel()
 
 	cases := []struct {
 		total         int
@@ -607,7 +586,6 @@ func TestSplitProportionsAcrossThresholds(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			left, right := layout.SplitProportions(tc.total)
 
@@ -631,7 +609,6 @@ func TestSplitProportionsAcrossThresholds(t *testing.T) {
 }
 
 func TestSidebarRendersCASSContext(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	createdAt := &cass.FlexTime{Time: time.Now().Add(-2 * time.Hour)}
@@ -653,7 +630,6 @@ func TestSidebarRendersCASSContext(t *testing.T) {
 }
 
 func TestDashboardCASSContextErrorClearsStaleSidebarEntries(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.focusedPanel = PanelSidebar
@@ -707,7 +683,6 @@ func TestDashboardCASSContextErrorClearsStaleSidebarEntries(t *testing.T) {
 }
 
 func TestSidebarRendersFileChanges(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	now := time.Now().Add(-2 * time.Minute)
@@ -734,7 +709,6 @@ func TestSidebarRendersFileChanges(t *testing.T) {
 }
 
 func TestDashboardFileChangeErrorClearsStaleSidebarEntries(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.focusedPanel = PanelSidebar
@@ -793,7 +767,6 @@ func TestDashboardFileChangeErrorClearsStaleSidebarEntries(t *testing.T) {
 }
 
 func TestRenderSidebar_FillsExactHeight(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 
@@ -804,7 +777,6 @@ func TestRenderSidebar_FillsExactHeight(t *testing.T) {
 }
 
 func TestSidebarRendersMetricsAndHistoryPanelsWhenSpaceAllows(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 
@@ -840,7 +812,6 @@ func TestSidebarRendersMetricsAndHistoryPanelsWhenSpaceAllows(t *testing.T) {
 }
 
 func TestDashboardMetricsErrorClearsStaleSnapshot(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.focusedPanel = PanelSidebar
@@ -890,7 +861,6 @@ func TestDashboardMetricsErrorClearsStaleSnapshot(t *testing.T) {
 }
 
 func TestDashboardHistoryErrorClearsStaleReplayableEntries(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.focusedPanel = PanelSidebar
@@ -949,7 +919,6 @@ func TestDashboardHistoryErrorClearsStaleReplayableEntries(t *testing.T) {
 }
 
 func TestPaneGridRendersEnhancedBadges(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(110) // below split threshold, uses grid view
 	m.animTick = 1
@@ -1023,10 +992,8 @@ func TestPaneGridRendersEnhancedBadges(t *testing.T) {
 }
 
 func TestHelpOverlayToggle(t *testing.T) {
-	t.Parallel()
 
 	t.Run("pressing_?_opens_help", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		if m.showHelp {
@@ -1044,7 +1011,6 @@ func TestHelpOverlayToggle(t *testing.T) {
 	})
 
 	t.Run("pressing_?_again_closes_help", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.showHelp = true
@@ -1060,7 +1026,6 @@ func TestHelpOverlayToggle(t *testing.T) {
 	})
 
 	t.Run("pressing_esc_closes_help", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.showHelp = true
@@ -1076,7 +1041,6 @@ func TestHelpOverlayToggle(t *testing.T) {
 	})
 
 	t.Run("help_overlay_blocks_other_keys", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.showHelp = true
@@ -1097,10 +1061,8 @@ func TestHelpOverlayToggle(t *testing.T) {
 }
 
 func TestToastControls(t *testing.T) {
-	t.Parallel()
 
 	t.Run("ctrl_x_dismisses_newest_toast", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.toasts.Push(components.Toast{ID: "oldest", Message: "one", Duration: 10 * time.Second})
@@ -1116,7 +1078,6 @@ func TestToastControls(t *testing.T) {
 	})
 
 	t.Run("n_toggles_toast_history_overlay", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.toasts.Push(components.Toast{ID: "toast-1", Message: "one", Duration: 10 * time.Second})
@@ -1141,7 +1102,6 @@ func TestToastControls(t *testing.T) {
 	})
 
 	t.Run("panel_local_n_keeps_history_overlay_closed", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.focusedPanel = PanelBeads
@@ -1156,7 +1116,6 @@ func TestToastControls(t *testing.T) {
 	})
 
 	t.Run("mouse_click_dismisses_toast_at_rendered_position", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(120)
 		m.toasts.Push(components.Toast{ID: "toast-hit", Message: "click me", Duration: 10 * time.Second})
@@ -1434,7 +1393,6 @@ func TestDashboardOpenFileMsgRejectsDeletedFile(t *testing.T) {
 }
 
 func TestKeyboardNavigationCursorMovement(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.panes = []tmux.Pane{
@@ -1477,7 +1435,6 @@ func TestKeyboardNavigationCursorMovement(t *testing.T) {
 }
 
 func TestDashboardPauseKeyTogglesRefreshAndResumesWithFetch(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -1507,7 +1464,6 @@ func TestDashboardPauseKeyTogglesRefreshAndResumesWithFetch(t *testing.T) {
 }
 
 func TestKeyboardNavigationNumberSelect(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.panes = []tmux.Pane{
@@ -1531,10 +1487,8 @@ func TestKeyboardNavigationNumberSelect(t *testing.T) {
 }
 
 func TestKeyboardNavigationPanelCycling(t *testing.T) {
-	t.Parallel()
 
 	t.Run("tab_cycles_split_panels", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(layout.SplitViewThreshold)
 		if m.focusedPanel != PanelPaneList {
@@ -1567,7 +1521,6 @@ func TestKeyboardNavigationPanelCycling(t *testing.T) {
 	})
 
 	t.Run("tab_cycles_mega_panels", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(layout.MegaWideViewThreshold)
 		m.focusedPanel = PanelAlerts
@@ -1595,7 +1548,6 @@ func TestKeyboardNavigationPanelCycling(t *testing.T) {
 	})
 
 	t.Run("tab_cycles_minimal_core_panels_only", func(t *testing.T) {
-		t.Parallel()
 
 		m := newTestModel(layout.MegaWideViewThreshold)
 		m.helpVerbosity = "minimal"
@@ -1616,7 +1568,6 @@ func TestKeyboardNavigationPanelCycling(t *testing.T) {
 }
 
 func TestHelpBarIncludesHelpHint(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	helpBar := m.renderHelpBar()
@@ -1630,7 +1581,6 @@ func TestHelpBarIncludesHelpHint(t *testing.T) {
 }
 
 func TestHelpVerbosityMinimalUsesCoreLayout(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.MegaWideViewThreshold)
 	m.helpVerbosity = "minimal"
@@ -1642,7 +1592,6 @@ func TestHelpVerbosityMinimalUsesCoreLayout(t *testing.T) {
 }
 
 func TestStatsBarShowsHelpVerbosity(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.helpVerbosity = "minimal"
@@ -1653,7 +1602,6 @@ func TestStatsBarShowsHelpVerbosity(t *testing.T) {
 }
 
 func TestFocusedPanelHandlesOwnHeight(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.MegaWideViewThreshold)
 	m.beadsPanel = panels.NewBeadsPanel()
@@ -1678,7 +1626,6 @@ func TestFocusedPanelHandlesOwnHeight(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			// Copy model to avoid race condition with parallel subtests
 			localM := m
 			localM.focusedPanel = tt.panel
@@ -1690,7 +1637,6 @@ func TestFocusedPanelHandlesOwnHeight(t *testing.T) {
 }
 
 func TestDashboardViewWithToastsStaysWithinViewportHeight(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.height = 30
@@ -1703,7 +1649,6 @@ func TestDashboardViewWithToastsStaysWithinViewportHeight(t *testing.T) {
 }
 
 func TestRenderBeadsPanelTracksFocusState(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.MegaWideViewThreshold)
 	m.beadsPanel = panels.NewBeadsPanel()
@@ -1724,7 +1669,6 @@ func TestRenderBeadsPanelTracksFocusState(t *testing.T) {
 // TestHelpBarContextualHints verifies that help hints change based on the focused panel.
 // This tests the getFocusedPanelHints() implementation (bd-144k acceptance criteria #2).
 func TestHelpBarContextualHints(t *testing.T) {
-	t.Parallel()
 
 	// Create model with wide terminal to ensure full help bar visibility
 	m := newTestModel(200)
@@ -1773,7 +1717,6 @@ func TestHelpBarContextualHints(t *testing.T) {
 // TestHelpBarAttentionContextualHint verifies the contextual attention hint behavior.
 // When attention items exist and focus is not on the attention panel, a hint should appear.
 func TestHelpBarAttentionContextualHint(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.tier = layout.TierWide
@@ -1828,7 +1771,6 @@ func TestHelpBarAttentionContextualHint(t *testing.T) {
 // TestHelpBarNoAccumulation verifies that multiple View() calls produce the same output
 // without accumulating duplicate hints (bd-144k acceptance criteria #4).
 func TestHelpBarNoAccumulation(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(140)
 	m.height = 30
@@ -1860,7 +1802,6 @@ func TestHelpBarNoAccumulation(t *testing.T) {
 }
 
 func TestViewRendersHelpOverlayWhenOpen(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.showHelp = true
@@ -1873,7 +1814,6 @@ func TestViewRendersHelpOverlayWhenOpen(t *testing.T) {
 }
 
 func TestQuickActionsBarWidthGated(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		width       int
@@ -1890,7 +1830,6 @@ func TestQuickActionsBarWidthGated(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.description, func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			quickActions := m.renderQuickActions()
@@ -1909,7 +1848,6 @@ func TestQuickActionsBarWidthGated(t *testing.T) {
 }
 
 func TestQuickActionsBarContainsExpectedActions(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200) // Wide enough to show quick actions
 	quickActions := m.renderQuickActions()
@@ -1929,7 +1867,6 @@ func TestQuickActionsBarContainsExpectedActions(t *testing.T) {
 }
 
 func TestLayoutModeString(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		mode LayoutMode
@@ -1946,7 +1883,6 @@ func TestLayoutModeString(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.want, func(t *testing.T) {
-			t.Parallel()
 			if got := tc.mode.String(); got != tc.want {
 				t.Errorf("LayoutMode(%d).String() = %q, want %q", tc.mode, got, tc.want)
 			}
@@ -1955,7 +1891,6 @@ func TestLayoutModeString(t *testing.T) {
 }
 
 func TestRenderSparkline(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		value float64
@@ -1973,7 +1908,6 @@ func TestRenderSparkline(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := RenderSparkline(tc.value, tc.width)
 			// Basic check: result should not be empty and roughly match width
 			if result == "" {
@@ -1988,7 +1922,6 @@ func TestRenderSparkline(t *testing.T) {
 }
 
 func TestRenderMiniBar(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	tests := []struct {
@@ -2005,7 +1938,6 @@ func TestRenderMiniBar(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := RenderMiniBar(tc.value, tc.width, m.theme)
 			// Should render something
 			if result == "" {
@@ -2016,7 +1948,6 @@ func TestRenderMiniBar(t *testing.T) {
 }
 
 func TestRenderLayoutIndicator(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	mode := LayoutForWidth(m.width)
@@ -2029,7 +1960,6 @@ func TestRenderLayoutIndicator(t *testing.T) {
 }
 
 func TestScrollIndicator(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	tests := []struct {
@@ -2048,7 +1978,6 @@ func TestScrollIndicator(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			vp := &ViewportPosition{
 				Offset:   tc.offset,
 				Total:    tc.total,
@@ -2063,7 +1992,6 @@ func TestScrollIndicator(t *testing.T) {
 }
 
 func TestEnsureVisible(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		selected int
@@ -2082,7 +2010,6 @@ func TestEnsureVisible(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			vp := &ViewportPosition{
 				Offset:   tc.offset,
 				Visible:  tc.visible,
@@ -2098,7 +2025,6 @@ func TestEnsureVisible(t *testing.T) {
 }
 
 func TestMinFunc(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		a, b, want int
@@ -2113,7 +2039,6 @@ func TestMinFunc(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(fmt.Sprintf("%d_%d", tc.a, tc.b), func(t *testing.T) {
-			t.Parallel()
 			if got := min(tc.a, tc.b); got != tc.want {
 				t.Errorf("min(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
 			}
@@ -2122,7 +2047,6 @@ func TestMinFunc(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input  string
@@ -2139,7 +2063,6 @@ func TestTruncate(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
 			got := truncate(tc.input, tc.maxLen)
 			if got != tc.want {
 				t.Errorf("truncate(%q, %d) = %q, want %q", tc.input, tc.maxLen, got, tc.want)
@@ -2149,7 +2072,6 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestGetStatusIconAndColor(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -2169,7 +2091,6 @@ func TestGetStatusIconAndColor(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			icon, color := getStatusIconAndColor(tc.state, m.theme, tc.tick)
 			if icon == "" {
 				t.Errorf("getStatusIconAndColor(%q, tick=%d) returned empty icon", tc.state, tc.tick)
@@ -2182,7 +2103,6 @@ func TestGetStatusIconAndColor(t *testing.T) {
 }
 
 func TestFormatRelativeTime(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		duration time.Duration
@@ -2198,7 +2118,6 @@ func TestFormatRelativeTime(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			result := formatRelativeTime(tc.duration)
 			if !strings.Contains(result, tc.contains) {
 				t.Errorf("formatRelativeTime(%v) = %q, expected to contain %q", tc.duration, result, tc.contains)
@@ -2208,7 +2127,6 @@ func TestFormatRelativeTime(t *testing.T) {
 }
 
 func TestSpinnerDot(t *testing.T) {
-	t.Parallel()
 
 	// Test multiple animation ticks
 	for i := 0; i < 10; i++ {
@@ -2220,7 +2138,6 @@ func TestSpinnerDot(t *testing.T) {
 }
 
 func TestComputeContextRanks(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	// Populate panes matching the status map
@@ -2256,7 +2173,6 @@ func TestComputeContextRanks(t *testing.T) {
 }
 
 func TestRenderDiagnosticsBar(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.showDiagnostics = true
@@ -2274,7 +2190,6 @@ func TestRenderDiagnosticsBar(t *testing.T) {
 }
 
 func TestRenderMetricsPanel(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.metricsPanel.SetData(panels.MetricsData{
@@ -2288,7 +2203,6 @@ func TestRenderMetricsPanel(t *testing.T) {
 }
 
 func TestDashboardMetricsPanelShortcutOverridesContextRefresh(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.focusedPanel = PanelSidebar
@@ -2334,7 +2248,6 @@ func TestDashboardMetricsPanelShortcutOverridesContextRefresh(t *testing.T) {
 }
 
 func TestDashboardFilesPanelShortcutCyclesTimeWindow(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.focusedPanel = PanelSidebar
@@ -2383,7 +2296,6 @@ func TestDashboardFilesPanelShortcutCyclesTimeWindow(t *testing.T) {
 }
 
 func TestDashboardFilesPanelEnterEmitsOpenFileMsg(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	m := newTestModel(200)
@@ -2419,7 +2331,6 @@ func TestDashboardFilesPanelEnterEmitsOpenFileMsg(t *testing.T) {
 }
 
 func TestDashboardTimelineShortcutSelectsNextMarker(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	m := newTestModel(200)
@@ -2465,7 +2376,6 @@ func TestDashboardTimelineShortcutSelectsNextMarker(t *testing.T) {
 }
 
 func TestDashboardSidebarRendersRotationConfirmPanelWhenPending(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	m := newTestModel(200)
@@ -2490,7 +2400,6 @@ func TestDashboardSidebarRendersRotationConfirmPanelWhenPending(t *testing.T) {
 }
 
 func TestDashboardRotationConfirmShortcutsOverrideGlobalBindings(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	tests := []struct {
@@ -2540,7 +2449,6 @@ func TestDashboardRotationConfirmShortcutsOverrideGlobalBindings(t *testing.T) {
 }
 
 func TestDashboardRotationConfirmNavigationMovesSingleStep(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	m := newTestModel(200)
@@ -2598,7 +2506,6 @@ func TestDashboardRotationConfirmNavigationMovesSingleStep(t *testing.T) {
 }
 
 func TestDashboardRotationConfirmErrorLeavesGlobalRefreshAvailable(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.focusedPanel = PanelSidebar
@@ -2627,7 +2534,6 @@ func TestDashboardRotationConfirmErrorLeavesGlobalRefreshAvailable(t *testing.T)
 }
 
 func TestDashboardAgentMailInboxSummaryClearsStaleBadgesOnEmptyRefresh(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.panes = []tmux.Pane{
@@ -2680,7 +2586,6 @@ func TestDashboardAgentMailInboxSummaryClearsStaleBadgesOnEmptyRefresh(t *testin
 }
 
 func TestDashboardAgentMailInboxSummaryAppliesPartialResultsOnError(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.panes = []tmux.Pane{
@@ -2741,7 +2646,6 @@ func TestDashboardAgentMailInboxSummaryAppliesPartialResultsOnError(t *testing.T
 }
 
 func TestDashboardAgentMailInboxSummaryCountsUnreadOnly(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	readAt := &agentmail.FlexTime{Time: time.Now()}
@@ -2838,7 +2742,6 @@ func TestDashboardAgentMailInboxSummaryPublishesAttentionOnlyForUnread(t *testin
 }
 
 func TestDashboardAgentMailOfflineRefreshClearsStaleLockDetails(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(layout.UltraWideViewThreshold)
 	m.agentMailAvailable = true
@@ -2878,7 +2781,6 @@ func TestDashboardAgentMailOfflineRefreshClearsStaleLockDetails(t *testing.T) {
 }
 
 func TestDashboardAgentMailInboxDetailSkipPreservesSummaryCache(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.agentMailInbox = map[string][]agentmail.InboxMessage{
@@ -2906,7 +2808,6 @@ func TestDashboardAgentMailInboxDetailSkipPreservesSummaryCache(t *testing.T) {
 }
 
 func TestDashboardInboxToggleTogglesDetailMode(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.agentMailInbox = map[string][]agentmail.InboxMessage{
@@ -2941,7 +2842,6 @@ func TestDashboardInboxToggleTogglesDetailMode(t *testing.T) {
 }
 
 func TestDashboardAgentMailInboxSummaryPreservesFetchedBodiesAndRefetchesNewIDs(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.showInboxDetails = true
@@ -2986,7 +2886,6 @@ func TestDashboardAgentMailInboxSummaryPreservesFetchedBodiesAndRefetchesNewIDs(
 }
 
 func TestDashboardAgentMailInboxSummaryGenIndependentFromDetailFetch(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	summaryGen := m.nextGen(refreshAgentMailInbox)
@@ -3015,7 +2914,6 @@ func TestDashboardAgentMailInboxSummaryGenIndependentFromDetailFetch(t *testing.
 }
 
 func TestDashboardAgentMailInboxDetailMergesBodiesIntoCurrentSummary(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.agentMailInbox = map[string][]agentmail.InboxMessage{
@@ -3056,7 +2954,6 @@ func TestDashboardAgentMailInboxDetailMergesBodiesIntoCurrentSummary(t *testing.
 }
 
 func TestDashboardAgentMailInboxDetailDoesNotRepopulateClearedSummary(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.agentMailInbox = map[string][]agentmail.InboxMessage{}
@@ -3082,7 +2979,6 @@ func TestDashboardAgentMailInboxDetailDoesNotRepopulateClearedSummary(t *testing
 }
 
 func TestDashboardAgentMailInboxSummaryClearsStaleDetailErrors(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.agentMailInboxErrors["1"] = errors.New("stale detail failure")
@@ -3110,7 +3006,6 @@ func TestDashboardAgentMailInboxSummaryClearsStaleDetailErrors(t *testing.T) {
 }
 
 func TestDashboardRenderPaneDetailShowsInboxBodiesAndErrorsWhenEnabled(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.showInboxDetails = true
@@ -3140,7 +3035,6 @@ func TestDashboardRenderPaneDetailShowsInboxBodiesAndErrorsWhenEnabled(t *testin
 }
 
 func TestDashboardMailRefreshAlsoSchedulesInboxSummary(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.fetchingMailInbox = false
@@ -3167,7 +3061,6 @@ func TestDashboardMailRefreshAlsoSchedulesInboxSummary(t *testing.T) {
 }
 
 func TestDashboardDCGStatusErrorClearsStaleBadgeState(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.dcgEnabled = true
@@ -3207,7 +3100,6 @@ func TestDashboardDCGStatusErrorClearsStaleBadgeState(t *testing.T) {
 }
 
 func TestDashboardConflictsNumericShortcutDoesNotChangePaneSelection(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.panes = []tmux.Pane{
@@ -3246,7 +3138,6 @@ func TestDashboardConflictsNumericShortcutDoesNotChangePaneSelection(t *testing.
 }
 
 func TestDashboardSidebarCyclesActiveSubpanelAndHints(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	m := newTestModel(200)
@@ -3318,7 +3209,6 @@ func TestDashboardSidebarCyclesActiveSubpanelAndHints(t *testing.T) {
 }
 
 func TestRenderHistoryPanel(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(200)
 	m.historyPanel.SetEntries([]history.HistoryEntry{
@@ -3339,7 +3229,6 @@ func TestRenderHistoryPanel(t *testing.T) {
 }
 
 func TestAgentBorderColor(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -3376,7 +3265,6 @@ func TestAgentBorderColor(t *testing.T) {
 }
 
 func TestAgentRowTypePresentation_CanonicalizesAliases(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	aliasPairs := [][2]string{
@@ -3397,7 +3285,6 @@ func TestAgentRowTypePresentation_CanonicalizesAliases(t *testing.T) {
 }
 
 func TestPanelStyles(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	// Test with FocusList (tick=0 for static, tick=5 for animation)
@@ -3423,7 +3310,6 @@ func TestPanelStyles(t *testing.T) {
 }
 
 func TestAgentBorderStyle(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -3452,7 +3338,6 @@ func TestAgentBorderStyle(t *testing.T) {
 }
 
 func TestAgentPanelStyles(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 
@@ -3485,7 +3370,6 @@ func TestAgentPanelStyles(t *testing.T) {
 }
 
 func TestMaxInt(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		a, b, want int
@@ -3500,7 +3384,6 @@ func TestMaxInt(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(fmt.Sprintf("%d_%d", tc.a, tc.b), func(t *testing.T) {
-			t.Parallel()
 			if got := maxInt(tc.a, tc.b); got != tc.want {
 				t.Errorf("maxInt(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
 			}
@@ -3509,7 +3392,6 @@ func TestMaxInt(t *testing.T) {
 }
 
 func TestTruncateRunes(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input  string
@@ -3528,7 +3410,6 @@ func TestTruncateRunes(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
 			got := layout.TruncateRunes(tc.input, tc.maxLen, "…")
 			if got != tc.want {
 				t.Errorf("TruncateRunes(%q, %d) = %q, want %q", tc.input, tc.maxLen, got, tc.want)
@@ -3540,7 +3421,6 @@ func TestTruncateRunes(t *testing.T) {
 // TestHiddenColCountCalculation verifies that HiddenColCount is calculated correctly
 // based on terminal width and column visibility thresholds.
 func TestHiddenColCountCalculation(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name           string
@@ -3587,7 +3467,6 @@ func TestHiddenColCountCalculation(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			dims := CalculateLayout(tc.width, 30)
 
@@ -3614,7 +3493,6 @@ func TestHiddenColCountCalculation(t *testing.T) {
 // TestRenderTableHeaderHiddenIndicator verifies that the header shows "+N hidden"
 // when columns are hidden due to narrow width.
 func TestRenderTableHeaderHiddenIndicator(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name          string
@@ -3651,7 +3529,6 @@ func TestRenderTableHeaderHiddenIndicator(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			m := newTestModel(tc.width)
 			dims := CalculateLayout(tc.width, 30)
@@ -3675,7 +3552,6 @@ func TestRenderTableHeaderHiddenIndicator(t *testing.T) {
 
 // TestRoutingUpdateMsgHandling verifies that RoutingUpdateMsg updates the model correctly.
 func TestRoutingUpdateMsgHandling(t *testing.T) {
-	t.Parallel()
 
 	m := newTestModel(120)
 	m.panes = []tmux.Pane{
@@ -3708,7 +3584,6 @@ func TestRoutingUpdateMsgHandling(t *testing.T) {
 // TestFleetCount_Consistent verifies that fleet counts in stats bar and ticker show same totals
 // This is part of bd-eti6 - Fix Fleet count inconsistency (0/17 vs 17 panes)
 func TestFleetCount_Consistent(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.width = 140
@@ -3775,7 +3650,6 @@ func TestFleetCount_Consistent(t *testing.T) {
 // TestFleetCount_ActiveDefinition verifies that "active" = has non-empty status
 // This tests the fix for bd-eti6
 func TestFleetCount_ActiveDefinition(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.width = 140
@@ -3818,7 +3692,6 @@ func TestFleetCount_ActiveDefinition(t *testing.T) {
 // TestFleetCount_FallbackWhenNoStatus verifies the fallback behavior when
 // paneStatus map is empty (status detection hasn't run yet)
 func TestFleetCount_FallbackWhenNoStatus(t *testing.T) {
-	t.Parallel()
 
 	m := New("test", "")
 	m.width = 140
@@ -3851,7 +3724,6 @@ func TestFleetCount_FallbackWhenNoStatus(t *testing.T) {
 
 // TestFleetCount_AgentTypesSumCorrectly verifies that agent type counts sum to total
 func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name          string
@@ -3873,7 +3745,6 @@ func TestFleetCount_AgentTypesSumCorrectly(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 
 			m := New("test", "")
 			m.width = 140

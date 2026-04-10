@@ -10,7 +10,6 @@ import (
 // =============================================================================
 
 func TestGetProfile_OperatorProfile(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("operator")
 	if profile == nil {
@@ -28,7 +27,6 @@ func TestGetProfile_OperatorProfile(t *testing.T) {
 }
 
 func TestGetProfile_DebugProfile(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("debug")
 	if profile == nil {
@@ -46,7 +44,6 @@ func TestGetProfile_DebugProfile(t *testing.T) {
 }
 
 func TestGetProfile_MinimalProfile(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("minimal")
 	if profile == nil {
@@ -64,7 +61,6 @@ func TestGetProfile_MinimalProfile(t *testing.T) {
 }
 
 func TestGetProfile_AlertsProfile(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("alerts")
 	if profile == nil {
@@ -89,7 +85,6 @@ func TestGetProfile_AlertsProfile(t *testing.T) {
 }
 
 func TestGetProfile_UnknownProfile(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("nonexistent")
 	if profile != nil {
@@ -98,7 +93,6 @@ func TestGetProfile_UnknownProfile(t *testing.T) {
 }
 
 func TestGetProfile_EmptyName(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("")
 	if profile != nil {
@@ -107,7 +101,6 @@ func TestGetProfile_EmptyName(t *testing.T) {
 }
 
 func TestGetProfile_CaseInsensitive(t *testing.T) {
-	t.Parallel()
 
 	tests := []string{"OPERATOR", "Operator", "OpErAtOr", "debug", "DEBUG", "Debug"}
 	expectedNames := []string{"operator", "operator", "operator", "debug", "debug", "debug"}
@@ -126,7 +119,6 @@ func TestGetProfile_CaseInsensitive(t *testing.T) {
 }
 
 func TestGetProfile_Whitespace(t *testing.T) {
-	t.Parallel()
 
 	// GetProfile trims whitespace
 	profile := GetProfile("  operator  ")
@@ -139,7 +131,6 @@ func TestGetProfile_Whitespace(t *testing.T) {
 }
 
 func TestListProfiles_AllBuiltins(t *testing.T) {
-	t.Parallel()
 
 	profiles := ListProfiles()
 	if len(profiles) != len(BuiltinProfiles) {
@@ -168,7 +159,6 @@ func TestListProfiles_AllBuiltins(t *testing.T) {
 }
 
 func TestListProfiles_IsolatedFromBuiltins(t *testing.T) {
-	t.Parallel()
 
 	profiles := ListProfiles()
 	if len(profiles) == 0 {
@@ -191,7 +181,6 @@ func TestListProfiles_IsolatedFromBuiltins(t *testing.T) {
 // =============================================================================
 
 func TestResolveEffectiveFilters_NoProfileNoExplicit(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("", ProfileFilters{})
 
@@ -211,7 +200,6 @@ func TestResolveEffectiveFilters_NoProfileNoExplicit(t *testing.T) {
 }
 
 func TestResolveEffectiveFilters_ProfileOnly(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("minimal", ProfileFilters{})
 
@@ -231,7 +219,6 @@ func TestResolveEffectiveFilters_ProfileOnly(t *testing.T) {
 }
 
 func TestResolveEffectiveFilters_ExplicitOnlyNoProfile(t *testing.T) {
-	t.Parallel()
 
 	explicit := ProfileFilters{
 		MinSeverity:      SeverityWarning,
@@ -259,7 +246,6 @@ func TestResolveEffectiveFilters_ExplicitOnlyNoProfile(t *testing.T) {
 }
 
 func TestResolveEffectiveFilters_UnknownProfile(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("nonexistent", ProfileFilters{})
 
@@ -273,7 +259,6 @@ func TestResolveEffectiveFilters_UnknownProfile(t *testing.T) {
 }
 
 func TestResolveEffectiveFilters_ExcludeTypes(t *testing.T) {
-	t.Parallel()
 
 	explicit := ProfileFilters{
 		ExcludeTypes: []EventType{EventTypePaneOutput, EventTypeSpawn},
@@ -301,7 +286,6 @@ func TestResolveEffectiveFilters_ExcludeTypes(t *testing.T) {
 // =============================================================================
 
 func TestMatchesFilters_CategoryFilter_Matches(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolvedFilters{
 		Categories:       []EventCategory{EventCategorySystem, EventCategoryAlert},
@@ -321,7 +305,6 @@ func TestMatchesFilters_CategoryFilter_Matches(t *testing.T) {
 }
 
 func TestMatchesFilters_CategoryFilter_NoMatch(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolvedFilters{
 		Categories:       []EventCategory{EventCategorySystem},
@@ -341,7 +324,6 @@ func TestMatchesFilters_CategoryFilter_NoMatch(t *testing.T) {
 }
 
 func TestMatchesFilters_CategoryFilter_Empty(t *testing.T) {
-	t.Parallel()
 
 	// Empty categories means all pass
 	filters := ResolvedFilters{
@@ -362,7 +344,6 @@ func TestMatchesFilters_CategoryFilter_Empty(t *testing.T) {
 }
 
 func TestMatchesFilters_SeverityFilter_Meets(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolvedFilters{
 		MinSeverity:      SeverityWarning,
@@ -394,7 +375,6 @@ func TestMatchesFilters_SeverityFilter_Meets(t *testing.T) {
 }
 
 func TestMatchesFilters_ActionabilityFilter_Meets(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolvedFilters{
 		MinSeverity:      SeverityInfo,
@@ -424,7 +404,6 @@ func TestMatchesFilters_ActionabilityFilter_Meets(t *testing.T) {
 }
 
 func TestMatchesFilters_ExcludeTypes(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolvedFilters{
 		MinSeverity:      SeverityInfo,
@@ -457,7 +436,6 @@ func TestMatchesFilters_ExcludeTypes(t *testing.T) {
 }
 
 func TestMatchesFilters_CombinedFilters(t *testing.T) {
-	t.Parallel()
 
 	// Minimal profile-like filters
 	filters := ResolvedFilters{
@@ -539,7 +517,6 @@ func TestMatchesFilters_CombinedFilters(t *testing.T) {
 // =============================================================================
 
 func TestOperatorProfile_FiltersNoiseCorrectly(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("operator", ProfileFilters{})
 
@@ -567,7 +544,6 @@ func TestOperatorProfile_FiltersNoiseCorrectly(t *testing.T) {
 }
 
 func TestDebugProfile_AllowsEverything(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("debug", ProfileFilters{})
 
@@ -585,7 +561,6 @@ func TestDebugProfile_AllowsEverything(t *testing.T) {
 }
 
 func TestMinimalProfile_OnlyCriticalActions(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("minimal", ProfileFilters{})
 
@@ -613,7 +588,6 @@ func TestMinimalProfile_OnlyCriticalActions(t *testing.T) {
 }
 
 func TestAlertsProfile_OnlyAlertCategory(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("alerts", ProfileFilters{})
 

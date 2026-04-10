@@ -193,7 +193,6 @@ func TestStreamManagerIntegration(t *testing.T) {
 }
 
 func TestStreamTopicForTarget(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string

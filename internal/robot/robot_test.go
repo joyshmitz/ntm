@@ -1870,7 +1870,6 @@ func TestPrintSnapshotWithSession(t *testing.T) {
 // ====================
 
 func TestAgentTypeString(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input    tmux.AgentType
@@ -5652,7 +5651,6 @@ func TestUpdateActivityLinesDelta(t *testing.T) {
 }
 
 func TestEnsureProjectWithRetryRetriesDatabaseLock(t *testing.T) {
-	t.Parallel()
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5688,7 +5686,6 @@ func TestEnsureProjectWithRetryRetriesDatabaseLock(t *testing.T) {
 }
 
 func TestEnsureProjectWithRetryDoesNotRetryNonLockErrors(t *testing.T) {
-	t.Parallel()
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5712,7 +5709,6 @@ func TestEnsureProjectWithRetryDoesNotRetryNonLockErrors(t *testing.T) {
 }
 
 func TestIsAgentMailDBLockError(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -5752,7 +5748,6 @@ func TestIsAgentMailDBLockError(t *testing.T) {
 }
 
 func TestGetInboxTallyAndCountInboxIgnoreReadMessages(t *testing.T) {
-	t.Parallel()
 
 	readAt := &agentmail.FlexTime{Time: time.Now()}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6051,7 +6046,6 @@ func TestBuildCorrelationGraphMailSummaryIgnoresReadMessagesForUnreadCounts(t *t
 // =============================================================================
 
 func TestBuildSnapshotAttentionSummary_NilFeed(t *testing.T) {
-	t.Parallel()
 	summary := buildSnapshotAttentionSummary(nil)
 	if summary != nil {
 		t.Error("expected nil summary for nil feed")
@@ -6059,7 +6053,6 @@ func TestBuildSnapshotAttentionSummary_NilFeed(t *testing.T) {
 }
 
 func TestBuildSnapshotAttentionSummary_EmptyFeedBasic(t *testing.T) {
-	t.Parallel()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       100,
 		RetentionPeriod:   time.Hour,
@@ -6083,7 +6076,6 @@ func TestBuildSnapshotAttentionSummary_EmptyFeedBasic(t *testing.T) {
 }
 
 func TestBuildSnapshotAttentionSummary_WithEvents(t *testing.T) {
-	t.Parallel()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       100,
 		RetentionPeriod:   time.Hour,
@@ -6146,7 +6138,6 @@ func TestBuildSnapshotAttentionSummary_WithEvents(t *testing.T) {
 }
 
 func TestBuildSnapshotAttentionSummary_TopItemsCapped(t *testing.T) {
-	t.Parallel()
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       100,
 		RetentionPeriod:   time.Hour,

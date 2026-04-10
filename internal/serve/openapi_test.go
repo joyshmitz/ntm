@@ -559,7 +559,6 @@ func TestGenerateOpenAPISpec_WithRESTCommands(t *testing.T) {
 
 // TestHandleOpenAPISpec exercises the handler that serves the OpenAPI JSON.
 func TestHandleOpenAPISpec_Handler(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rr := httptest.NewRecorder()
@@ -589,7 +588,6 @@ func TestHandleOpenAPISpec_Handler(t *testing.T) {
 
 // TestHandleSwaggerUI exercises the Swagger UI HTML handler.
 func TestHandleSwaggerUI_Handler(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 
 	rr := httptest.NewRecorder()

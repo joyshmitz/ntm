@@ -10,7 +10,6 @@ import (
 // They cover concurrency, nil-value handling, and edge cases not covered there.
 
 func TestTrendTracker_SeparatePaneTracking(t *testing.T) {
-	t.Parallel()
 
 	tt := NewTrendTracker(5)
 	now := time.Now()
@@ -34,7 +33,6 @@ func TestTrendTracker_SeparatePaneTracking(t *testing.T) {
 }
 
 func TestTrendTracker_NilContextValues(t *testing.T) {
-	t.Parallel()
 
 	tt := NewTrendTracker(5)
 	now := time.Now()
@@ -54,7 +52,6 @@ func TestTrendTracker_NilContextValues(t *testing.T) {
 }
 
 func TestTrendTracker_MixedNilAndValues(t *testing.T) {
-	t.Parallel()
 
 	tt := NewTrendTracker(5)
 	now := time.Now()
@@ -75,7 +72,6 @@ func TestTrendTracker_MixedNilAndValues(t *testing.T) {
 }
 
 func TestTrendTracker_ConcurrentAccess(t *testing.T) {
-	t.Parallel()
 
 	tt := NewTrendTracker(100)
 	var wg sync.WaitGroup
@@ -110,7 +106,6 @@ func TestTrendTracker_ConcurrentAccess(t *testing.T) {
 }
 
 func TestTrendTypeConstants(t *testing.T) {
-	t.Parallel()
 
 	expected := map[TrendType]string{
 		TrendDeclining: "declining",
@@ -127,7 +122,6 @@ func TestTrendTypeConstants(t *testing.T) {
 }
 
 func TestClassifyTrend_Boundaries(t *testing.T) {
-	t.Parallel()
 
 	// Test exact boundary values
 	tests := []struct {
@@ -152,7 +146,6 @@ func TestClassifyTrend_Boundaries(t *testing.T) {
 }
 
 func TestTrendInfo_EmptyPaneFields(t *testing.T) {
-	t.Parallel()
 
 	tt := NewTrendTracker(5)
 

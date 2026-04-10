@@ -11,7 +11,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestScannerStore_GetScan_NotFound(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	_, ok := store.GetScan("nonexistent")
@@ -21,7 +20,6 @@ func TestScannerStore_GetScan_NotFound(t *testing.T) {
 }
 
 func TestScannerStore_GetScan_Found(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	scan := &ScanRecord{
@@ -44,7 +42,6 @@ func TestScannerStore_GetScan_Found(t *testing.T) {
 }
 
 func TestScannerStore_UpdateScan(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	scan := &ScanRecord{
@@ -56,13 +53,10 @@ func TestScannerStore_UpdateScan(t *testing.T) {
 
 	// Update the scan
 	now := time.Now()
-	updated := &ScanRecord{
-		ID:          "scan-update",
-		State:       ScanStateCompleted,
-		Path:        "/project",
-		CompletedAt: &now,
-	}
-	store.UpdateScan(updated)
+	store.UpdateScan("scan-update", func(sr *ScanRecord) {
+		sr.State = ScanStateCompleted
+		sr.CompletedAt = &now
+	})
 
 	got, ok := store.GetScan("scan-update")
 	if !ok {
@@ -77,7 +71,6 @@ func TestScannerStore_UpdateScan(t *testing.T) {
 }
 
 func TestScannerStore_GetFindingsByScan_Empty(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	findings := store.GetFindingsByScan("no-such-scan")
@@ -87,7 +80,6 @@ func TestScannerStore_GetFindingsByScan_Empty(t *testing.T) {
 }
 
 func TestScannerStore_GetFindingsByScan_Filters(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 
@@ -108,7 +100,6 @@ func TestScannerStore_GetFindingsByScan_Filters(t *testing.T) {
 }
 
 func TestScannerStore_GetFindingsByScan_AllSameScan(t *testing.T) {
-	t.Parallel()
 
 	store := NewScannerStore()
 	for i := 0; i < 5; i++ {
@@ -130,7 +121,6 @@ func TestScannerStore_GetFindingsByScan_AllSameScan(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestJobStore_Delete_NotFound(t *testing.T) {
-	t.Parallel()
 
 	store := NewJobStore()
 	ok := store.Delete("nonexistent")
@@ -140,7 +130,6 @@ func TestJobStore_Delete_NotFound(t *testing.T) {
 }
 
 func TestJobStore_Delete_Found(t *testing.T) {
-	t.Parallel()
 
 	store := NewJobStore()
 	job := store.Create("test-job")
@@ -158,7 +147,6 @@ func TestJobStore_Delete_Found(t *testing.T) {
 }
 
 func TestJobStore_Delete_Idempotent(t *testing.T) {
-	t.Parallel()
 
 	store := NewJobStore()
 	job := store.Create("test-job")
@@ -175,7 +163,6 @@ func TestJobStore_Delete_Idempotent(t *testing.T) {
 }
 
 func TestJobStore_CRUD_Lifecycle(t *testing.T) {
-	t.Parallel()
 
 	store := NewJobStore()
 
@@ -219,7 +206,6 @@ func TestJobStore_CRUD_Lifecycle(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMemoryStore_DefaultDaemonInfo(t *testing.T) {
-	t.Parallel()
 
 	store := NewMemoryStore()
 	info := store.GetDaemonInfo()
@@ -233,7 +219,6 @@ func TestMemoryStore_DefaultDaemonInfo(t *testing.T) {
 }
 
 func TestMemoryStore_SetAndGetDaemonInfo(t *testing.T) {
-	t.Parallel()
 
 	store := NewMemoryStore()
 	newInfo := &MemoryDaemonInfo{
@@ -256,7 +241,6 @@ func TestMemoryStore_SetAndGetDaemonInfo(t *testing.T) {
 }
 
 func TestMemoryStore_GetDaemonInfoReturnsCopy(t *testing.T) {
-	t.Parallel()
 
 	store := NewMemoryStore()
 	startedAt := time.Now().UTC()
@@ -302,7 +286,6 @@ func TestMemoryStore_GetDaemonInfoReturnsCopy(t *testing.T) {
 }
 
 func TestMemoryStore_SetDaemonInfo_Overwrite(t *testing.T) {
-	t.Parallel()
 
 	store := NewMemoryStore()
 
@@ -323,7 +306,6 @@ func TestMemoryStore_SetDaemonInfo_Overwrite(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWSClient_Topics_Empty(t *testing.T) {
-	t.Parallel()
 
 	client := &WSClient{
 		topics: make(map[string]struct{}),
@@ -336,7 +318,6 @@ func TestWSClient_Topics_Empty(t *testing.T) {
 }
 
 func TestWSClient_Topics_WithSubscriptions(t *testing.T) {
-	t.Parallel()
 
 	client := &WSClient{
 		topics: map[string]struct{}{
@@ -361,7 +342,6 @@ func TestWSClient_Topics_WithSubscriptions(t *testing.T) {
 }
 
 func TestWSClient_Topics_SingleTopic(t *testing.T) {
-	t.Parallel()
 
 	client := &WSClient{
 		topics: map[string]struct{}{"events": {}},

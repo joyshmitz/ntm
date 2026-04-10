@@ -429,7 +429,6 @@ func TestBulkAssignSkipPanesParsing(t *testing.T) {
 }
 
 func TestParseBulkAssignSkipPanes_EdgeCases(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string

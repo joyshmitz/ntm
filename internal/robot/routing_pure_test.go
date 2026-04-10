@@ -7,7 +7,6 @@ import "testing"
 // =============================================================================
 
 func TestContextUsageForPane(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -25,7 +24,6 @@ func TestContextUsageForPane(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := contextUsageForPane(tc.usage, tc.paneIndex)
 			if got != tc.want {
 				t.Errorf("contextUsageForPane(_, %d) = %f, want %f", tc.paneIndex, got, tc.want)

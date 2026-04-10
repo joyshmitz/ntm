@@ -12,7 +12,6 @@ import (
 // =============================================================================
 
 func TestSplitJSONLines(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -60,7 +59,6 @@ func TestSplitJSONLines(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := splitJSONLines(tc.input)
 			if len(got) != tc.wantLen {
 				t.Errorf("splitJSONLines() returned %d lines, want %d", len(got), tc.wantLen)
@@ -82,10 +80,8 @@ func TestSplitJSONLines(t *testing.T) {
 // =============================================================================
 
 func TestAggregateTokenStats(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty events", func(t *testing.T) {
-		t.Parallel()
 		output := aggregateTokenStats(nil, 7, "", "agent")
 		if output.TotalTokens != 0 {
 			t.Errorf("expected 0 total tokens, got %d", output.TotalTokens)
@@ -99,7 +95,6 @@ func TestAggregateTokenStats(t *testing.T) {
 	})
 
 	t.Run("prompt events aggregate correctly", func(t *testing.T) {
-		t.Parallel()
 		eventList := []events.Event{
 			{
 				Type:      events.EventPromptSend,
@@ -134,7 +129,6 @@ func TestAggregateTokenStats(t *testing.T) {
 	})
 
 	t.Run("session create tracks spawns with token usage", func(t *testing.T) {
-		t.Parallel()
 		// AgentStats are only populated for agents with token usage,
 		// so we need both session create and prompt events.
 		eventList := []events.Event{
@@ -190,7 +184,6 @@ func TestAggregateTokenStats(t *testing.T) {
 	})
 
 	t.Run("group by day", func(t *testing.T) {
-		t.Parallel()
 		eventList := []events.Event{
 			{
 				Type:      events.EventPromptSend,
@@ -222,7 +215,6 @@ func TestAggregateTokenStats(t *testing.T) {
 	})
 
 	t.Run("group by model", func(t *testing.T) {
-		t.Parallel()
 		eventList := []events.Event{
 			{
 				Type:      events.EventPromptSend,
@@ -246,7 +238,6 @@ func TestAggregateTokenStats(t *testing.T) {
 	})
 
 	t.Run("breakdown sorted by tokens descending", func(t *testing.T) {
-		t.Parallel()
 		eventList := []events.Event{
 			{
 				Type:      events.EventPromptSend,

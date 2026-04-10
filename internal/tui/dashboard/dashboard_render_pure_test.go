@@ -22,7 +22,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestRchStatusActive(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -65,7 +64,6 @@ func TestRchStatusActive(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := rchStatusActive(tc.status)
 			if got != tc.want {
 				t.Errorf("rchStatusActive() = %v, want %v", got, tc.want)
@@ -86,7 +84,6 @@ func (m mockSizedPanel) Width() int  { return m.w }
 func (m mockSizedPanel) Height() int { return m.h }
 
 func TestLogPanelSize(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -102,7 +99,6 @@ func TestLogPanelSize(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := logPanelSize(tc.pname, tc.panel)
 			if got != tc.want {
 				t.Errorf("logPanelSize(%q, ...) = %q, want %q", tc.pname, got, tc.want)
@@ -116,7 +112,6 @@ func TestLogPanelSize(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHasMetricsData(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -138,7 +133,6 @@ func TestHasMetricsData(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := hasMetricsData(tc.data)
 			if got != tc.want {
 				t.Errorf("hasMetricsData() = %v, want %v", got, tc.want)
@@ -152,7 +146,6 @@ func TestHasMetricsData(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSlicesEqual(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -171,7 +164,6 @@ func TestSlicesEqual(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := slicesEqual(tc.a, tc.b)
 			if got != tc.want {
 				t.Errorf("slicesEqual(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
@@ -185,10 +177,8 @@ func TestSlicesEqual(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecordCostOutputDelta(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty pane ID returns early", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{}
 		m.recordCostOutputDelta("", "gpt-4", "old", "new")
 		if m.costOutputTokens != nil {
@@ -197,7 +187,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("empty current output returns early", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{}
 		m.recordCostOutputDelta("p1", "gpt-4", "old", "")
 		if m.costOutputTokens != nil {
@@ -206,7 +195,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("nil maps initialized on valid input", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{}
 		m.recordCostOutputDelta("p1", "gpt-4", "", "some new output here with enough tokens to register")
 		if m.costOutputTokens == nil {
@@ -218,7 +206,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("identical output no delta", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{}
 		m.recordCostOutputDelta("p1", "gpt-4", "same\ntext\n", "same\ntext\n")
 		if m.costOutputTokens != nil && m.costOutputTokens["p1"] > 0 {
@@ -227,7 +214,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("new output records tokens and model", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{
 			costOutputTokens: make(map[string]int),
 			costModels:       make(map[string]string),
@@ -242,7 +228,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("empty model name not stored", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{
 			costOutputTokens: make(map[string]int),
 			costModels:       make(map[string]string),
@@ -254,7 +239,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 	})
 
 	t.Run("tokens accumulate across calls", func(t *testing.T) {
-		t.Parallel()
 		m := &Model{
 			costOutputTokens: make(map[string]int),
 			costModels:       make(map[string]string),
@@ -276,7 +260,6 @@ func TestRecordCostOutputDelta(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderHealthBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -298,7 +281,6 @@ func TestRenderHealthBadge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			m := Model{theme: th, healthStatus: tc.healthStatus}
 			got := m.renderHealthBadge()
 			if tc.wantEmpty && got != "" {
@@ -319,7 +301,6 @@ func TestRenderHealthBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderScanBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -342,7 +323,6 @@ func TestRenderScanBadge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			m := Model{theme: th, scanStatus: tc.scanStatus, scanTotals: tc.scanTotals}
 			got := m.renderScanBadge()
 			if tc.wantEmpty && got != "" {
@@ -363,7 +343,6 @@ func TestRenderScanBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderAgentMailBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -383,7 +362,6 @@ func TestRenderAgentMailBadge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			m := Model{
 				theme:              th,
 				agentMailAvailable: tc.available,
@@ -409,7 +387,6 @@ func TestRenderAgentMailBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderCheckpointBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -431,7 +408,6 @@ func TestRenderCheckpointBadge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			m := Model{
 				theme:            th,
 				checkpointCount:  tc.count,
@@ -456,7 +432,6 @@ func TestRenderCheckpointBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderDCGBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
@@ -478,7 +453,6 @@ func TestRenderDCGBadge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			m := Model{
 				theme:        th,
 				dcgEnabled:   tc.enabled,
@@ -505,12 +479,10 @@ func TestRenderDCGBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderRateLimitAlert(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
 	t.Run("no rate limited panes", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme: th,
 			panes: []tmux.Pane{
@@ -529,7 +501,6 @@ func TestRenderRateLimitAlert(t *testing.T) {
 	})
 
 	t.Run("single rate limited pane", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:   th,
 			session: "myproj",
@@ -556,7 +527,6 @@ func TestRenderRateLimitAlert(t *testing.T) {
 	})
 
 	t.Run("multiple rate limited panes", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:   th,
 			session: "myproj",
@@ -582,7 +552,6 @@ func TestRenderRateLimitAlert(t *testing.T) {
 	})
 
 	t.Run("empty panes list", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th}
 		got := m.renderRateLimitAlert()
 		if got != "" {
@@ -591,7 +560,6 @@ func TestRenderRateLimitAlert(t *testing.T) {
 	})
 
 	t.Run("pane status missing", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:      th,
 			panes:      []tmux.Pane{{Index: 1, Type: tmux.AgentClaude}},
@@ -609,7 +577,6 @@ func TestRenderRateLimitAlert(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTierLabel(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -626,7 +593,6 @@ func TestTierLabel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := tierLabel(tc.tier)
 			if got != tc.want {
 				t.Errorf("tierLabel(%d) = %q, want %q", tc.tier, got, tc.want)
@@ -640,7 +606,6 @@ func TestTierLabel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNormalizeHelpVerbosity(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -657,7 +622,6 @@ func TestNormalizeHelpVerbosity(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := normalizedHelpVerbosity(tc.input)
 			if got != tc.want {
 				t.Errorf("normalizedHelpVerbosity(%q) = %q, want %q", tc.input, got, tc.want)
@@ -671,12 +635,10 @@ func TestNormalizeHelpVerbosity(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 
 	t.Run("default ok state", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th}
 		got := m.renderDiagnosticsBar(80)
 		if !strings.Contains(got, "diag") {
@@ -685,7 +647,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("fetching session state", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:           th,
 			fetchingSession: true,
@@ -698,7 +659,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("session fetch latency", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:               th,
 			sessionFetchLatency: 250 * time.Millisecond,
@@ -710,7 +670,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("session error overrides latency", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:               th,
 			sessionFetchLatency: 100 * time.Millisecond,
@@ -723,7 +682,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("fetching context state", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:            th,
 			fetchingContext:  true,
@@ -736,7 +694,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("status fetch latency", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:              th,
 			statusFetchLatency: 150 * time.Millisecond,
@@ -748,7 +705,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("status fetch error overrides latency", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:              th,
 			statusFetchLatency: 100 * time.Millisecond,
@@ -761,7 +717,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("wide width shows age section", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th}
 		m.lastUpdated[refreshSession] = time.Now().Add(-30 * time.Second)
 		got := m.renderDiagnosticsBar(120)
@@ -774,7 +729,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("narrow width hides age", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th}
 		got := m.renderDiagnosticsBar(100)
 		if strings.Contains(got, "age") {
@@ -783,7 +737,6 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 	})
 
 	t.Run("age with zero timestamps shows n/a", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th}
 		got := m.renderDiagnosticsBar(120)
 		if !strings.Contains(got, "n/a") {
@@ -797,13 +750,11 @@ func TestRenderDiagnosticsBar_BranchCoverage(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderStatsBar(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 	ic := icons.Current()
 
 	t.Run("minimal with no agents", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic}
 		got := m.renderStatsBar()
 		if !strings.Contains(got, "0 panes") {
@@ -812,7 +763,6 @@ func TestRenderStatsBar(t *testing.T) {
 	})
 
 	t.Run("with claude agents", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic, claudeCount: 3}
 		got := m.renderStatsBar()
 		if !strings.Contains(got, "3") {
@@ -821,7 +771,6 @@ func TestRenderStatsBar(t *testing.T) {
 	})
 
 	t.Run("with codex agents", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic, codexCount: 2}
 		got := m.renderStatsBar()
 		if !strings.Contains(got, "2") {
@@ -830,7 +779,6 @@ func TestRenderStatsBar(t *testing.T) {
 	})
 
 	t.Run("with gemini agents", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic, geminiCount: 1}
 		got := m.renderStatsBar()
 		if !strings.Contains(got, "1") {
@@ -839,7 +787,6 @@ func TestRenderStatsBar(t *testing.T) {
 	})
 
 	t.Run("with user panes", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic, userCount: 1}
 		got := m.renderStatsBar()
 		if !strings.Contains(got, "1") {
@@ -848,7 +795,6 @@ func TestRenderStatsBar(t *testing.T) {
 	})
 
 	t.Run("with all badges", func(t *testing.T) {
-		t.Parallel()
 		m := Model{
 			theme:              th,
 			icons:              ic,
@@ -880,13 +826,11 @@ func TestRenderStatsBar(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderAttentionBadge(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 	ic := icons.Current()
 
 	t.Run("empty when no attention panel", func(t *testing.T) {
-		t.Parallel()
 		m := Model{theme: th, icons: ic, attentionPanel: nil, attentionFeedOK: true}
 		got := m.renderAttentionBadge()
 		if got != "" {
@@ -895,7 +839,6 @@ func TestRenderAttentionBadge(t *testing.T) {
 	})
 
 	t.Run("empty when feed not available", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "test", Actionability: robot.ActionabilityActionRequired},
@@ -908,7 +851,6 @@ func TestRenderAttentionBadge(t *testing.T) {
 	})
 
 	t.Run("empty when no items", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData(nil, true)
 		m := Model{theme: th, icons: ic, attentionPanel: ap, attentionFeedOK: true}
@@ -919,7 +861,6 @@ func TestRenderAttentionBadge(t *testing.T) {
 	})
 
 	t.Run("shows action required count", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "critical1", Actionability: robot.ActionabilityActionRequired},
@@ -936,7 +877,6 @@ func TestRenderAttentionBadge(t *testing.T) {
 	})
 
 	t.Run("shows interesting count", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "interesting1", Actionability: robot.ActionabilityInteresting},
@@ -954,7 +894,6 @@ func TestRenderAttentionBadge(t *testing.T) {
 	})
 
 	t.Run("shows both action and interesting counts", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "action", Actionability: robot.ActionabilityActionRequired},
@@ -974,13 +913,11 @@ func TestRenderAttentionBadge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 	ic := icons.Current()
 
 	t.Run("overlay badge calm when no attention items", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData(nil, true)
 		m := Model{theme: th, icons: ic, popupMode: true, attentionPanel: ap, attentionFeedOK: true}
@@ -996,7 +933,6 @@ func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
 	})
 
 	t.Run("overlay badge shows action count", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "critical", Actionability: robot.ActionabilityActionRequired},
@@ -1013,7 +949,6 @@ func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
 	})
 
 	t.Run("overlay badge shows interesting count when no action items", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "interesting", Actionability: robot.ActionabilityInteresting},
@@ -1026,7 +961,6 @@ func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
 	})
 
 	t.Run("overlay badge stays calm when feed is unavailable", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "critical", Actionability: robot.ActionabilityActionRequired},
@@ -1047,13 +981,11 @@ func TestOverlayBadgeReflectsAttentionState(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStatsBarIncludesAttentionBadgeWhenNotPopup(t *testing.T) {
-	t.Parallel()
 
 	th := theme.Current()
 	ic := icons.Current()
 
 	t.Run("attention badge shown in non-popup mode", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "action", Actionability: robot.ActionabilityActionRequired},
@@ -1066,7 +998,6 @@ func TestStatsBarIncludesAttentionBadgeWhenNotPopup(t *testing.T) {
 	})
 
 	t.Run("attention badge not duplicated in popup mode", func(t *testing.T) {
-		t.Parallel()
 		ap := panels.NewAttentionPanel()
 		ap.SetData([]panels.AttentionItem{
 			{Summary: "action", Actionability: robot.ActionabilityActionRequired},

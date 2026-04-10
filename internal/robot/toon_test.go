@@ -165,7 +165,6 @@ func TestToonEncode_JSONMarshalError(t *testing.T) {
 // =============================================================================
 
 func TestFilepathBase(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -194,7 +193,6 @@ func TestFilepathBase(t *testing.T) {
 }
 
 func TestLooksLikeToonRustVersion(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -223,7 +221,6 @@ func TestLooksLikeToonRustVersion(t *testing.T) {
 }
 
 func TestToonDelimiterArg(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		input string

@@ -8,7 +8,6 @@ import (
 )
 
 func TestParseFile_YAML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -46,7 +45,6 @@ steps:
 }
 
 func TestParseFile_TOML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version = "2.0"
@@ -77,7 +75,6 @@ prompt = "Do something"
 }
 
 func TestParseFile_UnsupportedExtension(t *testing.T) {
-	t.Parallel()
 
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "workflow.json")
@@ -92,7 +89,6 @@ func TestParseFile_UnsupportedExtension(t *testing.T) {
 }
 
 func TestParseFile_InvalidYAML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -114,7 +110,6 @@ steps:
 }
 
 func TestParseFile_FileNotFound(t *testing.T) {
-	t.Parallel()
 
 	_, err := ParseFile("/nonexistent/path/workflow.yaml")
 	if err == nil {
@@ -123,7 +118,6 @@ func TestParseFile_FileNotFound(t *testing.T) {
 }
 
 func TestParseString_YAML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -144,7 +138,6 @@ steps:
 }
 
 func TestParseString_TOML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version = "2.0"
@@ -166,7 +159,6 @@ prompt = "test"
 }
 
 func TestValidate_MissingSchemaVersion(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		Name: "test",
@@ -193,7 +185,6 @@ func TestValidate_MissingSchemaVersion(t *testing.T) {
 }
 
 func TestValidate_MissingName(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -209,7 +200,6 @@ func TestValidate_MissingName(t *testing.T) {
 }
 
 func TestValidate_NoSteps(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -224,7 +214,6 @@ func TestValidate_NoSteps(t *testing.T) {
 }
 
 func TestValidate_DuplicateStepIDs(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -242,7 +231,6 @@ func TestValidate_DuplicateStepIDs(t *testing.T) {
 }
 
 func TestValidate_InvalidStepID(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -259,7 +247,6 @@ func TestValidate_InvalidStepID(t *testing.T) {
 }
 
 func TestValidate_MissingPromptAndParallel(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -276,7 +263,6 @@ func TestValidate_MissingPromptAndParallel(t *testing.T) {
 }
 
 func TestValidate_BothPromptAndParallel(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -297,7 +283,6 @@ func TestValidate_BothPromptAndParallel(t *testing.T) {
 }
 
 func TestValidate_MultipleAgentSelectionMethods(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -319,7 +304,6 @@ func TestValidate_MultipleAgentSelectionMethods(t *testing.T) {
 }
 
 func TestValidate_InvalidRoute(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -340,7 +324,6 @@ func TestValidate_InvalidRoute(t *testing.T) {
 }
 
 func TestValidate_InvalidErrorAction(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -361,7 +344,6 @@ func TestValidate_InvalidErrorAction(t *testing.T) {
 }
 
 func TestValidate_AllowsFailFastErrorAction(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -382,7 +364,6 @@ func TestValidate_AllowsFailFastErrorAction(t *testing.T) {
 }
 
 func TestValidate_InvalidWorkflowSettingsErrorAction(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -408,7 +389,6 @@ func TestValidate_InvalidWorkflowSettingsErrorAction(t *testing.T) {
 }
 
 func TestValidate_RetryWithZeroCount(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -434,7 +414,6 @@ func TestValidate_RetryWithZeroCount(t *testing.T) {
 }
 
 func TestValidate_CircularDependency(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -463,7 +442,6 @@ func TestValidate_CircularDependency(t *testing.T) {
 }
 
 func TestValidate_CycleWithExternalDependency(t *testing.T) {
-	t.Parallel()
 
 	// This tests the bug where a node depending on a cycle member
 	// was incorrectly reported as part of a cycle
@@ -495,7 +473,6 @@ func TestValidate_CycleWithExternalDependency(t *testing.T) {
 }
 
 func TestValidate_CycleInLoopSubsteps(t *testing.T) {
-	t.Parallel()
 
 	// This tests that cycles within loop sub-steps are detected
 	w := &Workflow{
@@ -534,7 +511,6 @@ func TestValidate_CycleInLoopSubsteps(t *testing.T) {
 }
 
 func TestValidate_ValidWorkflow(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -562,7 +538,6 @@ func TestValidate_ValidWorkflow(t *testing.T) {
 }
 
 func TestValidate_ParallelSteps(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -591,7 +566,6 @@ func TestValidate_ParallelSteps(t *testing.T) {
 }
 
 func TestValidate_UnknownAgentType(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -612,7 +586,6 @@ func TestValidate_UnknownAgentType(t *testing.T) {
 }
 
 func TestValidate_InvalidWaitCondition(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -629,7 +602,6 @@ func TestValidate_InvalidWaitCondition(t *testing.T) {
 }
 
 func TestValidate_LoopWithMissingItems(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -652,7 +624,6 @@ func TestValidate_LoopWithMissingItems(t *testing.T) {
 }
 
 func TestValidate_LoopNegativeMaxIterations(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -677,7 +648,6 @@ func TestValidate_LoopNegativeMaxIterations(t *testing.T) {
 }
 
 func TestValidate_VariableReferences(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -698,7 +668,6 @@ func TestValidate_VariableReferences(t *testing.T) {
 }
 
 func TestValidate_VariableReferencesInLoopSubsteps(t *testing.T) {
-	t.Parallel()
 
 	// This tests that variable references in loop sub-steps are validated
 	w := &Workflow{
@@ -738,7 +707,6 @@ func TestValidate_VariableReferencesInLoopSubsteps(t *testing.T) {
 }
 
 func TestValidate_VariableReferencesInWhenCondition(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -772,7 +740,6 @@ func TestValidate_VariableReferencesInWhenCondition(t *testing.T) {
 }
 
 func TestValidate_VariableReferencesInParallelSubsteps(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -807,7 +774,6 @@ func TestValidate_VariableReferencesInParallelSubsteps(t *testing.T) {
 }
 
 func TestLoadAndValidate(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -836,7 +802,6 @@ steps:
 }
 
 func TestIsValidID(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		id    string
@@ -865,7 +830,6 @@ func TestIsValidID(t *testing.T) {
 }
 
 func TestNormalizeAgentType(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input    string
@@ -914,7 +878,6 @@ func TestNormalizeAgentType(t *testing.T) {
 }
 
 func TestIsValidAgentType(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input    string
@@ -963,7 +926,6 @@ func TestIsValidAgentType(t *testing.T) {
 }
 
 func TestParseError_Error(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		err      ParseError
@@ -1000,7 +962,6 @@ func TestParseError_Error(t *testing.T) {
 }
 
 func TestIsValidPath(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -1051,7 +1012,6 @@ func TestIsValidPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := isValidPath(tt.path)
 			if got != tt.want {
 				t.Errorf("isValidPath(%q) = %v, want %v", tt.path, got, tt.want)
@@ -1061,7 +1021,6 @@ func TestIsValidPath(t *testing.T) {
 }
 
 func TestIsValidRoute(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		route RoutingStrategy
@@ -1076,7 +1035,6 @@ func TestIsValidRoute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.route), func(t *testing.T) {
-			t.Parallel()
 			got := isValidRoute(tt.route)
 			if got != tt.want {
 				t.Errorf("isValidRoute(%q) = %v, want %v", tt.route, got, tt.want)
@@ -1086,7 +1044,6 @@ func TestIsValidRoute(t *testing.T) {
 }
 
 func TestIsValidErrorAction(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		action ErrorAction
@@ -1102,7 +1059,6 @@ func TestIsValidErrorAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.action), func(t *testing.T) {
-			t.Parallel()
 			got := isValidErrorAction(tt.action)
 			if got != tt.want {
 				t.Errorf("isValidErrorAction(%q) = %v, want %v", tt.action, got, tt.want)
@@ -1112,7 +1068,6 @@ func TestIsValidErrorAction(t *testing.T) {
 }
 
 func TestIsValidWaitCondition(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		cond WaitCondition
@@ -1128,7 +1083,6 @@ func TestIsValidWaitCondition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.cond), func(t *testing.T) {
-			t.Parallel()
 			got := isValidWaitCondition(tt.cond)
 			if got != tt.want {
 				t.Errorf("isValidWaitCondition(%q) = %v, want %v", tt.cond, got, tt.want)
@@ -1138,7 +1092,6 @@ func TestIsValidWaitCondition(t *testing.T) {
 }
 
 func TestParseString_UnsupportedFormat(t *testing.T) {
-	t.Parallel()
 
 	_, err := ParseString("{}", "json")
 	if err == nil {
@@ -1158,7 +1111,6 @@ func TestParseString_UnsupportedFormat(t *testing.T) {
 }
 
 func TestParseString_InvalidYAML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 name: test
@@ -1181,7 +1133,6 @@ steps:
 }
 
 func TestParseString_InvalidTOML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 name = "test"
@@ -1202,7 +1153,6 @@ invalid toml [here
 }
 
 func TestParseString_YMLFormat(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -1222,7 +1172,6 @@ steps:
 }
 
 func TestParseFile_InvalidTOML(t *testing.T) {
-	t.Parallel()
 
 	content := `
 name = "test"
@@ -1241,7 +1190,6 @@ invalid toml [here
 }
 
 func TestValidate_StepWithPromptAndParallel(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1275,7 +1223,6 @@ func TestValidate_StepWithPromptAndParallel(t *testing.T) {
 }
 
 func TestValidate_StepWithUnknownAgent(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1304,7 +1251,6 @@ func TestValidate_StepWithUnknownAgent(t *testing.T) {
 }
 
 func TestValidate_StepWithExtendedSupportedAgentDoesNotWarn(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1327,7 +1273,6 @@ func TestValidate_StepWithExtendedSupportedAgentDoesNotWarn(t *testing.T) {
 }
 
 func TestValidate_StepWithInvalidRoute(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1359,7 +1304,6 @@ func TestValidate_StepWithInvalidRoute(t *testing.T) {
 }
 
 func TestValidate_StepWithMultipleAgentMethods(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1393,7 +1337,6 @@ func TestValidate_StepWithMultipleAgentMethods(t *testing.T) {
 }
 
 func TestValidate_IncompleteVarsReference(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1421,7 +1364,6 @@ func TestValidate_IncompleteVarsReference(t *testing.T) {
 }
 
 func TestValidate_IncompleteStepsReference(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1449,7 +1391,6 @@ func TestValidate_IncompleteStepsReference(t *testing.T) {
 }
 
 func TestValidate_UnknownReferenceType(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1477,7 +1418,6 @@ func TestValidate_UnknownReferenceType(t *testing.T) {
 }
 
 func TestValidate_StepWithEmptyID(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1505,7 +1445,6 @@ func TestValidate_StepWithEmptyID(t *testing.T) {
 }
 
 func TestValidate_StepWithInvalidPromptFile(t *testing.T) {
-	t.Parallel()
 
 	w := &Workflow{
 		SchemaVersion: "2.0",
@@ -1530,7 +1469,6 @@ func TestValidate_StepWithInvalidPromptFile(t *testing.T) {
 }
 
 func TestParseFile_YAMLUnknownField(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -1562,7 +1500,6 @@ steps:
 }
 
 func TestParseFile_TOMLUnknownField(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version = "2.0"
@@ -1598,7 +1535,6 @@ prompt = "Do something"
 }
 
 func TestParseString_YAMLUnknownField(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version: "2.0"
@@ -1625,7 +1561,6 @@ steps:
 }
 
 func TestParseString_TOMLUnknownField(t *testing.T) {
-	t.Parallel()
 
 	content := `
 schema_version = "2.0"
@@ -1656,7 +1591,6 @@ prompt = "Do something"
 }
 
 func TestParseString_YAMLCommentOnly(t *testing.T) {
-	t.Parallel()
 
 	w, err := ParseString("# comment only\n", "yaml")
 	if err != nil {

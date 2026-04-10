@@ -531,7 +531,6 @@ func TestUpdateProviderSummary(t *testing.T) {
 }
 
 func TestFindPTState_NormalizesAgentAliases(t *testing.T) {
-	t.Parallel()
 
 	claudeState := &pt.AgentState{Classification: pt.ClassUseful}
 	codexState := &pt.AgentState{Classification: pt.ClassStuck}
@@ -562,7 +561,6 @@ func TestFindPTState_NormalizesAgentAliases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := findPTState(states, "proj", tc.pane, tc.agentType)
 			if got != tc.want {
 				t.Fatalf("findPTState(..., %q) = %#v, want %#v", tc.agentType, got, tc.want)

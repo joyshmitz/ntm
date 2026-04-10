@@ -10,7 +10,6 @@ import (
 // =============================================================================
 
 func TestClassifyActivity_Active(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(5*time.Second, 30*time.Second, 2*time.Minute)
 	if status != StatusActive {
 		t.Errorf("expected StatusActive, got %s", status)
@@ -18,7 +17,6 @@ func TestClassifyActivity_Active(t *testing.T) {
 }
 
 func TestClassifyActivity_ActiveAtBoundary(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(30*time.Second, 30*time.Second, 2*time.Minute)
 	if status != StatusActive {
 		t.Errorf("expected StatusActive at exact boundary, got %s", status)
@@ -26,7 +24,6 @@ func TestClassifyActivity_ActiveAtBoundary(t *testing.T) {
 }
 
 func TestClassifyActivity_Idle(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(60*time.Second, 30*time.Second, 2*time.Minute)
 	if status != StatusIdle {
 		t.Errorf("expected StatusIdle, got %s", status)
@@ -34,7 +31,6 @@ func TestClassifyActivity_Idle(t *testing.T) {
 }
 
 func TestClassifyActivity_Stalled(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(3*time.Minute, 30*time.Second, 2*time.Minute)
 	if status != StatusStalled {
 		t.Errorf("expected StatusStalled, got %s", status)
@@ -42,7 +38,6 @@ func TestClassifyActivity_Stalled(t *testing.T) {
 }
 
 func TestClassifyActivity_StalledAtBoundary(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(2*time.Minute, 30*time.Second, 2*time.Minute)
 	if status != StatusStalled {
 		t.Errorf("expected StatusStalled at exact boundary, got %s", status)
@@ -50,7 +45,6 @@ func TestClassifyActivity_StalledAtBoundary(t *testing.T) {
 }
 
 func TestClassifyActivity_JustBelowStalled(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(2*time.Minute-time.Second, 30*time.Second, 2*time.Minute)
 	if status != StatusIdle {
 		t.Errorf("expected StatusIdle just below stalled threshold, got %s", status)
@@ -58,7 +52,6 @@ func TestClassifyActivity_JustBelowStalled(t *testing.T) {
 }
 
 func TestClassifyActivity_ZeroDuration(t *testing.T) {
-	t.Parallel()
 	status := ClassifyActivity(0, 30*time.Second, 2*time.Minute)
 	if status != StatusActive {
 		t.Errorf("expected StatusActive for zero duration, got %s", status)
@@ -66,7 +59,6 @@ func TestClassifyActivity_ZeroDuration(t *testing.T) {
 }
 
 func TestDefaultIndicatorConfig(t *testing.T) {
-	t.Parallel()
 	cfg := DefaultIndicatorConfig()
 
 	if cfg.PollInterval != 10*time.Second {
@@ -90,7 +82,6 @@ func TestDefaultIndicatorConfig(t *testing.T) {
 }
 
 func TestNewPaneIndicator_DefaultFill(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{Session: "test"})
 
 	if pi.config.PollInterval != 10*time.Second {
@@ -105,7 +96,6 @@ func TestNewPaneIndicator_DefaultFill(t *testing.T) {
 }
 
 func TestNewPaneIndicator_CustomThresholds(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{
 		Session:          "test",
 		PollInterval:     5 * time.Second,
@@ -125,7 +115,6 @@ func TestNewPaneIndicator_CustomThresholds(t *testing.T) {
 }
 
 func TestNewPaneIndicator_EnforcesInvariant(t *testing.T) {
-	t.Parallel()
 	// If ActiveThreshold >= StalledThreshold, StalledThreshold gets adjusted.
 	pi := NewPaneIndicator(IndicatorConfig{
 		Session:          "test",
@@ -140,7 +129,6 @@ func TestNewPaneIndicator_EnforcesInvariant(t *testing.T) {
 }
 
 func TestNewPaneIndicator_MinPollInterval(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{
 		Session:      "test",
 		PollInterval: 100 * time.Millisecond, // below 1s minimum
@@ -152,7 +140,6 @@ func TestNewPaneIndicator_MinPollInterval(t *testing.T) {
 }
 
 func TestPaneIndicator_ColorForStatus(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{Session: "test"})
 
 	tests := []struct {
@@ -174,7 +161,6 @@ func TestPaneIndicator_ColorForStatus(t *testing.T) {
 }
 
 func TestPaneIndicator_CustomColors(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{
 		Session:      "test",
 		ColorActive:  "#00ff88",
@@ -194,7 +180,6 @@ func TestPaneIndicator_CustomColors(t *testing.T) {
 }
 
 func TestPaneIndicator_GetStatus_UntrackedPane(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{Session: "test"})
 
 	// Untracked panes should report StatusActive (optimistic default).
@@ -205,7 +190,6 @@ func TestPaneIndicator_GetStatus_UntrackedPane(t *testing.T) {
 }
 
 func TestPaneIndicator_GetAllStatuses_Empty(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{Session: "test"})
 
 	statuses := pi.GetAllStatuses()
@@ -215,7 +199,6 @@ func TestPaneIndicator_GetAllStatuses_Empty(t *testing.T) {
 }
 
 func TestHashContent_Deterministic(t *testing.T) {
-	t.Parallel()
 	h1 := hashContent("hello world")
 	h2 := hashContent("hello world")
 	if h1 != h2 {
@@ -224,7 +207,6 @@ func TestHashContent_Deterministic(t *testing.T) {
 }
 
 func TestHashContent_Different(t *testing.T) {
-	t.Parallel()
 	h1 := hashContent("hello")
 	h2 := hashContent("world")
 	if h1 == h2 {
@@ -233,7 +215,6 @@ func TestHashContent_Different(t *testing.T) {
 }
 
 func TestHashContent_Empty(t *testing.T) {
-	t.Parallel()
 	h := hashContent("")
 	if h == "" {
 		t.Error("hashContent returned empty string for empty input")
@@ -241,7 +222,6 @@ func TestHashContent_Empty(t *testing.T) {
 }
 
 func TestActivityStatus_StringValues(t *testing.T) {
-	t.Parallel()
 	if string(StatusActive) != "active" {
 		t.Errorf("StatusActive = %q, want 'active'", StatusActive)
 	}
@@ -254,7 +234,6 @@ func TestActivityStatus_StringValues(t *testing.T) {
 }
 
 func TestColorConstants(t *testing.T) {
-	t.Parallel()
 	if ColorActive != "#00ff00" {
 		t.Errorf("ColorActive = %q, want '#00ff00'", ColorActive)
 	}
@@ -267,7 +246,6 @@ func TestColorConstants(t *testing.T) {
 }
 
 func TestClassifyActivity_CustomThresholds(t *testing.T) {
-	t.Parallel()
 	// With 10s active, 60s stalled
 	cases := []struct {
 		name   string
@@ -282,7 +260,6 @@ func TestClassifyActivity_CustomThresholds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := ClassifyActivity(tc.since, tc.active, tc.stall)
 			if got != tc.want {
 				t.Errorf("ClassifyActivity(%v, %v, %v) = %s, want %s",
@@ -293,7 +270,6 @@ func TestClassifyActivity_CustomThresholds(t *testing.T) {
 }
 
 func TestPaneIndicator_ConfigPreservesExplicitValues(t *testing.T) {
-	t.Parallel()
 	pi := NewPaneIndicator(IndicatorConfig{
 		Session:          "mysession",
 		PollInterval:     3 * time.Second,

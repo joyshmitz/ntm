@@ -12,7 +12,6 @@ import (
 )
 
 func TestLocalPerfTracker_TokensPerSecond(t *testing.T) {
-	t.Parallel()
 
 	tr := newLocalPerfTracker(10 * time.Second)
 	now := time.Unix(1000, 0)
@@ -31,7 +30,6 @@ func TestLocalPerfTracker_TokensPerSecond(t *testing.T) {
 }
 
 func TestLocalPerfTracker_FirstTokenLatency(t *testing.T) {
-	t.Parallel()
 
 	tr := newLocalPerfTracker(10 * time.Second)
 	sendAt := time.Unix(2000, 0)
@@ -49,7 +47,6 @@ func TestLocalPerfTracker_FirstTokenLatency(t *testing.T) {
 }
 
 func TestFetchOllamaPS(t *testing.T) {
-	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/ps" {
@@ -82,7 +79,6 @@ func TestFetchOllamaPS(t *testing.T) {
 }
 
 func TestNewLocalPerfTracker_DefaultWindow(t *testing.T) {
-	t.Parallel()
 
 	tr := newLocalPerfTracker(0)
 	if tr.window != 10*time.Second {
@@ -91,7 +87,6 @@ func TestNewLocalPerfTracker_DefaultWindow(t *testing.T) {
 }
 
 func TestLocalPerfTracker_IgnoresInvalidDeltas(t *testing.T) {
-	t.Parallel()
 
 	tr := newLocalPerfTracker(5 * time.Second)
 	base := time.Unix(3000, 0)
@@ -125,7 +120,6 @@ func TestOllamaHostFromEnv_FallbackToOllamaHost(t *testing.T) {
 }
 
 func TestFetchOllamaPS_ErrorPaths(t *testing.T) {
-	t.Parallel()
 
 	if _, err := fetchOllamaPS(context.Background(), ""); err == nil {
 		t.Fatal("expected missing-host error")
@@ -149,7 +143,6 @@ func TestFetchOllamaPS_ErrorPaths(t *testing.T) {
 }
 
 func TestIsLocalAgentType(t *testing.T) {
-	t.Parallel()
 
 	if !isLocalAgentType("ollama") {
 		t.Fatal("expected ollama to be local agent type")
@@ -160,7 +153,6 @@ func TestIsLocalAgentType(t *testing.T) {
 }
 
 func TestModelEnsureLocalPerfTracker(t *testing.T) {
-	t.Parallel()
 
 	m := &Model{}
 	if got := m.ensureLocalPerfTracker(""); got != nil {
@@ -177,7 +169,6 @@ func TestModelEnsureLocalPerfTracker(t *testing.T) {
 }
 
 func TestModelRefreshOllamaPSIfNeeded_SkipWhenFresh(t *testing.T) {
-	t.Parallel()
 
 	m := &Model{lastOllamaPSFetch: time.Now()}
 	prev := m.lastOllamaPSFetch
@@ -255,7 +246,6 @@ func TestModelRefreshOllamaPSIfNeeded_Success(t *testing.T) {
 }
 
 func TestDashboardOllamaPSErrorClearsStalePaneMemory(t *testing.T) {
-	t.Parallel()
 
 	m := New("session", "")
 	m.panes = []tmux.Pane{

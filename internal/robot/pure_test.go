@@ -10,7 +10,6 @@ import (
 )
 
 func TestParseJFPIDs(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name string
 		raw  string
@@ -29,7 +28,6 @@ func TestParseJFPIDs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := parseJFPIDs(tt.raw)
 			if len(got) != len(tt.want) {
 				t.Fatalf("parseJFPIDs(%q) = %v (len %d), want %v (len %d)", tt.raw, got, len(got), tt.want, len(tt.want))
@@ -44,7 +42,6 @@ func TestParseJFPIDs(t *testing.T) {
 }
 
 func TestNormalizedProgramType(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		program string
@@ -63,7 +60,6 @@ func TestNormalizedProgramType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := normalizedProgramType(tt.program)
 			if got != tt.want {
 				t.Errorf("normalizedProgramType(%q) = %q, want %q", tt.program, got, tt.want)
@@ -73,7 +69,6 @@ func TestNormalizedProgramType(t *testing.T) {
 }
 
 func TestEscapeQuotes(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -88,7 +83,6 @@ func TestEscapeQuotes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := escapeQuotes(tt.input)
 			if got != tt.want {
 				t.Errorf("escapeQuotes(%q) = %q, want %q", tt.input, got, tt.want)
@@ -98,7 +92,6 @@ func TestEscapeQuotes(t *testing.T) {
 }
 
 func TestFormatTarget(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name    string
 		session string
@@ -111,7 +104,6 @@ func TestFormatTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatTarget(tt.session, tt.pane)
 			if got != tt.want {
 				t.Errorf("formatTarget(%q, %d) = %q, want %q", tt.session, tt.pane, got, tt.want)
@@ -121,7 +113,6 @@ func TestFormatTarget(t *testing.T) {
 }
 
 func TestSummarizeReservations(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	future := now.Add(300 * time.Second)
@@ -172,7 +163,6 @@ func TestSummarizeReservations(t *testing.T) {
 }
 
 func TestSummarizeReservations_Empty(t *testing.T) {
-	t.Parallel()
 	got := summarizeReservations(nil)
 	if len(got) != 0 {
 		t.Errorf("summarizeReservations(nil) returned %d items, want 0", len(got))
@@ -180,7 +170,6 @@ func TestSummarizeReservations_Empty(t *testing.T) {
 }
 
 func TestSummarizeReservations_ExpiredClampedToZero(t *testing.T) {
-	t.Parallel()
 	past := time.Now().Add(-60 * time.Second)
 	reservations := []agentmail.FileReservation{
 		{
@@ -200,7 +189,6 @@ func TestSummarizeReservations_ExpiredClampedToZero(t *testing.T) {
 }
 
 func TestDetectReservationConflicts(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name         string
@@ -264,7 +252,6 @@ func TestDetectReservationConflicts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := detectReservationConflicts(tt.reservations)
 			if len(got) != tt.wantCount {
 				t.Fatalf("detectReservationConflicts: got %d conflicts, want %d; conflicts=%+v", len(got), tt.wantCount, got)
@@ -274,7 +261,6 @@ func TestDetectReservationConflicts(t *testing.T) {
 }
 
 func TestDetectReservationConflicts_HoldersSorted(t *testing.T) {
-	t.Parallel()
 	reservations := []agentmail.FileReservation{
 		{PathPattern: "*.go", AgentName: "Zulu", Exclusive: true},
 		{PathPattern: "*.go", AgentName: "Alpha", Exclusive: false},
@@ -293,7 +279,6 @@ func TestDetectReservationConflicts_HoldersSorted(t *testing.T) {
 }
 
 func TestMergeBudgetConfig(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name     string
 		base     ensemble.BudgetConfig
@@ -394,7 +379,6 @@ func TestMergeBudgetConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			result := mergeBudgetConfig(tt.base, tt.override)
 			tt.check(t, result)
 		})
@@ -402,10 +386,8 @@ func TestMergeBudgetConfig(t *testing.T) {
 }
 
 func TestBuildEnsembleSuggestHints(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil top pick returns nil", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleSuggestOutput{TopPick: nil}
 		got := buildEnsembleSuggestHints(output)
 		if got != nil {
@@ -414,7 +396,6 @@ func TestBuildEnsembleSuggestHints(t *testing.T) {
 	})
 
 	t.Run("single suggestion", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleSuggestOutput{
 			TopPick: &EnsembleSuggestion{
 				PresetName:  "research",
@@ -444,7 +425,6 @@ func TestBuildEnsembleSuggestHints(t *testing.T) {
 	})
 
 	t.Run("multiple suggestions adds alternative", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleSuggestOutput{
 			TopPick: &EnsembleSuggestion{
 				PresetName:  "research",
@@ -473,10 +453,8 @@ func TestBuildEnsembleSuggestHints(t *testing.T) {
 }
 
 func TestBuildEnsembleHints(t *testing.T) {
-	t.Parallel()
 
 	t.Run("modes pending suggests wait", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{TotalModes: 3, Completed: 1, Working: 1, Pending: 1},
 			Ensemble: EnsembleState{
@@ -500,7 +478,6 @@ func TestBuildEnsembleHints(t *testing.T) {
 	})
 
 	t.Run("all complete synthesis ready suggests synthesize", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{TotalModes: 3, Completed: 3, Working: 0, Pending: 0},
 			Ensemble: EnsembleState{
@@ -524,7 +501,6 @@ func TestBuildEnsembleHints(t *testing.T) {
 	})
 
 	t.Run("error mode adds warning", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{TotalModes: 2, Completed: 1, Errors: 1},
 			Ensemble: EnsembleState{
@@ -564,7 +540,6 @@ func TestBuildEnsembleHints(t *testing.T) {
 	})
 
 	t.Run("summary format", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary:  EnsembleSummary{TotalModes: 4, Completed: 2, Working: 1, Pending: 1},
 			Ensemble: EnsembleState{Modes: []EnsembleMode{}, Synthesis: EnsembleSynthesis{}},
@@ -580,7 +555,6 @@ func TestBuildEnsembleHints(t *testing.T) {
 	})
 
 	t.Run("summary format includes errors", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary:  EnsembleSummary{TotalModes: 3, Completed: 1, Working: 0, Pending: 0, Errors: 2},
 			Ensemble: EnsembleState{Modes: []EnsembleMode{}, Synthesis: EnsembleSynthesis{Status: "error"}},
@@ -597,10 +571,8 @@ func TestBuildEnsembleHints(t *testing.T) {
 }
 
 func TestConvertPTState(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil state returns nil", func(t *testing.T) {
-		t.Parallel()
 		got := convertPTState(nil, false)
 		if got != nil {
 			t.Errorf("expected nil for nil state, got %+v", got)
@@ -608,7 +580,6 @@ func TestConvertPTState(t *testing.T) {
 	})
 
 	t.Run("basic state conversion", func(t *testing.T) {
-		t.Parallel()
 		since := time.Now().Add(-30 * time.Second)
 		state := &pt.AgentState{
 			Pane:           "test__cc_1",
@@ -635,7 +606,6 @@ func TestConvertPTState(t *testing.T) {
 	})
 
 	t.Run("zero since omits since field", func(t *testing.T) {
-		t.Parallel()
 		state := &pt.AgentState{
 			Classification: pt.ClassIdle,
 			Confidence:     0.5,
@@ -650,7 +620,6 @@ func TestConvertPTState(t *testing.T) {
 	})
 
 	t.Run("with history populates signals", func(t *testing.T) {
-		t.Parallel()
 		since := time.Now().Add(-10 * time.Second)
 		state := &pt.AgentState{
 			Pane:           "test__cc_1",
@@ -686,7 +655,6 @@ func TestConvertPTState(t *testing.T) {
 	})
 
 	t.Run("isWorking false sets output recent false", func(t *testing.T) {
-		t.Parallel()
 		state := &pt.AgentState{
 			Classification: pt.ClassStuck,
 			Confidence:     0.9,
@@ -709,10 +677,8 @@ func TestConvertPTState(t *testing.T) {
 }
 
 func TestUpdatePTSummary(t *testing.T) {
-	t.Parallel()
 
 	t.Run("nil summary is safe", func(t *testing.T) {
-		t.Parallel()
 		// Should not panic
 		updatePTSummary(nil, pt.ClassUseful)
 	})
@@ -731,7 +697,6 @@ func TestUpdatePTSummary(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			summary := &PTHealthSummary{}
 			updatePTSummary(summary, tt.classification)
 
@@ -757,7 +722,6 @@ func TestUpdatePTSummary(t *testing.T) {
 }
 
 func TestUpdatePTSummary_Accumulates(t *testing.T) {
-	t.Parallel()
 	summary := &PTHealthSummary{}
 	updatePTSummary(summary, pt.ClassUseful)
 	updatePTSummary(summary, pt.ClassUseful)
@@ -771,7 +735,6 @@ func TestUpdatePTSummary_Accumulates(t *testing.T) {
 }
 
 func TestUpdatePTSummary_UnrecognizedClassification(t *testing.T) {
-	t.Parallel()
 	summary := &PTHealthSummary{}
 	updatePTSummary(summary, pt.Classification("bogus"))
 	if summary.Unknown != 1 {

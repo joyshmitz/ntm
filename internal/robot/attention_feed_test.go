@@ -67,7 +67,6 @@ func digestTestEvent(cursor int64, category EventCategory, eventType EventType, 
 }
 
 func TestPtAttentionSessionUsesFinalSeparator(t *testing.T) {
-	t.Parallel()
 
 	if got := ptAttentionSession("", "my__project__cc_1"); got != "my__project" {
 		t.Fatalf("ptAttentionSession() = %q, want %q", got, "my__project")
@@ -987,7 +986,6 @@ func TestAttentionFeed_SubscribeEventBus(t *testing.T) {
 // =============================================================================
 
 func TestAttentionFeed_StoreBackedPersistence(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 
@@ -1061,7 +1059,6 @@ func TestAttentionFeed_StoreBackedPersistence(t *testing.T) {
 }
 
 func TestAttentionFeed_StoreSyncCursorOnStartup(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 
@@ -1114,7 +1111,6 @@ func TestAttentionFeed_StoreSyncCursorOnStartup(t *testing.T) {
 }
 
 func TestAttentionFeed_ReplayForIncidentIncludesBoundedContext(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1185,7 +1181,6 @@ func TestAttentionFeed_ReplayForIncidentIncludesBoundedContext(t *testing.T) {
 }
 
 func TestAttentionFeed_ReconstructAsOfReturnsRecentWindowAndMetadata(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1260,7 +1255,6 @@ func TestAttentionFeed_ReconstructAsOfReturnsRecentWindowAndMetadata(t *testing.
 }
 
 func TestBuildEventsOutput_IncidentReplayIncludesHistoricalMetadata(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	oldStore := currentProjectionStore()
@@ -1357,7 +1351,6 @@ func TestBuildEventsOutput_IncidentReplayIncludesHistoricalMetadata(t *testing.T
 }
 
 func TestBuildEventsOutput_AsOfIncludesHistoricalMetadata(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1427,7 +1420,6 @@ func TestBuildEventsOutput_AsOfIncludesHistoricalMetadata(t *testing.T) {
 }
 
 func TestAttentionFeed_ReplayAnnotatesDurableOperatorState(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	feed := NewAttentionFeed(AttentionFeedConfig{
@@ -1529,7 +1521,6 @@ func TestAttentionFeed_ReplayAnnotatesDurableOperatorState(t *testing.T) {
 }
 
 func TestAttentionFeed_ReplayResurfacesAcknowledgedItemOnFingerprintChange(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 	feed := NewAttentionFeed(AttentionFeedConfig{
@@ -1607,7 +1598,6 @@ func TestAttentionFeed_ReplayResurfacesAcknowledgedItemOnFingerprintChange(t *te
 }
 
 func TestBuildAttentionDigest_RespectsOperatorStateVisibility(t *testing.T) {
-	t.Parallel()
 
 	base := digestTestEvent(1, EventCategoryAlert, EventTypeAlertWarning, ActionabilityInteresting, SeverityWarning, "operator-managed alert")
 
@@ -1665,7 +1655,6 @@ func TestBuildAttentionDigest_RespectsOperatorStateVisibility(t *testing.T) {
 }
 
 func TestAttentionFeed_AppendDeduplicated_AnnotatesCooldownResurfacing(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	window := 2 * time.Minute
@@ -1746,7 +1735,6 @@ func TestAttentionFeed_AppendDeduplicated_AnnotatesCooldownResurfacing(t *testin
 }
 
 func TestAttentionFeed_StoreCursorExpiration(t *testing.T) {
-	t.Parallel()
 
 	store := newTestAttentionStore(t)
 
@@ -1793,7 +1781,6 @@ func TestAttentionFeed_StoreCursorExpiration(t *testing.T) {
 }
 
 func TestAttentionFeed_StoreWriteFailureFallsBackConsistently(t *testing.T) {
-	t.Parallel()
 
 	store := newStubAttentionStore()
 	store.seed("persisted")
@@ -1864,7 +1851,6 @@ func TestAttentionFeed_StoreWriteFailureFallsBackConsistently(t *testing.T) {
 }
 
 func TestAttentionFeed_ConcurrentAppendPreservesCursorOrder(t *testing.T) {
-	t.Parallel()
 
 	store := newStubAttentionStore()
 	store.blockFirstAppend()
@@ -3497,7 +3483,6 @@ func BenchmarkAttentionFeed_Append(b *testing.B) {
 // =============================================================================
 
 func TestNewBusAttentionEvent_ReservationConflict(t *testing.T) {
-	t.Parallel()
 
 	event := ntmevents.NewReservationConflictEvent(
 		"myproject", "internal/auth/handler.go", "BlueLake", "cc_1",
@@ -3563,7 +3548,6 @@ func TestNewBusAttentionEvent_ReservationConflict(t *testing.T) {
 }
 
 func TestNewBusAttentionEvent_FileConflict(t *testing.T) {
-	t.Parallel()
 
 	event := ntmevents.NewFileConflictEvent(
 		"myproject", "cmd/main.go",
@@ -3620,7 +3604,6 @@ func TestNewBusAttentionEvent_FileConflict(t *testing.T) {
 }
 
 func TestNewReservationConflictEvent_UsesCanonicalNextActions(t *testing.T) {
-	t.Parallel()
 
 	conflict := watcher.FileConflict{
 		Path:           "internal/auth/handler.go",
@@ -3660,7 +3643,6 @@ func TestNewReservationConflictEvent_UsesCanonicalNextActions(t *testing.T) {
 }
 
 func TestConflictEvents_FeedToJournal(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 
@@ -3697,7 +3679,6 @@ func TestConflictEvents_FeedToJournal(t *testing.T) {
 }
 
 func TestNewBusAttentionEvent_RotationStarted(t *testing.T) {
-	t.Parallel()
 
 	att := mustBusAttentionEvent(t, ntmevents.NewRotationStartedEvent("proj", "cod-1", 91.0, "architect"))
 
@@ -3713,7 +3694,6 @@ func TestNewBusAttentionEvent_RotationStarted(t *testing.T) {
 }
 
 func TestNewBusAttentionEvent_RotationFailedFallsBackToNewAgent(t *testing.T) {
-	t.Parallel()
 
 	att := mustBusAttentionEvent(t, ntmevents.NewRotationCompletedEvent("proj", "", "cod-2", 0, false, "handoff timeout"))
 
@@ -3732,7 +3712,6 @@ func TestNewBusAttentionEvent_RotationFailedFallsBackToNewAgent(t *testing.T) {
 }
 
 func TestConflictEvents_PartialObservability(t *testing.T) {
-	t.Parallel()
 
 	// Reservation conflict with empty holders — should still work
 	event := ntmevents.NewReservationConflictEvent(
@@ -3954,7 +3933,6 @@ func TestEventsOptions_Fields(t *testing.T) {
 // =============================================================================
 
 func TestDigestOptions_Fields(t *testing.T) {
-	t.Parallel()
 
 	opts := DigestOptions{
 		SinceCursor:         100,
@@ -3986,7 +3964,6 @@ func TestDigestOptions_Fields(t *testing.T) {
 }
 
 func TestDigestResponse_EmptyFeed(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	SetAttentionFeed(feed)
@@ -4025,7 +4002,6 @@ func TestDigestResponse_EmptyFeed(t *testing.T) {
 }
 
 func TestDigestResponse_WithEvents(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	SetAttentionFeed(feed)
@@ -4100,7 +4076,6 @@ func TestDigestResponse_WithEvents(t *testing.T) {
 }
 
 func TestDigestResponse_CursorChaining(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	SetAttentionFeed(feed)
@@ -4162,7 +4137,6 @@ func TestDigestResponse_CursorChaining(t *testing.T) {
 }
 
 func TestDigestResponse_SessionFilter(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	SetAttentionFeed(feed)
@@ -4506,7 +4480,6 @@ func TestPrintAttention_ProfileShapesDigestAndNextCommand(t *testing.T) {
 // =============================================================================
 
 func TestOperatorLoop_CursorChaining(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	oldFeed := GetAttentionFeed()
@@ -4577,7 +4550,6 @@ func TestOperatorLoop_CursorChaining(t *testing.T) {
 }
 
 func TestOperatorLoop_ProfileFilteredEvents(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 
@@ -4659,7 +4631,6 @@ func TestOperatorLoop_ProfileFilteredEvents(t *testing.T) {
 }
 
 func TestNewPTStateChangeAttentionEvent_SuppressesBenignInitialClassification(t *testing.T) {
-	t.Parallel()
 
 	event, ok := NewPTStateChangeAttentionEvent(pt.ClassificationStateChange{
 		Session:  "proj",
@@ -4682,7 +4653,6 @@ func TestNewPTStateChangeAttentionEvent_SuppressesBenignInitialClassification(t 
 }
 
 func TestNewPTStateChangeAttentionEvent_RecoverySemantics(t *testing.T) {
-	t.Parallel()
 
 	event, ok := NewPTStateChangeAttentionEvent(pt.ClassificationStateChange{
 		Session:  "proj",
@@ -4717,7 +4687,6 @@ func TestNewPTStateChangeAttentionEvent_RecoverySemantics(t *testing.T) {
 }
 
 func TestPublishPTAlert_DeduplicatesRepeatedThresholdAlerts(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 	base := time.Date(2026, 3, 22, 20, 2, 0, 0, time.UTC)
@@ -4757,7 +4726,6 @@ func TestPublishPTAlert_DeduplicatesRepeatedThresholdAlerts(t *testing.T) {
 }
 
 func TestOperatorLoop_SnapshotSummaryConsistency(t *testing.T) {
-	t.Parallel()
 
 	feed := newTestAttentionFeed(t)
 

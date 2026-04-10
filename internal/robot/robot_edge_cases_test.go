@@ -10,7 +10,6 @@ import (
 // --- proxy_status.go edge cases ---
 
 func TestBuildProxyStatusInfo_NilBoth(t *testing.T) {
-	t.Parallel()
 	info := buildProxyStatusInfo(nil, nil)
 	if info.DaemonRunning {
 		t.Error("DaemonRunning = true, want false when both nil")
@@ -21,7 +20,6 @@ func TestBuildProxyStatusInfo_NilBoth(t *testing.T) {
 }
 
 func TestBuildProxyStatusInfo_StatusOverridesAvailability(t *testing.T) {
-	t.Parallel()
 	status := &tools.ProxyStatus{
 		Running:       true,
 		Version:       "2.0.0",
@@ -45,7 +43,6 @@ func TestBuildProxyStatusInfo_StatusOverridesAvailability(t *testing.T) {
 }
 
 func TestBuildProxyStatusInfo_EmptyStatusVersion(t *testing.T) {
-	t.Parallel()
 	// When status.Version is empty, availability version should persist
 	status := &tools.ProxyStatus{Running: true, Version: ""}
 	avail := &tools.ProxyAvailability{Version: tools.Version{Raw: "0.5.0"}}
@@ -56,7 +53,6 @@ func TestBuildProxyStatusInfo_EmptyStatusVersion(t *testing.T) {
 }
 
 func TestBuildProxyRouteInfos_NilStatus(t *testing.T) {
-	t.Parallel()
 	routes := buildProxyRouteInfos(nil)
 	if routes != nil {
 		t.Errorf("expected nil routes for nil status, got %v", routes)
@@ -64,7 +60,6 @@ func TestBuildProxyRouteInfos_NilStatus(t *testing.T) {
 }
 
 func TestBuildProxyRouteInfos_EmptyRouteStats(t *testing.T) {
-	t.Parallel()
 	status := &tools.ProxyStatus{
 		RouteStats: []tools.ProxyRouteStatus{},
 		Routes:     0,
@@ -76,7 +71,6 @@ func TestBuildProxyRouteInfos_EmptyRouteStats(t *testing.T) {
 }
 
 func TestBuildProxyRouteInfos_MultipleRoutes(t *testing.T) {
-	t.Parallel()
 	status := &tools.ProxyStatus{
 		RouteStats: []tools.ProxyRouteStatus{
 			{Domain: "api.openai.com", Active: true, Requests: 100},
@@ -100,7 +94,6 @@ func TestBuildProxyRouteInfos_MultipleRoutes(t *testing.T) {
 }
 
 func TestBuildProxyRouteInfos_RouteCountOnly(t *testing.T) {
-	t.Parallel()
 	status := &tools.ProxyStatus{Routes: 5}
 	routes := buildProxyRouteInfos(status)
 	if len(routes) != 5 {
@@ -114,7 +107,6 @@ func TestBuildProxyRouteInfos_RouteCountOnly(t *testing.T) {
 }
 
 func TestBuildProxyFailoverInfos_Empty(t *testing.T) {
-	t.Parallel()
 	result := buildProxyFailoverInfos(nil)
 	if result != nil {
 		t.Errorf("expected nil for nil events, got %v", result)
@@ -126,7 +118,6 @@ func TestBuildProxyFailoverInfos_Empty(t *testing.T) {
 }
 
 func TestBuildProxyFailoverInfos_Multiple(t *testing.T) {
-	t.Parallel()
 	events := []tools.ProxyFailoverEvent{
 		{Timestamp: "t1", Domain: "d1", From: "a", To: "b", Reason: "timeout"},
 		{Timestamp: "t2", Domain: "d2", From: "c", To: "d", Reason: "503"},
@@ -146,7 +137,6 @@ func TestBuildProxyFailoverInfos_Multiple(t *testing.T) {
 // --- watch_bead.go edge cases ---
 
 func TestCompileBeadMentionPattern_SpecialChars(t *testing.T) {
-	t.Parallel()
 	re, err := compileBeadMentionPattern("bd-123.456")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -160,7 +150,6 @@ func TestCompileBeadMentionPattern_SpecialChars(t *testing.T) {
 }
 
 func TestCompileBeadMentionPattern_Whitespace(t *testing.T) {
-	t.Parallel()
 	_, err := compileBeadMentionPattern("   ")
 	if err == nil {
 		t.Error("expected error for whitespace-only bead ID")
@@ -168,7 +157,6 @@ func TestCompileBeadMentionPattern_Whitespace(t *testing.T) {
 }
 
 func TestCompileBeadMentionPattern_WithPrefix(t *testing.T) {
-	t.Parallel()
 	re, err := compileBeadMentionPattern("ntm-abc")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -182,7 +170,6 @@ func TestCompileBeadMentionPattern_WithPrefix(t *testing.T) {
 }
 
 func TestFindBeadMentionMatches_AllEmpty(t *testing.T) {
-	t.Parallel()
 	re, _ := compileBeadMentionPattern("bd-1")
 	matches := findBeadMentionMatches([]string{}, re)
 	if len(matches) != 0 {
@@ -191,7 +178,6 @@ func TestFindBeadMentionMatches_AllEmpty(t *testing.T) {
 }
 
 func TestFindBeadMentionMatches_OnlyBlankLines(t *testing.T) {
-	t.Parallel()
 	re, _ := compileBeadMentionPattern("bd-1")
 	matches := findBeadMentionMatches([]string{"", "  ", "\t"}, re)
 	if len(matches) != 0 {
@@ -200,7 +186,6 @@ func TestFindBeadMentionMatches_OnlyBlankLines(t *testing.T) {
 }
 
 func TestFindBeadMentionMatches_MultipleMatchesSameLine(t *testing.T) {
-	t.Parallel()
 	re, _ := compileBeadMentionPattern("bd-5")
 	matches := findBeadMentionMatches([]string{"bd-5 and bd-5 again"}, re)
 	if len(matches) != 1 {
@@ -209,7 +194,6 @@ func TestFindBeadMentionMatches_MultipleMatchesSameLine(t *testing.T) {
 }
 
 func TestFindBeadMentionMatches_LineNumbers(t *testing.T) {
-	t.Parallel()
 	re, _ := compileBeadMentionPattern("bd-42")
 	lines := []string{
 		"line one",
@@ -233,7 +217,6 @@ func TestFindBeadMentionMatches_LineNumbers(t *testing.T) {
 // --- robot.go: parseSwarmSessionName ---
 
 func TestParseSwarmSessionName(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -252,7 +235,6 @@ func TestParseSwarmSessionName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			gotType, gotOK := parseSwarmSessionName(tt.input)
 			if gotType != tt.wantType || gotOK != tt.wantOK {
 				t.Errorf("parseSwarmSessionName(%q) = (%q, %v), want (%q, %v)",
@@ -265,7 +247,6 @@ func TestParseSwarmSessionName(t *testing.T) {
 // --- ru_sync.go: mergeRepoItems ---
 
 func TestMergeRepoItems_NilInput(t *testing.T) {
-	t.Parallel()
 	repos := &RUSyncRepos{Synced: []string{}, Skipped: []string{}}
 	var conflicts []string
 	mergeRepoItems(nil, repos, &conflicts)
@@ -275,7 +256,6 @@ func TestMergeRepoItems_NilInput(t *testing.T) {
 }
 
 func TestMergeRepoItems_NonListInput(t *testing.T) {
-	t.Parallel()
 	repos := &RUSyncRepos{Synced: []string{}, Skipped: []string{}}
 	var conflicts []string
 	mergeRepoItems("a string", repos, &conflicts)
@@ -285,7 +265,6 @@ func TestMergeRepoItems_NonListInput(t *testing.T) {
 }
 
 func TestMergeRepoItems_MixedStatuses(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "repo-a", "status": "synced"},
 		map[string]interface{}{"name": "repo-b", "status": "skipped"},
@@ -312,7 +291,6 @@ func TestMergeRepoItems_MixedStatuses(t *testing.T) {
 }
 
 func TestMergeRepoItems_SkipsEmptyNames(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "", "status": "synced"},
 		map[string]interface{}{"status": "synced"},
@@ -327,7 +305,6 @@ func TestMergeRepoItems_SkipsEmptyNames(t *testing.T) {
 }
 
 func TestMergeRepoItems_DeduplicatesEntries(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "repo-a", "status": "synced"},
 		map[string]interface{}{"name": "repo-a", "status": "synced"},
@@ -341,7 +318,6 @@ func TestMergeRepoItems_DeduplicatesEntries(t *testing.T) {
 }
 
 func TestMergeRepoItems_UnknownStatus(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "repo-a", "status": "weird"},
 	}
@@ -354,7 +330,6 @@ func TestMergeRepoItems_UnknownStatus(t *testing.T) {
 }
 
 func TestMergeRepoItems_CaseInsensitiveStatus(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "repo-a", "status": "SYNCED"},
 		map[string]interface{}{"name": "repo-b", "status": "Skipped"},
@@ -375,7 +350,6 @@ func TestMergeRepoItems_CaseInsensitiveStatus(t *testing.T) {
 }
 
 func TestMergeRepoItems_FallbackNameFields(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"repo": "by-repo", "status": "synced"},
 		map[string]interface{}{"path": "/abs/by-path", "status": "skipped"},
@@ -392,7 +366,6 @@ func TestMergeRepoItems_FallbackNameFields(t *testing.T) {
 }
 
 func TestMergeRepoItems_SkipsNonMapItems(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		"string-item",
 		42,
@@ -408,7 +381,6 @@ func TestMergeRepoItems_SkipsNonMapItems(t *testing.T) {
 }
 
 func TestMergeRepoItems_MergeConflictVariant(t *testing.T) {
-	t.Parallel()
 	items := []interface{}{
 		map[string]interface{}{"name": "r1", "status": "merge_conflict"},
 		map[string]interface{}{"name": "r2", "status": "conflicts"},
@@ -424,7 +396,6 @@ func TestMergeRepoItems_MergeConflictVariant(t *testing.T) {
 // --- rano_stats.go: normalizeRanoWindow edge cases ---
 
 func TestNormalizeRanoWindow_ValidDurations(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		input string
 		want  string
@@ -436,7 +407,6 @@ func TestNormalizeRanoWindow_ValidDurations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
 			got, err := normalizeRanoWindow(tt.input)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -451,7 +421,6 @@ func TestNormalizeRanoWindow_ValidDurations(t *testing.T) {
 // --- robot.go: formatRedactionCategoryCounts ---
 
 func TestFormatRedactionCategoryCounts_Empty(t *testing.T) {
-	t.Parallel()
 	got := formatRedactionCategoryCounts(nil)
 	if got != "" {
 		t.Errorf("expected empty for nil, got %q", got)
@@ -463,7 +432,6 @@ func TestFormatRedactionCategoryCounts_Empty(t *testing.T) {
 }
 
 func TestFormatRedactionCategoryCounts_Single(t *testing.T) {
-	t.Parallel()
 	got := formatRedactionCategoryCounts(map[string]int{"api_key": 3})
 	if got != "api_key=3" {
 		t.Errorf("got %q, want api_key=3", got)
@@ -471,7 +439,6 @@ func TestFormatRedactionCategoryCounts_Single(t *testing.T) {
 }
 
 func TestFormatRedactionCategoryCounts_SortedOutput(t *testing.T) {
-	t.Parallel()
 	got := formatRedactionCategoryCounts(map[string]int{
 		"ssh_key":  1,
 		"api_key":  5,

@@ -12,10 +12,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestToPolicyRuleSummaries(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
-		t.Parallel()
 		got := toPolicyRuleSummaries(nil)
 		if len(got) != 0 {
 			t.Fatalf("expected empty, got %d", len(got))
@@ -23,7 +21,6 @@ func TestToPolicyRuleSummaries(t *testing.T) {
 	})
 
 	t.Run("single_rule", func(t *testing.T) {
-		t.Parallel()
 		rules := []policy.Rule{
 			{Pattern: "rm -rf *", Reason: "dangerous"},
 		}
@@ -43,7 +40,6 @@ func TestToPolicyRuleSummaries(t *testing.T) {
 	})
 
 	t.Run("multiple_with_slb", func(t *testing.T) {
-		t.Parallel()
 		rules := []policy.Rule{
 			{Pattern: "git push --force", Reason: "force push", SLB: true},
 			{Pattern: "DROP TABLE", Reason: "destructive SQL"},
@@ -66,10 +62,8 @@ func TestToPolicyRuleSummaries(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
-	t.Parallel()
 
 	t.Run("minimal", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		got := generatePolicyYAMLFromPolicy(p)
 		if !strings.Contains(got, "# NTM Policy Configuration") {
@@ -81,7 +75,6 @@ func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
 	})
 
 	t.Run("with_allowed_rules", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		p.Allowed = []policy.Rule{
 			{Pattern: "echo *", Reason: "safe command"},
@@ -99,7 +92,6 @@ func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
 	})
 
 	t.Run("with_blocked_rules", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		p.Blocked = []policy.Rule{
 			{Pattern: "rm -rf /"},
@@ -114,7 +106,6 @@ func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
 	})
 
 	t.Run("with_approval_required", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		p.ApprovalRequired = []policy.Rule{
 			{Pattern: "git push", Reason: "review needed", SLB: true},
@@ -129,7 +120,6 @@ func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
 	})
 
 	t.Run("rule_without_reason", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		p.Allowed = []policy.Rule{
 			{Pattern: "ls"},
@@ -149,7 +139,6 @@ func TestGeneratePolicyYAMLFromPolicy(t *testing.T) {
 	})
 
 	t.Run("special_characters", func(t *testing.T) {
-		t.Parallel()
 		p := policy.DefaultPolicy()
 		p.Blocked = []policy.Rule{
 			{Pattern: "it's dangerous", Reason: "has \"quotes\""},

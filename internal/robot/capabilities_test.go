@@ -15,7 +15,6 @@ import (
 // =============================================================================
 
 func TestCategoryIndex(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -38,7 +37,6 @@ func TestCategoryIndex(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := categoryIndex(tc.cat)
 			if got != tc.want {
 				t.Errorf("categoryIndex(%q) = %d, want %d", tc.cat, got, tc.want)
@@ -52,7 +50,6 @@ func TestCategoryIndex(t *testing.T) {
 // =============================================================================
 
 func TestBuildCommandRegistry(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 
@@ -78,7 +75,6 @@ func TestBuildCommandRegistry(t *testing.T) {
 }
 
 func TestBuildCommandRegistryUniqueNames(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	seen := make(map[string]bool)
@@ -92,7 +88,6 @@ func TestBuildCommandRegistryUniqueNames(t *testing.T) {
 }
 
 func TestBuildCommandRegistryUniqueFlags(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	seen := make(map[string]bool)
@@ -106,7 +101,6 @@ func TestBuildCommandRegistryUniqueFlags(t *testing.T) {
 }
 
 func TestBuildCommandRegistryValidCategories(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	validCategories := make(map[string]bool)
@@ -122,7 +116,6 @@ func TestBuildCommandRegistryValidCategories(t *testing.T) {
 }
 
 func TestBuildCommandRegistryExamples(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 
@@ -134,7 +127,6 @@ func TestBuildCommandRegistryExamples(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_AttentionCommandsUseLiveFlagNames(t *testing.T) {
-	t.Parallel()
 
 	findCommand := func(name string) RobotCommandInfo {
 		t.Helper()
@@ -201,7 +193,6 @@ func TestBuildCommandRegistry_AttentionCommandsUseLiveFlagNames(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_HistoryCommandUsesCanonicalFlags(t *testing.T) {
-	t.Parallel()
 
 	var historyCmd RobotCommandInfo
 	for _, cmd := range buildCommandRegistry() {
@@ -236,7 +227,6 @@ func TestBuildCommandRegistry_HistoryCommandUsesCanonicalFlags(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_MailCheckUsesCanonicalSharedFlags(t *testing.T) {
-	t.Parallel()
 
 	var mailCheckCmd RobotCommandInfo
 	for _, cmd := range buildCommandRegistry() {
@@ -280,7 +270,6 @@ func TestBuildCommandRegistry_MailCheckUsesCanonicalSharedFlags(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *testing.T) {
-	t.Parallel()
 
 	findCommand := func(name string) RobotCommandInfo {
 		t.Helper()
@@ -449,7 +438,6 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 }
 
 func TestBuildCommandRegistryParameterFields(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 
@@ -472,7 +460,6 @@ func TestBuildCommandRegistryParameterFields(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_IncludesAttentionContractCommands(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	byFlag := make(map[string]RobotCommandInfo, len(commands))
@@ -506,7 +493,6 @@ func TestBuildCommandRegistry_IncludesAttentionContractCommands(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_IncludesRobotOverlay(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	for _, cmd := range commands {
@@ -532,7 +518,6 @@ func TestBuildCommandRegistry_IncludesRobotOverlay(t *testing.T) {
 }
 
 func TestBuildCommandRegistry_MatchesRootRobotCommandFlags(t *testing.T) {
-	t.Parallel()
 
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -598,7 +583,6 @@ func diffSortedKeys(left, right map[string]struct{}) []string {
 // =============================================================================
 
 func TestGetCapabilities(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -636,7 +620,6 @@ func TestGetCapabilities(t *testing.T) {
 }
 
 func TestGetCapabilities_RegistryMetadataVisible(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -668,7 +651,6 @@ func TestGetCapabilities_RegistryMetadataVisible(t *testing.T) {
 }
 
 func TestGetCapabilitiesSortOrder(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -695,7 +677,6 @@ func TestGetCapabilitiesSortOrder(t *testing.T) {
 }
 
 func TestDefaultAttentionCapabilities_BeadOrphanedUnsupported(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 	if caps == nil {
@@ -717,7 +698,6 @@ func TestDefaultAttentionCapabilities_BeadOrphanedUnsupported(t *testing.T) {
 }
 
 func TestDefaultAttentionCapabilities_ProfilesDiscoverable(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 	if caps == nil {
@@ -751,7 +731,6 @@ func TestDefaultAttentionCapabilities_ProfilesDiscoverable(t *testing.T) {
 }
 
 func TestDefaultAttentionCapabilities_OperatorBoundaryGuardrail(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 	if caps == nil {
@@ -776,7 +755,6 @@ func TestDefaultAttentionCapabilities_OperatorBoundaryGuardrail(t *testing.T) {
 }
 
 func TestDefaultAttentionCapabilities_GuardrailsIncluded(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 	if caps == nil {
@@ -808,7 +786,6 @@ func TestDefaultAttentionCapabilities_GuardrailsIncluded(t *testing.T) {
 }
 
 func TestGetProfile_NormalizesInput(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("  DEBUG ")
 	if profile == nil {
@@ -820,7 +797,6 @@ func TestGetProfile_NormalizesInput(t *testing.T) {
 }
 
 func TestGetProfile_ReturnsDetachedCopy(t *testing.T) {
-	t.Parallel()
 
 	profile := GetProfile("alerts")
 	if profile == nil {
@@ -846,7 +822,6 @@ func TestGetProfile_ReturnsDetachedCopy(t *testing.T) {
 }
 
 func TestListProfiles_ReturnsCopy(t *testing.T) {
-	t.Parallel()
 
 	profiles := ListProfiles()
 	if len(profiles) == 0 {
@@ -861,7 +836,6 @@ func TestListProfiles_ReturnsCopy(t *testing.T) {
 }
 
 func TestListProfiles_DeepCopiesNestedFilters(t *testing.T) {
-	t.Parallel()
 
 	profiles := ListProfiles()
 	var alerts *AttentionProfile
@@ -890,7 +864,6 @@ func TestListProfiles_DeepCopiesNestedFilters(t *testing.T) {
 }
 
 func TestResolveEffectiveFilters_ProfileAndExplicitOverrides(t *testing.T) {
-	t.Parallel()
 
 	filters := ResolveEffectiveFilters("operator", ProfileFilters{
 		MinSeverity:      SeverityError,
@@ -915,7 +888,6 @@ func TestResolveEffectiveFilters_ProfileAndExplicitOverrides(t *testing.T) {
 }
 
 func TestSeverityMeetsMinimum_CriticalRanksAboveError(t *testing.T) {
-	t.Parallel()
 
 	if !severityMeetsMinimum(SeverityCritical, SeverityError) {
 		t.Fatal("critical severity should satisfy an error minimum")
@@ -929,7 +901,6 @@ func TestSeverityMeetsMinimum_CriticalRanksAboveError(t *testing.T) {
 }
 
 func TestDefaultAttentionCapabilities_UnsupportedConditionsIncluded(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 	if caps == nil {
@@ -964,7 +935,6 @@ func TestDefaultAttentionCapabilities_UnsupportedConditionsIncluded(t *testing.T
 }
 
 func TestGetCapabilities_IncludesAttentionGuardrails(t *testing.T) {
-	t.Parallel()
 
 	output, err := GetCapabilities()
 	if err != nil {
@@ -979,7 +949,6 @@ func TestGetCapabilities_IncludesAttentionGuardrails(t *testing.T) {
 }
 
 func TestUnsupportedConditions_ConsistentWithSignalAvailability(t *testing.T) {
-	t.Parallel()
 
 	caps := DefaultAttentionCapabilities()
 
@@ -999,7 +968,6 @@ func TestUnsupportedConditions_ConsistentWithSignalAvailability(t *testing.T) {
 }
 
 func TestUnsupportedConditions_NotInAllWaitConditions(t *testing.T) {
-	t.Parallel()
 
 	// Unsupported conditions must NEVER appear in AllWaitConditions
 	waitSet := make(map[string]bool)
@@ -1015,7 +983,6 @@ func TestUnsupportedConditions_NotInAllWaitConditions(t *testing.T) {
 }
 
 func TestIsUnsupportedWaitCondition(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		condition string
@@ -1038,7 +1005,6 @@ func TestIsUnsupportedWaitCondition(t *testing.T) {
 }
 
 func TestBuildCommandRegistryWaitCommandReflectsExtendedConditions(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 
@@ -1111,7 +1077,6 @@ func TestBuildCommandRegistryWaitCommandReflectsExtendedConditions(t *testing.T)
 }
 
 func TestDocsContentMentionsAttentionWait(t *testing.T) {
-	t.Parallel()
 
 	commands := getCommandsContent()
 	if commands == nil {
@@ -1156,7 +1121,6 @@ func TestDocsContentMentionsAttentionWait(t *testing.T) {
 }
 
 func TestDocsContentMentionsOverlayHandoff(t *testing.T) {
-	t.Parallel()
 
 	commands := getCommandsContent()
 	if commands == nil {
@@ -1204,7 +1168,6 @@ func TestDocsContentMentionsOverlayHandoff(t *testing.T) {
 }
 
 func TestDocsContentMentionsRestartSurfaces(t *testing.T) {
-	t.Parallel()
 
 	commands := getCommandsContent()
 	if commands == nil {
@@ -1229,7 +1192,6 @@ func TestDocsContentMentionsRestartSurfaces(t *testing.T) {
 }
 
 func TestDocsContentMentionsActivityAndSupportBundle(t *testing.T) {
-	t.Parallel()
 
 	commands := getCommandsContent()
 	if commands == nil {
@@ -1265,7 +1227,6 @@ func TestDocsContentMentionsActivityAndSupportBundle(t *testing.T) {
 // =============================================================================
 
 func TestCategoryOrderCompleteness(t *testing.T) {
-	t.Parallel()
 
 	commands := buildCommandRegistry()
 	usedCategories := make(map[string]bool)

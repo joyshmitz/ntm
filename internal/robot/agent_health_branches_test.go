@@ -13,7 +13,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestConvertProviderUsage_WithAccount(t *testing.T) {
-	t.Parallel()
 
 	acct := "user@example.com"
 	payload := &caut.ProviderPayload{
@@ -32,7 +31,6 @@ func TestConvertProviderUsage_WithAccount(t *testing.T) {
 }
 
 func TestConvertProviderUsage_WithResetsAt(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	usedPct := 50.0
@@ -64,7 +62,6 @@ func TestConvertProviderUsage_WithResetsAt(t *testing.T) {
 }
 
 func TestConvertProviderUsage_WithStatus(t *testing.T) {
-	t.Parallel()
 
 	msg := "rate limited"
 	payload := &caut.ProviderPayload{
@@ -92,7 +89,6 @@ func TestConvertProviderUsage_WithStatus(t *testing.T) {
 }
 
 func TestConvertProviderUsage_StatusNoMessage(t *testing.T) {
-	t.Parallel()
 
 	payload := &caut.ProviderPayload{
 		Provider: "claude",
@@ -118,7 +114,6 @@ func TestConvertProviderUsage_StatusNoMessage(t *testing.T) {
 }
 
 func TestConvertProviderUsage_FullPayload(t *testing.T) {
-	t.Parallel()
 
 	acct := "team@acme.com"
 	usedPct := 89.1

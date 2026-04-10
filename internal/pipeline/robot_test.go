@@ -28,7 +28,6 @@ func captureStdout(t *testing.T, f func()) string {
 }
 
 func TestNewRobotResponse(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -46,7 +45,6 @@ func TestNewRobotResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			resp := NewRobotResponse(tt.success)
 
 			if resp.Success != tt.success {
@@ -67,7 +65,6 @@ func TestNewRobotResponse(t *testing.T) {
 }
 
 func TestNewErrorResponse(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -118,7 +115,6 @@ func TestNewErrorResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			resp := NewErrorResponse(tt.err, tt.code, tt.hint)
 
 			if resp.Success {
@@ -145,7 +141,6 @@ func TestNewErrorResponse(t *testing.T) {
 }
 
 func TestRobotCalculateProgress(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -220,7 +215,6 @@ func TestRobotCalculateProgress(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := calculateProgress(tt.state)
 
 			if got.Completed != tt.want.Completed {
@@ -249,7 +243,6 @@ func TestRobotCalculateProgress(t *testing.T) {
 }
 
 func TestConvertSteps(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	later := now.Add(5 * time.Second)
@@ -336,7 +329,6 @@ func TestConvertSteps(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := convertSteps(tt.state)
 			tt.check(t, got)
 		})
@@ -344,7 +336,6 @@ func TestConvertSteps(t *testing.T) {
 }
 
 func TestCountLines(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -385,7 +376,6 @@ func TestCountLines(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := countLines(tt.input)
 			if got != tt.want {
 				t.Errorf("countLines(%q) = %d, want %d", tt.input, got, tt.want)
@@ -395,7 +385,6 @@ func TestCountLines(t *testing.T) {
 }
 
 func TestParsePipelineVars(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -464,7 +453,6 @@ func TestParsePipelineVars(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := ParsePipelineVars(tt.input)
 
 			if tt.wantErr {
@@ -578,7 +566,6 @@ func TestUpdatePipelineFromState(t *testing.T) {
 }
 
 func TestOutputJSON(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string

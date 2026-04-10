@@ -16,7 +16,6 @@ func vhsTapeDir() string {
 }
 
 func TestVHSTapesExist(t *testing.T) {
-	t.Parallel()
 
 	expected := []string{
 		"dashboard-basic.tape",
@@ -41,7 +40,6 @@ func TestVHSTapesExist(t *testing.T) {
 }
 
 func TestVHSTapesSyntaxValid(t *testing.T) {
-	t.Parallel()
 
 	tapes, err := filepath.Glob(filepath.Join(vhsTapeDir(), "*.tape"))
 	if err != nil {
@@ -84,7 +82,6 @@ func TestVHSTapesSyntaxValid(t *testing.T) {
 }
 
 func TestTUIInspectorProfilesExist(t *testing.T) {
-	t.Parallel()
 
 	root := os.Getenv("NTM_TUI_INSPECTOR_ROOT")
 	if strings.TrimSpace(root) == "" {

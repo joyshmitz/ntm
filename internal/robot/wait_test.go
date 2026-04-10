@@ -658,7 +658,6 @@ func newWaitTestFeed(retention time.Duration) *AttentionFeed {
 // =============================================================================
 
 func TestFilterWaitPanes(t *testing.T) {
-	t.Parallel()
 
 	// Create test panes with various agent types and indices
 	// Note: detectAgentType looks for patterns like "claude", "codex", "gemini" in title

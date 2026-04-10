@@ -26,7 +26,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestIdempotencyStoreStop(t *testing.T) {
-	t.Parallel()
 	store := NewIdempotencyStore(time.Hour)
 	store.Set("key1", []byte(`{"ok":true}`), 200, nil)
 
@@ -49,7 +48,6 @@ func TestIdempotencyStoreStop(t *testing.T) {
 }
 
 func TestIdempotencyStoreExpiry(t *testing.T) {
-	t.Parallel()
 	store := NewIdempotencyStore(10 * time.Millisecond)
 	defer store.Stop()
 
@@ -105,10 +103,8 @@ func TestNewServer_DoesNotSpawnIdempotencyCleanupGoroutine(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServerValidate(t *testing.T) {
-	t.Parallel()
 
 	t.Run("defaults pass", func(t *testing.T) {
-		t.Parallel()
 		srv := New(Config{})
 		if err := srv.validate(); err != nil {
 			t.Fatalf("validate() = %v", err)
@@ -116,7 +112,6 @@ func TestServerValidate(t *testing.T) {
 	})
 
 	t.Run("api key mode without key", func(t *testing.T) {
-		t.Parallel()
 		srv := New(Config{
 			Auth: AuthConfig{Mode: AuthModeAPIKey},
 		})
@@ -127,7 +122,6 @@ func TestServerValidate(t *testing.T) {
 	})
 
 	t.Run("api key mode with key", func(t *testing.T) {
-		t.Parallel()
 		srv := New(Config{
 			Auth: AuthConfig{Mode: AuthModeAPIKey, APIKey: "test-key"},
 		})
@@ -142,7 +136,6 @@ func TestServerValidate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildMTLSConfigMissingFiles(t *testing.T) {
-	t.Parallel()
 	srv := New(Config{})
 	srv.auth.MTLS.CertFile = ""
 	srv.auth.MTLS.KeyFile = ""
@@ -154,7 +147,6 @@ func TestBuildMTLSConfigMissingFiles(t *testing.T) {
 }
 
 func TestBuildMTLSConfigBadCA(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "ca.pem")
 	os.WriteFile(caFile, []byte("not a certificate"), 0644)
@@ -170,7 +162,6 @@ func TestBuildMTLSConfigBadCA(t *testing.T) {
 }
 
 func TestBuildMTLSConfigValid(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 
 	// Generate a self-signed CA certificate
@@ -206,7 +197,6 @@ func TestBuildMTLSConfigValid(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRequestIDMiddlewareDeprecated(t *testing.T) {
-	t.Parallel()
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestIDFromContext(r.Context())
@@ -215,7 +205,6 @@ func TestRequestIDMiddlewareDeprecated(t *testing.T) {
 	handler := requestIDMiddleware(inner)
 
 	t.Run("generates ID when missing", func(t *testing.T) {
-		t.Parallel()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -229,7 +218,6 @@ func TestRequestIDMiddlewareDeprecated(t *testing.T) {
 	})
 
 	t.Run("preserves existing ID", func(t *testing.T) {
-		t.Parallel()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set(requestIDHeader, "test-req-123")
 		rec := httptest.NewRecorder()
@@ -246,7 +234,6 @@ func TestRequestIDMiddlewareDeprecated(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIdempotencyMiddlewareReplay(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 
@@ -380,7 +367,6 @@ func TestIdempotencyMiddlewareReplay(t *testing.T) {
 }
 
 func TestIdempotencyMiddlewarePreservesReplayRequestID(t *testing.T) {
-	t.Parallel()
 
 	srv, _ := setupTestServer(t)
 
@@ -428,7 +414,6 @@ func TestIdempotencyMiddlewarePreservesReplayRequestID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestResponseRecorder(t *testing.T) {
-	t.Parallel()
 	inner := httptest.NewRecorder()
 	rec := &responseRecorder{ResponseWriter: inner, statusCode: http.StatusOK}
 
@@ -964,7 +949,6 @@ func TestHandleDeleteCheckpoint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPerformDoctorCheckAPI(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	report := performDoctorCheckAPI(ctx)
 

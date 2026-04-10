@@ -71,7 +71,6 @@ func TestSynthesisProgressViewCompleteShowsResultPath(t *testing.T) {
 }
 
 func TestSynthesisPhaseString(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		phase SynthesisPhase
@@ -93,7 +92,6 @@ func TestSynthesisPhaseString(t *testing.T) {
 }
 
 func TestNewSynthesisProgress(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(80)
 	if sp == nil {
@@ -108,7 +106,6 @@ func TestNewSynthesisProgress(t *testing.T) {
 }
 
 func TestNewSynthesisProgress_SmallWidth(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(10)
 	if sp == nil {
@@ -121,7 +118,6 @@ func TestNewSynthesisProgress_SmallWidth(t *testing.T) {
 }
 
 func TestSynthesisProgress_SetData(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -143,7 +139,6 @@ func TestSynthesisProgress_SetData(t *testing.T) {
 }
 
 func TestSynthesisProgress_SetData_EmptyPhaseDefaultsToWaiting(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -158,7 +153,6 @@ func TestSynthesisProgress_SetData_EmptyPhaseDefaultsToWaiting(t *testing.T) {
 }
 
 func TestSynthesisProgress_CurrentProgress_ExplicitProgress(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -173,7 +167,6 @@ func TestSynthesisProgress_CurrentProgress_ExplicitProgress(t *testing.T) {
 }
 
 func TestSynthesisProgress_CurrentProgress_ComputedFromReadyTotal(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -189,7 +182,6 @@ func TestSynthesisProgress_CurrentProgress_ComputedFromReadyTotal(t *testing.T) 
 }
 
 func TestSynthesisProgress_CurrentProgress_ZeroTotal(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -204,7 +196,6 @@ func TestSynthesisProgress_CurrentProgress_ZeroTotal(t *testing.T) {
 }
 
 func TestSynthesisProgress_CurrentProgress_ClampAboveOne(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -219,7 +210,6 @@ func TestSynthesisProgress_CurrentProgress_ClampAboveOne(t *testing.T) {
 }
 
 func TestSynthesisProgress_TotalTokens_FromInputTokens(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -234,7 +224,6 @@ func TestSynthesisProgress_TotalTokens_FromInputTokens(t *testing.T) {
 }
 
 func TestSynthesisProgress_TotalTokens_FromLines(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -253,7 +242,6 @@ func TestSynthesisProgress_TotalTokens_FromLines(t *testing.T) {
 }
 
 func TestSynthesisProgress_TotalTokens_InputTokensTakesPrecedence(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -272,7 +260,6 @@ func TestSynthesisProgress_TotalTokens_InputTokensTakesPrecedence(t *testing.T) 
 }
 
 func TestSynthesisProgress_ViewWaiting_NoTotal(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -292,7 +279,6 @@ func TestSynthesisProgress_ViewWaiting_NoTotal(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewCollecting_NoLines(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -312,7 +298,6 @@ func TestSynthesisProgress_ViewCollecting_NoLines(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewCollecting_MultipleLines(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(80)
 	sp.SetData(SynthesisProgressData{
@@ -348,7 +333,6 @@ func TestSynthesisProgress_ViewCollecting_MultipleLines(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewSynthesizing(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -375,7 +359,6 @@ func TestSynthesisProgress_ViewSynthesizing(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewSynthesizing_EmptyStrategy(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -390,7 +373,6 @@ func TestSynthesisProgress_ViewSynthesizing_EmptyStrategy(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewComplete_NoResultPath(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -408,7 +390,6 @@ func TestSynthesisProgress_ViewComplete_NoResultPath(t *testing.T) {
 }
 
 func TestSynthesisProgress_ViewComplete_DoneBadge(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	sp.SetData(SynthesisProgressData{
@@ -423,7 +404,6 @@ func TestSynthesisProgress_ViewComplete_DoneBadge(t *testing.T) {
 }
 
 func TestSynthesisProgress_DefaultWidth(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(0)
 	sp.Width = 0
@@ -436,7 +416,6 @@ func TestSynthesisProgress_DefaultWidth(t *testing.T) {
 }
 
 func TestSynthesisProgress_Init(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	// Init should not panic
@@ -444,7 +423,6 @@ func TestSynthesisProgress_Init(t *testing.T) {
 }
 
 func TestSynthesisProgress_Update_WithMsg(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 	model, cmd := sp.Update(SynthesisProgressMsg{
@@ -465,7 +443,6 @@ func TestSynthesisProgress_Update_WithMsg(t *testing.T) {
 }
 
 func TestShortenPane(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -492,7 +469,6 @@ func TestShortenPane(t *testing.T) {
 }
 
 func TestClampFloat(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -518,7 +494,6 @@ func TestClampFloat(t *testing.T) {
 }
 
 func TestClampInt(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -543,7 +518,6 @@ func TestClampInt(t *testing.T) {
 }
 
 func TestRenderTierChip(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name string
@@ -573,7 +547,6 @@ func TestRenderTierChip(t *testing.T) {
 }
 
 func TestSynthesisProgressLine_RenderLine_EmptyModeCode(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(80)
 	sp.SetData(SynthesisProgressData{
@@ -593,7 +566,6 @@ func TestSynthesisProgressLine_RenderLine_EmptyModeCode(t *testing.T) {
 }
 
 func TestSynthesisProgressLine_StatusColors(t *testing.T) {
-	t.Parallel()
 
 	statuses := []string{"done", "active", "error", "pending", ""}
 
@@ -617,7 +589,6 @@ func TestSynthesisProgressLine_StatusColors(t *testing.T) {
 }
 
 func TestSynthesisProgress_PhaseTransitions(t *testing.T) {
-	t.Parallel()
 
 	sp := NewSynthesisProgress(60)
 

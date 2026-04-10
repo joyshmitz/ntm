@@ -11,7 +11,6 @@ import (
 // =============================================================================
 
 func TestHardKillResult_JSONStructure(t *testing.T) {
-	t.Parallel()
 
 	result := HardKillResult{
 		ShellPID:   12345,
@@ -45,7 +44,6 @@ func TestHardKillResult_JSONStructure(t *testing.T) {
 }
 
 func TestHardKillResult_OmitemptyPIDs(t *testing.T) {
-	t.Parallel()
 
 	result := HardKillResult{
 		KillMethod: "no_child_process",
@@ -82,7 +80,6 @@ func TestHardKillResult_OmitemptyPIDs(t *testing.T) {
 // =============================================================================
 
 func TestIsRobotErrorLine(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name      string
 		line      string
@@ -104,7 +101,6 @@ func TestIsRobotErrorLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			gotMatch, gotType := isRobotErrorLine(tt.line)
 			if gotMatch != tt.wantMatch {
 				t.Errorf("isRobotErrorLine(%q) match = %v, want %v", tt.line, gotMatch, tt.wantMatch)
@@ -121,10 +117,8 @@ func TestIsRobotErrorLine(t *testing.T) {
 // =============================================================================
 
 func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
-	t.Parallel()
 
 	t.Run("only unknown panes", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 3, Unknown: 3}
 		got := determineOverallHealth(summary)
 		if got != "degraded" {
@@ -133,7 +127,6 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("only degraded panes", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 3, Degraded: 3}
 		got := determineOverallHealth(summary)
 		if got != "degraded" {
@@ -142,7 +135,6 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("only rate limited", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 4, RateLimited: 4}
 		got := determineOverallHealth(summary)
 		if got != "degraded" {
@@ -151,7 +143,6 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("all unresponsive", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 4, Unresponsive: 4}
 		got := determineOverallHealth(summary)
 		if got != "critical" {
@@ -160,7 +151,6 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("single pane crashed", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 1, Crashed: 1}
 		got := determineOverallHealth(summary)
 		if got != "critical" {
@@ -169,7 +159,6 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("degraded plus unknown", func(t *testing.T) {
-		t.Parallel()
 		summary := DiagnoseSummary{TotalPanes: 4, Healthy: 2, Degraded: 1, Unknown: 1}
 		got := determineOverallHealth(summary)
 		if got != "degraded" {
@@ -179,10 +168,8 @@ func TestDetermineOverallHealth_EdgeCases(t *testing.T) {
 }
 
 func TestBuildRateLimitRecommendation_WaitSecondsVariations(t *testing.T) {
-	t.Parallel()
 
 	t.Run("large wait seconds", func(t *testing.T) {
-		t.Parallel()
 		check := &HealthCheck{
 			ErrorCheck: &ErrorCheckResult{
 				RateLimited: true,
@@ -199,7 +186,6 @@ func TestBuildRateLimitRecommendation_WaitSecondsVariations(t *testing.T) {
 	})
 
 	t.Run("negative wait seconds treated as no wait", func(t *testing.T) {
-		t.Parallel()
 		check := &HealthCheck{
 			ErrorCheck: &ErrorCheckResult{
 				RateLimited: true,
@@ -218,7 +204,6 @@ func TestBuildRateLimitRecommendation_WaitSecondsVariations(t *testing.T) {
 // =============================================================================
 
 func TestGetLastMeaningfulOutput(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name      string
 		lines     []string
@@ -237,7 +222,6 @@ func TestGetLastMeaningfulOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := getLastMeaningfulOutput(tt.lines, tt.maxLen, tt.agentType)
 			if tt.wantEmpty && got != "" {
 				t.Errorf("getLastMeaningfulOutput() = %q, want empty", got)
@@ -253,7 +237,6 @@ func TestGetLastMeaningfulOutput(t *testing.T) {
 }
 
 func TestGetLastMeaningfulOutput_Truncation(t *testing.T) {
-	t.Parallel()
 
 	lines := []string{"this is a very long line that should be truncated when maxLen is small"}
 	got := getLastMeaningfulOutput(lines, 20, "cc")
@@ -263,7 +246,6 @@ func TestGetLastMeaningfulOutput_Truncation(t *testing.T) {
 }
 
 func TestInterruptOutput_JSONStructure(t *testing.T) {
-	t.Parallel()
 
 	output := InterruptOutput{
 		RobotResponse:  NewRobotResponse(true),
@@ -303,7 +285,6 @@ func TestInterruptOutput_JSONStructure(t *testing.T) {
 }
 
 func TestInterruptOptions_Defaults(t *testing.T) {
-	t.Parallel()
 
 	opts := InterruptOptions{Session: "test"}
 	if opts.TimeoutMs != 0 {
@@ -321,7 +302,6 @@ func TestInterruptOptions_Defaults(t *testing.T) {
 }
 
 func TestPaneState_JSONStructure(t *testing.T) {
-	t.Parallel()
 
 	state := PaneState{
 		State:      "active",
@@ -351,7 +331,6 @@ func TestPaneState_JSONStructure(t *testing.T) {
 }
 
 func TestInterruptError_JSONStructure(t *testing.T) {
-	t.Parallel()
 
 	ie := InterruptError{
 		Pane:   "3",
@@ -381,7 +360,6 @@ func TestInterruptError_JSONStructure(t *testing.T) {
 // =============================================================================
 
 func TestTrendTracker_MaxSamples(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewTrendTracker(3) // Max 3 samples
 
@@ -403,7 +381,6 @@ func TestTrendTracker_MaxSamples(t *testing.T) {
 // =============================================================================
 
 func TestDiagnoseOutput_MixedStates(t *testing.T) {
-	t.Parallel()
 
 	output := DiagnoseOutput{
 		RobotResponse: NewRobotResponse(true),
@@ -468,7 +445,6 @@ func TestDiagnoseOutput_MixedStates(t *testing.T) {
 // =============================================================================
 
 func TestMonitorConfig_Defaults(t *testing.T) {
-	t.Parallel()
 
 	config := MonitorConfig{
 		Session:  "test",

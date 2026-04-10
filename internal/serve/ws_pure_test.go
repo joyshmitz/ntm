@@ -16,7 +16,6 @@ import (
 // =============================================================================
 
 func TestResponseRecorder_Bytes(t *testing.T) {
-	t.Parallel()
 	rr := httptest.NewRecorder()
 	rec := &responseRecorder{ResponseWriter: rr}
 
@@ -30,7 +29,6 @@ func TestResponseRecorder_Bytes(t *testing.T) {
 }
 
 func TestResponseRecorder_Bytes_Empty(t *testing.T) {
-	t.Parallel()
 	rr := httptest.NewRecorder()
 	rec := &responseRecorder{ResponseWriter: rr}
 
@@ -40,7 +38,6 @@ func TestResponseRecorder_Bytes_Empty(t *testing.T) {
 }
 
 func TestResponseRecorder_WriteHeader(t *testing.T) {
-	t.Parallel()
 	rr := httptest.NewRecorder()
 	rec := &responseRecorder{ResponseWriter: rr}
 
@@ -55,7 +52,6 @@ func TestResponseRecorder_WriteHeader(t *testing.T) {
 // =============================================================================
 
 func TestCanSubscribe_AlwaysTrue(t *testing.T) {
-	t.Parallel()
 	client := &WSClient{
 		id:     "test",
 		send:   make(chan []byte, 16),
@@ -81,7 +77,6 @@ func TestCanSubscribe_AlwaysTrue(t *testing.T) {
 // =============================================================================
 
 func TestSendError(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 16)
 	client := &WSClient{
 		id:     "test-err",
@@ -115,7 +110,6 @@ func TestSendError(t *testing.T) {
 }
 
 func TestSendError_BufferFull(t *testing.T) {
-	t.Parallel()
 	// Create client with zero-buffer channel
 	ch := make(chan []byte) // unbuffered
 	client := &WSClient{
@@ -128,7 +122,6 @@ func TestSendError_BufferFull(t *testing.T) {
 }
 
 func TestSendError_ClosedChannel(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 1)
 	close(ch)
 	client := &WSClient{
@@ -145,7 +138,6 @@ func TestSendError_ClosedChannel(t *testing.T) {
 // =============================================================================
 
 func TestSendAck(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 16)
 	client := &WSClient{
 		id:     "test-ack",
@@ -176,7 +168,6 @@ func TestSendAck(t *testing.T) {
 }
 
 func TestSendAck_ClosedChannel(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 1)
 	close(ch)
 	client := &WSClient{
@@ -193,7 +184,6 @@ func TestSendAck_ClosedChannel(t *testing.T) {
 // =============================================================================
 
 func TestSendPong(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 16)
 	client := &WSClient{
 		id:     "test-pong",
@@ -221,7 +211,6 @@ func TestSendPong(t *testing.T) {
 }
 
 func TestSendPong_ClosedChannel(t *testing.T) {
-	t.Parallel()
 	ch := make(chan []byte, 1)
 	close(ch)
 	client := &WSClient{
@@ -238,7 +227,6 @@ func TestSendPong_ClosedChannel(t *testing.T) {
 // =============================================================================
 
 func TestWSEventStore_CurrentSeq(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{
 		seq: 42,
 	}
@@ -248,7 +236,6 @@ func TestWSEventStore_CurrentSeq(t *testing.T) {
 }
 
 func TestWSEventStore_CurrentSeq_Concurrent(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{}
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
@@ -270,7 +257,6 @@ func TestWSEventStore_CurrentSeq_Concurrent(t *testing.T) {
 // =============================================================================
 
 func TestWSEventStore_Cleanup_NilDB(t *testing.T) {
-	t.Parallel()
 	store := &WSEventStore{db: nil}
 	if err := store.cleanup(); err != nil {
 		t.Errorf("cleanup() with nil db = %v, want nil", err)
@@ -282,7 +268,6 @@ func TestWSEventStore_Cleanup_NilDB(t *testing.T) {
 // =============================================================================
 
 func TestWriteApprovalRequired(t *testing.T) {
-	t.Parallel()
 	w := httptest.NewRecorder()
 
 	ar := &ApprovalRequired{
@@ -335,7 +320,6 @@ func TestWriteApprovalRequired(t *testing.T) {
 // =============================================================================
 
 func TestServer_WSHub_Nil(t *testing.T) {
-	t.Parallel()
 	s := &Server{}
 	if hub := s.WSHub(); hub != nil {
 		t.Errorf("WSHub() = %v, want nil for empty server", hub)
@@ -347,7 +331,6 @@ func TestServer_WSHub_Nil(t *testing.T) {
 // =============================================================================
 
 func TestPublishMailEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	s := &Server{wsHub: nil}
 	// Should not panic
 	s.publishMailEvent("agent1", "new_message", map[string]interface{}{"id": 1})
@@ -358,7 +341,6 @@ func TestPublishMailEvent_NilHub(t *testing.T) {
 // =============================================================================
 
 func TestPublishReservationEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	s := &Server{wsHub: nil}
 	// Should not panic
 	s.publishReservationEvent("agent1", "reserved", map[string]interface{}{"path": "*.go"})
@@ -369,7 +351,6 @@ func TestPublishReservationEvent_NilHub(t *testing.T) {
 // =============================================================================
 
 func TestPublishPipelineEvent_NilHub(t *testing.T) {
-	t.Parallel()
 	s := &Server{wsHub: nil}
 	// Should not panic
 	s.publishPipelineEvent("session1", "started", map[string]interface{}{"pipeline": "p1"})
@@ -380,7 +361,6 @@ func TestPublishPipelineEvent_NilHub(t *testing.T) {
 // =============================================================================
 
 func TestPublishMailEvent_WithHub(t *testing.T) {
-	t.Parallel()
 	hub := NewWSHub()
 	go hub.Run()
 	defer hub.Stop()
@@ -393,7 +373,6 @@ func TestPublishMailEvent_WithHub(t *testing.T) {
 }
 
 func TestPublishReservationEvent_WithHub(t *testing.T) {
-	t.Parallel()
 	hub := NewWSHub()
 	go hub.Run()
 	defer hub.Stop()
@@ -405,7 +384,6 @@ func TestPublishReservationEvent_WithHub(t *testing.T) {
 }
 
 func TestPublishPipelineEvent_WithHub(t *testing.T) {
-	t.Parallel()
 	hub := NewWSHub()
 	go hub.Run()
 	defer hub.Stop()
@@ -440,7 +418,6 @@ func setupServeGitRepo(t *testing.T) string {
 }
 
 func TestRunGit_Status(t *testing.T) {
-	t.Parallel()
 	repoDir := setupServeGitRepo(t)
 	out, err := runGit(repoDir, "status", "--porcelain")
 	if err != nil {
@@ -453,7 +430,6 @@ func TestRunGit_Status(t *testing.T) {
 }
 
 func TestRunGit_InvalidDir(t *testing.T) {
-	t.Parallel()
 	_, err := runGit("/nonexistent-serve-test-dir", "status")
 	if err == nil {
 		t.Error("expected error for invalid dir")
@@ -461,7 +437,6 @@ func TestRunGit_InvalidDir(t *testing.T) {
 }
 
 func TestGitCheckout_ValidRef(t *testing.T) {
-	t.Parallel()
 	repoDir := setupServeGitRepo(t)
 
 	// Get the initial commit hash
@@ -477,7 +452,6 @@ func TestGitCheckout_ValidRef(t *testing.T) {
 }
 
 func TestGitStashIfDirty_CleanRepo(t *testing.T) {
-	t.Parallel()
 	repoDir := setupServeGitRepo(t)
 
 	stashMsg, err := gitStashIfDirty(repoDir)

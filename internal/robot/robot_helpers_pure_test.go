@@ -18,7 +18,6 @@ import (
 // =============================================================================
 
 func TestSynthesisStatus(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name        string
 		status      ensemble.EnsembleStatus
@@ -99,7 +98,6 @@ func TestSynthesisStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := synthesisStatus(tt.status, tt.assignments)
 			if got != tt.want {
 				t.Errorf("synthesisStatus(%v, %v) = %q, want %q", tt.status, tt.assignments, got, tt.want)
@@ -113,10 +111,8 @@ func TestSynthesisStatus(t *testing.T) {
 // =============================================================================
 
 func TestMergeBudgetConfig_Override(t *testing.T) {
-	t.Parallel()
 
 	t.Run("override all fields", func(t *testing.T) {
-		t.Parallel()
 		base := ensemble.BudgetConfig{
 			MaxTokensPerMode:       1000,
 			MaxTotalTokens:         10000,
@@ -160,7 +156,6 @@ func TestMergeBudgetConfig_Override(t *testing.T) {
 	})
 
 	t.Run("zero overrides keep base values", func(t *testing.T) {
-		t.Parallel()
 		base := ensemble.BudgetConfig{
 			MaxTokensPerMode:       1000,
 			MaxTotalTokens:         10000,
@@ -184,7 +179,6 @@ func TestMergeBudgetConfig_Override(t *testing.T) {
 	})
 
 	t.Run("partial override", func(t *testing.T) {
-		t.Parallel()
 		base := ensemble.BudgetConfig{
 			MaxTokensPerMode: 1000,
 			MaxTotalTokens:   10000,
@@ -211,10 +205,8 @@ func TestMergeBudgetConfig_Override(t *testing.T) {
 // =============================================================================
 
 func TestBuildEnsembleHints_Actions(t *testing.T) {
-	t.Parallel()
 
 	t.Run("pending modes suggest wait", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{
 				TotalModes: 3,
@@ -245,7 +237,6 @@ func TestBuildEnsembleHints_Actions(t *testing.T) {
 	})
 
 	t.Run("all complete and ready suggests synthesize", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{
 				TotalModes: 3,
@@ -276,7 +267,6 @@ func TestBuildEnsembleHints_Actions(t *testing.T) {
 	})
 
 	t.Run("error mode adds warning", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{
 				TotalModes: 2,
@@ -320,7 +310,6 @@ func TestBuildEnsembleHints_Actions(t *testing.T) {
 	})
 
 	t.Run("zero total returns nil when no content", func(t *testing.T) {
-		t.Parallel()
 		output := EnsembleOutput{
 			Summary: EnsembleSummary{
 				TotalModes: 0,
@@ -339,7 +328,6 @@ func TestBuildEnsembleHints_Actions(t *testing.T) {
 }
 
 func TestOverlayPopupInnerCommand(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -362,7 +350,6 @@ func TestOverlayPopupInnerCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			want := "NTM_POPUP=1 " + tmux.ShellQuote(tt.ntmBin) + " dashboard --popup"
 			if tt.cursor > 0 {
 				want += fmt.Sprintf(" --attention-cursor %d", tt.cursor)
@@ -377,7 +364,6 @@ func TestOverlayPopupInnerCommand(t *testing.T) {
 }
 
 func TestOverlayPopupArgs(t *testing.T) {
-	t.Parallel()
 
 	args := overlayPopupArgs("/usr/local/bin/ntm", "proj", 9)
 	if len(args) != 7 {
@@ -618,7 +604,6 @@ func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
 // =============================================================================
 
 func TestYesNo(t *testing.T) {
-	t.Parallel()
 	if yesNo(true) != "yes" {
 		t.Errorf("yesNo(true) = %q, want %q", yesNo(true), "yes")
 	}
@@ -632,7 +617,6 @@ func TestYesNo(t *testing.T) {
 // =============================================================================
 
 func TestEscapeMarkdownCell(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name   string
 		input  string
@@ -652,7 +636,6 @@ func TestEscapeMarkdownCell(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := escapeMarkdownCell(tt.input, tt.maxLen)
 			if got != tt.want {
 				t.Errorf("escapeMarkdownCell(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
@@ -666,10 +649,8 @@ func TestEscapeMarkdownCell(t *testing.T) {
 // =============================================================================
 
 func TestDashboardCounts(t *testing.T) {
-	t.Parallel()
 
 	t.Run("empty sessions", func(t *testing.T) {
-		t.Parallel()
 		total, user, counts := dashboardCounts(nil)
 		if total != 0 {
 			t.Errorf("total = %d, want 0", total)
@@ -683,7 +664,6 @@ func TestDashboardCounts(t *testing.T) {
 	})
 
 	t.Run("multiple sessions with mixed agents", func(t *testing.T) {
-		t.Parallel()
 		sessions := []SnapshotSession{
 			{
 				Name: "proj1",
@@ -720,7 +700,6 @@ func TestDashboardCounts(t *testing.T) {
 	})
 
 	t.Run("aliases fold into canonical counts", func(t *testing.T) {
-		t.Parallel()
 		sessions := []SnapshotSession{
 			{
 				Name: "proj-aliases",
@@ -755,7 +734,6 @@ func TestDashboardCounts(t *testing.T) {
 	})
 
 	t.Run("newer agent types count independently", func(t *testing.T) {
-		t.Parallel()
 		sessions := []SnapshotSession{
 			{
 				Name: "proj-modern",
@@ -798,7 +776,6 @@ func TestDashboardCounts(t *testing.T) {
 // =============================================================================
 
 func TestAppendUnique(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name  string
 		list  []string
@@ -813,7 +790,6 @@ func TestAppendUnique(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := appendUnique(tt.list, tt.value)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d", len(got), len(tt.want))
@@ -832,7 +808,6 @@ func TestAppendUnique(t *testing.T) {
 // =============================================================================
 
 func TestIsUnknownJSONFlag(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
@@ -849,7 +824,6 @@ func TestIsUnknownJSONFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := isUnknownJSONFlag(tt.stderr)
 			if got != tt.want {
 				t.Errorf("isUnknownJSONFlag(%q) = %v, want %v", tt.stderr, got, tt.want)
@@ -863,7 +837,6 @@ func TestIsUnknownJSONFlag(t *testing.T) {
 // =============================================================================
 
 func TestRemoveFlag(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -879,7 +852,6 @@ func TestRemoveFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := removeFlag(tt.args, tt.flag)
 			if len(got) != len(tt.want) {
 				t.Fatalf("len = %d, want %d; got=%v", len(got), len(tt.want), got)
@@ -898,7 +870,6 @@ func TestRemoveFlag(t *testing.T) {
 // =============================================================================
 
 func TestResolveEnsembleBudget_EmptyPreset(t *testing.T) {
-	t.Parallel()
 	// With empty preset, should return default budget
 	budget := resolveEnsembleBudget("")
 	defaults := ensemble.DefaultBudgetConfig()
@@ -911,7 +882,6 @@ func TestResolveEnsembleBudget_EmptyPreset(t *testing.T) {
 }
 
 func TestResolveEnsembleBudget_WhitespacePreset(t *testing.T) {
-	t.Parallel()
 	budget := resolveEnsembleBudget("   ")
 	defaults := ensemble.DefaultBudgetConfig()
 	if budget.MaxTotalTokens != defaults.MaxTotalTokens {
@@ -924,7 +894,6 @@ func TestResolveEnsembleBudget_WhitespacePreset(t *testing.T) {
 // =============================================================================
 
 func TestBuildSnapshotAttentionSummary_UsesReplayWindowAndEventActions(t *testing.T) {
-	t.Parallel()
 
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       2,
@@ -986,7 +955,6 @@ func TestBuildSnapshotAttentionSummary_UsesReplayWindowAndEventActions(t *testin
 }
 
 func TestBuildSnapshotAttentionSummary_UsesDigestWhenOnlyInterestingEventsExist(t *testing.T) {
-	t.Parallel()
 
 	feed := NewAttentionFeed(AttentionFeedConfig{
 		JournalSize:       8,
@@ -1024,7 +992,6 @@ func TestBuildSnapshotAttentionSummary_UsesDigestWhenOnlyInterestingEventsExist(
 }
 
 func TestDashboardAttentionHeadline(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -1062,7 +1029,6 @@ func TestDashboardAttentionHeadline(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			if got := dashboardAttentionHeadline(tt.summary); got != tt.want {
 				t.Fatalf("dashboardAttentionHeadline(%+v) = %q, want %q", tt.summary, got, tt.want)
 			}
@@ -1071,7 +1037,6 @@ func TestDashboardAttentionHeadline(t *testing.T) {
 }
 
 func TestWriteAttentionSection_UnavailableAndClear(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -1092,7 +1057,6 @@ func TestWriteAttentionSection_UnavailableAndClear(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 
 			var sb strings.Builder
 			writeAttentionSection(&sb, tt.summary)
@@ -1105,7 +1069,6 @@ func TestWriteAttentionSection_UnavailableAndClear(t *testing.T) {
 
 // TestWriteAttentionSection_SummaryTable verifies the summary table rendering.
 func TestWriteAttentionSection_SummaryTable(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1132,7 +1095,6 @@ func TestWriteAttentionSection_SummaryTable(t *testing.T) {
 
 // TestWriteAttentionSection_TopItems verifies top action items rendering.
 func TestWriteAttentionSection_TopItems(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1162,7 +1124,6 @@ func TestWriteAttentionSection_TopItems(t *testing.T) {
 
 // TestWriteAttentionSection_NextSteps verifies next steps rendering.
 func TestWriteAttentionSection_NextSteps(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1190,7 +1151,6 @@ func TestWriteAttentionSection_NextSteps(t *testing.T) {
 
 // TestWriteAttentionSection_UnsupportedSignals verifies unsupported signals rendering.
 func TestWriteAttentionSection_UnsupportedSignals(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1212,7 +1172,6 @@ func TestWriteAttentionSection_UnsupportedSignals(t *testing.T) {
 
 // TestWriteAttentionSection_MarkdownEscaping verifies pipe characters are escaped.
 func TestWriteAttentionSection_MarkdownEscaping(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1236,7 +1195,6 @@ func TestWriteAttentionSection_MarkdownEscaping(t *testing.T) {
 
 // TestWriteAttentionSection_EmptySections verifies empty sections are not rendered.
 func TestWriteAttentionSection_EmptySections(t *testing.T) {
-	t.Parallel()
 
 	var sb strings.Builder
 	writeAttentionSection(&sb, &SnapshotAttentionSummary{
@@ -1263,7 +1221,6 @@ func TestWriteAttentionSection_EmptySections(t *testing.T) {
 }
 
 func TestBuildAttentionHintFromSummary(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -1309,7 +1266,6 @@ func TestBuildAttentionHintFromSummary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			if got := buildAttentionHintFromSummary(tt.summary); got != tt.want {
 				t.Fatalf("buildAttentionHintFromSummary(%+v) = %q, want %q", tt.summary, got, tt.want)
 			}

@@ -617,7 +617,6 @@ func TestStateClassifier_classifyState(t *testing.T) {
 // busy. Whenever a positive thinking signal is present the classifier
 // must trust it over the idle-prompt pattern.
 func TestStateClassifier_ThinkingBeatsIdlePrompt(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -650,7 +649,6 @@ func TestStateClassifier_ThinkingBeatsIdlePrompt(t *testing.T) {
 // must still return WAITING. This protects the common idle-codex path
 // from being accidentally broken by the thinking-first reorder.
 func TestStateClassifier_IdleWhenNoThinkingSignal(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -675,7 +673,6 @@ func TestStateClassifier_IdleWhenNoThinkingSignal(t *testing.T) {
 // actively-working agent. Before the thinking-first reorder this
 // returned WAITING; after the fix it must return THINKING.
 func TestStateClassifier_CodexWorkingScrollback(t *testing.T) {
-	t.Parallel()
 
 	// Verbatim-shape snapshot of a busy codex pane: UI chrome (chevron
 	// and context status) is present, and so are the "Working" bullet
@@ -723,7 +720,6 @@ func TestStateClassifier_CodexWorkingScrollback(t *testing.T) {
 // constructs a "historical working bullet above, idle chevron below"
 // snapshot and verifies the live-window filter drops the stale match.
 func TestFilterThinkingToLive_DropsHistoricalBullets(t *testing.T) {
-	t.Parallel()
 
 	// Content: a completed tool call with its "• Working" bullet high
 	// in scrollback, followed by 30+ lines of later output, ending in
@@ -790,7 +786,6 @@ func TestFilterThinkingToLive_DropsHistoricalBullets(t *testing.T) {
 // window (i.e. the pane is actively in a tool call), the filter must
 // keep it so the classifier still reports THINKING.
 func TestFilterThinkingToLive_KeepsCurrentBullets(t *testing.T) {
-	t.Parallel()
 
 	content := "" +
 		"  Explored connection.rs\n" +
@@ -827,7 +822,6 @@ func TestFilterThinkingToLive_KeepsCurrentBullets(t *testing.T) {
 // TestLastNLines covers the off-by-one edges of the helper that feeds
 // the live-window thinking filter.
 func TestLastNLines(t *testing.T) {
-	t.Parallel()
 
 	cases := []struct {
 		name string
@@ -847,7 +841,6 @@ func TestLastNLines(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := lastNLines(tc.in, tc.n)
 			if got != tc.want {
 				t.Errorf("lastNLines(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
@@ -1362,7 +1355,6 @@ func TestActivityAgentHints(t *testing.T) {
 // =============================================================================
 
 func TestVelocitySampleStruct(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	sample := VelocitySample{
@@ -1383,7 +1375,6 @@ func TestVelocitySampleStruct(t *testing.T) {
 }
 
 func TestVelocitySampleZeroValues(t *testing.T) {
-	t.Parallel()
 
 	var sample VelocitySample
 
@@ -1399,7 +1390,6 @@ func TestVelocitySampleZeroValues(t *testing.T) {
 }
 
 func TestStateTransitionStruct(t *testing.T) {
-	t.Parallel()
 
 	transition := StateTransition{
 		From:       StateGenerating,
@@ -1424,7 +1414,6 @@ func TestStateTransitionStruct(t *testing.T) {
 }
 
 func TestAgentStateConstants(t *testing.T) {
-	t.Parallel()
 
 	// Verify all state constants have expected values
 	states := map[AgentState]string{
@@ -1444,7 +1433,6 @@ func TestAgentStateConstants(t *testing.T) {
 }
 
 func TestPatternCategoryConstants(t *testing.T) {
-	t.Parallel()
 
 	categories := map[PatternCategory]string{
 		CategoryIdle:       "idle",
@@ -1461,7 +1449,6 @@ func TestPatternCategoryConstants(t *testing.T) {
 }
 
 func TestVelocityTrackerCircularBufferEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	// Test with size 1 - single element buffer
 	tracker := NewVelocityTrackerWithSize("test", 1)
@@ -1481,7 +1468,6 @@ func TestVelocityTrackerCircularBufferEdgeCases(t *testing.T) {
 }
 
 func TestVelocityTrackerExactMaxSamples(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewVelocityTrackerWithSize("test", 3)
 
@@ -1506,7 +1492,6 @@ func TestVelocityTrackerExactMaxSamples(t *testing.T) {
 }
 
 func TestVelocityTrackerRecentVelocityEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewVelocityTrackerWithSize("test", 10)
 
@@ -1529,7 +1514,6 @@ func TestVelocityTrackerRecentVelocityEdgeCases(t *testing.T) {
 }
 
 func TestLastOutputAgeLocked_AllSamplesNoOutput(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewVelocityTrackerWithSize("test", 5)
 
@@ -1551,7 +1535,6 @@ func TestLastOutputAgeLocked_AllSamplesNoOutput(t *testing.T) {
 }
 
 func TestLastOutputAgeLocked_MixedSamples(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewVelocityTrackerWithSize("test", 5)
 
@@ -1574,7 +1557,6 @@ func TestLastOutputAgeLocked_MixedSamples(t *testing.T) {
 }
 
 func TestClassifyState_StalledAfterGenerating(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", &ClassifierConfig{
 		StallThreshold: 100 * time.Millisecond, // Very short for testing
@@ -1607,7 +1589,6 @@ func TestClassifyState_StalledAfterGenerating(t *testing.T) {
 }
 
 func TestClassifyState_IdleNoOutputNotGenerating(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", &ClassifierConfig{
 		StallThreshold: 100 * time.Millisecond,
@@ -1637,7 +1618,6 @@ func TestClassifyState_IdleNoOutputNotGenerating(t *testing.T) {
 }
 
 func TestClassifyState_IdlePromptWithHighVelocity(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -1653,7 +1633,6 @@ func TestClassifyState_IdlePromptWithHighVelocity(t *testing.T) {
 }
 
 func TestClassifyState_ErrorTakesPriority(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -1676,7 +1655,6 @@ func TestClassifyState_ErrorTakesPriority(t *testing.T) {
 }
 
 func TestApplyHysteresis_SameStateResetsPending(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", &ClassifierConfig{
 		HysteresisDuration: time.Hour, // Long duration
@@ -1701,7 +1679,6 @@ func TestApplyHysteresis_SameStateResetsPending(t *testing.T) {
 }
 
 func TestApplyHysteresis_DifferentPendingState(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", &ClassifierConfig{
 		HysteresisDuration: time.Hour,
@@ -1728,7 +1705,6 @@ func TestApplyHysteresis_DifferentPendingState(t *testing.T) {
 }
 
 func TestRecordTransition_MaxHistoryBoundary(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -1757,7 +1733,6 @@ func TestRecordTransition_MaxHistoryBoundary(t *testing.T) {
 }
 
 func TestAgentActivityStruct(t *testing.T) {
-	t.Parallel()
 
 	now := time.Now()
 	activity := AgentActivity{
@@ -1791,7 +1766,6 @@ func TestAgentActivityStruct(t *testing.T) {
 }
 
 func TestClassifierConfigDefaults(t *testing.T) {
-	t.Parallel()
 
 	// Nil config should use defaults
 	sc := NewStateClassifier("test", nil)
@@ -1808,7 +1782,6 @@ func TestClassifierConfigDefaults(t *testing.T) {
 }
 
 func TestClassifierConfigCustomPatternLibrary(t *testing.T) {
-	t.Parallel()
 
 	customLib := NewPatternLibrary()
 	cfg := &ClassifierConfig{
@@ -1823,7 +1796,6 @@ func TestClassifierConfigCustomPatternLibrary(t *testing.T) {
 }
 
 func TestActivityMonitorWithConfig(t *testing.T) {
-	t.Parallel()
 
 	cfg := &ClassifierConfig{
 		AgentType:          "claude",
@@ -1843,7 +1815,6 @@ func TestActivityMonitorWithConfig(t *testing.T) {
 }
 
 func TestVelocityThresholdConstants(t *testing.T) {
-	t.Parallel()
 
 	// Verify threshold ordering
 	if VelocityHighThreshold <= VelocityMediumThreshold {
@@ -1855,7 +1826,6 @@ func TestVelocityThresholdConstants(t *testing.T) {
 }
 
 func TestDefaultConstantValues(t *testing.T) {
-	t.Parallel()
 
 	if DefaultMaxSamples != 10 {
 		t.Errorf("expected DefaultMaxSamples=10, got %d", DefaultMaxSamples)
@@ -1872,7 +1842,6 @@ func TestDefaultConstantValues(t *testing.T) {
 }
 
 func TestGenerateActivityHintsEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name         string
@@ -1932,7 +1901,6 @@ func TestGenerateActivityHintsEdgeCases(t *testing.T) {
 }
 
 func TestNormalizeAgentTypeEdgeCases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input string
@@ -1964,7 +1932,6 @@ func TestNormalizeAgentTypeEdgeCases(t *testing.T) {
 }
 
 func TestActivityMonitorNilConfig(t *testing.T) {
-	t.Parallel()
 
 	am := NewActivityMonitor(nil)
 
@@ -1981,7 +1948,6 @@ func TestActivityMonitorNilConfig(t *testing.T) {
 }
 
 func TestVelocityManagerConcurrentAccess(t *testing.T) {
-	t.Parallel()
 
 	vm := NewVelocityManager()
 
@@ -2008,7 +1974,6 @@ func TestVelocityManagerConcurrentAccess(t *testing.T) {
 }
 
 func TestActivityMonitorConcurrentAccess(t *testing.T) {
-	t.Parallel()
 
 	am := NewActivityMonitor(nil)
 
@@ -2033,7 +1998,6 @@ func TestActivityMonitorConcurrentAccess(t *testing.T) {
 }
 
 func TestStateClassifierConcurrentAccess(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -2053,7 +2017,6 @@ func TestStateClassifierConcurrentAccess(t *testing.T) {
 }
 
 func TestVelocityTrackerResetClearsAll(t *testing.T) {
-	t.Parallel()
 
 	tracker := NewVelocityTrackerWithSize("test", 5)
 
@@ -2087,7 +2050,6 @@ func TestVelocityTrackerResetClearsAll(t *testing.T) {
 }
 
 func TestVelocityTrackerResetClearsPersistedBaseline(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "reset-store-pane"
@@ -2139,7 +2101,6 @@ func TestVelocityTrackerResetClearsPersistedBaseline(t *testing.T) {
 }
 
 func TestClassifyStateVelocityBoundaries(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -2175,7 +2136,6 @@ func TestClassifyStateVelocityBoundaries(t *testing.T) {
 }
 
 func TestClassifyStateIdleAtBoundary(t *testing.T) {
-	t.Parallel()
 
 	sc := NewStateClassifier("test", nil)
 
@@ -2224,7 +2184,6 @@ func (m *mockWatermarkStore) SetWatermark(wm *state.OutputWatermark) error {
 }
 
 func TestVelocityTracker_RestartSafeBaseline_UnchangedContent(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "test-pane-unchanged"
@@ -2269,7 +2228,6 @@ func TestVelocityTracker_RestartSafeBaseline_UnchangedContent(t *testing.T) {
 }
 
 func TestVelocityTracker_RestartSafeBaseline_ChangedContent(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "test-pane-changed"
@@ -2292,7 +2250,6 @@ func TestVelocityTracker_RestartSafeBaseline_ChangedContent(t *testing.T) {
 }
 
 func TestVelocityTracker_RestartSafeBaseline_NoStore(t *testing.T) {
-	t.Parallel()
 
 	// Tracker without store should work normally (no persistence)
 	tracker := NewVelocityTracker("no-store-pane")
@@ -2318,7 +2275,6 @@ func TestVelocityTracker_RestartSafeBaseline_NoStore(t *testing.T) {
 }
 
 func TestVelocityTracker_RestartSafeBaseline_VelocityAcrossRestart(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "test-pane-velocity"
@@ -2341,7 +2297,6 @@ func TestVelocityTracker_RestartSafeBaseline_VelocityAcrossRestart(t *testing.T)
 }
 
 func TestVelocityTracker_RestartSafeBaseline_WithGrowth(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "test-pane-growth"
@@ -2368,7 +2323,6 @@ func TestVelocityTracker_RestartSafeBaseline_WithGrowth(t *testing.T) {
 }
 
 func TestVelocityManager_WithStore(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	manager := NewVelocityManager(WithManagerStore(store))
@@ -2387,7 +2341,6 @@ func TestVelocityManager_WithStore(t *testing.T) {
 }
 
 func TestStateClassifier_WithWatermarkStore(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	cfg := &ClassifierConfig{
@@ -2419,7 +2372,6 @@ func TestStateClassifier_WithWatermarkStore(t *testing.T) {
 // when content is unchanged after restart, CharsAdded is 0 (no false positive delta).
 // This is the critical test for bd-j9jo3.4.3 restart-safe baselines.
 func TestVelocityTracker_PostRestartUnchangedContent_CharsAddedZero(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "restart-delta-unchanged"
@@ -2462,7 +2414,6 @@ func TestVelocityTracker_PostRestartUnchangedContent_CharsAddedZero(t *testing.T
 // when buffer is cleared/reset between restarts, CharsAdded is 0 (no spurious transition).
 // A cleared buffer means hash mismatch, so it should treat current content as fresh baseline.
 func TestVelocityTracker_PostRestartClearedBuffer_CharsAddedZero(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "restart-delta-cleared"
@@ -2488,7 +2439,6 @@ func TestVelocityTracker_PostRestartClearedBuffer_CharsAddedZero(t *testing.T) {
 // TestVelocityTracker_PostRestartGrowingContent_CorrectDelta verifies that
 // after restart, if content grows compared to persisted baseline, delta is correct.
 func TestVelocityTracker_PostRestartGrowingContent_CorrectDelta(t *testing.T) {
-	t.Parallel()
 
 	store := newMockWatermarkStore()
 	paneID := "restart-delta-growth"
@@ -2525,7 +2475,6 @@ func TestVelocityTracker_PostRestartGrowingContent_CorrectDelta(t *testing.T) {
 // the very first sample in a fresh tracker (no prior baseline) has CharsAdded=0.
 // This is distinct from restart scenarios - it's about establishing a clean baseline.
 func TestVelocityTracker_FirstSampleBaseline_ZeroCharsAdded(t *testing.T) {
-	t.Parallel()
 
 	// No store - truly fresh tracker
 	tracker := NewVelocityTracker("first-sample-test")

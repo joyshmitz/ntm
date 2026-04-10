@@ -143,7 +143,6 @@ func TestRestartPaneDryRunShowsBead(t *testing.T) {
 }
 
 func TestRestartPaneAgentTypePrefersParsedPaneType(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{
 		Title:   "custom title",
@@ -157,7 +156,6 @@ func TestRestartPaneAgentTypePrefersParsedPaneType(t *testing.T) {
 }
 
 func TestSelectRestartPaneTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
-	t.Parallel()
 
 	panes := []tmux.Pane{
 		{ID: "%0", Index: 0, Title: "shell", Type: tmux.AgentUser, Command: "zsh"},
@@ -175,7 +173,6 @@ func TestSelectRestartPaneTargetsUsesParsedPaneTypeForFilters(t *testing.T) {
 }
 
 func TestSendRestartPromptsUsesAgentAwareSender(t *testing.T) {
-	t.Parallel()
 
 	targets := []restartPromptTarget{
 		{Pane: "1", Target: "%1", AgentType: tmux.AgentCodex},

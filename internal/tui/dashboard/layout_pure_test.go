@@ -18,7 +18,6 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestGetTokens(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name  string
@@ -32,7 +31,6 @@ func TestGetTokens(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := GetTokens(tc.width)
 			// Should match direct call to styles.TokensForWidth
 			want := styles.TokensForWidth(tc.width)
@@ -51,7 +49,6 @@ func TestGetTokens(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderDetailContextBar(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	tests := []struct {
@@ -108,7 +105,6 @@ func TestRenderDetailContextBar(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := renderDetailContextBar(tc.percent, tc.width, th, tc.tick)
 			if !tc.wantFn(got) {
 				t.Errorf("renderDetailContextBar(%v, %d, th, %d) = %q, did not pass validation",
@@ -123,7 +119,6 @@ func TestRenderDetailContextBar(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderContextMiniBar_EdgeCases(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	tests := []struct {
@@ -142,7 +137,6 @@ func TestRenderContextMiniBar_EdgeCases(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := RenderContextMiniBar(tc.percent, tc.width, tc.tick, th)
 			if got == "" {
 				t.Error("RenderContextMiniBar returned empty string")
@@ -170,7 +164,6 @@ func TestRenderContextMiniBar_EdgeCases(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTokenVelocityFromStatus(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name   string
@@ -215,7 +208,6 @@ func TestTokenVelocityFromStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := tokenVelocityFromStatus(tc.st)
 			if tc.wantEq >= 0 && got != tc.wantEq {
 				t.Errorf("tokenVelocityFromStatus() = %v, want %v", got, tc.wantEq)
@@ -232,10 +224,8 @@ func TestTokenVelocityFromStatus(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildPaneTableRow(t *testing.T) {
-	t.Parallel()
 
 	t.Run("basic_fields", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index:   1,
 			Type:    tmux.AgentClaude,
@@ -281,7 +271,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("compacted_state", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{Index: 2, Type: tmux.AgentCodex, Title: "agent-2"}
 		ps := PaneStatus{State: "compacted"}
 
@@ -293,7 +282,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("model_variant_from_context", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{Index: 3, Type: tmux.AgentGemini, Title: "agent-3"}
 		ps := PaneStatus{ContextModel: "gemini-2.5"}
 
@@ -305,7 +293,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("with_beads", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{Index: 4, Type: tmux.AgentClaude, Title: "agent-4"}
 		ps := PaneStatus{}
 		beads := []bv.BeadPreview{
@@ -324,7 +311,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("with_file_changes", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 5,
 			Type:  tmux.AgentClaude,
@@ -346,7 +332,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("token_velocity_from_command", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index:   6,
 			Type:    tmux.AgentCodex,
@@ -363,7 +348,6 @@ func TestBuildPaneTableRow(t *testing.T) {
 	})
 
 	t.Run("no_beads_returns_empty", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{Index: 7, Type: tmux.AgentClaude, Title: "agent-7"}
 		ps := PaneStatus{}
 
@@ -380,11 +364,9 @@ func TestBuildPaneTableRow(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderPaneDetail(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	t.Run("basic_pane", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 1,
 			Type:  tmux.AgentClaude,
@@ -411,7 +393,6 @@ func TestRenderPaneDetail(t *testing.T) {
 	})
 
 	t.Run("with_variant", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index:   2,
 			Type:    tmux.AgentCodex,
@@ -433,7 +414,6 @@ func TestRenderPaneDetail(t *testing.T) {
 	})
 
 	t.Run("with_context_usage", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 3,
 			Type:  tmux.AgentGemini,
@@ -462,7 +442,6 @@ func TestRenderPaneDetail(t *testing.T) {
 	})
 
 	t.Run("with_compaction", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 4, Type: tmux.AgentClaude, Title: "compact-agent",
 			Width: 80, Height: 24,
@@ -486,7 +465,6 @@ func TestRenderPaneDetail(t *testing.T) {
 	})
 
 	t.Run("with_command", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 5, Type: tmux.AgentCodex, Title: "cmd-agent",
 			Width: 80, Height: 24,
@@ -506,7 +484,6 @@ func TestRenderPaneDetail(t *testing.T) {
 	})
 
 	t.Run("narrow_detail_width", func(t *testing.T) {
-		t.Parallel()
 		pane := tmux.Pane{
 			Index: 6, Type: tmux.AgentClaude, Title: "narrow-agent",
 			Width: 80, Height: 24,
@@ -527,7 +504,6 @@ func TestRenderPaneDetail(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderLayoutIndicator_AllModes(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	tests := []struct {
@@ -543,7 +519,6 @@ func TestRenderLayoutIndicator_AllModes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.mode.String(), func(t *testing.T) {
-			t.Parallel()
 			got := RenderLayoutIndicator(tc.mode, th)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("RenderLayoutIndicator(%v) = %q, missing icon %q", tc.mode, got, tc.want)
@@ -560,7 +535,6 @@ func TestRenderLayoutIndicator_AllModes(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildPaneTableRows_WithHealthStates(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	panes := []tmux.Pane{
@@ -605,7 +579,6 @@ func TestBuildPaneTableRows_WithHealthStates(t *testing.T) {
 }
 
 func TestBuildPaneTableRows_Empty(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	rows := BuildPaneTableRows(nil, nil, nil, nil, nil, nil, 0, th)
@@ -615,7 +588,6 @@ func TestBuildPaneTableRows_Empty(t *testing.T) {
 }
 
 func TestBuildPaneTableRows_FileChangesByPaneID(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	panes := []tmux.Pane{
@@ -638,7 +610,6 @@ func TestBuildPaneTableRows_FileChangesByPaneID(t *testing.T) {
 }
 
 func TestBuildPaneTableRows_ContextHistoryCopied(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	panes := []tmux.Pane{
@@ -674,7 +645,6 @@ func TestBuildPaneTableRows_ContextHistoryCopied(t *testing.T) {
 }
 
 func TestRenderPaneRow_ContextHistoryTriggersWideSecondLine(t *testing.T) {
-	t.Parallel()
 	th := theme.Current()
 
 	row := PaneTableRow{
@@ -701,7 +671,6 @@ func TestRenderPaneRow_ContextHistoryTriggersWideSecondLine(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCurrentBeadForPane_NilAndEmpty(t *testing.T) {
-	t.Parallel()
 
 	pane := tmux.Pane{Title: "agent-1", ID: "%1"}
 

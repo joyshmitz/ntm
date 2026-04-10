@@ -6,7 +6,6 @@ package robot
 import "testing"
 
 func TestNormalizeEnsembleAgentType_Aliases(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input string
@@ -40,7 +39,6 @@ func TestNormalizeEnsembleAgentType_Aliases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
 			if got := normalizeEnsembleAgentType(tt.input); got != tt.want {
 				t.Fatalf("normalizeEnsembleAgentType(%q) = %q, want %q", tt.input, got, tt.want)
 			}
@@ -49,7 +47,6 @@ func TestNormalizeEnsembleAgentType_Aliases(t *testing.T) {
 }
 
 func TestParseEnsembleAgentMix_AcceptsSharedAliases(t *testing.T) {
-	t.Parallel()
 
 	mix, err := parseEnsembleAgentMix("openai-codex=2, google-gemini=1, ws=1")
 	if err != nil {

@@ -11,7 +11,6 @@ import (
 )
 
 func TestGetSpawnRejectsProjectNameWithLabelSeparator(t *testing.T) {
-	t.Parallel()
 
 	opts := SpawnOptions{
 		Session: "my--project",
@@ -109,7 +108,6 @@ func TestAgentTypeShort(t *testing.T) {
 
 // TestIsAgentReady_Patterns validates agent ready detection patterns
 func TestIsAgentReady_Patterns(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -151,7 +149,6 @@ func TestIsAgentReady_Patterns(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			got := isAgentReady(tc.output, tc.agentType)
 			if got != tc.expected {
 				t.Errorf("[E2E-SPAWN] isAgentReady(%q, %q) = %v, want %v",
@@ -163,10 +160,8 @@ func TestIsAgentReady_Patterns(t *testing.T) {
 
 // TestGetAgentCommands validates command resolution with/without config
 func TestGetAgentCommands(t *testing.T) {
-	t.Parallel()
 
 	t.Run("NilConfig", func(t *testing.T) {
-		t.Parallel()
 		cmds := getAgentCommands(nil)
 
 		// Should have default commands
@@ -184,7 +179,6 @@ func TestGetAgentCommands(t *testing.T) {
 	})
 
 	t.Run("CustomConfig", func(t *testing.T) {
-		t.Parallel()
 		cfg := config.Default()
 		cfg.Agents.Claude = "custom-claude --arg"
 		cfg.Agents.Codex = "custom-codex --flag"
@@ -206,7 +200,6 @@ func TestGetAgentCommands(t *testing.T) {
 	})
 
 	t.Run("PartialConfig", func(t *testing.T) {
-		t.Parallel()
 		cfg := config.Default()
 		cfg.Agents.Claude = "custom-claude"
 		// Leave codex and gemini as defaults
@@ -228,7 +221,6 @@ func TestGetAgentCommands(t *testing.T) {
 // TestSpawnOptions_DryRunMode validates dry-run returns correct structure without creating session
 func TestSpawnOptions_DryRunMode(t *testing.T) {
 	// DryRun should work even without tmux since it doesn't actually create sessions
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_dryrun_session",
@@ -298,7 +290,6 @@ func TestSpawnOptions_DryRunMode(t *testing.T) {
 // TestSpawnOptions_NoAgentsSpecified validates error when no agents specified
 func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_no_agents",
@@ -441,7 +432,6 @@ func TestSpawnOptions_MultipleAgentTypes(t *testing.T) {
 
 // TestSpawnOutput_SchemaStability validates JSON schema is consistent and deterministic
 func TestSpawnOutput_SchemaStability(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	// Test schema with dry-run (doesn't need tmux)
 	opts := SpawnOptions{
@@ -507,7 +497,6 @@ func TestSpawnOutput_SchemaStability(t *testing.T) {
 
 // TestSpawnOutput_DeterministicOrdering validates agent order is deterministic
 func TestSpawnOutput_DeterministicOrdering(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_deterministic_order",
@@ -572,7 +561,6 @@ func TestSpawnOutput_DeterministicOrdering(t *testing.T) {
 func TestPrintSpawn_TmuxNotInstalled(t *testing.T) {
 	// This test can only properly run in environments without tmux
 	// We'll test the dry-run path which doesn't check tmux, and note the behavior
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	// DryRun mode bypasses tmux check, so we can test that path
 	opts := SpawnOptions{
@@ -605,7 +593,6 @@ func TestPrintSpawn_TmuxNotInstalled(t *testing.T) {
 
 // TestSpawnOptions_NoUserPane validates NoUserPane option
 func TestSpawnOptions_NoUserPane(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	// Test with dry-run
 	optsWithUser := SpawnOptions{
@@ -662,7 +649,6 @@ func TestSpawnOptions_NoUserPane(t *testing.T) {
 
 // TestSpawnedAgent_TitleFormat validates pane title format consistency
 func TestSpawnedAgent_TitleFormat(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_title_format",
@@ -711,7 +697,6 @@ func TestSpawnedAgent_TitleFormat(t *testing.T) {
 
 // TestSpawnOutput_TimestampFormat validates created_at is RFC3339
 func TestSpawnOutput_TimestampFormat(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_timestamp",
@@ -750,7 +735,6 @@ func TestSpawnOutput_TimestampFormat(t *testing.T) {
 
 // TestSpawnOutput_WorkingDir validates working directory handling
 func TestSpawnOutput_WorkingDir(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	// Test with explicit working dir
 	customDir := "/tmp/test_spawn_workdir"
@@ -781,7 +765,6 @@ func TestSpawnOutput_WorkingDir(t *testing.T) {
 
 // TestSpawnOptions_PresetUsed validates preset field in output
 func TestSpawnOptions_PresetUsed(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:    "test_preset",
@@ -841,7 +824,6 @@ func findSubstringSpawn(s, sub string) bool {
 
 // TestNormalizeAssignStrategy validates strategy normalization
 func TestNormalizeAssignStrategy(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		input    string
@@ -863,7 +845,6 @@ func TestNormalizeAssignStrategy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
 			got := normalizeAssignStrategy(tc.input)
 			if got != tc.expected {
 				t.Errorf("normalizeAssignStrategy(%q) = %q, want %q", tc.input, got, tc.expected)
@@ -874,7 +855,6 @@ func TestNormalizeAssignStrategy(t *testing.T) {
 
 // TestGenerateWorkPrompt validates work prompt generation
 func TestGenerateWorkPrompt(t *testing.T) {
-	t.Parallel()
 
 	item := workItem{
 		ID:       "test-123",
@@ -912,7 +892,6 @@ func TestGenerateWorkPrompt(t *testing.T) {
 
 // TestSpawnOptions_AssignWorkDryRun validates assign-work in dry-run mode
 func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
-	// Note: Cannot use t.Parallel() because captureStdout modifies global os.Stdout
 
 	opts := SpawnOptions{
 		Session:        "test_assign_dryrun",
@@ -948,7 +927,6 @@ func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
 
 // TestSpawnAssignmentOutput_SchemaStability validates assignment output schema
 func TestSpawnAssignmentOutput_SchemaStability(t *testing.T) {
-	t.Parallel()
 
 	// Create a test assignment
 	assignment := SpawnAssignment{
@@ -995,7 +973,6 @@ func TestSpawnAssignmentOutput_SchemaStability(t *testing.T) {
 
 // TestSpawnOutput_ModeField validates mode field is set correctly
 func TestSpawnOutput_ModeField(t *testing.T) {
-	t.Parallel()
 
 	// Test output struct with mode field
 	output := SpawnOutput{
@@ -1042,7 +1019,6 @@ func TestSpawnOutput_ModeField(t *testing.T) {
 
 // TestSpawnRecovery_SchemaStability ensures SpawnRecovery JSON structure is stable
 func TestSpawnRecovery_SchemaStability(t *testing.T) {
-	t.Parallel()
 
 	recovery := SpawnRecovery{
 		HandoffPath:  "/path/to/handoff.yaml",
@@ -1081,7 +1057,6 @@ func TestSpawnRecovery_SchemaStability(t *testing.T) {
 
 // TestSpawnOutput_RecoveryField verifies the recovery field is included in SpawnOutput
 func TestSpawnOutput_RecoveryField(t *testing.T) {
-	t.Parallel()
 
 	output := SpawnOutput{
 		Session:    "test-session",
@@ -1129,7 +1104,6 @@ func TestSpawnOutput_RecoveryField(t *testing.T) {
 
 // TestSpawnOutput_RecoveryOmittedWhenNil verifies recovery is omitted from JSON when nil
 func TestSpawnOutput_RecoveryOmittedWhenNil(t *testing.T) {
-	t.Parallel()
 
 	output := SpawnOutput{
 		Session:    "test-session",
@@ -1158,7 +1132,6 @@ func TestSpawnOutput_RecoveryOmittedWhenNil(t *testing.T) {
 
 // TestLoadLatestHandoff_NoHandoff verifies graceful handling when no handoff exists
 func TestLoadLatestHandoff_NoHandoff(t *testing.T) {
-	t.Parallel()
 
 	// Use a temp directory with no handoffs
 	tmpDir := t.TempDir()

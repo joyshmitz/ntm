@@ -412,7 +412,6 @@ func TestTruncateMessage(t *testing.T) {
 }
 
 func TestTruncateMessage_ForLoopCompletion(t *testing.T) {
-	t.Parallel()
 
 	// Test case where the for loop completes without returning early (line 371)
 	// This happens when all rune boundaries fit within targetLen
@@ -521,7 +520,6 @@ func TestBuildPayloadFromStateWithFailure(t *testing.T) {
 }
 
 func TestFormatDesktopBody_AllEvents(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -564,7 +562,6 @@ func TestFormatDesktopBody_AllEvents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatDesktopBody(tt.payload)
 			if tt.contain != "" && !strings.Contains(got, tt.contain) {
 				t.Errorf("formatDesktopBody() = %q, want to contain %q", got, tt.contain)
@@ -574,7 +571,6 @@ func TestFormatDesktopBody_AllEvents(t *testing.T) {
 }
 
 func TestFormatDesktopTitle_UnknownEvent(t *testing.T) {
-	t.Parallel()
 
 	p := NotificationPayload{Event: "custom", WorkflowName: "test"}
 	got := formatDesktopTitle(p)
@@ -584,7 +580,6 @@ func TestFormatDesktopTitle_UnknownEvent(t *testing.T) {
 }
 
 func TestFormatMailSubject_AllEvents(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		event NotificationEvent
@@ -597,7 +592,6 @@ func TestFormatMailSubject_AllEvents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(string(tt.event), func(t *testing.T) {
-			t.Parallel()
 			p := NotificationPayload{Event: tt.event, WorkflowName: "wf", FailedStep: "deploy"}
 			got := formatMailSubject(p)
 			if got != tt.want {
@@ -608,7 +602,6 @@ func TestFormatMailSubject_AllEvents(t *testing.T) {
 }
 
 func TestFormatMailBody_AllEvents(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -661,7 +654,6 @@ func TestFormatMailBody_AllEvents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatMailBody(tt.payload)
 			if !strings.Contains(got, tt.contain) {
 				t.Errorf("formatMailBody() should contain %q, got:\n%s", tt.contain, got)
@@ -671,7 +663,6 @@ func TestFormatMailBody_AllEvents(t *testing.T) {
 }
 
 func TestBuildPayloadFromState_NoStartedTime(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		RunID:  "run-no-start",
@@ -690,7 +681,6 @@ func TestBuildPayloadFromState_NoStartedTime(t *testing.T) {
 }
 
 func TestBuildPayloadFromState_OngoingExecution(t *testing.T) {
-	t.Parallel()
 
 	// Test case where StartedAt is set but FinishedAt is zero (ongoing execution)
 	state := &ExecutionState{
@@ -713,7 +703,6 @@ func TestBuildPayloadFromState_OngoingExecution(t *testing.T) {
 }
 
 func TestBuildPayloadFromState_StateErrorsOnly(t *testing.T) {
-	t.Parallel()
 
 	state := &ExecutionState{
 		RunID:      "run-state-errs",
@@ -743,7 +732,6 @@ func TestBuildPayloadFromState_StateErrorsOnly(t *testing.T) {
 }
 
 func TestNotifyWebhook_EmptyURL(t *testing.T) {
-	t.Parallel()
 
 	n := NewNotifier(NotifierConfig{
 		Channels:   []string{"webhook"},
@@ -764,7 +752,6 @@ func TestNotifyWebhook_EmptyURL(t *testing.T) {
 }
 
 func TestNotifyMail_NilClient(t *testing.T) {
-	t.Parallel()
 
 	n := NewNotifier(NotifierConfig{
 		Channels:      []string{"mail"},
@@ -802,7 +789,6 @@ func TestNotifyNoChannels(t *testing.T) {
 }
 
 func TestNotifyWebhook_ServerError(t *testing.T) {
-	t.Parallel()
 
 	// Create a test server that returns 500
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -831,7 +817,6 @@ func TestNotifyWebhook_ServerError(t *testing.T) {
 }
 
 func TestNotifyWebhook_Success(t *testing.T) {
-	t.Parallel()
 
 	var receivedPayload NotificationPayload
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

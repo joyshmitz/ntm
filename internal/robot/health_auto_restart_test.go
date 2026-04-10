@@ -10,7 +10,6 @@ import (
 // =============================================================================
 
 func TestClassifyStuckPanes(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -123,7 +122,6 @@ func TestClassifyStuckPanes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := ClassifyStuckPanes(tt.agents, tt.threshold)
 			if !intSlicesEqual(got, tt.wantPanes) {
 				t.Errorf("ClassifyStuckPanes() = %v, want %v", got, tt.wantPanes)
@@ -137,10 +135,8 @@ func TestClassifyStuckPanes(t *testing.T) {
 // =============================================================================
 
 func TestBuildAutoRestartStuckOutput(t *testing.T) {
-	t.Parallel()
 
 	t.Run("basic output with stuck and restarted panes", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("test-session", []int{1, 3}, []int{1, 3}, nil, 5*time.Minute, false)
 
 		if out.Session != "test-session" {
@@ -164,7 +160,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("dry run mode", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("proj", []int{2}, nil, nil, 10*time.Minute, true)
 
 		if !out.DryRun {
@@ -179,7 +174,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("nil stuck panes becomes empty slice", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("s", nil, nil, nil, 5*time.Minute, false)
 
 		if out.StuckPanes == nil {
@@ -191,7 +185,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("nil restarted becomes empty slice", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("s", []int{1}, nil, nil, 5*time.Minute, false)
 
 		if out.Restarted == nil {
@@ -203,7 +196,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("with failed panes", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("s", []int{1, 2, 3}, []int{1}, []int{2, 3}, 5*time.Minute, false)
 
 		if !intSlicesEqual(out.Failed, []int{2, 3}) {
@@ -215,7 +207,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("checked_at is populated", func(t *testing.T) {
-		t.Parallel()
 		out := BuildAutoRestartStuckOutput("s", nil, nil, nil, 5*time.Minute, false)
 
 		if out.CheckedAt == "" {
@@ -228,7 +219,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 	})
 
 	t.Run("various thresholds", func(t *testing.T) {
-		t.Parallel()
 		cases := []struct {
 			dur  time.Duration
 			want string
@@ -252,7 +242,6 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 // =============================================================================
 
 func TestParseStuckThreshold(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name    string
@@ -324,7 +313,6 @@ func TestParseStuckThreshold(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got, err := ParseStuckThreshold(tt.input)
 			if tt.wantErr {
 				if err == nil {
@@ -348,7 +336,6 @@ func TestParseStuckThreshold(t *testing.T) {
 // =============================================================================
 
 func TestDefaultStuckThreshold(t *testing.T) {
-	t.Parallel()
 	if DefaultStuckThreshold != 5*time.Minute {
 		t.Errorf("DefaultStuckThreshold = %v, want 5m", DefaultStuckThreshold)
 	}
@@ -359,7 +346,6 @@ func TestDefaultStuckThreshold(t *testing.T) {
 // =============================================================================
 
 func TestClassifyStuckPanes_AllHealthStates(t *testing.T) {
-	t.Parallel()
 
 	threshold := 5 * time.Minute
 	thresholdSec := int(threshold.Seconds())
@@ -368,7 +354,6 @@ func TestClassifyStuckPanes_AllHealthStates(t *testing.T) {
 
 	for _, health := range healthStates {
 		t.Run("above_threshold_"+health, func(t *testing.T) {
-			t.Parallel()
 			agents := []SessionAgentHealth{
 				{Pane: 1, Health: health, IdleSinceSeconds: thresholdSec + 1},
 			}
@@ -379,7 +364,6 @@ func TestClassifyStuckPanes_AllHealthStates(t *testing.T) {
 		})
 
 		t.Run("below_threshold_"+health, func(t *testing.T) {
-			t.Parallel()
 			agents := []SessionAgentHealth{
 				{Pane: 1, Health: health, IdleSinceSeconds: thresholdSec - 1},
 			}
@@ -392,7 +376,6 @@ func TestClassifyStuckPanes_AllHealthStates(t *testing.T) {
 }
 
 func TestClassifyStuckPanes_PreservesPaneOrder(t *testing.T) {
-	t.Parallel()
 
 	agents := []SessionAgentHealth{
 		{Pane: 5, Health: "healthy", IdleSinceSeconds: 600},
@@ -407,7 +390,6 @@ func TestClassifyStuckPanes_PreservesPaneOrder(t *testing.T) {
 }
 
 func TestClassifyStuckPanes_LargePaneCount(t *testing.T) {
-	t.Parallel()
 
 	agents := make([]SessionAgentHealth, 20)
 	for i := range agents {
@@ -428,7 +410,6 @@ func TestClassifyStuckPanes_LargePaneCount(t *testing.T) {
 // =============================================================================
 
 func TestAutoRestartStuckOutput_JSONFields(t *testing.T) {
-	t.Parallel()
 
 	out := BuildAutoRestartStuckOutput("myproject", []int{1, 3}, []int{1}, []int{3}, 5*time.Minute, false)
 
@@ -445,7 +426,6 @@ func TestAutoRestartStuckOutput_JSONFields(t *testing.T) {
 }
 
 func TestShouldAutoRestartHealthState(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name        string
@@ -480,7 +460,6 @@ func TestShouldAutoRestartHealthState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 
 			gotRestart, gotReason := shouldAutoRestartHealthState(tt.state)
 			if gotRestart != tt.wantRestart {
