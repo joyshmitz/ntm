@@ -174,10 +174,20 @@ func seedRobotAPIContractState(t *testing.T, store *state.Store, bus *events.Eve
 		if err := store.CreateSession(&sess); err != nil {
 			t.Fatalf("create session %q: %v", sess.ID, err)
 		}
+		if err := store.UpsertRuntimeSession(&state.RuntimeSession{
+			Name:        sess.Name,
+			ProjectPath: sess.ProjectPath,
+			Attached:    true,
+			AgentCount:  1,
+			CreatedAt:   &sess.CreatedAt,
+			StaleAfter:  now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("upsert runtime session %q: %v", sess.Name, err)
+		}
 	}
 
 	lastSeen := now
-	if err := store.CreateAgent(&state.Agent{
+	agent := &state.Agent{
 		ID:         "agent-1",
 		SessionID:  liveSessionID,
 		Name:       "BlueLake",
@@ -186,8 +196,19 @@ func seedRobotAPIContractState(t *testing.T, store *state.Store, bus *events.Eve
 		TmuxPaneID: "%1",
 		LastSeen:   &lastSeen,
 		Status:     state.AgentWorking,
-	}); err != nil {
+	}
+	if err := store.CreateAgent(agent); err != nil {
 		t.Fatalf("create agent: %v", err)
+	}
+	if err := store.UpsertRuntimeAgent(&state.RuntimeAgent{
+		ID:          agent.SessionID + ":" + agent.TmuxPaneID,
+		SessionName: liveSessionID,
+		Pane:        agent.TmuxPaneID,
+		AgentType:   string(agent.Type),
+		State:       state.AgentState(agent.Status),
+		StaleAfter:  now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("upsert runtime agent: %v", err)
 	}
 
 	bus.PublishSync(events.BaseEvent{
