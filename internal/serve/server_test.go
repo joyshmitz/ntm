@@ -5431,7 +5431,7 @@ func TestParseJWT(t *testing.T) {
 
 	t.Run("invalid format", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, err := parseJWT("not.a.jwt.token")
+		_, _, _, _, err := parseJWT("not.a.jwt.token")
 		if err == nil {
 			t.Error("expected error for invalid JWT format")
 		}
@@ -5439,7 +5439,7 @@ func TestParseJWT(t *testing.T) {
 
 	t.Run("only two parts", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, err := parseJWT("two.parts")
+		_, _, _, _, err := parseJWT("two.parts")
 		if err == nil {
 			t.Error("expected error for two-part token")
 		}
@@ -5447,7 +5447,7 @@ func TestParseJWT(t *testing.T) {
 
 	t.Run("invalid base64 header", func(t *testing.T) {
 		t.Parallel()
-		_, _, _, err := parseJWT("!!!invalid." + payloadB64 + "." + sigB64)
+		_, _, _, _, err := parseJWT("!!!invalid." + payloadB64 + "." + sigB64)
 		if err == nil {
 			t.Error("expected error for invalid base64 header")
 		}
@@ -6121,7 +6121,7 @@ func TestAuthenticateAPIKey_MissingKey(t *testing.T) {
 
 func TestParseJWT_InvalidFormat(t *testing.T) {
 	t.Parallel()
-	_, _, _, err := parseJWT("not.a.valid.jwt.too.many.parts")
+	_, _, _, _, err := parseJWT("not.a.valid.jwt.too.many.parts")
 	if err == nil || !strings.Contains(err.Error(), "invalid jwt format") {
 		t.Errorf("expected 'invalid jwt format' error, got: %v", err)
 	}
@@ -6129,7 +6129,7 @@ func TestParseJWT_InvalidFormat(t *testing.T) {
 
 func TestParseJWT_BadHeaderBase64(t *testing.T) {
 	t.Parallel()
-	_, _, _, err := parseJWT("!!!bad-base64.eyJ0ZXN0IjoxfQ.sig")
+	_, _, _, _, err := parseJWT("!!!bad-base64.eyJ0ZXN0IjoxfQ.sig")
 	if err == nil || !strings.Contains(err.Error(), "decode jwt header") {
 		t.Errorf("expected header decode error, got: %v", err)
 	}
@@ -6138,7 +6138,7 @@ func TestParseJWT_BadHeaderBase64(t *testing.T) {
 func TestParseJWT_BadPayloadBase64(t *testing.T) {
 	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
-	_, _, _, err := parseJWT(header + ".!!!bad.sig")
+	_, _, _, _, err := parseJWT(header + ".!!!bad.sig")
 	if err == nil || !strings.Contains(err.Error(), "decode jwt payload") {
 		t.Errorf("expected payload decode error, got: %v", err)
 	}
@@ -6148,7 +6148,7 @@ func TestParseJWT_BadSignatureBase64(t *testing.T) {
 	t.Parallel()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
-	_, _, _, err := parseJWT(header + "." + payload + ".!!!bad")
+	_, _, _, _, err := parseJWT(header + "." + payload + ".!!!bad")
 	if err == nil || !strings.Contains(err.Error(), "decode jwt signature") {
 		t.Errorf("expected signature decode error, got: %v", err)
 	}
@@ -6159,7 +6159,7 @@ func TestParseJWT_InvalidHeaderJSON(t *testing.T) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user"}`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
-	_, _, _, err := parseJWT(header + "." + payload + "." + sig)
+	_, _, _, _, err := parseJWT(header + "." + payload + "." + sig)
 	if err == nil || !strings.Contains(err.Error(), "parse jwt header") {
 		t.Errorf("expected header parse error, got: %v", err)
 	}
@@ -6170,7 +6170,7 @@ func TestParseJWT_InvalidPayloadJSON(t *testing.T) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`not-json`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte(`sig`))
-	_, _, _, err := parseJWT(header + "." + payload + "." + sig)
+	_, _, _, _, err := parseJWT(header + "." + payload + "." + sig)
 	if err == nil || !strings.Contains(err.Error(), "parse jwt payload") {
 		t.Errorf("expected payload parse error, got: %v", err)
 	}
