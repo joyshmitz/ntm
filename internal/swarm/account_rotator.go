@@ -742,7 +742,7 @@ func (r *AccountRotator) OnLimitHit(event LimitHitEvent) (*RotationRecord, error
 		elapsed := time.Since(lastRotation)
 		r.logger().Warn("[AccountRotator] cooldown_active",
 			"session_pane", event.SessionPane,
-			"last_rotation", state.LastRotation,
+			"last_rotation", lastRotation,
 			"elapsed", elapsed,
 			"cooldown", r.CooldownDuration)
 		return nil, fmt.Errorf("cooldown active for pane %s: %v remaining",
