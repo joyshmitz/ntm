@@ -157,6 +157,8 @@ type agentCapWaiter struct {
 	granted bool
 }
 
+const codexThrottlePollInterval = 25 * time.Millisecond
+
 // agentCapState tracks the state of caps for one agent type.
 type agentCapState struct {
 	config     AgentCapConfig
@@ -258,14 +260,12 @@ func (ac *AgentCaps) TryAcquire(agentType string) bool {
 	defer ac.mu.Unlock()
 
 	// Codex rate-limit throttle gate (bd-3qoly): only affects cod agents.
-	if agentType == "cod" && ac.codexThrottle != nil {
-		if !ac.codexThrottle.MayLaunch(ac.running["cod"]) {
-			slog.Info("codex throttle blocked launch",
-				"agent_type", agentType,
-				"running", ac.running["cod"],
-			)
-			return false
-		}
+	if !ac.codexThrottleAllowsLocked(agentType) {
+		slog.Info("codex throttle blocked launch",
+			"agent_type", agentType,
+			"running", ac.running["cod"],
+		)
+		return false
 	}
 
 	state := ac.getCapState(agentType)
@@ -315,6 +315,13 @@ func (ac *AgentCaps) Acquire(ctx context.Context, agentType string) error {
 	// First try without blocking
 	if ac.TryAcquire(agentType) {
 		return nil
+	}
+
+	// Codex throttle recovery is time-based rather than event-driven.
+	// Polling here avoids waiter handoffs that can bypass the throttle gate
+	// or sleep forever while the throttle cools down.
+	if agentType == "cod" && ac.codexThrottle != nil {
+		return ac.acquireWithThrottlePolling(ctx, agentType)
 	}
 
 	// Need to wait
@@ -367,6 +374,53 @@ func (ac *AgentCaps) Acquire(ctx context.Context, agentType string) error {
 			return nil
 		}
 		return errAgentCapReset
+	}
+}
+
+func (ac *AgentCaps) codexThrottleAllowsLocked(agentType string) bool {
+	return agentType != "cod" || ac.codexThrottle == nil || ac.codexThrottle.MayLaunch(ac.running["cod"])
+}
+
+func (ac *AgentCaps) acquireWithThrottlePolling(ctx context.Context, agentType string) error {
+	ticker := time.NewTicker(codexThrottlePollInterval)
+	defer ticker.Stop()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		ac.mu.Lock()
+		state := ac.getCapState(agentType)
+		ac.updateRampUp(agentType, state)
+
+		if ac.codexThrottleAllowsLocked(agentType) &&
+			ac.running[agentType] < state.currentCap &&
+			!ac.globalCapExceeded() {
+			ac.running[agentType]++
+			ac.stats.TotalRunning++
+			if state.startedAt.IsZero() {
+				state.startedAt = time.Now()
+				state.lastRampUp = time.Now()
+			}
+			runningCount := ac.running[agentType]
+			currentCap := state.currentCap
+			ac.mu.Unlock()
+
+			slog.Debug("agent cap acquired after throttle wait",
+				"agent_type", agentType,
+				"running", runningCount,
+				"cap", currentCap,
+			)
+			return nil
+		}
+		ac.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

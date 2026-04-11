@@ -138,6 +138,34 @@ func TestAgentCaps_Acquire_Blocking(t *testing.T) {
 	}
 }
 
+func TestAgentCaps_Acquire_RespectsCodexThrottle(t *testing.T) {
+	cfg := AgentCapsConfig{
+		Default: AgentCapConfig{
+			MaxConcurrent: 1,
+		},
+		PerAgent: map[string]AgentCapConfig{
+			"cod": {
+				MaxConcurrent: 1,
+			},
+		},
+	}
+
+	caps := NewAgentCaps(cfg)
+	caps.RecordCodexRateLimit("pane-1", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+
+	err := caps.Acquire(ctx, "cod")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Acquire() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	if got := caps.GetRunning("cod"); got != 0 {
+		t.Fatalf("running cod = %d, want 0 after throttled acquire timeout", got)
+	}
+}
+
 func TestAgentCaps_RampUp(t *testing.T) {
 	cfg := AgentCapsConfig{
 		PerAgent: map[string]AgentCapConfig{
