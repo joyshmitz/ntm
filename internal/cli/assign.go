@@ -770,7 +770,6 @@ func getAssignOutput(opts robot.AssignOptions) (*robot.AssignOutput, error) {
 	// Get beads from bv
 	wd, _ := os.Getwd()
 	readyBeads := bv.GetReadyPreview(wd, 50)
-	inProgress := bv.GetInProgressList(wd, 50)
 
 	// Filter to specific beads if requested
 	if len(opts.Beads) > 0 {
