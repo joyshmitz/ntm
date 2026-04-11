@@ -1187,6 +1187,60 @@ func TestReplayEvents(t *testing.T) {
 	}
 }
 
+func TestReplayEvents_HandlerMayWriteToStore(t *testing.T) {
+	store := testStore(t)
+
+	sess := &Session{
+		ID: "replay-write-sess", Name: "replay-write-test", ProjectPath: "/test",
+		CreatedAt: time.Now(), Status: SessionActive,
+	}
+	if err := store.CreateSession(sess); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		entry := &EventLogEntry{
+			SessionID: sess.ID,
+			EventType: "test_event",
+			EventData: `{"seq": 1}`,
+		}
+		if err := store.LogEvent(entry); err != nil {
+			t.Fatalf("LogEvent error: %v", err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- store.ReplayEvents(sess.ID, 0, func(e EventLogEntry) error {
+			if e.ID != 1 {
+				return nil
+			}
+			sess.Status = SessionPaused
+			return store.UpdateSession(sess)
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ReplayEvents error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReplayEvents deadlocked when handler wrote to store")
+	}
+
+	got, err := store.GetSession(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("session should still exist after replay handler update")
+	}
+	if got.Status != SessionPaused {
+		t.Fatalf("session status = %q, want %q", got.Status, SessionPaused)
+	}
+}
+
 // ======================
 // Migration Tests
 // ======================

@@ -932,27 +932,40 @@ func (s *Store) ListEvents(sessionID string, limit int) ([]EventLogEntry, error)
 // ReplayEvents replays events from a given ID for crash recovery.
 func (s *Store) ReplayEvents(sessionID string, fromID int64, handler func(EventLogEntry) error) error {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.Query(`
-		SELECT id, COALESCE(session_id, ''), event_type, event_data, COALESCE(correlation_id, ''), created_at
-		FROM event_log WHERE session_id = ? AND id > ?
+	entries, err := func() ([]EventLogEntry, error) {
+		rows, err := s.db.Query(`
+			SELECT id, COALESCE(session_id, ''), event_type, event_data, COALESCE(correlation_id, ''), created_at
+			FROM event_log WHERE session_id = ? AND id > ?
 		ORDER BY id ASC`, sessionID, fromID)
-	if err != nil {
-		return fmt.Errorf("query events for replay: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var entry EventLogEntry
-		if err := rows.Scan(&entry.ID, &entry.SessionID, &entry.EventType, &entry.EventData, &entry.CorrelationID, &entry.CreatedAt); err != nil {
-			return fmt.Errorf("scan event for replay: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("query events for replay: %w", err)
 		}
+		defer rows.Close()
+
+		var entries []EventLogEntry
+		for rows.Next() {
+			var entry EventLogEntry
+			if err := rows.Scan(&entry.ID, &entry.SessionID, &entry.EventType, &entry.EventData, &entry.CorrelationID, &entry.CreatedAt); err != nil {
+				return nil, fmt.Errorf("scan event for replay: %w", err)
+			}
+			entries = append(entries, entry)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return entries, nil
+	}()
+	s.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
 		if err := handler(entry); err != nil {
 			return fmt.Errorf("replay handler error at event %d: %w", entry.ID, err)
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 // ========================
