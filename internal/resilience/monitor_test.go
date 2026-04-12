@@ -1140,6 +1140,70 @@ func TestMonitorStart_CanRestartAfterStop(t *testing.T) {
 	}
 }
 
+func TestMonitorStartWaitsForConcurrentStop(t *testing.T) {
+	cfg := config.Default()
+	cfg.Resilience.AutoRestart = false
+
+	m := NewMonitor("test-session", t.TempDir(), cfg, false)
+
+	stopEntered := make(chan struct{}, 1)
+	blockedDone := make(chan struct{})
+	m.cancel = func() {
+		select {
+		case stopEntered <- struct{}{}:
+		default:
+		}
+	}
+	m.done = blockedDone
+
+	stopped := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not enter cancellation path")
+	}
+
+	started := make(chan struct{})
+	go func() {
+		m.Start(context.Background())
+		close(started)
+	}()
+
+	select {
+	case <-started:
+		t.Fatal("Start() returned before concurrent Stop() finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(blockedDone)
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not return after done channel closed")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start() did not resume after Stop() completed")
+	}
+
+	m.mu.RLock()
+	running := m.cancel != nil && m.done != nil
+	m.mu.RUnlock()
+	if !running {
+		t.Fatal("monitor should be running after Start() resumes")
+	}
+
+	m.Stop()
+}
+
 func TestCheckHealthIsWorkingGuardSkipsCrash(t *testing.T) {
 	// When the health check reports StatusError/ProcessExited but the agent
 	// is still actively producing output (ActivityActive), the IsWorking

@@ -61,11 +61,12 @@ type Monitor struct {
 
 	autoRestart bool // Whether to automatically restart crashed agents
 
-	mu     sync.RWMutex
-	agents map[string]*AgentState // keyed by pane ID
-	cancel context.CancelFunc
-	done   chan struct{}
-	wg     sync.WaitGroup // Waits for background tasks on shutdown
+	lifecycleMu sync.Mutex
+	mu          sync.RWMutex
+	agents      map[string]*AgentState // keyed by pane ID
+	cancel      context.CancelFunc
+	done        chan struct{}
+	wg          sync.WaitGroup // Waits for background tasks on shutdown
 }
 
 // NewMonitor creates a new resilience monitor for a session
@@ -208,7 +209,7 @@ func (m *Monitor) ScanAndRegisterAgents() error {
 	return nil
 }
 
-// Start begins monitoring agent health in the background
+// Start begins monitoring agent health in the background.
 func (m *Monitor) Start(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -216,6 +217,9 @@ func (m *Monitor) Start(ctx context.Context) {
 
 	childCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 
 	m.mu.Lock()
 	if m.cancel != nil {
@@ -234,9 +238,14 @@ func (m *Monitor) Start(ctx context.Context) {
 // Stop stops the monitor gracefully.
 // Safe to call even if Start() was never called.
 func (m *Monitor) Stop() {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	m.mu.Lock()
 	cancel := m.cancel
 	done := m.done
+	m.cancel = nil
+	m.done = nil
 	m.mu.Unlock()
 
 	if cancel == nil {
@@ -246,13 +255,6 @@ func (m *Monitor) Stop() {
 	cancel()
 	<-done
 	m.wg.Wait()
-
-	m.mu.Lock()
-	if m.done == done {
-		m.done = nil
-	}
-	m.cancel = nil
-	m.mu.Unlock()
 }
 
 // GetRestartCount returns the number of restarts for an agent

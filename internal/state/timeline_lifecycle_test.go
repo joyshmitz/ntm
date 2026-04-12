@@ -277,6 +277,86 @@ func TestTimelineLifecycleStop(t *testing.T) {
 	t.Log("PASS: Stop finalizes all active sessions")
 }
 
+func TestTimelineLifecycle_StartSessionDoesNotRacePastStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{BaseDir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister failed: %v", err)
+	}
+
+	tracker := NewTimelineTracker(nil)
+	lifecycle, err := NewTimelineLifecycle(tracker, persister)
+	if err != nil {
+		t.Fatalf("NewTimelineLifecycle failed: %v", err)
+	}
+
+	oldRunner := &checkpointRunner{
+		ticker: time.NewTicker(time.Hour),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		oldRunner.ticker.Stop()
+		select {
+		case <-oldRunner.done:
+		default:
+			close(oldRunner.done)
+		}
+	})
+
+	lifecycle.mu.Lock()
+	lifecycle.activeSessions["old-session"] = struct{}{}
+	lifecycle.mu.Unlock()
+	persister.mu.Lock()
+	persister.checkpoints["old-session"] = oldRunner
+	persister.mu.Unlock()
+
+	stopped := make(chan struct{})
+	go func() {
+		lifecycle.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-oldRunner.stop:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not begin draining the old checkpoint runner")
+	}
+
+	started := make(chan struct{})
+	go func() {
+		lifecycle.StartSession("new-session")
+		close(started)
+	}()
+
+	select {
+	case <-started:
+		t.Fatal("StartSession returned before Stop completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(oldRunner.done)
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not finish")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("StartSession did not unblock after Stop finished")
+	}
+
+	if lifecycle.IsSessionActive("new-session") {
+		t.Fatal("new-session should not become active after lifecycle stop")
+	}
+	if len(lifecycle.ActiveSessions()) != 0 {
+		t.Fatalf("expected no active sessions after Stop, got %v", lifecycle.ActiveSessions())
+	}
+}
+
 func TestStartSessionTimeline(t *testing.T) {
 	// This tests the convenience function
 	// Note: This uses the global lifecycle, so we need to be careful about state

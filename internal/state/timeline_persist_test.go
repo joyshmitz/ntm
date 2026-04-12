@@ -1433,6 +1433,84 @@ func TestStop_WaitsForCheckpointRunnersExit(t *testing.T) {
 	}
 }
 
+func TestStartCheckpoint_DoesNotRacePastConcurrentStop(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	persister, err := NewTimelinePersister(&TimelinePersistConfig{
+		BaseDir:            tmpDir,
+		CheckpointInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewTimelinePersister: %v", err)
+	}
+
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer tracker.Stop()
+
+	oldRunner := &checkpointRunner{
+		ticker: time.NewTicker(time.Hour),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		oldRunner.ticker.Stop()
+		select {
+		case <-oldRunner.done:
+		default:
+			close(oldRunner.done)
+		}
+	})
+
+	persister.mu.Lock()
+	persister.checkpoints["race-session"] = oldRunner
+	persister.mu.Unlock()
+
+	stopped := make(chan struct{})
+	go func() {
+		persister.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-oldRunner.stop:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not signal checkpoint runner stop")
+	}
+
+	started := make(chan struct{})
+	go func() {
+		persister.StartCheckpoint("race-session", tracker)
+		close(started)
+	}()
+
+	select {
+	case <-started:
+		t.Fatal("StartCheckpoint returned before Stop completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(oldRunner.done)
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not finish")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("StartCheckpoint did not unblock after Stop finished")
+	}
+
+	persister.mu.RLock()
+	_, exists := persister.checkpoints["race-session"]
+	persister.mu.RUnlock()
+	if exists {
+		t.Fatal("StartCheckpoint installed a runner after Stop completed")
+	}
+}
+
 func TestGetTimelinePath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

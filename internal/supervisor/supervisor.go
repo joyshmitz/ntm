@@ -74,15 +74,17 @@ type Supervisor struct {
 	projectDir string
 	ntmDir     string // .ntm directory path
 
-	daemons map[string]*ManagedDaemon
-	mu      sync.RWMutex
+	daemons     map[string]*ManagedDaemon
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	stopped     bool
 
 	healthInterval    time.Duration
 	maxRestarts       int
 	restartBackoffMax time.Duration
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	shutdownCh chan struct{}
+	cancel     func()
 }
 
 // Config holds supervisor configuration.
@@ -131,7 +133,13 @@ func New(cfg Config) (*Supervisor, error) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	shutdownCh := make(chan struct{})
+	var cancelOnce sync.Once
+	cancel := func() {
+		cancelOnce.Do(func() {
+			close(shutdownCh)
+		})
+	}
 
 	return &Supervisor{
 		sessionID:         cfg.SessionID,
@@ -141,13 +149,20 @@ func New(cfg Config) (*Supervisor, error) {
 		healthInterval:    cfg.HealthInterval,
 		maxRestarts:       cfg.MaxRestarts,
 		restartBackoffMax: cfg.RestartBackoffMax,
-		ctx:               ctx,
+		shutdownCh:        shutdownCh,
 		cancel:            cancel,
 	}, nil
 }
 
 // Start starts a daemon with the given spec.
 func (s *Supervisor) Start(spec DaemonSpec) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if s.stopped {
+		return fmt.Errorf("supervisor is shut down")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -184,7 +199,7 @@ func (s *Supervisor) Start(spec DaemonSpec) error {
 	}
 
 	// Create command
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, spec.Command, args...)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdout = logFile
@@ -250,6 +265,9 @@ func (s *Supervisor) Start(spec DaemonSpec) error {
 
 // Stop stops a daemon gracefully.
 func (s *Supervisor) Stop(name string) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	s.mu.Lock()
 	daemon, exists := s.daemons[name]
 	if !exists {
@@ -263,6 +281,25 @@ func (s *Supervisor) Stop(name string) error {
 
 // StopAll stops all daemons owned by this session.
 func (s *Supervisor) StopAll() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.stopAllOwnedDaemons()
+}
+
+// Shutdown stops all owned daemons and cancels the supervisor context.
+func (s *Supervisor) Shutdown() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if s.stopped {
+		return nil
+	}
+	s.stopped = true
+	s.cancel()
+	return s.stopAllOwnedDaemons()
+}
+
+func (s *Supervisor) stopAllOwnedDaemons() error {
 	s.mu.Lock()
 	daemons := make([]*ManagedDaemon, 0, len(s.daemons))
 	for _, d := range s.daemons {
@@ -283,12 +320,6 @@ func (s *Supervisor) StopAll() error {
 		return fmt.Errorf("errors stopping daemons: %v", errs)
 	}
 	return nil
-}
-
-// Shutdown stops all owned daemons and cancels the supervisor context.
-func (s *Supervisor) Shutdown() error {
-	s.cancel()
-	return s.StopAll()
 }
 
 // Status returns the status of all managed daemons.
@@ -385,7 +416,7 @@ func (s *Supervisor) monitorDaemon(d *ManagedDaemon) {
 
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-s.shutdownCh:
 			return
 		case <-ticker.C:
 			d.mu.RLock()
@@ -485,7 +516,7 @@ func (s *Supervisor) handleDaemonFailure(d *ManagedDaemon) {
 	}
 
 	select {
-	case <-s.ctx.Done():
+	case <-s.shutdownCh:
 		return
 	case <-time.After(backoff):
 	}
@@ -528,7 +559,7 @@ var healthCheckClient = &http.Client{
 
 // checkHealthHTTP performs an HTTP health check.
 func (s *Supervisor) checkHealthHTTP(url string) bool {
-	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -552,7 +583,7 @@ func (s *Supervisor) checkHealthCmd(cmdArgs []string) bool {
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)

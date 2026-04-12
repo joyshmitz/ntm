@@ -363,6 +363,94 @@ func TestAutoScanner_StopWaitsForInFlightScan(t *testing.T) {
 	}
 }
 
+func TestAutoScanner_StartWaitsForConcurrentStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := DefaultAutoScannerConfig(tmpDir)
+	cfg.ScanTimeout = time.Second
+
+	auto := NewAutoScannerWithScanner(cfg, &Scanner{binaryPath: "ubs"})
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		_ = auto.Stop()
+	})
+
+	auto.scan = func(ctx context.Context, path string, opts ScanOptions) (*ScanResult, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		<-release
+		return nil, ctx.Err()
+	}
+
+	if err := auto.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	auto.TriggerScan()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- auto.Stop()
+	}()
+
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before in-flight scan finished cleanup: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- auto.Start()
+	}()
+
+	select {
+	case err := <-startDone:
+		t.Fatalf("Start returned before concurrent Stop completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after releasing in-flight scan")
+	}
+
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("Start after concurrent Stop: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not resume after Stop completed")
+	}
+
+	if !auto.IsRunning() {
+		t.Fatal("auto scanner should be running after Start resumes")
+	}
+
+	if err := auto.Stop(); err != nil {
+		t.Fatalf("final Stop: %v", err)
+	}
+}
+
 func TestAutoScanner_StaleScanDoesNotOverwriteLatestResult(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := DefaultAutoScannerConfig(tmpDir)

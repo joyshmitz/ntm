@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -407,6 +408,7 @@ func TestHealthCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
+	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	go server.Serve(ln)
@@ -485,5 +487,105 @@ func TestHandleDaemonFailure_IdempotentWhenAlreadyFailed(t *testing.T) {
 	s.handleDaemonFailure(d)
 	if d.Restarts != 1 {
 		t.Fatalf("Restarts after 2nd call = %d, want 1", d.Restarts)
+	}
+}
+
+func TestShutdownPreventsFutureStarts(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := New(Config{
+		SessionID:  "test-session",
+		ProjectDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := s.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	err = s.Start(DaemonSpec{
+		Name:    "after-shutdown",
+		Command: "sleep",
+		Args:    []string{"1"},
+	})
+	if err == nil {
+		t.Fatal("Start() after Shutdown should return error")
+	}
+	if _, exists := s.GetDaemon("after-shutdown"); exists {
+		t.Fatal("Start() after Shutdown installed a daemon")
+	}
+}
+
+func TestStartWaitsForConcurrentShutdown(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := New(Config{
+		SessionID:  "test-session",
+		ProjectDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	blocked := &ManagedDaemon{
+		Spec:    DaemonSpec{Name: "existing"},
+		State:   StateRunning,
+		OwnerID: "test-session",
+	}
+	blocked.mu.Lock()
+	var releaseOnce sync.Once
+	releaseBlocked := func() {
+		releaseOnce.Do(func() {
+			blocked.mu.Unlock()
+		})
+	}
+	t.Cleanup(releaseBlocked)
+
+	s.mu.Lock()
+	s.daemons["existing"] = blocked
+	s.mu.Unlock()
+
+	stopped := make(chan struct{})
+	go func() {
+		_ = s.Shutdown()
+		close(stopped)
+	}()
+
+	startAttempt := make(chan error, 1)
+	go func() {
+		startAttempt <- s.Start(DaemonSpec{
+			Name:    "late-daemon",
+			Command: "sleep",
+			Args:    []string{"1"},
+		})
+	}()
+
+	select {
+	case err := <-startAttempt:
+		t.Fatalf("Start returned before Shutdown completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseBlocked()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish")
+	}
+
+	select {
+	case err := <-startAttempt:
+		if err == nil {
+			t.Fatal("Start after concurrent Shutdown should return error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not unblock after Shutdown")
+	}
+
+	if _, exists := s.GetDaemon("late-daemon"); exists {
+		t.Fatal("concurrent Start installed a daemon after Shutdown")
 	}
 }

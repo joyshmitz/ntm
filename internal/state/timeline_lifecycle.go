@@ -9,9 +9,11 @@ import (
 // TimelineLifecycle manages the integration between TimelineTracker and
 // TimelinePersister for automatic persistence during session lifecycle.
 type TimelineLifecycle struct {
-	mu        sync.Mutex
-	tracker   *TimelineTracker
-	persister *TimelinePersister
+	mu          sync.Mutex
+	lifecycleMu sync.Mutex
+	tracker     *TimelineTracker
+	persister   *TimelinePersister
+	stopped     bool
 
 	// activeSessions tracks sessions with active checkpointing
 	activeSessions map[string]struct{}
@@ -47,14 +49,21 @@ func (l *TimelineLifecycle) StartSession(sessionID string) {
 		return
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lifecycleMu.Lock()
+	defer l.lifecycleMu.Unlock()
 
-	if _, active := l.activeSessions[normalizedSessionID]; active {
-		return // Already tracking
+	if l.stopped {
+		return
 	}
 
+	l.mu.Lock()
+	if _, active := l.activeSessions[normalizedSessionID]; active {
+		l.mu.Unlock()
+		return // Already tracking
+	}
 	l.activeSessions[normalizedSessionID] = struct{}{}
+	l.mu.Unlock()
+
 	l.persister.StartCheckpoint(normalizedSessionID, l.tracker)
 }
 
@@ -66,10 +75,17 @@ func (l *TimelineLifecycle) EndSession(sessionID string) error {
 		return err
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lifecycleMu.Lock()
+	defer l.lifecycleMu.Unlock()
 
+	if l.stopped {
+		return nil
+	}
+
+	l.mu.Lock()
 	delete(l.activeSessions, normalizedSessionID)
+	l.mu.Unlock()
+
 	return l.persister.FinalizeSession(normalizedSessionID, l.tracker)
 }
 
@@ -110,16 +126,25 @@ func (l *TimelineLifecycle) GetPersister() *TimelinePersister {
 
 // Stop stops all active checkpoints and cleans up resources.
 func (l *TimelineLifecycle) Stop() {
+	l.lifecycleMu.Lock()
+	defer l.lifecycleMu.Unlock()
+
+	if l.stopped {
+		return
+	}
+	l.stopped = true
+
 	l.mu.Lock()
 	sessions := make([]string, 0, len(l.activeSessions))
 	for s := range l.activeSessions {
 		sessions = append(sessions, s)
+		delete(l.activeSessions, s)
 	}
 	l.mu.Unlock()
 
 	// Finalize all active sessions
 	for _, sessionID := range sessions {
-		_ = l.EndSession(sessionID)
+		_ = l.persister.FinalizeSession(sessionID, l.tracker)
 	}
 
 	l.persister.Stop()

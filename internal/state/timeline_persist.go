@@ -89,8 +89,10 @@ func DefaultTimelinePersistConfig() TimelinePersistConfig {
 
 // TimelinePersister handles saving and loading timeline data.
 type TimelinePersister struct {
-	mu     sync.RWMutex
-	config TimelinePersistConfig
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	config      TimelinePersistConfig
+	stopped     bool
 
 	// checkpoints tracks active checkpoint workers for each session.
 	checkpoints map[string]*checkpointRunner
@@ -397,6 +399,13 @@ func (p *TimelinePersister) StartCheckpoint(sessionID string, tracker *TimelineT
 		return
 	}
 
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
+	if p.stopped {
+		return
+	}
+
 	p.stopCheckpointRunner(normalizedSessionID)
 
 	runner := &checkpointRunner{
@@ -481,6 +490,14 @@ func (p *TimelinePersister) GetTimelineInfo(sessionID string) (*TimelineInfo, er
 
 // Stop stops all active checkpoints and cleans up resources.
 func (p *TimelinePersister) Stop() {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
+	if p.stopped {
+		return
+	}
+	p.stopped = true
+
 	p.mu.Lock()
 	runners := make([]*checkpointRunner, 0, len(p.checkpoints))
 	for sessionID, runner := range p.checkpoints {

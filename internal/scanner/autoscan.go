@@ -120,6 +120,7 @@ type AutoScanner struct {
 	watcher *watcher.Watcher
 	scan    func(context.Context, string, ScanOptions) (*ScanResult, error)
 
+	lifecycleMu       sync.Mutex
 	mu                sync.Mutex
 	running           bool
 	lastScanTime      time.Time
@@ -169,12 +170,15 @@ func NewAutoScannerWithScanner(cfg AutoScannerConfig, scanner *Scanner) *AutoSca
 
 // Start begins watching for file changes and auto-scanning.
 func (a *AutoScanner) Start() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
 
+	a.mu.Lock()
 	if a.running {
+		a.mu.Unlock()
 		return nil // Already running
 	}
+	a.mu.Unlock()
 
 	// Create watcher with event handler
 	w, err := watcher.New(
@@ -198,14 +202,19 @@ func (a *AutoScanner) Start() error {
 		return err
 	}
 
+	a.mu.Lock()
 	a.watcher = w
 	a.running = true
+	a.mu.Unlock()
 
 	return nil
 }
 
 // Stop stops watching and scanning.
 func (a *AutoScanner) Stop() error {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+
 	a.mu.Lock()
 	if !a.running {
 		a.mu.Unlock()
