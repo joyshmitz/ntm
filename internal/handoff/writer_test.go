@@ -11,6 +11,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// testTempDir returns a tempdir with all symlinked path components resolved.
+// The Writer's ensureSafeDir check rejects any path that traverses a symlink,
+// which breaks on macOS where t.TempDir() returns /var/folders/... but /var is
+// a symlink to /private/var. Resolving up-front keeps tests portable.
+func testTempDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(d); err == nil {
+		return resolved
+	}
+	return d
+}
+
 func TestNewWriter(t *testing.T) {
 	w := NewWriter("/tmp/testproject")
 
@@ -96,7 +109,7 @@ func TestTruncateLog(t *testing.T) {
 }
 
 func TestWriterEnsureDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Test creating session directory
@@ -151,7 +164,7 @@ func TestWriterEnsureDir(t *testing.T) {
 }
 
 func TestWriterWrite(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test-session").
@@ -200,7 +213,7 @@ func TestWriterWrite(t *testing.T) {
 }
 
 func TestWriterWriteRejectsSymlinkedSessionDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	outsideDir := t.TempDir()
@@ -223,7 +236,7 @@ func TestWriterWriteRejectsSymlinkedSessionDir(t *testing.T) {
 }
 
 func TestWriterWriteAppendsLedger(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("ledger-session").
@@ -257,7 +270,7 @@ func TestWriterWriteAppendsLedger(t *testing.T) {
 }
 
 func TestWriterWriteValidationFailure(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Missing required fields
@@ -276,7 +289,7 @@ func TestWriterWriteValidationFailure(t *testing.T) {
 }
 
 func TestWriterWriteInvalidSession(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("invalid session!").
@@ -293,7 +306,7 @@ func TestWriterWriteInvalidSession(t *testing.T) {
 }
 
 func TestWriterWriteDefaultDescription(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Test goal", "Test now")
@@ -311,7 +324,7 @@ func TestWriterWriteDefaultDescription(t *testing.T) {
 }
 
 func TestWriterWriteAuto(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test-session").
@@ -349,7 +362,7 @@ func TestWriterWriteAuto(t *testing.T) {
 }
 
 func TestWriterWriteAutoAppendsLedger(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("auto-ledger").
@@ -380,7 +393,7 @@ func TestWriterWriteAutoAppendsLedger(t *testing.T) {
 }
 
 func TestWriterRotation(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriterWithOptions(tmpDir, 3, nil) // Keep only 3 files
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -435,7 +448,7 @@ func TestWriterRotation(t *testing.T) {
 }
 
 func TestWriterRotationSkipsSymlinkedYAMLFiles(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriterWithOptions(tmpDir, 2, nil)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -480,7 +493,7 @@ func TestWriterRotationSkipsSymlinkedYAMLFiles(t *testing.T) {
 }
 
 func TestWriterArchive(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -507,7 +520,7 @@ func TestWriterArchive(t *testing.T) {
 }
 
 func TestWriterArchiveAlreadyArchived(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Create a file in archive manually
@@ -530,7 +543,7 @@ func TestWriterArchiveAlreadyArchived(t *testing.T) {
 }
 
 func TestWriterArchiveRejectsSymlinkedSessionDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	outsideDir := t.TempDir()
@@ -553,7 +566,7 @@ func TestWriterArchiveRejectsSymlinkedSessionDir(t *testing.T) {
 }
 
 func TestWriterArchiveRejectsSymlinkedArchiveDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -579,7 +592,7 @@ func TestWriterArchiveRejectsSymlinkedArchiveDir(t *testing.T) {
 }
 
 func TestWriterDelete(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -599,7 +612,7 @@ func TestWriterDelete(t *testing.T) {
 }
 
 func TestWriterDeleteOutsideBaseDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Try to delete a file outside the handoff directory
@@ -613,7 +626,7 @@ func TestWriterDeleteOutsideBaseDir(t *testing.T) {
 }
 
 func TestWriterDeleteRejectsPathThroughSymlinkedSessionDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	outsideDir := t.TempDir()
@@ -635,7 +648,7 @@ func TestWriterDeleteRejectsPathThroughSymlinkedSessionDir(t *testing.T) {
 }
 
 func TestWriterCleanArchive(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Create archive with old files
@@ -682,7 +695,7 @@ func TestWriterCleanArchive(t *testing.T) {
 }
 
 func TestWriterCleanArchiveNoArchive(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Clean non-existent archive should not error
@@ -696,7 +709,7 @@ func TestWriterCleanArchiveNoArchive(t *testing.T) {
 }
 
 func TestWriterConcurrentWrites(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	var wg sync.WaitGroup
@@ -743,7 +756,7 @@ func TestWriterConcurrentWrites(t *testing.T) {
 }
 
 func TestWriterAtomicWriteIntegrity(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").
@@ -790,7 +803,7 @@ func TestWriterBaseDir(t *testing.T) {
 }
 
 func TestWriterGeneralSession(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Test "general" session (special case)
@@ -807,7 +820,7 @@ func TestWriterGeneralSession(t *testing.T) {
 }
 
 func TestWriterFilePermissions(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
@@ -950,7 +963,7 @@ func TestFormatLedgerEntry_MinimalFields(t *testing.T) {
 // =============================================================================
 
 func TestWriterDeleteNonexistentFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Ensure the session dir exists so path is within base dir
@@ -967,7 +980,7 @@ func TestWriterDeleteNonexistentFile(t *testing.T) {
 }
 
 func TestWriterArchiveOutsideBaseDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	err := w.Archive("/tmp/some-other-dir/file.yaml")
@@ -980,7 +993,7 @@ func TestWriterArchiveOutsideBaseDir(t *testing.T) {
 }
 
 func TestWriterArchiveNonexistentFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Within base dir but file doesn't exist
@@ -1001,7 +1014,7 @@ func TestWriterArchiveNonexistentFile(t *testing.T) {
 // =============================================================================
 
 func TestWriterWriteAutoValidationFailure(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Missing required fields
@@ -1016,7 +1029,7 @@ func TestWriterWriteAutoValidationFailure(t *testing.T) {
 }
 
 func TestWriterWriteAutoWithAllFields(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("auto-full").
@@ -1066,7 +1079,7 @@ func TestWriterWriteAutoWithAllFields(t *testing.T) {
 // =============================================================================
 
 func TestAppendLedgerEntry_EmptySession(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := &Handoff{Goal: "test goal", Now: "test now"}
@@ -1179,7 +1192,7 @@ func TestMarshalYAML(t *testing.T) {
 func TestWriteToPath(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").
@@ -1219,7 +1232,7 @@ func TestWriteToPath(t *testing.T) {
 func TestWriteToPath_ValidationError(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	// Invalid handoff (missing required fields)
@@ -1239,7 +1252,7 @@ func TestWriteToPath_ValidationError(t *testing.T) {
 func TestWriteToPath_CreatesParentDirs(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
+	tmpDir := testTempDir(t)
 	w := NewWriter(tmpDir)
 
 	h := New("test").WithGoalAndNow("Goal", "Now")
