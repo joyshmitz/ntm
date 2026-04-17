@@ -45,6 +45,8 @@ storage.sqlite3-*
 # beads local state
 .beads/.br_history/
 .beads/.bv.lock
+.beads/.write.lock
+.beads/.sync.lock
 
 # Temporary/backup files
 *.bak
