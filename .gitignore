@@ -47,6 +47,7 @@ storage.sqlite3-*
 .beads/.bv.lock
 .beads/.write.lock
 .beads/.sync.lock
+.beads/.migration-hint-ts
 
 # Temporary/backup files
 *.bak
