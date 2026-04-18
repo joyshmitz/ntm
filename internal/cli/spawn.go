@@ -3338,16 +3338,35 @@ func isRecoveryEmptyInboxError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Typed-error paths: `agentmail.mapJSONRPCError` wraps the server's
+	// "agent not registered" / "not found" JSON-RPC responses through
+	// these sentinels. In the recovery context both mean "there's no
+	// prior state to restore", which is an expected silent empty-state,
+	// not a warning — `ntm spawn` still proceeds normally.
 	if errors.Is(err, agentmail.ErrAgentNotRegistered) ||
 		errors.Is(err, agentmail.ErrNotFound) {
 		return true
 	}
-	// Fallback string match for server responses that pre-date the
-	// typed-error mapping (or come back through a wrapper that eats
-	// the sentinel).
+	// String fallback for plain errors that never went through the
+	// typed-mapping (e.g. a wrapper ate the Unwrap chain, or the
+	// server returned the message via a non-standard transport).
+	//
+	// Narrowly match only the specific server-emitted shapes:
+	//
+	//   "Agent 'X' not found. Project 'Y' has no registered agents yet."
+	//   "Agent 'X' not found in project 'Y'"
+	//
+	// A loose `contains("agent") && contains("not found")` heuristic
+	// would false-match `APIError.Error()` output — every APIError
+	// stringifies as `"agentmail: <op> failed: <inner>"`, so a plain
+	// "Project 'x' not found" or DNS-level "host not found" wrapped
+	// through APIError would incorrectly resolve to empty-inbox and
+	// hide real failures.
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "has no registered agents") ||
-		(strings.Contains(msg, "agent") && strings.Contains(msg, "not found"))
+	if strings.Contains(msg, "has no registered agents") {
+		return true
+	}
+	return strings.Contains(msg, "agent '") && strings.Contains(msg, "' not found")
 }
 
 func listRecoveryReservations(ctx context.Context, client recoveryMailClient, projectKey, sessionName, agentName string) ([]agentmail.FileReservation, string, error) {

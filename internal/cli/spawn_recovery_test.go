@@ -136,6 +136,26 @@ func TestIsRecoveryEmptyInboxError(t *testing.T) {
 		{"has no registered agents text", errors.New("Project 'x' has no registered agents yet"), true},
 		{"server unavailable", agentmail.ErrServerUnavailable, false},
 		{"generic error", errors.New("something blew up"), false},
+		// False-positive guards: `APIError.Error()` always prepends
+		// "agentmail: <op> failed: <inner>", so a loose `contains("agent")`
+		// heuristic would silently swallow these as "empty inbox". The
+		// tightened `"agent '"` + `"' not found"` pair-match must NOT
+		// match these.
+		{
+			name: "wrapped project-not-found (untyped) does not false-match",
+			err:  errors.New("agentmail: fetch_inbox failed: Project 'x' not found"),
+			want: false,
+		},
+		{
+			name: "wrapped DNS host-not-found does not false-match",
+			err:  errors.New("agentmail: fetch_inbox failed: lookup api.example.com: no such host"),
+			want: false,
+		},
+		{
+			name: "unrelated user-agent header error with 'not found' does not match",
+			err:  errors.New("user-agent header missing; endpoint '/foo' not found"),
+			want: false,
+		},
 	}
 
 	for _, tc := range cases {
