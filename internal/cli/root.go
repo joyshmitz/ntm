@@ -3937,6 +3937,7 @@ func init() {
 		newSessionPersistCmd(),
 		newHandoffCmd(),
 		newResumeCmd(),
+		newTimelineCmd(),
 
 		// Utilities
 		newOverlayCmd(),
