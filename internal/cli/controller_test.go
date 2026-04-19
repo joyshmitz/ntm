@@ -42,8 +42,8 @@ func TestResolveControllerPrompt_DefaultTemplate(t *testing.T) {
 	}
 
 	// Verify the prompt mentions coordination commands with session name
-	if !strings.Contains(content, "--robot-status-session=myproject") {
-		t.Error("prompt should contain '--robot-status-session=myproject'")
+	if !strings.Contains(content, "--robot-activity=myproject") {
+		t.Error("prompt should contain '--robot-activity=myproject'")
 	}
 	if !strings.Contains(content, "ntm send myproject --pane") {
 		t.Error("prompt should contain 'ntm send myproject --pane'")
@@ -52,8 +52,16 @@ func TestResolveControllerPrompt_DefaultTemplate(t *testing.T) {
 	if strings.Contains(content, "ntm view myproject") {
 		t.Error("prompt should NOT contain 'ntm view myproject' (changes human layout; use --robot-tail)")
 	}
-	if strings.Contains(content, "--panes=N --msg=") {
-		t.Error("prompt should NOT contain '--panes=N --msg=' (invalid flag for ntm send)")
+	// The bug in #109: the `ntm send` SUBCOMMAND does not accept --msg. Only
+	// the --robot-send GLOBAL flag does. So the broken combination was
+	// "ntm send <session> --panes=... --msg=...". Guard against that shape.
+	if strings.Contains(content, "ntm send myproject --panes") && strings.Contains(content, "--msg") {
+		// Check whether any line contains both `ntm send myproject` and `--msg`
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "ntm send myproject") && strings.Contains(line, "--msg") {
+				t.Errorf("prompt line mixes 'ntm send' subcommand with invalid --msg flag: %q", line)
+			}
+		}
 	}
 }
 
@@ -476,9 +484,13 @@ func TestDefaultControllerPromptContent(t *testing.T) {
 	if !strings.Contains(defaultControllerPrompt, "ntm send") {
 		t.Error("default prompt should mention ntm send command")
 	}
-	// Verify the stale/disruptive examples from issue #109 are NOT present
-	if strings.Contains(defaultControllerPrompt, "--panes=N --msg=") {
-		t.Error("default prompt must not use invalid --msg flag for 'ntm send' (issue #109)")
+	// Verify the stale/disruptive examples from issue #109 are NOT present.
+	// The bug: ntm send (subcommand) does not accept --msg. Only --robot-send
+	// (global flag) does. Fail if any line mixes 'ntm send' subcommand with --msg.
+	for _, line := range strings.Split(defaultControllerPrompt, "\n") {
+		if strings.Contains(line, "ntm send ") && strings.Contains(line, "--msg") {
+			t.Errorf("default prompt line mixes 'ntm send' subcommand with invalid --msg flag: %q (issue #109)", line)
+		}
 	}
 	// 'ntm view' changes the human operator's tmux layout; controller agents must not run it
 	if strings.Contains(defaultControllerPrompt, "- ntm view") {
