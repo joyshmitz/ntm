@@ -323,11 +323,20 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 			return true
 		}
 		idleMatch := matchAnyRegex(lastLines, ccIdlePatterns)
-		// Active spinner overrides idle: if we see a spinner pattern in the last few lines, the agent is working even if an idle pattern also matches (e.g. from the permanent status bar or a stale prompt above the spinner).
-		if idleMatch && matchAnyRegex(lastLines, ccSpinnerActivePatterns) {
-			return false
+		// Active spinner overrides idle ONLY when the spinner appears AFTER
+		// the most recent prompt marker. A stale spinner above a fresh ❯
+		// prompt (e.g. agent just finished a 17-minute "thinking" run, then
+		// printed its idle prompt) must NOT block the idle verdict, otherwise
+		// operators polling for dispatchable panes never see them as idle.
+		if idleMatch {
+			lastIdle := lastLineIdxMatching(lastLines, ccIdlePatterns)
+			lastSpin := lastLineIdxMatching(lastLines, ccSpinnerActivePatterns)
+			if lastSpin > lastIdle {
+				return false
+			}
+			return true
 		}
-		return idleMatch
+		return false
 	case AgentTypeCodex:
 		return matchAnyRegex(lastLines, codIdlePatterns)
 	case AgentTypeGemini:

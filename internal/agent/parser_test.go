@@ -265,6 +265,55 @@ Human: `
 	}
 }
 
+// Regression: a stale spinner from a long "thinking" run that remains in the
+// scrollback above a fresh ❯ prompt must not block the idle verdict. Before
+// the fix, ccSpinnerActivePatterns unconditionally overrode any idle match,
+// so operators polling --robot-is-working never saw newly-idle agents and
+// could never dispatch fresh work to them.
+func TestParser_Parse_Idle_Claude_StaleSpinnerAbovePrompt(t *testing.T) {
+	p := NewParser()
+	output := "✻ Crystallizing… (17m 2s · thinking)\n" +
+		"  ⏿  Tip: Use /btw to ask a quick side\n" +
+		"     question without interrupting\n" +
+		"     Claude's current work\n" +
+		"\n" +
+		"────────────────────────────────────────\n" +
+		"❯ \n" +
+		"────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on          ·\n"
+	state, err := p.Parse(output)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if !state.IsIdle {
+		t.Error("Expected IsIdle=true when fresh ❯ prompt sits below stale spinner")
+	}
+	if state.IsWorking {
+		t.Error("Expected IsWorking=false when idle")
+	}
+	if state.GetRecommendation() != RecommendSafeToRestart {
+		t.Errorf("Recommendation = %v, want %v", state.GetRecommendation(), RecommendSafeToRestart)
+	}
+}
+
+// Confirm the inverse still holds: spinner BELOW the prompt means working,
+// not idle (the agent printed a prompt and then resumed thinking).
+func TestParser_Parse_Working_Claude_SpinnerBelowStalePrompt(t *testing.T) {
+	p := NewParser()
+	output := "❯ tell me a joke\n" +
+		"────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on          ·\n" +
+		"\n" +
+		"✻ Crystallizing… (3s · thinking)\n"
+	state, err := p.Parse(output)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if state.IsIdle {
+		t.Error("Expected IsIdle=false when spinner runs after the prompt")
+	}
+}
+
 func TestParser_Parse_Codex_ContextExtraction(t *testing.T) {
 	p := NewParser()
 	output := `Processing your request...

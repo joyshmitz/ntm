@@ -374,6 +374,28 @@ func matchAnyRegex(text string, patterns []*regexp.Regexp) bool {
 	return false
 }
 
+// lastLineIdxMatching returns the highest line index (0-based, counting from
+// the start of `text`) that matches any of the regex patterns. Returns -1 when
+// nothing matches. Used by detectIdle to compare ordering of competing markers
+// (e.g. a fresh idle prompt below a stale spinner) so the most-recent state
+// wins instead of an unconditional override.
+func lastLineIdxMatching(text string, patterns []*regexp.Regexp) int {
+	if text == "" || len(patterns) == 0 {
+		return -1
+	}
+	lines := strings.Split(text, "\n")
+	last := -1
+	for i, line := range lines {
+		for _, p := range patterns {
+			if p.MatchString(line) {
+				last = i
+				break
+			}
+		}
+	}
+	return last
+}
+
 // collectMatches returns all patterns that matched in the text.
 func collectMatches(text string, patterns []string) []string {
 	var matches []string
