@@ -428,6 +428,49 @@ func TestRemoveIfEmptyObjectNoOpsOnJSONNull(t *testing.T) {
 	}
 }
 
+// Regression: if the user's settings.json contains literal `null` (valid
+// JSON that Go unmarshals into a map as nil, NOT into an empty map), a
+// subsequent `parsed[ModelKey] = model` assignment would panic with
+// "assignment to entry in nil map". Fixed in WriteModel by resetting a
+// nil parsed map to an empty one before assignment.
+func TestWriteModelHandlesJSONNullSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte(`null`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both paths — writing a model, and clearing the model — must not
+	// panic on null content.
+	if err := WriteModel(path, "sonnet-4.6"); err != nil {
+		t.Fatalf("WriteModel with null settings: %v", err)
+	}
+	model, hasModel, err := ReadModel(path)
+	if err != nil {
+		t.Fatalf("ReadModel: %v", err)
+	}
+	if !hasModel || model != "sonnet-4.6" {
+		t.Errorf("post-write-on-null got (%q, %t); want (\"sonnet-4.6\", true)", model, hasModel)
+	}
+
+	// Reset to `null` and exercise the clear-model path too.
+	if err := os.WriteFile(path, []byte(`null`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteModel(path, ""); err != nil {
+		t.Fatalf("WriteModel(empty) with null settings: %v", err)
+	}
+	// Clearing a field from a null-content file ends up writing `{}`.
+	// Not ideal but safer than panicking.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{}" {
+		t.Errorf("clear-on-null produced %q; expected \"{}\"", raw)
+	}
+}
+
 func TestRemoveIfEmptyObjectNoOpsOnJSONArray(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")

@@ -122,6 +122,16 @@ func WriteModel(settingsPath, model string) error {
 		if err := json.Unmarshal(raw, &parsed); err != nil {
 			return fmt.Errorf("parse %s: %w", settingsPath, err)
 		}
+		// JSON `null` unmarshals into a map[string]any by setting the map
+		// to nil (not an error). A later `parsed[key] = value` on a nil
+		// map panics with "assignment to entry in nil map", so reset to
+		// an empty non-nil map and treat `null` as "no pre-existing
+		// object to merge with" — the subsequent write will replace the
+		// `null` content with either `{}` (for model == "") or
+		// `{"model": "..."}`.
+		if parsed == nil {
+			parsed = map[string]any{}
+		}
 	}
 
 	if model == "" {
