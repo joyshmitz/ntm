@@ -5685,10 +5685,14 @@ func cassSearchOperational(t *testing.T) bool {
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Exercise the same code path (Search, not SearchQuick) with a budget
+	// well below the handler's 30s timeout. Under VPS load cass can be slow
+	// enough that the handler-side ctx gets killed even when SearchQuick was
+	// fast, so gate on a realistic full Search completing promptly.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := client.SearchQuick(ctx, "test")
+	_, err := client.Search(ctx, cass.SearchOptions{Query: "test", Limit: 1})
 	return err == nil
 }
 
