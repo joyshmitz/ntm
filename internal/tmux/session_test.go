@@ -1172,6 +1172,84 @@ func TestDetectAgentFromCommandEdgeCases(t *testing.T) {
 	}
 }
 
+// Regression test for acfs#267: when an agent runs under a wrapper
+// like Bun, tmux's pane_current_command reports the wrapper, not the
+// agent. We need to identify the wrapper as a candidate for deeper
+// inspection (process-tree walk) rather than treating it as a plain
+// user pane.
+func TestIsAgentWrapperCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		// tmux `pane_current_command` returns the immediate process
+		// basename — bare names like "bun", "node", or absolute paths.
+		// It does NOT return argv, so all realistic inputs are short.
+		{"bun bare", "bun", true},
+		{"bun absolute path", "/home/jerry/.bun/bin/bun", true},
+		{"node bare", "node", true},
+		{"npx bare", "npx", true},
+		{"deno bare", "deno", true},
+		{"python bare", "python", true},
+		{"python3 bare", "python3", true},
+
+		// Shells — also wrappers when the agent was launched directly
+		// inside the pane shell.
+		{"sh", "sh", true},
+		{"bash", "bash", true},
+		{"zsh", "zsh", true},
+
+		// Direct agent / non-wrapper commands.
+		{"claude bare", "claude", false},
+		{"codex bare", "codex", false},
+		{"gemini bare", "gemini", false},
+		{"random program", "some_other_tool", false},
+		{"empty", "", false},
+
+		// Case insensitivity / whitespace.
+		{"BUN uppercase", "BUN", true},
+		{"  bun with spaces", "  bun  ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAgentWrapperCommand(tt.command)
+			if got != tt.want {
+				t.Errorf("isAgentWrapperCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// Tests the joined-argv detection path inside detectAgentFromProcessTree
+// without spawning real processes. The logic that runs at each frame
+// is `detectAgentFromCommand(strings.Join(argv, " "))` plus per-arg
+// detection — exercise both shapes against the patterns we care
+// about for issue acfs#267.
+func TestDetectAgentFromCommand_BunCodexArgvShape(t *testing.T) {
+	t.Parallel()
+
+	// The exact argv shape from the issue body.
+	bunCodexArgv := []string{
+		"bun",
+		"/home/jerry/.bun/bin/codex",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"-m", "gpt-5.5-codex",
+	}
+	if got := detectAgentFromCommand(strings.Join(bunCodexArgv, " ")); got != AgentCodex {
+		t.Errorf("joined bun-codex argv: detectAgentFromCommand = %q, want %q", got, AgentCodex)
+	}
+
+	// And one of the arg elements alone — `/home/.../codex` should
+	// match through the `/codex` suffix branch.
+	if got := detectAgentFromCommand("/home/jerry/.bun/bin/codex"); got != AgentCodex {
+		t.Errorf("argv[1] /home/.../codex: detectAgentFromCommand = %q, want %q", got, AgentCodex)
+	}
+}
+
 func TestFormatTagsEdgeCases(t *testing.T) {
 	t.Parallel()
 

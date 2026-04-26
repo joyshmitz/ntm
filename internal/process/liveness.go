@@ -98,6 +98,80 @@ func GetChildPID(parentPID int) int {
 // IsChildAlive is an alias for HasChildAlive for backward compatibility.
 var IsChildAlive = HasChildAlive
 
+// GetCmdline returns the full argv of the process with the given PID,
+// or an empty slice if it can't be read. On Linux this uses
+// `/proc/<pid>/cmdline`; on other systems it falls back to `ps -o
+// command=`.
+//
+// This is useful for distinguishing wrapper processes (`bun`, `node`,
+// `npx`, `python`) from the agent binary they launched: the wrapper
+// shows up as the process's basename, but the agent it's running is
+// usually visible in argv (e.g. `bun /home/.../codex ...`).
+func GetCmdline(pid int) []string {
+	if pid <= 0 {
+		return nil
+	}
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		// /proc/.../cmdline is NUL-separated, with a trailing NUL.
+		raw := strings.TrimRight(string(data), "\x00")
+		if raw == "" {
+			return nil
+		}
+		return strings.Split(raw, "\x00")
+	}
+	// Fallback for non-Linux. `ps -o command=` returns a single
+	// space-separated string with no easy way to recover argv0
+	// boundaries inside arguments, but it's enough for substring
+	// matching against agent binary names.
+	cmd := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid))
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		return nil
+	}
+	return strings.Fields(line)
+}
+
+// GetChildPIDs returns up to `limit` direct children of `parentPID`.
+// Linux fast path reads `/proc/<pid>/task/<pid>/children`; falls back
+// to `pgrep -P`. Returns nil on failure.
+func GetChildPIDs(parentPID int, limit int) []int {
+	if parentPID <= 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+
+	collect := func(parts []string) []int {
+		var out []int
+		for _, p := range parts {
+			pid, err := strconv.Atoi(p)
+			if err != nil || pid <= 0 {
+				continue
+			}
+			out = append(out, pid)
+			if len(out) >= limit {
+				return out
+			}
+		}
+		return out
+	}
+
+	taskPath := fmt.Sprintf("/proc/%d/task/%d/children", parentPID, parentPID)
+	if data, err := os.ReadFile(taskPath); err == nil {
+		return collect(strings.Fields(string(data)))
+	}
+	cmd := exec.Command("pgrep", "-P", strconv.Itoa(parentPID))
+	if out, err := cmd.Output(); err == nil {
+		return collect(strings.Fields(string(out)))
+	}
+	return nil
+}
+
 // processStateNames maps single-character /proc state codes to human names.
 var processStateNames = map[string]string{
 	"R": "running",

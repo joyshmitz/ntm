@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/process"
 )
 
 // bufferSeq is a monotonic counter that ensures unique tmux buffer names
@@ -194,6 +195,100 @@ func detectAgentFromCommand(command string) AgentType {
 		return AgentOllama
 	}
 
+	return AgentUser
+}
+
+// agentWrapperCommands lists shell-bin names that frequently appear as
+// `pane_current_command` even when the pane is actually running an
+// agent under them. tmux only reports the immediate process name, so a
+// pane running `bun /home/.../codex ...` reports `bun` and gets
+// classified as a user pane unless we look one level deeper. See
+// acfs#267.
+var agentWrapperCommands = map[string]struct{}{
+	"bun":     {},
+	"node":    {},
+	"npx":     {},
+	"deno":    {},
+	"python":  {},
+	"python3": {},
+	"sh":      {},
+	"bash":    {},
+	"zsh":     {},
+}
+
+func isAgentWrapperCommand(command string) bool {
+	base := strings.ToLower(strings.TrimSpace(command))
+	if base == "" {
+		return false
+	}
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if i := strings.IndexAny(base, " \t"); i >= 0 {
+		base = base[:i]
+	}
+	_, ok := agentWrapperCommands[base]
+	return ok
+}
+
+// detectAgentFromProcessTree walks up to `maxDepth` levels of
+// descendants under shellPID and returns the first agent type that
+// matches either an argv element or a child process command.
+//
+// This handles the common Bun-wrapper case (acfs#267): the immediate
+// child of zsh is `bun /home/.../codex ...`, whose own child is the
+// real codex binary. Without this walk, NTM mis-classifies the pane
+// as user.
+//
+// Bounded by `maxDepth` (default 4) and a child-fanout limit
+// (`process.GetChildPIDs(_, 8)`) to keep the per-pane cost bounded
+// even on busy hosts.
+func detectAgentFromProcessTree(shellPID int, maxDepth int) AgentType {
+	if shellPID <= 0 {
+		return AgentUser
+	}
+	if maxDepth <= 0 {
+		maxDepth = 4
+	}
+
+	type frame struct {
+		pid   int
+		depth int
+	}
+	stack := []frame{{pid: shellPID, depth: 0}}
+	visited := map[int]bool{shellPID: true}
+
+	for len(stack) > 0 {
+		// Pop. Pre-order traversal — check argv before descending.
+		top := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		argv := process.GetCmdline(top.pid)
+		// Detect on the joined argv as well as on each individual element
+		// so wrappers like `bun /home/.../codex ...` get caught: the
+		// agent name appears as a path component of one of argv's
+		// arguments rather than as the immediate command.
+		joined := strings.Join(argv, " ")
+		if t := detectAgentFromCommand(joined); t != AgentUser {
+			return t
+		}
+		for _, arg := range argv {
+			if t := detectAgentFromCommand(arg); t != AgentUser {
+				return t
+			}
+		}
+
+		if top.depth >= maxDepth {
+			continue
+		}
+		for _, child := range process.GetChildPIDs(top.pid, 8) {
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
+			stack = append(stack, frame{pid: child, depth: top.depth + 1})
+		}
+	}
 	return AgentUser
 }
 
@@ -1393,10 +1488,19 @@ func parsePaneFromParts(parts1, parts2 []string) (*Pane, error) {
 	// Parse pane title using regex to extract type, index, variant, and tags
 	pane.Type, pane.NTMIndex, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
 
-	// Fallback: if title didn't match NTM format, try detecting from process command
+	// Fallback chain:
+	//  1. Title-based parse (NTM-formatted titles).
+	//  2. Immediate command name (`claude`, `codex`, etc.).
+	//  3. Process tree walk — required when the agent runs under a
+	//     wrapper that shows up in tmux's `pane_current_command` (e.g.
+	//     Bun-launched Codex shows `bun`, not `codex`). See acfs#267.
 	if pane.Type == AgentUser && pane.Command != "" {
 		if detected := detectAgentFromCommand(pane.Command); detected != AgentUser {
 			pane.Type = detected
+		} else if isAgentWrapperCommand(pane.Command) && pane.PID > 0 {
+			if detected := detectAgentFromProcessTree(pane.PID, 4); detected != AgentUser {
+				pane.Type = detected
+			}
 		}
 	}
 
