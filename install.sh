@@ -197,6 +197,12 @@ resolve_latest_version_from_redirect() {
 
     if has_cmd curl; then
         effective_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null) || return 1
+    elif has_cmd wget; then
+        effective_url=$(
+            wget -S --spider "$url" 2>&1 |
+                awk 'tolower($1) == "location:" { loc = $2 } END { sub(/\r$/, "", loc); print loc }'
+        ) || return 1
+        [[ -n "$effective_url" ]] || return 1
     else
         return 1
     fi
@@ -509,9 +515,11 @@ install_ntm() {
             for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
                 if [ -e "$rc" ] && [ -w "$rc" ]; then
                     if ! grep -F "$install_dir" "$rc" >/dev/null 2>&1; then
-                        echo "" >> "$rc"
-                        echo "# Added by ntm installer" >> "$rc"
-                        echo "export PATH=\"\$PATH:${install_dir}\"" >> "$rc"
+                        {
+                            echo ""
+                            echo "# Added by ntm installer"
+                            echo "export PATH=\"\$PATH:${install_dir}\""
+                        } >> "$rc"
                         path_updated=1
                     fi
                 fi
@@ -699,9 +707,11 @@ setup_shell_integration() {
 
     # In easy-mode, auto-add without prompting
     if [ "$EASY_MODE" = true ]; then
-        echo "" >> "$rc_file"
-        echo "# NTM - Named Tmux Manager" >> "$rc_file"
-        echo "$init_cmd" >> "$rc_file"
+        {
+            echo ""
+            echo "# NTM - Named Tmux Manager"
+            echo "$init_cmd"
+        } >> "$rc_file"
         print_success "Added shell integration to ${rc_file}"
         print_info "Restart your shell or run 'source ${rc_file}' to activate."
         return
