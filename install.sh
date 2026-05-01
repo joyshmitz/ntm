@@ -163,6 +163,22 @@ has_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_release_version() {
+    local version="${1#v}"
+    [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?([+][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+}
+
+normalize_release_version() {
+    local version="$1"
+
+    if ! is_release_version "$version"; then
+        print_error "Invalid version: $version (expected vX.Y.Z or X.Y.Z)"
+        return 1
+    fi
+
+    printf 'v%s\n' "${version#v}"
+}
+
 # Download a file
 download_file() {
     local url="$1"
@@ -208,8 +224,8 @@ resolve_latest_version_from_redirect() {
     fi
 
     tag="${effective_url##*/}"
-    if [[ -n "$tag" && "$tag" =~ ^v[0-9] && "$tag" != *"/"* ]]; then
-        printf '%s\n' "$tag"
+    if is_release_version "$tag"; then
+        normalize_release_version "$tag"
         return 0
     fi
 
@@ -288,6 +304,53 @@ build_download_url() {
     local version="$1"
     local asset_name="$2"
     printf 'https://github.com/%s/%s/releases/download/%s/%s\n' "$REPO_OWNER" "$REPO_NAME" "$version" "$asset_name"
+}
+
+verify_downloaded_asset() {
+    local asset_path="$1"
+    local checksum_path="$2"
+    local asset_name="$3"
+    local expected actual
+
+    if [ ! -f "$checksum_path" ]; then
+        print_error "Checksums file not found: $checksum_path"
+        return 1
+    fi
+
+    expected=$(
+        awk -v name="$asset_name" '
+            {
+                filename = $NF
+                sub(/\r$/, "", filename)
+                if (filename == name) {
+                    print $1
+                    exit
+                }
+            }
+        ' "$checksum_path"
+    )
+
+    if ! printf '%s\n' "$expected" | grep -Eq '^[0-9A-Fa-f]{64}$'; then
+        print_error "No SHA256 checksum found for $asset_name"
+        return 1
+    fi
+
+    if has_cmd sha256sum; then
+        actual=$(sha256sum "$asset_path" | awk '{print $1}')
+    elif has_cmd shasum; then
+        actual=$(shasum -a 256 "$asset_path" | awk '{print $1}')
+    else
+        print_error "Need sha256sum or shasum to verify downloaded asset"
+        return 1
+    fi
+
+    expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+    actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+
+    if [ "$expected" != "$actual" ]; then
+        print_error "Checksum mismatch for $asset_name"
+        return 1
+    fi
 }
 
 asset_url_exists() {
@@ -376,7 +439,7 @@ ensure_install_dir() {
 
 # Main installation function
 install_ntm() {
-    local platform version install_dir tmp_dir asset_name download_url download_path binary_path
+    local platform version install_dir tmp_dir asset_name download_url download_path binary_path checksum_url checksum_path
 
     print_info "Installing ${BIN_NAME}..."
 
@@ -408,6 +471,13 @@ install_ntm() {
         fi
     else
         version="$VERSION"
+    fi
+
+    if ! version=$(normalize_release_version "$version"); then
+        exit 1
+    fi
+
+    if [ -n "$VERSION" ]; then
         # Fetch release info for this version
         local release_json
         release_json=$(get_release_by_tag "$version" || true)
@@ -468,6 +538,17 @@ install_ntm() {
     # Download
     if ! download_file "$download_url" "$download_path"; then
         print_error "Download failed"
+        exit 1
+    fi
+
+    checksum_url=$(build_download_url "$version" "checksums.txt")
+    checksum_path="${tmp_dir}/checksums.txt"
+    print_info "Verifying checksum..."
+    if ! download_file "$checksum_url" "$checksum_path"; then
+        print_error "Could not download checksums file"
+        exit 1
+    fi
+    if ! verify_downloaded_asset "$download_path" "$checksum_path" "$asset_name"; then
         exit 1
     fi
 
