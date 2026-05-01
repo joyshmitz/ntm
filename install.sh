@@ -191,6 +191,25 @@ get_latest_release() {
     fi
 }
 
+resolve_latest_version_from_redirect() {
+    local url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+    local effective_url tag
+
+    if has_cmd curl; then
+        effective_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null) || return 1
+    else
+        return 1
+    fi
+
+    tag="${effective_url##*/}"
+    if [[ -n "$tag" && "$tag" =~ ^v[0-9] && "$tag" != *"/"* ]]; then
+        printf '%s\n' "$tag"
+        return 0
+    fi
+
+    return 1
+}
+
 # Get a specific tagged release info from GitHub
 get_release_by_tag() {
     local version="$1"
@@ -265,6 +284,47 @@ build_download_url() {
     printf 'https://github.com/%s/%s/releases/download/%s/%s\n' "$REPO_OWNER" "$REPO_NAME" "$version" "$asset_name"
 }
 
+asset_url_exists() {
+    local url="$1"
+
+    if has_cmd curl; then
+        curl -fsIL -o /dev/null "$url" 2>/dev/null
+        return $?
+    elif has_cmd wget; then
+        wget -q --spider "$url" 2>/dev/null
+        return $?
+    fi
+
+    return 1
+}
+
+find_downloadable_asset_name() {
+    local platform="$1"
+    local version="$2"
+    local clean_version="${version#v}"
+    local alt_platform="${platform//_/-}"
+    local candidate url
+    local -a candidates=(
+        "${BIN_NAME}_${clean_version}_${platform}.tar.gz"
+        "${BIN_NAME}_${version}_${platform}.tar.gz"
+        "${BIN_NAME}_${platform}.tar.gz"
+        "${BIN_NAME}-${clean_version}-${alt_platform}.tar.gz"
+        "${BIN_NAME}_${clean_version}_${platform}.zip"
+        "${BIN_NAME}_${version}_${platform}.zip"
+        "${BIN_NAME}_${platform}.zip"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        url=$(build_download_url "$version" "$candidate")
+        if asset_url_exists "$url"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 extract_downloaded_asset() {
     local asset_name="$1"
     local downloaded_path="$2"
@@ -326,11 +386,16 @@ install_ntm() {
     if [ -z "$VERSION" ]; then
         print_info "Fetching latest version..."
         local release_json
-        release_json=$(get_latest_release) || {
-            print_error "Could not fetch release info from GitHub"
-            exit 1
-        }
-        version=$(echo "$release_json" | extract_version)
+        version=$(resolve_latest_version_from_redirect || true)
+        if [ -n "$version" ]; then
+            release_json=""
+        else
+            release_json=$(get_latest_release) || {
+                print_error "Could not fetch release info from GitHub"
+                exit 1
+            }
+            version=$(echo "$release_json" | extract_version)
+        fi
         if [ -z "$version" ]; then
             print_error "Could not determine latest version"
             exit 1
@@ -339,20 +404,18 @@ install_ntm() {
         version="$VERSION"
         # Fetch release info for this version
         local release_json
-        release_json=$(get_release_by_tag "$version") || {
-            print_error "Could not fetch release info for ${version} from GitHub"
-            exit 1
-        }
+        release_json=$(get_release_by_tag "$version" || true)
+        if [ -z "$release_json" ]; then
+            print_warn "Could not fetch release info for ${version} from GitHub; trying known asset names"
+        fi
     fi
 
     print_info "Installing ${BIN_NAME} ${version} for ${platform}"
 
-    # Fetch release info if we don't have it
+    # Fetch release info if we don't have it. If the API is rate-limited, fall
+    # back to probing the deterministic release asset names below.
     if [ -z "${release_json:-}" ]; then
-        release_json=$(get_latest_release) || {
-            print_error "Could not fetch release info from GitHub"
-            exit 1
-        }
+        release_json=$(get_release_by_tag "$version" || true)
     fi
 
     # Find download asset
@@ -370,8 +433,15 @@ install_ntm() {
         case "$platform" in
             darwin_amd64|darwin_arm64)
                 asset_name=$(find_asset_name "darwin_all" "$release_json")
+                if [ -z "$asset_name" ]; then
+                    asset_name=$(find_downloadable_asset_name "darwin_all" "$version" || true)
+                fi
                 ;;
         esac
+    fi
+
+    if [ -z "$asset_name" ]; then
+        asset_name=$(find_downloadable_asset_name "$platform" "$version" || true)
     fi
 
     if [ -z "$asset_name" ]; then
