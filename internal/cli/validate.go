@@ -197,7 +197,20 @@ func runValidation(all, fix bool) error {
 
 	// Output results
 	if IsJSONOutput() {
-		return output.PrintJSON(report)
+		// Print first; only return the validation error after the
+		// JSON document has been emitted so automation can still
+		// parse the report. The root command has SilenceErrors=true
+		// (root.go:88-89), so cobra won't print this error on top
+		// of the JSON we just wrote — but it does propagate to
+		// `os.Exit(non-zero)`, which is the contract this command
+		// previously violated by always exiting 0 in JSON mode (#112).
+		if err := output.PrintJSON(report); err != nil {
+			return err
+		}
+		if !report.Valid {
+			return fmt.Errorf("validation failed with %d errors", report.Summary.ErrorCount)
+		}
+		return nil
 	}
 
 	return printValidationReport(report)

@@ -235,19 +235,43 @@ func runHealthOnce(session string) error {
 			Verbose: healthVerbose,
 		})
 		if err != nil {
-			return encodeHealthOutput(HealthOutput{
+			if encErr := encodeHealthOutput(HealthOutput{
 				SessionHealth: &health.SessionHealth{Session: session},
 				Error:         err.Error(),
-			})
+			}); encErr != nil {
+				return encErr
+			}
+			return err
 		}
 		output, err := coerceHealthOutput(result)
 		if err != nil {
-			return encodeHealthOutput(HealthOutput{
+			if encErr := encodeHealthOutput(HealthOutput{
 				SessionHealth: &health.SessionHealth{Session: session},
 				Error:         err.Error(),
-			})
+			}); encErr != nil {
+				return encErr
+			}
+			return err
 		}
-		return encodeHealthOutput(output)
+		// Print the JSON document first so automation can still
+		// parse the report. Only after that do we surface the
+		// non-OK status as a returned error so the process exits
+		// non-zero — the documented scripting contract that the
+		// previous code violated by always exiting 0 in JSON mode
+		// (#112). Root command has SilenceErrors=true so cobra
+		// won't print the error on top of the JSON.
+		if err := encodeHealthOutput(output); err != nil {
+			return err
+		}
+		if output.SessionHealth != nil {
+			switch output.SessionHealth.OverallStatus {
+			case health.StatusError:
+				return fmt.Errorf("session health: error")
+			case health.StatusWarning:
+				return fmt.Errorf("session health: warning")
+			}
+		}
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
