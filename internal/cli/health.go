@@ -270,6 +270,18 @@ func runHealthOnce(session string) error {
 		if err := encodeHealthOutput(output); err != nil {
 			return err
 		}
+		// In watch mode `runHealthOnce` is invoked from inside
+		// `runHealthWatch`'s ticker loop, which deliberately
+		// keeps running across non-OK ticks (see the
+		// `// Don't exit on transient errors in watch mode`
+		// comment in the watch loop). The non-JSON path mirrors
+		// that with an `if !healthWatch` guard around its
+		// severity-ladder `os.Exit` calls; do the same here so a
+		// `--json --watch` session doesn't terminate on the
+		// first warning/error tick.
+		if healthWatch {
+			return nil
+		}
 		// `Error` covers the "buildHealthOutput surfaced a soft
 		// failure (e.g. session not found) but still produced a
 		// JSON-shaped report" case — those legitimately had an
