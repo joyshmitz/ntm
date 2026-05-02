@@ -254,22 +254,34 @@ func runHealthOnce(session string) error {
 			return err
 		}
 		// Print the JSON document first so automation can still
-		// parse the report. Only after that do we surface the
-		// non-OK status as a returned error so the process exits
-		// non-zero — the documented scripting contract that the
-		// previous code violated by always exiting 0 in JSON mode
-		// (#112). Root command has SilenceErrors=true so cobra
-		// won't print the error on top of the JSON.
+		// parse the report. Only after that do we surface a non-OK
+		// outcome as a returned error so the process exits non-zero
+		// — the documented scripting contract that the previous
+		// code violated by always exiting 0 in JSON mode (#112).
+		// Root command has SilenceErrors=true so cobra won't print
+		// the error on top of the JSON.
 		if err := encodeHealthOutput(output); err != nil {
 			return err
 		}
-		if output.SessionHealth != nil {
-			switch output.SessionHealth.OverallStatus {
-			case health.StatusError:
-				return fmt.Errorf("session health: error")
-			case health.StatusWarning:
-				return fmt.Errorf("session health: warning")
-			}
+		// `Error` covers the "buildHealthOutput surfaced a soft
+		// failure (e.g. session not found) but still produced a
+		// JSON-shaped report" case — those legitimately had an
+		// empty `OverallStatus` and slipped through the previous
+		// status-only check.
+		if output.Error != "" {
+			return fmt.Errorf("session health: %s", output.Error)
+		}
+		// Treat anything other than `StatusOK` as a non-zero
+		// outcome. This catches `StatusError` and `StatusWarning`
+		// (the documented severity ladder) plus `StatusUnknown`
+		// and the zero-value empty string, so future status
+		// additions don't silently regress to "exit 0 means
+		// healthy."
+		if output.SessionHealth != nil && output.SessionHealth.OverallStatus != health.StatusOK {
+			return fmt.Errorf(
+				"session health: %s",
+				output.SessionHealth.OverallStatus,
+			)
 		}
 		return nil
 	}
