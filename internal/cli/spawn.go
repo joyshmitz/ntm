@@ -2282,7 +2282,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	}
 
 	// Emit analytics events (JSONL) for session creation and agent spawns.
-	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OllamaCount, dir, opts.RecipeName)
+	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
 	for _, agent := range launchedAgents {
 		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,
