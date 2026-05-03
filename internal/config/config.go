@@ -837,6 +837,7 @@ type AgentConfig struct {
 	Cursor       string            `toml:"cursor"`
 	Windsurf     string            `toml:"windsurf"`
 	Aider        string            `toml:"aider"`
+	Opencode     string            `toml:"oc"`      // Opencode (https://opencode.ai) launch command — see ntm#116
 	Plugins      map[string]string `toml:"plugins"` // Custom agent commands keyed by type
 	DefaultCount int               `toml:"default_count"`
 }
@@ -1743,6 +1744,7 @@ type ModelsConfig struct {
 	Cursor        map[string]string `toml:"cursor"`         // Cursor model aliases
 	Windsurf      map[string]string `toml:"windsurf"`       // Windsurf model aliases
 	Aider         map[string]string `toml:"aider"`          // Aider model aliases
+	Opencode      map[string]string `toml:"opencode"`       // Opencode (oc) model aliases — see ntm#116
 	// ContextLimits allows overriding built-in context window sizes for models.
 	// Keys are model names (e.g., "claude-opus-4-6"), values are token counts.
 	// These override the built-in defaults in internal/models/registry.go.

@@ -198,6 +198,8 @@ func canonicalSpawnAgentType(raw string) (AgentType, bool) {
 		return AgentTypeWindsurf, true
 	case agentpkg.AgentTypeAider:
 		return AgentTypeAider, true
+	case agentpkg.AgentTypeOpencode:
+		return AgentTypeOpencode, true
 	case agentpkg.AgentTypeOllama:
 		return AgentTypeOllama, true
 	default:
@@ -213,6 +215,7 @@ func orderedSpawnAgentTypes() []AgentType {
 		AgentTypeCursor,
 		AgentTypeWindsurf,
 		AgentTypeAider,
+		AgentTypeOpencode,
 		AgentTypeOllama,
 	}
 }
@@ -347,6 +350,7 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 	opts.CursorCount = 0
 	opts.WindsurfCount = 0
 	opts.AiderCount = 0
+	opts.OpencodeCount = 0
 	opts.OllamaCount = 0
 
 	for _, agent := range opts.Agents {
@@ -363,6 +367,8 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 			opts.WindsurfCount++
 		case AgentTypeAider:
 			opts.AiderCount++
+		case AgentTypeOpencode:
+			opts.OpencodeCount++
 		case AgentTypeOllama:
 			opts.OllamaCount++
 		}
@@ -385,6 +391,7 @@ func populateSpawnAgentsFromCounts(opts *SpawnOptions) {
 		{agentType: AgentTypeCursor, count: opts.CursorCount},
 		{agentType: AgentTypeWindsurf, count: opts.WindsurfCount},
 		{agentType: AgentTypeAider, count: opts.AiderCount},
+		{agentType: AgentTypeOpencode, count: opts.OpencodeCount},
 		{agentType: AgentTypeOllama, count: opts.OllamaCount},
 	}
 	for _, entry := range legacyCounts {
@@ -414,7 +421,7 @@ func profileAssignmentWarning(profileCount, agentCount int) string {
 }
 
 func legacySpawnTotalAgentCount(opts SpawnOptions) int {
-	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OllamaCount
+	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OpencodeCount + opts.OllamaCount
 }
 
 func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
@@ -593,6 +600,7 @@ type SpawnOptions struct {
 	CursorCount        int
 	WindsurfCount      int
 	AiderCount         int
+	OpencodeCount      int
 	OllamaCount        int
 	UserPane           bool
 	AutoRestart        bool
@@ -1220,6 +1228,7 @@ Examples:
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAider, &agentSpecs), "aider", "Aider agents (N or N:model)")
+	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeOpencode, &agentSpecs), "oc", "Opencode agents (N or N:model)")
 	cmd.Flags().Var(&personaSpecs, "persona", "Persona-defined agents (name or name:count)")
 	cmd.Flags().BoolVar(&noUserPane, "no-user", false, "don't reserve a pane for the user")
 	cmd.Flags().StringVarP(&recipeName, "recipe", "r", "", "use a recipe for agent configuration")
@@ -1737,6 +1746,15 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			agentCmdTemplate = cfg.Agents.Windsurf
 		case AgentTypeAider:
 			agentCmdTemplate = cfg.Agents.Aider
+		case AgentTypeOpencode:
+			agentCmdTemplate = cfg.Agents.Opencode
+			if agentCmdTemplate == "" {
+				// Sensible default if [agents] oc isn't configured: invoke
+				// the upstream opencode binary on PATH. Users can override
+				// via `[agents] oc = "..."` to point at a wrapper script
+				// or pin a specific provider/model.
+				agentCmdTemplate = "opencode"
+			}
 		default:
 			// Check plugins
 			if p, ok := opts.PluginMap[string(agent.Type)]; ok {

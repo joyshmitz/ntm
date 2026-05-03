@@ -25,6 +25,12 @@ const (
 	AgentTypeCursor   AgentType = "cursor"
 	AgentTypeWindsurf AgentType = "windsurf"
 	AgentTypeAider    AgentType = "aider"
+	// AgentTypeOpencode covers https://opencode.ai panes. See ntm#116 — the
+	// `--oc` flag on spawn/add lets users mix opencode panes alongside the
+	// other built-in agent types without overloading `--cursor` and getting
+	// the wrong pane title / detection. Launch command resolves through the
+	// `[agents] oc = "..."` config key (or the default `opencode` binary).
+	AgentTypeOpencode AgentType = "oc"
 )
 
 // AgentSpec represents a parsed agent specification with optional model
@@ -178,6 +184,8 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 		aliases = cfg.Models.Windsurf
 	case AgentTypeAider:
 		aliases = cfg.Models.Aider
+	case AgentTypeOpencode:
+		aliases = cfg.Models.Opencode
 	}
 
 	if aliases == nil {

@@ -19,6 +19,7 @@ const (
 	AgentTypeCursor     AgentType = "cursor"   // Cursor AI
 	AgentTypeWindsurf   AgentType = "windsurf" // Windsurf IDE
 	AgentTypeAider      AgentType = "aider"    // Aider CLI
+	AgentTypeOpencode   AgentType = "oc"       // Opencode (https://opencode.ai) — see ntm#116
 	AgentTypeUser       AgentType = "user"     // User/Shell pane
 	AgentTypeUnknown    AgentType = "unknown"  // Unable to determine agent type
 )
@@ -44,6 +45,8 @@ func (t AgentType) Canonical() AgentType {
 		return AgentTypeWindsurf
 	case "aider":
 		return AgentTypeAider
+	case "oc", "opencode":
+		return AgentTypeOpencode
 	case "ollama":
 		return AgentTypeOllama
 	case "user":
@@ -72,6 +75,8 @@ func (t AgentType) DisplayName() string {
 		return "Windsurf"
 	case AgentTypeAider:
 		return "Aider"
+	case AgentTypeOpencode:
+		return "Opencode"
 	case AgentTypeUser:
 		return "User"
 	default:
@@ -96,6 +101,8 @@ func (t AgentType) ProfileName() string {
 		return "Windsurf"
 	case AgentTypeAider:
 		return "Aider"
+	case AgentTypeOpencode:
+		return "Opencode"
 	case AgentTypeUser:
 		return "User"
 	default:
@@ -112,7 +119,7 @@ func (t AgentType) ProfileName() string {
 // IsValid returns true if this is a known agent type.
 func (t AgentType) IsValid() bool {
 	switch t.Canonical() {
-	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeUser:
+	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeUser:
 		return true
 	default:
 		return false
