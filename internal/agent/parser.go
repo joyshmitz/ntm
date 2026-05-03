@@ -196,7 +196,7 @@ func (p *parserImpl) extractMetrics(output string, state *AgentState) {
 			state.IsContextLow = true
 		}
 
-	case AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOllama:
+	case AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeOllama:
 		// No specific metrics yet for these agents
 	}
 }

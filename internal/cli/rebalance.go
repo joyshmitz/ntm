@@ -329,7 +329,8 @@ func normalizeAgentTypeLike(value string) string {
 func isSupportedWorkAgentType(agentType agentpkg.AgentType) bool {
 	switch agentType {
 	case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
-		agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
+		agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider,
+		agentpkg.AgentTypeOpencode, agentpkg.AgentTypeOllama:
 		return true
 	default:
 		return false

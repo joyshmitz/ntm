@@ -386,7 +386,7 @@ func matchesLegacySendTypeFilter(pane tmux.Pane, targetCC, targetCod, targetGmi 
 
 func isInterruptibleAgentPane(pane tmux.Pane) bool {
 	switch tmux.AgentType(pane.Type).Canonical() {
-	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOllama:
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
 		return true
 	default:
 		return false

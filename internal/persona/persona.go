@@ -115,7 +115,8 @@ func (p *Persona) Validate() error {
 		// Validate agent type aliases against the shared canonical resolver.
 		switch agentpkg.AgentType(p.AgentType).Canonical() {
 		case agentpkg.AgentTypeClaudeCode, agentpkg.AgentTypeCodex, agentpkg.AgentTypeGemini,
-			agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider, agentpkg.AgentTypeOllama:
+			agentpkg.AgentTypeCursor, agentpkg.AgentTypeWindsurf, agentpkg.AgentTypeAider,
+			agentpkg.AgentTypeOpencode, agentpkg.AgentTypeOllama:
 			// valid
 		default:
 			return fmt.Errorf("persona %q: invalid agent_type %q", p.Name, p.AgentType)
