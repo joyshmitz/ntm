@@ -58,6 +58,16 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 		return cfg.Agents.Windsurf, nil, nil
 	case AgentTypeAider:
 		return cfg.Agents.Aider, nil, nil
+	case AgentTypeOpencode:
+		template := cfg.Agents.Opencode
+		if template == "" {
+			// Sensible default if [agents] oc isn't configured: invoke
+			// the upstream opencode binary on PATH. Mirrors the spawn
+			// dispatch path in spawn.go so `ntm spawn --oc=N` and
+			// `ntm add --oc=N` behave identically.
+			template = "opencode"
+		}
+		return template, nil, nil
 	default:
 		if p, ok := pluginMap[string(agentType)]; ok {
 			return p.Command, p.Env, nil
@@ -392,7 +402,7 @@ func runAdd(opts AddOptions) error {
 
 	// Add agents
 	flatAgents := opts.Agents.Flatten()
-	ccCount, codCount, gmiCount, ollamaCount, cursorCount, windsurfCount, aiderCount := 0, 0, 0, 0, 0, 0, 0
+	ccCount, codCount, gmiCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0
 	var rateLimitTracker *ratelimit.RateLimitTracker
 	openAICooldownWaited := false
 	ollamaHost := ""
@@ -472,6 +482,8 @@ func runAdd(opts AddOptions) error {
 			windsurfCount++
 		case AgentTypeAider:
 			aiderCount++
+		case AgentTypeOpencode:
+			opencodeCount++
 		}
 
 		// Configure Claude hooks for DCG and RCH integrations
@@ -717,6 +729,7 @@ func runAdd(opts AddOptions) error {
 			AddedCursor:         cursorCount,
 			AddedWindsurf:       windsurfCount,
 			AddedAider:          aiderCount,
+			AddedOpencode:       opencodeCount,
 			TotalAdded:          totalAgents,
 			NewPanes:            newPanes,
 		})

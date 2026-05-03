@@ -150,6 +150,7 @@ type AddResponse struct {
 	AddedCursor   int            `json:"added_cursor"`
 	AddedWindsurf int            `json:"added_windsurf"`
 	AddedAider    int            `json:"added_aider"`
+	AddedOpencode int            `json:"added_oc"`
 	TotalAdded    int            `json:"total_added"`
 	NewPanes      []PaneResponse `json:"new_panes,omitempty"`
 }
