@@ -25,6 +25,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/clipboard"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	ctxmon "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/cost"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
@@ -49,6 +50,32 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/util"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
 )
+
+// compactionRecoveryConfigToRuntime converts the `[context_rotation.recovery]`
+// TOML surface into the runtime `status.RecoveryConfig` that the recovery
+// engine consumes. Zero / empty fields fall through to the engine's hardcoded
+// defaults, so a partial TOML override behaves the same as a full default
+// config except for the fields the user actually set. The `Enabled` flag is
+// honoured by skipping recovery entirely when false; that semantic lives in
+// the dashboard call site rather than the engine because the engine has no
+// notion of "configured but disabled".
+func compactionRecoveryConfigToRuntime(cfg *config.CompactionRecoveryConfig) status.RecoveryConfig {
+	rc := status.DefaultRecoveryConfig()
+	if cfg == nil {
+		return rc
+	}
+	if cfg.CooldownSeconds > 0 {
+		rc.Cooldown = time.Duration(cfg.CooldownSeconds) * time.Second
+	}
+	if cfg.MaxRecoveriesPerPane > 0 {
+		rc.MaxRecoveries = cfg.MaxRecoveriesPerPane
+	}
+	if cfg.Prompt != "" {
+		rc.Prompt = cfg.Prompt
+	}
+	rc.IncludeBeadContext = cfg.IncludeBeadContext
+	return rc
+}
 
 func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	prevWidth := m.width
@@ -2716,6 +2743,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Config.Integrations.Rano.PollIntervalMs > 0 {
 				m.ranoNetworkRefreshInterval = time.Duration(msg.Config.Integrations.Rano.PollIntervalMs) * time.Millisecond
 			}
+
+			// Issue #113: rebuild the compaction-recovery integration from
+			// `[context_rotation.recovery]` so user TOML actually reaches
+			// the runtime. Until this wired up, the dashboard would silently
+			// use NewCompactionRecoveryIntegrationDefault() regardless of
+			// what the config file said. Defaults still kick in when fields
+			// are zero — see compactionRecoveryConfigToRuntime — so this is
+			// a pure additive bridge.
+			m.compaction = status.NewCompactionRecoveryIntegration(
+				compactionRecoveryConfigToRuntime(&msg.Config.ContextRotation.Recovery),
+			)
 
 			// Re-initialize renderer with new theme colors
 			_, detailWidth := layout.SplitProportions(m.width)

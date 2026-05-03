@@ -855,15 +855,51 @@ func DefaultContextConfig() ContextConfig {
 
 // ContextRotationConfig holds configuration for automatic context window rotation
 type ContextRotationConfig struct {
-	Enabled              bool    `toml:"enabled"`                // Top-level toggle for context rotation
-	WarningThreshold     float64 `toml:"warning_threshold"`      // 0.0-1.0, warn when context usage exceeds this
-	RotateThreshold      float64 `toml:"rotate_threshold"`       // 0.0-1.0, rotate agent when usage exceeds this
-	SummaryMaxTokens     int     `toml:"summary_max_tokens"`     // Max tokens for handoff summary
-	MinSessionAgeSec     int     `toml:"min_session_age_sec"`    // Don't rotate agents younger than this
-	TryCompactFirst      bool    `toml:"try_compact_first"`      // Try to compact before rotating
-	RequireConfirm       bool    `toml:"require_confirm"`        // Require user confirmation before rotating
-	ConfirmTimeoutSec    int     `toml:"confirm_timeout_sec"`    // Seconds to wait for confirmation (0 = no auto-rotate)
-	DefaultConfirmAction string  `toml:"default_confirm_action"` // Action if timeout expires: "rotate", "ignore", "compact"
+	Enabled              bool                     `toml:"enabled"`                // Top-level toggle for context rotation
+	WarningThreshold     float64                  `toml:"warning_threshold"`      // 0.0-1.0, warn when context usage exceeds this
+	RotateThreshold      float64                  `toml:"rotate_threshold"`       // 0.0-1.0, rotate agent when usage exceeds this
+	SummaryMaxTokens     int                      `toml:"summary_max_tokens"`     // Max tokens for handoff summary
+	MinSessionAgeSec     int                      `toml:"min_session_age_sec"`    // Don't rotate agents younger than this
+	TryCompactFirst      bool                     `toml:"try_compact_first"`      // Try to compact before rotating
+	RequireConfirm       bool                     `toml:"require_confirm"`        // Require user confirmation before rotating
+	ConfirmTimeoutSec    int                      `toml:"confirm_timeout_sec"`    // Seconds to wait for confirmation (0 = no auto-rotate)
+	DefaultConfirmAction string                   `toml:"default_confirm_action"` // Action if timeout expires: "rotate", "ignore", "compact"
+	Recovery             CompactionRecoveryConfig `toml:"recovery"`               // Compaction-recovery prompt behaviour (issue #113)
+}
+
+// CompactionRecoveryConfig holds configuration for the compaction recovery
+// surface — i.e. the prompt that gets re-sent to a pane after a context
+// rotation/compaction so the agent re-reads its setup. The runtime side
+// of this lives in internal/status/recovery.go (RecoveryConfig); this
+// type is the TOML bridge that #113 was asking for.
+//
+// Mapping back to the runtime fields:
+//
+//	cooldown_seconds        -> RecoveryConfig.Cooldown (time.Duration)
+//	prompt                  -> RecoveryConfig.Prompt
+//	max_recoveries_per_pane -> RecoveryConfig.MaxRecoveries
+//	include_bead_context    -> RecoveryConfig.IncludeBeadContext
+//	enabled                 -> gate before invoking recovery at all
+type CompactionRecoveryConfig struct {
+	Enabled              bool   `toml:"enabled"`                 // Top-level toggle for compaction recovery prompts
+	CooldownSeconds      int    `toml:"cooldown_seconds"`        // Minimum seconds between recovery prompts per pane (0 = engine default)
+	IncludeBeadContext   bool   `toml:"include_bead_context"`    // Include current Beads task context in the recovery prompt
+	MaxRecoveriesPerPane int    `toml:"max_recoveries_per_pane"` // Cap on recovery prompts per pane before giving up (0 = engine default)
+	Prompt               string `toml:"prompt"`                  // Override the recovery prompt sent on rotation
+}
+
+// DefaultCompactionRecoveryConfig returns sensible defaults for the recovery
+// integration. The numeric zero values are treated by the runtime as "use the
+// engine's hardcoded fallback", so emitting them here keeps DefaultLayer()
+// minimal while still exposing the surface in configuration tooling.
+func DefaultCompactionRecoveryConfig() CompactionRecoveryConfig {
+	return CompactionRecoveryConfig{
+		Enabled:              true,
+		CooldownSeconds:      0,
+		IncludeBeadContext:   true,
+		MaxRecoveriesPerPane: 0,
+		Prompt:               "",
+	}
 }
 
 // DefaultContextRotationConfig returns sensible defaults for context rotation
@@ -878,6 +914,7 @@ func DefaultContextRotationConfig() ContextRotationConfig {
 		RequireConfirm:       false,    // Don't require confirmation by default
 		ConfirmTimeoutSec:    60,       // 60 seconds timeout for confirmation
 		DefaultConfirmAction: "rotate", // Auto-rotate on timeout
+		Recovery:             DefaultCompactionRecoveryConfig(),
 	}
 }
 
