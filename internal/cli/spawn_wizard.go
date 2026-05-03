@@ -22,6 +22,7 @@ type SpawnWizardResult struct {
 	CursorCount   int
 	WindsurfCount int
 	AiderCount    int
+	OpencodeCount int
 	OllamaCount   int
 	Recipe        string // empty = no recipe
 	Template      string // empty = no template
@@ -52,6 +53,7 @@ func wizardAgentSpecs(result SpawnWizardResult) AgentSpecs {
 		{agentType: AgentTypeCursor, count: result.CursorCount},
 		{agentType: AgentTypeWindsurf, count: result.WindsurfCount},
 		{agentType: AgentTypeAider, count: result.AiderCount},
+		{agentType: AgentTypeOpencode, count: result.OpencodeCount},
 		{agentType: AgentTypeOllama, count: result.OllamaCount},
 	}
 	for _, entry := range counts {
@@ -71,6 +73,7 @@ func spawnWizardResultFromCounts(counts map[string]int) SpawnWizardResult {
 		CursorCount:   counts["cursor"],
 		WindsurfCount: counts["windsurf"],
 		AiderCount:    counts["aider"],
+		OpencodeCount: counts["oc"],
 		OllamaCount:   counts["ollama"],
 	}
 }
@@ -85,6 +88,7 @@ func formatWizardAgentCountSummary(counts map[string]int) string {
 		{key: "cursor"},
 		{key: "windsurf"},
 		{key: "aider"},
+		{key: "oc"},
 		{key: "ollama"},
 	}
 	parts := make([]string, 0, len(entries))

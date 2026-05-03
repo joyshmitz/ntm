@@ -267,6 +267,12 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 	case "aider":
 		agentTypeFull = "aider"
 		agentCmdTemplate = cfg.Agents.Aider
+	case "oc":
+		agentTypeFull = "opencode"
+		agentCmdTemplate = cfg.Agents.Opencode
+		if agentCmdTemplate == "" {
+			agentCmdTemplate = "opencode"
+		}
 	case "ollama":
 		agentTypeFull = "ollama"
 		agentCmdTemplate = cfg.Agents.Ollama

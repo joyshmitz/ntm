@@ -45,6 +45,7 @@ const (
 	AgentCursor   = agent.AgentTypeCursor
 	AgentWindsurf = agent.AgentTypeWindsurf
 	AgentAider    = agent.AgentTypeAider
+	AgentOpencode = agent.AgentTypeOpencode
 	AgentOllama   = agent.AgentTypeOllama
 	AgentUser     = agent.AgentTypeUser
 	AgentUnknown  = agent.AgentTypeUnknown

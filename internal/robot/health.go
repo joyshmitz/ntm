@@ -2010,6 +2010,9 @@ func isAgentRunning(output, agentType string) bool {
 	case "aider":
 		return strings.Contains(outputLower, "aider") ||
 			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
+	case "oc", "opencode":
+		return strings.Contains(outputLower, "opencode") ||
+			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
 	case "ollama":
 		return strings.Contains(outputLower, "ollama") ||
 			(len(lastLine) < 50 && strings.HasSuffix(lastLine, ">"))
@@ -2036,6 +2039,8 @@ func getAgentCommand(agentType string) string {
 		return "windsurf"
 	case "aider":
 		return "aider"
+	case "oc", "opencode":
+		return "opencode"
 	case "ollama":
 		return "ollama"
 	default:

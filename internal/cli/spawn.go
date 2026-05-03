@@ -432,6 +432,7 @@ func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
 		"NTM_AGENT_COUNT_CURSOR":   fmt.Sprintf("%d", opts.CursorCount),
 		"NTM_AGENT_COUNT_WINDSURF": fmt.Sprintf("%d", opts.WindsurfCount),
 		"NTM_AGENT_COUNT_AIDER":    fmt.Sprintf("%d", opts.AiderCount),
+		"NTM_AGENT_COUNT_OC":       fmt.Sprintf("%d", opts.OpencodeCount),
 		"NTM_AGENT_COUNT_OLLAMA":   fmt.Sprintf("%d", opts.OllamaCount),
 		"NTM_AGENT_COUNT_TOTAL":    fmt.Sprintf("%d", totalAgents),
 	}
@@ -448,6 +449,7 @@ func spawnSessionCreatedEventFields(opts SpawnOptions, dir string) map[string]st
 		"agent_cursor":   fmt.Sprintf("%d", opts.CursorCount),
 		"agent_windsurf": fmt.Sprintf("%d", opts.WindsurfCount),
 		"agent_aider":    fmt.Sprintf("%d", opts.AiderCount),
+		"agent_oc":       fmt.Sprintf("%d", opts.OpencodeCount),
 		"agent_ollama":   fmt.Sprintf("%d", opts.OllamaCount),
 	}
 }
@@ -2992,6 +2994,8 @@ func agentTypeToProgram(agentType string) string {
 		return "windsurf"
 	case "aider":
 		return "aider"
+	case "oc":
+		return "opencode"
 	default:
 		return agentType
 	}

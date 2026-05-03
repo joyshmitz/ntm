@@ -298,6 +298,8 @@ func shortAgentType(agentType string) string {
 		return "ws"
 	case "aider":
 		return "aid"
+	case "oc", "opencode":
+		return "oc"
 	case "ollama":
 		return "oll"
 	case "user":

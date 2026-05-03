@@ -1783,6 +1783,7 @@ type StatusSummary struct {
 	CursorCount   int            `json:"cursor_count"`
 	WindsurfCount int            `json:"windsurf_count"`
 	AiderCount    int            `json:"aider_count"`
+	OpencodeCount int            `json:"opencode_count"`
 	OllamaCount   int            `json:"ollama_count"`
 	AgentsByState map[string]int `json:"agents_by_state"`
 	AgentsByType  map[string]int `json:"agents_by_type"`
@@ -2263,6 +2264,7 @@ func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
 		CursorCount:   base.Summary.CursorCount,
 		WindsurfCount: base.Summary.WindsurfCount,
 		AiderCount:    base.Summary.AiderCount,
+		OpencodeCount: base.Summary.OpencodeCount,
 		OllamaCount:   base.Summary.OllamaCount,
 		AgentsByState: make(map[string]int, len(base.Summary.AgentsByState)),
 		AgentsByType:  make(map[string]int, len(base.Summary.AgentsByType)),
@@ -2587,6 +2589,8 @@ func statusAccumulateAgentSummary(summary *StatusSummary, agentType, agentState 
 		summary.WindsurfCount++
 	case "aider":
 		summary.AiderCount++
+	case "oc":
+		summary.OpencodeCount++
 	case "ollama":
 		summary.OllamaCount++
 	}
@@ -3735,6 +3739,8 @@ func ResolveAgentType(t string) string {
 		return "windsurf"
 	case agent.AgentTypeAider:
 		return "aider"
+	case agent.AgentTypeOpencode:
+		return "oc"
 	case agent.AgentTypeOllama:
 		return "ollama"
 	case agent.AgentTypeUser:

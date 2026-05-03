@@ -252,6 +252,8 @@ func ackPaneTMUXAgentType(pane tmux.Pane) tmux.AgentType {
 		return tmux.AgentWindsurf
 	case "aider":
 		return tmux.AgentAider
+	case "oc":
+		return tmux.AgentOpencode
 	case "ollama":
 		return tmux.AgentOllama
 	case "user":

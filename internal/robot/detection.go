@@ -45,6 +45,8 @@ var processPatterns = map[string]string{
 	"windsurf":     "windsurf",
 	"aider":        "aider",
 	"aider-chat":   "aider",
+	"opencode":     "oc",
+	"oc":           "oc",
 	"ollama":       "ollama",
 }
 

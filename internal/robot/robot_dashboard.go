@@ -108,6 +108,8 @@ func GetDashboard() (*DashboardOutput, error) {
 							output.Summary.WindsurfCount++
 						case "aider":
 							output.Summary.AiderCount++
+						case "oc":
+							output.Summary.OpencodeCount++
 						case "ollama":
 							output.Summary.OllamaCount++
 						}

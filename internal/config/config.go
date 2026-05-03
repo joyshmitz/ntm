@@ -1801,6 +1801,8 @@ func canonicalModelLookupAgentType(agentType string) string {
 		return "windsurf"
 	case agent.AgentTypeAider:
 		return "aider"
+	case agent.AgentTypeOpencode:
+		return "opencode"
 	default:
 		return strings.ToLower(strings.TrimSpace(agentType))
 	}
@@ -1843,6 +1845,8 @@ func (m *ModelsConfig) GetModelName(agentType, alias string) string {
 		aliases = m.Windsurf
 	case "aider":
 		aliases = m.Aider
+	case "opencode":
+		aliases = m.Opencode
 	}
 
 	if aliases != nil {
@@ -4118,6 +4122,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Agents.Windsurf, nil
 		case "aider":
 			return cfg.Agents.Aider, nil
+		case "oc":
+			return cfg.Agents.Opencode, nil
 		case "plugins":
 			return cfg.Agents.Plugins, nil
 		case "default_count":
