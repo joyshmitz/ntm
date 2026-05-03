@@ -2503,8 +2503,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-				// Compaction check
-				event, recoverySent, _ := m.compaction.CheckAndRecover(data.Output, statusAgentType, m.session, data.PaneIndex)
+				// Compaction check — gated by [context_rotation.recovery] enabled
+				// per issue #113. Pre-config-load (m.cfg == nil) we run with
+				// defaults (recovery enabled). Once the first ConfigReloadMsg
+				// lands, m.cfg.ContextRotation.Recovery.Enabled is the source
+				// of truth; users who set it to false get neither compaction
+				// detection nor recovery prompts on this pane.
+				var event *status.CompactionEvent
+				var recoverySent bool
+				if m.cfg == nil || m.cfg.ContextRotation.Recovery.Enabled {
+					event, recoverySent, _ = m.compaction.CheckAndRecover(data.Output, statusAgentType, m.session, data.PaneIndex)
+				}
 
 				if event != nil {
 					now := time.Now()
