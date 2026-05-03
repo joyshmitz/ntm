@@ -3880,9 +3880,12 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 					Source:           "tmux",
 					Status:           "unavailable",
 					CollectedAt:      tmuxCollectedAt,
+					FreshnessSec:     0,
+					StaleAfterSec:    5,
 					Provenance:       "live",
 					DegradedFeatures: []string{"pane_output", "pane_pid"},
-					CollectionError:  err.Error(),
+					LastError:        err.Error(),
+					LastErrorAt:      time.Now().UTC().Format(time.RFC3339),
 				},
 			},
 		}, nil
@@ -3898,8 +3901,8 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 				Source:        "tmux",
 				Status:        "fresh",
 				CollectedAt:   tmuxCollectedAt,
-				FreshnessSec:  time.Since(tmuxCollectedAt).Seconds(),
-				StaleAfterSec: 5.0,
+				FreshnessSec:  int(time.Since(tmuxCollectedAt).Seconds()),
+				StaleAfterSec: 5,
 				Provenance:    "live",
 			},
 		},
@@ -9685,18 +9688,31 @@ type AgentActivityInfo struct {
 }
 
 // SourceHealthEntry describes the freshness of a source feeding a robot
-// output. Mirrors the contract in docs/freshness-degraded-state-contract.md
-// so downstream automation can decide whether to trust a field, retry, or
-// surface a degraded warning to its operator. See ntm#117.
+// output. Field names, types, and JSON keys exactly match the documented
+// contract in docs/freshness-degraded-state-contract.md §2.2 so this surface
+// can be consumed interchangeably with the existing
+// adapters.SourceHealthSection used by --robot-status. See ntm#117.
 type SourceHealthEntry struct {
-	Source           string    `json:"source"`                      // e.g. "tmux"
-	Status           string    `json:"status"`                      // "fresh" | "stale" | "unavailable"
-	CollectedAt      time.Time `json:"collected_at"`                // when the source was last polled
-	FreshnessSec     float64   `json:"freshness_sec"`               // age in seconds at the moment this output was assembled
-	StaleAfterSec    float64   `json:"stale_after_sec,omitempty"`   // optional: callers should treat status=fresh as stale once this threshold is exceeded
-	Provenance       string    `json:"provenance"`                  // "live" | "cached" | "derived"
-	DegradedFeatures []string  `json:"degraded_features,omitempty"` // names of output fields that are stale/missing because of this source
-	CollectionError  string    `json:"collection_error,omitempty"`  // last error from the source (when status != "fresh")
+	// Identity
+	Source string `json:"source"` // e.g. "tmux"
+	// Status enum: "fresh" | "stale" | "unavailable" | "unknown".
+	Status string `json:"status"`
+	// Timing — RFC 3339 timestamp + integer seconds. Integer (not float)
+	// matches the contract spec; downstream consumers parse `freshness_sec`
+	// and `stale_after_sec` as JSON numbers without surprise sub-second
+	// precision differences.
+	CollectedAt   time.Time `json:"collected_at"`
+	FreshnessSec  int       `json:"freshness_sec"`
+	StaleAfterSec int       `json:"stale_after_sec"`
+	// Degradation — degraded_features names which output fields are
+	// stale or missing because of this source. last_error / last_error_at
+	// are populated when status != "fresh"; they're optional in the
+	// healthy case so a fresh entry stays compact.
+	DegradedFeatures []string `json:"degraded_features,omitempty"`
+	LastError        string   `json:"last_error,omitempty"`
+	LastErrorAt      string   `json:"last_error_at,omitempty"`
+	// Provenance enum: "live" | "cached" | "derived".
+	Provenance string `json:"provenance"`
 }
 
 // ActivitySummary provides aggregate state counts.
@@ -9755,9 +9771,11 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 				Status:           "unavailable",
 				CollectedAt:      tmuxCollectedAt,
 				FreshnessSec:     0,
+				StaleAfterSec:    5,
 				Provenance:       "live",
 				DegradedFeatures: []string{"agent_states", "pane_pid", "agent_list"},
-				CollectionError:  err.Error(),
+				LastError:        err.Error(),
+				LastErrorAt:      time.Now().UTC().Format(time.RFC3339),
 			},
 		}
 		output.RobotResponse = NewErrorResponse(
@@ -9777,8 +9795,8 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 			Source:        "tmux",
 			Status:        "fresh",
 			CollectedAt:   tmuxCollectedAt,
-			FreshnessSec:  time.Since(tmuxCollectedAt).Seconds(),
-			StaleAfterSec: 5.0,
+			FreshnessSec:  int(time.Since(tmuxCollectedAt).Seconds()),
+			StaleAfterSec: 5,
 			Provenance:    "live",
 		},
 	}
