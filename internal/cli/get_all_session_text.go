@@ -182,6 +182,8 @@ func getAgentTypeShort(agentType tmux.AgentType) string {
 		return "windsurf"
 	case tmux.AgentAider:
 		return "aider"
+	case tmux.AgentOpencode:
+		return "oc"
 	case tmux.AgentOllama:
 		return "ollama"
 	default:

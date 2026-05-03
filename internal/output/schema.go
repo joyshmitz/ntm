@@ -90,6 +90,7 @@ type AgentCountsResponse struct {
 	Cursor   int `json:"cursor"`
 	Windsurf int `json:"windsurf"`
 	Aider    int `json:"aider"`
+	Opencode int `json:"oc,omitempty"`
 	User     int `json:"user,omitempty"`
 	Other    int `json:"other,omitempty"`
 	Total    int `json:"total"`

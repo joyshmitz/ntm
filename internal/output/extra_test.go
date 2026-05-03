@@ -852,6 +852,8 @@ func TestAgentBadge(t *testing.T) {
 		{"cursor", "cursor", "Cursor"},
 		{"windsurf", "windsurf", "Windsurf"},
 		{"aider", "aider", "Aider"},
+		{"opencode short", "oc", "Opencode"},
+		{"opencode long", "opencode", "Opencode"},
 		{"ollama", "ollama", "Ollama"},
 		{"user", "user", "User"},
 		// Default/unknown

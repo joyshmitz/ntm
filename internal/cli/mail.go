@@ -888,6 +888,8 @@ func resolveAgentName(p tmux.Pane) string {
 		prefix = "Windsurf"
 	case tmux.AgentAider:
 		prefix = "Aider"
+	case tmux.AgentOpencode:
+		prefix = "Opencode"
 	case tmux.AgentOllama:
 		prefix = "Ollama"
 	default:
