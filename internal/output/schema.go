@@ -81,7 +81,12 @@ type PaneResponse struct {
 	ContextModel   string  `json:"context_model,omitempty"`
 }
 
-// AgentCountsResponse is the standard format for agent counts
+// AgentCountsResponse is the standard format for agent counts.
+//
+// Real agent types (claude/codex/gemini/cursor/windsurf/aider/opencode/
+// ollama) always emit even at 0 so consumers see a stable schema across
+// sessions. Only the metadata categories (user, other) use `omitempty` —
+// they're not agents per se, just fallback buckets.
 type AgentCountsResponse struct {
 	Claude   int `json:"claude"`
 	Codex    int `json:"codex"`
@@ -90,7 +95,7 @@ type AgentCountsResponse struct {
 	Cursor   int `json:"cursor"`
 	Windsurf int `json:"windsurf"`
 	Aider    int `json:"aider"`
-	Opencode int `json:"oc,omitempty"`
+	Opencode int `json:"oc"`
 	User     int `json:"user,omitempty"`
 	Other    int `json:"other,omitempty"`
 	Total    int `json:"total"`
