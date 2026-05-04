@@ -1283,10 +1283,16 @@ func TestPaneOutput_CaptureProvenance(t *testing.T) {
 			CaptureCollectedAt: "2026-05-03T20:31:00Z",
 			CaptureProvenance:  "live",
 		}
-		blob, _ := json.Marshal(p)
+		blob, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
 		s := string(blob)
 		if !strings.Contains(s, `"capture_provenance":"live"`) {
 			t.Errorf("expected capture_provenance=live, got %s", s)
+		}
+		if !strings.Contains(s, `"capture_collected_at":"2026-05-03T20:31:00Z"`) {
+			t.Errorf("expected capture_collected_at in JSON, got %s", s)
 		}
 		if strings.Contains(s, "capture_error") {
 			t.Errorf("happy path must omit capture_error, got %s", s)
@@ -1303,13 +1309,32 @@ func TestPaneOutput_CaptureProvenance(t *testing.T) {
 			CaptureProvenance:  "unavailable",
 			CaptureError:       "exit status 1",
 		}
-		blob, _ := json.Marshal(p)
+		blob, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
 		s := string(blob)
 		if !strings.Contains(s, `"capture_provenance":"unavailable"`) {
 			t.Errorf("expected capture_provenance=unavailable, got %s", s)
 		}
 		if !strings.Contains(s, "exit status 1") {
 			t.Errorf("expected capture_error preserved, got %s", s)
+		}
+	})
+
+	t.Run("zero values omit all capture fields", func(t *testing.T) {
+		// Backwards-compat: a consumer pinned to the pre-#117 shape sees
+		// nothing new in their JSON unless the producer populates the fields.
+		p := PaneOutput{Type: "claude", State: "active", Lines: []string{}}
+		blob, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		s := string(blob)
+		for _, key := range []string{"capture_provenance", "capture_collected_at", "capture_error"} {
+			if strings.Contains(s, key) {
+				t.Errorf("zero-value PaneOutput must omit %q (omitempty), got %s", key, s)
+			}
 		}
 	})
 }
