@@ -994,6 +994,85 @@ func TestFilterErrorToLiveWhenIdle_NoIdlePromptKeepsHistoricalError(t *testing.T
 	}
 }
 
+// TestActivity_RateLimitedFlagFollowsLiveWindow asserts that the
+// activity-level RateLimited flag stays consistent with the classified
+// state when a stale rate-limit pattern scrolled above a current idle
+// prompt: the pane has recovered and downstream consumers
+// (resilience monitor, health surface) must no longer treat it as
+// throttled. Without the fix, `rate_limit_text` matched anywhere in the
+// capture would keep `RateLimited: true` even though `State: WAITING` —
+// the resilience monitor would then continue applying rate-limit
+// recovery against an already-healthy pane.
+func TestActivity_RateLimitedFlagFollowsLiveWindow(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("Error: rate limit exceeded — back off and retry\n")
+	b.WriteString("\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString("    additional output line that scrolled past the live window\n")
+	}
+	b.WriteString("• Recovered after rate-limit cooldown.\n")
+	b.WriteString("\n")
+	b.WriteString("› Continue the previous task\n")
+	b.WriteString("\n")
+	b.WriteString("  gpt-5.5 high · 47% left\n")
+	content := b.String()
+
+	lib := NewPatternLibrary()
+	full := lib.Match(content, "codex")
+	live := lib.Match(lastNLines(content, liveThinkingWindowLines), "codex")
+
+	// Test premise: rate_limit_text only appears in `full`, not `live`,
+	// and `live` carries an idle prompt (codex chevron) so the filter
+	// debounce predicate fires.
+	sawFullRateLimit := false
+	for _, m := range full {
+		if m.Pattern == "rate_limit_text" {
+			sawFullRateLimit = true
+			break
+		}
+	}
+	if !sawFullRateLimit {
+		t.Fatalf("test premise broken: rate_limit_text not in full-capture matches; got %+v", full)
+	}
+	for _, m := range live {
+		if m.Pattern == "rate_limit_text" {
+			t.Fatalf("test premise broken: rate_limit_text leaked into live-window matches; got %+v", live)
+		}
+	}
+	sawLiveIdle := false
+	for _, m := range live {
+		if m.Category == CategoryIdle {
+			sawLiveIdle = true
+			break
+		}
+	}
+	if !sawLiveIdle {
+		t.Fatalf("test premise broken: no idle prompt in live tail; got %+v", live)
+	}
+
+	// Pre-filter: isRateLimitPatternMatch over the unfiltered set still
+	// flags rate_limit_text — that's the inconsistent reading we no
+	// longer want to see propagated.
+	if !isRateLimitPatternMatch(full) {
+		t.Fatalf("isRateLimitPatternMatch over `full` should still observe rate_limit_text (sanity)")
+	}
+
+	// Post-filter (what activity.go actually feeds the flag now): the
+	// stale rate_limit_text is dropped, so the flag must read false.
+	filtered := filterErrorToLiveWhenIdle(full, live)
+	if isRateLimitPatternMatch(filtered) {
+		t.Fatalf("isRateLimitPatternMatch(filtered) returned true; rate_limit_text leaked through filter on a recovered pane: %+v", filtered)
+	}
+
+	// And the classifier on the filtered set must land on WAITING — the
+	// pane is healthy.
+	sc := NewStateClassifier("test", nil)
+	state, _, trigger := sc.classifyState(0.0, filtered)
+	if state != StateWaiting {
+		t.Fatalf("classifier returned %s (trigger=%q); want WAITING for a recovered-from-rate-limit pane", state, trigger)
+	}
+}
+
 // TestLastNLines covers the off-by-one edges of the helper that feeds
 // the live-window thinking filter.
 func TestLastNLines(t *testing.T) {

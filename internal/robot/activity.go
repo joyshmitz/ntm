@@ -775,7 +775,15 @@ func (sc *StateClassifier) classifyInternal(sample *VelocitySample) (*AgentActiv
 
 	// Check whether any matched pattern is a rate-limit indicator so the
 	// RateLimited flag on AgentActivity is set from real pattern evidence.
-	rateLimited := isRateLimitPatternMatch(matches)
+	// We scan `effectiveMatches` rather than `matches` so the flag stays
+	// consistent with the state classification: when filterErrorToLiveWhenIdle
+	// drops a stale rate-limit pattern that scrolled above a current idle
+	// prompt, the pane is no longer rate-limited and downstream consumers
+	// (`internal/health/health.go`, `internal/resilience/monitor.go`) must
+	// not continue to gate on a recovered pane as if it were still throttled.
+	// `DetectedPatterns` deliberately keeps the unfiltered view because it
+	// is an observability surface, not a state predicate.
+	rateLimited := isRateLimitPatternMatch(effectiveMatches)
 
 	// Build result
 	activity := &AgentActivity{
