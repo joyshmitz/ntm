@@ -820,6 +820,180 @@ func TestFilterThinkingToLive_KeepsCurrentBullets(t *testing.T) {
 	}
 }
 
+// TestFilterErrorToLiveWhenIdle_DropsHistoricalErrorAboveLivePrompt is the
+// regression test for ntm#118: codex panes were reported as ERROR when a
+// stale "failed" or "api error" line sat high in scrollback above a current
+// chevron prompt. The classifier's unconditional ERROR-priority rule
+// promoted the historical match over the live idle signal and pinned the
+// pane to ERROR until a human poked it. The fix mirrors the existing
+// CategoryThinking live-window filter: when the live tail contains an idle
+// prompt and the error pattern only appears in the older scrollback,
+// classifyState should land on WAITING.
+func TestFilterErrorToLiveWhenIdle_DropsHistoricalErrorAboveLivePrompt(t *testing.T) {
+	// "failed" 40 lines above an idle codex chevron.
+	var b strings.Builder
+	b.WriteString("Error: failed to upload chunk 17 with: connection reset\n")
+	b.WriteString("\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString("    additional output line that scrolled past the live window\n")
+	}
+	b.WriteString("• I retried successfully and have no more actions to run.\n")
+	b.WriteString("\n")
+	b.WriteString("› Summarize recent commits\n")
+	b.WriteString("\n")
+	b.WriteString("  gpt-5.5 high · 47% left\n")
+	content := b.String()
+
+	lib := NewPatternLibrary()
+	full := lib.Match(content, "codex")
+	live := lib.Match(lastNLines(content, liveThinkingWindowLines), "codex")
+
+	// Sanity: full-capture scan SHOULD see the historical failed_text
+	// match (this is the bug being fixed).
+	sawHistoricalError := false
+	for _, m := range full {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			sawHistoricalError = true
+			break
+		}
+	}
+	if !sawHistoricalError {
+		t.Fatalf("expected historical failed_text in full-capture scan (test premise broken); got %+v", full)
+	}
+
+	// Live-window scan must NOT see the failed_text — it scrolled past.
+	for _, m := range live {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			t.Fatalf("live-window scan unexpectedly saw historical failed_text: %+v", live)
+		}
+	}
+
+	// Live tail must contain the codex chevron (idle prompt) so the
+	// debounce predicate fires.
+	sawLiveIdle := false
+	for _, m := range live {
+		if m.Category == CategoryIdle {
+			sawLiveIdle = true
+			break
+		}
+	}
+	if !sawLiveIdle {
+		t.Fatalf("expected idle prompt in live tail (test premise broken); got %+v", live)
+	}
+
+	// The filter should drop the stale error match entirely.
+	filtered := filterErrorToLiveWhenIdle(full, live)
+	for _, m := range filtered {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			t.Fatalf("filterErrorToLiveWhenIdle failed to drop stale failed_text: %+v", filtered)
+		}
+	}
+
+	// And now the full classifier run: with the stale error filtered,
+	// classifyState should see only the idle chevron + context line and
+	// return WAITING.
+	sc := NewStateClassifier("test", nil)
+	state, _, trigger := sc.classifyState(0.0, filtered)
+	if state != StateWaiting {
+		t.Fatalf("classifier returned %s (trigger=%q) on idle codex pane with historical failed_text; want WAITING", state, trigger)
+	}
+}
+
+// TestFilterErrorToLiveWhenIdle_KeepsFreshErrorInLiveTail is the inverse:
+// when the failure is currently visible in the live tail (e.g. a fresh API
+// error that just landed alongside the chevron), the filter must NOT drop
+// it. The pane is genuinely in trouble and should classify as ERROR.
+func TestFilterErrorToLiveWhenIdle_KeepsFreshErrorInLiveTail(t *testing.T) {
+	content := "" +
+		"  Read connection.rs\n" +
+		"  Edited connection.rs\n" +
+		"\n" +
+		"Error: failed to commit changes: write conflict\n" +
+		"› Please fix the merge conflict and continue\n" +
+		"\n" +
+		"  gpt-5.5 high · ~/Developer/flywheel\n"
+
+	lib := NewPatternLibrary()
+	full := lib.Match(content, "codex")
+	live := lib.Match(lastNLines(content, liveThinkingWindowLines), "codex")
+
+	// Both error and idle prompt are in the live tail.
+	sawLiveError := false
+	sawLiveIdle := false
+	for _, m := range live {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			sawLiveError = true
+		}
+		if m.Category == CategoryIdle {
+			sawLiveIdle = true
+		}
+	}
+	if !sawLiveError || !sawLiveIdle {
+		t.Fatalf("test premise broken: liveError=%v liveIdle=%v live=%+v", sawLiveError, sawLiveIdle, live)
+	}
+
+	filtered := filterErrorToLiveWhenIdle(full, live)
+	sawError := false
+	for _, m := range filtered {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			sawError = true
+			break
+		}
+	}
+	if !sawError {
+		t.Fatalf("filterErrorToLiveWhenIdle dropped a fresh in-live-tail failed_text: %+v", filtered)
+	}
+
+	sc := NewStateClassifier("test", nil)
+	state, _, _ := sc.classifyState(0.0, filtered)
+	if state != StateError {
+		t.Fatalf("classifier returned %s on fresh failed_text in live tail; want ERROR", state)
+	}
+}
+
+// TestFilterErrorToLiveWhenIdle_NoIdlePromptKeepsHistoricalError ensures the
+// debounce only fires when the live tail actually shows the pane is
+// currently waiting at a prompt. A pane that is generating output (no idle
+// match) with an error somewhere in the buffer should keep ERROR priority,
+// since "no live prompt + historical error" is not the false-positive shape
+// the issue describes — it could just be a stalled error mid-output.
+func TestFilterErrorToLiveWhenIdle_NoIdlePromptKeepsHistoricalError(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("Error: failed to acquire lock on resource\n")
+	for i := 0; i < 30; i++ {
+		b.WriteString("    streaming output without an idle chrome line yet\n")
+	}
+	content := b.String()
+
+	lib := NewPatternLibrary()
+	full := lib.Match(content, "codex")
+	live := lib.Match(lastNLines(content, liveThinkingWindowLines), "codex")
+
+	// Premise: live tail has neither a fresh error nor an idle prompt.
+	for _, m := range live {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			t.Fatalf("test premise broken: live tail unexpectedly contains failed_text; got %+v", live)
+		}
+		if m.Category == CategoryIdle {
+			t.Fatalf("test premise broken: live tail unexpectedly contains an idle prompt; got %+v", live)
+		}
+	}
+
+	// With no idle prompt in the live tail the filter must be a no-op
+	// and the historical error must survive.
+	filtered := filterErrorToLiveWhenIdle(full, live)
+	sawError := false
+	for _, m := range filtered {
+		if m.Category == CategoryError && m.Pattern == "failed_text" {
+			sawError = true
+			break
+		}
+	}
+	if !sawError {
+		t.Fatalf("filterErrorToLiveWhenIdle wrongly dropped historical error with no live idle prompt; got %+v", filtered)
+	}
+}
+
 // TestLastNLines covers the off-by-one edges of the helper that feeds
 // the live-window thinking filter.
 func TestLastNLines(t *testing.T) {

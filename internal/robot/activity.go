@@ -755,9 +755,17 @@ func (sc *StateClassifier) classifyInternal(sample *VelocitySample) (*AgentActiv
 	// so matching them anywhere in the capture would falsely keep a
 	// long-idle pane in THINKING state. Dropping stale thinking matches
 	// lets classifyState fall through to the correct idle/unknown path.
+	//
+	// CategoryError matches are filtered with the same live-window logic
+	// when an idle prompt is present in the live tail: stale "failed" or
+	// "api error" text high in scrollback above a current chevron prompt
+	// would otherwise pin the pane to ERROR forever, even though the agent
+	// is sitting at a healthy prompt waiting for input. Fresh errors that
+	// land inside the live tail still classify as ERROR.
 	liveContent := lastNLines(content, liveThinkingWindowLines)
 	liveMatches := sc.patternLibrary.Match(liveContent, sc.agentType)
 	effectiveMatches := filterThinkingToLive(matches, liveMatches)
+	effectiveMatches = filterErrorToLiveWhenIdle(effectiveMatches, liveMatches)
 
 	// Calculate proposed state and confidence
 	proposedState, confidence, trigger := sc.classifyState(velocity, effectiveMatches)
@@ -870,6 +878,82 @@ func filterThinkingToLive(full, live []PatternMatch) []PatternMatch {
 	for _, m := range full {
 		if m.Category == CategoryThinking {
 			if _, ok := liveThinking[m.Pattern]; !ok {
+				continue
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// filterErrorToLiveWhenIdle drops CategoryError matches from `full` whose
+// pattern name is not also present in `live`, but only when `live` contains a
+// CategoryIdle prompt match. The combination of "no live error + a live idle
+// prompt" is the signature of historical error text scrolled high in the
+// buffer above a current healthy chevron/prompt: the agent has finished the
+// failure path, recovered, and is now waiting for the next input. Fresh
+// errors (rate limits, auth failures, crashes that just happened) still
+// match in `live` and survive the filter as ERROR. When no idle prompt is in
+// the live tail the pane is not currently waiting and `full` is returned
+// unchanged so error priority is preserved.
+//
+// Errors that are *only* surfaced via `*-text` regex patterns (failed_text,
+// api_error, etc.) are the load-bearing instances of this false positive
+// because they match raw substrings ("failed", "api error") that linger in
+// scrollback long after the offending operation completed; the same logic
+// applies to any CategoryError pattern that exists in `full` but not in
+// `live` once a fresh idle prompt is observed.
+func filterErrorToLiveWhenIdle(full, live []PatternMatch) []PatternMatch {
+	// Fast path: no error matches at all → nothing to filter.
+	hasError := false
+	for _, m := range full {
+		if m.Category == CategoryError {
+			hasError = true
+			break
+		}
+	}
+	if !hasError {
+		return full
+	}
+	// Only debounce when the live tail shows the pane is actively waiting
+	// at an idle prompt. Without this guard a pane that just rolled an
+	// error past the live window with no follow-up prompt would silently
+	// drop the error and misclassify as the next-best non-error state.
+	hasLiveIdle := false
+	for _, m := range live {
+		if m.Category == CategoryIdle {
+			hasLiveIdle = true
+			break
+		}
+	}
+	if !hasLiveIdle {
+		return full
+	}
+	// Build the set of error-pattern names that are still in the live tail.
+	// Any CategoryError match in `full` whose name is in this set is fresh
+	// and must keep ERROR priority; the rest are stale scrollback artifacts.
+	liveError := make(map[string]struct{}, len(live))
+	for _, m := range live {
+		if m.Category == CategoryError {
+			liveError[m.Pattern] = struct{}{}
+		}
+	}
+	allLive := true
+	for _, m := range full {
+		if m.Category == CategoryError {
+			if _, ok := liveError[m.Pattern]; !ok {
+				allLive = false
+				break
+			}
+		}
+	}
+	if allLive {
+		return full
+	}
+	out := make([]PatternMatch, 0, len(full))
+	for _, m := range full {
+		if m.Category == CategoryError {
+			if _, ok := liveError[m.Pattern]; !ok {
 				continue
 			}
 		}
