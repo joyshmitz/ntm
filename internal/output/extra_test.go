@@ -903,6 +903,13 @@ func TestOutputAgentBadgeColor(t *testing.T) {
 		{"aider", "aider", string(current.Aider)},
 		{"ollama", "ollama", string(current.Ollama)},
 		{"user", "user", string(current.User)},
+		// Opencode currently has no dedicated theme color, so it falls
+		// through to current.Overlay (same as the unknown bucket). This
+		// test pins that behavior — if a future change adds a theme.Opencode
+		// color and an explicit case, this test will fail and should be
+		// updated to expect the new color.
+		{"opencode short", "oc", string(current.Overlay)},
+		{"opencode long", "opencode", string(current.Overlay)},
 		{"unknown", "other", string(current.Overlay)},
 	}
 
