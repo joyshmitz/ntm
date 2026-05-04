@@ -105,6 +105,18 @@ var contentPatterns = []struct {
 		},
 	},
 	{
+		// `opencode` (https://opencode.ai). Matches the binary name as a
+		// whole word followed by `>` (prompt indicator) or end-of-line, or
+		// `opencode/` as a path-style fragment in tracebacks. Word-boundary
+		// `\b` avoids false-matching session names like `openconductor` or
+		// project names containing `opencode` as a substring.
+		agentType: "oc",
+		patterns: []*regexp.Regexp{
+			regexp.MustCompile(`(?i)\bopencode\s*(>|$)`),
+			regexp.MustCompile(`(?i)\bopencode/`),
+		},
+	},
+	{
 		agentType: "ollama",
 		patterns: []*regexp.Regexp{
 			regexp.MustCompile(`(?im)(^ollama>\s*$|\bollama\s+(run|chat|serve|pull)\b|^\s*ollama\s+cli\b)`),
