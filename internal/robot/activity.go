@@ -905,12 +905,13 @@ func filterThinkingToLive(full, live []PatternMatch) []PatternMatch {
 // the live tail the pane is not currently waiting and `full` is returned
 // unchanged so error priority is preserved.
 //
-// Errors that are *only* surfaced via `*-text` regex patterns (failed_text,
-// api_error, etc.) are the load-bearing instances of this false positive
-// because they match raw substrings ("failed", "api error") that linger in
-// scrollback long after the offending operation completed; the same logic
-// applies to any CategoryError pattern that exists in `full` but not in
-// `live` once a fresh idle prompt is observed.
+// Plain-text error patterns (failed_text, api_error, exception, …) are the
+// load-bearing instances of this false positive because their regexes match
+// raw substrings ("failed", "error:", "exception:") that linger in
+// scrollback long after the offending operation completed. The filter is
+// pattern-agnostic though — it applies to every CategoryError match that
+// exists in `full` but not in `live` once a fresh idle prompt is observed,
+// including rate-limit, auth, network, and crash patterns.
 func filterErrorToLiveWhenIdle(full, live []PatternMatch) []PatternMatch {
 	// Fast path: no error matches at all → nothing to filter.
 	hasError := false
