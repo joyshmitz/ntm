@@ -596,7 +596,7 @@ func newSendCmd() *cobra.Command {
 						return fmt.Errorf("cannot use --project with a specific session name; use just --project or just a session name")
 					}
 				}
-				return runSendProject(cmd, projectFilter, args, targets, targetAll, skipFirst, paneIndex, tags, noHooks, dryRun)
+				return runSendProject(cmd, projectFilter, args, targets, targetAll, skipFirst, paneIndex, tags, noHooks, dryRun, forceNonInteractive)
 			}
 
 			if len(args) == 0 {
@@ -804,7 +804,7 @@ func newSendCmd() *cobra.Command {
 }
 
 // runSendProject broadcasts a prompt to all sessions matching a base project (bd-3cu02.14).
-func runSendProject(cmd *cobra.Command, project string, args []string, targets SendTargets, targetAll, skipFirst bool, paneIndex int, tags []string, noHooks, dryRun bool) error {
+func runSendProject(cmd *cobra.Command, project string, args []string, targets SendTargets, targetAll, skipFirst bool, paneIndex int, tags []string, noHooks, dryRun, forceNonInteractive bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -841,15 +841,16 @@ func runSendProject(cmd *cobra.Command, project string, args []string, targets S
 	delivered := 0
 	for _, s := range matching {
 		opts := SendOptions{
-			Session:   s.Name,
-			Prompt:    promptText,
-			Targets:   targets,
-			TargetAll: targetAll,
-			SkipFirst: skipFirst,
-			PaneIndex: paneIndex,
-			Tags:      tags,
-			NoHooks:   noHooks,
-			DryRun:    dryRun,
+			Session:             s.Name,
+			Prompt:              promptText,
+			Targets:             targets,
+			TargetAll:           targetAll,
+			SkipFirst:           skipFirst,
+			PaneIndex:           paneIndex,
+			Tags:                tags,
+			NoHooks:             noHooks,
+			DryRun:              dryRun,
+			ForceNonInteractive: forceNonInteractive,
 		}
 		if err := runSendWithTargets(opts); err != nil {
 			sendErrors = append(sendErrors, fmt.Sprintf("%s: %v", s.Name, err))
