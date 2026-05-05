@@ -47,20 +47,21 @@ import (
 
 // SendResult is the JSON output for the send command.
 type SendResult struct {
-	Success       bool               `json:"success"`
-	Session       string             `json:"session"`
-	PromptPreview string             `json:"prompt_preview,omitempty"`
-	Redaction     *RedactionSummary  `json:"redaction,omitempty"`
-	Warnings      []string           `json:"warnings,omitempty"`
-	Blocked       bool               `json:"blocked,omitempty"`
-	ErrorCode     string             `json:"error_code,omitempty"`
-	Randomized    bool               `json:"randomized,omitempty"`
-	SeedUsed      int64              `json:"seed_used,omitempty"`
-	Targets       []int              `json:"targets"`
-	Delivered     int                `json:"delivered"`
-	Failed        int                `json:"failed"`
-	RoutedTo      *SendRoutingResult `json:"routed_to,omitempty"`
-	Error         string             `json:"error,omitempty"`
+	Success              bool               `json:"success"`
+	Session              string             `json:"session"`
+	PromptPreview        string             `json:"prompt_preview,omitempty"`
+	NonInteractiveForced bool               `json:"non_interactive_forced,omitempty"`
+	Redaction            *RedactionSummary  `json:"redaction,omitempty"`
+	Warnings             []string           `json:"warnings,omitempty"`
+	Blocked              bool               `json:"blocked,omitempty"`
+	ErrorCode            string             `json:"error_code,omitempty"`
+	Randomized           bool               `json:"randomized,omitempty"`
+	SeedUsed             int64              `json:"seed_used,omitempty"`
+	Targets              []int              `json:"targets"`
+	Delivered            int                `json:"delivered"`
+	Failed               int                `json:"failed"`
+	RoutedTo             *SendRoutingResult `json:"routed_to,omitempty"`
+	Error                string             `json:"error,omitempty"`
 }
 
 type SendDryRunEntry struct {
@@ -73,18 +74,19 @@ type SendDryRunEntry struct {
 }
 
 type SendDryRunResult struct {
-	Success   bool               `json:"success"`
-	DryRun    bool               `json:"dry_run"`
-	Session   string             `json:"session"`
-	Redaction *RedactionSummary  `json:"redaction,omitempty"`
-	Warnings  []string           `json:"warnings,omitempty"`
-	Blocked   bool               `json:"blocked,omitempty"`
-	ErrorCode string             `json:"error_code,omitempty"`
-	Total     int                `json:"total"`
-	WouldSend []SendDryRunEntry  `json:"would_send"`
-	RoutedTo  *SendRoutingResult `json:"routed_to,omitempty"`
-	Message   string             `json:"message,omitempty"`
-	Error     string             `json:"error,omitempty"`
+	Success              bool               `json:"success"`
+	DryRun               bool               `json:"dry_run"`
+	Session              string             `json:"session"`
+	NonInteractiveForced bool               `json:"non_interactive_forced,omitempty"`
+	Redaction            *RedactionSummary  `json:"redaction,omitempty"`
+	Warnings             []string           `json:"warnings,omitempty"`
+	Blocked              bool               `json:"blocked,omitempty"`
+	ErrorCode            string             `json:"error_code,omitempty"`
+	Total                int                `json:"total"`
+	WouldSend            []SendDryRunEntry  `json:"would_send"`
+	RoutedTo             *SendRoutingResult `json:"routed_to,omitempty"`
+	Message              string             `json:"message,omitempty"`
+	Error                string             `json:"error,omitempty"`
 }
 
 // SendRoutingResult contains routing decision info for smart routing.
@@ -236,6 +238,12 @@ type SendOptions struct {
 	CassCheck      bool
 	CassSimilarity float64
 	CassCheckDays  int
+
+	// ForceNonInteractive bypasses safe confirmation gates (currently the CASS
+	// duplicate-work prompt) so a recovery/status wrapper can drive `ntm send`
+	// without piping `y` through stdin. Destructive or ambiguous confirmation
+	// classes are NOT bypassed by this flag — they fail closed.
+	ForceNonInteractive bool
 
 	// Hooks
 	NoHooks bool
@@ -488,6 +496,7 @@ func newSendCmd() *cobra.Command {
 	var dryRun bool
 	var cassCheck bool
 	var noCassCheck bool
+	var forceNonInteractive bool
 	var cassSimilarity float64
 	var cassCheckDays int
 	var noHooks bool
@@ -543,6 +552,13 @@ func newSendCmd() *cobra.Command {
 		Duplicate Detection:
 		By default, checks CASS for similar past sessions to avoid duplicate work.
 		Use --no-cass-check to skip.
+
+		Non-interactive automation:
+		Use --force-non-interactive to bypass safe confirmation gates (currently
+		the CASS duplicate prompt) so recovery/status wrappers can drive 'ntm
+		send' without piping 'y' through stdin. Destructive or ambiguous
+		confirmation classes are NOT bypassed by this flag — they fail closed.
+		When set, JSON output includes "non_interactive_forced": true.
 
 		Smart Routing:
 		Use --smart to automatically select the best agent based on routing strategies.
@@ -618,29 +634,30 @@ func newSendCmd() *cobra.Command {
 					}
 				}
 				batchOpts := SendOptions{
-					Session:         session,
-					BasePrompt:      resolvedBasePrompt,
-					Targets:         targets,
-					TargetAll:       targetAll,
-					SkipFirst:       skipFirst,
-					PaneIndex:       paneIndex,
-					Tags:            tags,
-					SmartRoute:      smartRoute,
-					RouteStrategy:   routeStrategy,
-					CassCheck:       cassCheck && !noCassCheck,
-					CassSimilarity:  cassSimilarity,
-					CassCheckDays:   cassCheckDays,
-					NoHooks:         noHooks,
-					DryRun:          dryRun,
-					BatchFile:       batchFile,
-					BatchDelay:      delay,
-					BatchConfirm:    batchConfirm,
-					BatchStopOnErr:  batchStopOnErr,
-					BatchBroadcast:  batchBroadcast,
-					BatchAgentIndex: batchAgentIndex,
-					Randomize:       randomize,
-					Seed:            seed,
-					PriorityOrder:   priorityOrder,
+					Session:             session,
+					BasePrompt:          resolvedBasePrompt,
+					Targets:             targets,
+					TargetAll:           targetAll,
+					SkipFirst:           skipFirst,
+					PaneIndex:           paneIndex,
+					Tags:                tags,
+					SmartRoute:          smartRoute,
+					RouteStrategy:       routeStrategy,
+					CassCheck:           cassCheck && !noCassCheck,
+					CassSimilarity:      cassSimilarity,
+					CassCheckDays:       cassCheckDays,
+					ForceNonInteractive: forceNonInteractive,
+					NoHooks:             noHooks,
+					DryRun:              dryRun,
+					BatchFile:           batchFile,
+					BatchDelay:          delay,
+					BatchConfirm:        batchConfirm,
+					BatchStopOnErr:      batchStopOnErr,
+					BatchBroadcast:      batchBroadcast,
+					BatchAgentIndex:     batchAgentIndex,
+					Randomize:           randomize,
+					Seed:                seed,
+					PriorityOrder:       priorityOrder,
 				}
 				return runSendBatch(batchOpts)
 			}
@@ -659,24 +676,25 @@ func newSendCmd() *cobra.Command {
 			}
 
 			opts := SendOptions{
-				Session:        session,
-				BasePrompt:     resolvedBasePrompt,
-				Targets:        targets,
-				TargetAll:      targetAll,
-				SkipFirst:      skipFirst,
-				PaneIndex:      paneIndex,
-				Panes:          panes,
-				PanesSpecified: panesSpecified,
-				Tags:           tags,
-				SmartRoute:     smartRoute,
-				RouteStrategy:  routeStrategy,
-				CassCheck:      cassCheck && !noCassCheck,
-				CassSimilarity: cassSimilarity,
-				CassCheckDays:  cassCheckDays,
-				NoHooks:        noHooks,
-				DryRun:         dryRun,
-				Randomize:      randomize,
-				Seed:           seed,
+				Session:             session,
+				BasePrompt:          resolvedBasePrompt,
+				Targets:             targets,
+				TargetAll:           targetAll,
+				SkipFirst:           skipFirst,
+				PaneIndex:           paneIndex,
+				Panes:               panes,
+				PanesSpecified:      panesSpecified,
+				Tags:                tags,
+				SmartRoute:          smartRoute,
+				RouteStrategy:       routeStrategy,
+				CassCheck:           cassCheck && !noCassCheck,
+				CassSimilarity:      cassSimilarity,
+				CassCheckDays:       cassCheckDays,
+				ForceNonInteractive: forceNonInteractive,
+				NoHooks:             noHooks,
+				DryRun:              dryRun,
+				Randomize:           randomize,
+				Seed:                seed,
 			}
 
 			// Handle template-based prompts
@@ -747,6 +765,10 @@ func newSendCmd() *cobra.Command {
 	// CASS check flags
 	cmd.Flags().BoolVar(&cassCheck, "cass-check", true, "Check for duplicate work in CASS")
 	cmd.Flags().BoolVar(&noCassCheck, "no-cass-check", false, "Skip CASS duplicate check")
+	cmd.Flags().BoolVar(&forceNonInteractive, "force-non-interactive", false,
+		"Bypass safe confirmation gates (currently the CASS duplicate prompt) for "+
+			"recovery/status automation. Destructive or ambiguous classes are NOT "+
+			"bypassed — they fail closed. Sets non_interactive_forced=true in JSON output.")
 	cmd.Flags().Float64Var(&cassSimilarity, "cass-similarity", 0.7, "Similarity threshold for duplicate detection")
 	cmd.Flags().IntVar(&cassCheckDays, "cass-check-days", 7, "Look back N days for duplicates")
 	cmd.Flags().BoolVar(&noHooks, "no-hooks", false, "Disable command hooks")
@@ -1121,8 +1143,9 @@ func runSendInternal(opts SendOptions) (err error) {
 				code = "SENSITIVE_DATA_BLOCKED"
 			}
 			result := SendResult{
-				Success: false,
-				Session: session,
+				Success:              false,
+				Session:              session,
+				NonInteractiveForced: opts.ForceNonInteractive,
 				Redaction: func() *RedactionSummary {
 					if redactionSummary == nil {
 						return nil
@@ -1283,7 +1306,7 @@ func runSendInternal(opts SendOptions) (err error) {
 
 	// CASS Duplicate Detection
 	if opts.CassCheck {
-		if err := checkCassDuplicates(session, sessionInferred, prompt, opts.CassSimilarity, opts.CassCheckDays); err != nil {
+		if err := checkCassDuplicates(session, sessionInferred, prompt, opts.CassSimilarity, opts.CassCheckDays, opts.ForceNonInteractive); err != nil {
 			if err.Error() == "aborted by user" {
 				fmt.Println("Aborted.")
 				return nil
@@ -1498,16 +1521,17 @@ func runSendInternal(opts SendOptions) (err error) {
 	if dryRun {
 		entries := buildSendDryRunEntries(selectedPanes, prompt, promptSource)
 		return printSendDryRunResult(SendDryRunResult{
-			Success:   true,
-			DryRun:    true,
-			Session:   session,
-			Redaction: redactionSummary,
-			Warnings:  redactionWarnings,
-			Blocked:   false,
-			Total:     len(entries),
-			WouldSend: entries,
-			RoutedTo:  opts.routingResult,
-			Message:   "use without --dry-run to execute",
+			Success:              true,
+			DryRun:               true,
+			Session:              session,
+			NonInteractiveForced: opts.ForceNonInteractive,
+			Redaction:            redactionSummary,
+			Warnings:             redactionWarnings,
+			Blocked:              false,
+			Total:                len(entries),
+			WouldSend:            entries,
+			RoutedTo:             opts.routingResult,
+			Message:              "use without --dry-run to execute",
 		})
 	}
 
@@ -1519,18 +1543,19 @@ func runSendInternal(opts SendOptions) (err error) {
 			histErr = err
 			if jsonOutput {
 				result := SendResult{
-					Success:       false,
-					Session:       session,
-					PromptPreview: truncatePrompt(prompt, 50),
-					Redaction:     redactionSummary,
-					Warnings:      redactionWarnings,
-					Randomized:    opts.Randomize,
-					SeedUsed:      seedUsed,
-					Targets:       targetPanes,
-					Delivered:     delivered,
-					Failed:        failed,
-					RoutedTo:      opts.routingResult,
-					Error:         err.Error(),
+					Success:              false,
+					Session:              session,
+					PromptPreview:        truncatePrompt(prompt, 50),
+					NonInteractiveForced: opts.ForceNonInteractive,
+					Redaction:            redactionSummary,
+					Warnings:             redactionWarnings,
+					Randomized:           opts.Randomize,
+					SeedUsed:             seedUsed,
+					Targets:              targetPanes,
+					Delivered:            delivered,
+					Failed:               failed,
+					RoutedTo:             opts.routingResult,
+					Error:                err.Error(),
 				}
 				return json.NewEncoder(os.Stdout).Encode(result)
 			}
@@ -1541,17 +1566,18 @@ func runSendInternal(opts SendOptions) (err error) {
 
 		if jsonOutput {
 			result := SendResult{
-				Success:       true,
-				Session:       session,
-				PromptPreview: truncatePrompt(prompt, 50),
-				Redaction:     redactionSummary,
-				Warnings:      redactionWarnings,
-				Randomized:    opts.Randomize,
-				SeedUsed:      seedUsed,
-				Targets:       targetPanes,
-				Delivered:     delivered,
-				Failed:        failed,
-				RoutedTo:      opts.routingResult,
+				Success:              true,
+				Session:              session,
+				PromptPreview:        truncatePrompt(prompt, 50),
+				NonInteractiveForced: opts.ForceNonInteractive,
+				Redaction:            redactionSummary,
+				Warnings:             redactionWarnings,
+				Randomized:           opts.Randomize,
+				SeedUsed:             seedUsed,
+				Targets:              targetPanes,
+				Delivered:            delivered,
+				Failed:               failed,
+				RoutedTo:             opts.routingResult,
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
@@ -1615,17 +1641,18 @@ func runSendInternal(opts SendOptions) (err error) {
 	// JSON output mode
 	if jsonOutput {
 		result := SendResult{
-			Success:       failed == 0,
-			Session:       session,
-			PromptPreview: truncatePrompt(prompt, 50),
-			Redaction:     redactionSummary,
-			Warnings:      redactionWarnings,
-			Randomized:    opts.Randomize,
-			SeedUsed:      seedUsed,
-			Targets:       targetPanes,
-			Delivered:     delivered,
-			Failed:        failed,
-			RoutedTo:      opts.routingResult,
+			Success:              failed == 0,
+			Session:              session,
+			PromptPreview:        truncatePrompt(prompt, 50),
+			NonInteractiveForced: opts.ForceNonInteractive,
+			Redaction:            redactionSummary,
+			Warnings:             redactionWarnings,
+			Randomized:           opts.Randomize,
+			SeedUsed:             seedUsed,
+			Targets:              targetPanes,
+			Delivered:            delivered,
+			Failed:               failed,
+			RoutedTo:             opts.routingResult,
 		}
 		if failed > 0 {
 			result.Error = fmt.Sprintf("%d pane(s) failed", failed)
@@ -2817,7 +2844,7 @@ func resolveSendSessionForCommand(session string) (string, bool, error) {
 	return res.Session, res.Inferred, nil
 }
 
-func checkCassDuplicates(session string, inferred bool, prompt string, threshold float64, days int) error {
+func checkCassDuplicates(session string, inferred bool, prompt string, threshold float64, days int, forceNonInteractive bool) error {
 	var opts []cass.ClientOption
 	if cfg != nil && cfg.CASS.BinaryPath != "" {
 		opts = append(opts, cass.WithBinaryPath(cfg.CASS.BinaryPath))
@@ -2861,6 +2888,15 @@ func checkCassDuplicates(session string, inferred bool, prompt string, threshold
 	}
 
 	if res.DuplicatesFound {
+		// --force-non-interactive: continue without confirmation, log to stderr so
+		// the warning doesn't leak into machine-readable stdout (JSON pipelines).
+		if forceNonInteractive {
+			fmt.Fprintf(os.Stderr,
+				"warning: CASS duplicate check found %d similar session(s); "+
+					"continuing because --force-non-interactive was used.\n",
+				len(res.SimilarSessions))
+			return nil
+		}
 		if jsonOutput {
 			return fmt.Errorf("duplicates found in CASS: %d similar sessions", len(res.SimilarSessions))
 		}
@@ -3100,18 +3136,19 @@ func runDistributeMode(session, strategy string, limit int, autoExecute bool, dr
 
 // BatchResult represents the JSON output for batch send operations
 type BatchResult struct {
-	Success         bool                `json:"success"`
-	Session         string              `json:"session"`
-	Randomized      bool                `json:"randomized,omitempty"`
-	SeedUsed        int64               `json:"seed_used,omitempty"`
-	PriorityOrdered bool                `json:"priority_ordered,omitempty"`
-	Order           []string            `json:"order,omitempty"` // BatchPrompt.Source in execution order (for debugging/tests)
-	Total           int                 `json:"batch_total"`
-	Delivered       int                 `json:"batch_delivered"`
-	Failed          int                 `json:"batch_failed"`
-	Skipped         int                 `json:"batch_skipped"`
-	Results         []BatchPromptResult `json:"results"`
-	Error           string              `json:"error,omitempty"`
+	Success              bool                `json:"success"`
+	Session              string              `json:"session"`
+	NonInteractiveForced bool                `json:"non_interactive_forced,omitempty"`
+	Randomized           bool                `json:"randomized,omitempty"`
+	SeedUsed             int64               `json:"seed_used,omitempty"`
+	PriorityOrdered      bool                `json:"priority_ordered,omitempty"`
+	Order                []string            `json:"order,omitempty"` // BatchPrompt.Source in execution order (for debugging/tests)
+	Total                int                 `json:"batch_total"`
+	Delivered            int                 `json:"batch_delivered"`
+	Failed               int                 `json:"batch_failed"`
+	Skipped              int                 `json:"batch_skipped"`
+	Results              []BatchPromptResult `json:"results"`
+	Error                string              `json:"error,omitempty"`
 }
 
 // BatchPromptResult represents the result of sending a single prompt in a batch
@@ -3446,12 +3483,13 @@ func runSendBatch(opts SendOptions) error {
 		}
 
 		return printSendDryRunResult(SendDryRunResult{
-			Success:   true,
-			DryRun:    true,
-			Session:   opts.Session,
-			Total:     len(entries),
-			WouldSend: entries,
-			Message:   "use without --dry-run to execute",
+			Success:              true,
+			DryRun:               true,
+			Session:              opts.Session,
+			NonInteractiveForced: opts.ForceNonInteractive,
+			Total:                len(entries),
+			WouldSend:            entries,
+			Message:              "use without --dry-run to execute",
 		})
 	}
 
@@ -3648,11 +3686,12 @@ summary:
 	// Output results
 	if jsonOutput {
 		batchResult := BatchResult{
-			Success:         failed == 0 && !interrupted,
-			Session:         opts.Session,
-			Randomized:      opts.Randomize,
-			SeedUsed:        seedUsed,
-			PriorityOrdered: opts.PriorityOrder,
+			Success:              failed == 0 && !interrupted,
+			Session:              opts.Session,
+			NonInteractiveForced: opts.ForceNonInteractive,
+			Randomized:           opts.Randomize,
+			SeedUsed:             seedUsed,
+			PriorityOrdered:      opts.PriorityOrder,
 			Order: func() []string {
 				if !opts.Randomize {
 					return nil

@@ -1545,3 +1545,86 @@ func TestFilterPanesForBatchCanonicalizesAliasTypes(t *testing.T) {
 		t.Fatalf("filterPanesForBatch(alias types) = %+v, want pane indices [1 2]", got)
 	}
 }
+
+// TestSendForceNonInteractiveFlag verifies that --force-non-interactive is registered
+// and parses without consuming a positional argument.
+func TestSendForceNonInteractiveFlag(t *testing.T) {
+	cmd := newSendCmd()
+	flag := cmd.Flags().Lookup("force-non-interactive")
+	if flag == nil {
+		t.Fatal("--force-non-interactive flag is not registered on `ntm send`")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--force-non-interactive default = %q, want %q", flag.DefValue, "false")
+	}
+	// The flag is wrapper-friendly; the help text must call out which classes
+	// are bypassed and which fail closed so callers can audit the contract.
+	usage := flag.Usage
+	for _, want := range []string{"CASS", "fail closed", "non_interactive_forced"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("--force-non-interactive usage missing %q, got: %q", want, usage)
+		}
+	}
+
+	// Parse with the flag set; the prompt must still land in remaining args
+	// (i.e., the flag must not swallow a positional).
+	parsed := newSendCmd()
+	args := []string{"my-session", "--force-non-interactive", "do the thing"}
+	if err := parsed.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags(%v) error = %v", args, err)
+	}
+	remaining := parsed.Flags().Args()
+	if len(remaining) < 2 || remaining[1] != "do the thing" {
+		t.Errorf("remaining args = %v, want prompt to be parsed positionally", remaining)
+	}
+}
+
+// TestSendResultJSONOmitsForceFieldByDefault asserts that the JSON output stays
+// backwards-compatible: the new `non_interactive_forced` field has `omitempty`,
+// so callers that don't set the flag never see it appear.
+func TestSendResultJSONOmitsForceFieldByDefault(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload any
+	}{
+		{"SendResult", SendResult{Success: true, Session: "s", Targets: []int{}}},
+		{"SendDryRunResult", SendDryRunResult{Success: true, DryRun: true, Session: "s"}},
+		{"BatchResult", BatchResult{Success: true, Session: "s"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if strings.Contains(string(b), "non_interactive_forced") {
+				t.Errorf("default %s JSON includes the field; want omitempty: %s", tc.name, b)
+			}
+		})
+	}
+}
+
+// TestSendResultJSONEmitsForceFieldWhenSet asserts the inverse: when callers
+// pass --force-non-interactive, the JSON contract surfaces it for downstream
+// auditing/log analysis.
+func TestSendResultJSONEmitsForceFieldWhenSet(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload any
+	}{
+		{"SendResult", SendResult{Success: true, Session: "s", Targets: []int{}, NonInteractiveForced: true}},
+		{"SendDryRunResult", SendDryRunResult{Success: true, DryRun: true, Session: "s", NonInteractiveForced: true}},
+		{"BatchResult", BatchResult{Success: true, Session: "s", NonInteractiveForced: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if !strings.Contains(string(b), `"non_interactive_forced":true`) {
+				t.Errorf("%s JSON missing non_interactive_forced=true: %s", tc.name, b)
+			}
+		})
+	}
+}
