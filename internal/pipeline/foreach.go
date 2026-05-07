@@ -255,7 +255,7 @@ func (e *Executor) prepareForeachIterations(ctx context.Context, parent *Step, c
 				plan.PaneID, plan.PaneIndex, plan.PaneVars = paneAssignmentFromItem(item, panes)
 			}
 			if plan.PaneID == "" && config.PaneStrategy != "" {
-				paneID, paneIndex, paneVars, err := selectForeachPane(config.PaneStrategy, strategyPanes, panes, item, i)
+				paneID, paneIndex, paneVars, err := e.selectForeachPaneWithState(config.PaneStrategy, strategyPanes, panes, item, i)
 				if err != nil {
 					return nil, fmt.Errorf("iteration %d pane assignment: %w", i, err)
 				}
@@ -1193,6 +1193,66 @@ func foreachStrategyPanes(panes []tmux.Pane) []paneStrategyPane {
 		})
 	}
 	return out
+}
+
+// snapshotAdjudicatorHistory returns a copy of the chronological list of
+// rotate_adjudicator assignments made so far during this run.
+func (e *Executor) snapshotAdjudicatorHistory() []string {
+	if e == nil {
+		return nil
+	}
+	e.adjudicatorMu.Lock()
+	defer e.adjudicatorMu.Unlock()
+	if len(e.adjudicatorHistory) == 0 {
+		return nil
+	}
+	return append([]string(nil), e.adjudicatorHistory...)
+}
+
+// recordAdjudicator appends paneID to the rotate_adjudicator history. Empty
+// IDs are ignored so a failed pane assignment does not poison the history.
+func (e *Executor) recordAdjudicator(paneID string) {
+	if e == nil || paneID == "" {
+		return
+	}
+	e.adjudicatorMu.Lock()
+	defer e.adjudicatorMu.Unlock()
+	e.adjudicatorHistory = append(e.adjudicatorHistory, paneID)
+}
+
+// resetAdjudicatorHistory clears the rotate_adjudicator history. Called at
+// the start of each Run so resumed/repeated invocations of the same Executor
+// pick a deterministic first adjudicator instead of inheriting prior runs.
+func (e *Executor) resetAdjudicatorHistory() {
+	if e == nil {
+		return
+	}
+	e.adjudicatorMu.Lock()
+	defer e.adjudicatorMu.Unlock()
+	e.adjudicatorHistory = nil
+}
+
+// selectForeachPaneWithState dispatches pane assignment with run-scoped
+// state. For rotate_adjudicator, it threads the live adjudicator history
+// into the strategy and records the chosen pane afterward so subsequent
+// debate items receive balanced assignments. All other strategies delegate
+// straight to selectForeachPane unchanged.
+func (e *Executor) selectForeachPaneWithState(strategy string, strategyPanes []paneStrategyPane, panes []tmux.Pane, item interface{}, iterationIndex int) (string, int, map[string]interface{}, error) {
+	if strings.TrimSpace(strategy) == "rotate_adjudicator" {
+		history := e.snapshotAdjudicatorHistory()
+		paneID, err := rotateAdjudicator(
+			foreachPaneIDs(strategyPanes),
+			foreachItemStrings(item, "champions", "champion_a", "champion_b"),
+			history,
+		)
+		if err != nil {
+			return "", 0, nil, err
+		}
+		index, vars := paneVarsForID(panes, paneID)
+		e.recordAdjudicator(paneID)
+		return paneID, index, vars, nil
+	}
+	return selectForeachPane(strategy, strategyPanes, panes, item, iterationIndex)
 }
 
 func selectForeachPane(strategy string, strategyPanes []paneStrategyPane, panes []tmux.Pane, item interface{}, iterationIndex int) (string, int, map[string]interface{}, error) {

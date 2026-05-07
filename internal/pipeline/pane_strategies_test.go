@@ -159,6 +159,74 @@ func TestByModelFamilyDifferenceErrorsWhenNoPanesAvailable(t *testing.T) {
 	}
 }
 
+func TestSelectForeachPaneWithStateRotatesAdjudicatorAcrossDebates(t *testing.T) {
+	// rotate_adjudicator must avoid the most recent adjudicator across
+	// successive debate items. Without history threading, the strategy
+	// always returned the first non-champion pane, so a debate set with
+	// rotating champions would pin every adjudication to the same pane
+	// and never balance the adjudication load (bd-2ubxp.9 contract).
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+
+	strategyPanes := []paneStrategyPane{
+		{ID: "%1"},
+		{ID: "%2"},
+		{ID: "%3"},
+		{ID: "%4"},
+	}
+	debates := []map[string]interface{}{
+		{"champion_a": "%1", "champion_b": "%2"}, // %3 or %4 eligible; first is %3
+		{"champion_a": "%1", "champion_b": "%2"}, // same eligibility, but %3 just adjudicated
+		{"champion_a": "%3", "champion_b": "%4"}, // now only %1/%2 eligible
+	}
+	got := make([]string, 0, len(debates))
+	for i, item := range debates {
+		paneID, _, _, err := e.selectForeachPaneWithState("rotate_adjudicator", strategyPanes, nil, item, i)
+		if err != nil {
+			t.Fatalf("debate %d: error = %v", i, err)
+		}
+		got = append(got, paneID)
+	}
+
+	// First debate must pick %3 (first eligible non-champion).
+	// Second debate must AVOID %3 (most-recent adjudicator) and pick %4.
+	// Third debate's champions exclude %3,%4 — must pick %1 (first eligible).
+	want := []string{"%3", "%4", "%1"}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("debate %d adjudicator = %q, want %q (full sequence: %v)", i, got[i], w, got)
+		}
+	}
+}
+
+func TestSelectForeachPaneWithStateNonRotateUnaffected(t *testing.T) {
+	// Sanity: non-rotate strategies must still go through the unchanged
+	// selectForeachPane path so the adjudicator-history wrapper does not
+	// alter pane assignment for round_robin / by_model_family / domain.
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+
+	strategyPanes := []paneStrategyPane{
+		{ID: "%1"},
+		{ID: "%2"},
+		{ID: "%3"},
+	}
+	for i := 0; i < 4; i++ {
+		paneID, _, _, err := e.selectForeachPaneWithState("round_robin", strategyPanes, nil, nil, i)
+		if err != nil {
+			t.Fatalf("iter %d: error = %v", i, err)
+		}
+		want := strategyPanes[i%3].ID
+		if paneID != want {
+			t.Errorf("iter %d round_robin = %q, want %q", i, paneID, want)
+		}
+	}
+	// Adjudicator history must remain empty after round_robin assignments.
+	if got := e.snapshotAdjudicatorHistory(); len(got) != 0 {
+		t.Fatalf("adjudicator history = %v, want empty after round_robin", got)
+	}
+}
+
 func TestByModelFamilyDifferenceErrorsWhenAuthorFamilyMissing(t *testing.T) {
 	// An item that lacks author_model/model_family/family/type yields an empty
 	// author family. byModelFamilyDifference must reject that input rather than

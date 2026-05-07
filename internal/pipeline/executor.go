@@ -97,6 +97,14 @@ type Executor struct {
 	graph    *DependencyGraph
 	progress chan<- ProgressEvent
 	cancelFn context.CancelFunc
+
+	// adjudicatorHistory records the order in which rotate_adjudicator picked
+	// adjudicator panes during this run. Each entry is the chosen pane ID;
+	// rotateAdjudicator uses the gap-since-last-seen to balance assignments
+	// across multiple debate items, so the history must persist across
+	// foreach iterations within the run rather than being reset per step.
+	adjudicatorMu      sync.Mutex
+	adjudicatorHistory []string
 }
 
 // NewExecutor creates a new workflow executor
@@ -182,6 +190,10 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	}
 	e.progress = progress
 	e.stateMu.Unlock()
+
+	// Reset run-scoped strategy state so a re-used Executor doesn't inherit
+	// rotate_adjudicator history from a prior Run.
+	e.resetAdjudicatorHistory()
 
 	// Initialize variables with runtime overrides taking precedence over
 	// workflow defaults, and validate declared VarType values before execution.
