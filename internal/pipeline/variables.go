@@ -544,14 +544,27 @@ func (s *Substitutor) resolveSteps(parts []string) (interface{}, error) {
 
 	stepID := parts[0]
 	field := parts[1]
+	rest := parts[2:]
+	if base, indexes, ok := splitBracketAccess(field); ok {
+		field = base
+		rest = append(indexes, rest...)
+	}
 
 	// First, check Variables for flat key lookup (backward compatible)
 	key := "steps." + stepID + "." + field
 	if val, exists := s.state.Variables[key]; exists {
-		if len(parts) > 2 {
-			return navigateNested(val, parts[2:])
+		if len(rest) > 0 {
+			return navigateNested(val, rest)
 		}
 		return val, nil
+	}
+	if field == "parsed_data" || field == "data" {
+		if val, exists := s.state.Variables[stepID+"_parsed"]; exists {
+			if len(rest) > 0 {
+				return navigateNested(val, rest)
+			}
+			return val, nil
+		}
 	}
 
 	// Then check Steps map if available
@@ -566,20 +579,20 @@ func (s *Substitutor) resolveSteps(parts []string) (interface{}, error) {
 
 	switch field {
 	case "output":
-		if len(parts) > 2 {
+		if len(rest) > 0 {
 			// Accessing parsed data field: steps.id.output.field
 			if result.ParsedData != nil {
-				return navigateNested(result.ParsedData, parts[2:])
+				return navigateNested(result.ParsedData, rest)
 			}
 			return nil, fmt.Errorf("step %s has no parsed data", stepID)
 		}
 		return result.Output, nil
-	case "data":
+	case "data", "parsed_data":
 		if result.ParsedData == nil {
 			return nil, fmt.Errorf("step %s has no parsed data", stepID)
 		}
-		if len(parts) > 2 {
-			return navigateNested(result.ParsedData, parts[2:])
+		if len(rest) > 0 {
+			return navigateNested(result.ParsedData, rest)
 		}
 		return result.ParsedData, nil
 	case "pane":
@@ -596,6 +609,31 @@ func (s *Substitutor) resolveSteps(parts []string) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("unknown step field: %s", field)
 	}
+}
+
+func splitBracketAccess(part string) (string, []string, bool) {
+	start := strings.IndexByte(part, '[')
+	if start < 0 {
+		return part, nil, false
+	}
+	base := part[:start]
+	if base == "" {
+		return part, nil, false
+	}
+	rest := part[start:]
+	var indexes []string
+	for rest != "" {
+		if !strings.HasPrefix(rest, "[") {
+			return part, nil, false
+		}
+		end := strings.IndexByte(rest, ']')
+		if end <= 1 {
+			return part, nil, false
+		}
+		indexes = append(indexes, strings.TrimSpace(rest[1:end]))
+		rest = rest[end+1:]
+	}
+	return base, indexes, true
 }
 
 // resolveEnv handles env.NAME references
