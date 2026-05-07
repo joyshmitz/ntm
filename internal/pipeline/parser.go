@@ -207,6 +207,7 @@ var knownStepTOMLFields = map[string]bool{
 	"when":                     true,
 	"branch":                   true,
 	"branches":                 true,
+	"bead_query":               true,
 	"output_var":               true,
 	"output_parse":             true,
 	"parallel":                 true,
@@ -404,6 +405,7 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 	hasParallel := len(step.Parallel.Steps) > 0
 	hasForeach := step.Foreach != nil || step.ForeachPane != nil
 	hasBranch := step.Branch != "" || len(step.Branches) > 0
+	hasBeadQuery := step.BeadQuery != nil
 	mailStepKinds := step.mailStepKindNames()
 	hasMailStep := len(mailStepKinds) > 0
 
@@ -449,12 +451,19 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			Hint:    "Agent Mail step kinds run through MCP Agent Mail rather than tmux pane dispatch",
 		})
 	}
-
-	if !hasPrompt && !hasParallel && !hasCommand && !hasTemplate &&
-		!hasForeach && !hasBranch && !hasMailStep && step.Loop == nil {
+	if hasBeadQuery && (hasPrompt || hasParallel || hasCommand || hasTemplate || hasForeach || hasBranch || hasMailStep || step.Loop != nil) {
 		result.addError(ParseError{
 			Field:   stepField,
-			Message: "step must have prompt, prompt_file, command, template, parallel, loop, foreach, or branch",
+			Message: "step cannot combine bead_query with prompt, command, template, parallel, loop, foreach, branch, or Agent Mail step kinds",
+			Hint:    "bead_query runs a structured br query and stores its result through output_var",
+		})
+	}
+
+	if !hasPrompt && !hasParallel && !hasCommand && !hasTemplate &&
+		!hasForeach && !hasBranch && !hasBeadQuery && !hasMailStep && step.Loop == nil {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: "step must have prompt, prompt_file, command, template, parallel, loop, foreach, branch, or bead_query",
 			Hint:    "Pick the step kind that matches the work you want done.",
 		})
 	}

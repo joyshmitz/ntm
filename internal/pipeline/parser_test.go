@@ -351,7 +351,15 @@ func TestValidate_StepKindMutualExclusivityAndRequiredWork(t *testing.T) {
 		{
 			name:          "empty step has no work",
 			step:          Step{ID: "s1"},
-			wantErrSubstr: "must have prompt, prompt_file, command, template, parallel, loop, foreach, or branch",
+			wantErrSubstr: "must have prompt, prompt_file, command, template, parallel, loop, foreach, branch, or bead_query",
+		},
+		{
+			name: "bead_query only is valid",
+			step: Step{
+				ID:        "s1",
+				BeadQuery: &BeadQueryStep{Label: StringOrList{"hypothesis"}},
+			},
+			wantValid: true,
 		},
 		{
 			name: "loop with until only is valid",

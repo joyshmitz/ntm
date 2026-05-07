@@ -1,0 +1,220 @@
+package pipeline
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestBeadQuery_ParseYAMLAndValidate(t *testing.T) {
+	content := `
+schema_version: "2.0"
+name: bead-query
+steps:
+  - id: collect
+    bead_query:
+      label: [hypothesis, phase-4]
+      status: open
+      filter: 'priority==1 && label==hypothesis'
+    output_var: hypothesis_beads
+`
+
+	workflow, err := ParseString(content, "yaml")
+	if err != nil {
+		t.Fatalf("ParseString() error = %v", err)
+	}
+	if result := Validate(workflow); !result.Valid {
+		t.Fatalf("Validate() failed: %+v", result.Errors)
+	}
+
+	query := workflow.Steps[0].BeadQuery
+	if query == nil {
+		t.Fatal("BeadQuery = nil")
+	}
+	if !reflect.DeepEqual(query.Label, StringOrList{"hypothesis", "phase-4"}) {
+		t.Fatalf("BeadQuery.Label = %#v", query.Label)
+	}
+	if query.Status != "open" || query.Filter != "priority==1 && label==hypothesis" {
+		t.Fatalf("BeadQuery = %#v", query)
+	}
+}
+
+func TestBeadQuery_ParseTOMLKnownFields(t *testing.T) {
+	content := `
+schema_version = "2.0"
+name = "bead-query-toml"
+
+[[steps]]
+id = "collect"
+output_var = "hypothesis_beads"
+
+[steps.bead_query]
+label = "hypothesis"
+status = "open"
+filter = "status==open"
+`
+
+	workflow, err := ParseString(content, "toml")
+	if err != nil {
+		t.Fatalf("ParseString() error = %v", err)
+	}
+	if result := Validate(workflow); !result.Valid {
+		t.Fatalf("Validate() failed: %+v", result.Errors)
+	}
+	if got := workflow.Steps[0].BeadQuery.Label; !reflect.DeepEqual(got, StringOrList{"hypothesis"}) {
+		t.Fatalf("BeadQuery.Label = %#v", got)
+	}
+}
+
+func TestBeadQuery_JSONRoundTrip(t *testing.T) {
+	step := Step{
+		ID: "collect",
+		BeadQuery: &BeadQueryStep{
+			Label:  StringOrList{"hypothesis"},
+			Status: "open",
+			Filter: "priority==1",
+		},
+		OutputVar: "beads",
+	}
+
+	data, err := json.Marshal(step)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var got Step
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v\nJSON:\n%s", err, data)
+	}
+	if !reflect.DeepEqual(got, step) {
+		t.Fatalf("JSON round trip mismatch\nwant: %#v\n got: %#v\nJSON:\n%s", step, got, data)
+	}
+}
+
+func TestBeadQuery_ValidationConflict(t *testing.T) {
+	result := Validate(&Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "bead-query-conflict",
+		Steps: []Step{{
+			ID:        "bad",
+			Command:   "br list --json",
+			BeadQuery: &BeadQueryStep{Label: StringOrList{"hypothesis"}},
+		}},
+	})
+	if result.Valid {
+		t.Fatal("Validate() succeeded, want conflict")
+	}
+	for _, err := range result.Errors {
+		if strings.Contains(err.Message, "cannot combine bead_query") {
+			return
+		}
+	}
+	t.Fatalf("Validate() errors = %+v, want bead_query conflict", result.Errors)
+}
+
+func TestExecuteBeadQueryCapturesTypedRecords(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "bead-query-exec",
+		Steps: []Step{{
+			ID: "collect",
+			BeadQuery: &BeadQueryStep{
+				Label:  StringOrList{"hypothesis"},
+				Status: "open",
+				Filter: "status==open && label==hypothesis",
+			},
+			OutputVar: "hypothesis_beads",
+		}},
+	}
+
+	config := DefaultExecutorConfig("session")
+	config.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
+		t.Helper()
+		wantArgs := []string{"list", "--json", "--label", "hypothesis", "--status", "open"}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("br args = %#v, want %#v", args, wantArgs)
+		}
+		return []byte(`{"issues":[
+			{"id":"bd-1","title":"One","description":"first","labels":["hypothesis","phase-4"],"status":"open","priority":1,"issue_type":"task"},
+			{"id":"bd-2","title":"Two","labels":["other"],"status":"open","priority":1,"issue_type":"task"},
+			{"id":"bd-3","title":"Three","labels":["hypothesis"],"status":"closed","priority":1,"issue_type":"task"}
+		]}`), nil
+	}
+
+	executor := NewExecutor(config)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	result := state.Steps["collect"]
+	records, ok := result.ParsedData.([]BeadRecord)
+	if !ok {
+		t.Fatalf("ParsedData = %T, want []BeadRecord", result.ParsedData)
+	}
+	if len(records) != 1 || records[0].ID != "bd-1" || records[0].Title != "One" {
+		t.Fatalf("records = %#v", records)
+	}
+
+	var output []BeadRecord
+	if err := json.Unmarshal([]byte(result.Output), &output); err != nil {
+		t.Fatalf("result.Output is not BeadRecord JSON: %v\n%s", err, result.Output)
+	}
+	if !reflect.DeepEqual(output, records) {
+		t.Fatalf("output records = %#v, want %#v", output, records)
+	}
+	if got := state.Variables["hypothesis_beads"]; got != result.Output {
+		t.Fatalf("output var = %#v, want %#v", got, result.Output)
+	}
+	if got := state.Variables["hypothesis_beads_parsed"]; !reflect.DeepEqual(got, records) {
+		t.Fatalf("parsed output var = %#v, want %#v", got, records)
+	}
+}
+
+func TestBeadQueryFilterOperators(t *testing.T) {
+	records := []BeadRecord{
+		{ID: "bd-1", Labels: []string{"hypothesis"}, Status: "open", Priority: 1},
+		{ID: "bd-2", Labels: []string{"question"}, Status: "open", Priority: 2},
+		{ID: "bd-3", Labels: []string{"hypothesis"}, Status: "closed", Priority: 2},
+	}
+
+	got, err := filterBeadRecords(records, `label==hypothesis && status!=closed || id=="bd-2"`)
+	if err != nil {
+		t.Fatalf("filterBeadRecords() error = %v", err)
+	}
+	ids := make([]string, 0, len(got))
+	for _, record := range got {
+		ids = append(ids, record.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"bd-1", "bd-2"}) {
+		t.Fatalf("filtered ids = %#v", ids)
+	}
+}
+
+func TestBeadQueryBrErrorFailsStep(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "bead-query-error",
+		Steps: []Step{{
+			ID:        "collect",
+			BeadQuery: &BeadQueryStep{Label: StringOrList{"hypothesis"}},
+		}},
+	}
+
+	config := DefaultExecutorConfig("session")
+	config.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
+		return nil, fmt.Errorf("boom")
+	}
+
+	executor := NewExecutor(config)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want bead_query failure")
+	}
+	if got := state.Steps["collect"].Error; got == nil || !strings.Contains(got.Message, "bead_query") {
+		t.Fatalf("step error = %#v, want bead_query error", got)
+	}
+}

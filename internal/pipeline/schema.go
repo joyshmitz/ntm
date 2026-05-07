@@ -389,6 +389,10 @@ type Step struct {
 	Branch   string                 `yaml:"branch,omitempty" toml:"branch,omitempty" json:"branch,omitempty"`
 	Branches map[string]interface{} `yaml:"branches,omitempty" toml:"branches,omitempty" json:"branches,omitempty"`
 
+	// BeadQuery runs a structured br query and captures typed bead records as
+	// JSON output, avoiding shell-piped br|jq steps in pipeline definitions.
+	BeadQuery *BeadQueryStep `yaml:"bead_query,omitempty" toml:"bead_query,omitempty" json:"bead_query,omitempty"`
+
 	// Output handling
 	OutputVar   string      `yaml:"output_var,omitempty" toml:"output_var,omitempty" json:"output_var,omitempty"`       // Store output in variable
 	OutputParse OutputParse `yaml:"output_parse,omitempty" toml:"output_parse,omitempty" json:"output_parse,omitempty"` // none, json, yaml, lines, first_line, regex
