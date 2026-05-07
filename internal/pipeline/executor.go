@@ -1024,7 +1024,18 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	if waitCondition == WaitNone {
 		go func() {
-			_ = cmd.Wait()
+			cleanup := waitCommandWithProcessGroupCleanup(ctx, cmd)
+			if cleanup.Cancelled {
+				slog.Warn(EventCommandCancelled,
+					"run_id", e.runIDForLog(),
+					"workflow", workflow.Name,
+					"step_id", step.ID,
+					"agent_type", "command",
+					FieldDurationMS, time.Since(result.StartedAt).Milliseconds(),
+					"bytes_captured", len(stdoutBuf.String()),
+					FieldSignalSent, cleanup.SignalSent,
+				)
+			}
 		}()
 		result.Status = StatusCompleted
 		result.FinishedAt = time.Now()
