@@ -316,8 +316,8 @@ func TestLoopTimesExceedsMaxIterations(t *testing.T) {
 	step := &Step{
 		ID: "test-step",
 		Loop: &LoopConfig{
-			Times:         200, // Exceeds default 100
-			MaxIterations: IntOrExpr{Value: 50},  // Explicit limit
+			Times:         200,                  // Exceeds default 100
+			MaxIterations: IntOrExpr{Value: 50}, // Explicit limit
 		},
 	}
 

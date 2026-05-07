@@ -89,6 +89,7 @@ func NewExecutor(config ExecutorConfig) *Executor {
 		detector: status.NewDetector(),
 		router:   robot.NewRouter(),
 		scorer:   robot.NewAgentScorer(robot.DefaultRoutingConfig()),
+		limits:   LimitsConfig{}.EffectiveLimits(),
 		tmux:     realTmuxClient{},
 	}
 	e.loopExec = NewLoopExecutor(e)

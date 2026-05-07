@@ -71,6 +71,60 @@ func formatUndecodedTOMLKeys(keys []toml.Key) string {
 	return strings.Join(parts, ", ")
 }
 
+func filterUndecodedTOMLKeys(keys []toml.Key) []toml.Key {
+	filtered := make([]toml.Key, 0, len(keys))
+	for _, key := range keys {
+		if isKnownParallelInlineStepKey(key) {
+			continue
+		}
+		filtered = append(filtered, key)
+	}
+	return filtered
+}
+
+func isKnownParallelInlineStepKey(key toml.Key) bool {
+	if len(key) < 3 || key[0] != "steps" || key[1] != "parallel" {
+		return false
+	}
+	return knownStepTOMLFields[key[2]]
+}
+
+var knownStepTOMLFields = map[string]bool{
+	"id":              true,
+	"name":            true,
+	"description":     true,
+	"agent":           true,
+	"pane":            true,
+	"route":           true,
+	"prompt":          true,
+	"prompt_file":     true,
+	"command":         true,
+	"args":            true,
+	"template":        true,
+	"params":          true,
+	"template_params": true,
+	"wait":            true,
+	"timeout":         true,
+	"depends_on":      true,
+	"after":           true,
+	"on_error":        true,
+	"on_failure":      true,
+	"on_success":      true,
+	"retry_count":     true,
+	"retry_delay":     true,
+	"retry_backoff":   true,
+	"when":            true,
+	"branch":          true,
+	"branches":        true,
+	"output_var":      true,
+	"output_parse":    true,
+	"parallel":        true,
+	"loop":            true,
+	"loop_control":    true,
+	"foreach":         true,
+	"foreach_pane":    true,
+}
+
 // ParseFile parses a workflow file (YAML or TOML) and returns the workflow
 func ParseFile(path string) (*Workflow, error) {
 	data, err := os.ReadFile(path)
@@ -99,7 +153,7 @@ func ParseFile(path string) (*Workflow, error) {
 				Hint:    "Check TOML syntax - keys and values must be properly formatted",
 			}
 		}
-		if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		if undecoded := filterUndecodedTOMLKeys(md.Undecoded()); len(undecoded) > 0 {
 			return nil, &ParseError{
 				File:    path,
 				Field:   undecoded[0].String(),
@@ -139,7 +193,7 @@ func ParseString(content string, format string) (*Workflow, error) {
 				Message: fmt.Sprintf("TOML parse error: %v", err),
 			}
 		}
-		if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		if undecoded := filterUndecodedTOMLKeys(md.Undecoded()); len(undecoded) > 0 {
 			return nil, &ParseError{
 				Field:   undecoded[0].String(),
 				Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
