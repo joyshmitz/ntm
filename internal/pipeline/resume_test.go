@@ -708,3 +708,60 @@ func TestApplyResumeStateLogsOrphanDrops(t *testing.T) {
 		t.Errorf("level = %q, want WARN", level)
 	}
 }
+
+// TestApplyResumeStateRebuildsRetainedStepOutputs covers bd-bllgq: when
+// applyResumeState marks a completed step as already-executed in the
+// dependency graph, it must also rebuild steps.<id>.output / data plus
+// the output_var aliases. Otherwise a partially-written or legacy state
+// file with Steps populated but Variables empty leaves downstream
+// substitution unable to see the producer's output.
+func TestApplyResumeStateRebuildsRetainedStepOutputs(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "applyResumeState-rebuild",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{ID: "producer", Command: "echo done", OutputVar: "producer_out"},
+			{ID: "consumer", Command: "echo ${steps.producer.output}", DependsOn: []string{"producer"}},
+		},
+	}
+	executor := NewExecutor(DefaultExecutorConfig("session"))
+	executor.graph = NewDependencyGraph(workflow)
+	executor.state = &ExecutionState{
+		RunID:      "run-rebuild",
+		WorkflowID: workflow.Name,
+		Status:     StatusRunning,
+		Steps: map[string]StepResult{
+			"producer": {
+				StepID:     "producer",
+				Status:     StatusCompleted,
+				Output:     "retained-output",
+				ParsedData: map[string]interface{}{"k": "v"},
+			},
+		},
+		Variables: map[string]interface{}{},
+	}
+
+	executor.applyResumeState()
+
+	executor.varMu.RLock()
+	defer executor.varMu.RUnlock()
+
+	got, ok := executor.state.Variables["steps.producer.output"]
+	if !ok {
+		t.Errorf("steps.producer.output not rebuilt on resume; vars=%#v", executor.state.Variables)
+	} else if got != "retained-output" {
+		t.Errorf("steps.producer.output = %v, want retained-output", got)
+	}
+	if data, ok := executor.state.Variables["steps.producer.data"]; !ok {
+		t.Errorf("steps.producer.data not rebuilt on resume")
+	} else if m, _ := data.(map[string]interface{}); m["k"] != "v" {
+		t.Errorf("steps.producer.data = %v, want {k:v}", data)
+	}
+	if got, _ := executor.state.Variables["producer_out"].(string); got != "retained-output" {
+		t.Errorf("producer_out = %v, want retained-output", got)
+	}
+	if got, _ := executor.state.Variables["producer_out_parsed"].(map[string]interface{}); got["k"] != "v" {
+		t.Errorf("producer_out_parsed = %v, want {k:v}", got)
+	}
+}

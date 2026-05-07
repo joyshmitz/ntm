@@ -2829,6 +2829,19 @@ func (e *Executor) applyResumeState() {
 		err    error
 	}
 	var orphanDrops []orphanDrop
+	// bd-bllgq: rebuild canonical substitution variables for retained
+	// completed/skipped steps. A persisted state file may carry Steps but
+	// have an empty / partial Variables map (legacy file, trimmed dump,
+	// partial write). Without rebuild, downstream steps that reference
+	// ${steps.<id>.output} or the producer's output_var see undefined
+	// variables and fail or stale-resolve.
+	type retainedStepOutput struct {
+		stepID     string
+		output     string
+		parsedData interface{}
+		outputVar  string
+	}
+	var retained []retainedStepOutput
 
 	e.stateMu.Lock()
 	if e.state == nil {
@@ -2846,7 +2859,17 @@ func (e *Executor) applyResumeState() {
 			delete(e.state.Steps, stepID)
 			orphanStepIDs = append(orphanStepIDs, stepID)
 			orphanDrops = append(orphanDrops, orphanDrop{stepID: stepID, err: err})
+			continue
 		}
+		entry := retainedStepOutput{
+			stepID:     stepID,
+			output:     result.Output,
+			parsedData: result.ParsedData,
+		}
+		if step, ok := e.graph.GetStep(stepID); ok {
+			entry.outputVar = step.OutputVar
+		}
+		retained = append(retained, entry)
 	}
 	for stepID := range e.state.InFlightSteps {
 		rerunStepIDs = append(rerunStepIDs, stepID)
@@ -2864,6 +2887,22 @@ func (e *Executor) applyResumeState() {
 	}
 	for _, stepID := range orphanStepIDs {
 		e.clearStepVariables(stepID)
+	}
+	if len(retained) > 0 {
+		e.varMu.Lock()
+		if e.state.Variables == nil {
+			e.state.Variables = make(map[string]interface{})
+		}
+		for _, entry := range retained {
+			StoreStepOutput(e.state, entry.stepID, entry.output, entry.parsedData)
+			if entry.outputVar != "" {
+				e.state.Variables[entry.outputVar] = entry.output
+				if entry.parsedData != nil {
+					e.state.Variables[entry.outputVar+"_parsed"] = entry.parsedData
+				}
+			}
+		}
+		e.varMu.Unlock()
 	}
 	for _, drop := range orphanDrops {
 		slog.Warn("resume dropped persisted step result with no graph entry",
