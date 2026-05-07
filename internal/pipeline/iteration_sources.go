@@ -1,12 +1,12 @@
 // Package pipeline — iteration_sources.go implements the resolver for
-// foreach iteration source fields (Beads, Pairs, Debates). Phase B-1 owns
-// only the beads resolver; pairs/debates land in sibling beads.
+// foreach iteration source fields (Beads, Pairs, Debates).
 package pipeline
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -165,6 +165,79 @@ func parseBrListJSON(out []byte) ([]interface{}, error) {
 		items = append(items, issue)
 	}
 	return items, nil
+}
+
+// ResolvePairs expands a foreach.Pairs expression into a list of pair-record
+// maps. The input is a "$(...)" shell command whose stdout follows the
+// brennerbot debate-pair format:
+//
+//	DEBATE-001|H-001|H-002|champion-pane-1|champion-pane-2
+//
+// Each well-formed line becomes a map with keys
+// {debate_id, h1, h2, champion_a, champion_b}, accessible via ${item.h1},
+// etc. Malformed lines are logged at Warn and skipped. Empty stdout yields
+// zero iterations (not an error).
+func (r *IterationSourceResolver) ResolvePairs(ctx context.Context, expr string) ([]interface{}, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return []interface{}{}, nil
+	}
+	shellCmd, ok := stripShellInvocation(expr)
+	if !ok {
+		return nil, fmt.Errorf("pairs source must be a shell expression of the form $(...): %q", expr)
+	}
+	out, err := r.runShell(ctx, shellCmd)
+	if err != nil {
+		return nil, fmt.Errorf("pairs shell command failed: %w", err)
+	}
+	return parsePairsOutput(out), nil
+}
+
+// parsePairsOutput parses pipe-delimited debate-pair lines. Malformed lines
+// are warned and skipped; well-formed lines become record maps.
+func parsePairsOutput(out []byte) []interface{} {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return []interface{}{}
+	}
+	lines := strings.Split(trimmed, "\n")
+	items := make([]interface{}, 0, len(lines))
+	for lineNo, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "|")
+		if len(fields) != 5 {
+			slog.Warn("pairs source: malformed line skipped",
+				"line_no", lineNo+1,
+				"line", line,
+				"fields", len(fields),
+				"want_fields", 5,
+			)
+			continue
+		}
+		debateID := strings.TrimSpace(fields[0])
+		h1 := strings.TrimSpace(fields[1])
+		h2 := strings.TrimSpace(fields[2])
+		champA := strings.TrimSpace(fields[3])
+		champB := strings.TrimSpace(fields[4])
+		if debateID == "" || h1 == "" || h2 == "" || champA == "" || champB == "" {
+			slog.Warn("pairs source: line has empty field, skipped",
+				"line_no", lineNo+1,
+				"line", line,
+			)
+			continue
+		}
+		items = append(items, map[string]interface{}{
+			"debate_id":  debateID,
+			"h1":         h1,
+			"h2":         h2,
+			"champion_a": champA,
+			"champion_b": champB,
+		})
+	}
+	return items
 }
 
 // runShell executes a shell command, defaulting to /bin/sh -c in ProjectDir.

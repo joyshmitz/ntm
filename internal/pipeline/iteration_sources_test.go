@@ -257,6 +257,133 @@ func TestParseStructuredBeadsQuery_RejectsEmptyValue(t *testing.T) {
 	}
 }
 
+func TestResolvePairs_ParsesThreeWellFormedLines(t *testing.T) {
+	const stdout = `DEBATE-001|H-001|H-002|p1|p2
+DEBATE-002|H-003|H-004|p3|p4
+DEBATE-003|H-005|H-006|p5|p6
+`
+	r := &IterationSourceResolver{
+		RunShell: func(_ context.Context, cmd string) ([]byte, error) {
+			if !strings.Contains(cmd, "generate-debate-pairs") {
+				t.Fatalf("unexpected shell cmd: %q", cmd)
+			}
+			return []byte(stdout), nil
+		},
+	}
+
+	got, err := r.ResolvePairs(context.Background(), "$(./scripts/generate-debate-pairs.sh --workspace=/tmp/ws)")
+	if err != nil {
+		t.Fatalf("ResolvePairs: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3", len(got))
+	}
+	wantKeys := []string{"debate_id", "h1", "h2", "champion_a", "champion_b"}
+	first, ok := got[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("item 0 is %T, want map", got[0])
+	}
+	for _, k := range wantKeys {
+		if _, ok := first[k]; !ok {
+			t.Errorf("first item missing %q", k)
+		}
+	}
+	if first["debate_id"] != "DEBATE-001" {
+		t.Errorf("debate_id = %v, want DEBATE-001", first["debate_id"])
+	}
+	if first["h1"] != "H-001" {
+		t.Errorf("h1 = %v, want H-001", first["h1"])
+	}
+	if first["h2"] != "H-002" {
+		t.Errorf("h2 = %v, want H-002", first["h2"])
+	}
+	if first["champion_a"] != "p1" {
+		t.Errorf("champion_a = %v, want p1", first["champion_a"])
+	}
+	if first["champion_b"] != "p2" {
+		t.Errorf("champion_b = %v, want p2", first["champion_b"])
+	}
+}
+
+func TestResolvePairs_SkipsMalformedLines(t *testing.T) {
+	const stdout = `DEBATE-001|H-001|H-002|p1|p2
+this-line-has-no-pipes
+DEBATE-002|H-003|H-004|p3|p4
+TOO|FEW|FIELDS
+DEBATE-003|H-005|H-006||p6
+DEBATE-004|H-007|H-008|p7|p8
+`
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return []byte(stdout), nil },
+	}
+
+	got, err := r.ResolvePairs(context.Background(), "$(echo)")
+	if err != nil {
+		t.Fatalf("ResolvePairs: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d items, want 3 (only well-formed lines)", len(got))
+	}
+	wantIDs := []string{"DEBATE-001", "DEBATE-002", "DEBATE-004"}
+	for i, item := range got {
+		m := item.(map[string]interface{})
+		if m["debate_id"] != wantIDs[i] {
+			t.Errorf("item %d debate_id = %v, want %s", i, m["debate_id"], wantIDs[i])
+		}
+	}
+}
+
+func TestResolvePairs_EmptyOutputZeroIterations(t *testing.T) {
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return []byte(""), nil },
+	}
+	got, err := r.ResolvePairs(context.Background(), "$(true)")
+	if err != nil {
+		t.Fatalf("ResolvePairs: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d items, want 0", len(got))
+	}
+}
+
+func TestResolvePairs_RequiresShellForm(t *testing.T) {
+	r := &IterationSourceResolver{}
+	_, err := r.ResolvePairs(context.Background(), "literal-not-shell")
+	if err == nil {
+		t.Fatal("expected error for non-shell expression")
+	}
+	if !strings.Contains(err.Error(), "must be a shell expression") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolvePairs_EmptyExpression(t *testing.T) {
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) {
+			t.Fatal("must not run shell on empty expr")
+			return nil, nil
+		},
+	}
+	got, err := r.ResolvePairs(context.Background(), "  ")
+	if err != nil {
+		t.Fatalf("ResolvePairs: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d items, want 0", len(got))
+	}
+}
+
+func TestResolvePairs_ShellErrorPropagates(t *testing.T) {
+	want := errors.New("script blew up")
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return nil, want },
+	}
+	_, err := r.ResolvePairs(context.Background(), "$(false)")
+	if err == nil || !errors.Is(err, want) {
+		t.Fatalf("err = %v, want wrap of %v", err, want)
+	}
+}
+
 func TestStripShellInvocation(t *testing.T) {
 	cases := map[string]struct {
 		in     string
