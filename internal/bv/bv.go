@@ -656,6 +656,39 @@ func GetDependencyContext(dir string, n int) (*DependencyContext, error) {
 	return ctx, nil
 }
 
+// hasLocalBeadsDB returns true when `dir` itself contains a .beads directory.
+// Recovery list helpers use this to refuse to walk up into a parent repo's
+// work-item database when the child has none of its own (#130).
+//
+// This deliberately does NOT use normalizeTriageDir / ResolveProjectDir,
+// because those helpers walk UP the filesystem to find a beads/git root —
+// which is exactly the behavior the recovery contract needs to defeat. We
+// must consult the literal `dir` (after Abs+Clean only) to know whether the
+// caller's working directory is its own beads workspace.
+//
+// An empty `dir` falls back to cwd. Any stat error is treated as "no local
+// db" so we err on the side of an empty recovery list rather than surfacing
+// parent rows.
+func hasLocalBeadsDB(dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		dir = cwd
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(filepath.Clean(abs), ".beads"))
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 // RunBd executes br (beads_rust) with given args and returns stdout.
 // If br reports a missing database and suggests `--no-db`, it retries once with `--no-db`
 // and caches that preference for the remainder of the process.
@@ -991,9 +1024,18 @@ func GetReadyPreview(dir string, limit int) []BeadPreview {
 	return previews
 }
 
-// GetInProgressList returns in-progress beads with assignees
+// GetInProgressList returns in-progress beads with assignees.
+//
+// Recovery contract: when the directory has no local .beads/ database, return
+// an empty list rather than letting br walk up the filesystem and surface a
+// parent repo's work items as if they belonged here (#130). Recovery context
+// is trust-sensitive — parent rows are worse than no rows.
 func GetInProgressList(dir string, limit int) []BeadInProgress {
 	var items []BeadInProgress
+
+	if !hasLocalBeadsDB(dir) {
+		return items
+	}
 
 	output, err := RunBd(dir, "list", "--status=in_progress", "--json")
 	if err != nil {
@@ -1033,8 +1075,15 @@ func GetInProgressList(dir string, limit int) []BeadInProgress {
 
 // GetRecentlyCompletedList returns recently completed beads.
 // These are beads with status=done, ordered by completion time descending.
+//
+// Recovery contract: see GetInProgressList — short-circuit empty when the
+// directory has no local .beads/ database (#130).
 func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 	var items []BeadPreview
+
+	if !hasLocalBeadsDB(dir) {
+		return items
+	}
 
 	output, err := RunBd(dir, "list", "--status=done", "--json")
 	if err != nil {
@@ -1067,8 +1116,15 @@ func GetRecentlyCompletedList(dir string, limit int) []BeadPreview {
 }
 
 // GetBlockedList returns blocked beads (beads that are blocked by dependencies).
+//
+// Recovery contract: see GetInProgressList — short-circuit empty when the
+// directory has no local .beads/ database (#130).
 func GetBlockedList(dir string, limit int) []BeadPreview {
 	var items []BeadPreview
+
+	if !hasLocalBeadsDB(dir) {
+		return items
+	}
 
 	output, err := RunBd(dir, "blocked", "--json")
 	if err != nil {

@@ -749,3 +749,76 @@ func TestContainsString(t *testing.T) {
 		})
 	}
 }
+
+// TestHasLocalBeadsDB verifies the recovery-list gating predicate. When the
+// directory has no local .beads/ directory, recovery list reads must short-
+// circuit empty rather than letting br walk up into a parent repo (#130).
+func TestHasLocalBeadsDB(t *testing.T) {
+	t.Run("missing_beads_dir_returns_false", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := hasLocalBeadsDB(dir); got != false {
+			t.Errorf("hasLocalBeadsDB(%q) = true, want false (no .beads/)", dir)
+		}
+	})
+
+	t.Run("present_beads_dir_returns_true", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(.beads) failed: %v", err)
+		}
+		if got := hasLocalBeadsDB(dir); got != true {
+			t.Errorf("hasLocalBeadsDB(%q) = false, want true", dir)
+		}
+	})
+
+	t.Run("beads_is_a_file_returns_false", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".beads"), []byte("not a dir"), 0o600); err != nil {
+			t.Fatalf("WriteFile(.beads) failed: %v", err)
+		}
+		if got := hasLocalBeadsDB(dir); got != false {
+			t.Errorf("hasLocalBeadsDB(%q) = true, want false (.beads is a regular file)", dir)
+		}
+	})
+
+	t.Run("child_without_local_db_does_not_inherit_parent", func(t *testing.T) {
+		// Reproduces #130's repro shape: parent has a .beads/ directory, child
+		// does not. The child must report no local DB even though the parent has one.
+		parent := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(parent, ".beads"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(parent/.beads) failed: %v", err)
+		}
+		child := filepath.Join(parent, "child")
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatalf("MkdirAll(child) failed: %v", err)
+		}
+		if got := hasLocalBeadsDB(child); got != false {
+			t.Errorf("hasLocalBeadsDB(%q) = true, want false (child has no .beads/, must not inherit parent's)", child)
+		}
+	})
+}
+
+// TestRecoveryListsRespectMissingLocalBeadsDB verifies the recovery list
+// helpers (GetInProgressList, GetRecentlyCompletedList, GetBlockedList)
+// short-circuit to empty when no local .beads/ database is present, rather
+// than allowing br to walk up into a parent repo's database (#130).
+func TestRecoveryListsRespectMissingLocalBeadsDB(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(parent, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(parent/.beads) failed: %v", err)
+	}
+	child := filepath.Join(parent, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("MkdirAll(child) failed: %v", err)
+	}
+
+	if got := GetInProgressList(child, 10); len(got) != 0 {
+		t.Errorf("GetInProgressList(%q) returned %d items, want 0 (no local .beads/)", child, len(got))
+	}
+	if got := GetRecentlyCompletedList(child, 10); len(got) != 0 {
+		t.Errorf("GetRecentlyCompletedList(%q) returned %d items, want 0 (no local .beads/)", child, len(got))
+	}
+	if got := GetBlockedList(child, 10); len(got) != 0 {
+		t.Errorf("GetBlockedList(%q) returned %d items, want 0 (no local .beads/)", child, len(got))
+	}
+}
