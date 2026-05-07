@@ -204,11 +204,18 @@ type WorkflowSettings struct {
 	Timeout          Duration     `yaml:"timeout,omitempty" toml:"timeout,omitempty" json:"timeout,omitempty"`    // Global timeout (e.g., "30m")
 	OnError          ErrorAction  `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"` // fail, fail_fast, continue, retry
 	Limits           LimitsConfig `yaml:"limits,omitempty" toml:"limits,omitempty" json:"limits,omitempty"`
+	LogDispatch      *bool        `yaml:"log_dispatch,omitempty" toml:"log_dispatch,omitempty" json:"log_dispatch,omitempty"`
 	NotifyOnComplete bool         `yaml:"notify_on_complete,omitempty" toml:"notify_on_complete,omitempty" json:"notify_on_complete,omitempty"`
 	NotifyOnError    bool         `yaml:"notify_on_error,omitempty" toml:"notify_on_error,omitempty" json:"notify_on_error,omitempty"`
 	NotifyChannels   []string     `yaml:"notify_channels,omitempty" toml:"notify_channels,omitempty" json:"notify_channels,omitempty"` // desktop, webhook, mail
 	WebhookURL       string       `yaml:"webhook_url,omitempty" toml:"webhook_url,omitempty" json:"webhook_url,omitempty"`
 	MailRecipient    string       `yaml:"mail_recipient,omitempty" toml:"mail_recipient,omitempty" json:"mail_recipient,omitempty"`
+}
+
+// DispatchLoggingEnabled reports whether template dispatch audit logs should
+// be written. Nil means the operator did not set the option, so logs default on.
+func (s WorkflowSettings) DispatchLoggingEnabled() bool {
+	return s.LogDispatch == nil || *s.LogDispatch
 }
 
 // LimitsConfig defines resource caps to prevent runaway pipelines.
@@ -1253,9 +1260,11 @@ type ParallelGroupResult struct {
 
 // DefaultWorkflowSettings returns sensible defaults for workflow settings
 func DefaultWorkflowSettings() WorkflowSettings {
+	logDispatch := true
 	return WorkflowSettings{
 		Timeout:          Duration{Duration: 30 * time.Minute},
 		OnError:          ErrorActionFail,
+		LogDispatch:      &logDispatch,
 		NotifyOnComplete: false,
 		NotifyOnError:    true,
 	}

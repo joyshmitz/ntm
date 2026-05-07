@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1069,7 +1070,15 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		"template", step.Template,
 	)
 
-	e.writeDispatchLog(step.ID, rendered)
+	if workflow.Settings.DispatchLoggingEnabled() {
+		e.writeDispatchLog(step.ID, rendered, dispatchLogOptions{
+			Template: step.Template,
+			PaneID:   paneID,
+			Session:  e.config.Session,
+			Params:   step.Params,
+			Args:     step.Args,
+		})
+	}
 
 	beforeOutput, _ := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 
@@ -1195,23 +1204,102 @@ func (e *Executor) resolveTemplatePath(template string) string {
 	return ""
 }
 
-// writeDispatchLog writes the rendered template content to session-logs/ for
-// audit trail consistency. Best-effort; failures are logged but not fatal.
-func (e *Executor) writeDispatchLog(stepID, rendered string) {
+type dispatchLogOptions struct {
+	Template string
+	PaneID   string
+	Session  string
+	Params   map[string]interface{}
+	Args     map[string]interface{}
+}
+
+// writeDispatchLog writes the rendered template content to session-logs/ in
+// the audit format consumed by existing drift checks. Best-effort; failures are
+// logged but not fatal.
+func (e *Executor) writeDispatchLog(stepID, rendered string, opts ...dispatchLogOptions) {
 	dir := e.config.ProjectDir
 	if dir == "" {
 		return
 	}
 	logDir := filepath.Join(dir, "session-logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		slog.Warn("failed to create session-logs dir", "error", err)
+		slog.Warn("failed to create session-logs dir", "run_id", e.runIDForLog(), "step_id", stepID, "error", err)
 		return
 	}
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	filename := filepath.Join(logDir, fmt.Sprintf("dispatch-%s-%s.log", ts, stepID))
-	if err := os.WriteFile(filename, []byte(rendered), 0o644); err != nil {
-		slog.Warn("failed to write dispatch log", "error", err, "path", filename)
+
+	var opt dispatchLogOptions
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	filename := filepath.Join(logDir, fmt.Sprintf("dispatch-%s-%s.log", ts, sanitizeDispatchLogStepID(stepID)))
+	if err := os.WriteFile(filename, []byte(formatDispatchLog(opt, rendered)), 0o644); err != nil {
+		slog.Warn("failed to write dispatch log", "run_id", e.runIDForLog(), "step_id", stepID, "error", err, "path", filename)
+	}
+}
+
+func (e *Executor) runIDForLog() string {
+	if e.state == nil {
+		return ""
+	}
+	return e.state.RunID
+}
+
+func formatDispatchLog(opt dispatchLogOptions, rendered string) string {
+	var b strings.Builder
+	b.WriteString("=== Dispatch ===\n")
+	fmt.Fprintf(&b, "MO: %s\n", opt.Template)
+	fmt.Fprintf(&b, "Target pane: %s\n", opt.PaneID)
+	fmt.Fprintf(&b, "Target session: %s\n", opt.Session)
+	b.WriteString("Params:\n")
+	for _, key := range sortedDispatchParamKeys(opt.Args, opt.Params) {
+		fmt.Fprintf(&b, "  %s=%v\n", key, dispatchParamValue(key, opt.Args, opt.Params))
+	}
+	b.WriteString("=== Rendered ===\n")
+	b.WriteString(rendered)
+	if rendered != "" && !strings.HasSuffix(rendered, "\n") {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func sortedDispatchParamKeys(maps ...map[string]interface{}) []string {
+	seen := make(map[string]bool)
+	var keys []string
+	for _, values := range maps {
+		for key := range values {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func dispatchParamValue(key string, args, params map[string]interface{}) interface{} {
+	if params != nil {
+		if value, ok := params[key]; ok {
+			return value
+		}
+	}
+	if args != nil {
+		return args[key]
+	}
+	return nil
+}
+
+func sanitizeDispatchLogStepID(stepID string) string {
+	if stepID == "" {
+		return "step"
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, stepID)
 }
 
 // executeParallel runs parallel sub-steps concurrently.
