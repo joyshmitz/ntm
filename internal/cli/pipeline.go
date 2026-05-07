@@ -237,11 +237,13 @@ func printPipelineLintErrors(w io.Writer, errs []pipeline.ParseError) {
 // newPipelineRunCmd creates the "pipeline run" subcommand
 func newPipelineRunCmd() *cobra.Command {
 	var (
-		session    string
-		varsFlag   []string
-		varsFile   string
-		dryRun     bool
-		background bool
+		session       string
+		varsFlag      []string
+		varsFile      string
+		dryRun        bool
+		background    bool
+		startFromStep string
+		fromState     string
 	)
 
 	cmd := &cobra.Command{
@@ -378,6 +380,18 @@ Examples:
 			execCfg.DryRun = dryRun
 			execCfg.ProjectDir = projectDir
 			execCfg.WorkflowFile = workflowPath
+			if startFromStep != "" {
+				execCfg.StartFromStep = startFromStep
+				if fromState != "" {
+					prior, err := pipeline.LoadState(projectDir, fromState)
+					if err != nil {
+						return fmt.Errorf("--from-state: load run %q: %w", fromState, err)
+					}
+					execCfg.StartFromState = prior
+				}
+			} else if fromState != "" {
+				return fmt.Errorf("--from-state requires --start-from")
+			}
 			executor := pipeline.NewExecutor(execCfg)
 
 			// Create progress channel
@@ -450,6 +464,8 @@ Examples:
 	cmd.Flags().StringVar(&varsFile, "var-file", "", "JSON file with variables")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate without executing")
 	cmd.Flags().BoolVarP(&background, "background", "b", false, "Run in background")
+	cmd.Flags().StringVar(&startFromStep, "start-from", "", "Begin execution at the given step ID; transitive dependencies are marked Skipped")
+	cmd.Flags().StringVar(&fromState, "from-state", "", "Run ID whose persisted outputs should be reused for steps skipped by --start-from")
 
 	return cmd
 }
