@@ -897,8 +897,10 @@ func (p *ParallelSpec) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// UnmarshalTOML accepts bool, []Step, or the canonical struct table emitted by
-// the TOML encoder.
+// UnmarshalTOML accepts bool and the canonical struct table emitted by the
+// TOML encoder. Inline table arrays of steps are intentionally rejected because
+// BurntSushi/toml cannot mark their nested keys as consumed for strict unknown
+// field checks.
 func (p *ParallelSpec) UnmarshalTOML(data any) error {
 	if b, ok := data.(bool); ok {
 		p.Flag = b
@@ -915,13 +917,17 @@ func (p *ParallelSpec) UnmarshalTOML(data any) error {
 		return nil
 	}
 	if arr, ok := data.([]interface{}); ok {
-		var steps []Step
-		if err := decodeTOMLValue(arr, &steps); err != nil {
-			return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+		if len(arr) > 0 {
+			return fmt.Errorf("parallel: TOML inline step arrays are not supported; use [[steps.parallel.steps]] tables")
 		}
 		p.Flag = false
-		p.Steps = steps
+		p.Steps = nil
 		return nil
+	}
+	if m, ok := tomlMap(data); ok {
+		if arr, ok := m["steps"].([]interface{}); ok && len(arr) > 0 {
+			return fmt.Errorf("parallel: TOML inline step arrays are not supported; use [[steps.parallel.steps]] tables")
+		}
 	}
 	type raw ParallelSpec
 	var obj raw

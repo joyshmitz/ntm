@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,23 +236,6 @@ parallel = true
 			},
 		},
 		{
-			name: "parallel inline table list",
-			content: `
-schema_version = "2.0"
-name = "parallel-list"
-
-[[steps]]
-id = "parallel"
-parallel = [{ id = "child", prompt = "hello" }]
-`,
-			assert: func(t *testing.T, got *Workflow) {
-				t.Helper()
-				if len(got.Steps[0].Parallel.Steps) != 1 || got.Steps[0].Parallel.Steps[0].ID != "child" {
-					t.Fatalf("Parallel.Steps = %#v, want child step", got.Steps[0].Parallel.Steps)
-				}
-			},
-		},
-		{
 			name: "after scalar",
 			content: `
 schema_version = "2.0"
@@ -406,5 +390,38 @@ max_rounds = "${defaults.max_rounds}"
 			}
 			tt.assert(t, got)
 		})
+	}
+}
+
+func TestParseStringTOML_RejectsParallelInlineStepArrays(t *testing.T) {
+	tests := []string{
+		`
+schema_version = "2.0"
+name = "parallel-inline-list"
+
+[[steps]]
+id = "parallel"
+parallel = [{ id = "child", prompt = "hello" }]
+`,
+		`
+schema_version = "2.0"
+name = "parallel-inline-steps"
+
+[[steps]]
+id = "parallel"
+
+[steps.parallel]
+steps = [{ id = "child", prompt = "hello" }]
+`,
+	}
+
+	for _, content := range tests {
+		_, err := ParseString(content, "toml")
+		if err == nil {
+			t.Fatal("ParseString() error = nil, want inline step array limitation")
+		}
+		if !strings.Contains(err.Error(), "TOML inline step arrays are not supported") {
+			t.Fatalf("ParseString() error = %v, want inline step array limitation", err)
+		}
 	}
 }

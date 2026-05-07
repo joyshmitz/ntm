@@ -283,6 +283,26 @@ Run multiple steps concurrently using the `parallel` block:
     - Review: ${steps.review.output}
 ```
 
+TOML workflows must use array-of-tables for nested parallel steps:
+
+```toml
+[[steps]]
+id = "parallel_work"
+
+[[steps.parallel.steps]]
+id = "research"
+agent = "claude"
+prompt = "Research the problem"
+
+[[steps.parallel.steps]]
+id = "prototype"
+agent = "codex"
+prompt = "Write initial code"
+```
+
+Inline TOML table arrays such as `parallel = [{ id = "research", prompt = "..." }]`
+are rejected so unknown-field validation can stay strict.
+
 ### Parallel Execution Rules
 
 1. All parallel steps run concurrently on different agents
