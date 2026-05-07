@@ -173,7 +173,10 @@ func notifyMacOS(title, body string) error {
 }
 
 func notifyLinux(title, body string) error {
-	cmd := exec.Command("notify-send", title, body)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "notify-send", title, body)
 	return cmd.Run()
 }
 
