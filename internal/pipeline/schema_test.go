@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1269,5 +1271,175 @@ func TestNormalize_RecursiveParallel(t *testing.T) {
 	}
 	if len(inner.After) != 0 {
 		t.Errorf("nested After should be cleared, got %v", []string(inner.After))
+	}
+}
+
+func TestSchemaAlternationTypes_UnmarshalJSONShorthands(t *testing.T) {
+	data := []byte(`{
+		"name": "json-shorthand",
+		"notes": "single note",
+		"outputs": [
+			"deliverables/report.md",
+			{"workspace": "${workspace_path}"},
+			{"name": "summary", "path": "out/summary.md", "description": "final report"}
+		],
+		"steps": [
+			{"id": "pane-index", "prompt": "hello", "pane": 3},
+			{
+				"id": "pane-expr",
+				"prompt": "hello",
+				"pane": "${defaults.triage_pane}",
+				"after": "pane-index",
+				"parallel": true,
+				"loop": {"items": "${vars.items}", "max_iterations": "${defaults.max_iterations}"},
+				"foreach": {"models": "codex", "max_rounds": 2}
+			},
+			{
+				"id": "parallel-list",
+				"parallel": [{"id": "a", "prompt": "A"}],
+				"on_failure": "retry:2"
+			},
+			{
+				"id": "fallback",
+				"on_failure": {"pane": "${defaults.recovery_pane}", "template": "MO-recover.md"}
+			}
+		]
+	}`)
+
+	var workflow Workflow
+	if err := json.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(workflow.Notes, StringOrList{"single note"}) {
+		t.Fatalf("Notes = %v, want single-note list", workflow.Notes)
+	}
+	if workflow.Outputs[0].Path != "deliverables/report.md" {
+		t.Fatalf("bare output path = %q", workflow.Outputs[0].Path)
+	}
+	if workflow.Outputs[1].Name != "workspace" || workflow.Outputs[1].Path != "${workspace_path}" {
+		t.Fatalf("single-key output = %+v", workflow.Outputs[1])
+	}
+	if workflow.Outputs[2].Name != "summary" || workflow.Outputs[2].Path != "out/summary.md" {
+		t.Fatalf("structured output = %+v", workflow.Outputs[2])
+	}
+
+	if workflow.Steps[0].Pane != (PaneSpec{Index: 3}) {
+		t.Fatalf("Pane index = %+v", workflow.Steps[0].Pane)
+	}
+	step := workflow.Steps[1]
+	if step.Pane != (PaneSpec{Expr: "${defaults.triage_pane}"}) {
+		t.Fatalf("Pane expr = %+v", step.Pane)
+	}
+	if !reflect.DeepEqual(step.After, AfterRef{"pane-index"}) {
+		t.Fatalf("After = %v", []string(step.After))
+	}
+	if !step.Parallel.Flag || step.Parallel.Len() != 0 {
+		t.Fatalf("Parallel flag = %+v", step.Parallel)
+	}
+	if step.Loop.MaxIterations != (IntOrExpr{Expr: "${defaults.max_iterations}"}) {
+		t.Fatalf("Loop max_iterations = %+v", step.Loop.MaxIterations)
+	}
+	if !reflect.DeepEqual(step.Foreach.Models, StringOrList{"codex"}) {
+		t.Fatalf("Foreach models = %v", step.Foreach.Models)
+	}
+	if step.Foreach.MaxRounds != (IntOrExpr{Value: 2}) {
+		t.Fatalf("Foreach max_rounds = %+v", step.Foreach.MaxRounds)
+	}
+
+	parallelList := workflow.Steps[2]
+	if parallelList.Parallel.Len() != 1 || parallelList.Parallel.Steps[0].ID != "a" {
+		t.Fatalf("Parallel list = %+v", parallelList.Parallel)
+	}
+	if parallelList.OnFailure.Action != "retry" || parallelList.OnFailure.RetryCount != 2 {
+		t.Fatalf("retry shorthand = %+v", parallelList.OnFailure)
+	}
+
+	fallback := workflow.Steps[3].OnFailure.Fallback
+	if fallback["pane"] != "${defaults.recovery_pane}" || fallback["template"] != "MO-recover.md" {
+		t.Fatalf("fallback map = %#v", fallback)
+	}
+}
+
+func TestSchemaAlternationTypes_JSONRoundTripCanonical(t *testing.T) {
+	workflow := Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "json-roundtrip",
+		Notes:         StringOrList{"operator note", "second note"},
+		Outputs: []OutputDecl{
+			{Path: "deliverables/report.md"},
+			{Name: "summary", Path: "out/summary.md", Description: "final report"},
+		},
+		Steps: []Step{
+			{
+				ID:        "pane-index",
+				Pane:      PaneSpec{Index: 2},
+				After:     AfterRef{"bootstrap"},
+				Prompt:    "literal pane",
+				OnFailure: OnFailureSpec{Action: "retry", RetryCount: 3},
+			},
+			{
+				ID:     "pane-expr",
+				Pane:   PaneSpec{Expr: "${defaults.triage_pane}"},
+				Prompt: "expr pane",
+				Parallel: ParallelSpec{
+					Steps: []Step{{ID: "sub", Prompt: "sub prompt"}},
+				},
+				Loop: &LoopConfig{
+					Items:         "${vars.items}",
+					MaxIterations: IntOrExpr{Expr: "${defaults.max_iterations}"},
+				},
+				Foreach: &ForeachConfig{
+					Items:     "${vars.models}",
+					Models:    StringOrList{"codex", "gemini"},
+					MaxRounds: IntOrExpr{Value: 2},
+				},
+			},
+			{
+				ID:       "parallel-flag",
+				Prompt:   "flag",
+				Parallel: ParallelSpec{Flag: true},
+				OnFailure: OnFailureSpec{
+					Fallback: map[string]interface{}{
+						"pane":     "${defaults.recovery_pane}",
+						"template": "MO-recover.md",
+					},
+				},
+			},
+		},
+	}
+
+	data, err := json.Marshal(workflow)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var got Workflow
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, workflow) {
+		t.Fatalf("roundtrip mismatch\n got: %#v\nwant: %#v\njson: %s", got, workflow, data)
+	}
+}
+
+func TestSchemaAlternationTypes_UnmarshalJSONErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		dst  interface{}
+		json string
+	}{
+		{name: "pane object wrong shape", dst: &PaneSpec{}, json: `{"index": "nope"}`},
+		{name: "after number", dst: &AfterRef{}, json: `42`},
+		{name: "parallel string", dst: &ParallelSpec{}, json: `"yes"`},
+		{name: "output empty object", dst: &OutputDecl{}, json: `{}`},
+		{name: "notes object", dst: &StringOrList{}, json: `{"note": "x"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tt.json), tt.dst); err == nil {
+				t.Fatal("expected unmarshal error")
+			}
+		})
 	}
 }
