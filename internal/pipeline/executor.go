@@ -38,6 +38,17 @@ type ExecutorConfig struct {
 	DryRun           bool          // If true, validate but don't execute
 	Verbose          bool          // Enable verbose logging
 	RunID            string        // Optional: pre-generated run ID (if empty, one is generated)
+
+	// StartFromStep, when non-empty, instructs Run() to mark every transitive
+	// dependency of this step as StatusSkipped and begin actual execution at
+	// this step. The step ID must refer to a top-level step (not nested inside
+	// a parallel, loop, or foreach body) — otherwise Run() returns an error.
+	StartFromStep string
+
+	// StartFromState, when non-nil, supplies prior step results that are copied
+	// into the synthetic Skipped entries created by StartFromStep so that
+	// ${steps.X.output} references in later steps resolve to the prior values.
+	StartFromState *ExecutionState
 }
 
 // MinProgressInterval is the minimum allowed progress interval to prevent ticker panics.
@@ -190,6 +201,20 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 		e.stateMu.Unlock()
 		e.persistState()
 		return e.state, fmt.Errorf("workflow has dependency errors: %v", errors[0])
+	}
+
+	if err := e.applyStartFrom(workflow); err != nil {
+		e.stateMu.Lock()
+		e.state.Status = StatusFailed
+		e.state.Errors = append(e.state.Errors, ExecutionError{
+			Type:      "start_from",
+			Message:   err.Error(),
+			Timestamp: time.Now(),
+			Fatal:     true,
+		})
+		e.stateMu.Unlock()
+		e.persistState()
+		return e.state, err
 	}
 
 	// Emit start event
@@ -2496,4 +2521,144 @@ func GenerateRunID() string {
 		return fmt.Sprintf("run-%s-%x", timestamp, time.Now().UnixNano()%0xffffffff)
 	}
 	return fmt.Sprintf("run-%s-%s", timestamp, hex.EncodeToString(randBytes))
+}
+
+// StartFromSkipReason is the SkipReason set on synthetic step results
+// generated when --start-from skips dependency-wise prior steps.
+const StartFromSkipReason = "--start-from skipped"
+
+// findStepContainer walks workflow.Steps recursively and reports whether
+// stepID lives inside a parallel/loop/foreach body. The container kind helps
+// the operator understand why --start-from was rejected.
+func findStepContainer(workflow *Workflow, stepID string) (parentID, kind string, inside bool) {
+	if workflow == nil {
+		return "", "", false
+	}
+	var walk func(steps []Step, parent *Step, parentKind string) bool
+	walk = func(steps []Step, parent *Step, parentKind string) bool {
+		for i := range steps {
+			s := &steps[i]
+			if parent != nil && s.ID == stepID {
+				parentID = parent.ID
+				kind = parentKind
+				inside = true
+				return true
+			}
+			if len(s.Parallel.Steps) > 0 {
+				if walk(s.Parallel.Steps, s, "parallel") {
+					return true
+				}
+			}
+			if s.Loop != nil && len(s.Loop.Steps) > 0 {
+				if walk(s.Loop.Steps, s, "loop") {
+					return true
+				}
+			}
+			if s.Foreach != nil && len(s.Foreach.Steps) > 0 {
+				if walk(s.Foreach.Steps, s, "foreach") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	walk(workflow.Steps, nil, "")
+	return
+}
+
+// applyStartFrom synthesizes Skipped step results for every transitive
+// dependency of e.config.StartFromStep, copies prior outputs from
+// e.config.StartFromState when available, and marks those steps executed in
+// the dependency graph so e.executeWorkflow runs only at-or-after the target.
+func (e *Executor) applyStartFrom(workflow *Workflow) error {
+	target := e.config.StartFromStep
+	if target == "" {
+		return nil
+	}
+
+	if _, ok := e.graph.GetStep(target); !ok {
+		return fmt.Errorf("--start-from step %q not found in workflow", target)
+	}
+	if parent, kind, inside := findStepContainer(workflow, target); inside {
+		return fmt.Errorf("--start-from step %q is inside %s body of %q; --start-from must target a top-level step (parent: %q)", target, kind, parent, parent)
+	}
+
+	// Compute transitive deps via BFS over the dependency graph.
+	skipSet := make(map[string]struct{})
+	queue := append([]string(nil), e.graph.GetDependencies(target)...)
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if _, seen := skipSet[id]; seen {
+			continue
+		}
+		skipSet[id] = struct{}{}
+		queue = append(queue, e.graph.GetDependencies(id)...)
+	}
+
+	if len(skipSet) == 0 {
+		// Nothing to skip; target had no dependencies.
+		return nil
+	}
+
+	// Synthesize results in deterministic order so log output and persisted
+	// state are reproducible across runs.
+	skipped := make([]string, 0, len(skipSet))
+	for id := range skipSet {
+		skipped = append(skipped, id)
+	}
+	sort.Strings(skipped)
+
+	now := time.Now()
+	prior := e.config.StartFromState
+
+	e.stateMu.Lock()
+	e.varMu.Lock()
+	for _, id := range skipped {
+		result := StepResult{
+			StepID:     id,
+			Status:     StatusSkipped,
+			SkipReason: StartFromSkipReason,
+			StartedAt:  now,
+			FinishedAt: now,
+		}
+		if prior != nil {
+			if priorResult, ok := prior.Steps[id]; ok {
+				result.Output = priorResult.Output
+				result.ParsedData = priorResult.ParsedData
+				result.PaneUsed = priorResult.PaneUsed
+				result.AgentType = priorResult.AgentType
+			}
+		}
+		e.state.Steps[id] = result
+
+		// Make ${steps.X.output} resolvable by populating both the canonical
+		// step-output path and any output_var the step declared.
+		if result.Output != "" || result.ParsedData != nil {
+			StoreStepOutput(e.state, id, result.Output, result.ParsedData)
+			if step, ok := e.graph.GetStep(id); ok && step.OutputVar != "" {
+				e.state.Variables[step.OutputVar] = result.Output
+				if result.ParsedData != nil {
+					e.state.Variables[step.OutputVar+"_parsed"] = result.ParsedData
+				}
+			}
+		}
+	}
+	e.varMu.Unlock()
+	e.stateMu.Unlock()
+
+	for _, id := range skipped {
+		if err := e.graph.MarkExecuted(id); err != nil {
+			return fmt.Errorf("--start-from: mark %q executed: %w", id, err)
+		}
+	}
+
+	slog.Info("pipeline.start_from.applied",
+		"run_id", e.state.RunID,
+		"workflow", workflow.Name,
+		"target", target,
+		"skipped_count", len(skipped),
+		"with_prior_state", prior != nil,
+	)
+	return nil
 }
