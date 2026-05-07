@@ -481,6 +481,25 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		iterResult.Results = append(iterResult.Results, result)
 		e.storeForeachNestedResult(&step, result)
 
+		if result.Status == StatusSkipped {
+			if step.LoopControl == LoopControlBreak || step.LoopControl == LoopControlContinue {
+				continue
+			}
+			iterResult.Skipped = true
+			iterResult.SkipKind = result.SkipKind
+			iterResult.SkipReason = result.SkipReason
+			slog.Info("foreach iteration skipped by body step",
+				"run_id", e.state.RunID,
+				"workflow", workflow.Name,
+				"step_id", parent.ID,
+				"agent_type", "foreach",
+				"iteration", plan.Index,
+				"body_step_id", step.ID,
+				"skip_kind", result.SkipKind,
+			)
+			return iterResult
+		}
+
 		if result.Status == StatusFailed || result.Status == StatusCancelled {
 			if resolveErrorAction(step.OnError, "") != ErrorActionContinue {
 				iterResult.Error = resultErrorMessage(result)

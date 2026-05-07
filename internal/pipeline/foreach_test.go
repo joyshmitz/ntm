@@ -424,6 +424,126 @@ func TestExecuteForeachLoopControlBreakSkipsRemainingIterations(t *testing.T) {
 	}
 }
 
+func TestExecuteForeachSkippedBodyStepSkipsIteration(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-skipped-body",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "skip_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["a","b","c"]`,
+			Steps: []Step{{
+				ID:      "maybe",
+				When:    `${item} == "run"`,
+				Command: `printf '%s' '${item}'`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 3 {
+		t.Fatalf("iterations = %d, want 3", len(iterations))
+	}
+	for _, iteration := range iterations {
+		if !iteration.Skipped || iteration.SkipKind != SkipKindWhenCondition {
+			t.Fatalf("iteration = %#v, want when-condition skip", iteration)
+		}
+	}
+	if got := foreachLeafOutputs(result); len(got) != 0 {
+		t.Fatalf("outputs = %v, want none", got)
+	}
+	if !strings.Contains(result.Output, "3 skipped") {
+		t.Fatalf("foreach output = %q, want skipped count", result.Output)
+	}
+}
+
+func TestExecuteForeachMixedSkippedAndCompletedIterations(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-mixed-skip",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "mixed_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["run","skip-one","skip-two"]`,
+			Steps: []Step{{
+				ID:      "maybe",
+				When:    `${item} == "run"`,
+				Command: `printf '%s' '${item}'`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 3 {
+		t.Fatalf("iterations = %d, want 3", len(iterations))
+	}
+	if iterations[0].Skipped {
+		t.Fatalf("iteration 0 skipped unexpectedly: %#v", iterations[0])
+	}
+	for _, iteration := range iterations[1:] {
+		if !iteration.Skipped || iteration.SkipKind != SkipKindWhenCondition {
+			t.Fatalf("iteration = %#v, want when-condition skip", iteration)
+		}
+	}
+	if got, want := strings.Join(foreachLeafOutputs(result), ","), "run"; got != want {
+		t.Fatalf("outputs = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteForeachFailFastFailureIsNotCountedAsSkipped(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-fail-fast-not-skipped",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "fail_fast_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["ok","bad","after"]`,
+			Steps: []Step{{
+				ID:      "maybe",
+				Command: `case '${item}' in bad) exit 9;; *) printf '%s' '${item}';; esac`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusFailed {
+		t.Fatalf("foreach status = %s, want failed", result.Status)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 2 {
+		t.Fatalf("iterations = %d, want fail-fast halt after 2", len(iterations))
+	}
+	if iterations[1].Skipped {
+		t.Fatalf("failed iteration marked skipped: %#v", iterations[1])
+	}
+	if iterations[1].Results[0].Status != StatusFailed {
+		t.Fatalf("iteration 1 status = %s, want failed", iterations[1].Results[0].Status)
+	}
+}
+
 func TestExecuteForeachLoopControlContinueSkipsRestOfIteration(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,
