@@ -1,4 +1,4 @@
-package pipeline_test
+package pipeline
 
 import (
 	"bufio"
@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/pipeline"
+	pipelinepkg "github.com/Dicklesworthstone/ntm/internal/pipeline"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -25,7 +25,7 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	)
 
 	workflowPath := filepath.Join("testdata", "brennerbot-incident.yaml")
-	workflow, validation, err := pipeline.LoadAndValidate(workflowPath)
+	workflow, validation, err := pipelinepkg.LoadAndValidate(workflowPath)
 	if err != nil {
 		t.Fatalf("LoadAndValidate() error = %v", err)
 	}
@@ -34,7 +34,7 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	}
 
 	workspace := copyIncidentWorkspaceFixture(t)
-	mockTmux := pipeline.NewMockTmuxClient()
+	mockTmux := pipelinepkg.NewMockTmuxClient()
 	mockTmux.AddPane(sessionName, tmux.Pane{
 		ID:       "%1",
 		Index:    1,
@@ -51,7 +51,7 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 		Type:     tmux.AgentCodex,
 		Tags:     []string{"evidence"},
 	})
-	scripter := pipeline.NewAgentScripter().
+	scripter := pipelinepkg.NewAgentScripter().
 		Match("H-001", "MO-04a result: H-001 evidence captured\n").
 		Match("H-002", "MO-04a result: H-002 evidence captured\n")
 	mockTmux.SetAgentScripter(scripter)
@@ -61,14 +61,14 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	restoreLogs := captureSlog(t, &logBuf)
 	defer restoreLogs()
 
-	cfg := pipeline.DefaultExecutorConfig(sessionName)
+	cfg := pipelinepkg.DefaultExecutorConfig(sessionName)
 	cfg.ProjectDir = workspace
 	cfg.WorkflowFile = workflowPath
 	cfg.DefaultTimeout = time.Second
 	cfg.GlobalTimeout = configuredWallBudget
 	cfg.RunID = "e2e-brennerbot-incident"
 
-	executor := pipeline.NewExecutor(cfg)
+	executor := pipelinepkg.NewExecutor(cfg)
 	executor.SetTmuxClient(mockTmux)
 
 	started := time.Now()
@@ -77,8 +77,8 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if state.Status != pipeline.StatusCompleted {
-		t.Fatalf("state.Status = %q, want %q", state.Status, pipeline.StatusCompleted)
+	if state.Status != pipelinepkg.StatusCompleted {
+		t.Fatalf("state.Status = %q, want %q", state.Status, pipelinepkg.StatusCompleted)
 	}
 	if elapsed > 5*configuredWallBudget {
 		t.Fatalf("run took %s, want under %s", elapsed, 5*configuredWallBudget)
@@ -99,6 +99,7 @@ func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	assertDispatchHistory(t, mockTmux, "%2", "MO-04a Investigate", "H-002")
 	assertPaneOutputContains(t, mockTmux, "%1", "MO-04a result: H-001 evidence captured")
 	assertPaneOutputContains(t, mockTmux, "%2", "MO-04a result: H-002 evidence captured")
+	assertDispatchGolden(t, workspace, filepath.Join("testdata", "goldens", "brennerbot-incident-dispatch.golden"))
 
 	events := parseJSONLEvents(t, &logBuf)
 	assertLogEvent(t, events, "command step starting", "step_id", "phase_0_scope", "agent_type", "command")
@@ -128,7 +129,7 @@ func copyIncidentWorkspaceFixture(t *testing.T) string {
 	return workspace
 }
 
-func assertTopLevelStepsCompleted(t *testing.T, state *pipeline.ExecutionState, steps []pipeline.Step) {
+func assertTopLevelStepsCompleted(t *testing.T, state *pipelinepkg.ExecutionState, steps []pipelinepkg.Step) {
 	t.Helper()
 
 	for _, step := range steps {
@@ -136,15 +137,15 @@ func assertTopLevelStepsCompleted(t *testing.T, state *pipeline.ExecutionState, 
 	}
 }
 
-func assertStepCompleted(t *testing.T, state *pipeline.ExecutionState, stepID string) {
+func assertStepCompleted(t *testing.T, state *pipelinepkg.ExecutionState, stepID string) {
 	t.Helper()
 
 	result, ok := state.Steps[stepID]
 	if !ok {
 		t.Fatalf("state missing step %q", stepID)
 	}
-	if result.Status != pipeline.StatusCompleted {
-		t.Fatalf("step %q status = %q, want %q; error = %+v", stepID, result.Status, pipeline.StatusCompleted, result.Error)
+	if result.Status != pipelinepkg.StatusCompleted {
+		t.Fatalf("step %q status = %q, want %q; error = %+v", stepID, result.Status, pipelinepkg.StatusCompleted, result.Error)
 	}
 }
 
@@ -160,7 +161,7 @@ func assertFileContains(t *testing.T, path, want string) {
 	}
 }
 
-func assertDispatchHistory(t *testing.T, mockTmux *pipeline.MockTmuxClient, paneID string, wants ...string) {
+func assertDispatchHistory(t *testing.T, mockTmux *pipelinepkg.MockTmuxClient, paneID string, wants ...string) {
 	t.Helper()
 
 	history, err := mockTmux.PasteHistory(paneID)
@@ -180,7 +181,7 @@ func assertDispatchHistory(t *testing.T, mockTmux *pipeline.MockTmuxClient, pane
 	}
 }
 
-func assertPaneOutputContains(t *testing.T, mockTmux *pipeline.MockTmuxClient, paneID, want string) {
+func assertPaneOutputContains(t *testing.T, mockTmux *pipelinepkg.MockTmuxClient, paneID, want string) {
 	t.Helper()
 
 	output, err := mockTmux.CapturePaneOutput(paneID, 0)
