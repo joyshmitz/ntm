@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -32,13 +31,8 @@ func (e *Executor) resolveBranch(ctx context.Context, step *Step) (string, error
 		)
 
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil {
-				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			return nil
-		}
+		configureCommandProcessGroup(cmd)
+		cmd.Cancel = func() error { return cancelCommandProcessGroup(cmd) }
 		if e.config.ProjectDir != "" {
 			cmd.Dir = e.config.ProjectDir
 		}

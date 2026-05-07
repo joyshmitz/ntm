@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // IterationSourceResolver expands foreach iteration source expressions into
@@ -525,13 +524,8 @@ func (r *IterationSourceResolver) runShell(ctx context.Context, shellCmd string)
 		return r.RunShell(ctx, shellCmd)
 	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	configureCommandProcessGroup(cmd)
+	cmd.Cancel = func() error { return cancelCommandProcessGroup(cmd) }
 	if r.ProjectDir != "" {
 		cmd.Dir = r.ProjectDir
 	}

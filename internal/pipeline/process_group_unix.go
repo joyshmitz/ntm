@@ -1,3 +1,5 @@
+//go:build !windows
+
 package pipeline
 
 import (
@@ -19,6 +21,20 @@ type commandCleanupResult struct {
 
 func configureCommandProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// cancelCommandProcessGroup is the cmd.Cancel handler used for shell
+// subprocesses that opt into process-group isolation. Sending SIGKILL to
+// -pid kills the whole group; if that fails (e.g. the process already
+// exited), fall back to a single-process Kill.
+func cancelCommandProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+		return nil
+	}
+	return cmd.Process.Kill()
 }
 
 func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) commandCleanupResult {
