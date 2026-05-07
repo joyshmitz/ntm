@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -2413,5 +2414,66 @@ func TestSubstitute_ItemWithDefaultFallback(t *testing.T) {
 	}
 	if result != "none" {
 		t.Errorf("got %q, want %q", result, "none")
+	}
+}
+
+// TestNormalizeStringVar covers bd-q84t9: declared `type: string` must
+// reject non-string values from --var-file (which can be native JSON
+// booleans, numbers, arrays, or objects). Plain --var input is always a
+// string and passes through.
+func TestNormalizeStringVar(t *testing.T) {
+	t.Run("string passes", func(t *testing.T) {
+		got, err := normalizeStringVar("name", "hello")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if got != "hello" {
+			t.Errorf("got %v, want hello", got)
+		}
+	})
+
+	rejects := []struct {
+		name  string
+		value interface{}
+		want  string
+	}{
+		{"bool", true, "expected string, got boolean true"},
+		{"number_int", json.Number("42"), "expected string, got number 42"},
+		{"number_float", json.Number("3.14"), "expected string, got number 3.14"},
+		{"array", []interface{}{"a", "b"}, "expected string, got array of length 2"},
+		{"object", map[string]interface{}{"k": "v"}, "expected string, got object"},
+		{"nil", nil, "expected string, got null"},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeStringVar("name", tc.value)
+			if err == nil {
+				t.Fatalf("normalizeStringVar(%v) err = nil, want %q", tc.value, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateWorkflowVariables_RejectsNonStringForDeclaredString is a
+// higher-level bd-q84t9 regression: a workflow declaring vars.foo type
+// "string" must reject a JSON number override from a --var-file.
+func TestValidateWorkflowVariables_RejectsNonStringForDeclaredString(t *testing.T) {
+	wf := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "string-var-typed",
+		Vars: map[string]VarDef{
+			"label": {Type: VarTypeString, Default: "foo"},
+		},
+	}
+	overrides := map[string]interface{}{"label": json.Number("42")}
+	_, err := ValidateWorkflowVariables(wf, overrides)
+	if err == nil {
+		t.Fatal("ValidateWorkflowVariables() err = nil, want type-mismatch error")
+	}
+	if !strings.Contains(err.Message, "expected string") {
+		t.Errorf("err = %q, want type-mismatch", err.Message)
 	}
 }

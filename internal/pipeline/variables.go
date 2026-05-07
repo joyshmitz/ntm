@@ -220,8 +220,12 @@ func resolveDefaultString(s string, vars map[string]interface{}) (interface{}, e
 
 func normalizeWorkflowVar(name string, typ VarType, value interface{}) (interface{}, error) {
 	switch typ {
-	case "", VarTypeString:
+	case "":
+		// Untyped: accept any value verbatim. Used for legacy workflows
+		// without declared types.
 		return value, nil
+	case VarTypeString:
+		return normalizeStringVar(name, value)
 	case VarTypeNumber:
 		return normalizeNumberVar(name, value)
 	case VarTypeBoolean:
@@ -230,6 +234,30 @@ func normalizeWorkflowVar(name string, typ VarType, value interface{}) (interfac
 		return normalizeArrayVar(name, value)
 	default:
 		return nil, fmt.Errorf("variable %s: unknown declared type %q", name, typ)
+	}
+}
+
+// normalizeStringVar enforces the declared `type: string` contract. Values
+// from --var (CLI strings) and YAML/JSON var-files must round-trip as a
+// string; native JSON booleans, numbers, arrays, or objects are rejected
+// rather than silently coerced (bd-q84t9, paired with bd-t1fj5's existing
+// number/boolean/array enforcement).
+func normalizeStringVar(name string, value interface{}) (interface{}, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, fmt.Errorf("variable %s: expected string, got null", name)
+	case string:
+		return v, nil
+	case json.Number:
+		return nil, fmt.Errorf("variable %s: expected string, got number %s", name, v.String())
+	case bool:
+		return nil, fmt.Errorf("variable %s: expected string, got boolean %t", name, v)
+	case []interface{}:
+		return nil, fmt.Errorf("variable %s: expected string, got array of length %d", name, len(v))
+	case map[string]interface{}:
+		return nil, fmt.Errorf("variable %s: expected string, got object", name)
+	default:
+		return nil, fmt.Errorf("variable %s: expected string, got %T", name, value)
 	}
 }
 
