@@ -85,6 +85,96 @@ func PrepareWorkflowVariables(workflow *Workflow, overrides map[string]interface
 	return vars, nil
 }
 
+// VariableValidationResult captures normalized runtime variables plus non-fatal
+// input warnings that callers can surface before execution starts.
+type VariableValidationResult struct {
+	Variables map[string]interface{}
+	Warnings  []ParseError
+}
+
+// ValidateWorkflowVariables checks runtime overrides against declared workflow
+// variable metadata. Undeclared overrides remain available but are reported as
+// warnings because they cannot receive VarType validation.
+func ValidateWorkflowVariables(workflow *Workflow, overrides map[string]interface{}) (*VariableValidationResult, *ParseError) {
+	result := &VariableValidationResult{}
+	if workflow != nil {
+		for name := range overrides {
+			if _, ok := workflow.Vars[name]; ok {
+				continue
+			}
+			result.Warnings = append(result.Warnings, ParseError{
+				Field:   fmt.Sprintf("vars.%s", name),
+				Message: fmt.Sprintf("undeclared variable %q; will be available but not validated", name),
+				Hint:    "Declare the variable under workflow vars to enable type validation.",
+			})
+		}
+	}
+
+	vars, err := PrepareWorkflowVariables(workflow, overrides)
+	if err != nil {
+		return result, workflowVariableParseError(err)
+	}
+	result.Variables = vars
+	return result, nil
+}
+
+func workflowVariableParseError(err error) *ParseError {
+	message := err.Error()
+	name := workflowVariableNameFromError(message)
+	field := "vars"
+	if name != "" {
+		field = fmt.Sprintf("vars.%s", name)
+	}
+	return &ParseError{
+		Field:   field,
+		Message: message,
+		Hint:    workflowVariableErrorHint(name, message),
+	}
+}
+
+func workflowVariableNameFromError(message string) string {
+	rest, ok := strings.CutPrefix(message, "variable ")
+	if !ok {
+		return ""
+	}
+	name, _, ok := strings.Cut(rest, ":")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(name)
+}
+
+func workflowVariableErrorHint(name, message string) string {
+	switch {
+	case strings.Contains(message, "expected number"):
+		if name == "" {
+			return "Use a parseable number such as 5 or 5.0."
+		}
+		return fmt.Sprintf("use --var %s=5 or --var %s=5.0", name, name)
+	case strings.Contains(message, "expected boolean"):
+		if name == "" {
+			return "Use true/false, 1/0, or yes/no."
+		}
+		return fmt.Sprintf("use --var %s=true or --var %s=false", name, name)
+	case strings.Contains(message, "expected array"):
+		if name == "" {
+			return "Use comma-separated CLI input or a JSON array in --var-file."
+		}
+		return fmt.Sprintf("use --var %s=a,b,c or provide %q as a JSON array in --var-file", name, name)
+	case strings.Contains(message, "required value missing"):
+		if name == "" {
+			return "Provide required variables with --var or --var-file."
+		}
+		return fmt.Sprintf("provide --var %s=value or include %q in --var-file", name, name)
+	case strings.Contains(message, "cyclic default reference"):
+		return "Remove the cycle between workflow var defaults."
+	case strings.Contains(message, "unknown declared type"):
+		return "Use one of: string, number, boolean, array."
+	default:
+		return "Fix the workflow variable value and retry."
+	}
+}
+
 func variableDefaultRefs(s string) []string {
 	matches := varPattern.FindAllStringSubmatch(s, -1)
 	refs := make([]string, 0, len(matches))
@@ -126,7 +216,7 @@ func normalizeWorkflowVar(name string, typ VarType, value interface{}) (interfac
 	case VarTypeBoolean:
 		return normalizeBooleanVar(name, value)
 	case VarTypeArray:
-		return normalizeArrayVar(value), nil
+		return normalizeArrayVar(name, value)
 	default:
 		return nil, fmt.Errorf("variable %s: unknown declared type %q", name, typ)
 	}
@@ -183,24 +273,24 @@ func normalizeBooleanVar(name string, value interface{}) (interface{}, error) {
 	}
 }
 
-func normalizeArrayVar(value interface{}) interface{} {
+func normalizeArrayVar(name string, value interface{}) (interface{}, error) {
 	switch v := value.(type) {
 	case []interface{}:
-		return v
+		return v, nil
 	case []string:
-		return v
+		return v, nil
 	case string:
 		if strings.TrimSpace(v) == "" {
-			return []string{}
+			return []string{}, nil
 		}
 		parts := strings.Split(v, ",")
 		items := make([]string, 0, len(parts))
 		for _, part := range parts {
 			items = append(items, strings.TrimSpace(part))
 		}
-		return items
+		return items, nil
 	default:
-		return []interface{}{value}
+		return nil, fmt.Errorf("variable %s: expected array, got %T", name, value)
 	}
 }
 

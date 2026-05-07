@@ -122,6 +122,92 @@ func TestPrepareWorkflowVariablesErrors(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowVariablesWarningsAndHints(t *testing.T) {
+	workflow := &Workflow{
+		Vars: map[string]VarDef{
+			"n":        {Type: VarTypeNumber},
+			"flag":     {Type: VarTypeBoolean},
+			"items":    {Type: VarTypeArray},
+			"required": {Type: VarTypeString, Required: true},
+		},
+	}
+
+	result, parseErr := ValidateWorkflowVariables(workflow, map[string]interface{}{
+		"n":        "5",
+		"flag":     "true",
+		"items":    "a,b,c",
+		"required": "ok",
+		"extra":    "available",
+	})
+	if parseErr != nil {
+		t.Fatalf("ValidateWorkflowVariables() error = %v", parseErr)
+	}
+	if got := result.Variables["n"]; got != 5 {
+		t.Fatalf("n = %#v, want int 5", got)
+	}
+	if got := result.Variables["flag"]; got != true {
+		t.Fatalf("flag = %#v, want true", got)
+	}
+	if !reflect.DeepEqual(result.Variables["items"], []string{"a", "b", "c"}) {
+		t.Fatalf("items = %#v, want []string", result.Variables["items"])
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0].Message, "undeclared variable \"extra\"") {
+		t.Fatalf("warnings = %#v, want undeclared variable warning", result.Warnings)
+	}
+}
+
+func TestValidateWorkflowVariablesErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		workflow  *Workflow
+		overrides map[string]interface{}
+		wantMsg   string
+		wantHint  string
+	}{
+		{
+			name: "number mismatch",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"n": {Type: VarTypeNumber},
+			}},
+			overrides: map[string]interface{}{"n": "abc"},
+			wantMsg:   "variable n: expected number, got 'abc'",
+			wantHint:  "use --var n=5 or --var n=5.0",
+		},
+		{
+			name: "array mismatch",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"items": {Type: VarTypeArray},
+			}},
+			overrides: map[string]interface{}{"items": 12},
+			wantMsg:   "variable items: expected array",
+			wantHint:  "provide \"items\" as a JSON array",
+		},
+		{
+			name: "required missing",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"token": {Type: VarTypeString, Required: true},
+			}},
+			wantMsg:  "variable token: required value missing",
+			wantHint: "provide --var token=value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, parseErr := ValidateWorkflowVariables(tt.workflow, tt.overrides)
+			if parseErr == nil {
+				t.Fatal("ValidateWorkflowVariables() error = nil, want error")
+			}
+			if !strings.Contains(parseErr.Message, tt.wantMsg) {
+				t.Fatalf("Message = %q, want %q", parseErr.Message, tt.wantMsg)
+			}
+			if !strings.Contains(parseErr.Hint, tt.wantHint) {
+				t.Fatalf("Hint = %q, want %q", parseErr.Hint, tt.wantHint)
+			}
+		})
+	}
+}
+
 func TestSubstitutor_Substitute(t *testing.T) {
 	state := &ExecutionState{
 		RunID:      "run-123",

@@ -294,27 +294,9 @@ Examples:
 				return err
 			}
 
-			// Parse variables
-			vars := make(map[string]interface{})
-
-			// Load from file first
-			if varsFile != "" {
-				data, err := os.ReadFile(varsFile)
-				if err != nil {
-					return fmt.Errorf("failed to read var file: %w", err)
-				}
-				if err := json.Unmarshal(data, &vars); err != nil {
-					return fmt.Errorf("failed to parse var file: %w", err)
-				}
-			}
-
-			// Override with command-line vars
-			for _, v := range varsFlag {
-				parts := strings.SplitN(v, "=", 2)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid variable format: %q (expected key=value)", v)
-				}
-				vars[parts[0]] = parts[1]
+			vars, err := parsePipelineRunVariables(varsFile, varsFlag)
+			if err != nil {
+				return err
 			}
 
 			// JSON mode
@@ -365,7 +347,21 @@ Examples:
 				return fmt.Errorf("workflow validation failed")
 			}
 
+			varValidation, varErr := pipeline.ValidateWorkflowVariables(workflow, vars)
+			if varErr != nil {
+				fmt.Fprintln(os.Stderr, "Variable validation failed:")
+				fmt.Printf("  ❌ %s\n", varErr.Message)
+				if varErr.Hint != "" {
+					fmt.Printf("     💡 %s\n", varErr.Hint)
+				}
+				return fmt.Errorf("variable validation failed")
+			}
+			vars = varValidation.Variables
+
 			for _, w := range result.Warnings {
+				fmt.Printf("  ⚠️  %s\n", w.Message)
+			}
+			for _, w := range varValidation.Warnings {
 				fmt.Printf("  ⚠️  %s\n", w.Message)
 			}
 
@@ -468,6 +464,30 @@ Examples:
 	cmd.Flags().StringVar(&fromState, "from-state", "", "Run ID whose persisted outputs should be reused for steps skipped by --start-from")
 
 	return cmd
+}
+
+func parsePipelineRunVariables(varsFile string, varsFlag []string) (map[string]interface{}, error) {
+	vars := make(map[string]interface{})
+
+	if varsFile != "" {
+		data, err := os.ReadFile(varsFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read var file: %w", err)
+		}
+		if err := json.Unmarshal(data, &vars); err != nil {
+			return nil, fmt.Errorf("failed to parse var file: %w", err)
+		}
+	}
+
+	for _, v := range varsFlag {
+		parts := strings.SplitN(v, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid variable format: %q (expected key=value)", v)
+		}
+		vars[parts[0]] = parts[1]
+	}
+
+	return vars, nil
 }
 
 // newPipelineStatusCmd creates the "pipeline status" subcommand

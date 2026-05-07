@@ -120,6 +120,7 @@ type PipelineRunOutput struct {
 	Session    string           `json:"session"`
 	Status     string           `json:"status"`
 	DryRun     bool             `json:"dry_run,omitempty"`
+	Warnings   []ParseError     `json:"warnings,omitempty"`
 	Progress   PipelineProgress `json:"progress,omitempty"`
 	AgentHints *PipelineHints   `json:"_agent_hints,omitempty"`
 }
@@ -271,6 +272,21 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 		)
 		outputJSON(output)
 		return 1
+	}
+
+	varValidation, varErr := ValidateWorkflowVariables(workflow, opts.Variables)
+	if varErr != nil {
+		output.RobotResponse = NewErrorResponse(
+			errors.New(varErr.Message),
+			ErrCodeInvalidFlag,
+			varErr.Hint,
+		)
+		outputJSON(output)
+		return 1
+	}
+	if varValidation != nil {
+		opts.Variables = varValidation.Variables
+		output.Warnings = varValidation.Warnings
 	}
 
 	// Create executor
