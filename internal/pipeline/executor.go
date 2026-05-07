@@ -23,7 +23,6 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
-	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
@@ -70,6 +69,7 @@ type Executor struct {
 	stateMu  sync.RWMutex // Protects state.Steps for concurrent access
 	varMu    sync.RWMutex // Protects state.Variables for concurrent access
 	defaults map[string]interface{}
+	tmux     TmuxClient
 	graph    *DependencyGraph
 	progress chan<- ProgressEvent
 	cancelFn context.CancelFunc
@@ -88,9 +88,26 @@ func NewExecutor(config ExecutorConfig) *Executor {
 		detector: status.NewDetector(),
 		router:   robot.NewRouter(),
 		scorer:   robot.NewAgentScorer(robot.DefaultRoutingConfig()),
+		tmux:     realTmuxClient{},
 	}
 	e.loopExec = NewLoopExecutor(e)
 	return e
+}
+
+// SetTmuxClient swaps the tmux transport used by the executor.
+// Tests use this to install a deterministic in-memory tmux implementation.
+func (e *Executor) SetTmuxClient(client TmuxClient) {
+	if client == nil {
+		client = realTmuxClient{}
+	}
+	e.tmux = client
+}
+
+func (e *Executor) tmuxClient() TmuxClient {
+	if e.tmux == nil {
+		e.tmux = realTmuxClient{}
+	}
+	return e.tmux
 }
 
 // SetNotifier sets the notifier for sending notifications on workflow events.
@@ -644,10 +661,10 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	}
 
 	// Capture state before sending
-	beforeOutput, _ := tmux.CapturePaneOutput(paneID, 2000)
+	beforeOutput, _ := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 
 	// Send prompt
-	if err := tmux.PasteKeys(paneID, prompt, true); err != nil {
+	if err := e.tmuxClient().PasteKeys(paneID, prompt, true); err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
 			Type:      "send",
@@ -709,7 +726,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	}
 
 	// Capture output
-	afterOutput, err := tmux.CapturePaneOutput(paneID, 2000)
+	afterOutput, err := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -1017,9 +1034,9 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 
 	e.writeDispatchLog(step.ID, rendered)
 
-	beforeOutput, _ := tmux.CapturePaneOutput(paneID, 2000)
+	beforeOutput, _ := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 
-	if err := tmux.PasteKeys(paneID, rendered, true); err != nil {
+	if err := e.tmuxClient().PasteKeys(paneID, rendered, true); err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
 			Type:      "send",
@@ -1076,7 +1093,7 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		}
 	}
 
-	afterOutput, err := tmux.CapturePaneOutput(paneID, 2000)
+	afterOutput, err := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -1486,10 +1503,10 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		}
 
 		// Capture state before sending
-		beforeOutput, _ = tmux.CapturePaneOutput(paneID, 2000)
+		beforeOutput, _ = e.tmuxClient().CapturePaneOutput(paneID, 2000)
 
 		// Send prompt
-		if err := tmux.PasteKeys(paneID, prompt, true); err != nil {
+		if err := e.tmuxClient().PasteKeys(paneID, prompt, true); err != nil {
 			result.Status = StatusFailed
 			result.Error = &StepError{
 				Type:      "send",
@@ -1540,7 +1557,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		// Capture output
 		{
 			var captureErr error
-			afterOutput, captureErr = tmux.CapturePaneOutput(paneID, 2000)
+			afterOutput, captureErr = e.tmuxClient().CapturePaneOutput(paneID, 2000)
 			if captureErr != nil {
 				result.Status = StatusFailed
 				result.Error = &StepError{
@@ -1636,7 +1653,7 @@ func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, pane
 		return "", "", fmt.Errorf("pane expression %q not yet resolved at pane-selection time", step.Pane.Expr)
 	}
 	if step.Pane.Index > 0 {
-		panes, err := tmux.GetPanes(e.config.Session)
+		panes, err := e.tmuxClient().GetPanes(e.config.Session)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to get panes: %w", err)
 		}
@@ -1739,7 +1756,7 @@ func (e *Executor) selectPane(step *Step) (paneID string, agentType string, err 
 		return "", "", fmt.Errorf("pane expression %q not yet resolved at pane-selection time", step.Pane.Expr)
 	}
 	if step.Pane.Index > 0 {
-		panes, err := tmux.GetPanes(e.config.Session)
+		panes, err := e.tmuxClient().GetPanes(e.config.Session)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to get panes: %w", err)
 		}
@@ -2163,7 +2180,7 @@ func (e *Executor) captureErrorContext(paneID string, lines int) string {
 	if paneID == "" || e.config.DryRun {
 		return ""
 	}
-	output, err := tmux.CapturePaneOutput(paneID, lines)
+	output, err := e.tmuxClient().CapturePaneOutput(paneID, lines)
 	if err != nil {
 		return ""
 	}
