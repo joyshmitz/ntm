@@ -194,6 +194,94 @@ func TestBeadQueryFilterOperators(t *testing.T) {
 	}
 }
 
+func TestBeadQuerySubstitutesVariablesInArgsAndFilter(t *testing.T) {
+	// bead_query is meant to replace shell-piped br|jq commands. Without
+	// variable substitution, fields like label/status/filter would be sent
+	// verbatim (literal "${vars.target_label}") to br, returning the wrong
+	// result set with no diagnostic.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "bead-query-vars",
+		Vars: map[string]VarDef{
+			"target_label":    {Type: VarTypeString, Default: "hypothesis"},
+			"target_state":    {Type: VarTypeString, Default: "open"},
+			"target_priority": {Type: VarTypeString, Default: "1"},
+		},
+		Steps: []Step{{
+			ID: "collect",
+			BeadQuery: &BeadQueryStep{
+				Label:    StringOrList{"${vars.target_label}"},
+				Status:   "${vars.target_state}",
+				Priority: "${vars.target_priority}",
+				Filter:   "status==${vars.target_state}",
+			},
+			OutputVar: "beads",
+		}},
+	}
+
+	config := DefaultExecutorConfig("session")
+	config.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
+		t.Helper()
+		wantArgs := []string{"list", "--json", "--limit", "0", "--label", "hypothesis", "--status", "open", "--priority", "1"}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("br args = %#v, want %#v", args, wantArgs)
+		}
+		return []byte(`{"issues":[
+			{"id":"bd-1","status":"open","labels":["hypothesis"],"priority":1,"issue_type":"task"},
+			{"id":"bd-2","status":"closed","labels":["hypothesis"],"priority":1,"issue_type":"task"}
+		]}`), nil
+	}
+
+	executor := NewExecutor(config)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	records, ok := state.Steps["collect"].ParsedData.([]BeadRecord)
+	if !ok {
+		t.Fatalf("ParsedData = %T, want []BeadRecord", state.Steps["collect"].ParsedData)
+	}
+	// Filter "status==open" must apply against the resolved value, leaving
+	// only bd-1.
+	if len(records) != 1 || records[0].ID != "bd-1" {
+		t.Fatalf("filtered records = %#v, want one record bd-1", records)
+	}
+}
+
+func TestBeadQueryFailsOnUnresolvedVariable(t *testing.T) {
+	// A typo'd reference must fail the step rather than silently sending the
+	// literal "${vars.unknown}" to br.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "bead-query-unresolved",
+		Steps: []Step{{
+			ID: "collect",
+			BeadQuery: &BeadQueryStep{
+				Label: StringOrList{"${vars.unknown}"},
+			},
+		}},
+	}
+
+	config := DefaultExecutorConfig("session")
+	config.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
+		t.Fatalf("br must not be called when variable substitution fails; args=%v", args)
+		return nil, nil
+	}
+
+	executor := NewExecutor(config)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want substitution failure")
+	}
+	stepResult := state.Steps["collect"]
+	if stepResult.Status != StatusFailed {
+		t.Fatalf("Status = %v, want %v", stepResult.Status, StatusFailed)
+	}
+	if stepResult.Error == nil || !strings.Contains(stepResult.Error.Message, "variable substitution failed") {
+		t.Fatalf("step error = %#v, want substitution failure", stepResult.Error)
+	}
+}
+
 func TestBeadQueryBrErrorFailsStep(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,

@@ -48,7 +48,17 @@ func (e *Executor) executeBeadQuery(ctx context.Context, step *Step, workflow *W
 		AgentType: "bead_query",
 	}
 
-	args := step.BeadQuery.brListArgs()
+	resolvedQuery, err := e.substituteBeadQueryFields(step.BeadQuery)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = stepRuntimeError(step, "bead_query", "bead_query",
+			fmt.Sprintf("variable substitution failed: %v", err),
+			"reference declared workflow vars or provide a | fallback for optional values",
+			err.Error())
+		result.FinishedAt = time.Now()
+		return result
+	}
+	args := resolvedQuery.brListArgs()
 	if e.config.DryRun {
 		result.Status = StatusCompleted
 		result.Output = dryRunOutput(step, "Would run br "+strings.Join(args, " "))
@@ -88,7 +98,7 @@ func (e *Executor) executeBeadQuery(ctx context.Context, step *Step, workflow *W
 		result.FinishedAt = time.Now()
 		return result
 	}
-	records, err = filterBeadRecords(records, step.BeadQuery.Filter)
+	records, err = filterBeadRecords(records, resolvedQuery.Filter)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "bead_query", "bead_query",
@@ -123,6 +133,71 @@ func (e *Executor) executeBeadQuery(ctx context.Context, step *Step, workflow *W
 		"records", len(records),
 	)
 	return result
+}
+
+// substituteBeadQueryFields resolves ${vars.X}, ${steps.X.output}, ${defaults.X},
+// and other supported namespaces inside every bead_query field that becomes a
+// br list argument or in-memory filter clause. Strict substitution surfaces
+// unresolvable references as an explicit error rather than silently sending
+// the literal "${vars.X}" to br, which would otherwise produce empty result
+// sets without any diagnostic.
+func (e *Executor) substituteBeadQueryFields(in *BeadQueryStep) (BeadQueryStep, error) {
+	if in == nil {
+		return BeadQueryStep{}, nil
+	}
+	q := *in
+	if len(q.Label) > 0 {
+		labels := make(StringOrList, 0, len(q.Label))
+		for i, label := range q.Label {
+			if label == "" {
+				labels = append(labels, label)
+				continue
+			}
+			resolved, err := e.substituteStrict(label)
+			if err != nil {
+				return BeadQueryStep{}, fmt.Errorf("label[%d]: %w", i, err)
+			}
+			labels = append(labels, resolved)
+		}
+		q.Label = labels
+	}
+
+	scalarFields := []struct {
+		name string
+		ptr  *string
+	}{
+		{"status", &q.Status},
+		{"state", &q.State},
+		{"type", &q.Type},
+		{"priority", &q.Priority},
+		{"assignee", &q.Assignee},
+		{"filter", &q.Filter},
+	}
+	for _, f := range scalarFields {
+		if *f.ptr == "" {
+			continue
+		}
+		resolved, err := e.substituteStrict(*f.ptr)
+		if err != nil {
+			return BeadQueryStep{}, fmt.Errorf("%s: %w", f.name, err)
+		}
+		*f.ptr = resolved
+	}
+	return q, nil
+}
+
+// substituteStrict resolves variable references using the standard substitutor
+// stack and returns an error when any reference cannot be resolved. Mirrors
+// substituteVariables but propagates errors so callers can fail closed.
+func (e *Executor) substituteStrict(s string) (string, error) {
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
+	sub.SetDefaults(e.defaults)
+	s = e.substituteRuntimeVariables(s)
+	return sub.SubstituteStrict(s)
 }
 
 func (q *BeadQueryStep) brListArgs() []string {
