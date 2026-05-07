@@ -792,6 +792,15 @@ func (e *Executor) substituteForeachStepFieldsProtected(step *Step, protected ma
 		config.Pairs = e.substituteForeachString(config.Pairs, protected)
 		config.Debates = e.substituteForeachString(config.Debates, protected)
 		config.Filter = e.substituteForeachString(config.Filter, protected)
+		// bd-8bujt: foreach.models is a StringOrList that can hold either
+		// an inline literal list of model-family tokens or (single-entry)
+		// a shell command emitting one family per line. Both forms must
+		// receive the same protected-root substitution as items/beads/etc.
+		// so workflow vars like ${vars.model_family} resolve before
+		// ResolveForeachItems hands the list to the runtime.
+		for i := range config.Models {
+			config.Models[i] = e.substituteForeachString(config.Models[i], protected)
+		}
 		config.Template = e.substituteForeachString(config.Template, bodyProtected)
 		config.Params = substituteForeachInterfaceMap(e, config.Params, bodyProtected)
 		config.TemplateParams = substituteForeachInterfaceMap(e, config.TemplateParams, bodyProtected)

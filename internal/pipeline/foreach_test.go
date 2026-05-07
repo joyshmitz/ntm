@@ -716,6 +716,46 @@ func appendForeachLeafOutputs(outputs *[]string, result StepResult) {
 	}
 }
 
+func TestSubstituteForeachFieldsResolvesModelsList(t *testing.T) {
+	// bd-8bujt: foreach.models entries must receive the same protected-root
+	// substitution as items/beads/pairs/debates/filter, otherwise workflow
+	// vars and shell sources containing ${...} reach ResolveModels as raw
+	// literals and fall apart silently.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-models-substitution",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	e := createForeachTestExecutor(t, workflow)
+	e.state.Variables["model_family"] = "claude"
+	e.state.Variables["fallback"] = "codex"
+
+	step := &Step{
+		ID: "fanout",
+		Foreach: &ForeachConfig{
+			Models: StringOrList{
+				"${vars.model_family}",
+				"${vars.fallback}",
+				"literal-pinned-model",
+			},
+			Steps: []Step{{ID: "echo", Command: "true"}},
+		},
+	}
+
+	e.substituteForeachStepFieldsProtected(step, nil)
+
+	got := step.Foreach.Models
+	want := StringOrList{"claude", "codex", "literal-pinned-model"}
+	if len(got) != len(want) {
+		t.Fatalf("len(Models) = %d, want %d (%#v)", len(got), len(want), got)
+	}
+	for i, want := range want {
+		if got[i] != want {
+			t.Errorf("Models[%d] = %q, want %q", i, got[i], want)
+		}
+	}
+}
+
 func TestForeachMaxConcurrentBoundedByGlobalCap(t *testing.T) {
 	// bd-pwxh1: per-step foreach.max_concurrent must be capped by the
 	// global settings.limits.max_concurrent_foreach. Otherwise a workflow
