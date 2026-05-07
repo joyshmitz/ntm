@@ -2055,14 +2055,20 @@ func truncatePrompt(s string, n int) string {
 }
 
 func (e *Executor) applyResumeState() {
-	if e.state == nil || e.graph == nil {
+	if e.graph == nil {
 		return
 	}
 
-	rerun := make(map[string]StepResult)
+	var rerunStepIDs []string
+
+	e.stateMu.Lock()
+	if e.state == nil {
+		e.stateMu.Unlock()
+		return
+	}
 	for stepID, result := range e.state.Steps {
 		if shouldRerunStep(result) {
-			rerun[stepID] = result
+			rerunStepIDs = append(rerunStepIDs, stepID)
 			continue
 		}
 		if err := e.graph.MarkExecuted(stepID); err != nil {
@@ -2070,12 +2076,16 @@ func (e *Executor) applyResumeState() {
 		}
 	}
 
-	if len(rerun) == 0 {
+	for _, stepID := range rerunStepIDs {
+		delete(e.state.Steps, stepID)
+	}
+	e.stateMu.Unlock()
+
+	if len(rerunStepIDs) == 0 {
 		return
 	}
 
-	for stepID := range rerun {
-		delete(e.state.Steps, stepID)
+	for _, stepID := range rerunStepIDs {
 		e.clearStepVariables(stepID)
 	}
 }
@@ -2096,6 +2106,9 @@ func shouldRerunStep(result StepResult) bool {
 }
 
 func (e *Executor) clearStepVariables(stepID string) {
+	e.varMu.Lock()
+	defer e.varMu.Unlock()
+
 	if e.state == nil || e.state.Variables == nil {
 		return
 	}
