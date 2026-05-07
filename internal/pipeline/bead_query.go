@@ -126,7 +126,7 @@ func (e *Executor) executeBeadQuery(ctx context.Context, step *Step, workflow *W
 }
 
 func (q *BeadQueryStep) brListArgs() []string {
-	args := []string{"list", "--json"}
+	args := []string{"list", "--json", "--limit", "0"}
 	if q == nil {
 		return args
 	}

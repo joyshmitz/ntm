@@ -133,7 +133,7 @@ func TestExecuteBeadQueryCapturesTypedRecords(t *testing.T) {
 	config := DefaultExecutorConfig("session")
 	config.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
 		t.Helper()
-		wantArgs := []string{"list", "--json", "--label", "hypothesis", "--status", "open"}
+		wantArgs := []string{"list", "--json", "--limit", "0", "--label", "hypothesis", "--status", "open"}
 		if !reflect.DeepEqual(args, wantArgs) {
 			t.Fatalf("br args = %#v, want %#v", args, wantArgs)
 		}
