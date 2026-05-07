@@ -562,3 +562,273 @@ func TestParallelSpec_RoundTrip(t *testing.T) {
 		t.Errorf("round-trip steps lost: %+v", rtSteps.Parallel)
 	}
 }
+
+func TestOnFailureSpec_UnmarshalYAML(t *testing.T) {
+	type doc struct {
+		OnFailure OnFailureSpec `yaml:"on_failure"`
+	}
+
+	tests := []struct {
+		name       string
+		yaml       string
+		wantAction string
+		wantRetry  int
+		wantFB     bool
+		wantZero   bool
+		wantErr    bool
+	}{
+		{
+			name:       "continue string",
+			yaml:       "on_failure: continue",
+			wantAction: "continue",
+		},
+		{
+			name:       "retry:3",
+			yaml:       "on_failure: 'retry:3'",
+			wantAction: "retry",
+			wantRetry:  3,
+		},
+		{
+			name:       "retry:abc (unparseable count)",
+			yaml:       "on_failure: 'retry:abc'",
+			wantAction: "retry:abc",
+			wantRetry:  0,
+		},
+		{
+			name:   "structured fallback",
+			yaml:   "on_failure:\n  pane: 1\n  template: foo.md",
+			wantFB: true,
+		},
+		{
+			name:       "fallback_to_ntm_inbox",
+			yaml:       "on_failure: fallback_to_ntm_inbox",
+			wantAction: "fallback_to_ntm_inbox",
+		},
+		{
+			name:     "missing",
+			yaml:     "other: value",
+			wantZero: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			err := yaml.Unmarshal([]byte(tt.yaml), &d)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d.OnFailure.Action != tt.wantAction {
+				t.Errorf("Action = %q, want %q", d.OnFailure.Action, tt.wantAction)
+			}
+			if d.OnFailure.RetryCount != tt.wantRetry {
+				t.Errorf("RetryCount = %d, want %d", d.OnFailure.RetryCount, tt.wantRetry)
+			}
+			if tt.wantFB && len(d.OnFailure.Fallback) == 0 {
+				t.Error("expected Fallback to be non-empty")
+			}
+			if d.OnFailure.IsZero() != tt.wantZero {
+				t.Errorf("IsZero() = %v, want %v", d.OnFailure.IsZero(), tt.wantZero)
+			}
+		})
+	}
+}
+
+func TestOnFailureSpec_MarshalYAML(t *testing.T) {
+	tests := []struct {
+		name string
+		spec OnFailureSpec
+		want string
+	}{
+		{
+			name: "continue",
+			spec: OnFailureSpec{Action: "continue"},
+			want: "continue",
+		},
+		{
+			name: "retry with count",
+			spec: OnFailureSpec{Action: "retry", RetryCount: 3},
+			want: "retry:3",
+		},
+		{
+			name: "fallback map",
+			spec: OnFailureSpec{Fallback: map[string]interface{}{"pane": 1}},
+			want: "pane:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := yaml.Marshal(tt.spec)
+			if err != nil {
+				t.Fatalf("yaml.Marshal error: %v", err)
+			}
+			if !strings.Contains(string(out), tt.want) {
+				t.Errorf("output = %q, want to contain %q", string(out), tt.want)
+			}
+		})
+	}
+}
+
+func TestOnFailureSpec_IsZero(t *testing.T) {
+	tests := []struct {
+		name string
+		spec OnFailureSpec
+		want bool
+	}{
+		{"empty", OnFailureSpec{}, true},
+		{"action only", OnFailureSpec{Action: "continue"}, false},
+		{"retry count only", OnFailureSpec{RetryCount: 3}, false},
+		{"fallback only", OnFailureSpec{Fallback: map[string]interface{}{"pane": 1}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.spec.IsZero(); got != tt.want {
+				t.Errorf("IsZero() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOnFailureSpec_RoundTrip(t *testing.T) {
+	type doc struct {
+		OnFailure OnFailureSpec `yaml:"on_failure"`
+	}
+
+	orig := doc{OnFailure: OnFailureSpec{Action: "retry", RetryCount: 5}}
+	out, err := yaml.Marshal(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rt doc
+	if err := yaml.Unmarshal(out, &rt); err != nil {
+		t.Fatal(err)
+	}
+	if rt.OnFailure.Action != "retry" || rt.OnFailure.RetryCount != 5 {
+		t.Errorf("round-trip failed: %+v", rt.OnFailure)
+	}
+}
+
+func TestIntOrExpr_UnmarshalYAML(t *testing.T) {
+	type doc struct {
+		Val IntOrExpr `yaml:"val"`
+	}
+
+	tests := []struct {
+		name     string
+		yaml     string
+		wantVal  int
+		wantExpr string
+		wantZero bool
+		wantErr  bool
+	}{
+		{
+			name:    "literal int 6",
+			yaml:    "val: 6",
+			wantVal: 6,
+		},
+		{
+			name:     "template expression",
+			yaml:     "val: '${defaults.foo}'",
+			wantExpr: "${defaults.foo}",
+		},
+		{
+			name:     "zero is unset",
+			yaml:     "val: 0",
+			wantZero: true,
+		},
+		{
+			name:    "negative",
+			yaml:    "val: -1",
+			wantVal: -1,
+		},
+		{
+			name:     "missing",
+			yaml:     "other: 1",
+			wantZero: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			err := yaml.Unmarshal([]byte(tt.yaml), &d)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d.Val.Value != tt.wantVal {
+				t.Errorf("Value = %d, want %d", d.Val.Value, tt.wantVal)
+			}
+			if d.Val.Expr != tt.wantExpr {
+				t.Errorf("Expr = %q, want %q", d.Val.Expr, tt.wantExpr)
+			}
+			if d.Val.IsZero() != tt.wantZero {
+				t.Errorf("IsZero() = %v, want %v", d.Val.IsZero(), tt.wantZero)
+			}
+		})
+	}
+}
+
+func TestIntOrExpr_MarshalYAML(t *testing.T) {
+	tests := []struct {
+		name string
+		spec IntOrExpr
+		want string
+	}{
+		{
+			name: "int 6",
+			spec: IntOrExpr{Value: 6},
+			want: "6",
+		},
+		{
+			name: "expr",
+			spec: IntOrExpr{Expr: "${defaults.foo}"},
+			want: "${defaults.foo}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := yaml.Marshal(tt.spec)
+			if err != nil {
+				t.Fatalf("yaml.Marshal error: %v", err)
+			}
+			if !strings.Contains(string(out), tt.want) {
+				t.Errorf("output = %q, want to contain %q", string(out), tt.want)
+			}
+		})
+	}
+}
+
+func TestIntOrExpr_IsZero(t *testing.T) {
+	tests := []struct {
+		name string
+		spec IntOrExpr
+		want bool
+	}{
+		{"default", IntOrExpr{}, true},
+		{"zero value", IntOrExpr{Value: 0}, true},
+		{"non-zero value", IntOrExpr{Value: 5}, false},
+		{"has expr", IntOrExpr{Expr: "x"}, false},
+		{"negative", IntOrExpr{Value: -1}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.spec.IsZero(); got != tt.want {
+				t.Errorf("IsZero() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
