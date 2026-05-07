@@ -941,6 +941,16 @@ func (p *ParallelSpec) UnmarshalTOML(data any) error {
 		if arr, ok := m["steps"].([]interface{}); ok && len(arr) > 0 {
 			return fmt.Errorf("parallel: TOML inline step arrays are not supported; use [[steps.parallel.steps]] tables")
 		}
+		// bd-k44ib: detect the malformed shape `[steps.parallel]` populated with
+		// step-shaped fields like id/prompt/command. The user almost certainly
+		// meant `[[steps.parallel.steps]]` (an array of tables). Without this
+		// check, decodeTOMLValue silently produces an empty ParallelSpec because
+		// the JSON-roundtrip used by decodeTOMLValue ignores keys that aren't on
+		// raw ParallelSpec, and validation later complains generically that the
+		// step has no kind. Surface a precise error pointing at the bad table.
+		if badKey := firstUnknownParallelTableKey(m); badKey != "" {
+			return fmt.Errorf("parallel: unexpected key %q under [steps.parallel] table — to declare inline parallel sub-steps use [[steps.parallel.steps]] (an array of tables)", badKey)
+		}
 	}
 	type raw ParallelSpec
 	var obj raw
@@ -949,6 +959,24 @@ func (p *ParallelSpec) UnmarshalTOML(data any) error {
 	}
 	*p = ParallelSpec(obj)
 	return nil
+}
+
+// firstUnknownParallelTableKey reports the first key in a `[steps.parallel]`
+// table that is not part of the canonical ParallelSpec schema. The TOML
+// table form is allowed to carry "steps" (the array of Step tables) plus the
+// ParallelSpec struct fields the encoder round-trips ("Flag"/"flag"). Any
+// other key — particularly step-shaped keys like id, prompt, command — means
+// the operator wrote a single table where they meant `[[steps.parallel.steps]]`
+// (an array of tables). Returns "" when every key is recognized.
+func firstUnknownParallelTableKey(m map[string]interface{}) string {
+	for k := range m {
+		switch k {
+		case "steps", "Steps", "flag", "Flag":
+			continue
+		}
+		return k
+	}
+	return ""
 }
 
 // MarshalYAML mirrors the input form — emit a bool when only Flag is set,

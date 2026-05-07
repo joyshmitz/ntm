@@ -173,11 +173,22 @@ func filterUndecodedTOMLKeys(keys []toml.Key) []toml.Key {
 	return filtered
 }
 
+// isKnownParallelInlineStepKey reports whether an undecoded key is a leftover
+// from the canonical inline-step shape `[[steps.parallel.steps]]`. After
+// ParallelSpec.UnmarshalTOML consumes those entries via JSON round-trip, the
+// BurntSushi decoder still considers them undecoded because UnmarshalTOML
+// cannot mark child keys as consumed; we suppress only those (and only when
+// they match a known step field) so genuine config errors still surface.
+//
+// bd-k44ib: previously this matched any `steps.parallel.<known-step-field>`
+// key, which silently swallowed malformed `[steps.parallel] id=... prompt=...`
+// shapes. The narrowed check now requires the path to begin with the
+// canonical `steps.parallel.steps.*` so unrelated shapes get a real error.
 func isKnownParallelInlineStepKey(key toml.Key) bool {
-	if len(key) < 3 || key[0] != "steps" || key[1] != "parallel" {
+	if len(key) < 4 || key[0] != "steps" || key[1] != "parallel" || key[2] != "steps" {
 		return false
 	}
-	return knownStepTOMLFields[key[2]]
+	return knownStepTOMLFields[key[3]]
 }
 
 var knownStepTOMLFields = map[string]bool{

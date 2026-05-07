@@ -425,3 +425,68 @@ steps = [{ id = "child", prompt = "hello" }]
 		}
 	}
 }
+
+// bd-k44ib: a TOML workflow that puts step-shaped fields directly under
+// `[steps.parallel]` (a single table instead of `[[steps.parallel.steps]]`,
+// an array of tables) used to be silently accepted with an empty parallel
+// block, then fail validation with a misleading "step must have prompt, ..."
+// error. The parser must surface the bad table shape directly.
+func TestParseStringTOML_RejectsParallelTableWithStepFields(t *testing.T) {
+	cases := map[string]string{
+		"id_and_prompt_at_table_level": `
+schema_version = "2.0"
+name = "probe"
+
+[[steps]]
+id = "p"
+
+[steps.parallel]
+id = "child"
+prompt = "hello"
+`,
+		"command_at_table_level": `
+schema_version = "2.0"
+name = "probe"
+
+[[steps]]
+id = "p"
+
+[steps.parallel]
+command = "echo hi"
+`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseString(content, "toml")
+			if err == nil {
+				t.Fatalf("ParseString() error = nil, want unexpected-key error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "[steps.parallel]") || !strings.Contains(msg, "[[steps.parallel.steps]]") {
+				t.Fatalf("ParseString() error = %v, want hint pointing at the canonical array-of-tables form", err)
+			}
+		})
+	}
+}
+
+// bd-k44ib: malformed `[steps.parallel.<unknown>]` subtables under a parallel
+// step should not be silently swallowed by filterUndecodedTOMLKeys. Only the
+// canonical `steps.parallel.steps.*` leftovers from inline-array decoding
+// are suppressed.
+func TestParseStringTOML_RejectsParallelUnknownSubtable(t *testing.T) {
+	content := `
+schema_version = "2.0"
+name = "probe"
+
+[[steps]]
+id = "p"
+prompt = "hi"
+
+[steps.parallel.bogus]
+nope = "yes"
+`
+	_, err := ParseString(content, "toml")
+	if err == nil {
+		t.Fatalf("ParseString() error = nil, want error for unknown steps.parallel subtable")
+	}
+}
