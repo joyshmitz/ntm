@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -19,6 +21,46 @@ type IterationSourceResolver struct {
 	ProjectDir string
 	RunShell   func(ctx context.Context, shellCmd string) ([]byte, error)
 	RunBr      func(ctx context.Context, args []string) ([]byte, error)
+}
+
+// ResolveItems expands a foreach.Items expression to a uniform item list.
+//
+// Supported forms:
+//   - JSON array literals such as ["cc","cod"] or [1,2.5,true].
+//   - Exact workflow variable references such as ${vars.hypotheses}, where
+//     the referenced value must already be an array-like value.
+//   - Exact direct variable references such as ${session_id}, which may be a
+//     scalar and is then wrapped as a single iteration item.
+func (r *IterationSourceResolver) ResolveItems(_ context.Context, expr string, vars map[string]interface{}) ([]interface{}, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return []interface{}{}, nil
+	}
+
+	if strings.HasPrefix(expr, "[") {
+		items, err := parseItemsJSONLiteral(expr)
+		if err != nil {
+			return nil, fmt.Errorf("items JSON array: %w", err)
+		}
+		return items, nil
+	}
+
+	if ref, ok := exactVariableReference(expr); ok {
+		value, err := lookupItemsVariable(ref, vars)
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(ref, "vars.") {
+			items, err := arrayLikeItems(value)
+			if err != nil {
+				return nil, fmt.Errorf("items reference ${%s}: %w", ref, err)
+			}
+			return items, nil
+		}
+		return scalarOrArrayItems(value)
+	}
+
+	return []interface{}{expr}, nil
 }
 
 // ResolveBeads expands a foreach.Beads expression to a list of bead records.
@@ -98,6 +140,130 @@ func parseBeadsShellOutput(out []byte) ([]interface{}, error) {
 		items = append(items, line)
 	}
 	return items, nil
+}
+
+func parseItemsJSONLiteral(expr string) ([]interface{}, error) {
+	dec := json.NewDecoder(strings.NewReader(expr))
+	dec.UseNumber()
+
+	var raw interface{}
+	if err := dec.Decode(&raw); err != nil {
+		return nil, err
+	}
+	var trailing interface{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("contains trailing JSON tokens")
+	}
+
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected JSON array, got %T", raw)
+	}
+	return normalizeJSONNumbers(arr).([]interface{}), nil
+}
+
+func exactVariableReference(expr string) (string, bool) {
+	if !strings.HasPrefix(expr, "${") || !strings.HasSuffix(expr, "}") {
+		return "", false
+	}
+	ref := strings.TrimSpace(expr[2 : len(expr)-1])
+	if ref == "" {
+		return "", false
+	}
+	return ref, true
+}
+
+func lookupItemsVariable(ref string, vars map[string]interface{}) (interface{}, error) {
+	if vars == nil {
+		return nil, fmt.Errorf("items reference ${%s}: no variables available", ref)
+	}
+
+	key := ref
+	if strings.HasPrefix(ref, "vars.") {
+		key = strings.TrimPrefix(ref, "vars.")
+	}
+	value, ok := vars[key]
+	if !ok {
+		return nil, fmt.Errorf("items reference ${%s}: undefined variable", ref)
+	}
+	return value, nil
+}
+
+func scalarOrArrayItems(value interface{}) ([]interface{}, error) {
+	if items, err := arrayLikeItems(value); err == nil {
+		return items, nil
+	}
+	return []interface{}{value}, nil
+}
+
+func arrayLikeItems(value interface{}) ([]interface{}, error) {
+	switch v := value.(type) {
+	case []interface{}:
+		return v, nil
+	case []string:
+		items := make([]interface{}, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return items, nil
+	case []int:
+		items := make([]interface{}, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return items, nil
+	case []int64:
+		items := make([]interface{}, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return items, nil
+	case []float64:
+		items := make([]interface{}, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return items, nil
+	case []bool:
+		items := make([]interface{}, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return items, nil
+	default:
+		return nil, fmt.Errorf("expected array-like value, got %T", value)
+	}
+}
+
+func normalizeJSONNumbers(value interface{}) interface{} {
+	switch v := value.(type) {
+	case []interface{}:
+		for i, item := range v {
+			v[i] = normalizeJSONNumbers(item)
+		}
+		return v
+	case map[string]interface{}:
+		for key, item := range v {
+			v[key] = normalizeJSONNumbers(item)
+		}
+		return v
+	case json.Number:
+		s := v.String()
+		if !strings.ContainsAny(s, ".eE") {
+			if n, err := strconv.Atoi(s); err == nil {
+				return n
+			}
+		}
+		if n, err := v.Float64(); err == nil {
+			return n
+		}
+		return s
+	default:
+		return value
+	}
 }
 
 // parseStructuredBeadsQuery turns "label1,label2,key:value,..." into the

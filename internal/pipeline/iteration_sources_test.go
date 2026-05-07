@@ -257,6 +257,91 @@ func TestParseStructuredBeadsQuery_RejectsEmptyValue(t *testing.T) {
 	}
 }
 
+func TestResolveItems_JSONArrayLiteral(t *testing.T) {
+	r := &IterationSourceResolver{}
+
+	got, err := r.ResolveItems(context.Background(), `["a", "b", "c"]`, nil)
+	if err != nil {
+		t.Fatalf("ResolveItems: %v", err)
+	}
+	want := []interface{}{"a", "b", "c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveItems_VarsListReference(t *testing.T) {
+	r := &IterationSourceResolver{}
+	vars := map[string]interface{}{
+		"list": []interface{}{"x", "y"},
+	}
+
+	got, err := r.ResolveItems(context.Background(), "${vars.list}", vars)
+	if err != nil {
+		t.Fatalf("ResolveItems: %v", err)
+	}
+	want := []interface{}{"x", "y"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveItems_UnknownVarsReferenceErrors(t *testing.T) {
+	r := &IterationSourceResolver{}
+
+	_, err := r.ResolveItems(context.Background(), "${vars.unknown}", map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "undefined variable") {
+		t.Fatalf("err = %v, want undefined variable", err)
+	}
+}
+
+func TestResolveItems_JSONArrayPreservesScalarTypes(t *testing.T) {
+	r := &IterationSourceResolver{}
+
+	got, err := r.ResolveItems(context.Background(), `[1, 2.5, true]`, nil)
+	if err != nil {
+		t.Fatalf("ResolveItems: %v", err)
+	}
+	want := []interface{}{1, 2.5, true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveItems_DirectScalarReferenceBecomesSingleItem(t *testing.T) {
+	r := &IterationSourceResolver{}
+	vars := map[string]interface{}{
+		"session_id": "ntm-squad-001",
+	}
+
+	got, err := r.ResolveItems(context.Background(), "${session_id}", vars)
+	if err != nil {
+		t.Fatalf("ResolveItems: %v", err)
+	}
+	want := []interface{}{"ntm-squad-001"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveItems_VarsScalarReferenceErrors(t *testing.T) {
+	r := &IterationSourceResolver{}
+	vars := map[string]interface{}{
+		"name": "not-a-list",
+	}
+
+	_, err := r.ResolveItems(context.Background(), "${vars.name}", vars)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "expected array-like value") {
+		t.Fatalf("err = %v, want array-like type error", err)
+	}
+}
+
 func TestResolvePairs_ParsesThreeWellFormedLines(t *testing.T) {
 	const stdout = `DEBATE-001|H-001|H-002|p1|p2
 DEBATE-002|H-003|H-004|p3|p4
