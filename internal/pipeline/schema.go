@@ -147,6 +147,40 @@ func (o *OutputDecl) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalTOML accepts the same shorthand forms as YAML and JSON.
+func (o *OutputDecl) UnmarshalTOML(data any) error {
+	if s, ok := data.(string); ok {
+		o.Path = s
+		return nil
+	}
+	m, ok := tomlMap(data)
+	if !ok {
+		return fmt.Errorf("output declaration must be a string, mapping, or {name: path}")
+	}
+
+	type rawDecl OutputDecl
+	var raw rawDecl
+	if err := decodeTOMLValue(m, &raw); err == nil && (raw.Name != "" || raw.Path != "" || raw.Description != "") {
+		*o = OutputDecl(raw)
+		return nil
+	}
+
+	if len(m) != 1 {
+		return fmt.Errorf("output single-key shorthand must have exactly one key, got %d", len(m))
+	}
+	for k, v := range m {
+		o.Name = k
+		switch tv := v.(type) {
+		case string:
+			o.Path = tv
+		case nil:
+		default:
+			o.Path = fmt.Sprintf("%v", tv)
+		}
+	}
+	return nil
+}
+
 // VarDef defines a workflow variable with optional default and type info
 type VarDef struct {
 	Description string      `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
@@ -167,13 +201,62 @@ const (
 
 // WorkflowSettings contains global workflow configuration
 type WorkflowSettings struct {
-	Timeout          Duration    `yaml:"timeout,omitempty" toml:"timeout,omitempty" json:"timeout,omitempty"`    // Global timeout (e.g., "30m")
-	OnError          ErrorAction `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"` // fail, fail_fast, continue, retry
-	NotifyOnComplete bool        `yaml:"notify_on_complete,omitempty" toml:"notify_on_complete,omitempty" json:"notify_on_complete,omitempty"`
-	NotifyOnError    bool        `yaml:"notify_on_error,omitempty" toml:"notify_on_error,omitempty" json:"notify_on_error,omitempty"`
-	NotifyChannels   []string    `yaml:"notify_channels,omitempty" toml:"notify_channels,omitempty" json:"notify_channels,omitempty"` // desktop, webhook, mail
-	WebhookURL       string      `yaml:"webhook_url,omitempty" toml:"webhook_url,omitempty" json:"webhook_url,omitempty"`
-	MailRecipient    string      `yaml:"mail_recipient,omitempty" toml:"mail_recipient,omitempty" json:"mail_recipient,omitempty"`
+	Timeout          Duration     `yaml:"timeout,omitempty" toml:"timeout,omitempty" json:"timeout,omitempty"`    // Global timeout (e.g., "30m")
+	OnError          ErrorAction  `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"` // fail, fail_fast, continue, retry
+	Limits           LimitsConfig `yaml:"limits,omitempty" toml:"limits,omitempty" json:"limits,omitempty"`
+	NotifyOnComplete bool         `yaml:"notify_on_complete,omitempty" toml:"notify_on_complete,omitempty" json:"notify_on_complete,omitempty"`
+	NotifyOnError    bool         `yaml:"notify_on_error,omitempty" toml:"notify_on_error,omitempty" json:"notify_on_error,omitempty"`
+	NotifyChannels   []string     `yaml:"notify_channels,omitempty" toml:"notify_channels,omitempty" json:"notify_channels,omitempty"` // desktop, webhook, mail
+	WebhookURL       string       `yaml:"webhook_url,omitempty" toml:"webhook_url,omitempty" json:"webhook_url,omitempty"`
+	MailRecipient    string       `yaml:"mail_recipient,omitempty" toml:"mail_recipient,omitempty" json:"mail_recipient,omitempty"`
+}
+
+// LimitsConfig defines resource caps to prevent runaway pipelines.
+// Zero values mean "use default".
+type LimitsConfig struct {
+	MaxForeachIterations  int   `yaml:"max_foreach_iterations,omitempty" toml:"max_foreach_iterations,omitempty" json:"max_foreach_iterations,omitempty"`
+	MaxConcurrentForeach  int   `yaml:"max_concurrent_foreach,omitempty" toml:"max_concurrent_foreach,omitempty" json:"max_concurrent_foreach,omitempty"`
+	MaxCommandStdoutBytes int64 `yaml:"max_command_stdout_bytes,omitempty" toml:"max_command_stdout_bytes,omitempty" json:"max_command_stdout_bytes,omitempty"`
+	MaxCommandStderrBytes int64 `yaml:"max_command_stderr_bytes,omitempty" toml:"max_command_stderr_bytes,omitempty" json:"max_command_stderr_bytes,omitempty"`
+	MaxTemplateBytes      int64 `yaml:"max_template_bytes,omitempty" toml:"max_template_bytes,omitempty" json:"max_template_bytes,omitempty"`
+	MaxStepCountTotal     int   `yaml:"max_step_count_total,omitempty" toml:"max_step_count_total,omitempty" json:"max_step_count_total,omitempty"`
+	MaxSubstitutionDepth  int   `yaml:"max_substitution_recursion,omitempty" toml:"max_substitution_recursion,omitempty" json:"max_substitution_recursion,omitempty"`
+}
+
+const (
+	DefaultMaxForeachIterations  = 10000
+	DefaultMaxConcurrentForeach  = 16
+	DefaultMaxCommandStdoutBytes = 16 * 1024 * 1024 // 16 MB
+	DefaultMaxCommandStderrBytes = 4 * 1024 * 1024  // 4 MB
+	DefaultMaxTemplateBytes      = 256 * 1024       // 256 KB
+	DefaultMaxStepCountTotal     = 100000
+	DefaultMaxSubstitutionDepth  = 8
+)
+
+// EffectiveLimits returns the limits config with defaults applied for zero values.
+func (lc LimitsConfig) EffectiveLimits() LimitsConfig {
+	if lc.MaxForeachIterations <= 0 {
+		lc.MaxForeachIterations = DefaultMaxForeachIterations
+	}
+	if lc.MaxConcurrentForeach <= 0 {
+		lc.MaxConcurrentForeach = DefaultMaxConcurrentForeach
+	}
+	if lc.MaxCommandStdoutBytes <= 0 {
+		lc.MaxCommandStdoutBytes = DefaultMaxCommandStdoutBytes
+	}
+	if lc.MaxCommandStderrBytes <= 0 {
+		lc.MaxCommandStderrBytes = DefaultMaxCommandStderrBytes
+	}
+	if lc.MaxTemplateBytes <= 0 {
+		lc.MaxTemplateBytes = DefaultMaxTemplateBytes
+	}
+	if lc.MaxStepCountTotal <= 0 {
+		lc.MaxStepCountTotal = DefaultMaxStepCountTotal
+	}
+	if lc.MaxSubstitutionDepth <= 0 {
+		lc.MaxSubstitutionDepth = DefaultMaxSubstitutionDepth
+	}
+	return lc
 }
 
 // Duration is a wrapper for time.Duration that supports YAML/TOML/JSON parsing
@@ -370,6 +453,24 @@ func (s *StringOrList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalTOML accepts either a single string or a list of strings.
+func (s *StringOrList) UnmarshalTOML(data any) error {
+	if single, ok := data.(string); ok {
+		if single != "" {
+			*s = []string{single}
+		} else {
+			*s = nil
+		}
+		return nil
+	}
+	list, ok := tomlStringSlice(data)
+	if !ok {
+		return fmt.Errorf("expected string or list of strings")
+	}
+	*s = list
+	return nil
+}
+
 // PaneSpec is a step's `pane:` selector. The canonical form is an integer
 // pane index; brennerbot-style pipelines pass `${defaults.triage_pane}` style
 // template references, which arrive as strings during YAML parse and are
@@ -418,6 +519,28 @@ func (p *PaneSpec) UnmarshalJSON(data []byte) error {
 	type raw PaneSpec
 	var obj raw
 	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("pane: must be int or template string: %w", err)
+	}
+	*p = PaneSpec(obj)
+	return nil
+}
+
+// UnmarshalTOML accepts int, string, or the canonical struct table emitted by
+// the TOML encoder.
+func (p *PaneSpec) UnmarshalTOML(data any) error {
+	if n, ok := tomlInt(data); ok {
+		p.Index = n
+		p.Expr = ""
+		return nil
+	}
+	if s, ok := data.(string); ok {
+		p.Index = 0
+		p.Expr = s
+		return nil
+	}
+	type raw PaneSpec
+	var obj raw
+	if err := decodeTOMLValue(data, &obj); err != nil {
 		return fmt.Errorf("pane: must be int or template string: %w", err)
 	}
 	*p = PaneSpec(obj)
@@ -492,6 +615,36 @@ func (o *OnFailureSpec) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return fmt.Errorf("on_failure: must be string or mapping: %w", err)
 	}
+	o.Action = ""
+	o.RetryCount = 0
+	o.Fallback = m
+	return nil
+}
+
+// UnmarshalTOML accepts the same forms as YAML and JSON.
+func (o *OnFailureSpec) UnmarshalTOML(data any) error {
+	if s, ok := data.(string); ok {
+		o.setActionString(s)
+		return nil
+	}
+	m, ok := tomlMap(data)
+	if !ok {
+		return fmt.Errorf("on_failure: must be string or mapping")
+	}
+
+	var rawFields struct {
+		Action     string                 `json:"Action"`
+		RetryCount int                    `json:"RetryCount"`
+		Fallback   map[string]interface{} `json:"Fallback"`
+	}
+	if err := decodeTOMLValue(m, &rawFields); err == nil &&
+		(rawFields.Action != "" || rawFields.RetryCount != 0 || rawFields.Fallback != nil || mapHasAnyKey(m, "Action", "RetryCount", "Fallback")) {
+		o.Action = rawFields.Action
+		o.RetryCount = rawFields.RetryCount
+		o.Fallback = rawFields.Fallback
+		return nil
+	}
+
 	o.Action = ""
 	o.RetryCount = 0
 	o.Fallback = m
@@ -582,6 +735,28 @@ func (i *IntOrExpr) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalTOML accepts int, string, or the canonical struct table emitted by
+// the TOML encoder.
+func (i *IntOrExpr) UnmarshalTOML(data any) error {
+	if n, ok := tomlInt(data); ok {
+		i.Value = n
+		i.Expr = ""
+		return nil
+	}
+	if s, ok := data.(string); ok {
+		i.Value = 0
+		i.Expr = s
+		return nil
+	}
+	type raw IntOrExpr
+	var obj raw
+	if err := decodeTOMLValue(data, &obj); err != nil {
+		return fmt.Errorf("expected integer or template expression: %w", err)
+	}
+	*i = IntOrExpr(obj)
+	return nil
+}
+
 // MarshalYAML emits literal int when set, otherwise the expression.
 func (i IntOrExpr) MarshalYAML() (interface{}, error) {
 	if i.Expr != "" {
@@ -633,6 +808,24 @@ func (a *AfterRef) UnmarshalJSON(data []byte) error {
 	var list []string
 	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("after: must be a string or list of strings: %w", err)
+	}
+	*a = list
+	return nil
+}
+
+// UnmarshalTOML accepts either a single string or a list of strings.
+func (a *AfterRef) UnmarshalTOML(data any) error {
+	if s, ok := data.(string); ok {
+		if s != "" {
+			*a = []string{s}
+		} else {
+			*a = nil
+		}
+		return nil
+	}
+	list, ok := tomlStringSlice(data)
+	if !ok {
+		return fmt.Errorf("after: must be a string or list of strings")
 	}
 	*a = list
 	return nil
@@ -697,6 +890,41 @@ func (p *ParallelSpec) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalTOML accepts bool, []Step, or the canonical struct table emitted by
+// the TOML encoder.
+func (p *ParallelSpec) UnmarshalTOML(data any) error {
+	if b, ok := data.(bool); ok {
+		p.Flag = b
+		p.Steps = nil
+		return nil
+	}
+	if arr, ok := data.([]map[string]interface{}); ok {
+		var steps []Step
+		if err := decodeTOMLValue(arr, &steps); err != nil {
+			return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+		}
+		p.Flag = false
+		p.Steps = steps
+		return nil
+	}
+	if arr, ok := data.([]interface{}); ok {
+		var steps []Step
+		if err := decodeTOMLValue(arr, &steps); err != nil {
+			return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+		}
+		p.Flag = false
+		p.Steps = steps
+		return nil
+	}
+	type raw ParallelSpec
+	var obj raw
+	if err := decodeTOMLValue(data, &obj); err != nil {
+		return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+	}
+	*p = ParallelSpec(obj)
+	return nil
+}
+
 // MarshalYAML mirrors the input form — emit a bool when only Flag is set,
 // emit the list otherwise. Keeps round-tripping clean for tooling.
 func (p ParallelSpec) MarshalYAML() (interface{}, error) {
@@ -726,6 +954,68 @@ func jsonObjectHasAnyKey(data []byte, keys ...string) bool {
 	}
 	for _, key := range keys {
 		if _, ok := obj[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeTOMLValue(data any, dst any) error {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
+
+func tomlMap(data any) (map[string]interface{}, bool) {
+	switch m := data.(type) {
+	case map[string]interface{}:
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
+func tomlStringSlice(data any) ([]string, bool) {
+	switch list := data.(type) {
+	case []string:
+		return list, true
+	case []interface{}:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			s, ok := item.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func tomlInt(data any) (int, bool) {
+	switch n := data.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+func mapHasAnyKey(m map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := m[key]; ok {
 			return true
 		}
 	}
@@ -802,6 +1092,22 @@ func (o *OutputParse) UnmarshalJSON(data []byte) error {
 	type raw OutputParse
 	var obj raw
 	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("output_parse: must be a string or object: %w", err)
+	}
+	*o = OutputParse(obj)
+	return nil
+}
+
+// UnmarshalTOML accepts the string shorthand and the canonical table form.
+func (o *OutputParse) UnmarshalTOML(data any) error {
+	if s, ok := data.(string); ok {
+		o.Type = s
+		o.Pattern = ""
+		return nil
+	}
+	type raw OutputParse
+	var obj raw
+	if err := decodeTOMLValue(data, &obj); err != nil {
 		return fmt.Errorf("output_parse: must be a string or object: %w", err)
 	}
 	*o = OutputParse(obj)

@@ -3355,3 +3355,131 @@ func TestResolveTemplatePath(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Resource limits tests (bd-unxfp)
+// ---------------------------------------------------------------------------
+
+func TestExecuteCommand_StdoutTruncation(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.limits = LimitsConfig{MaxCommandStdoutBytes: 50}.EffectiveLimits()
+
+	step := &Step{
+		ID:      "big-output",
+		Command: "head -c 200 /dev/zero | tr '\\0' '-'",
+	}
+
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
+	}
+	if !strings.Contains(result.Output, "[TRUNCATED at 50 bytes]") {
+		t.Errorf("expected truncation marker, got: %q", result.Output)
+	}
+	actualContent := strings.SplitN(result.Output, "\n[TRUNCATED", 2)[0]
+	if len(actualContent) != 50 {
+		t.Errorf("content before marker is %d bytes, want 50", len(actualContent))
+	}
+}
+
+func TestExecuteCommand_StdoutUnderLimit(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.limits = LimitsConfig{MaxCommandStdoutBytes: 1000}.EffectiveLimits()
+
+	step := &Step{
+		ID:      "small-output",
+		Command: "echo hello",
+	}
+
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed", result.Status)
+	}
+	if strings.Contains(result.Output, "TRUNCATED") {
+		t.Errorf("should not truncate small output: %q", result.Output)
+	}
+	if result.Output != "hello" {
+		t.Errorf("got %q, want %q", result.Output, "hello")
+	}
+}
+
+func TestExecuteTemplate_SizeLimitExceeded(t *testing.T) {
+	tmpDir := t.TempDir()
+	bigContent := strings.Repeat("X", 1024)
+	if err := os.WriteFile(filepath.Join(tmpDir, "big.md"), []byte(bigContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newCommandTestExecutor(t)
+	e.config.ProjectDir = tmpDir
+	e.limits = LimitsConfig{MaxTemplateBytes: 100}.EffectiveLimits()
+
+	step := &Step{
+		ID:       "big-template",
+		Template: "big.md",
+	}
+
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusFailed {
+		t.Fatalf("status=%s, want failed", result.Status)
+	}
+	if result.Error == nil || result.Error.Type != "limit_exceeded" {
+		t.Errorf("expected limit_exceeded error, got: %v", result.Error)
+	}
+}
+
+func TestExecuteTemplate_SizeUnderLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "small.md"), []byte("Hello <NAME>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newCommandTestExecutor(t)
+	e.config.ProjectDir = tmpDir
+	e.config.DryRun = true
+	e.limits = LimitsConfig{MaxTemplateBytes: 1024}.EffectiveLimits()
+
+	step := &Step{
+		ID:       "small-template",
+		Template: "small.md",
+		Params:   map[string]interface{}{"NAME": "World"},
+	}
+
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
+	}
+}
+
+func TestLimitsConfig_EffectiveLimits_Defaults(t *testing.T) {
+	lc := LimitsConfig{}.EffectiveLimits()
+	if lc.MaxForeachIterations != DefaultMaxForeachIterations {
+		t.Errorf("MaxForeachIterations=%d, want %d", lc.MaxForeachIterations, DefaultMaxForeachIterations)
+	}
+	if lc.MaxCommandStdoutBytes != DefaultMaxCommandStdoutBytes {
+		t.Errorf("MaxCommandStdoutBytes=%d, want %d", lc.MaxCommandStdoutBytes, DefaultMaxCommandStdoutBytes)
+	}
+	if lc.MaxTemplateBytes != DefaultMaxTemplateBytes {
+		t.Errorf("MaxTemplateBytes=%d, want %d", lc.MaxTemplateBytes, DefaultMaxTemplateBytes)
+	}
+	if lc.MaxSubstitutionDepth != DefaultMaxSubstitutionDepth {
+		t.Errorf("MaxSubstitutionDepth=%d, want %d", lc.MaxSubstitutionDepth, DefaultMaxSubstitutionDepth)
+	}
+}
+
+func TestLimitsConfig_EffectiveLimits_Override(t *testing.T) {
+	lc := LimitsConfig{
+		MaxForeachIterations:  50000,
+		MaxCommandStdoutBytes: 32 * 1024 * 1024,
+	}.EffectiveLimits()
+
+	if lc.MaxForeachIterations != 50000 {
+		t.Errorf("MaxForeachIterations=%d, want %d", lc.MaxForeachIterations, 50000)
+	}
+	if lc.MaxCommandStdoutBytes != 32*1024*1024 {
+		t.Errorf("MaxCommandStdoutBytes=%d, want %d", lc.MaxCommandStdoutBytes, 32*1024*1024)
+	}
+	if lc.MaxTemplateBytes != DefaultMaxTemplateBytes {
+		t.Errorf("other defaults should be preserved: MaxTemplateBytes=%d", lc.MaxTemplateBytes)
+	}
+}

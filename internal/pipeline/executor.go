@@ -69,6 +69,7 @@ type Executor struct {
 	stateMu  sync.RWMutex // Protects state.Steps for concurrent access
 	varMu    sync.RWMutex // Protects state.Variables for concurrent access
 	defaults map[string]interface{}
+	limits   LimitsConfig
 	tmux     TmuxClient
 	graph    *DependencyGraph
 	progress chan<- ProgressEvent
@@ -167,6 +168,7 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	e.varMu.Unlock()
 
 	e.defaults = workflow.Defaults
+	e.limits = workflow.Settings.Limits.EffectiveLimits()
 
 	e.persistState()
 
@@ -290,6 +292,7 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 
 	e.progress = progress
 	e.defaults = workflow.Defaults
+	e.limits = workflow.Settings.Limits.EffectiveLimits()
 
 	// Build dependency graph
 	e.graph = NewDependencyGraph(workflow)
@@ -862,6 +865,15 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	waitErr := cmd.Wait()
 
 	output := strings.TrimSpace(stdoutBuf.String())
+	if int64(len(output)) > e.limits.MaxCommandStdoutBytes {
+		slog.Warn("command stdout truncated",
+			"run_id", e.state.RunID,
+			"step_id", step.ID,
+			"bytes_captured", len(output),
+			"limit", e.limits.MaxCommandStdoutBytes,
+		)
+		output = output[:e.limits.MaxCommandStdoutBytes] + fmt.Sprintf("\n[TRUNCATED at %d bytes]", e.limits.MaxCommandStdoutBytes)
+	}
 	result.Output = output
 
 	if waitErr != nil {
@@ -979,6 +991,24 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 			Timestamp: time.Now(),
 		}
 		result.FinishedAt = time.Now()
+		return result
+	}
+
+	if int64(len(content)) > e.limits.MaxTemplateBytes {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "limit_exceeded",
+			Message:   fmt.Sprintf("template file %s exceeds size limit (%d bytes > %d max)", step.Template, len(content), e.limits.MaxTemplateBytes),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		slog.Error("pipeline.limit.exceeded",
+			"run_id", e.state.RunID,
+			"step_id", step.ID,
+			"limit", "max_template_bytes",
+			"actual", len(content),
+			"max", e.limits.MaxTemplateBytes,
+		)
 		return result
 	}
 
