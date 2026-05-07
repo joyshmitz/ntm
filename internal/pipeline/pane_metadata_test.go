@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,4 +504,59 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// erroringTmuxClient simulates an offline / detached tmux session for the
+// bd-ujk04 fallback test below.
+type erroringTmuxClient struct {
+	err error
+}
+
+func (e *erroringTmuxClient) GetPanes(string) ([]tmux.Pane, error)          { return nil, e.err }
+func (e *erroringTmuxClient) PasteKeys(string, string, bool) error          { return nil }
+func (e *erroringTmuxClient) CapturePaneOutput(string, int) (string, error) { return "", nil }
+
+// TestLoadPaneMetadataCache_RosterFallbackOnSessionError covers bd-ujk04:
+// a tmux/session lookup failure (resumed-offline session, missing tmux
+// server, etc.) must NOT short-circuit the cascading fallback chain.
+// LoadPaneMetadataCache should treat the error as a session miss and
+// continue on to roster.yaml / RESUME.md / phase0_scope_decision.md so a
+// purely-resumed pipeline can still resolve ${pane.role}.
+func TestLoadPaneMetadataCache_RosterFallbackOnSessionError(t *testing.T) {
+	tmpDir := t.TempDir()
+	rosterDir := filepath.Join(tmpDir, ".brenner_workspace")
+	if err := os.MkdirAll(rosterDir, 0o755); err != nil {
+		t.Fatalf("mkdir roster dir: %v", err)
+	}
+	rosterYAML := strings.TrimSpace(`
+panes:
+  - pane: 1
+    role: proposer
+    model: cc
+  - pane: 2
+    role: investigator
+    model: cod
+`)
+	writeFile(t, filepath.Join(rosterDir, "roster.yaml"), rosterYAML)
+
+	client := &erroringTmuxClient{err: fmt.Errorf("tmux: server not found")}
+
+	cache, err := LoadPaneMetadataCache(client, "missing-session", tmpDir)
+	if err != nil {
+		t.Fatalf("LoadPaneMetadataCache err = %v, want nil (fallback should succeed)", err)
+	}
+	if cache == nil {
+		t.Fatal("LoadPaneMetadataCache returned nil cache despite roster.yaml fallback")
+	}
+
+	got, err := cache.Lookup("2")
+	if err != nil {
+		t.Fatalf("cache.Lookup(2) err = %v", err)
+	}
+	if got.Role != "investigator" {
+		t.Errorf("pane 2 role = %q, want investigator", got.Role)
+	}
+	if got.Model != "cod" {
+		t.Errorf("pane 2 model = %q, want cod", got.Model)
+	}
 }

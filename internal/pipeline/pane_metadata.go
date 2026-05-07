@@ -145,9 +145,18 @@ func LoadPaneMetadataCache(client TmuxClient, session, projectDir string) (*Pane
 	if client != nil && session != "" {
 		entries, err := paneMetadataFromSession(client, session)
 		if err != nil {
-			return nil, err
+			// bd-ujk04: a tmux/session lookup failure (resumed-offline,
+			// missing session, etc.) must NOT short-circuit the cascading
+			// fallback chain. Treat it as a miss, log context, and let
+			// RESUME.md / roster.yaml / phase0 still populate the cache.
+			slog.Warn("pipeline.pane_metadata.session_lookup_failed",
+				"session", session,
+				"project_dir", projectDir,
+				"error", err.Error(),
+			)
+		} else {
+			sessionEntries = entries
 		}
-		sessionEntries = entries
 	}
 
 	rosterEntries, rosterSource, err := loadRosterFallbackEntries(projectDir)
