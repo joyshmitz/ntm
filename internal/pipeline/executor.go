@@ -2787,12 +2787,23 @@ func (e *Executor) applyResumeState() {
 	// downstream prompts/conditions can resolve through ghost outputs from
 	// steps that aren't even in the dependency graph any more.
 	var orphanStepIDs []string
+	// bd-98sd7: capture (stepID, err) pairs for orphan drops so the resume
+	// path emits a warning instead of silently deleting persisted step
+	// results when MarkExecuted reports e.g. "unknown step" for a synthetic
+	// foreach iteration ID.
+	type orphanDrop struct {
+		stepID string
+		err    error
+	}
+	var orphanDrops []orphanDrop
 
 	e.stateMu.Lock()
 	if e.state == nil {
 		e.stateMu.Unlock()
 		return
 	}
+	runID := e.state.RunID
+	workflowID := e.state.WorkflowID
 	for stepID, result := range e.state.Steps {
 		if shouldRerunStep(result) {
 			rerunStepIDs = append(rerunStepIDs, stepID)
@@ -2801,6 +2812,7 @@ func (e *Executor) applyResumeState() {
 		if err := e.graph.MarkExecuted(stepID); err != nil {
 			delete(e.state.Steps, stepID)
 			orphanStepIDs = append(orphanStepIDs, stepID)
+			orphanDrops = append(orphanDrops, orphanDrop{stepID: stepID, err: err})
 		}
 	}
 	for stepID := range e.state.InFlightSteps {
@@ -2819,6 +2831,14 @@ func (e *Executor) applyResumeState() {
 	}
 	for _, stepID := range orphanStepIDs {
 		e.clearStepVariables(stepID)
+	}
+	for _, drop := range orphanDrops {
+		slog.Warn("resume dropped persisted step result with no graph entry",
+			"run_id", runID,
+			"workflow", workflowID,
+			"step_id", drop.stepID,
+			"error", drop.err.Error(),
+		)
 	}
 }
 

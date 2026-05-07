@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -631,5 +632,71 @@ func TestExecutionStateResumeMetadataJSONRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded, original) {
 		t.Fatalf("round-trip mismatch:\n got: %#v\nwant: %#v", decoded, original)
+	}
+}
+
+// TestApplyResumeStateLogsOrphanDrops covers bd-98sd7: when MarkExecuted
+// rejects a step ID (most often because it is a synthetic loop-iteration
+// ID that is not part of the current workflow's dependency graph), the
+// step record is dropped from state.Steps. Previously this happened
+// silently; now applyResumeState emits a slog.Warn so the audit trail
+// loss is observable.
+func TestApplyResumeStateLogsOrphanDrops(t *testing.T) {
+	var buf bytes.Buffer
+	restore := capturePipelineLogs(t, &buf)
+	defer restore()
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "applyResumeState-orphan",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "real_step", Command: "true"}},
+	}
+	executor := NewExecutor(DefaultExecutorConfig("session"))
+	executor.graph = NewDependencyGraph(workflow)
+	executor.state = &ExecutionState{
+		RunID:      "run-orphan",
+		WorkflowID: workflow.Name,
+		Status:     StatusRunning,
+		Steps: map[string]StepResult{
+			"real_step":      {StepID: "real_step", Status: StatusCompleted, Output: "ok"},
+			"ghost_iter_2_x": {StepID: "ghost_iter_2_x", Status: StatusCompleted, Output: "stale"},
+		},
+		Variables: map[string]interface{}{
+			"steps.ghost_iter_2_x.output": "stale",
+		},
+	}
+
+	executor.applyResumeState()
+
+	if _, ok := executor.state.Steps["real_step"]; !ok {
+		t.Errorf("real_step should still be in state.Steps after applyResumeState")
+	}
+	if _, ok := executor.state.Steps["ghost_iter_2_x"]; ok {
+		t.Errorf("ghost_iter_2_x should have been dropped (no graph entry)")
+	}
+
+	events := parseJSONLEvents(t, &buf)
+	var found map[string]any
+	for _, evt := range events {
+		if msg, _ := evt["msg"].(string); strings.Contains(msg, "resume dropped persisted step result") {
+			found = evt
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected slog.Warn for dropped step; saw events = %#v", events)
+	}
+	if got, _ := found["step_id"].(string); got != "ghost_iter_2_x" {
+		t.Errorf("step_id = %q, want %q", got, "ghost_iter_2_x")
+	}
+	if got, _ := found["run_id"].(string); got != "run-orphan" {
+		t.Errorf("run_id = %q, want run-orphan", got)
+	}
+	if got, _ := found["workflow"].(string); got != workflow.Name {
+		t.Errorf("workflow = %q, want %q", got, workflow.Name)
+	}
+	if level, _ := found["level"].(string); level != "WARN" {
+		t.Errorf("level = %q, want WARN", level)
 	}
 }
