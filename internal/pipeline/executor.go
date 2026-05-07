@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -878,20 +877,8 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	cmdCtx, cmdCancel := context.WithTimeout(ctx, timeout)
 	defer cmdCancel()
 
-	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-c", expandedCmd)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-				if errors.Is(err, syscall.ESRCH) {
-					return os.ErrProcessDone
-				}
-				return cmd.Process.Kill()
-			}
-		}
-		return nil
-	}
-	cmd.WaitDelay = time.Second
+	cmd := exec.Command("/bin/sh", "-c", expandedCmd)
+	configureCommandProcessGroup(cmd)
 
 	if e.config.ProjectDir != "" {
 		cmd.Dir = e.config.ProjectDir
@@ -945,9 +932,21 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		return result
 	}
 
-	waitErr := cmd.Wait()
+	cleanup := waitCommandWithProcessGroupCleanup(cmdCtx, cmd)
+	waitErr := cleanup.Err
 
 	output := strings.TrimSpace(stdoutBuf.String())
+	if cleanup.Cancelled {
+		slog.Warn(EventCommandCancelled,
+			"run_id", e.state.RunID,
+			"workflow", workflow.Name,
+			"step_id", step.ID,
+			"agent_type", "command",
+			FieldDurationMS, time.Since(result.StartedAt).Milliseconds(),
+			"bytes_captured", len(stdoutBuf.String()),
+			FieldSignalSent, cleanup.SignalSent,
+		)
+	}
 	if int64(len(output)) > e.limits.MaxCommandStdoutBytes {
 		slog.Warn("command stdout truncated",
 			"run_id", e.state.RunID,
