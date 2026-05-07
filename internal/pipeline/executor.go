@@ -49,9 +49,6 @@ type ExecutorConfig struct {
 	// into the synthetic Skipped entries created by StartFromStep so that
 	// ${steps.X.output} references in later steps resolve to the prior values.
 	StartFromState *ExecutionState
-
-	// ResumeOptions controls how Resume interprets prior persisted state.
-	ResumeOptions ResumeOptions
 }
 
 // MinProgressInterval is the minimum allowed progress interval to prevent ticker panics.
@@ -160,19 +157,16 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 
 	e.stateMu.Lock()
 	e.state = &ExecutionState{
-		RunID:         runID,
-		WorkflowID:    workflow.Name,
-		WorkflowFile:  e.config.WorkflowFile,
-		Session:       e.config.Session,
-		Status:        StatusRunning,
-		StartedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-		Steps:         make(map[string]StepResult),
-		Variables:     make(map[string]interface{}),
-		Errors:        []ExecutionError{},
-		ForeachState:  make(map[string]ForeachIterationState),
-		ParallelState: make(map[string]ParallelGroupState),
-		InFlightSteps: make(map[string]InFlightStepState),
+		RunID:        runID,
+		WorkflowID:   workflow.Name,
+		WorkflowFile: e.config.WorkflowFile,
+		Session:      e.config.Session,
+		Status:       StatusRunning,
+		StartedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		Steps:        make(map[string]StepResult),
+		Variables:    make(map[string]interface{}),
+		Errors:       []ExecutionError{},
 	}
 	e.progress = progress
 	e.stateMu.Unlock()
@@ -350,20 +344,6 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 		return e.state, fmt.Errorf("workflow has dependency errors: %v", errors[0])
 	}
 
-	if err := e.applyResumeOptions(workflow, e.config.ResumeOptions); err != nil {
-		e.stateMu.Lock()
-		e.state.Status = StatusFailed
-		e.state.Errors = append(e.state.Errors, ExecutionError{
-			Type:      "resume",
-			Message:   err.Error(),
-			Timestamp: time.Now(),
-			Fatal:     true,
-		})
-		e.stateMu.Unlock()
-		e.persistState()
-		return e.state, err
-	}
-
 	e.applyResumeState()
 	e.persistState()
 
@@ -519,20 +499,9 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 		// Execute ready steps (potentially in parallel if they're independent)
 		// For now, execute one at a time for simplicity
 		// TODO: Optimize with goroutine pool for truly parallel independent steps
-		sort.SliceStable(ready, func(i, j int) bool {
-			_, _, insideI := findStepContainer(workflow, ready[i])
-			_, _, insideJ := findStepContainer(workflow, ready[j])
-			return !insideI && insideJ
-		})
 		for _, stepID := range ready {
 			step, exists := e.graph.GetStep(stepID)
 			if !exists {
-				continue
-			}
-			if _, _, inside := findStepContainer(workflow, stepID); inside {
-				if err := e.graph.MarkExecuted(stepID); err != nil {
-					return fmt.Errorf("failed to mark nested step %s as executed: %w", stepID, err)
-				}
 				continue
 			}
 
@@ -611,9 +580,6 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		StartedAt: time.Now(),
 		Attempts:  0,
 	}
-	e.markStepInFlight(step.ID, stepKind(step), -1)
-	e.persistState()
-	defer e.clearStepInFlight(step.ID)
 
 	// Check for failed dependencies (in CONTINUE mode, skip steps with failed deps)
 	if e.graph.HasFailedDependency(step.ID) {
@@ -1520,8 +1486,6 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	e.emitProgress("parallel_start", step.ID,
 		stepProgressMessage("Starting parallel group", step, fmt.Sprintf("%d steps, on_error=%s", len(step.Parallel.Steps), onError)),
 		e.calculateProgress())
-	e.beginParallelState(step.ID, len(step.Parallel.Steps))
-	e.persistState()
 
 	var wg sync.WaitGroup
 	results := make([]StepResult, len(step.Parallel.Steps))
@@ -1559,7 +1523,6 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 				e.state.UpdatedAt = time.Now()
 				e.stateMu.Unlock()
 				mu.Unlock()
-				e.markParallelSubstepFinished(step.ID, ps.ID, StatusCancelled)
 				e.persistState()
 				return
 			case sem <- struct{}{}: // Acquire token
@@ -1568,8 +1531,6 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 			defer func() { <-sem }() // Release token
 
 			// Execute the step with pane coordination
-			e.markParallelSubstepStarted(step.ID, ps.ID)
-			e.persistState()
 			pResult := e.executeParallelStep(parallelCtx, &ps, workflow, usedPanes, &panesMu)
 
 			mu.Lock()
@@ -1590,13 +1551,11 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 			}
 			mu.Unlock()
 
-			e.markParallelSubstepFinished(step.ID, ps.ID, pResult.Status)
 			e.persistState()
 		}(i, pStep)
 	}
 
 	wg.Wait()
-	e.completeParallelState(step.ID)
 
 	// Aggregate results
 	completed := 0
@@ -1706,9 +1665,6 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		Status:    StatusRunning,
 		StartedAt: time.Now(),
 	}
-	e.markStepInFlight(step.ID, "parallel_step", -1)
-	e.persistState()
-	defer e.clearStepInFlight(step.ID)
 
 	// Check for unsupported nested structures
 	if len(step.Parallel.Steps) > 0 || step.Loop != nil {
@@ -2451,11 +2407,6 @@ func (e *Executor) applyResumeState() {
 			delete(e.state.Steps, stepID)
 		}
 	}
-	for stepID := range e.state.InFlightSteps {
-		rerunStepIDs = append(rerunStepIDs, stepID)
-		delete(e.state.Steps, stepID)
-	}
-	e.state.InFlightSteps = nil
 
 	for _, stepID := range rerunStepIDs {
 		delete(e.state.Steps, stepID)
@@ -2518,47 +2469,13 @@ func (e *Executor) snapshotState() *ExecutionState {
 			snapshot.Steps[key] = value
 		}
 	}
-	if e.state.ForeachState != nil {
-		snapshot.ForeachState = make(map[string]ForeachIterationState, len(e.state.ForeachState))
-		for key, value := range e.state.ForeachState {
-			value.CompletedIterationIDs = append([]string(nil), value.CompletedIterationIDs...)
-			snapshot.ForeachState[key] = value
-		}
-	}
-	if e.state.ParallelState != nil {
-		snapshot.ParallelState = make(map[string]ParallelGroupState, len(e.state.ParallelState))
-		for key, value := range e.state.ParallelState {
-			value.CompletedStepIDs = append([]string(nil), value.CompletedStepIDs...)
-			value.FailedStepIDs = append([]string(nil), value.FailedStepIDs...)
-			value.InFlightStepIDs = append([]string(nil), value.InFlightStepIDs...)
-			snapshot.ParallelState[key] = value
-		}
-	}
-	if e.state.InFlightSteps != nil {
-		snapshot.InFlightSteps = make(map[string]InFlightStepState, len(e.state.InFlightSteps))
-		for key, value := range e.state.InFlightSteps {
-			snapshot.InFlightSteps[key] = value
-		}
-	}
 	e.stateMu.RUnlock()
 
 	e.varMu.RLock()
 	if e.state.Variables != nil {
 		snapshot.Variables = make(map[string]interface{}, len(e.state.Variables))
 		for key, value := range e.state.Variables {
-			snapshot.Variables[key] = cloneInterfaceValue(value)
-		}
-	}
-	if e.state.ScopeStack != nil {
-		snapshot.ScopeStack = make([]ScopeFrame, len(e.state.ScopeStack))
-		for i, frame := range e.state.ScopeStack {
-			snapshot.ScopeStack[i] = frame
-			if frame.Variables != nil {
-				snapshot.ScopeStack[i].Variables = make(map[string]interface{}, len(frame.Variables))
-				for key, value := range frame.Variables {
-					snapshot.ScopeStack[i].Variables[key] = cloneInterfaceValue(value)
-				}
-			}
+			snapshot.Variables[key] = value
 		}
 	}
 	e.varMu.RUnlock()
@@ -2570,16 +2487,6 @@ func (e *Executor) persistState() {
 	if e.state == nil {
 		return
 	}
-
-	now := time.Now()
-	e.stateMu.Lock()
-	if e.state == nil {
-		e.stateMu.Unlock()
-		return
-	}
-	e.state.LastCheckpointAt = now
-	e.state.UpdatedAt = now
-	e.stateMu.Unlock()
 
 	projectDir := e.config.ProjectDir
 	if projectDir == "" {
