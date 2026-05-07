@@ -3,16 +3,21 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -550,20 +555,22 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		StartedAt: time.Now(),
 	}
 
+	// Dispatch command steps to executeCommand.
+	if step.Command != "" {
+		return e.executeCommand(ctx, step, workflow)
+	}
+
 	// Phase-A graceful handling for step kinds whose execution semantics
-	// are still under development: `command:`, `template:`, `foreach:`,
+	// are still under development: `template:`, `foreach:`,
 	// `foreach_pane:`, and `branch:`. These steps parse and validate, but
 	// the executor doesn't yet know how to dispatch them. In dry-run mode
 	// we report what we *would* do; in real-run mode we surface a clear
 	// error so the operator can drive that step manually.
-	if step.Command != "" || step.Template != "" ||
+	if step.Template != "" ||
 		step.Foreach != nil || step.ForeachPane != nil ||
 		step.Branch != "" {
 		var kind, summary string
 		switch {
-		case step.Command != "":
-			kind = "command"
-			summary = truncatePrompt(step.Command, 80)
 		case step.Template != "":
 			kind = "template"
 			summary = step.Template
@@ -730,6 +737,186 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 
 	result.Status = StatusCompleted
 	result.FinishedAt = time.Now()
+	return result
+}
+
+// executeCommand runs a shell command step via /bin/sh -c.
+func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Workflow) StepResult {
+	result := StepResult{
+		StepID:    step.ID,
+		Status:    StatusRunning,
+		StartedAt: time.Now(),
+		AgentType: "command",
+	}
+
+	expandedCmd := e.substituteVariables(step.Command)
+
+	if e.config.DryRun {
+		result.Status = StatusCompleted
+		result.Output = fmt.Sprintf("[DRY RUN] Would execute command: %s", truncatePrompt(expandedCmd, 200))
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	slog.Info("command step starting",
+		"run_id", e.state.RunID,
+		"workflow", workflow.Name,
+		"step_id", step.ID,
+		"agent_type", "command",
+	)
+
+	timeout := e.config.DefaultTimeout
+	if step.Timeout.Duration > 0 {
+		timeout = step.Timeout.Duration
+	}
+	cmdCtx, cmdCancel := context.WithTimeout(ctx, timeout)
+	defer cmdCancel()
+
+	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-c", expandedCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+
+	if e.config.ProjectDir != "" {
+		cmd.Dir = e.config.ProjectDir
+	}
+
+	env := os.Environ()
+	for k, v := range step.Args {
+		env = append(env, fmt.Sprintf("%s=%v", k, v))
+	}
+	cmd.Env = env
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	if step.OutputParse.Type != "" && step.OutputParse.Type != "none" {
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+	} else {
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stdoutBuf
+	}
+
+	waitCondition := step.Wait
+	if waitCondition == "" {
+		waitCondition = WaitCompletion
+	}
+
+	if err := cmd.Start(); err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "command",
+			Message:   fmt.Sprintf("failed to start command: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		slog.Error("command step start failed",
+			"run_id", e.state.RunID,
+			"step_id", step.ID,
+			"error", err,
+		)
+		return result
+	}
+
+	if waitCondition == WaitNone {
+		go cmd.Wait()
+		result.Status = StatusCompleted
+		result.FinishedAt = time.Now()
+		slog.Info("command step fire-and-forget",
+			"run_id", e.state.RunID,
+			"step_id", step.ID,
+		)
+		return result
+	}
+
+	waitErr := cmd.Wait()
+
+	output := strings.TrimSpace(stdoutBuf.String())
+	result.Output = output
+
+	if waitErr != nil {
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			result.Status = StatusFailed
+			result.Error = &StepError{
+				Type:      "timeout",
+				Message:   fmt.Sprintf("command timed out after %s", timeout),
+				Timestamp: time.Now(),
+			}
+			slog.Warn("command step timed out",
+				"run_id", e.state.RunID,
+				"step_id", step.ID,
+				"timeout", timeout,
+			)
+			result.FinishedAt = time.Now()
+			return result
+		}
+		if ctx.Err() == context.Canceled {
+			result.Status = StatusCancelled
+			result.Error = &StepError{
+				Type:      "cancelled",
+				Message:   "command cancelled",
+				Timestamp: time.Now(),
+			}
+			result.FinishedAt = time.Now()
+			return result
+		}
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			result.Status = StatusFailed
+			result.Error = &StepError{
+				Type:      "exit",
+				Message:   fmt.Sprintf("command exited with status %d", exitErr.ExitCode()),
+				Details:   fmt.Sprintf("%d", exitErr.ExitCode()),
+				Timestamp: time.Now(),
+			}
+			slog.Warn("command step exited non-zero",
+				"run_id", e.state.RunID,
+				"step_id", step.ID,
+				"exit_code", exitErr.ExitCode(),
+			)
+		} else {
+			result.Status = StatusFailed
+			result.Error = &StepError{
+				Type:      "command",
+				Message:   waitErr.Error(),
+				Timestamp: time.Now(),
+			}
+			slog.Error("command step failed",
+				"run_id", e.state.RunID,
+				"step_id", step.ID,
+				"error", waitErr,
+			)
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	if step.OutputVar != "" && step.OutputParse.Type != "" && step.OutputParse.Type != "none" {
+		parsed, err := e.parseOutput(output, step.OutputParse)
+		if err != nil {
+			e.stateMu.Lock()
+			e.state.Errors = append(e.state.Errors, ExecutionError{
+				StepID:    step.ID,
+				Type:      "parse",
+				Message:   fmt.Sprintf("failed to parse output: %v", err),
+				Timestamp: time.Now(),
+				Fatal:     false,
+			})
+			e.stateMu.Unlock()
+		} else {
+			result.ParsedData = parsed
+		}
+	}
+
+	result.Status = StatusCompleted
+	result.FinishedAt = time.Now()
+	slog.Info("command step completed",
+		"run_id", e.state.RunID,
+		"step_id", step.ID,
+	)
 	return result
 }
 

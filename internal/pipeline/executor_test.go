@@ -2976,3 +2976,198 @@ func TestNormalizeAgentType_Aliases(t *testing.T) {
 		})
 	}
 }
+
+// newCommandTestExecutor returns an executor pre-configured for command step tests.
+func newCommandTestExecutor(t *testing.T) *Executor {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfg := DefaultExecutorConfig("test-cmd")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-cmd-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+	return e
+}
+
+func TestExecuteCommand_EchoHello(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{ID: "echo-step", Command: "echo hello"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Output != "hello" {
+		t.Errorf("Output = %q, want %q", result.Output, "hello")
+	}
+	if result.AgentType != "command" {
+		t.Errorf("AgentType = %q, want %q", result.AgentType, "command")
+	}
+}
+
+func TestExecuteCommand_ExitCode(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{ID: "exit-step", Command: "exit 7"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusFailed)
+	}
+	if result.Error == nil {
+		t.Fatal("Error is nil, want non-nil")
+	}
+	if result.Error.Type != "exit" {
+		t.Errorf("Error.Type = %q, want %q", result.Error.Type, "exit")
+	}
+	if result.Error.Details != "7" {
+		t.Errorf("Error.Details = %q, want %q", result.Error.Details, "7")
+	}
+}
+
+func TestExecuteCommand_Timeout(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{
+		ID:      "slow-step",
+		Command: "sleep 60",
+		Timeout: Duration{Duration: 200 * time.Millisecond},
+	}
+	start := time.Now()
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+	elapsed := time.Since(start)
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusFailed)
+	}
+	if result.Error == nil || result.Error.Type != "timeout" {
+		errType := ""
+		if result.Error != nil {
+			errType = result.Error.Type
+		}
+		t.Errorf("Error.Type = %q, want %q", errType, "timeout")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %s, expected timeout around 200ms", elapsed)
+	}
+}
+
+func TestExecuteCommand_CtxCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	e := newCommandTestExecutor(t)
+	step := &Step{
+		ID:      "cancel-step",
+		Command: "sleep 60",
+		Timeout: Duration{Duration: 30 * time.Second},
+	}
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	result := e.executeCommand(ctx, step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCancelled && result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want cancelled or failed", result.Status)
+	}
+}
+
+func TestExecuteCommand_VariableSubstitution(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.state.Variables["x"] = "world"
+	step := &Step{ID: "var-step", Command: "echo ${vars.x}"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Output != "world" {
+		t.Errorf("Output = %q, want %q", result.Output, "world")
+	}
+}
+
+func TestExecuteCommand_ArgsAsEnvVars(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{
+		ID:      "env-step",
+		Command: "echo $MY_KEY",
+		Args:    map[string]interface{}{"MY_KEY": "my_value"},
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Output != "my_value" {
+		t.Errorf("Output = %q, want %q", result.Output, "my_value")
+	}
+}
+
+func TestExecuteCommand_DryRun(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-cmd")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-dry",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+	step := &Step{ID: "dry-step", Command: "echo should-not-run"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusCompleted)
+	}
+	if !strings.Contains(result.Output, "[DRY RUN]") {
+		t.Errorf("Output = %q, want to contain [DRY RUN]", result.Output)
+	}
+}
+
+func TestExecuteCommand_WaitNone(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{
+		ID:      "fire-forget",
+		Command: "sleep 10",
+		Wait:    WaitNone,
+	}
+	start := time.Now()
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+	elapsed := time.Since(start)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusCompleted)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("WaitNone took %s, should return near-instantly", elapsed)
+	}
+}
+
+func TestExecuteCommand_ProjectDir(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{ID: "pwd-step", Command: "pwd"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if !strings.Contains(result.Output, e.config.ProjectDir) {
+		t.Errorf("Output = %q, want to contain ProjectDir %q", result.Output, e.config.ProjectDir)
+	}
+}
+
+func TestExecuteCommand_MultilineOutput(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{ID: "multi-step", Command: "echo line1; echo line2; echo line3"}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if !strings.Contains(result.Output, "line1") || !strings.Contains(result.Output, "line3") {
+		t.Errorf("Output = %q, want to contain line1 and line3", result.Output)
+	}
+}
