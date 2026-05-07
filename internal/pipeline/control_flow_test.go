@@ -28,9 +28,6 @@ func TestResolveBranch_Literal(t *testing.T) {
 	step := &Step{
 		ID:     "branch-lit",
 		Branch: "fresh-pass",
-		Branches: map[string]interface{}{
-			"fresh-pass": "do-fresh",
-		},
 	}
 
 	key, err := e.resolveBranch(context.Background(), step)
@@ -47,9 +44,6 @@ func TestResolveBranch_ShellCommand(t *testing.T) {
 	step := &Step{
 		ID:     "branch-shell",
 		Branch: "$(echo audit-only)",
-		Branches: map[string]interface{}{
-			"audit-only": "do-audit",
-		},
 	}
 
 	key, err := e.resolveBranch(context.Background(), step)
@@ -111,8 +105,8 @@ func TestResolveBranch_VariableSubstitution(t *testing.T) {
 
 func TestLookupBranch_MatchFound(t *testing.T) {
 	branches := map[string]interface{}{
-		"fresh-pass": map[string]interface{}{"steps": []string{"a", "b"}},
-		"audit-only": "single-step",
+		"fresh-pass": map[string]interface{}{"command": "echo fresh"},
+		"audit-only": map[string]interface{}{"command": "echo audit"},
 	}
 
 	val, err := lookupBranch(branches, "fresh-pass")
@@ -126,8 +120,8 @@ func TestLookupBranch_MatchFound(t *testing.T) {
 
 func TestLookupBranch_NoMatch_Error(t *testing.T) {
 	branches := map[string]interface{}{
-		"a": "step-a",
-		"b": "step-b",
+		"a": map[string]interface{}{"command": "echo a"},
+		"b": map[string]interface{}{"command": "echo b"},
 	}
 
 	_, err := lookupBranch(branches, "c")
@@ -141,31 +135,85 @@ func TestLookupBranch_NoMatch_Error(t *testing.T) {
 
 func TestLookupBranch_DefaultFallback(t *testing.T) {
 	branches := map[string]interface{}{
-		"a":       "step-a",
-		"default": "fallback-step",
+		"a":       map[string]interface{}{"command": "echo a"},
+		"default": map[string]interface{}{"command": "echo fallback"},
 	}
 
 	val, err := lookupBranch(branches, "unknown")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if val != "fallback-step" {
-		t.Errorf("got %v, want %q", val, "fallback-step")
+	if val == nil {
+		t.Fatal("expected non-nil value")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// executeBranch integration tests
+// parseBranchSteps tests (bd-w6nth.2)
 // ---------------------------------------------------------------------------
 
-func TestExecuteBranch_LiteralMatch(t *testing.T) {
+func TestParseBranchSteps_SingleStep(t *testing.T) {
+	val := map[string]interface{}{
+		"id":      "step-a",
+		"command": "echo hello",
+	}
+	steps, err := parseBranchSteps(val, "parent", "key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("got %d steps, want 1", len(steps))
+	}
+	if steps[0].Command != "echo hello" {
+		t.Errorf("command=%q, want %q", steps[0].Command, "echo hello")
+	}
+}
+
+func TestParseBranchSteps_ListOfSteps(t *testing.T) {
+	val := []interface{}{
+		map[string]interface{}{"id": "s1", "command": "echo one"},
+		map[string]interface{}{"id": "s2", "command": "echo two"},
+		map[string]interface{}{"id": "s3", "command": "echo three"},
+	}
+	steps, err := parseBranchSteps(val, "parent", "key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("got %d steps, want 3", len(steps))
+	}
+	if steps[2].Command != "echo three" {
+		t.Errorf("step[2].command=%q, want %q", steps[2].Command, "echo three")
+	}
+}
+
+func TestParseBranchSteps_AutoGeneratesID(t *testing.T) {
+	val := map[string]interface{}{
+		"command": "echo auto-id",
+	}
+	steps, err := parseBranchSteps(val, "dispatch", "fresh")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if steps[0].ID != "dispatch.fresh.0" {
+		t.Errorf("ID=%q, want %q", steps[0].ID, "dispatch.fresh.0")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// executeBranch integration tests (bd-w6nth.1 + bd-w6nth.2)
+// ---------------------------------------------------------------------------
+
+func TestExecuteBranch_SingleCommandStep(t *testing.T) {
 	e := newBranchTestExecutor()
 	step := &Step{
-		ID:     "br-lit",
+		ID:     "br-cmd",
 		Branch: "fresh-pass",
 		Branches: map[string]interface{}{
-			"fresh-pass": "run-fresh",
-			"audit-only": "run-audit",
+			"fresh-pass": map[string]interface{}{
+				"id":      "do-fresh",
+				"command": "echo fresh-output",
+			},
 		},
 	}
 
@@ -173,19 +221,19 @@ func TestExecuteBranch_LiteralMatch(t *testing.T) {
 	if result.Status != StatusCompleted {
 		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
 	}
-	if result.Output != "fresh-pass" {
-		t.Errorf("output=%q, want %q", result.Output, "fresh-pass")
+	if !strings.Contains(result.Output, "fresh-output") {
+		t.Errorf("output=%q, want to contain %q", result.Output, "fresh-output")
 	}
 }
 
-func TestExecuteBranch_ShellMatch(t *testing.T) {
+func TestExecuteBranch_ShellDispatch(t *testing.T) {
 	e := newBranchTestExecutor()
 	step := &Step{
-		ID:     "br-shell",
+		ID:     "br-shell-disp",
 		Branch: "$(echo audit-only)",
 		Branches: map[string]interface{}{
-			"fresh-pass": "run-fresh",
-			"audit-only": "run-audit",
+			"fresh-pass": map[string]interface{}{"command": "echo fresh"},
+			"audit-only": map[string]interface{}{"command": "echo audit-result"},
 		},
 	}
 
@@ -193,8 +241,31 @@ func TestExecuteBranch_ShellMatch(t *testing.T) {
 	if result.Status != StatusCompleted {
 		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
 	}
-	if result.Output != "audit-only" {
-		t.Errorf("output=%q, want %q", result.Output, "audit-only")
+	if !strings.Contains(result.Output, "audit-result") {
+		t.Errorf("output=%q, want to contain %q", result.Output, "audit-result")
+	}
+}
+
+func TestExecuteBranch_MultipleSteps(t *testing.T) {
+	e := newBranchTestExecutor()
+	step := &Step{
+		ID:     "br-multi",
+		Branch: "investigate",
+		Branches: map[string]interface{}{
+			"investigate": []interface{}{
+				map[string]interface{}{"id": "inv-1", "command": "echo step-one"},
+				map[string]interface{}{"id": "inv-2", "command": "echo step-two"},
+				map[string]interface{}{"id": "inv-3", "command": "echo step-three"},
+			},
+		},
+	}
+
+	result := e.executeBranch(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusCompleted {
+		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
+	}
+	if !strings.Contains(result.Output, "step-one") || !strings.Contains(result.Output, "step-three") {
+		t.Errorf("output should contain all step outputs, got: %q", result.Output)
 	}
 }
 
@@ -204,7 +275,7 @@ func TestExecuteBranch_NoMatch_Error(t *testing.T) {
 		ID:     "br-nomatch",
 		Branch: "unknown-key",
 		Branches: map[string]interface{}{
-			"a": "step-a",
+			"a": map[string]interface{}{"command": "echo a"},
 		},
 	}
 
@@ -223,8 +294,8 @@ func TestExecuteBranch_DefaultFallback(t *testing.T) {
 		ID:     "br-default",
 		Branch: "$(echo something-unexpected)",
 		Branches: map[string]interface{}{
-			"expected": "step-expected",
-			"default":  "step-fallback",
+			"expected": map[string]interface{}{"command": "echo expected"},
+			"default":  map[string]interface{}{"command": "echo fallback-ran"},
 		},
 	}
 
@@ -232,8 +303,8 @@ func TestExecuteBranch_DefaultFallback(t *testing.T) {
 	if result.Status != StatusCompleted {
 		t.Fatalf("status=%s, want completed; error=%v", result.Status, result.Error)
 	}
-	if result.Output != "something-unexpected" {
-		t.Errorf("output=%q, want %q", result.Output, "something-unexpected")
+	if !strings.Contains(result.Output, "fallback-ran") {
+		t.Errorf("expected fallback output, got: %q", result.Output)
 	}
 }
 
@@ -244,7 +315,7 @@ func TestExecuteBranch_DryRun(t *testing.T) {
 		ID:     "br-dry",
 		Branch: "$(echo hello)",
 		Branches: map[string]interface{}{
-			"hello": "step-hello",
+			"hello": map[string]interface{}{"command": "echo should-not-run"},
 		},
 	}
 
@@ -260,9 +331,11 @@ func TestExecuteBranch_DryRun(t *testing.T) {
 func TestExecuteBranch_ShellFailure(t *testing.T) {
 	e := newBranchTestExecutor()
 	step := &Step{
-		ID:       "br-shellfail",
-		Branch:   "$(exit 42)",
-		Branches: map[string]interface{}{"x": "y"},
+		ID:     "br-shellfail",
+		Branch: "$(exit 42)",
+		Branches: map[string]interface{}{
+			"x": map[string]interface{}{"command": "echo x"},
+		},
 	}
 
 	result := e.executeBranch(context.Background(), step, &Workflow{Name: "test"})
@@ -271,5 +344,47 @@ func TestExecuteBranch_ShellFailure(t *testing.T) {
 	}
 	if result.Error == nil || !strings.Contains(result.Error.Message, "branch predicate failed") {
 		t.Errorf("expected predicate-failed error, got: %v", result.Error)
+	}
+}
+
+func TestExecuteBranch_BodyStepFails(t *testing.T) {
+	e := newBranchTestExecutor()
+	step := &Step{
+		ID:     "br-fail-body",
+		Branch: "go",
+		Branches: map[string]interface{}{
+			"go": []interface{}{
+				map[string]interface{}{"id": "ok-step", "command": "echo ok"},
+				map[string]interface{}{"id": "fail-step", "command": "exit 1"},
+				map[string]interface{}{"id": "skip-step", "command": "echo should-not-run"},
+			},
+		},
+	}
+
+	result := e.executeBranch(context.Background(), step, &Workflow{Name: "test"})
+	if result.Status != StatusFailed {
+		t.Fatalf("status=%s, want failed", result.Status)
+	}
+}
+
+func TestExecuteBranch_VariableScopeCleanup(t *testing.T) {
+	e := newBranchTestExecutor()
+	e.state.Variables["keep_me"] = "preserved"
+
+	step := &Step{
+		ID:     "br-scope",
+		Branch: "go",
+		Branches: map[string]interface{}{
+			"go": map[string]interface{}{
+				"id":      "scope-step",
+				"command": "echo scoped",
+			},
+		},
+	}
+
+	e.executeBranch(context.Background(), step, &Workflow{Name: "test"})
+
+	if e.state.Variables["keep_me"] != "preserved" {
+		t.Errorf("pre-existing variable lost after branch execution")
 	}
 }
