@@ -505,6 +505,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		failedDeps := e.graph.GetFailedDependencies(step.ID)
 		result.Status = StatusSkipped
 		result.SkipReason = fmt.Sprintf("dependency failed: %v", failedDeps)
+		result.SkipKind = SkipKindFailedDependency
 		result.FinishedAt = time.Now()
 		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
 		return result
@@ -526,6 +527,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		if skip {
 			result.Status = StatusSkipped
 			result.SkipReason = fmt.Sprintf("condition '%s' evaluated to false", step.When)
+			result.SkipKind = SkipKindWhenCondition
 			result.FinishedAt = time.Now()
 			e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
 			return result
@@ -652,6 +654,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		}
 		result.Status = StatusSkipped
 		result.SkipReason = fmt.Sprintf("%s steps are not yet executed by ntm pipeline runner; dispatch %q manually (%s)", kind, step.ID, summary)
+		result.SkipKind = SkipKindNotImplemented
 		result.FinishedAt = time.Now()
 		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
 		return result
@@ -1392,6 +1395,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 					StartedAt:  time.Now(),
 					FinishedAt: time.Now(),
 					SkipReason: "cancelled due to parallel group failure",
+					SkipKind:   SkipKindCancelled,
 				}
 				e.stateMu.Lock()
 				e.state.Steps[ps.ID] = results[idx]
@@ -1556,6 +1560,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		result.Status = StatusCancelled
 		result.FinishedAt = time.Now()
 		result.SkipReason = "context cancelled"
+		result.SkipKind = SkipKindCancelled
 		return result
 	}
 
@@ -1575,6 +1580,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		if skip {
 			result.Status = StatusSkipped
 			result.SkipReason = fmt.Sprintf("condition '%s' evaluated to false", step.When)
+			result.SkipKind = SkipKindWhenCondition
 			result.FinishedAt = time.Now()
 			return result
 		}
@@ -1682,6 +1688,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 			case <-ctx.Done():
 				result.Status = StatusCancelled
 				result.SkipReason = "context cancelled during wait"
+				result.SkipKind = SkipKindCancelled
 				result.FinishedAt = time.Now()
 				return result
 			case <-time.After(timeout):
@@ -1694,6 +1701,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 				if ctx.Err() != nil {
 					result.Status = StatusCancelled
 					result.SkipReason = "context cancelled during execution"
+					result.SkipKind = SkipKindCancelled
 					result.FinishedAt = time.Now()
 					return result
 				}
@@ -2300,10 +2308,10 @@ func shouldRerunStep(result StepResult) bool {
 	case StatusFailed, StatusCancelled, StatusRunning, StatusPending:
 		return true
 	case StatusSkipped:
-		if strings.HasPrefix(result.SkipReason, "dependency failed") {
+		if result.SkipKind == SkipKindFailedDependency || strings.HasPrefix(result.SkipReason, "dependency failed") {
 			return true
 		}
-		if strings.HasPrefix(result.SkipReason, "cancelled") {
+		if result.SkipKind == SkipKindCancelled || strings.HasPrefix(result.SkipReason, "cancelled") {
 			return true
 		}
 	}
@@ -2627,6 +2635,7 @@ func (e *Executor) applyStartFrom(workflow *Workflow) error {
 			StepID:     id,
 			Status:     StatusSkipped,
 			SkipReason: StartFromSkipReason,
+			SkipKind:   SkipKindStartFrom,
 			StartedAt:  now,
 			FinishedAt: now,
 		}

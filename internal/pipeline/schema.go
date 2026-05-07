@@ -1204,6 +1204,22 @@ const (
 	StatusSkipped   ExecutionStatus = "skipped"
 )
 
+// SkipKind classifies why a step was skipped or cancelled.
+type SkipKind string
+
+const (
+	SkipKindNone             SkipKind = ""
+	SkipKindWhenCondition    SkipKind = "when_false"
+	SkipKindNotImplemented   SkipKind = "phase_b_not_implemented"
+	SkipKindFailedDependency SkipKind = "failed_dependency"
+	SkipKindStartFrom        SkipKind = "start_from_excluded"
+	SkipKindForeachFilter    SkipKind = "foreach_filter_excluded"
+	SkipKindForeachContinue  SkipKind = "foreach_loop_control_continue"
+	SkipKindForeachBreak     SkipKind = "foreach_loop_control_break_after"
+	SkipKindCancelled        SkipKind = "cancelled"
+	SkipKindLimit            SkipKind = "resource_limit_exceeded"
+)
+
 // StepResult contains the result of executing a step
 type StepResult struct {
 	StepID     string          `json:"step_id"`
@@ -1216,6 +1232,7 @@ type StepResult struct {
 	ParsedData interface{}     `json:"parsed_data,omitempty"` // Result of output_parse
 	Error      *StepError      `json:"error,omitempty"`
 	SkipReason string          `json:"skip_reason,omitempty"` // If skipped due to 'when' condition
+	SkipKind   SkipKind        `json:"skip_kind,omitempty"`   // Structured classifier for SkipReason
 	Attempts   int             `json:"attempts,omitempty"`    // Number of retry attempts
 }
 
