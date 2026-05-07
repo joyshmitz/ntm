@@ -2832,11 +2832,14 @@ func (e *Executor) applyStartFrom(workflow *Workflow) error {
 		return nil
 	}
 
-	if _, ok := e.graph.GetStep(target); !ok {
-		return fmt.Errorf("--start-from step %q not found in workflow", target)
-	}
+	// Check for nested-body containment first: foreach body steps are not
+	// indexed in the dependency graph, so a graph-only lookup would misreport
+	// them as "not found" instead of surfacing the foreach-body rejection.
 	if parent, kind, inside := findStepContainer(workflow, target); inside {
 		return fmt.Errorf("--start-from step %q is inside %s body of %q; --start-from must target a top-level step (parent: %q)", target, kind, parent, parent)
+	}
+	if _, ok := e.graph.GetStep(target); !ok {
+		return fmt.Errorf("--start-from step %q not found in workflow", target)
 	}
 
 	// Compute transitive deps via BFS over the dependency graph.

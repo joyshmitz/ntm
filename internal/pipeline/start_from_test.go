@@ -183,6 +183,46 @@ func TestStartFrom_InsideLoopBody_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestStartFrom_InsideForeachBody_ReturnsForeachRejection(t *testing.T) {
+	// Foreach body steps are not indexed in the dependency graph, so a naive
+	// graph-only lookup would report them as "not found in workflow" instead of
+	// surfacing the actual constraint: --start-from must target a top-level
+	// step. Operators need the foreach-body diagnostic to know which parent
+	// step to target instead.
+	wf := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "start-from-foreach",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID: "fanout",
+				Foreach: &ForeachConfig{
+					Items: `["a","b"]`,
+					Steps: []Step{
+						{ID: "iter_child", Prompt: "child"},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	cfg.StartFromStep = "iter_child"
+	e := NewExecutor(cfg)
+
+	_, err := e.Run(context.Background(), wf, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want foreach-body error")
+	}
+	if !strings.Contains(err.Error(), "foreach") || !strings.Contains(err.Error(), "fanout") {
+		t.Fatalf("err = %v, want it to mention the foreach container and parent id", err)
+	}
+	if strings.Contains(err.Error(), "not found in workflow") {
+		t.Fatalf("err = %v, want foreach-body diagnostic, not graph 'not found' fallback", err)
+	}
+}
+
 func TestStartFrom_NoTransitiveDeps_RunsAllRemaining(t *testing.T) {
 	// Targeting the very first step is a no-op for skipping, but must not
 	// crash and must still execute every step normally.
