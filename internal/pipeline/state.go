@@ -11,7 +11,13 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
-const pipelineStateDirName = "pipelines"
+const (
+	pipelineStateDirName = "pipelines"
+
+	// PipelineStateSchemaVersion is the on-disk schema version for persisted
+	// pipeline execution state files.
+	PipelineStateSchemaVersion = 1
+)
 
 func pipelineStateDir(projectDir string) string {
 	return filepath.Join(projectDir, ".ntm", pipelineStateDirName)
@@ -35,7 +41,7 @@ func SaveState(projectDir string, state *ExecutionState) error {
 		return fmt.Errorf("create pipeline state dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := marshalStateForDisk(state)
 	if err != nil {
 		return fmt.Errorf("marshal pipeline state: %w", err)
 	}
@@ -61,6 +67,16 @@ func LoadState(projectDir, runID string) (*ExecutionState, error) {
 		return nil, fmt.Errorf("read pipeline state: %w", err)
 	}
 
+	var header struct {
+		StateSchemaVersion int `json:"state_schema_version,omitempty"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return nil, fmt.Errorf("parse pipeline state header: %w", err)
+	}
+	if header.StateSchemaVersion > PipelineStateSchemaVersion {
+		return nil, fmt.Errorf("pipeline state schema version %d is newer than supported version %d", header.StateSchemaVersion, PipelineStateSchemaVersion)
+	}
+
 	var state ExecutionState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("parse pipeline state: %w", err)
@@ -71,6 +87,26 @@ func LoadState(projectDir, runID string) (*ExecutionState, error) {
 	}
 
 	return &state, nil
+}
+
+func marshalStateForDisk(state *ExecutionState) ([]byte, error) {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+
+	version, err := json.Marshal(PipelineStateSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	doc["state_schema_version"] = version
+
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // CleanupStates removes pipeline state files older than the provided duration.
