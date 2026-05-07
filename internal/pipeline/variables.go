@@ -162,6 +162,8 @@ func (s *Substitutor) resolveVar(path string) (interface{}, error) {
 		return s.resolveLoop(parts[1:])
 	case "defaults":
 		return s.resolveDefaults(parts[1:])
+	case "item":
+		return s.resolveItem(parts[1:])
 	case "session":
 		return s.session, nil
 	case "run_id":
@@ -327,6 +329,24 @@ func (s *Substitutor) resolveDefaults(parts []string) (interface{}, error) {
 	}
 
 	return value, nil
+}
+
+// resolveItem handles ${item} and ${item.X} references inside foreach iterations.
+func (s *Substitutor) resolveItem(parts []string) (interface{}, error) {
+	if s.state == nil || s.state.Variables == nil {
+		return nil, fmt.Errorf("item is only available inside foreach iterations")
+	}
+
+	item, ok := s.state.Variables["loop.item"]
+	if !ok {
+		return nil, fmt.Errorf("item is only available inside foreach iterations")
+	}
+
+	if len(parts) == 0 {
+		return item, nil
+	}
+
+	return navigateNested(item, parts)
 }
 
 // navigateNested traverses nested data structures using dot notation.
@@ -694,7 +714,7 @@ func ValidateVarRefs(template string, availableVars []string) []string {
 
 		// Valid namespaces that don't need to be pre-declared
 		switch parts[0] {
-		case "env", "session", "run_id", "timestamp", "workflow", "loop", "defaults":
+		case "env", "session", "run_id", "timestamp", "workflow", "loop", "defaults", "item":
 			continue
 		case "vars":
 			if len(parts) > 1 && !varSet["vars."+parts[1]] && !varSet[parts[1]] {

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1884,5 +1885,139 @@ func TestSubstitute_DefaultsNoKeyError(t *testing.T) {
 	_, err := sub.Substitute("${defaults}")
 	if err == nil {
 		t.Fatal("expected error for bare defaults reference")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ${item} / ${item.X} loop-local binding tests (bd-6lkqr.3)
+// ---------------------------------------------------------------------------
+
+func TestSubstitute_ItemScalarInForeach(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	items := []interface{}{1, 2, 3}
+
+	for i, item := range items {
+		SetLoopVars(state, "item", item, i, len(items))
+		sub := NewSubstitutor(state, "sess", "wf")
+		result, err := sub.Substitute("val=${item}")
+		if err != nil {
+			t.Fatalf("iteration %d: unexpected error: %v", i, err)
+		}
+		want := fmt.Sprintf("val=%d", item)
+		if result != want {
+			t.Errorf("iteration %d: got %q, want %q", i, result, want)
+		}
+	}
+	ClearLoopVars(state, "item")
+}
+
+func TestSubstitute_ItemStringScalar(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	SetLoopVars(state, "item", "hello", 0, 1)
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	result, err := sub.Substitute("${item}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "hello" {
+		t.Errorf("got %q, want %q", result, "hello")
+	}
+}
+
+func TestSubstitute_ItemMapFields(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	record := map[string]interface{}{
+		"id":    "bd-123",
+		"title": "Fix the thing",
+		"priority": map[string]interface{}{
+			"level": 1,
+		},
+	}
+	SetLoopVars(state, "item", record, 0, 1)
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	result, err := sub.Substitute("${item.id}: ${item.title} (P${item.priority.level})")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "bd-123: Fix the thing (P1)"
+	if result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
+func TestSubstitute_ItemOutsideForeachError(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	_, err := sub.Substitute("${item}")
+	if err == nil {
+		t.Fatal("expected error for item reference outside foreach")
+	}
+	subErr, ok := err.(*SubstitutionError)
+	if !ok {
+		t.Fatalf("expected SubstitutionError, got %T", err)
+	}
+	if subErr.VarRef != "item" {
+		t.Errorf("VarRef=%q, want %q", subErr.VarRef, "item")
+	}
+}
+
+func TestSubstitute_ItemFieldOutsideForeachError(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	_, err := sub.Substitute("${item.id}")
+	if err == nil {
+		t.Fatal("expected error for item.id reference outside foreach")
+	}
+}
+
+func TestSubstitute_ItemNilStateError(t *testing.T) {
+	sub := NewSubstitutor(nil, "sess", "wf")
+
+	_, err := sub.Substitute("${item}")
+	if err == nil {
+		t.Fatal("expected error for item reference with nil state")
+	}
+}
+
+func TestSubstitute_ItemClearedAfterLoop(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	SetLoopVars(state, "item", "value", 0, 1)
+	ClearLoopVars(state, "item")
+
+	sub := NewSubstitutor(state, "sess", "wf")
+	_, err := sub.Substitute("${item}")
+	if err == nil {
+		t.Fatal("expected error after loop vars cleared")
+	}
+}
+
+func TestSubstitute_ItemWithAsAlias(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	SetLoopVars(state, "file", "/tmp/test.txt", 0, 1)
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	result, err := sub.Substitute("${item}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "/tmp/test.txt" {
+		t.Errorf("got %q, want %q", result, "/tmp/test.txt")
+	}
+}
+
+func TestSubstitute_ItemWithDefaultFallback(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	result, err := sub.Substitute(`${item | "none"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "none" {
+		t.Errorf("got %q, want %q", result, "none")
 	}
 }
