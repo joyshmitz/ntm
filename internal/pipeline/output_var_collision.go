@@ -218,22 +218,22 @@ func (e *Executor) storeParallelOutputVars(parent *Step, results []StepResult, c
 				e.state.Variables[name+"_parsed"] = parsed
 			}
 		default:
-			// bd-iw5bw: aggregate keeps index alignment between
-			// vars.<name>[i] and vars.<name>_parsed[i]. Previously the
-			// parsed slice only got an entry when ParsedData was non-nil,
-			// so a later sibling with parsed output would shift up and
-			// downstream ${vars.shared.N} / ${vars.shared_parsed.N}
-			// templates correlated to the wrong child or hit out-of-bounds.
-			outputs := make([]string, 0, len(indices))
-			parsed := make([]interface{}, 0, len(indices))
+			// bd-iw5bw + bd-i3eah: aggregate stores a []string in
+			// declaration order with len == len(parallel.Steps in the
+			// group). Non-completed substeps reserve an empty-string
+			// slot so positional indexing (${vars.shared.N}) remains
+			// stable when a sibling fails or is cancelled. The parallel
+			// _parsed slice mirrors this layout.
+			outputs := make([]string, len(indices))
+			parsed := make([]interface{}, len(indices))
 			hasParsed := false
-			for _, index := range indices {
+			for slot, index := range indices {
 				result := results[index]
 				if result.Status != StatusCompleted {
 					continue
 				}
-				outputs = append(outputs, result.Output)
-				parsed = append(parsed, result.ParsedData)
+				outputs[slot] = result.Output
+				parsed[slot] = result.ParsedData
 				if result.ParsedData != nil {
 					hasParsed = true
 				}

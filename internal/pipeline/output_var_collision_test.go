@@ -186,6 +186,66 @@ func TestStoreParallelOutputVarsAggregatePreservesParsedAlignment(t *testing.T) 
 	}
 }
 
+// TestStoreParallelOutputVarsAggregatePreservesPositionalIndexing covers
+// bd-i3eah: when a substep fails or is cancelled, the aggregate output_var
+// slice must reserve a slot rather than shift later siblings up. Pipelines
+// that index the slice positionally (${vars.shared.N}) would otherwise
+// silently read the wrong row.
+func TestStoreParallelOutputVarsAggregatePreservesPositionalIndexing(t *testing.T) {
+	parent := &Step{
+		ID: "fanout",
+		Parallel: ParallelSpec{Steps: []Step{
+			{ID: "left", OutputVar: "shared"},
+			{ID: "middle", OutputVar: "shared"},
+			{ID: "right", OutputVar: "shared"},
+		}},
+	}
+	results := []StepResult{
+		{StepID: "left", Status: StatusCompleted, Output: "left raw"},
+		{StepID: "middle", Status: StatusFailed, Error: &StepError{Type: "timeout", Message: "boom"}},
+		{StepID: "right", Status: StatusCompleted, Output: "right raw", ParsedData: map[string]interface{}{"value": 3}},
+	}
+
+	e := &Executor{
+		state: &ExecutionState{
+			RunID:     "i3eah-run",
+			Variables: make(map[string]interface{}),
+		},
+	}
+	e.storeParallelOutputVars(parent, results, []string{"left", "right"})
+
+	got, ok := e.state.Variables["shared"].([]string)
+	if !ok {
+		t.Fatalf("shared = %T, want []string", e.state.Variables["shared"])
+	}
+	if len(got) != 3 {
+		t.Fatalf("len(shared) = %d, want 3 (one slot per declared substep)", len(got))
+	}
+	if got[0] != "left raw" {
+		t.Errorf("shared[0] = %q, want left raw", got[0])
+	}
+	if got[1] != "" {
+		t.Errorf("shared[1] = %q, want empty placeholder for failed middle sibling", got[1])
+	}
+	if got[2] != "right raw" {
+		t.Errorf("shared[2] = %q, want right raw (must NOT shift up to slot 1)", got[2])
+	}
+
+	parsed, ok := e.state.Variables["shared_parsed"].([]interface{})
+	if !ok {
+		t.Fatalf("shared_parsed = %T, want []interface{}", e.state.Variables["shared_parsed"])
+	}
+	if len(parsed) != 3 {
+		t.Fatalf("len(shared_parsed) = %d, want 3 to align with shared", len(parsed))
+	}
+	if parsed[1] != nil {
+		t.Errorf("shared_parsed[1] = %#v, want nil for failed middle sibling", parsed[1])
+	}
+	if m, _ := parsed[2].(map[string]interface{}); m == nil || m["value"] != 3 {
+		t.Errorf("shared_parsed[2] = %#v, want right parsed payload at index 2", parsed[2])
+	}
+}
+
 func TestExecuteParallelDuplicateOutputVarLastModeLogsDebug(t *testing.T) {
 	var buf bytes.Buffer
 	previous := slog.Default()
