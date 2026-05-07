@@ -547,6 +547,7 @@ func (le *LoopExecutor) resolveItems(expr string) ([]interface{}, error) {
 
 	// Try to resolve as a variable reference
 	sub := NewSubstitutor(le.executor.state, le.executor.config.Session, le.executor.state.WorkflowID)
+	sub.SetDefaults(le.executor.defaults)
 
 	// Strip ${ and } if present
 	varPath := resolved

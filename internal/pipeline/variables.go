@@ -20,6 +20,7 @@ type Substitutor struct {
 	state    *ExecutionState
 	session  string
 	workflow string
+	defaults map[string]interface{}
 }
 
 // NewSubstitutor creates a new substitutor with the given execution context.
@@ -29,6 +30,11 @@ func NewSubstitutor(state *ExecutionState, session, workflow string) *Substituto
 		session:  session,
 		workflow: workflow,
 	}
+}
+
+// SetDefaults sets the workflow-level defaults map for ${defaults.X} resolution.
+func (s *Substitutor) SetDefaults(d map[string]interface{}) {
+	s.defaults = d
 }
 
 // SubstitutionError represents an error during variable substitution
@@ -154,6 +160,8 @@ func (s *Substitutor) resolveVar(path string) (interface{}, error) {
 		return s.resolveEnv(parts[1:])
 	case "loop":
 		return s.resolveLoop(parts[1:])
+	case "defaults":
+		return s.resolveDefaults(parts[1:])
 	case "session":
 		return s.session, nil
 	case "run_id":
@@ -292,6 +300,28 @@ func (s *Substitutor) resolveLoop(parts []string) (interface{}, error) {
 	}
 
 	// Handle nested access: loop.item.field
+	if len(parts) > 1 {
+		return navigateNested(value, parts[1:])
+	}
+
+	return value, nil
+}
+
+// resolveDefaults handles defaults.X and defaults.X.nested.field references.
+func (s *Substitutor) resolveDefaults(parts []string) (interface{}, error) {
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("defaults requires a key name")
+	}
+	if s.defaults == nil {
+		return nil, fmt.Errorf("no defaults defined in workflow")
+	}
+
+	root := parts[0]
+	value, ok := s.defaults[root]
+	if !ok {
+		return nil, fmt.Errorf("undefined default: %s", root)
+	}
+
 	if len(parts) > 1 {
 		return navigateNested(value, parts[1:])
 	}
@@ -664,7 +694,7 @@ func ValidateVarRefs(template string, availableVars []string) []string {
 
 		// Valid namespaces that don't need to be pre-declared
 		switch parts[0] {
-		case "env", "session", "run_id", "timestamp", "workflow", "loop":
+		case "env", "session", "run_id", "timestamp", "workflow", "loop", "defaults":
 			continue
 		case "vars":
 			if len(parts) > 1 && !varSet["vars."+parts[1]] && !varSet[parts[1]] {

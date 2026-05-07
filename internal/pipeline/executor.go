@@ -69,6 +69,7 @@ type Executor struct {
 	state    *ExecutionState
 	stateMu  sync.RWMutex // Protects state.Steps for concurrent access
 	varMu    sync.RWMutex // Protects state.Variables for concurrent access
+	defaults map[string]interface{}
 	graph    *DependencyGraph
 	progress chan<- ProgressEvent
 	cancelFn context.CancelFunc
@@ -147,6 +148,8 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 		e.state.Variables[name] = val
 	}
 	e.varMu.Unlock()
+
+	e.defaults = workflow.Defaults
 
 	e.persistState()
 
@@ -269,6 +272,7 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	e.stateMu.Unlock()
 
 	e.progress = progress
+	e.defaults = workflow.Defaults
 
 	// Build dependency graph
 	e.graph = NewDependencyGraph(workflow)
@@ -1830,6 +1834,7 @@ func (e *Executor) substituteVariables(s string) string {
 	e.stateMu.RLock()
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
+	sub.SetDefaults(e.defaults)
 	result, _ := sub.Substitute(s)
 	return result
 }
@@ -1850,6 +1855,7 @@ func (e *Executor) evaluateCondition(condition string) (bool, error) {
 	e.stateMu.RLock()
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
+	sub.SetDefaults(e.defaults)
 	return EvaluateCondition(condition, sub)
 }
 

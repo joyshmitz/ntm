@@ -1725,3 +1725,164 @@ func TestResolveLoop_NestedAccess(t *testing.T) {
 		t.Errorf("got %q, want 'test_item'", result)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ${defaults.X} resolution tests (bd-6lkqr.2)
+// ---------------------------------------------------------------------------
+
+func TestSubstitute_DefaultsFlatString(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"model_mix": "cc:3,cod:1,gmi:1",
+	})
+
+	result, err := sub.Substitute("mix=${defaults.model_mix}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "mix=cc:3,cod:1,gmi:1" {
+		t.Errorf("got %q, want %q", result, "mix=cc:3,cod:1,gmi:1")
+	}
+}
+
+func TestSubstitute_DefaultsDottedPath(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"hard_caps": map[string]interface{}{
+			"phase_4_max_rounds": 6,
+		},
+	})
+
+	result, err := sub.Substitute("max=${defaults.hard_caps.phase_4_max_rounds}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "max=6" {
+		t.Errorf("got %q, want %q", result, "max=6")
+	}
+}
+
+func TestSubstitute_DefaultsDeepNested(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": "deep",
+			},
+		},
+	})
+
+	result, err := sub.Substitute("${defaults.a.b.c}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "deep" {
+		t.Errorf("got %q, want %q", result, "deep")
+	}
+}
+
+func TestSubstitute_DefaultsUnknownPathError(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"known": "yes",
+	})
+
+	_, err := sub.Substitute("${defaults.unknown}")
+	if err == nil {
+		t.Fatal("expected error for unknown default key")
+	}
+	subErr, ok := err.(*SubstitutionError)
+	if !ok {
+		t.Fatalf("expected SubstitutionError, got %T", err)
+	}
+	if subErr.VarRef != "defaults.unknown" {
+		t.Errorf("VarRef=%q, want %q", subErr.VarRef, "defaults.unknown")
+	}
+}
+
+func TestSubstitute_DefaultsNilMapError(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	_, err := sub.Substitute("${defaults.anything}")
+	if err == nil {
+		t.Fatal("expected error when defaults is nil")
+	}
+}
+
+func TestSubstitute_DefaultsIntValue(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"retries": 3,
+	})
+
+	result, err := sub.Substitute("retries=${defaults.retries}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "retries=3" {
+		t.Errorf("got %q, want %q", result, "retries=3")
+	}
+}
+
+func TestSubstitute_DefaultsFloatValue(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"threshold": 0.75,
+	})
+
+	result, err := sub.Substitute("t=${defaults.threshold}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "t=0.75" {
+		t.Errorf("got %q, want %q", result, "t=0.75")
+	}
+}
+
+func TestSubstitute_DefaultsBoolValue(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{
+		"verbose": true,
+	})
+
+	result, err := sub.Substitute("verbose=${defaults.verbose}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "verbose=true" {
+		t.Errorf("got %q, want %q", result, "verbose=true")
+	}
+}
+
+func TestSubstitute_DefaultsWithDefault(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{})
+
+	result, err := sub.Substitute(`${defaults.missing | "fallback"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "fallback" {
+		t.Errorf("got %q, want %q", result, "fallback")
+	}
+}
+
+func TestSubstitute_DefaultsNoKeyError(t *testing.T) {
+	state := &ExecutionState{Variables: map[string]interface{}{}}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetDefaults(map[string]interface{}{"x": "y"})
+
+	_, err := sub.Substitute("${defaults}")
+	if err == nil {
+		t.Fatal("expected error for bare defaults reference")
+	}
+}
