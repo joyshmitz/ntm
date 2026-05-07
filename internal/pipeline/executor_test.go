@@ -1340,6 +1340,38 @@ func TestExecutor_Run_DryRun(t *testing.T) {
 	}
 }
 
+func TestExecutor_Run_DryRun_RendersStepDescription(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "test-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID:          "step1",
+				Description: "Draft the release plan",
+				Prompt:      "Do task 1",
+			},
+		},
+	}
+
+	state, err := e.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() returned error in dry run mode: %v", err)
+	}
+
+	output := state.Steps["step1"].Output
+	if !strings.Contains(output, "▶ [step1] Draft the release plan") {
+		t.Fatalf("dry-run output = %q, want dispatch line with step description", output)
+	}
+	if !strings.Contains(output, "[DRY RUN] Would execute") {
+		t.Fatalf("dry-run output = %q, want dry-run action", output)
+	}
+}
+
 // TestExecutor_Run_DryRun_WithVariables tests variable substitution in dry run mode
 func TestExecutor_Run_DryRun_WithVariables(t *testing.T) {
 
@@ -1564,9 +1596,10 @@ func TestExecutor_Run_DryRun_ProgressEvents(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,
 		Name:          "test-workflow",
+		Description:   "Coordinate the release",
 		Settings:      DefaultWorkflowSettings(),
 		Steps: []Step{
-			{ID: "step1", Prompt: "Task 1"},
+			{ID: "step1", Description: "Draft the release plan", Prompt: "Task 1"},
 		},
 	}
 
@@ -1598,6 +1631,23 @@ func TestExecutor_Run_DryRun_ProgressEvents(t *testing.T) {
 	// Last event should be workflow_complete
 	if len(events) > 0 && events[len(events)-1].Type != "workflow_complete" {
 		t.Errorf("last event type = %q, want workflow_complete", events[len(events)-1].Type)
+	}
+
+	var sawWorkflowDescription, sawStepDescription bool
+	for _, event := range events {
+		if event.Type == "workflow_start" && strings.Contains(event.Message, "Coordinate the release") {
+			sawWorkflowDescription = true
+		}
+		if (event.Type == "step_start" || event.Type == "step_complete") &&
+			strings.Contains(event.Message, "Draft the release plan") {
+			sawStepDescription = true
+		}
+	}
+	if !sawWorkflowDescription {
+		t.Fatalf("progress events = %+v, want workflow_start with description", events)
+	}
+	if !sawStepDescription {
+		t.Fatalf("progress events = %+v, want step progress with description", events)
 	}
 }
 

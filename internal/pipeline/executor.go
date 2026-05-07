@@ -192,7 +192,7 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	}
 
 	// Emit start event
-	e.emitProgress("workflow_start", "", fmt.Sprintf("Starting workflow: %s", workflow.Name), 0)
+	e.emitProgress("workflow_start", "", workflowProgressMessage("Starting workflow", workflow), 0)
 
 	// Execute steps in dependency order
 	err := e.executeWorkflow(ctx, workflow)
@@ -317,7 +317,7 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	e.persistState()
 
 	// Emit start event
-	e.emitProgress("workflow_start", "", fmt.Sprintf("Resuming workflow: %s", workflow.Name), e.calculateProgress())
+	e.emitProgress("workflow_start", "", workflowProgressMessage("Resuming workflow", workflow), e.calculateProgress())
 
 	// Execute steps in dependency order
 	err := e.executeWorkflow(ctx, workflow)
@@ -528,7 +528,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		result.Status = StatusRunning
 
 		e.emitProgress("step_start", step.ID,
-			fmt.Sprintf("Executing step %s (attempt %d/%d)", step.ID, attempt, maxAttempts),
+			stepProgressMessage("Executing step", step, fmt.Sprintf("attempt %d/%d", attempt, maxAttempts)),
 			e.calculateProgress())
 
 		// Execute the step
@@ -539,7 +539,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 			result.Attempts = attempt
 			result.FinishedAt = time.Now()
 			e.emitProgress("step_complete", step.ID,
-				fmt.Sprintf("Step %s completed", step.ID), e.calculateProgress())
+				stepProgressMessage("Step completed", step, ""), e.calculateProgress())
 			return result
 		}
 
@@ -612,7 +612,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		}
 		if e.config.DryRun {
 			result.Status = StatusCompleted
-			result.Output = fmt.Sprintf("[DRY RUN] Would execute %s step: %s", kind, summary)
+			result.Output = dryRunOutput(step, fmt.Sprintf("Would execute %s step: %s", kind, summary))
 			result.FinishedAt = time.Now()
 			return result
 		}
@@ -655,7 +655,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	// Dry run mode - don't actually execute
 	if e.config.DryRun {
 		result.Status = StatusCompleted
-		result.Output = "[DRY RUN] Would execute: " + truncatePrompt(prompt, 100)
+		result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(prompt, 100))
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -776,7 +776,7 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	if e.config.DryRun {
 		result.Status = StatusCompleted
-		result.Output = fmt.Sprintf("[DRY RUN] Would execute command: %s", truncatePrompt(expandedCmd, 200))
+		result.Output = dryRunOutput(step, "Would execute command: "+truncatePrompt(expandedCmd, 200))
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -1044,8 +1044,8 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 
 	if e.config.DryRun {
 		result.Status = StatusCompleted
-		result.Output = fmt.Sprintf("[DRY RUN] Would dispatch template %s (%d chars) to pane %s",
-			step.Template, len(rendered), paneID)
+		result.Output = dryRunOutput(step,
+			fmt.Sprintf("Would dispatch template %s (%d chars) to pane %s", step.Template, len(rendered), paneID))
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -1233,7 +1233,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	defer cancelParallel()
 
 	e.emitProgress("parallel_start", step.ID,
-		fmt.Sprintf("Starting parallel group with %d steps (on_error=%s)", len(step.Parallel.Steps), onError),
+		stepProgressMessage("Starting parallel group", step, fmt.Sprintf("%d steps, on_error=%s", len(step.Parallel.Steps), onError)),
 		e.calculateProgress())
 
 	var wg sync.WaitGroup
@@ -1501,7 +1501,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		}
 
 		e.emitProgress("step_start", step.ID,
-			fmt.Sprintf("Executing parallel step %s (attempt %d/%d) on %s", step.ID, attempt, maxAttempts, agentType),
+			stepProgressMessage("Executing parallel step", step, fmt.Sprintf("attempt %d/%d on %s", attempt, maxAttempts, agentType)),
 			e.calculateProgress())
 
 		// --- Execution Logic (inlined from executeStepOnce) ---
@@ -1524,7 +1524,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		// Dry run mode
 		if e.config.DryRun {
 			result.Status = StatusCompleted
-			result.Output = "[DRY RUN] Would execute: " + truncatePrompt(prompt, 100)
+			result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(prompt, 100))
 			result.FinishedAt = time.Now()
 			return result
 		}
@@ -2020,8 +2020,52 @@ func (e *Executor) sendNotification(ctx context.Context, workflow *Workflow, eve
 	_ = e.notifier.Notify(notifyCtx, payload)
 }
 
-// truncatePrompt truncates a prompt for display, respecting UTF-8 boundaries.
-// Ensures the returned string is at most n bytes.
+func workflowProgressMessage(action string, workflow *Workflow) string {
+	if workflow == nil {
+		return action
+	}
+	message := fmt.Sprintf("%s: %s", action, workflow.Name)
+	if desc := shortDescription(workflow.Description); desc != "" {
+		message += ": " + desc
+	}
+	return message
+}
+
+func stepProgressMessage(action string, step *Step, detail string) string {
+	if step == nil {
+		if detail == "" {
+			return action
+		}
+		return fmt.Sprintf("%s (%s)", action, detail)
+	}
+	message := fmt.Sprintf("%s %s", action, step.ID)
+	if desc := shortDescription(step.Description); desc != "" {
+		message += ": " + desc
+	}
+	if detail != "" {
+		message += " (" + detail + ")"
+	}
+	return message
+}
+
+func dryRunOutput(step *Step, action string) string {
+	return fmt.Sprintf("%s\n[DRY RUN] %s", dryRunDispatchLine(step), action)
+}
+
+func dryRunDispatchLine(step *Step) string {
+	if step == nil {
+		return "▶"
+	}
+	if desc := shortDescription(step.Description); desc != "" {
+		return fmt.Sprintf("▶ [%s] %s", step.ID, desc)
+	}
+	return fmt.Sprintf("▶ [%s]", step.ID)
+}
+
+func shortDescription(desc string) string {
+	return truncatePrompt(strings.TrimSpace(desc), 80)
+}
+
 // describeForeach builds a one-line summary of a ForeachConfig for dry-run
 // output and skip-reason messages. Picks the most-specific iteration source
 // available so the operator can see at a glance what the step would loop over.
@@ -2056,6 +2100,8 @@ func describeForeach(fc *ForeachConfig) string {
 	return src
 }
 
+// truncatePrompt truncates a prompt for display, respecting UTF-8 boundaries.
+// Ensures the returned string is at most n bytes.
 func truncatePrompt(s string, n int) string {
 	// Replace newlines with spaces for single-line display
 	s = strings.ReplaceAll(s, "\n", " ")

@@ -367,7 +367,11 @@ Examples:
 				fmt.Printf("  ⚠️  %s\n", w.Message)
 			}
 
-			fmt.Printf("✓ Validated workflow: %s (%d steps)\n\n", workflow.Name, len(workflow.Steps))
+			fmt.Printf("✓ Validated workflow: %s (%d steps)\n", workflow.Name, len(workflow.Steps))
+			if desc := strings.TrimSpace(workflow.Description); desc != "" {
+				fmt.Printf("   Description: %s\n", desc)
+			}
+			fmt.Println()
 
 			// Create executor
 			execCfg := pipeline.DefaultExecutorConfig(session)
