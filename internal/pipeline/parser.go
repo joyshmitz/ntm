@@ -539,6 +539,8 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 		})
 	}
 
+	validateOutputVarCollisions(step, stepField, result)
+
 	// Validate parallel sub-steps
 	for j, pStep := range step.Parallel.Steps {
 		validateStep(&pStep, fmt.Sprintf("%s.parallel[%d]", stepField, j), stepIDs, result)

@@ -1396,6 +1396,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	var mu sync.Mutex
 	var firstError error
 	var cancelled bool
+	completionOrder := make([]string, 0, len(step.Parallel.Steps))
 
 	// Track used panes to coordinate agent selection
 	usedPanes := make(map[string]bool)
@@ -1438,6 +1439,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 
 			mu.Lock()
 			results[idx] = pResult
+			completionOrder = append(completionOrder, pResult.StepID)
 			e.stateMu.Lock()
 			e.state.Steps[ps.ID] = pResult
 			e.state.UpdatedAt = time.Now()
@@ -1487,6 +1489,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 		}
 	}
 	result.ParsedData = groupOutputs
+	e.storeParallelOutputVars(step, results, completionOrder)
 
 	// Determine final status based on error mode and results
 	if failed > 0 || cancelled {
@@ -1779,12 +1782,6 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		if result.Status == StatusCompleted {
 			// Store output
 			e.varMu.Lock()
-			if step.OutputVar != "" {
-				e.state.Variables[step.OutputVar] = result.Output
-				if result.ParsedData != nil {
-					e.state.Variables[step.OutputVar+"_parsed"] = result.ParsedData
-				}
-			}
 			StoreStepOutput(e.state, step.ID, result.Output, result.ParsedData)
 			e.varMu.Unlock()
 

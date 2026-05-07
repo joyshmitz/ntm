@@ -394,8 +394,9 @@ type Step struct {
 	BeadQuery *BeadQueryStep `yaml:"bead_query,omitempty" toml:"bead_query,omitempty" json:"bead_query,omitempty"`
 
 	// Output handling
-	OutputVar   string      `yaml:"output_var,omitempty" toml:"output_var,omitempty" json:"output_var,omitempty"`       // Store output in variable
-	OutputParse OutputParse `yaml:"output_parse,omitempty" toml:"output_parse,omitempty" json:"output_parse,omitempty"` // none, json, yaml, lines, first_line, regex
+	OutputVar     string        `yaml:"output_var,omitempty" toml:"output_var,omitempty" json:"output_var,omitempty"`                // Store output in variable
+	OutputVarMode OutputVarMode `yaml:"output_var_mode,omitempty" toml:"output_var_mode,omitempty" json:"output_var_mode,omitempty"` // aggregate, last, collect
+	OutputParse   OutputParse   `yaml:"output_parse,omitempty" toml:"output_parse,omitempty" json:"output_parse,omitempty"`          // none, json, yaml, lines, first_line, regex
 
 	// Parallel execution. Two forms accepted:
 	//   - parallel: [<step>, <step>, ...]  — explicit inline sub-steps
@@ -1067,6 +1068,7 @@ type ForeachConfig struct {
 	Body           []Step                 `yaml:"body,omitempty" toml:"body,omitempty" json:"body,omitempty"` // Alias for Steps.
 	Parallel       bool                   `yaml:"parallel,omitempty" toml:"parallel,omitempty" json:"parallel,omitempty"`
 	MaxConcurrent  int                    `yaml:"max_concurrent,omitempty" toml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`
+	OutputVarMode  OutputVarMode          `yaml:"output_var_mode,omitempty" toml:"output_var_mode,omitempty" json:"output_var_mode,omitempty"`
 }
 
 // RoutingStrategy defines how to select an agent for a step
