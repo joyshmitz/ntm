@@ -1088,6 +1088,10 @@ func TestParseError_Error(t *testing.T) {
 			"test.yaml:line 10: line error",
 		},
 		{
+			ParseError{File: "test.yaml", Line: 10, Column: 7, Message: "column error"},
+			"test.yaml:line 10, column 7: column error",
+		},
+		{
 			ParseError{Field: "steps[0].id", Message: "field error"},
 			"steps[0].id: field error",
 		},
@@ -1274,6 +1278,12 @@ steps:
 	if !strings.Contains(pe.Message, "YAML parse error") {
 		t.Errorf("expected 'YAML parse error' in message, got %q", pe.Message)
 	}
+	if pe.Line == 0 {
+		t.Errorf("expected line number in YAML parse error, got %+v", pe)
+	}
+	if pe.Hint == "" || !strings.Contains(pe.Hint, "docs/WORKFLOW_SCHEMA.md") {
+		t.Errorf("expected schema-doc hint, got %q", pe.Hint)
+	}
 }
 
 func TestParseString_InvalidTOML(t *testing.T) {
@@ -1293,6 +1303,12 @@ invalid toml [here
 	}
 	if !strings.Contains(pe.Message, "TOML parse error") {
 		t.Errorf("expected 'TOML parse error' in message, got %q", pe.Message)
+	}
+	if pe.Line == 0 || pe.Column == 0 {
+		t.Errorf("expected line and column in TOML parse error, got %+v", pe)
+	}
+	if pe.Hint == "" {
+		t.Errorf("expected TOML parse hint, got empty")
 	}
 }
 
@@ -1641,6 +1657,15 @@ steps:
 	if !strings.Contains(pe.Message, "field legacy not found") {
 		t.Fatalf("expected unknown-field message, got %q", pe.Message)
 	}
+	if pe.Field != "legacy" {
+		t.Fatalf("expected field legacy, got %q", pe.Field)
+	}
+	if pe.Line == 0 {
+		t.Fatalf("expected line number for unknown YAML field, got %+v", pe)
+	}
+	if pe.Hint == "" || !strings.Contains(pe.Hint, "docs/WORKFLOW_SCHEMA.md") {
+		t.Fatalf("expected schema-doc hint, got %q", pe.Hint)
+	}
 }
 
 func TestParseFile_TOMLUnknownField(t *testing.T) {
@@ -1676,6 +1701,9 @@ prompt = "Do something"
 	if !strings.Contains(pe.Message, "unknown TOML field") {
 		t.Fatalf("expected unknown TOML field message, got %q", pe.Message)
 	}
+	if pe.Hint == "" || !strings.Contains(pe.Hint, "docs/WORKFLOW_SCHEMA.md") {
+		t.Fatalf("expected schema-doc hint, got %q", pe.Hint)
+	}
 }
 
 func TestParseString_YAMLUnknownField(t *testing.T) {
@@ -1701,6 +1729,15 @@ steps:
 	}
 	if !strings.Contains(pe.Message, "field legacy not found") {
 		t.Fatalf("expected unknown-field message, got %q", pe.Message)
+	}
+	if pe.Field != "legacy" {
+		t.Fatalf("expected field legacy, got %q", pe.Field)
+	}
+	if pe.Line == 0 {
+		t.Fatalf("expected line number for unknown YAML field, got %+v", pe)
+	}
+	if pe.Hint == "" || !strings.Contains(pe.Hint, "docs/WORKFLOW_SCHEMA.md") {
+		t.Fatalf("expected schema-doc hint, got %q", pe.Hint)
 	}
 }
 
@@ -1731,6 +1768,9 @@ prompt = "Do something"
 	}
 	if !strings.Contains(pe.Message, "unknown TOML field") {
 		t.Fatalf("expected unknown TOML field message, got %q", pe.Message)
+	}
+	if pe.Hint == "" || !strings.Contains(pe.Hint, "docs/WORKFLOW_SCHEMA.md") {
+		t.Fatalf("expected schema-doc hint, got %q", pe.Hint)
 	}
 }
 

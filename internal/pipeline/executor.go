@@ -763,6 +763,27 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	return result
 }
 
+func stepRuntimeError(step *Step, kind, typ, reason, hint, details string) *StepError {
+	detailParts := []string{
+		"kind=" + kind,
+		"step_id=" + step.ID,
+		"reason=" + reason,
+	}
+	if hint != "" {
+		detailParts = append(detailParts, "hint="+hint)
+	}
+	if details != "" {
+		detailParts = append(detailParts, "details="+details)
+	}
+
+	return &StepError{
+		Type:      typ,
+		Message:   fmt.Sprintf("%s step %q failed: %s", kind, step.ID, reason),
+		Details:   strings.Join(detailParts, " "),
+		Timestamp: time.Now(),
+	}
+}
+
 // executeCommand runs a shell command step via /bin/sh -c.
 func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Workflow) StepResult {
 	result := StepResult{
@@ -836,11 +857,10 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	if err := cmd.Start(); err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "command",
-			Message:   fmt.Sprintf("failed to start command: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "command", "command",
+			fmt.Sprintf("start failed: %v", err),
+			"check shell syntax, executable availability, and project_dir",
+			err.Error())
 		result.FinishedAt = time.Now()
 		slog.Error("command step start failed",
 			"run_id", e.state.RunID,
@@ -880,11 +900,10 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	if waitErr != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			result.Status = StatusFailed
-			result.Error = &StepError{
-				Type:      "timeout",
-				Message:   fmt.Sprintf("command timed out after %s", timeout),
-				Timestamp: time.Now(),
-			}
+			result.Error = stepRuntimeError(step, "command", "timeout",
+				fmt.Sprintf("timed out after %s", timeout),
+				"increase step.timeout or reduce command runtime",
+				"")
 			slog.Warn("command step timed out",
 				"run_id", e.state.RunID,
 				"step_id", step.ID,
@@ -895,23 +914,20 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		}
 		if ctx.Err() == context.Canceled {
 			result.Status = StatusCancelled
-			result.Error = &StepError{
-				Type:      "cancelled",
-				Message:   "command cancelled",
-				Timestamp: time.Now(),
-			}
+			result.Error = stepRuntimeError(step, "command", "cancelled",
+				"cancelled by workflow context",
+				"retry the run if cancellation was not intentional",
+				"")
 			result.FinishedAt = time.Now()
 			return result
 		}
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			result.Status = StatusFailed
-			result.Error = &StepError{
-				Type:      "exit",
-				Message:   fmt.Sprintf("command exited with status %d", exitErr.ExitCode()),
-				Details:   fmt.Sprintf("%d", exitErr.ExitCode()),
-				Timestamp: time.Now(),
-			}
+			result.Error = stepRuntimeError(step, "command", "exit",
+				fmt.Sprintf("exit_code=%d", exitErr.ExitCode()),
+				"inspect stdout/stderr and command arguments",
+				fmt.Sprintf("exit_code=%d", exitErr.ExitCode()))
 			slog.Warn("command step exited non-zero",
 				"run_id", e.state.RunID,
 				"step_id", step.ID,
@@ -919,11 +935,10 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 			)
 		} else {
 			result.Status = StatusFailed
-			result.Error = &StepError{
-				Type:      "command",
-				Message:   waitErr.Error(),
-				Timestamp: time.Now(),
-			}
+			result.Error = stepRuntimeError(step, "command", "command",
+				fmt.Sprintf("wait failed: %v", waitErr),
+				"check command process lifecycle and project_dir",
+				waitErr.Error())
 			slog.Error("command step failed",
 				"run_id", e.state.RunID,
 				"step_id", step.ID,
@@ -974,11 +989,10 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	templatePath := e.resolveTemplatePath(step.Template)
 	if templatePath == "" {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "template",
-			Message:   fmt.Sprintf("template file not found: %s", step.Template),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "template",
+			fmt.Sprintf("template file not found: %s", step.Template),
+			"place the template beside the workflow file, under project_dir, or use an absolute path",
+			"")
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -986,22 +1000,20 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "template",
-			Message:   fmt.Sprintf("failed to read template: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "template",
+			fmt.Sprintf("failed to read template: %v", err),
+			"check template path permissions and project_dir",
+			err.Error())
 		result.FinishedAt = time.Now()
 		return result
 	}
 
 	if int64(len(content)) > e.limits.MaxTemplateBytes {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "limit_exceeded",
-			Message:   fmt.Sprintf("template file %s exceeds size limit (%d bytes > %d max)", step.Template, len(content), e.limits.MaxTemplateBytes),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "limit_exceeded",
+			fmt.Sprintf("template file %s exceeds size limit (%d bytes > %d max)", step.Template, len(content), e.limits.MaxTemplateBytes),
+			"raise settings.limits.max_template_bytes or split the template",
+			"")
 		result.FinishedAt = time.Now()
 		slog.Error("pipeline.limit.exceeded",
 			"run_id", e.state.RunID,
@@ -1017,11 +1029,10 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	rendered, err := RenderTemplate(string(content), step.Params, step.Args, reserved)
 	if err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "template",
-			Message:   fmt.Sprintf("template rendering failed: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "template",
+			fmt.Sprintf("template rendering failed: %v", err),
+			"provide every declared template parameter through params or args",
+			err.Error())
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -1031,11 +1042,10 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	paneID, agentType, err := e.selectPane(step)
 	if err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "routing",
-			Message:   fmt.Sprintf("failed to select pane: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "routing",
+			fmt.Sprintf("failed to select pane: %v", err),
+			"set exactly one of pane, agent, or route and verify panes are available",
+			err.Error())
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -1065,11 +1075,10 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 
 	if err := e.tmuxClient().PasteKeys(paneID, rendered, true); err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "send",
-			Message:   fmt.Sprintf("failed to send rendered template: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "send",
+			fmt.Sprintf("failed to send rendered template: %v", err),
+			"check that the target tmux pane still exists and accepts input",
+			err.Error())
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -1107,13 +1116,12 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 				result.Status = StatusCancelled
 			} else {
 				result.Status = StatusFailed
-				result.Error = &StepError{
-					Type:       "timeout",
-					Message:    fmt.Sprintf("timeout waiting for completion: %v", err),
-					PaneOutput: e.captureErrorContext(paneID, 50),
-					AgentState: e.detectAgentState(paneID),
-					Timestamp:  time.Now(),
-				}
+				result.Error = stepRuntimeError(step, "template", "timeout",
+					fmt.Sprintf("timeout waiting for completion: %v", err),
+					"increase step.timeout or change wait mode",
+					err.Error())
+				result.Error.PaneOutput = e.captureErrorContext(paneID, 50)
+				result.Error.AgentState = e.detectAgentState(paneID)
 			}
 			result.FinishedAt = time.Now()
 			return result
@@ -1123,11 +1131,10 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	afterOutput, err := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 	if err != nil {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "capture",
-			Message:   fmt.Sprintf("failed to capture output: %v", err),
-			Timestamp: time.Now(),
-		}
+		result.Error = stepRuntimeError(step, "template", "capture",
+			fmt.Sprintf("failed to capture output: %v", err),
+			"check that the target tmux pane still exists",
+			err.Error())
 		result.FinishedAt = time.Now()
 		return result
 	}

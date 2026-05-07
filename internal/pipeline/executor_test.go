@@ -3073,8 +3073,13 @@ func TestExecuteCommand_ExitCode(t *testing.T) {
 	if result.Error.Type != "exit" {
 		t.Errorf("Error.Type = %q, want %q", result.Error.Type, "exit")
 	}
-	if result.Error.Details != "7" {
-		t.Errorf("Error.Details = %q, want %q", result.Error.Details, "7")
+	if !strings.Contains(result.Error.Message, `command step "exit-step" failed`) {
+		t.Errorf("Error.Message = %q, want structured command-step context", result.Error.Message)
+	}
+	for _, want := range []string{"kind=command", "step_id=exit-step", "reason=exit_code=7", "hint="} {
+		if !strings.Contains(result.Error.Details, want) {
+			t.Errorf("Error.Details = %q, want to contain %q", result.Error.Details, want)
+		}
 	}
 }
 
@@ -3276,6 +3281,16 @@ func TestExecuteTemplate_MissingFile(t *testing.T) {
 	if result.Error == nil || result.Error.Type != "template" {
 		t.Errorf("expected template error, got %+v", result.Error)
 	}
+	if result.Error != nil {
+		if !strings.Contains(result.Error.Message, `template step "tpl-step" failed`) {
+			t.Errorf("Error.Message = %q, want structured template-step context", result.Error.Message)
+		}
+		for _, want := range []string{"kind=template", "step_id=tpl-step", "template file not found", "hint="} {
+			if !strings.Contains(result.Error.Details, want) {
+				t.Errorf("Error.Details = %q, want to contain %q", result.Error.Details, want)
+			}
+		}
+	}
 }
 
 func TestExecuteTemplate_UnresolvedDeclaredPlaceholder(t *testing.T) {
@@ -3308,6 +3323,13 @@ func TestExecuteTemplate_UnresolvedDeclaredPlaceholder(t *testing.T) {
 	}
 	if result.Error == nil || !strings.Contains(result.Error.Message, "ROLE") {
 		t.Errorf("expected error mentioning ROLE, got %+v", result.Error)
+	}
+	if result.Error != nil {
+		for _, want := range []string{"kind=template", "step_id=tpl-step", "hint="} {
+			if !strings.Contains(result.Error.Details, want) {
+				t.Errorf("Error.Details = %q, want to contain %q", result.Error.Details, want)
+			}
+		}
 	}
 }
 

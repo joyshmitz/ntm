@@ -2,10 +2,13 @@ package pipeline
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -16,6 +19,7 @@ import (
 type ParseError struct {
 	File    string `json:"file,omitempty"`
 	Line    int    `json:"line,omitempty"`
+	Column  int    `json:"column,omitempty"`
 	Field   string `json:"field,omitempty"`
 	Message string `json:"message"`
 	Hint    string `json:"hint,omitempty"`
@@ -27,7 +31,11 @@ func (e ParseError) Error() string {
 		parts = append(parts, e.File)
 	}
 	if e.Line > 0 {
-		parts = append(parts, fmt.Sprintf("line %d", e.Line))
+		if e.Column > 0 {
+			parts = append(parts, fmt.Sprintf("line %d, column %d", e.Line, e.Column))
+		} else {
+			parts = append(parts, fmt.Sprintf("line %d", e.Line))
+		}
 	}
 	if e.Field != "" {
 		parts = append(parts, e.Field)
@@ -38,6 +46,89 @@ func (e ParseError) Error() string {
 		return fmt.Sprintf("%s: %s", location, e.Message)
 	}
 	return e.Message
+}
+
+var (
+	parseErrorLinePattern     = regexp.MustCompile(`(?i)\bline\s+([0-9]+)`)
+	parseErrorColumnPattern   = regexp.MustCompile(`(?i)\bcolumn\s+([0-9]+)`)
+	yamlUnknownFieldPattern   = regexp.MustCompile(`field ([^[:space:]]+) not found`)
+	workflowSchemaDocsSection = "docs/WORKFLOW_SCHEMA.md"
+)
+
+func buildYAMLParseError(path string, err error) *ParseError {
+	message := err.Error()
+	var typeErr *yaml.TypeError
+	if errors.As(err, &typeErr) && len(typeErr.Errors) > 0 {
+		message = strings.Join(typeErr.Errors, "; ")
+	}
+
+	parseErr := &ParseError{
+		File:    path,
+		Message: fmt.Sprintf("YAML parse error: %s", message),
+		Hint:    fmt.Sprintf("Check YAML syntax at the reported location and verify fields against %s", workflowSchemaDocsSection),
+	}
+	parseErr.Line, parseErr.Column = extractParseErrorLocation(message)
+	if field := extractYAMLUnknownField(message); field != "" {
+		parseErr.Field = field
+		parseErr.Hint = fmt.Sprintf("Remove or rename %q; supported workflow fields are documented in %s", field, workflowSchemaDocsSection)
+	}
+	return parseErr
+}
+
+func buildTOMLParseError(path string, err error) *ParseError {
+	parseErr := &ParseError{
+		File:    path,
+		Message: fmt.Sprintf("TOML parse error: %v", err),
+		Hint:    fmt.Sprintf("Check TOML syntax at the reported location and verify fields against %s", workflowSchemaDocsSection),
+	}
+
+	var tomlErr toml.ParseError
+	if errors.As(err, &tomlErr) {
+		if tomlErr.Message != "" {
+			parseErr.Message = fmt.Sprintf("TOML parse error: %s", tomlErr.Message)
+		}
+		parseErr.Line = tomlErr.Position.Line
+		parseErr.Column = tomlErr.Position.Col
+		parseErr.Field = tomlErr.LastKey
+		if tomlErr.Usage != "" {
+			parseErr.Hint = tomlErr.Usage
+		}
+	}
+	return parseErr
+}
+
+func buildUnknownTOMLFieldError(path string, undecoded []toml.Key) *ParseError {
+	field := undecoded[0].String()
+	return &ParseError{
+		File:    path,
+		Field:   field,
+		Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
+		Hint:    fmt.Sprintf("Remove or rename %q; supported workflow fields are documented in %s", field, workflowSchemaDocsSection),
+	}
+}
+
+func extractParseErrorLocation(message string) (int, int) {
+	return firstIntSubmatch(parseErrorLinePattern, message), firstIntSubmatch(parseErrorColumnPattern, message)
+}
+
+func firstIntSubmatch(pattern *regexp.Regexp, s string) int {
+	match := pattern.FindStringSubmatch(s)
+	if len(match) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func extractYAMLUnknownField(message string) string {
+	match := yamlUnknownFieldPattern.FindStringSubmatch(message)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.Trim(match[1], "`\"'")
 }
 
 // ValidationResult contains the result of validating a workflow
@@ -138,28 +229,15 @@ func ParseFile(path string) (*Workflow, error) {
 	switch ext {
 	case ".yaml", ".yml":
 		if err := parseYAMLWorkflow(data, &workflow); err != nil {
-			return nil, &ParseError{
-				File:    path,
-				Message: fmt.Sprintf("YAML parse error: %v", err),
-				Hint:    "Check YAML syntax and remove unsupported fields",
-			}
+			return nil, buildYAMLParseError(path, err)
 		}
 	case ".toml":
 		md, err := toml.Decode(string(data), &workflow)
 		if err != nil {
-			return nil, &ParseError{
-				File:    path,
-				Message: fmt.Sprintf("TOML parse error: %v", err),
-				Hint:    "Check TOML syntax - keys and values must be properly formatted",
-			}
+			return nil, buildTOMLParseError(path, err)
 		}
 		if undecoded := filterUndecodedTOMLKeys(md.Undecoded()); len(undecoded) > 0 {
-			return nil, &ParseError{
-				File:    path,
-				Field:   undecoded[0].String(),
-				Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
-				Hint:    "Remove or rename unsupported fields",
-			}
+			return nil, buildUnknownTOMLFieldError(path, undecoded)
 		}
 	default:
 		return nil, &ParseError{
@@ -182,23 +260,15 @@ func ParseString(content string, format string) (*Workflow, error) {
 	switch strings.ToLower(format) {
 	case "yaml", "yml":
 		if err := parseYAMLWorkflow([]byte(content), &workflow); err != nil {
-			return nil, &ParseError{
-				Message: fmt.Sprintf("YAML parse error: %v", err),
-			}
+			return nil, buildYAMLParseError("", err)
 		}
 	case "toml":
 		md, err := toml.Decode(content, &workflow)
 		if err != nil {
-			return nil, &ParseError{
-				Message: fmt.Sprintf("TOML parse error: %v", err),
-			}
+			return nil, buildTOMLParseError("", err)
 		}
 		if undecoded := filterUndecodedTOMLKeys(md.Undecoded()); len(undecoded) > 0 {
-			return nil, &ParseError{
-				Field:   undecoded[0].String(),
-				Message: fmt.Sprintf("unknown TOML field(s): %s", formatUndecodedTOMLKeys(undecoded)),
-				Hint:    "Remove or rename unsupported fields",
-			}
+			return nil, buildUnknownTOMLFieldError("", undecoded)
 		}
 	default:
 		return nil, &ParseError{
