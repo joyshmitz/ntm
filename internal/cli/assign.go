@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,6 +74,12 @@ var (
 	// Retry flags for retrying failed assignments
 	assignRetry       string // Bead ID to retry
 	assignRetryFailed bool   // Retry all failed assignments
+
+	// Repository binding (issue #123): explicitly pin the bead-source path so
+	// `ntm assign <session>` returns the same ready-bead set regardless of the
+	// caller's CWD. Used by long-running watchers (launchd/cron/systemd) where
+	// CWD-walk discovery would otherwise pick up the wrong `.beads/`.
+	assignRepoPath string
 )
 
 const assignWatchOverlayKey = "F12"
@@ -228,6 +235,9 @@ Examples:
 	cmd.Flags().StringVar(&assignRetry, "retry", "", "Retry a specific failed assignment (bead ID)")
 	cmd.Flags().BoolVar(&assignRetryFailed, "retry-failed", false, "Retry all failed assignments")
 
+	// Repository binding (issue #123)
+	cmd.Flags().StringVar(&assignRepoPath, "repo", "", "Pin the bead-source repository path (overrides CWD discovery; required for daemon/cron use)")
+
 	return cmd
 }
 
@@ -269,11 +279,35 @@ func runAssign(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	// Enable project webhooks (if configured) so assignment lifecycle events
-	// can fan out while this command runs (including watch mode).
+	// Resolve the project directory that backs this session's bead store.
+	// `--repo` (issue #123) takes precedence over session/CWD discovery so
+	// daemon callers (launchd, cron, systemd) can guarantee a stable bead
+	// source regardless of where the watcher was launched from.
 	projectDir, err := resolveAssignProjectDir(session)
-	if err != nil {
+	if err != nil && assignRepoPath == "" {
 		return err
+	}
+	if assignRepoPath != "" {
+		abs, absErr := filepath.Abs(assignRepoPath)
+		if absErr != nil {
+			return fmt.Errorf("--repo %q: %w", assignRepoPath, absErr)
+		}
+		info, statErr := os.Stat(abs)
+		if statErr != nil {
+			return fmt.Errorf("--repo %q is not accessible: %w", assignRepoPath, statErr)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("--repo %q is not a directory", assignRepoPath)
+		}
+		projectDir = abs
+	}
+	// Bind every downstream bv/bd CWD-walk to the resolved project directory
+	// so the same `ntm assign <session>` call returns identical ready-bead
+	// sets regardless of the caller's shell location.
+	if projectDir != "" {
+		if chErr := os.Chdir(projectDir); chErr != nil {
+			return fmt.Errorf("chdir to project dir %q: %w", projectDir, chErr)
+		}
 	}
 	if cfg != nil {
 		redactCfg := cfg.Redaction.ToRedactionLibConfig()
@@ -426,6 +460,7 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 		Quiet:           assignQuiet,
 		Timeout:         assignTimeout,
 		AgentTypeFilter: agentTypeFilter,
+		DryRun:          assignDryRun,
 	}
 
 	// Load or create assignment store
@@ -466,7 +501,11 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 	}()
 
 	// Do initial assignment pass
-	watchLoop.logf("Performing initial assignment pass...")
+	if assignDryRun {
+		watchLoop.logf("Performing initial assignment pass... (dry-run: previewing only, no dispatch)")
+	} else {
+		watchLoop.logf("Performing initial assignment pass...")
+	}
 
 	assignOpts := &AssignCommandOptions{
 		Session:         session,
@@ -485,9 +524,14 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 	if err != nil {
 		watchLoop.logf("Warning: Initial assignment failed: %v", err)
 	} else if len(initialOutput.Assignments) > 0 {
-		// Execute initial assignments
 		assignOpts.Quiet = assignQuiet // Restore quiet setting for execution
-		if err := executeAssignmentsEnhanced(session, initialOutput, assignOpts); err != nil {
+		if assignDryRun {
+			// Dry-run: report the planned assignments, do not dispatch.
+			watchLoop.logf("Initial assignment (dry-run): %d beads would be assigned (no dispatch)", len(initialOutput.Assignments))
+			for _, assigned := range initialOutput.Assignments {
+				watchLoop.logf("  Would assign %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
+			}
+		} else if err := executeAssignmentsEnhanced(session, initialOutput, assignOpts); err != nil {
 			watchLoop.logf("Warning: Failed to execute initial assignments: %v", err)
 		} else {
 			watchLoop.logf("Initial assignment: %d beads to %d agents", len(initialOutput.Assignments), len(initialOutput.Assignments))
@@ -3818,6 +3862,9 @@ type AutoReassignOptions struct {
 	Quiet           bool
 	Timeout         time.Duration
 	AgentTypeFilter string
+	// DryRun, when true, computes assignments and reports them but never
+	// dispatches to live panes. Honored by `--watch --dry-run` (issue #122).
+	DryRun bool
 }
 
 // AutoReassignResult contains the result of an auto-reassignment operation
@@ -3955,8 +4002,9 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 	assignments := generateAssignmentsEnhanced(idleAgents, filteredBeads, assignOpts)
 	result.Assignments = assignments
 
-	// Step 6: Execute assignments
-	if len(assignments) > 0 {
+	// Step 6: Execute assignments (skipped under --dry-run; the planner output
+	// is still returned so callers can preview what would have been dispatched).
+	if len(assignments) > 0 && !opts.DryRun {
 		// Create a mock enhanced output for execution
 		enhancedOut := &AssignOutputEnhanced{
 			Strategy:    opts.Strategy,
@@ -3971,6 +4019,8 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 				fmt.Fprintf(os.Stderr, "[AUTO] Successfully assigned %d unblocked beads\n", len(assignments))
 			}
 		}
+	} else if len(assignments) > 0 && opts.DryRun && opts.Verbose {
+		fmt.Fprintf(os.Stderr, "[AUTO] Dry-run: would assign %d unblocked beads (no dispatch)\n", len(assignments))
 	}
 
 	return result, nil
@@ -4280,11 +4330,18 @@ func (w *WatchLoop) handleCompletion(event completion.CompletionEvent) error {
 			w.logf("Unblocked: %s", strings.Join(ids, ", "))
 		}
 
-		// Log assignments
+		// Log assignments. In dry-run mode the planner output is real but
+		// nothing has been dispatched — distinguish the log line so operators
+		// don't mistake the preview for live execution.
+		dryRun := w.opts != nil && w.opts.DryRun
 		for _, assigned := range result.Assignments {
 			w.totalAssigned++
 			w.lastAssignmentAt = time.Now()
-			w.logf("Assigned: %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
+			if dryRun {
+				w.logf("Would assign (dry-run): %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
+			} else {
+				w.logf("Assigned: %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
+			}
 
 			// Respect limit
 			if w.limit > 0 && len(result.Assignments) >= w.limit {
