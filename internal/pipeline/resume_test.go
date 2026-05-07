@@ -500,6 +500,43 @@ func TestResumeRejectingStaleStateDoesNotRefreshCheckpoint(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsLegacyStateWithOnlyUpdatedAt(t *testing.T) {
+	// bd-05l02: a legacy state with LastCheckpointAt zero, UpdatedAt older
+	// than MaxResumeAge, and no child step / foreach / parallel / in-flight
+	// timestamps must still fail the stale-age guard. Before the fix
+	// resumeCheckpointTime returned the zero time and the guard was a no-op.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "legacy-only-updated",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	stale := time.Now().Add(-72 * time.Hour)
+	prior := &ExecutionState{
+		RunID:      "legacy-only-updated",
+		WorkflowID: workflow.Name,
+		Session:    "session",
+		Status:     StatusRunning,
+		UpdatedAt:  stale,
+		Steps:      map[string]StepResult{},
+		Variables:  map[string]interface{}{},
+	}
+
+	executor := NewExecutor(DefaultExecutorConfig("session"))
+	_, err := executor.ResumeWithOptions(context.Background(), workflow, prior, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		MaxResumeAge:   2 * time.Hour,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err == nil {
+		t.Fatal("ResumeWithOptions() error = nil, want stale-state rejection from UpdatedAt fallback")
+	}
+	if !strings.Contains(err.Error(), "older than MaxResumeAge") {
+		t.Fatalf("error = %q, want stale-state message", err.Error())
+	}
+}
+
 func TestResumeRejectsLegacyStateWithoutCheckpoint(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,

@@ -330,6 +330,10 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	}
 	e.varMu.Unlock()
 
+	// Backfill missing identity fields before resume validation. These are
+	// safe to apply even if applyResumeOptions later rejects the resume —
+	// the on-disk file is not refreshed (bd-0n73e) so we just leave the
+	// in-memory state better-typed for the rejection error.
 	e.stateMu.Lock()
 	if e.state.RunID == "" {
 		if e.config.RunID != "" {
@@ -347,14 +351,13 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	if e.state.Session == "" {
 		e.state.Session = e.config.Session
 	}
-	if e.state.StartedAt.IsZero() {
-		e.state.StartedAt = time.Now()
-	}
-	e.state.Status = StatusRunning
-	e.state.UpdatedAt = time.Now()
-	e.state.FinishedAt = time.Time{}
-	e.state.CancelledAt = nil
-	e.state.CurrentStep = ""
+	// bd-05l02: do NOT backfill StartedAt or clobber UpdatedAt yet.
+	// resumeCheckpointTime falls back to StartedAt and UpdatedAt for legacy
+	// state files that have no LastCheckpointAt and no child timestamps;
+	// if Resume() set them to time.Now() before applyResumeOptions ran, the
+	// stale-age guard would always see a fresh checkpoint. The
+	// "starting to run" mutations move to after the resume validation
+	// succeeds.
 	e.stateMu.Unlock()
 
 	e.progress = progress
@@ -399,6 +402,21 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 		// resume attempts see the same age the rejection just observed.
 		return e.state, err
 	}
+
+	// bd-05l02: now that resume validation has accepted the prior state,
+	// transition it to "running" and backfill StartedAt for runs that
+	// never recorded one. applyResumeState writes step results;
+	// persistState refreshes LastCheckpointAt as part of normal checkpointing.
+	e.stateMu.Lock()
+	if e.state.StartedAt.IsZero() {
+		e.state.StartedAt = time.Now()
+	}
+	e.state.Status = StatusRunning
+	e.state.UpdatedAt = time.Now()
+	e.state.FinishedAt = time.Time{}
+	e.state.CancelledAt = nil
+	e.state.CurrentStep = ""
+	e.stateMu.Unlock()
 
 	e.applyResumeState()
 	e.persistState()

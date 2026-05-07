@@ -565,6 +565,12 @@ func resumeCheckpointTime(state *ExecutionState) time.Time {
 	}
 
 	checkpoint := state.StartedAt
+	// bd-05l02: legacy state files often record only UpdatedAt and have no
+	// child timestamps (cancelled/persisted before any step result, or a
+	// minimal fixture). Without this, resumeCheckpointTime would return
+	// the zero time and applyResumeOptions would skip the MaxResumeAge
+	// check, letting stale legacy state bypass the resume safety contract.
+	checkpoint = mostRecentTime(checkpoint, state.UpdatedAt)
 	checkpoint = mostRecentTime(checkpoint, state.FinishedAt)
 
 	for _, result := range state.Steps {
