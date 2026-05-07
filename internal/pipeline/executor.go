@@ -1568,6 +1568,9 @@ func describeForeach(fc *ForeachConfig) string {
 	default:
 		src = "(no iteration source)"
 	}
+	if fc.Filter != "" {
+		src += " filter=" + fc.Filter
+	}
 	if fc.PaneStrategy != "" {
 		src += " strategy=" + fc.PaneStrategy
 	}
