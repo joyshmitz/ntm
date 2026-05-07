@@ -15,6 +15,11 @@ type paneStrategyPane struct {
 	ID          string
 	ModelFamily string
 	Domains     []string
+	Excluded    bool
+}
+
+func (p paneStrategyPane) available() bool {
+	return p.ID != "" && !p.Excluded
 }
 
 // rotateAdjudicator chooses an adjudicator pane from orderedPanes while
@@ -69,7 +74,7 @@ func byModelFamily(orderedPanes []paneStrategyPane, modelFamily string) (string,
 		return "", errNoModelFamilyPane
 	}
 	for _, pane := range orderedPanes {
-		if pane.ID != "" && pane.ModelFamily == modelFamily {
+		if pane.available() && pane.ModelFamily == modelFamily {
 			return pane.ID, nil
 		}
 	}
@@ -82,7 +87,7 @@ func byModelFamily(orderedPanes []paneStrategyPane, modelFamily string) (string,
 func byModelFamilyDifference(orderedPanes []paneStrategyPane, authorModelFamily string) (paneID string, warnFallback bool, err error) {
 	firstPane := ""
 	for _, pane := range orderedPanes {
-		if pane.ID == "" {
+		if !pane.available() {
 			continue
 		}
 		if firstPane == "" {
@@ -103,7 +108,7 @@ func byModelFamilyDifference(orderedPanes []paneStrategyPane, authorModelFamily 
 // round-robin assignment using iterationIndex.
 func roundRobinByDomain(orderedPanes []paneStrategyPane, domain string, iterationIndex int) (string, error) {
 	for _, pane := range orderedPanes {
-		if pane.ID == "" {
+		if !pane.available() {
 			continue
 		}
 		for _, paneDomain := range pane.Domains {
@@ -118,7 +123,7 @@ func roundRobinByDomain(orderedPanes []paneStrategyPane, domain string, iteratio
 func roundRobinPane(orderedPanes []paneStrategyPane, iterationIndex int) (string, error) {
 	var paneIDs []string
 	for _, pane := range orderedPanes {
-		if pane.ID != "" {
+		if pane.available() {
 			paneIDs = append(paneIDs, pane.ID)
 		}
 	}

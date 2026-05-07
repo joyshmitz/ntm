@@ -190,6 +190,55 @@ func TestRoundRobinByDomainFallsBackToRoundRobin(t *testing.T) {
 	}
 }
 
+func TestRoundRobinPaneCyclesInDeclarationOrder(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1"},
+		{ID: "p2"},
+		{ID: "p3"},
+	}
+
+	var got []string
+	for i := 0; i < 5; i++ {
+		paneID, err := roundRobinPane(panes, i)
+		if err != nil {
+			t.Fatalf("roundRobinPane(%d) error = %v", i, err)
+		}
+		got = append(got, paneID)
+	}
+	want := []string{"p1", "p2", "p3", "p1", "p2"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("roundRobinPane sequence = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRoundRobinPaneErrorsWhenNoPanesAvailable(t *testing.T) {
+	got, err := roundRobinPane(nil, 0)
+	if !errors.Is(err, errNoPaneForStrategy) {
+		t.Fatalf("roundRobinPane() error = %v, want %v", err, errNoPaneForStrategy)
+	}
+	if got != "" {
+		t.Fatalf("roundRobinPane() = %q, want empty pane", got)
+	}
+}
+
+func TestRoundRobinPaneSkipsExcludedPanes(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p0", Excluded: true},
+		{ID: "p1"},
+		{ID: "p2"},
+	}
+
+	got, err := roundRobinPane(panes, 2)
+	if err != nil {
+		t.Fatalf("roundRobinPane() error = %v", err)
+	}
+	if got != "p1" {
+		t.Fatalf("roundRobinPane() = %q, want p1 after excluding p0", got)
+	}
+}
+
 func TestParsePaneDomainRoster(t *testing.T) {
 	roster := `
 pane p2:
