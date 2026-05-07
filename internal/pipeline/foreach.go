@@ -283,10 +283,7 @@ func (e *Executor) prepareForeachIterations(ctx context.Context, parent *Step, c
 }
 
 func (e *Executor) materializeForeachSteps(parent *Step, config *ForeachConfig, body []Step, plan foreachIterationPlan, total int) ([]Step, error) {
-	varName := config.As
-	if varName == "" {
-		varName = "item"
-	}
+	varName := foreachVarName(config)
 
 	scope := e.pushForeachVars(varName, plan.Item, plan.Index, total, plan.PaneVars)
 	defer e.popForeachVars(scope)
@@ -310,9 +307,10 @@ func (e *Executor) materializeForeachSteps(parent *Step, config *ForeachConfig, 
 func (e *Executor) pushForeachVars(varName string, item interface{}, index, total int, paneVars map[string]interface{}) VariableScope {
 	e.varMu.Lock()
 	defer e.varMu.Unlock()
-	keys := append(loopScopeKeys(varName), paneVariableKey)
+	keys := append(loopScopeKeys(varName), paneVariableKey, varName)
 	scope := CaptureVariableScope(e.state.Variables, keys...)
 	SetLoopVars(e.state, varName, item, index, total)
+	e.state.Variables[varName] = item
 	if paneVars != nil {
 		e.state.Variables[paneVariableKey] = cloneInterfaceMap(paneVars)
 	}
@@ -528,22 +526,26 @@ func (e *Executor) storeForeachNestedResult(step *Step, result StepResult) {
 }
 
 func (e *Executor) substituteForeachStepFields(step *Step) {
-	step.Name = e.substituteVariables(step.Name)
-	step.Description = e.substituteVariables(step.Description)
-	step.Agent = e.substituteVariables(step.Agent)
-	step.Prompt = e.substituteVariables(step.Prompt)
-	step.PromptFile = e.substituteVariables(step.PromptFile)
-	step.Command = e.substituteVariables(step.Command)
-	step.Template = e.substituteVariables(step.Template)
-	step.Wait = WaitCondition(e.substituteVariables(string(step.Wait)))
-	step.When = e.substituteVariables(step.When)
-	step.Branch = e.substituteVariables(step.Branch)
-	step.OutputVar = e.substituteVariables(step.OutputVar)
-	step.Args = substituteInterfaceMap(e, step.Args)
-	step.Params = substituteInterfaceMap(e, step.Params)
-	step.TemplateParams = substituteInterfaceMap(e, step.TemplateParams)
+	e.substituteForeachStepFieldsProtected(step, nil)
+}
+
+func (e *Executor) substituteForeachStepFieldsProtected(step *Step, protected map[string]struct{}) {
+	step.Name = e.substituteForeachString(step.Name, protected)
+	step.Description = e.substituteForeachString(step.Description, protected)
+	step.Agent = e.substituteForeachString(step.Agent, protected)
+	step.Prompt = e.substituteForeachString(step.Prompt, protected)
+	step.PromptFile = e.substituteForeachString(step.PromptFile, protected)
+	step.Command = e.substituteForeachString(step.Command, protected)
+	step.Template = e.substituteForeachString(step.Template, protected)
+	step.Wait = WaitCondition(e.substituteForeachString(string(step.Wait), protected))
+	step.When = e.substituteForeachString(step.When, protected)
+	step.Branch = e.substituteForeachString(step.Branch, protected)
+	step.OutputVar = e.substituteForeachString(step.OutputVar, protected)
+	step.Args = substituteForeachInterfaceMap(e, step.Args, protected)
+	step.Params = substituteForeachInterfaceMap(e, step.Params, protected)
+	step.TemplateParams = substituteForeachInterfaceMap(e, step.TemplateParams, protected)
 	if step.Pane.Expr != "" {
-		resolved := strings.TrimSpace(e.substituteVariables(step.Pane.Expr))
+		resolved := strings.TrimSpace(e.substituteForeachString(step.Pane.Expr, protected))
 		if idx, err := strconv.Atoi(resolved); err == nil {
 			step.Pane.Index = idx
 			step.Pane.Expr = ""
@@ -552,34 +554,155 @@ func (e *Executor) substituteForeachStepFields(step *Step) {
 		}
 	}
 	for i := range step.Parallel.Steps {
-		e.substituteForeachStepFields(&step.Parallel.Steps[i])
+		e.substituteForeachStepFieldsProtected(&step.Parallel.Steps[i], protected)
 	}
 	if step.Loop != nil {
 		for i := range step.Loop.Steps {
-			e.substituteForeachStepFields(&step.Loop.Steps[i])
+			e.substituteForeachStepFieldsProtected(&step.Loop.Steps[i], protected)
 		}
 		for i := range step.Loop.Body {
-			e.substituteForeachStepFields(&step.Loop.Body[i])
+			e.substituteForeachStepFieldsProtected(&step.Loop.Body[i], protected)
 		}
 	}
 	for _, config := range []*ForeachConfig{step.Foreach, step.ForeachPane} {
 		if config == nil {
 			continue
 		}
+		bodyProtected := cloneProtectedRoots(protected)
+		bodyProtected[foreachVarName(config)] = struct{}{}
+		bodyProtected["loop"] = struct{}{}
+		if foreachVarName(config) == "item" && e.foreachLoopItemActive() {
+			slog.Debug("nested foreach item alias shadows outer item",
+				"run_id", e.state.RunID,
+				"step_id", step.ID,
+				"agent_type", "foreach",
+			)
+		}
+
+		config.Items = e.substituteForeachString(config.Items, protected)
+		config.Beads = e.substituteForeachString(config.Beads, protected)
+		config.Pairs = e.substituteForeachString(config.Pairs, protected)
+		config.Debates = e.substituteForeachString(config.Debates, protected)
+		config.Filter = e.substituteForeachString(config.Filter, protected)
+		config.Template = e.substituteForeachString(config.Template, bodyProtected)
+		config.Params = substituteForeachInterfaceMap(e, config.Params, bodyProtected)
+		config.TemplateParams = substituteForeachInterfaceMap(e, config.TemplateParams, bodyProtected)
 		for i := range config.Steps {
-			e.substituteForeachStepFields(&config.Steps[i])
+			e.substituteForeachStepFieldsProtected(&config.Steps[i], bodyProtected)
 		}
 		for i := range config.Body {
-			e.substituteForeachStepFields(&config.Body[i])
+			e.substituteForeachStepFieldsProtected(&config.Body[i], bodyProtected)
 		}
-		config.Items = e.substituteVariables(config.Items)
-		config.Beads = e.substituteVariables(config.Beads)
-		config.Pairs = e.substituteVariables(config.Pairs)
-		config.Debates = e.substituteVariables(config.Debates)
-		config.Filter = e.substituteVariables(config.Filter)
-		config.Template = e.substituteVariables(config.Template)
-		config.Params = substituteInterfaceMap(e, config.Params)
-		config.TemplateParams = substituteInterfaceMap(e, config.TemplateParams)
+	}
+}
+
+func foreachVarName(config *ForeachConfig) string {
+	if config == nil || config.As == "" {
+		return "item"
+	}
+	return config.As
+}
+
+func cloneProtectedRoots(in map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(in)+2)
+	for key := range in {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func (e *Executor) foreachLoopItemActive() bool {
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
+	if e.state == nil || e.state.Variables == nil {
+		return false
+	}
+	_, ok := e.state.Variables["loop.item"]
+	return ok
+}
+
+func (e *Executor) substituteForeachString(s string, protected map[string]struct{}) string {
+	if s == "" {
+		return ""
+	}
+
+	type protectedRef struct {
+		token string
+		match string
+	}
+	var refs []protectedRef
+	escaped := escapedPattern.ReplaceAllString(s, escapePlaceholder)
+	rewritten := varPattern.ReplaceAllStringFunc(escaped, func(match string) string {
+		expr := strings.TrimSpace(match[2 : len(match)-1])
+		varPath, defaultVal, hasDefault := parseDefault(expr)
+		root := foreachVarRoot(varPath)
+		if _, ok := protected[root]; ok {
+			token := fmt.Sprintf("\x00FOREACH_PROTECTED_%d\x00", len(refs))
+			refs = append(refs, protectedRef{token: token, match: match})
+			return token
+		}
+		value, found, err := e.resolveForeachAlias(varPath)
+		if found {
+			if err == nil {
+				return formatValue(value)
+			}
+			if hasDefault {
+				return defaultVal
+			}
+			return match
+		}
+		return match
+	})
+
+	out := e.substituteVariables(rewritten)
+	for _, ref := range refs {
+		out = strings.ReplaceAll(out, ref.token, ref.match)
+	}
+	return out
+}
+
+func foreachVarRoot(varPath string) string {
+	varPath = strings.TrimSpace(varPath)
+	if varPath == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(varPath, '.'); idx >= 0 {
+		return varPath[:idx]
+	}
+	return varPath
+}
+
+func (e *Executor) resolveForeachAlias(varPath string) (interface{}, bool, error) {
+	parts := strings.Split(strings.TrimSpace(varPath), ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return nil, false, nil
+	}
+	if knownSubstitutionNamespace(parts[0]) {
+		return nil, false, nil
+	}
+
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
+	if e.state == nil || e.state.Variables == nil {
+		return nil, false, nil
+	}
+	value, ok := e.state.Variables[parts[0]]
+	if !ok {
+		return nil, false, nil
+	}
+	if len(parts) == 1 {
+		return value, true, nil
+	}
+	resolved, err := navigateNested(value, parts[1:])
+	return resolved, true, err
+}
+
+func knownSubstitutionNamespace(root string) bool {
+	switch root {
+	case "vars", "steps", "env", "loop", "defaults", "item", "pane", "session", "run_id", "timestamp", "workflow", "runtime":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -764,6 +887,40 @@ func cloneInterfaceValue(value interface{}) interface{} {
 		return out
 	case []string:
 		return append([]string(nil), v...)
+	default:
+		return value
+	}
+}
+
+func substituteForeachInterfaceMap(e *Executor, in map[string]interface{}, protected map[string]struct{}) map[string]interface{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = substituteForeachInterfaceValue(e, value, protected)
+	}
+	return out
+}
+
+func substituteForeachInterfaceValue(e *Executor, value interface{}, protected map[string]struct{}) interface{} {
+	switch v := value.(type) {
+	case string:
+		return e.substituteForeachString(v, protected)
+	case map[string]interface{}:
+		return substituteForeachInterfaceMap(e, v, protected)
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = substituteForeachInterfaceValue(e, item, protected)
+		}
+		return out
+	case []string:
+		out := make([]string, len(v))
+		for i, item := range v {
+			out[i] = e.substituteForeachString(item, protected)
+		}
+		return out
 	default:
 		return value
 	}
