@@ -587,14 +587,16 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		return e.executeTemplate(ctx, step, workflow)
 	}
 
+	// Dispatch branch steps to resolveBranch + lookupBranch.
+	if step.Branch != "" {
+		return e.executeBranch(ctx, step, workflow)
+	}
+
 	// Phase-A graceful handling for step kinds whose execution semantics
-	// are still under development: `foreach:`, `foreach_pane:`, and
-	// `branch:`. These steps parse and validate, but the executor doesn't
-	// yet know how to dispatch them. In dry-run mode we report what we
-	// *would* do; in real-run mode we surface a clear error so the
-	// operator can drive that step manually.
-	if step.Foreach != nil || step.ForeachPane != nil ||
-		step.Branch != "" {
+	// are still under development: `foreach:` and `foreach_pane:`.
+	// These steps parse and validate, but the executor doesn't yet know
+	// how to dispatch them.
+	if step.Foreach != nil || step.ForeachPane != nil {
 		var kind, summary string
 		switch {
 		case step.Foreach != nil:
@@ -603,9 +605,6 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		case step.ForeachPane != nil:
 			kind = "foreach_pane"
 			summary = describeForeach(step.ForeachPane)
-		case step.Branch != "":
-			kind = "branch"
-			summary = truncatePrompt(step.Branch, 80)
 		}
 		if e.config.DryRun {
 			result.Status = StatusCompleted
@@ -613,9 +612,6 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 			result.FinishedAt = time.Now()
 			return result
 		}
-		// Real-run path: not yet implemented. Mark skipped (not failed) so the
-		// rest of the workflow can proceed, and surface the situation through
-		// SkipReason for the operator to act on manually.
 		result.Status = StatusSkipped
 		result.SkipReason = fmt.Sprintf("%s steps are not yet executed by ntm pipeline runner; dispatch %q manually (%s)", kind, step.ID, summary)
 		result.FinishedAt = time.Now()
