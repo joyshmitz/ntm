@@ -413,6 +413,13 @@ type Step struct {
 	// where each iteration goes to a different pane index, use ForeachPane.
 	Foreach     *ForeachConfig `yaml:"foreach,omitempty" toml:"foreach,omitempty" json:"foreach,omitempty"`
 	ForeachPane *ForeachConfig `yaml:"foreach_pane,omitempty" toml:"foreach_pane,omitempty" json:"foreach_pane,omitempty"`
+
+	// Agent Mail step kinds. These execute through MCP Agent Mail rather than
+	// tmux pane dispatch and are mutually exclusive with prompt/command/etc.
+	MailSend               *MailSendStep               `yaml:"mail_send,omitempty" toml:"mail_send,omitempty" json:"mail_send,omitempty"`
+	FileReservationPaths   *FileReservationPathsStep   `yaml:"file_reservation_paths,omitempty" toml:"file_reservation_paths,omitempty" json:"file_reservation_paths,omitempty"`
+	MailInboxCheck         *MailInboxCheckStep         `yaml:"mail_inbox_check,omitempty" toml:"mail_inbox_check,omitempty" json:"mail_inbox_check,omitempty"`
+	FileReservationRelease *FileReservationReleaseStep `yaml:"file_reservation_release,omitempty" toml:"file_reservation_release,omitempty" json:"file_reservation_release,omitempty"`
 }
 
 // StringOrList accepts either a single string or a list of strings. Used for

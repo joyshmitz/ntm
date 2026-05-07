@@ -181,39 +181,43 @@ func isKnownParallelInlineStepKey(key toml.Key) bool {
 }
 
 var knownStepTOMLFields = map[string]bool{
-	"id":              true,
-	"name":            true,
-	"description":     true,
-	"agent":           true,
-	"pane":            true,
-	"route":           true,
-	"prompt":          true,
-	"prompt_file":     true,
-	"command":         true,
-	"args":            true,
-	"template":        true,
-	"params":          true,
-	"template_params": true,
-	"wait":            true,
-	"timeout":         true,
-	"depends_on":      true,
-	"after":           true,
-	"on_error":        true,
-	"on_failure":      true,
-	"on_success":      true,
-	"retry_count":     true,
-	"retry_delay":     true,
-	"retry_backoff":   true,
-	"when":            true,
-	"branch":          true,
-	"branches":        true,
-	"output_var":      true,
-	"output_parse":    true,
-	"parallel":        true,
-	"loop":            true,
-	"loop_control":    true,
-	"foreach":         true,
-	"foreach_pane":    true,
+	"id":                       true,
+	"name":                     true,
+	"description":              true,
+	"agent":                    true,
+	"pane":                     true,
+	"route":                    true,
+	"prompt":                   true,
+	"prompt_file":              true,
+	"command":                  true,
+	"args":                     true,
+	"template":                 true,
+	"params":                   true,
+	"template_params":          true,
+	"wait":                     true,
+	"timeout":                  true,
+	"depends_on":               true,
+	"after":                    true,
+	"on_error":                 true,
+	"on_failure":               true,
+	"on_success":               true,
+	"retry_count":              true,
+	"retry_delay":              true,
+	"retry_backoff":            true,
+	"when":                     true,
+	"branch":                   true,
+	"branches":                 true,
+	"output_var":               true,
+	"output_parse":             true,
+	"parallel":                 true,
+	"loop":                     true,
+	"loop_control":             true,
+	"foreach":                  true,
+	"foreach_pane":             true,
+	"mail_send":                true,
+	"file_reservation_paths":   true,
+	"mail_inbox_check":         true,
+	"file_reservation_release": true,
 }
 
 // ParseFile parses a workflow file (YAML or TOML) and returns the workflow
@@ -400,6 +404,8 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 	hasParallel := len(step.Parallel.Steps) > 0
 	hasForeach := step.Foreach != nil || step.ForeachPane != nil
 	hasBranch := step.Branch != "" || len(step.Branches) > 0
+	mailStepKinds := step.mailStepKindNames()
+	hasMailStep := len(mailStepKinds) > 0
 
 	if hasPrompt && hasParallel {
 		result.addError(ParseError{
@@ -429,9 +435,23 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			Hint:    "Pick one: command runs a shell command; template renders an MO and dispatches it",
 		})
 	}
+	if len(mailStepKinds) > 1 {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: fmt.Sprintf("step can only use one Agent Mail step kind, got: %s", strings.Join(mailStepKinds, ", ")),
+			Hint:    "Choose one of mail_send, file_reservation_paths, mail_inbox_check, or file_reservation_release",
+		})
+	}
+	if hasMailStep && (hasPrompt || hasParallel || hasCommand || hasTemplate || hasForeach || hasBranch || step.Loop != nil) {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: "step cannot combine Agent Mail step kind with prompt, command, template, parallel, loop, foreach, or branch",
+			Hint:    "Agent Mail step kinds run through MCP Agent Mail rather than tmux pane dispatch",
+		})
+	}
 
 	if !hasPrompt && !hasParallel && !hasCommand && !hasTemplate &&
-		!hasForeach && !hasBranch && step.Loop == nil {
+		!hasForeach && !hasBranch && !hasMailStep && step.Loop == nil {
 		result.addError(ParseError{
 			Field:   stepField,
 			Message: "step must have prompt, prompt_file, command, template, parallel, loop, foreach, or branch",
