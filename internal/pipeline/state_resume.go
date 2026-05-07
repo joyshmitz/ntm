@@ -141,10 +141,7 @@ func (e *Executor) applyResumeOptions(workflow *Workflow, opts ResumeOptions) er
 		e.stateMu.RUnlock()
 		return fmt.Errorf("resume state is nil")
 	}
-	checkpoint := state.LastCheckpointAt
-	if checkpoint.IsZero() {
-		checkpoint = state.UpdatedAt
-	}
+	checkpoint := resumeCheckpointTime(state)
 	priorSession := state.Session
 	targetSession := e.config.Session
 	e.stateMu.RUnlock()
@@ -529,4 +526,58 @@ func removeString(values []string, value string) []string {
 		}
 	}
 	return out
+}
+
+func resumeCheckpointTime(state *ExecutionState) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	if !state.LastCheckpointAt.IsZero() {
+		return state.LastCheckpointAt
+	}
+
+	checkpoint := state.StartedAt
+	checkpoint = mostRecentTime(checkpoint, state.FinishedAt)
+
+	for _, result := range state.Steps {
+		checkpoint = mostRecentTime(checkpoint, stepResultCheckpointTime(result))
+	}
+	for _, execErr := range state.Errors {
+		checkpoint = mostRecentTime(checkpoint, execErr.Timestamp)
+	}
+	for _, foreach := range state.ForeachState {
+		checkpoint = mostRecentTime(checkpoint, foreach.StartedAt)
+		checkpoint = mostRecentTime(checkpoint, foreach.UpdatedAt)
+	}
+	for _, parallel := range state.ParallelState {
+		checkpoint = mostRecentTime(checkpoint, parallel.StartedAt)
+		checkpoint = mostRecentTime(checkpoint, parallel.UpdatedAt)
+		checkpoint = mostRecentTime(checkpoint, parallel.CompletedAt)
+	}
+	for _, inFlight := range state.InFlightSteps {
+		checkpoint = mostRecentTime(checkpoint, inFlight.StartedAt)
+	}
+
+	return checkpoint
+}
+
+func stepResultCheckpointTime(result StepResult) time.Time {
+	checkpoint := mostRecentTime(result.StartedAt, result.FinishedAt)
+	if result.Error != nil {
+		checkpoint = mostRecentTime(checkpoint, result.Error.Timestamp)
+	}
+	return checkpoint
+}
+
+func mostRecentTime(a, b time.Time) time.Time {
+	if a.IsZero() {
+		return b
+	}
+	if b.IsZero() {
+		return a
+	}
+	if b.After(a) {
+		return b
+	}
+	return a
 }

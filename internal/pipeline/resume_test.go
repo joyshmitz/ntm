@@ -198,6 +198,47 @@ func TestResumeRejectsStaleState(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsLegacyStateWithoutCheckpoint(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "resume-legacy-stale",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	stale := time.Now().Add(-72 * time.Hour)
+	prior := &ExecutionState{
+		RunID:      "legacy-stale",
+		WorkflowID: workflow.Name,
+		Session:    "session",
+		Status:     StatusRunning,
+		StartedAt:  stale.Add(-time.Hour),
+		UpdatedAt:  stale,
+		Steps: map[string]StepResult{
+			"step": {
+				StepID:     "step",
+				Status:     StatusCompleted,
+				StartedAt:  stale.Add(-30 * time.Minute),
+				FinishedAt: stale,
+			},
+		},
+		Variables: map[string]interface{}{},
+	}
+
+	executor := NewExecutor(DefaultExecutorConfig("session"))
+	_, err := executor.ResumeWithOptions(context.Background(), workflow, prior, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		MaxResumeAge:   2 * time.Hour,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err == nil {
+		t.Fatal("ResumeWithOptions() error = nil, want stale-state error for legacy checkpoint-less state")
+	}
+	if !strings.Contains(err.Error(), "older than MaxResumeAge") {
+		t.Fatalf("error = %q, want stale-state message", err.Error())
+	}
+}
+
 func TestExecutionStateResumeMetadataJSONRoundTrip(t *testing.T) {
 	stamp := time.Date(2026, 5, 7, 12, 30, 0, 0, time.UTC)
 	original := ExecutionState{
