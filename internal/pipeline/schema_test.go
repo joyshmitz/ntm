@@ -832,3 +832,203 @@ func TestIntOrExpr_IsZero(t *testing.T) {
 		})
 	}
 }
+
+func TestAfterRef_UnmarshalYAML(t *testing.T) {
+	type doc struct {
+		After AfterRef `yaml:"after"`
+	}
+
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "single string",
+			yaml: "after: spawn",
+			want: []string{"spawn"},
+		},
+		{
+			name: "list of strings",
+			yaml: "after:\n  - spawn\n  - audit",
+			want: []string{"spawn", "audit"},
+		},
+		{
+			name: "empty string",
+			yaml: "after: ''",
+			want: nil,
+		},
+		{
+			name: "missing",
+			yaml: "other: value",
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			if err := yaml.Unmarshal([]byte(tt.yaml), &d); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(d.After) != len(tt.want) {
+				t.Fatalf("len = %d, want %d; got %v", len(d.After), len(tt.want), []string(d.After))
+			}
+			for i := range d.After {
+				if d.After[i] != tt.want[i] {
+					t.Errorf("index %d: got %q, want %q", i, d.After[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestStringOrList_UnmarshalYAML(t *testing.T) {
+	type doc struct {
+		Notes StringOrList `yaml:"notes"`
+	}
+
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "single string",
+			yaml: "notes: one note",
+			want: []string{"one note"},
+		},
+		{
+			name: "list",
+			yaml: "notes:\n  - a\n  - b",
+			want: []string{"a", "b"},
+		},
+		{
+			name: "empty string",
+			yaml: "notes: ''",
+			want: nil,
+		},
+		{
+			name: "missing",
+			yaml: "other: value",
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			if err := yaml.Unmarshal([]byte(tt.yaml), &d); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(d.Notes) != len(tt.want) {
+				t.Fatalf("len = %d, want %d; got %v", len(d.Notes), len(tt.want), []string(d.Notes))
+			}
+			for i := range d.Notes {
+				if d.Notes[i] != tt.want[i] {
+					t.Errorf("index %d: got %q, want %q", i, d.Notes[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestOutputDecl_UnmarshalYAML(t *testing.T) {
+	type doc struct {
+		Outputs []OutputDecl `yaml:"outputs"`
+	}
+
+	tests := []struct {
+		name     string
+		yaml     string
+		wantLen  int
+		wantName string
+		wantPath string
+		wantErr  bool
+	}{
+		{
+			name:     "bare string path",
+			yaml:     "outputs:\n  - deliverables/HANDBACK.md",
+			wantLen:  1,
+			wantPath: "deliverables/HANDBACK.md",
+		},
+		{
+			name:     "full struct",
+			yaml:     "outputs:\n  - name: report\n    description: final\n    path: foo",
+			wantLen:  1,
+			wantName: "report",
+			wantPath: "foo",
+		},
+		{
+			name:     "single-key shorthand",
+			yaml:     "outputs:\n  - workspace: ${workspace_path}",
+			wantLen:  1,
+			wantName: "workspace",
+			wantPath: "${workspace_path}",
+		},
+		{
+			name:     "name-only structured form",
+			yaml:     "outputs:\n  - name: report",
+			wantLen:  1,
+			wantName: "report",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			err := yaml.Unmarshal([]byte(tt.yaml), &d)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(d.Outputs) != tt.wantLen {
+				t.Fatalf("len = %d, want %d", len(d.Outputs), tt.wantLen)
+			}
+			if tt.wantLen > 0 {
+				o := d.Outputs[0]
+				if tt.wantName != "" && o.Name != tt.wantName {
+					t.Errorf("Name = %q, want %q", o.Name, tt.wantName)
+				}
+				if tt.wantPath != "" && o.Path != tt.wantPath {
+					t.Errorf("Path = %q, want %q", o.Path, tt.wantPath)
+				}
+			}
+		})
+	}
+}
+
+func TestOutputDecl_UnmarshalYAML_Errors(t *testing.T) {
+	type doc struct {
+		Outputs []OutputDecl `yaml:"outputs"`
+	}
+
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "empty map",
+			yaml: "outputs:\n  - {}",
+		},
+		{
+			name: "two-key shorthand",
+			yaml: "outputs:\n  - a: 1\n    b: 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d doc
+			err := yaml.Unmarshal([]byte(tt.yaml), &d)
+			if err == nil {
+				t.Fatal("expected error for invalid OutputDecl form")
+			}
+		})
+	}
+}
