@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -166,4 +167,51 @@ func TestDeclaredPlaceholders(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestArgsToEnvStringifiesSupportedTypes(t *testing.T) {
+	got, err := argsToEnv(map[string]interface{}{
+		"FOO":    "bar",
+		"COUNT":  5,
+		"FLAG":   true,
+		"EMPTY":  nil,
+		"LIST":   []interface{}{1, 2, 3},
+		"NESTED": map[string]interface{}{"name": "ada", "count": 2},
+	})
+	if err != nil {
+		t.Fatalf("argsToEnv() error: %v", err)
+	}
+	gotMap := envSliceMap(got)
+	want := map[string]string{
+		"FOO":    "bar",
+		"COUNT":  "5",
+		"FLAG":   "true",
+		"EMPTY":  "",
+		"LIST":   "[1,2,3]",
+		"NESTED": `{"count":2,"name":"ada"}`,
+	}
+	if !reflect.DeepEqual(gotMap, want) {
+		t.Fatalf("env map = %#v, want %#v", gotMap, want)
+	}
+}
+
+func TestArgsToEnvRejectsInvalidKey(t *testing.T) {
+	_, err := argsToEnv(map[string]interface{}{"foo-bar": "bad"})
+	if err == nil {
+		t.Fatal("argsToEnv() error = nil, want invalid env var name")
+	}
+	if !strings.Contains(err.Error(), "invalid env var name") {
+		t.Fatalf("error = %q, want invalid env var name", err.Error())
+	}
+}
+
+func envSliceMap(values []string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, value := range values {
+		key, val, ok := strings.Cut(value, "=")
+		if ok {
+			out[key] = val
+		}
+	}
+	return out
 }

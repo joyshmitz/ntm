@@ -3148,16 +3148,40 @@ func TestExecuteCommand_ArgsAsEnvVars(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{
 		ID:      "env-step",
-		Command: "echo $MY_KEY",
-		Args:    map[string]interface{}{"MY_KEY": "my_value"},
+		Command: `printf '%s|%s|%s' "$MY_KEY" "$COUNT" "$FLAG"`,
+		Args: map[string]interface{}{
+			"MY_KEY": "my_value",
+			"COUNT":  5,
+			"FLAG":   true,
+		},
 	}
 	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
 
 	if result.Status != StatusCompleted {
 		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
 	}
-	if result.Output != "my_value" {
-		t.Errorf("Output = %q, want %q", result.Output, "my_value")
+	if result.Output != "my_value|5|true" {
+		t.Errorf("Output = %q, want %q", result.Output, "my_value|5|true")
+	}
+}
+
+func TestExecuteCommand_InvalidArgEnvNameFailsValidation(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	step := &Step{
+		ID:      "bad-env-step",
+		Command: "true",
+		Args:    map[string]interface{}{"foo-bar": "bad"},
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusFailed)
+	}
+	if result.Error == nil || result.Error.Type != "validation" {
+		t.Fatalf("Error = %+v, want validation error", result.Error)
+	}
+	if !strings.Contains(result.Error.Message, "invalid env var name") {
+		t.Fatalf("Error.Message = %q, want invalid env var name", result.Error.Message)
 	}
 }
 

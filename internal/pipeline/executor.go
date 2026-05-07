@@ -980,10 +980,17 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		cmd.Dir = e.config.ProjectDir
 	}
 
-	env := os.Environ()
-	for k, v := range step.Args {
-		env = append(env, fmt.Sprintf("%s=%v", k, v))
+	argEnv, err := argsToEnv(step.Args)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = stepRuntimeError(step, "command", "validation",
+			err.Error(),
+			"use POSIX-compatible arg keys when passing command args as environment variables",
+			err.Error())
+		result.FinishedAt = time.Now()
+		return result
 	}
+	env := append(os.Environ(), argEnv...)
 	cmd.Env = env
 
 	var stdoutBuf, stderrBuf bytes.Buffer
