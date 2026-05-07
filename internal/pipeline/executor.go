@@ -1792,6 +1792,22 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	sem := make(chan struct{}, 8)
 
 	for i, pStep := range step.Parallel.Steps {
+		// bd-qbymk: when resuming a parallel group whose parent never
+		// completed but some children did persist completed StepResults,
+		// applyResumeState retains those entries. Re-dispatching them here
+		// would duplicate side effects (re-run commands, re-prompt agents)
+		// against an already-finished substep. Adopt the persisted result
+		// instead so resume honors the parallel-progress contract.
+		e.stateMu.RLock()
+		existing, hasExisting := e.state.Steps[pStep.ID]
+		e.stateMu.RUnlock()
+		if hasExisting && !shouldRerunStep(existing) && existing.Status == StatusCompleted {
+			results[i] = existing
+			completionOrder = append(completionOrder, existing.StepID)
+			e.markParallelSubstepFinished(step.ID, pStep.ID, existing.Status)
+			continue
+		}
+
 		wg.Add(1)
 		go func(idx int, ps Step) {
 			defer wg.Done()

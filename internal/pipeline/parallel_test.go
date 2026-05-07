@@ -408,3 +408,75 @@ func TestExecuteParallelStep_WithCondition(t *testing.T) {
 		t.Errorf("expected StatusSkipped, got %s", result.Status)
 	}
 }
+
+// TestExecuteParallel_ResumeSkipsAlreadyCompletedSubsteps covers bd-qbymk:
+// when a parallel group's parent never completed but some children did persist
+// completed StepResults, resume must adopt those persisted results instead of
+// re-dispatching the children — re-running already-finished commands/prompts
+// would duplicate side effects against the parallel-progress contract.
+func TestExecuteParallel_ResumeSkipsAlreadyCompletedSubsteps(t *testing.T) {
+	e, workflow := createTestExecutor()
+	step := &Step{
+		ID: "parallel_group",
+		Parallel: ParallelSpec{Steps: []Step{
+			{ID: "step1", Prompt: "Task 1"},
+			{ID: "step2", Prompt: "Task 2"},
+			{ID: "step3", Prompt: "Task 3"},
+		}},
+	}
+
+	// Simulate a prior partial run: step1 finished and was persisted with a
+	// distinctive output marker; step2 and step3 never completed.
+	priorOutput := "PRIOR-RUN-OUTPUT-step1"
+	priorFinishedAt := time.Now().Add(-1 * time.Hour)
+	e.state.Steps["step1"] = StepResult{
+		StepID:     "step1",
+		Status:     StatusCompleted,
+		StartedAt:  priorFinishedAt.Add(-1 * time.Minute),
+		FinishedAt: priorFinishedAt,
+		Output:     priorOutput,
+		AgentType:  "prompt",
+	}
+
+	result := e.executeParallel(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("group status = %q, want %q", result.Status, StatusCompleted)
+	}
+
+	got := e.state.Steps["step1"]
+	if got.Output != priorOutput {
+		t.Fatalf("step1 was re-dispatched: Output = %q, want preserved %q", got.Output, priorOutput)
+	}
+	if !got.FinishedAt.Equal(priorFinishedAt) {
+		t.Fatalf("step1 was re-dispatched: FinishedAt = %v, want preserved %v", got.FinishedAt, priorFinishedAt)
+	}
+
+	// step2 and step3 still ran, so they have fresh dry-run output (non-empty)
+	// and were never seeded with the prior marker.
+	for _, id := range []string{"step2", "step3"} {
+		r, ok := e.state.Steps[id]
+		if !ok {
+			t.Fatalf("missing fresh result for %s — should have been dispatched on resume", id)
+		}
+		if r.Output == priorOutput {
+			t.Fatalf("%s output = %q matches prior marker — wrong substep was preserved", id, r.Output)
+		}
+	}
+
+	// ParallelState.CompletedStepIDs must include step1 even though it was
+	// adopted, so the parallel-progress invariant holds across the resume.
+	gs := e.state.ParallelState[step.ID]
+	if !containsStringSlice(gs.CompletedStepIDs, "step1") {
+		t.Fatalf("ParallelState.CompletedStepIDs = %v, want it to include step1", gs.CompletedStepIDs)
+	}
+}
+
+func containsStringSlice(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
+}
