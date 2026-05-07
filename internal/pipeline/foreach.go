@@ -1208,7 +1208,7 @@ func selectForeachPane(strategy string, strategyPanes []paneStrategyPane, panes 
 		paneID, err = byModelFamily(strategyPanes, foreachItemString(item, "model_family", "model", "family", "type"))
 	case "by_model_family_difference":
 		var warned bool
-		paneID, warned, err = byModelFamilyDifference(strategyPanes, foreachAuthorModelFamily(item))
+		paneID, warned, err = byModelFamilyDifference(strategyPanes, foreachAuthorModelFamilyForPanes(item, strategyPanes))
 		if warned {
 			slog.Warn("foreach pane assignment fell back to first available pane",
 				"strategy", strategy,

@@ -19,6 +19,13 @@ func TestForeachAuthorModelFamilyFallsBackToAuthorModel(t *testing.T) {
 	}
 }
 
+func TestForeachAuthorModelFamilyNormalizesVerboseAuthorModel(t *testing.T) {
+	item := map[string]interface{}{"author_model": "claude-sonnet-4"}
+	if got := foreachAuthorModelFamily(item); got != "cc" {
+		t.Fatalf("foreachAuthorModelFamily() = %q, want cc", got)
+	}
+}
+
 func TestForeachAuthorModelFamilySkipsBlankAliases(t *testing.T) {
 	item := map[string]interface{}{
 		"model_family": "   ",
@@ -46,5 +53,17 @@ func TestSelectForeachPaneModelFamilyDifferencePrefersCanonicalOverVerboseAuthor
 	}
 	if got != "p2" {
 		t.Fatalf("selectForeachPane() = %q, want p2", got)
+	}
+}
+
+func TestForeachAuthorModelFamilyForPanesPrefersPaneVocabulary(t *testing.T) {
+	strategyPanes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "codex"},
+		{ID: "p2", ModelFamily: "claude"},
+	}
+	item := map[string]interface{}{"author_model": "openai-codex"}
+
+	if got := foreachAuthorModelFamilyForPanes(item, strategyPanes); got != "codex" {
+		t.Fatalf("foreachAuthorModelFamilyForPanes() = %q, want codex", got)
 	}
 }
