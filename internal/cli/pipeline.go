@@ -302,12 +302,14 @@ Examples:
 			// JSON mode
 			if jsonOutput {
 				opts := pipeline.PipelineRunOptions{
-					WorkflowFile: workflowPath,
-					Session:      session,
-					ProjectDir:   projectDir,
-					Variables:    vars,
-					DryRun:       dryRun,
-					Background:   background,
+					WorkflowFile:  workflowPath,
+					Session:       session,
+					ProjectDir:    projectDir,
+					Variables:     vars,
+					DryRun:        dryRun,
+					Background:    background,
+					StartFromStep: startFromStep,
+					FromState:     fromState,
 				}
 				exitCode := pipeline.PrintPipelineRun(opts)
 				if exitCode != 0 {

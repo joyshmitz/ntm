@@ -104,12 +104,15 @@ type PipelineStep struct {
 
 // PipelineRunOptions configures a pipeline run
 type PipelineRunOptions struct {
-	WorkflowFile string                 // Path to workflow YAML/TOML file
-	Session      string                 // Tmux session name
-	ProjectDir   string                 // Optional: project root for .ntm pipeline state
-	Variables    map[string]interface{} // Runtime variables
-	DryRun       bool                   // Validate without executing
-	Background   bool                   // Run in background
+	WorkflowFile   string                 // Path to workflow YAML/TOML file
+	Session        string                 // Tmux session name
+	ProjectDir     string                 // Optional: project root for .ntm pipeline state
+	Variables      map[string]interface{} // Runtime variables
+	DryRun         bool                   // Validate without executing
+	Background     bool                   // Run in background
+	StartFromStep  string                 // Optional top-level step ID to start from
+	FromState      string                 // Optional prior run ID to copy skipped outputs from
+	StartFromState *ExecutionState        // Optional preloaded prior state
 }
 
 // PipelineRunOutput is the response for --robot-pipeline-run
@@ -274,6 +277,16 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 		return 1
 	}
 
+	if opts.StartFromStep == "" && (opts.FromState != "" || opts.StartFromState != nil) {
+		output.RobotResponse = NewErrorResponse(
+			errors.New("--from-state requires --start-from"),
+			ErrCodeInvalidFlag,
+			"Provide a top-level step with --start-from when reusing prior state.",
+		)
+		outputJSON(output)
+		return 1
+	}
+
 	varValidation, varErr := ValidateWorkflowVariables(workflow, opts.Variables)
 	if varErr != nil {
 		output.RobotResponse = NewErrorResponse(
@@ -298,6 +311,21 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 		execCfg.ProjectDir = projectDir
 	}
 	execCfg.WorkflowFile = workflowPath
+	execCfg.StartFromStep = opts.StartFromStep
+	execCfg.StartFromState = opts.StartFromState
+	if opts.FromState != "" {
+		prior, err := LoadState(execCfg.ProjectDir, opts.FromState)
+		if err != nil {
+			output.RobotResponse = NewErrorResponse(
+				fmt.Errorf("--from-state: load run %q: %w", opts.FromState, err),
+				ErrCodeInvalidFlag,
+				"Check that the prior run ID exists under the pipeline state directory.",
+			)
+			outputJSON(output)
+			return 1
+		}
+		execCfg.StartFromState = prior
+	}
 	executor := NewExecutor(execCfg)
 
 	// Create context

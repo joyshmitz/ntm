@@ -1558,6 +1558,59 @@ steps:
 	}
 }
 
+func TestPrintPipelineRun_DryRunHonorsStartFrom(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	workflowContent := `schema_version: "2.0"
+name: start-from-json-test
+steps:
+  - id: step1
+    prompt: "first"
+  - id: step2
+    prompt: "second"
+    depends_on: [step1]
+  - id: step3
+    prompt: "third"
+    depends_on: [step2]
+`
+	workflowPath := tmpDir + "/start-from.yaml"
+	if err := os.WriteFile(workflowPath, []byte(workflowContent), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	opts := PipelineRunOptions{
+		WorkflowFile:  workflowPath,
+		Session:       "test-session",
+		ProjectDir:    tmpDir,
+		DryRun:        true,
+		StartFromStep: "step2",
+	}
+
+	var exitCode int
+	output := captureStdout(t, func() {
+		exitCode = PrintPipelineRun(opts)
+	})
+	if exitCode != 0 {
+		t.Fatalf("PrintPipelineRun() exit code = %d, want 0\nOutput: %s", exitCode, output)
+	}
+
+	var result PipelineRunOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, output)
+	}
+
+	state, err := LoadState(tmpDir, result.RunID)
+	if err != nil {
+		t.Fatalf("LoadState(%q) failed: %v", result.RunID, err)
+	}
+	if got := state.Steps["step1"]; got.Status != StatusSkipped || got.SkipReason != StartFromSkipReason {
+		t.Fatalf("step1 result = %#v, want start-from skipped", got)
+	}
+	if got := state.Steps["step2"]; got.Status != StatusCompleted {
+		t.Fatalf("step2 status = %v, want completed", got.Status)
+	}
+}
+
 func TestPrintPipelineList_StatusCounts(t *testing.T) {
 	ClearPipelineRegistry()
 	defer ClearPipelineRegistry()
