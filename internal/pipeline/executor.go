@@ -49,6 +49,9 @@ type ExecutorConfig struct {
 	// into the synthetic Skipped entries created by StartFromStep so that
 	// ${steps.X.output} references in later steps resolve to the prior values.
 	StartFromState *ExecutionState
+
+	// ResumeOptions controls how Resume interprets prior persisted state.
+	ResumeOptions ResumeOptions
 }
 
 // MinProgressInterval is the minimum allowed progress interval to prevent ticker panics.
@@ -157,16 +160,19 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 
 	e.stateMu.Lock()
 	e.state = &ExecutionState{
-		RunID:        runID,
-		WorkflowID:   workflow.Name,
-		WorkflowFile: e.config.WorkflowFile,
-		Session:      e.config.Session,
-		Status:       StatusRunning,
-		StartedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-		Steps:        make(map[string]StepResult),
-		Variables:    make(map[string]interface{}),
-		Errors:       []ExecutionError{},
+		RunID:         runID,
+		WorkflowID:    workflow.Name,
+		WorkflowFile:  e.config.WorkflowFile,
+		Session:       e.config.Session,
+		Status:        StatusRunning,
+		StartedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+		Steps:         make(map[string]StepResult),
+		Variables:     make(map[string]interface{}),
+		Errors:        []ExecutionError{},
+		ForeachState:  make(map[string]ForeachIterationState),
+		ParallelState: make(map[string]ParallelGroupState),
+		InFlightSteps: make(map[string]InFlightStepState),
 	}
 	e.progress = progress
 	e.stateMu.Unlock()
@@ -236,30 +242,22 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	err = e.executeWorkflow(ctx, workflow)
 
 	// Finalize state
-	e.stateMu.Lock()
-	e.state.FinishedAt = time.Now()
-	e.state.UpdatedAt = time.Now()
-
 	if err != nil {
-		if ctx.Err() == context.Canceled {
-			e.state.Status = StatusCancelled
-			e.sendNotification(ctx, workflow, NotifyCancelled)
-		} else if ctx.Err() == context.DeadlineExceeded {
-			e.state.Status = StatusFailed
-			e.state.Errors = append(e.state.Errors, ExecutionError{
-				Type:      "timeout",
-				Message:   "workflow exceeded global timeout",
-				Timestamp: time.Now(),
-				Fatal:     true,
-			})
-			e.sendNotification(ctx, workflow, NotifyFailed)
+		if ctx.Err() != nil {
+			e.finalizeCancelledWorkflow(ctx, workflow)
 		} else {
+			e.stateMu.Lock()
+			e.state.FinishedAt = time.Now()
+			e.state.UpdatedAt = time.Now()
 			e.state.Status = StatusFailed
 			e.sendNotification(ctx, workflow, NotifyFailed)
+			e.stateMu.Unlock()
 		}
-		e.stateMu.Unlock()
 		e.emitProgress("workflow_error", "", err.Error(), e.calculateProgress())
 	} else {
+		e.stateMu.Lock()
+		e.state.FinishedAt = time.Now()
+		e.state.UpdatedAt = time.Now()
 		e.state.Status = StatusCompleted
 		e.sendNotification(ctx, workflow, NotifyCompleted)
 		e.stateMu.Unlock()
@@ -326,6 +324,7 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	e.state.Status = StatusRunning
 	e.state.UpdatedAt = time.Now()
 	e.state.FinishedAt = time.Time{}
+	e.state.CancelledAt = nil
 	e.state.CurrentStep = ""
 	e.stateMu.Unlock()
 
@@ -351,6 +350,20 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 		return e.state, fmt.Errorf("workflow has dependency errors: %v", errors[0])
 	}
 
+	if err := e.applyResumeOptions(workflow, e.config.ResumeOptions); err != nil {
+		e.stateMu.Lock()
+		e.state.Status = StatusFailed
+		e.state.Errors = append(e.state.Errors, ExecutionError{
+			Type:      "resume",
+			Message:   err.Error(),
+			Timestamp: time.Now(),
+			Fatal:     true,
+		})
+		e.stateMu.Unlock()
+		e.persistState()
+		return e.state, err
+	}
+
 	e.applyResumeState()
 	e.persistState()
 
@@ -361,30 +374,22 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	err := e.executeWorkflow(ctx, workflow)
 
 	// Finalize state
-	e.stateMu.Lock()
-	e.state.FinishedAt = time.Now()
-	e.state.UpdatedAt = time.Now()
-
 	if err != nil {
-		if ctx.Err() == context.Canceled {
-			e.state.Status = StatusCancelled
-			e.sendNotification(ctx, workflow, NotifyCancelled)
-		} else if ctx.Err() == context.DeadlineExceeded {
-			e.state.Status = StatusFailed
-			e.state.Errors = append(e.state.Errors, ExecutionError{
-				Type:      "timeout",
-				Message:   "workflow exceeded global timeout",
-				Timestamp: time.Now(),
-				Fatal:     true,
-			})
-			e.sendNotification(ctx, workflow, NotifyFailed)
+		if ctx.Err() != nil {
+			e.finalizeCancelledWorkflow(ctx, workflow)
 		} else {
+			e.stateMu.Lock()
+			e.state.FinishedAt = time.Now()
+			e.state.UpdatedAt = time.Now()
 			e.state.Status = StatusFailed
 			e.sendNotification(ctx, workflow, NotifyFailed)
+			e.stateMu.Unlock()
 		}
-		e.stateMu.Unlock()
 		e.emitProgress("workflow_error", "", err.Error(), e.calculateProgress())
 	} else {
+		e.stateMu.Lock()
+		e.state.FinishedAt = time.Now()
+		e.state.UpdatedAt = time.Now()
 		e.state.Status = StatusCompleted
 		e.sendNotification(ctx, workflow, NotifyCompleted)
 		e.stateMu.Unlock()
@@ -394,6 +399,91 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	e.persistState()
 
 	return e.state, err
+}
+
+func (e *Executor) finalizeCancelledWorkflow(ctx context.Context, workflow *Workflow) {
+	cancelledAt := time.Now()
+
+	e.stateMu.Lock()
+	e.state.Status = StatusCancelled
+	if e.state.CancelledAt == nil {
+		e.state.CancelledAt = &cancelledAt
+	}
+	e.state.UpdatedAt = cancelledAt
+	if ctx.Err() == context.DeadlineExceeded {
+		e.state.Errors = append(e.state.Errors, ExecutionError{
+			Type:      "timeout",
+			Message:   "workflow exceeded global timeout",
+			Timestamp: cancelledAt,
+			Fatal:     true,
+		})
+	}
+	e.stateMu.Unlock()
+	e.persistState()
+
+	e.runOnCancelSteps(workflow)
+
+	finishedAt := time.Now()
+	e.stateMu.Lock()
+	e.state.Status = StatusCancelled
+	if e.state.CancelledAt == nil {
+		e.state.CancelledAt = &cancelledAt
+	}
+	e.state.FinishedAt = finishedAt
+	e.state.UpdatedAt = finishedAt
+	e.state.CurrentStep = ""
+	e.stateMu.Unlock()
+	e.sendNotification(ctx, workflow, NotifyCancelled)
+}
+
+func (e *Executor) runOnCancelSteps(workflow *Workflow) {
+	if workflow == nil || len(workflow.Settings.OnCancel) == 0 {
+		return
+	}
+
+	cleanupWorkflow := *workflow
+	for i := range workflow.Settings.OnCancel {
+		step := workflow.Settings.OnCancel[i]
+		if step.ID == "" {
+			step.ID = fmt.Sprintf("on_cancel_%d", i+1)
+		}
+
+		e.stateMu.Lock()
+		e.state.CurrentStep = step.ID
+		e.state.UpdatedAt = time.Now()
+		e.stateMu.Unlock()
+
+		result := e.executeStep(context.Background(), &step, &cleanupWorkflow)
+		if result.FinishedAt.IsZero() {
+			result.FinishedAt = time.Now()
+		}
+
+		e.stateMu.Lock()
+		e.state.Steps[step.ID] = result
+		e.state.UpdatedAt = time.Now()
+		if result.Status == StatusFailed && result.Error != nil {
+			e.state.Errors = append(e.state.Errors, ExecutionError{
+				StepID:    step.ID,
+				Type:      "on_cancel",
+				Message:   result.Error.Message,
+				Timestamp: time.Now(),
+				Fatal:     false,
+			})
+		}
+		e.stateMu.Unlock()
+
+		if step.OutputVar != "" && result.Status == StatusCompleted {
+			e.varMu.Lock()
+			e.state.Variables[step.OutputVar] = result.Output
+			if result.ParsedData != nil {
+				e.state.Variables[step.OutputVar+"_parsed"] = result.ParsedData
+			}
+			StoreStepOutput(e.state, step.ID, result.Output, result.ParsedData)
+			e.varMu.Unlock()
+		}
+
+		e.persistState()
+	}
 }
 
 // Cancel cancels the current execution
@@ -429,9 +519,20 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 		// Execute ready steps (potentially in parallel if they're independent)
 		// For now, execute one at a time for simplicity
 		// TODO: Optimize with goroutine pool for truly parallel independent steps
+		sort.SliceStable(ready, func(i, j int) bool {
+			_, _, insideI := findStepContainer(workflow, ready[i])
+			_, _, insideJ := findStepContainer(workflow, ready[j])
+			return !insideI && insideJ
+		})
 		for _, stepID := range ready {
 			step, exists := e.graph.GetStep(stepID)
 			if !exists {
+				continue
+			}
+			if _, _, inside := findStepContainer(workflow, stepID); inside {
+				if err := e.graph.MarkExecuted(stepID); err != nil {
+					return fmt.Errorf("failed to mark nested step %s as executed: %w", stepID, err)
+				}
 				continue
 			}
 
@@ -489,6 +590,13 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 					// Retry is handled within executeStep
 				}
 			}
+
+			if result.Status == StatusCancelled {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return context.Canceled
+			}
 		}
 	}
 
@@ -503,6 +611,9 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		StartedAt: time.Now(),
 		Attempts:  0,
 	}
+	e.markStepInFlight(step.ID, stepKind(step), -1)
+	e.persistState()
+	defer e.clearStepInFlight(step.ID)
 
 	// Check for failed dependencies (in CONTINUE mode, skip steps with failed deps)
 	if e.graph.HasFailedDependency(step.ID) {
@@ -580,6 +691,15 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 			result.FinishedAt = time.Now()
 			e.emitProgress("step_complete", step.ID,
 				stepProgressMessage("Step completed", step, ""), e.calculateProgress())
+			return result
+		}
+
+		if stepResult.Status == StatusCancelled {
+			result = stepResult
+			result.Attempts = attempt
+			if result.FinishedAt.IsZero() {
+				result.FinishedAt = time.Now()
+			}
 			return result
 		}
 
@@ -745,7 +865,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	case WaitCompletion, WaitIdle:
 		// Wait for agent to return to idle
 		if err := e.waitForIdle(ctx, paneID, timeout); err != nil {
-			if ctx.Err() == context.Canceled {
+			if ctx.Err() != nil {
 				result.Status = StatusCancelled
 			} else {
 				result.Status = StatusFailed
@@ -935,6 +1055,21 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	result.Output = output
 
 	if waitErr != nil {
+		if ctx.Err() != nil {
+			result.Status = StatusCancelled
+			errorType := "cancelled"
+			reason := "cancelled by workflow context"
+			if ctx.Err() == context.DeadlineExceeded {
+				errorType = "timeout"
+				reason = "workflow exceeded global timeout"
+			}
+			result.Error = stepRuntimeError(step, "command", errorType,
+				reason,
+				"retry the run if cancellation was not intentional",
+				"")
+			result.FinishedAt = time.Now()
+			return result
+		}
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			result.Status = StatusFailed
 			result.Error = stepRuntimeError(step, "command", "timeout",
@@ -946,15 +1081,6 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 				"step_id", step.ID,
 				"timeout", timeout,
 			)
-			result.FinishedAt = time.Now()
-			return result
-		}
-		if ctx.Err() == context.Canceled {
-			result.Status = StatusCancelled
-			result.Error = stepRuntimeError(step, "command", "cancelled",
-				"cancelled by workflow context",
-				"retry the run if cancellation was not intentional",
-				"")
 			result.FinishedAt = time.Now()
 			return result
 		}
@@ -1118,7 +1244,14 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 
 	beforeOutput, _ := e.tmuxClient().CapturePaneOutput(paneID, 2000)
 
+	if ctx.Err() != nil {
+		return e.markTemplateCancelled(&result, step, workflow, paneID, ctx.Err().Error())
+	}
+
 	if err := e.tmuxClient().PasteKeys(paneID, rendered, true); err != nil {
+		if ctx.Err() != nil {
+			return e.markTemplateCancelled(&result, step, workflow, paneID, ctx.Err().Error())
+		}
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "template", "send",
 			fmt.Sprintf("failed to send rendered template: %v", err),
@@ -1147,9 +1280,7 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 	case WaitTime:
 		select {
 		case <-ctx.Done():
-			result.Status = StatusCancelled
-			result.FinishedAt = time.Now()
-			return result
+			return e.markTemplateCancelled(&result, step, workflow, paneID, ctx.Err().Error())
 		case <-time.After(timeout):
 			result.Status = StatusCompleted
 			result.FinishedAt = time.Now()
@@ -1157,8 +1288,8 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 
 	case WaitCompletion, WaitIdle:
 		if err := e.waitForIdle(ctx, paneID, timeout); err != nil {
-			if ctx.Err() == context.Canceled {
-				result.Status = StatusCancelled
+			if ctx.Err() != nil {
+				return e.markTemplateCancelled(&result, step, workflow, paneID, ctx.Err().Error())
 			} else {
 				result.Status = StatusFailed
 				result.Error = stepRuntimeError(step, "template", "timeout",
@@ -1211,6 +1342,29 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		"pane_id", paneID,
 	)
 	return result
+}
+
+func (e *Executor) markTemplateCancelled(result *StepResult, step *Step, workflow *Workflow, paneID string, reason string) StepResult {
+	if reason == "" {
+		reason = "cancelled by workflow context"
+	}
+	result.Status = StatusCancelled
+	result.SkipReason = reason
+	result.SkipKind = SkipKindCancelled
+	result.Error = stepRuntimeError(step, "template", "cancelled",
+		reason,
+		"retry the run if cancellation was not intentional",
+		"")
+	result.FinishedAt = time.Now()
+	slog.Warn(EventTemplateCancelled,
+		"run_id", e.runIDForLog(),
+		"workflow", workflow.Name,
+		"step_id", step.ID,
+		"agent_type", "template",
+		"pane_id", paneID,
+		FieldDurationMS, result.FinishedAt.Sub(result.StartedAt).Milliseconds(),
+	)
+	return *result
 }
 
 // resolveTemplatePath resolves a template reference to an absolute file path.
@@ -1366,6 +1520,8 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	e.emitProgress("parallel_start", step.ID,
 		stepProgressMessage("Starting parallel group", step, fmt.Sprintf("%d steps, on_error=%s", len(step.Parallel.Steps), onError)),
 		e.calculateProgress())
+	e.beginParallelState(step.ID, len(step.Parallel.Steps))
+	e.persistState()
 
 	var wg sync.WaitGroup
 	results := make([]StepResult, len(step.Parallel.Steps))
@@ -1403,6 +1559,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 				e.state.UpdatedAt = time.Now()
 				e.stateMu.Unlock()
 				mu.Unlock()
+				e.markParallelSubstepFinished(step.ID, ps.ID, StatusCancelled)
 				e.persistState()
 				return
 			case sem <- struct{}{}: // Acquire token
@@ -1411,6 +1568,8 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 			defer func() { <-sem }() // Release token
 
 			// Execute the step with pane coordination
+			e.markParallelSubstepStarted(step.ID, ps.ID)
+			e.persistState()
 			pResult := e.executeParallelStep(parallelCtx, &ps, workflow, usedPanes, &panesMu)
 
 			mu.Lock()
@@ -1431,11 +1590,13 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 			}
 			mu.Unlock()
 
+			e.markParallelSubstepFinished(step.ID, ps.ID, pResult.Status)
 			e.persistState()
 		}(i, pStep)
 	}
 
 	wg.Wait()
+	e.completeParallelState(step.ID)
 
 	// Aggregate results
 	completed := 0
@@ -1545,6 +1706,9 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		Status:    StatusRunning,
 		StartedAt: time.Now(),
 	}
+	e.markStepInFlight(step.ID, "parallel_step", -1)
+	e.persistState()
+	defer e.clearStepInFlight(step.ID)
 
 	// Check for unsupported nested structures
 	if len(step.Parallel.Steps) > 0 || step.Loop != nil {
@@ -2109,7 +2273,7 @@ func (e *Executor) calculateProgress() float64 {
 	e.stateMu.RLock()
 	completed := 0
 	for _, result := range e.state.Steps {
-		if result.Status == StatusCompleted || result.Status == StatusFailed || result.Status == StatusSkipped {
+		if result.Status == StatusCompleted || result.Status == StatusFailed || result.Status == StatusSkipped || result.Status == StatusCancelled {
 			completed++
 		}
 	}
@@ -2287,6 +2451,11 @@ func (e *Executor) applyResumeState() {
 			delete(e.state.Steps, stepID)
 		}
 	}
+	for stepID := range e.state.InFlightSteps {
+		rerunStepIDs = append(rerunStepIDs, stepID)
+		delete(e.state.Steps, stepID)
+	}
+	e.state.InFlightSteps = nil
 
 	for _, stepID := range rerunStepIDs {
 		delete(e.state.Steps, stepID)
@@ -2349,13 +2518,47 @@ func (e *Executor) snapshotState() *ExecutionState {
 			snapshot.Steps[key] = value
 		}
 	}
+	if e.state.ForeachState != nil {
+		snapshot.ForeachState = make(map[string]ForeachIterationState, len(e.state.ForeachState))
+		for key, value := range e.state.ForeachState {
+			value.CompletedIterationIDs = append([]string(nil), value.CompletedIterationIDs...)
+			snapshot.ForeachState[key] = value
+		}
+	}
+	if e.state.ParallelState != nil {
+		snapshot.ParallelState = make(map[string]ParallelGroupState, len(e.state.ParallelState))
+		for key, value := range e.state.ParallelState {
+			value.CompletedStepIDs = append([]string(nil), value.CompletedStepIDs...)
+			value.FailedStepIDs = append([]string(nil), value.FailedStepIDs...)
+			value.InFlightStepIDs = append([]string(nil), value.InFlightStepIDs...)
+			snapshot.ParallelState[key] = value
+		}
+	}
+	if e.state.InFlightSteps != nil {
+		snapshot.InFlightSteps = make(map[string]InFlightStepState, len(e.state.InFlightSteps))
+		for key, value := range e.state.InFlightSteps {
+			snapshot.InFlightSteps[key] = value
+		}
+	}
 	e.stateMu.RUnlock()
 
 	e.varMu.RLock()
 	if e.state.Variables != nil {
 		snapshot.Variables = make(map[string]interface{}, len(e.state.Variables))
 		for key, value := range e.state.Variables {
-			snapshot.Variables[key] = value
+			snapshot.Variables[key] = cloneInterfaceValue(value)
+		}
+	}
+	if e.state.ScopeStack != nil {
+		snapshot.ScopeStack = make([]ScopeFrame, len(e.state.ScopeStack))
+		for i, frame := range e.state.ScopeStack {
+			snapshot.ScopeStack[i] = frame
+			if frame.Variables != nil {
+				snapshot.ScopeStack[i].Variables = make(map[string]interface{}, len(frame.Variables))
+				for key, value := range frame.Variables {
+					snapshot.ScopeStack[i].Variables[key] = cloneInterfaceValue(value)
+				}
+			}
 		}
 	}
 	e.varMu.RUnlock()
@@ -2367,6 +2570,16 @@ func (e *Executor) persistState() {
 	if e.state == nil {
 		return
 	}
+
+	now := time.Now()
+	e.stateMu.Lock()
+	if e.state == nil {
+		e.stateMu.Unlock()
+		return
+	}
+	e.state.LastCheckpointAt = now
+	e.state.UpdatedAt = now
+	e.stateMu.Unlock()
 
 	projectDir := e.config.ProjectDir
 	if projectDir == "" {

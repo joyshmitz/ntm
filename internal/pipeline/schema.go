@@ -203,6 +203,7 @@ const (
 type WorkflowSettings struct {
 	Timeout          Duration     `yaml:"timeout,omitempty" toml:"timeout,omitempty" json:"timeout,omitempty"`    // Global timeout (e.g., "30m")
 	OnError          ErrorAction  `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"` // fail, fail_fast, continue, retry
+	OnCancel         []Step       `yaml:"on_cancel,omitempty" toml:"on_cancel,omitempty" json:"on_cancel,omitempty"`
 	Limits           LimitsConfig `yaml:"limits,omitempty" toml:"limits,omitempty" json:"limits,omitempty"`
 	LogDispatch      *bool        `yaml:"log_dispatch,omitempty" toml:"log_dispatch,omitempty" json:"log_dispatch,omitempty"`
 	NotifyOnComplete bool         `yaml:"notify_on_complete,omitempty" toml:"notify_on_complete,omitempty" json:"notify_on_complete,omitempty"`
@@ -1263,6 +1264,7 @@ type ExecutionState struct {
 	StartedAt    time.Time              `json:"started_at"`
 	UpdatedAt    time.Time              `json:"updated_at"`
 	FinishedAt   time.Time              `json:"finished_at,omitempty"`
+	CancelledAt  *time.Time             `json:"cancelled_at,omitempty"`
 	CurrentStep  string                 `json:"current_step,omitempty"`
 	Steps        map[string]StepResult  `json:"steps"`
 	Variables    map[string]interface{} `json:"variables"` // Runtime variables including step outputs
