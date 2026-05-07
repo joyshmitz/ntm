@@ -473,6 +473,10 @@ func TestLoadDefaultsForMissingFields(t *testing.T) {
 }
 
 func TestDefaultPath(t *testing.T) {
+	// bd-xkls4: clear ambient NTM_CONFIG so the HOME/XDG default-path
+	// resolver isn't preempted by a hostile outer-shell value (e.g.
+	// /nonexistent/config.toml) and the default shape assertions hold.
+	t.Setenv("NTM_CONFIG", "")
 	path := DefaultPath()
 	if !strings.Contains(path, "config.toml") {
 		t.Errorf("DefaultPath should contain config.toml: %s", path)
@@ -483,6 +487,9 @@ func TestDefaultPath(t *testing.T) {
 }
 
 func TestDefaultPathWithXDG(t *testing.T) {
+	// bd-xkls4: clear ambient NTM_CONFIG; otherwise it shadows
+	// XDG_CONFIG_HOME and the test's /custom/xdg path expectation breaks.
+	t.Setenv("NTM_CONFIG", "")
 	original := os.Getenv("XDG_CONFIG_HOME")
 	defer os.Setenv("XDG_CONFIG_HOME", original)
 	os.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
@@ -830,6 +837,10 @@ func TestCreateDefaultAlreadyExists(t *testing.T) {
 
 func TestCreateDefaultSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
+	// bd-xkls4: clear ambient NTM_CONFIG so DefaultPath resolves through
+	// the test XDG_CONFIG_HOME and CreateDefault writes inside the temp
+	// dir instead of trying to mkdir /nonexistent.
+	t.Setenv("NTM_CONFIG", "")
 	origXDG := os.Getenv("XDG_CONFIG_HOME")
 	os.Setenv("XDG_CONFIG_HOME", tmpDir)
 	defer os.Setenv("XDG_CONFIG_HOME", origXDG)
