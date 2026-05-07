@@ -67,3 +67,37 @@ func TestForeachAuthorModelFamilyForPanesPrefersPaneVocabulary(t *testing.T) {
 		t.Fatalf("foreachAuthorModelFamilyForPanes() = %q, want codex", got)
 	}
 }
+
+func TestSelectForeachPaneModelFamilyDifferenceTreatsClaudeVariantsAsSameFamily(t *testing.T) {
+	// Pane spawn paths set ModelFamily to bare variant names like "opus",
+	// "sonnet", or "haiku" via paneMetadataFromTmuxPane. Without grouping
+	// those under Claude, by_model_family_difference would compare
+	// "opus" != "cc" exactly and route the Claude-authored work back to a
+	// Claude pane — defeating the cross-family debate contract.
+	cases := []struct {
+		name        string
+		opusVariant string
+		authorModel string
+	}{
+		{name: "opus variant", opusVariant: "opus", authorModel: "claude-sonnet-4"},
+		{name: "sonnet variant", opusVariant: "sonnet", authorModel: "claude-opus-4"},
+		{name: "haiku variant", opusVariant: "haiku", authorModel: "anthropic-claude-3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			strategyPanes := []paneStrategyPane{
+				{ID: "p1", ModelFamily: tc.opusVariant},
+				{ID: "p2", ModelFamily: "cod"},
+			}
+			item := map[string]interface{}{"author_model": tc.authorModel}
+
+			got, _, _, err := selectForeachPane("by_model_family_difference", strategyPanes, nil, item, 0)
+			if err != nil {
+				t.Fatalf("selectForeachPane() error = %v", err)
+			}
+			if got != "p2" {
+				t.Fatalf("selectForeachPane() = %q, want p2 (Claude-authored work must avoid the Claude-variant pane)", got)
+			}
+		})
+	}
+}

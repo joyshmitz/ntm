@@ -76,8 +76,18 @@ func modelFamilyGroup(raw string) string {
 		return "gemini"
 	}
 
+	// Bare Claude model variants used as pane.ModelFamily / item.author_model
+	// (e.g. "opus", "sonnet", "haiku") must group under Claude so the
+	// cross-family adversarial contract treats them as same-family.
+	switch normalized {
+	case "opus", "sonnet", "haiku":
+		return "claude"
+	}
+
 	switch {
-	case strings.HasPrefix(normalized, "claude"), strings.HasPrefix(normalized, "anthropic"):
+	case strings.HasPrefix(normalized, "claude"), strings.HasPrefix(normalized, "anthropic"),
+		strings.HasPrefix(normalized, "opus"), strings.HasPrefix(normalized, "sonnet"),
+		strings.HasPrefix(normalized, "haiku"):
 		return "claude"
 	case strings.HasPrefix(normalized, "codex"), strings.HasPrefix(normalized, "openai"), strings.HasPrefix(normalized, "gpt"):
 		return "codex"
