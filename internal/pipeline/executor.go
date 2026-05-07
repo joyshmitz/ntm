@@ -389,7 +389,14 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 			Fatal:     true,
 		})
 		e.stateMu.Unlock()
-		e.persistState()
+		// bd-0n73e: applyResumeOptions failures (MaxResumeAge stale-state,
+		// session mismatch, force-iter validation, roster-change policy)
+		// must not rewrite LastCheckpointAt/UpdatedAt to time.Now() —
+		// otherwise a stale resume rejected once would pass the same age
+		// guard on the next attempt because persistState refreshed the
+		// checkpoint timestamp. The error is still returned to the caller;
+		// we just leave the on-disk state file untouched so subsequent
+		// resume attempts see the same age the rejection just observed.
 		return e.state, err
 	}
 

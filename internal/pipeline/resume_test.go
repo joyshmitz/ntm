@@ -435,6 +435,71 @@ func TestResumeRejectsStaleState(t *testing.T) {
 	}
 }
 
+func TestResumeRejectingStaleStateDoesNotRefreshCheckpoint(t *testing.T) {
+	// bd-0n73e: a resume that fails the MaxResumeAge guard must not
+	// rewrite LastCheckpointAt/UpdatedAt on disk; otherwise a second
+	// attempt would silently pass the same age check and resume work
+	// that should remain blocked.
+	tmpDir := t.TempDir()
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "stale-resume-no-refresh",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	stale := time.Now().Add(-48 * time.Hour)
+	prior := &ExecutionState{
+		RunID:            "stale-no-refresh",
+		WorkflowID:       workflow.Name,
+		Session:          "session",
+		Status:           StatusRunning,
+		StartedAt:        stale.Add(-time.Hour),
+		UpdatedAt:        stale,
+		LastCheckpointAt: stale,
+		Steps:            map[string]StepResult{},
+		Variables:        map[string]interface{}{},
+	}
+	if err := SaveState(tmpDir, prior); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	cfg := DefaultExecutorConfig("session")
+	cfg.ProjectDir = tmpDir
+	executor := NewExecutor(cfg)
+	_, err := executor.ResumeWithOptions(context.Background(), workflow, prior, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		MaxResumeAge:   time.Hour,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err == nil {
+		t.Fatal("ResumeWithOptions() error = nil, want stale-state rejection")
+	}
+
+	// Reload the on-disk file. The checkpoint must still be ~stale, not now.
+	reloaded, err := LoadState(tmpDir, prior.RunID)
+	if err != nil {
+		t.Fatalf("LoadState after rejected resume: %v", err)
+	}
+	if delta := time.Since(reloaded.LastCheckpointAt); delta < 24*time.Hour {
+		t.Fatalf("LastCheckpointAt advanced after rejected stale resume (delta=%s); a follow-up resume would bypass MaxResumeAge", delta)
+	}
+
+	// A second resume against the same state must still be rejected.
+	_, err = executor.ResumeWithOptions(context.Background(), workflow, reloaded, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		MaxResumeAge:   time.Hour,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err == nil {
+		t.Fatal("second ResumeWithOptions() error = nil, want stale-state rejection on retry")
+	}
+	if !strings.Contains(err.Error(), "older than MaxResumeAge") {
+		t.Fatalf("second attempt error = %q, want stale-state message", err.Error())
+	}
+}
+
 func TestResumeRejectsLegacyStateWithoutCheckpoint(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,
