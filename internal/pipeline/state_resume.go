@@ -2,6 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -53,11 +56,20 @@ type ResumeOptions struct {
 
 // ForeachIterationState records durable progress for loop/foreach-style
 // iteration steps. CompletedIterationIDs use the stable "<step>_iter<N>" form.
+//
+// ItemsFingerprint (bd-3awat) records a content hash of the resolved items
+// list at the time the foreach started. CompletedIterationIDs are keyed by
+// integer index, so resuming against a list whose elements have shifted
+// (resolved from a dynamic source between runs — vars expression, prior
+// step output, glob, etc.) would silently apply old completion records to
+// new items. Recording the fingerprint lets executeForEach refuse resume
+// when the resolved items diverge from the original run.
 type ForeachIterationState struct {
 	StepID                string    `json:"step_id"`
 	CurrentIteration      int       `json:"current_iteration"`
 	Total                 int       `json:"total"`
 	CompletedIterationIDs []string  `json:"completed_iteration_ids,omitempty"`
+	ItemsFingerprint      string    `json:"items_fingerprint,omitempty"`
 	StartedAt             time.Time `json:"started_at,omitempty"`
 	UpdatedAt             time.Time `json:"updated_at,omitempty"`
 }
@@ -394,6 +406,77 @@ func (e *Executor) beginForeachState(stepID string, total int) int {
 	state.CurrentIteration = start
 	e.state.ForeachState[stepID] = state
 	return start
+}
+
+// computeForeachItemsFingerprint returns a stable hash of the resolved
+// foreach items so resume can detect drift when items resolve from a
+// dynamic source (vars expression, prior step output, glob, etc.).
+//
+// Empty inputs hash deterministically (the empty-array form), matching the
+// JSON encoding so an unchanged empty-source resume verifies cleanly.
+// Unmarshalable values fall back to the Go-formatted form: a fingerprint
+// is best-effort drift detection, not a security boundary.
+func computeForeachItemsFingerprint(items []interface{}) string {
+	if items == nil {
+		items = []interface{}{}
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		encoded = []byte(fmt.Sprintf("%#v", items))
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+// verifyForeachItemsFingerprint compares the supplied fingerprint against
+// the one persisted on prior foreach state. Returns nil if no prior state
+// exists, the fingerprints match, or there is no recorded fingerprint
+// (legacy state files predate this field). Returns an error when the prior
+// run completed at least one iteration with a fingerprint that no longer
+// matches — that is the unsafe-resume case where iteration N's completion
+// record applies to a different items[N] than the resume sees.
+func (e *Executor) verifyForeachItemsFingerprint(stepID, fingerprint string) error {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	if e.state == nil || e.state.ForeachState == nil {
+		return nil
+	}
+	prior, ok := e.state.ForeachState[stepID]
+	if !ok {
+		return nil
+	}
+	if prior.ItemsFingerprint == "" || len(prior.CompletedIterationIDs) == 0 {
+		return nil
+	}
+	if prior.ItemsFingerprint == fingerprint {
+		return nil
+	}
+	return fmt.Errorf("foreach %q items changed since prior run (completed=%d, prior_fingerprint=%s, current_fingerprint=%s); resume would apply old iteration records to different items",
+		stepID, len(prior.CompletedIterationIDs), prior.ItemsFingerprint[:12], fingerprint[:12])
+}
+
+// recordForeachItemsFingerprint stores the fingerprint of the resolved
+// items on the foreach state. Idempotent: re-records the same fingerprint
+// on resume when nothing has changed, so verifyForeachItemsFingerprint can
+// catch drift on a subsequent resume even after a checkpointed run that
+// was originally written before this field existed.
+func (e *Executor) recordForeachItemsFingerprint(stepID, fingerprint string) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.state == nil {
+		return
+	}
+	if e.state.ForeachState == nil {
+		e.state.ForeachState = make(map[string]ForeachIterationState)
+	}
+	state := e.state.ForeachState[stepID]
+	if state.StepID == "" {
+		state.StepID = stepID
+		state.StartedAt = time.Now()
+	}
+	state.ItemsFingerprint = fingerprint
+	state.UpdatedAt = time.Now()
+	e.state.ForeachState[stepID] = state
 }
 
 func firstIncompleteIteration(completed []string, stepID string, total int) int {

@@ -143,6 +143,27 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	le.executor.emitProgress("loop_start", step.ID,
 		fmt.Sprintf("Starting for-each loop with %d items", total), le.executor.calculateProgress())
 
+	// bd-3awat: CompletedIterationIDs are keyed by integer index. If items
+	// resolve from a dynamic source (vars expression, prior step output,
+	// glob, etc.) and the resolved list differs between the original run
+	// and a resume, applying old completion records to different items at
+	// the same index would silently produce wrong outputs. Fingerprint the
+	// resolved items at start and refuse resume on drift; record the
+	// fingerprint on first run and on a clean (no-op) resume so subsequent
+	// resumes of legacy state files are also protected.
+	itemsFingerprint := computeForeachItemsFingerprint(items)
+	if err := le.executor.verifyForeachItemsFingerprint(step.ID, itemsFingerprint); err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "loop",
+			Message:   err.Error(),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+	le.executor.recordForeachItemsFingerprint(step.ID, itemsFingerprint)
+
 	startIndex := le.executor.beginForeachState(step.ID, total)
 	le.executor.persistState()
 

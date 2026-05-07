@@ -803,3 +803,107 @@ func TestExecuteLoop_TimesWithCollect(t *testing.T) {
 		t.Errorf("expected 3 iterations, got %d", result.Iterations)
 	}
 }
+
+// TestExecuteForEach_RecordsAndVerifiesItemsFingerprint covers bd-3awat:
+// fresh foreach runs persist a fingerprint of the resolved items, and a
+// resume against a divergent items list fails fast instead of silently
+// applying old completion records to different items.
+func TestExecuteForEach_RecordsAndVerifiesItemsFingerprint(t *testing.T) {
+	config := ExecutorConfig{
+		Session:       "fp-session",
+		DryRun:        true,
+		GlobalTimeout: 30 * time.Second,
+	}
+	executor := NewExecutor(config)
+	executor.state = &ExecutionState{
+		Variables: map[string]interface{}{
+			"items": []interface{}{"a", "b", "c"},
+		},
+		Steps: make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID:     "fanout",
+		Prompt: "Process ${loop.item}",
+		Loop: &LoopConfig{
+			Items: "${vars.items}",
+			As:    "item",
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+	if result.Status != StatusCompleted {
+		t.Fatalf("first run status = %v, want completed", result.Status)
+	}
+	state, ok := executor.state.ForeachState["fanout"]
+	if !ok {
+		t.Fatalf("ForeachState[\"fanout\"] missing after first run")
+	}
+	if state.ItemsFingerprint == "" {
+		t.Fatal("ItemsFingerprint empty after first run; expected fingerprint to be recorded")
+	}
+	if len(state.CompletedIterationIDs) != 3 {
+		t.Fatalf("CompletedIterationIDs after first run = %#v, want 3 entries", state.CompletedIterationIDs)
+	}
+	originalFingerprint := state.ItemsFingerprint
+
+	// Resume scenario: items unchanged. The legacy loop executor's resume
+	// path picks up where the prior run left off; here the prior run
+	// completed all iterations so no body re-runs, but verifyForeachItems
+	// must accept the unchanged fingerprint.
+	executor.state.Variables["items"] = []interface{}{"a", "b", "c"}
+	result = executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+	if result.Status != StatusCompleted {
+		t.Fatalf("unchanged-items resume status = %v, want completed", result.Status)
+	}
+	if got := executor.state.ForeachState["fanout"].ItemsFingerprint; got != originalFingerprint {
+		t.Fatalf("ItemsFingerprint changed across unchanged-items resume: was %s, got %s", originalFingerprint, got)
+	}
+
+	// Drift scenario: items reordered. Index-keyed completion records
+	// would silently apply iteration 0's record to a different items[0],
+	// so resume must fail with a clear error.
+	executor.state.Variables["items"] = []interface{}{"c", "b", "a"}
+	result = executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+	if result.Status != StatusFailed {
+		t.Fatalf("reordered-items resume status = %v, want failed", result.Status)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "items changed since prior run") {
+		t.Fatalf("reordered-items resume error = %#v, want items-changed message", result.Error)
+	}
+
+	// Drift scenario: items list shrunk to a different content. Same
+	// failure path — fingerprint mismatch.
+	executor.state.Variables["items"] = []interface{}{"a", "b"}
+	result = executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+	if result.Status != StatusFailed {
+		t.Fatalf("shrunk-items resume status = %v, want failed", result.Status)
+	}
+}
+
+// TestComputeForeachItemsFingerprint_StableAndDivergent verifies the
+// fingerprint is deterministic for equivalent inputs and diverges for
+// reordered or modified inputs (bd-3awat).
+func TestComputeForeachItemsFingerprint_StableAndDivergent(t *testing.T) {
+	a := computeForeachItemsFingerprint([]interface{}{"x", "y", "z"})
+	b := computeForeachItemsFingerprint([]interface{}{"x", "y", "z"})
+	if a != b {
+		t.Fatalf("fingerprint not stable for identical inputs: %s vs %s", a, b)
+	}
+
+	reordered := computeForeachItemsFingerprint([]interface{}{"z", "y", "x"})
+	if reordered == a {
+		t.Fatalf("fingerprint identical for reordered inputs: %s", reordered)
+	}
+
+	shrunk := computeForeachItemsFingerprint([]interface{}{"x", "y"})
+	if shrunk == a {
+		t.Fatalf("fingerprint identical for shrunk inputs: %s", shrunk)
+	}
+
+	emptyA := computeForeachItemsFingerprint(nil)
+	emptyB := computeForeachItemsFingerprint([]interface{}{})
+	if emptyA != emptyB {
+		t.Fatalf("nil and empty-slice fingerprints differ: %s vs %s", emptyA, emptyB)
+	}
+}
