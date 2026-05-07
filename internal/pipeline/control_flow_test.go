@@ -618,6 +618,56 @@ func TestOnFailureActionSetsRuntimeVariableAndSkipsOriginalFailure(t *testing.T)
 	}
 }
 
+func TestOnFailureActionFiresInsideForeachBody(t *testing.T) {
+	// A failed foreach body step with on_failure: <action> must run the
+	// on_failure action just like a top-level step does. Without this,
+	// moving a working step into a foreach body silently disabled the
+	// recovery contract: the step returned StatusFailed without setting
+	// runtime.<id>_failure_action, downstream guarded steps could not
+	// route around it, and per-item fallback handling broke for
+	// brennerbot / incident workflows.
+	executor := NewExecutor(DefaultExecutorConfig("foreach-failure-session"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-onfailure-action-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID: "fanout",
+				Foreach: &ForeachConfig{
+					Items: `["alpha"]`,
+					As:    "item",
+					Steps: []Step{
+						{
+							ID:        "register_mail",
+							Command:   "exit 4",
+							OnFailure: OnFailureSpec{Action: "fallback_to_ntm_inbox"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil after handled on_failure action inside foreach", err)
+	}
+
+	register := state.Steps["fanout_iter0_register_mail"]
+	if register.Status != StatusSkipped {
+		t.Fatalf("foreach body register_mail status = %s, want skipped (action ran)", register.Status)
+	}
+	if register.SkipKind != SkipKindOnFailureAction {
+		t.Errorf("foreach body register_mail SkipKind = %q, want %q",
+			register.SkipKind, SkipKindOnFailureAction)
+	}
+	if got := state.Variables["runtime.fanout_iter0_register_mail_failure_action"]; got != "fallback_to_ntm_inbox" {
+		t.Fatalf("runtime failure action = %v, want fallback_to_ntm_inbox", got)
+	}
+}
+
 func TestOnFailureActionNotSetOnSuccessSkipsRuntimeGuardedStep(t *testing.T) {
 	executor := NewExecutor(DefaultExecutorConfig("runtime-failure-session"))
 

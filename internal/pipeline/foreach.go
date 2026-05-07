@@ -680,6 +680,20 @@ func (e *Executor) executeForeachNestedStep(ctx context.Context, step *Step, wor
 			}
 		}
 	}
+
+	// Mirror executeStep's on_failure tail so foreach body steps honour the
+	// same recovery contract as top-level steps. Without this, moving a step
+	// from top-level into a foreach body silently disabled on_failure
+	// actions (fallback_to_ntm_inbox / suppress) and recovery template
+	// dispatches — which the brennerbot/incident workflows rely on for
+	// per-item fallback handling.
+	if result.Status == StatusFailed {
+		result = e.executeOnFailureAction(step, result)
+		if result.Status == StatusSkipped {
+			return result
+		}
+		result = e.executeOnFailureRecovery(ctx, step, workflow, result)
+	}
 	return result
 }
 
