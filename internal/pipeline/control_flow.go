@@ -171,13 +171,15 @@ func (e *Executor) executeBranch(ctx context.Context, step *Step, workflow *Work
 		return result
 	}
 
-	// Snapshot variables before branch body for scoping
+	// Snapshot variables before branch body for scoping.
 	e.varMu.RLock()
-	varSnapshot := make(map[string]interface{}, len(e.state.Variables))
-	for k, v := range e.state.Variables {
-		varSnapshot[k] = v
-	}
+	varSnapshot := captureAllVariables(e.state.Variables)
 	e.varMu.RUnlock()
+	defer func() {
+		e.varMu.Lock()
+		restoreAllVariables(e.state, varSnapshot)
+		e.varMu.Unlock()
+	}()
 
 	// Execute branch steps sequentially
 	var outputs []string
@@ -213,11 +215,6 @@ func (e *Executor) executeBranch(ctx context.Context, step *Step, workflow *Work
 			break
 		}
 	}
-
-	// Restore variables to pre-branch snapshot (scope cleanup)
-	e.varMu.Lock()
-	e.state.Variables = varSnapshot
-	e.varMu.Unlock()
 
 	if allPassed {
 		result.Status = StatusCompleted

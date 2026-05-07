@@ -141,16 +141,15 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		case <-ctx.Done():
 			result.Status = StatusCancelled
 			result.FinishedAt = time.Now()
-			le.clearLoopVars(varName)
 			return result
 		default:
 		}
 
-		// Set loop variables
-		le.setLoopVars(varName, item, i, total)
+		scope := le.pushLoopVars(varName, item, i, total)
 
 		// Execute nested steps
 		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		le.popLoopVars(scope)
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
@@ -184,7 +183,6 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 			case <-ctx.Done():
 				result.Status = StatusCancelled
 				result.FinishedAt = time.Now()
-				le.clearLoopVars(varName)
 				return result
 			case <-time.After(loop.Delay.Duration):
 			}
@@ -195,8 +193,6 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	if loop.Collect != "" {
 		le.storeCollected(loop.Collect, result.Collected)
 	}
-
-	le.clearLoopVars(varName)
 
 	if result.Error != nil {
 		result.Status = StatusFailed
@@ -241,7 +237,6 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 		case <-ctx.Done():
 			result.Status = StatusCancelled
 			result.FinishedAt = time.Now()
-			le.clearLoopVars(varName)
 			return result
 		default:
 		}
@@ -256,7 +251,6 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 				Timestamp: time.Now(),
 			}
 			result.FinishedAt = time.Now()
-			le.clearLoopVars(varName)
 			return result
 		}
 
@@ -266,11 +260,11 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 			break
 		}
 
-		// Set loop variables (for while loops, item is the iteration count)
-		le.setLoopVars(varName, i, i, maxIterations)
+		scope := le.pushLoopVars(varName, i, i, maxIterations)
 
 		// Execute nested steps
 		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		le.popLoopVars(scope)
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
@@ -304,7 +298,6 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 			case <-ctx.Done():
 				result.Status = StatusCancelled
 				result.FinishedAt = time.Now()
-				le.clearLoopVars(varName)
 				return result
 			case <-time.After(loop.Delay.Duration):
 			}
@@ -329,8 +322,6 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 	if loop.Collect != "" {
 		le.storeCollected(loop.Collect, result.Collected)
 	}
-
-	le.clearLoopVars(varName)
 
 	if result.Error != nil {
 		result.Status = StatusFailed
@@ -392,16 +383,15 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 		case <-ctx.Done():
 			result.Status = StatusCancelled
 			result.FinishedAt = time.Now()
-			le.clearLoopVars(varName)
 			return result
 		default:
 		}
 
-		// Set loop variables
-		le.setLoopVars(varName, i, i, times)
+		scope := le.pushLoopVars(varName, i, i, times)
 
 		// Execute nested steps
 		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		le.popLoopVars(scope)
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
@@ -435,7 +425,6 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 			case <-ctx.Done():
 				result.Status = StatusCancelled
 				result.FinishedAt = time.Now()
-				le.clearLoopVars(varName)
 				return result
 			case <-time.After(loop.Delay.Duration):
 			}
@@ -446,8 +435,6 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 	if loop.Collect != "" {
 		le.storeCollected(loop.Collect, result.Collected)
 	}
-
-	le.clearLoopVars(varName)
 
 	if result.Error != nil {
 		result.Status = StatusFailed
@@ -633,18 +620,21 @@ func parseItemsString(s string) ([]interface{}, error) {
 	return result, nil
 }
 
-// setLoopVars sets loop context variables.
-func (le *LoopExecutor) setLoopVars(varName string, item interface{}, index, total int) {
+// pushLoopVars sets loop context variables and returns the scope needed to
+// restore the previous outer loop context.
+func (le *LoopExecutor) pushLoopVars(varName string, item interface{}, index, total int) VariableScope {
 	le.executor.varMu.Lock()
 	defer le.executor.varMu.Unlock()
+	scope := CaptureVariableScope(le.executor.state.Variables, loopScopeKeys(varName)...)
 	SetLoopVars(le.executor.state, varName, item, index, total)
+	return scope
 }
 
-// clearLoopVars removes loop context variables.
-func (le *LoopExecutor) clearLoopVars(varName string) {
+// popLoopVars restores the previous loop context.
+func (le *LoopExecutor) popLoopVars(scope VariableScope) {
 	le.executor.varMu.Lock()
 	defer le.executor.varMu.Unlock()
-	ClearLoopVars(le.executor.state, varName)
+	scope.Restore(le.executor.state.Variables)
 }
 
 // storeCollected stores collected loop results in a variable.
