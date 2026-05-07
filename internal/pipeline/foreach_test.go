@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func createForeachTestExecutor(t *testing.T, workflow *Workflow) *Executor {
@@ -792,5 +794,117 @@ func TestForeachMaxConcurrentZeroGlobalAllowsPerStep(t *testing.T) {
 	// And a missing per-step value falls back to a safe minimum of 1.
 	if got := foreachMaxConcurrent(&ForeachConfig{}, limits); got != 1 {
 		t.Fatalf("foreachMaxConcurrent(unbounded global, no per-step) = %d, want 1", got)
+	}
+}
+
+// bd-2ubxp.13: foreach_pane treats the panes themselves as the iteration set,
+// dispatching the body for every pane in the session unless a filter excludes
+// it. Items come from the tmux client's pane list and are surfaced as
+// ${item.X} / ${pane.X} maps.
+func TestExecuteForeachPaneNoFilterIteratesAllPanes(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-pane-no-filter",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "fanout_pane",
+		ForeachPane: &ForeachConfig{
+			Steps: []Step{{
+				ID:      "echo",
+				Command: `printf '%s' '${pane.role}'`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+	mock := NewMockTmuxClient(
+		tmux.Pane{ID: "%1", Index: 1, NTMIndex: 1, Type: tmux.AgentClaude, Tags: []string{"role=investigator"}},
+		tmux.Pane{ID: "%2", Index: 2, NTMIndex: 2, Type: tmux.AgentCodex, Tags: []string{"role=adjudicator"}},
+		tmux.Pane{ID: "%3", Index: 3, NTMIndex: 3, Type: tmux.AgentGemini, Tags: []string{"role=investigator"}},
+	)
+	e.SetTmuxClient(mock)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 3 {
+		t.Fatalf("iterations = %d, want 3", len(iterations))
+	}
+	var outputs []string
+	for _, iter := range iterations {
+		if iter.Skipped {
+			t.Fatalf("iteration %d unexpectedly skipped: kind=%q reason=%q", iter.Index, iter.SkipKind, iter.SkipReason)
+		}
+		if len(iter.Results) != 1 {
+			t.Fatalf("iteration %d results = %d, want 1", iter.Index, len(iter.Results))
+		}
+		outputs = append(outputs, iter.Results[0].Output)
+	}
+	if got, want := strings.Join(outputs, ","), "investigator,adjudicator,investigator"; got != want {
+		t.Fatalf("outputs = %q, want %q", got, want)
+	}
+}
+
+// bd-2ubxp.13: a foreach_pane filter narrows the iteration set to panes whose
+// metadata satisfies the predicate; non-matching panes are recorded as
+// SkipKindForeachFilter without dispatching the body.
+func TestExecuteForeachPaneFilterByRoleIncludesOnlyMatchingPanes(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-pane-filter",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "fanout_pane",
+		ForeachPane: &ForeachConfig{
+			Filter: `pane.role=="investigator"`,
+			Steps: []Step{{
+				ID:      "echo",
+				Command: `printf '%s' '${pane.id}'`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+	mock := NewMockTmuxClient(
+		tmux.Pane{ID: "%1", Index: 1, NTMIndex: 1, Type: tmux.AgentClaude, Tags: []string{"role=investigator"}},
+		tmux.Pane{ID: "%2", Index: 2, NTMIndex: 2, Type: tmux.AgentCodex, Tags: []string{"role=adjudicator"}},
+		tmux.Pane{ID: "%3", Index: 3, NTMIndex: 3, Type: tmux.AgentGemini, Tags: []string{"role=investigator"}},
+	)
+	e.SetTmuxClient(mock)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 3 {
+		t.Fatalf("iterations = %d, want 3", len(iterations))
+	}
+	var dispatched []string
+	skipped := 0
+	for _, iter := range iterations {
+		if iter.Skipped {
+			skipped++
+			if iter.SkipKind != SkipKindForeachFilter {
+				t.Fatalf("iteration %d skip kind = %q, want %q", iter.Index, iter.SkipKind, SkipKindForeachFilter)
+			}
+			continue
+		}
+		if len(iter.Results) != 1 {
+			t.Fatalf("iteration %d results = %d, want 1", iter.Index, len(iter.Results))
+		}
+		dispatched = append(dispatched, iter.Results[0].Output)
+	}
+	if skipped != 1 {
+		t.Fatalf("skipped iterations = %d, want 1", skipped)
+	}
+	if got, want := strings.Join(dispatched, ","), "%1,%3"; got != want {
+		t.Fatalf("dispatched outputs = %q, want %q", got, want)
 	}
 }
