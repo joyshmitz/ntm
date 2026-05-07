@@ -168,16 +168,24 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	e.progress = progress
 	e.stateMu.Unlock()
 
-	// Initialize variables with defaults and overrides
+	// Initialize variables with runtime overrides taking precedence over
+	// workflow defaults, and validate declared VarType values before execution.
+	preparedVars, err := PrepareWorkflowVariables(workflow, vars)
+	if err != nil {
+		e.stateMu.Lock()
+		e.state.Status = StatusFailed
+		e.state.Errors = append(e.state.Errors, ExecutionError{
+			Type:      "variables",
+			Message:   err.Error(),
+			Timestamp: time.Now(),
+			Fatal:     true,
+		})
+		e.stateMu.Unlock()
+		e.persistState()
+		return e.state, err
+	}
 	e.varMu.Lock()
-	for name, def := range workflow.Vars {
-		if def.Default != nil {
-			e.state.Variables[name] = def.Default
-		}
-	}
-	for name, val := range vars {
-		e.state.Variables[name] = val
-	}
+	e.state.Variables = preparedVars
 	e.varMu.Unlock()
 
 	e.defaults = workflow.Defaults
@@ -221,7 +229,7 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	e.emitProgress("workflow_start", "", workflowProgressMessage("Starting workflow", workflow), 0)
 
 	// Execute steps in dependency order
-	err := e.executeWorkflow(ctx, workflow)
+	err = e.executeWorkflow(ctx, workflow)
 
 	// Finalize state
 	e.stateMu.Lock()

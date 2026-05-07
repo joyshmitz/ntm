@@ -3,10 +3,124 @@ package pipeline
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPrepareWorkflowVariablesPrecedenceAndTypes(t *testing.T) {
+	workflow := &Workflow{
+		Vars: map[string]VarDef{
+			"name":    {Default: "default-name", Type: VarTypeString},
+			"count":   {Default: 1, Type: VarTypeNumber},
+			"enabled": {Default: false, Type: VarTypeBoolean},
+			"items":   {Default: []interface{}{"default"}, Type: VarTypeArray},
+		},
+	}
+
+	got, err := PrepareWorkflowVariables(workflow, map[string]interface{}{
+		"name":    "cli-name",
+		"count":   "5",
+		"enabled": "yes",
+		"items":   "a,b,c",
+	})
+	if err != nil {
+		t.Fatalf("PrepareWorkflowVariables() error = %v", err)
+	}
+
+	if got["name"] != "cli-name" {
+		t.Fatalf("name = %v, want CLI override", got["name"])
+	}
+	if got["count"] != 5 {
+		t.Fatalf("count = %#v, want int 5", got["count"])
+	}
+	if got["enabled"] != true {
+		t.Fatalf("enabled = %#v, want true", got["enabled"])
+	}
+	wantItems := []string{"a", "b", "c"}
+	if !reflect.DeepEqual(got["items"], wantItems) {
+		t.Fatalf("items = %#v, want %#v", got["items"], wantItems)
+	}
+}
+
+func TestPrepareWorkflowVariablesNativeJSONTypes(t *testing.T) {
+	workflow := &Workflow{
+		Vars: map[string]VarDef{
+			"count": {Type: VarTypeNumber},
+			"items": {Type: VarTypeArray},
+		},
+	}
+
+	got, err := PrepareWorkflowVariables(workflow, map[string]interface{}{
+		"count": float64(2.5),
+		"items": []interface{}{"x", "y"},
+	})
+	if err != nil {
+		t.Fatalf("PrepareWorkflowVariables() error = %v", err)
+	}
+	if got["count"] != float64(2.5) {
+		t.Fatalf("count = %#v, want native float64", got["count"])
+	}
+	if !reflect.DeepEqual(got["items"], []interface{}{"x", "y"}) {
+		t.Fatalf("items = %#v, want native array", got["items"])
+	}
+}
+
+func TestPrepareWorkflowVariablesDefaultReferences(t *testing.T) {
+	workflow := &Workflow{
+		Vars: map[string]VarDef{
+			"a": {Default: "${vars.b}", Type: VarTypeString},
+			"b": {Default: "hello", Type: VarTypeString},
+		},
+	}
+
+	got, err := PrepareWorkflowVariables(workflow, nil)
+	if err != nil {
+		t.Fatalf("PrepareWorkflowVariables() error = %v", err)
+	}
+	if got["a"] != "hello" {
+		t.Fatalf("a = %#v, want chained default", got["a"])
+	}
+}
+
+func TestPrepareWorkflowVariablesErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		workflow  *Workflow
+		overrides map[string]interface{}
+		want      string
+	}{
+		{
+			name: "number mismatch",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"n": {Type: VarTypeNumber},
+			}},
+			overrides: map[string]interface{}{"n": "abc"},
+			want:      "variable n: expected number, got 'abc'",
+		},
+		{
+			name: "cyclic defaults",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"a": {Default: "${vars.b}"},
+				"b": {Default: "${vars.a}"},
+			}},
+			want: "cyclic default reference",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := PrepareWorkflowVariables(tt.workflow, tt.overrides)
+			if err == nil {
+				t.Fatal("PrepareWorkflowVariables() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("PrepareWorkflowVariables() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
 
 func TestSubstitutor_Substitute(t *testing.T) {
 	state := &ExecutionState{

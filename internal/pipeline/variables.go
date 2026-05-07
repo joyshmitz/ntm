@@ -14,6 +14,196 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// PrepareWorkflowVariables applies runtime overrides and workflow defaults,
+// validating declared variable types as values enter the execution state.
+func PrepareWorkflowVariables(workflow *Workflow, overrides map[string]interface{}) (map[string]interface{}, error) {
+	if workflow == nil {
+		return nil, fmt.Errorf("workflow is nil")
+	}
+
+	vars := make(map[string]interface{}, len(workflow.Vars)+len(overrides))
+	for name, val := range overrides {
+		if def, ok := workflow.Vars[name]; ok {
+			normalized, err := normalizeWorkflowVar(name, def.Type, val)
+			if err != nil {
+				return nil, err
+			}
+			vars[name] = normalized
+			continue
+		}
+		vars[name] = val
+	}
+
+	resolving := make(map[string]bool)
+	resolved := make(map[string]bool)
+	var resolveDefault func(string) error
+	resolveDefault = func(name string) error {
+		if _, ok := vars[name]; ok || resolved[name] {
+			return nil
+		}
+		def, ok := workflow.Vars[name]
+		if !ok || def.Default == nil {
+			resolved[name] = true
+			return nil
+		}
+		if resolving[name] {
+			return fmt.Errorf("variable %s: cyclic default reference", name)
+		}
+		resolving[name] = true
+		defer delete(resolving, name)
+
+		value := def.Default
+		if s, ok := value.(string); ok {
+			for _, ref := range variableDefaultRefs(s) {
+				if err := resolveDefault(ref); err != nil {
+					return err
+				}
+			}
+			value = resolveDefaultString(s, vars)
+		}
+
+		normalized, err := normalizeWorkflowVar(name, def.Type, value)
+		if err != nil {
+			return err
+		}
+		vars[name] = normalized
+		resolved[name] = true
+		return nil
+	}
+
+	for name := range workflow.Vars {
+		if err := resolveDefault(name); err != nil {
+			return nil, err
+		}
+	}
+	for name, def := range workflow.Vars {
+		if _, ok := vars[name]; !ok && def.Required {
+			return nil, fmt.Errorf("variable %s: required value missing", name)
+		}
+	}
+
+	return vars, nil
+}
+
+func variableDefaultRefs(s string) []string {
+	matches := varPattern.FindAllStringSubmatch(s, -1)
+	refs := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		ref := strings.TrimSpace(match[1])
+		ref, _, _ = parseDefault(ref)
+		parts := strings.Split(ref, ".")
+		if len(parts) >= 2 && parts[0] == "vars" {
+			refs = append(refs, parts[1])
+		}
+	}
+	return refs
+}
+
+func resolveDefaultString(s string, vars map[string]interface{}) interface{} {
+	state := &ExecutionState{Variables: vars}
+	sub := NewSubstitutor(state, "", "")
+	trimmed := strings.TrimSpace(s)
+	if match := varPattern.FindStringSubmatch(trimmed); len(match) == 2 && match[0] == trimmed {
+		if value, err := sub.resolveVar(match[1]); err == nil {
+			return value
+		}
+	}
+	if resolved, err := sub.Substitute(s); err == nil {
+		return resolved
+	}
+	return s
+}
+
+func normalizeWorkflowVar(name string, typ VarType, value interface{}) (interface{}, error) {
+	switch typ {
+	case "", VarTypeString:
+		return value, nil
+	case VarTypeNumber:
+		return normalizeNumberVar(name, value)
+	case VarTypeBoolean:
+		return normalizeBooleanVar(name, value)
+	case VarTypeArray:
+		return normalizeArrayVar(value), nil
+	default:
+		return nil, fmt.Errorf("variable %s: unknown declared type %q", name, typ)
+	}
+}
+
+func normalizeNumberVar(name string, value interface{}) (interface{}, error) {
+	switch v := value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return value, nil
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i, nil
+		}
+		f, err := v.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("variable %s: expected number, got '%s'", name, v.String())
+		}
+		return f, nil
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil, fmt.Errorf("variable %s: expected number, got ''", name)
+		}
+		if !strings.ContainsAny(s, ".eE") {
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return int(i), nil
+			}
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, fmt.Errorf("variable %s: expected number, got '%s'", name, v)
+		}
+		return f, nil
+	default:
+		return nil, fmt.Errorf("variable %s: expected number, got %T", name, value)
+	}
+}
+
+func normalizeBooleanVar(name string, value interface{}) (interface{}, error) {
+	switch v := value.(type) {
+	case bool:
+		return v, nil
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "t", "1", "yes", "y":
+			return true, nil
+		case "false", "f", "0", "no", "n":
+			return false, nil
+		default:
+			return nil, fmt.Errorf("variable %s: expected boolean, got '%s'", name, v)
+		}
+	default:
+		return nil, fmt.Errorf("variable %s: expected boolean, got %T", name, value)
+	}
+}
+
+func normalizeArrayVar(value interface{}) interface{} {
+	switch v := value.(type) {
+	case []interface{}:
+		return v
+	case []string:
+		return v
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return []string{}
+		}
+		parts := strings.Split(v, ",")
+		items := make([]string, 0, len(parts))
+		for _, part := range parts {
+			items = append(items, strings.TrimSpace(part))
+		}
+		return items
+	default:
+		return []interface{}{value}
+	}
+}
+
 // Substitutor handles variable substitution in workflow prompts and conditions.
 // It supports multiple variable types: vars, steps, env, and context variables.
 type Substitutor struct {
