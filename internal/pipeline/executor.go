@@ -293,6 +293,17 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 		return nil, fmt.Errorf("resume state is nil")
 	}
 
+	// bd-0wzkc: reject resume of state captured for a different workflow.
+	// applyResumeState marks any completed StepResult IDs as executed in the
+	// new graph; if the operator passes a run ID from another pipeline,
+	// matching step IDs are silently skipped and stale outputs are reused
+	// even though the surrounding logic is incompatible. There is no
+	// override flag here because the failure mode is silent corruption of
+	// downstream variables rather than a recoverable mismatch.
+	if prior.WorkflowID != "" && workflow != nil && workflow.Name != "" && prior.WorkflowID != workflow.Name {
+		return nil, fmt.Errorf("resume state %q was captured for workflow %q but target workflow is %q", prior.RunID, prior.WorkflowID, workflow.Name)
+	}
+
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancelFn = cancel

@@ -269,6 +269,108 @@ func TestNormalizeResumeOptionsDefaultsKeepStateOnNonZero(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsMismatchedWorkflowID(t *testing.T) {
+	// bd-0wzkc: prior state captured for a different workflow must not
+	// resume against the current workflow. Otherwise applyResumeState
+	// marks any matching step IDs as executed in the new graph and reuses
+	// their outputs in incompatible logic.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "current-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	prior := &ExecutionState{
+		RunID:      "from-other-workflow",
+		WorkflowID: "other-workflow",
+		Session:    "session",
+		Status:     StatusRunning,
+		Steps:      map[string]StepResult{"step": {StepID: "step", Status: StatusCompleted, Output: "stale"}},
+		Variables:  map[string]interface{}{},
+	}
+	executor := NewExecutor(DefaultExecutorConfig("session"))
+	_, err := executor.Resume(context.Background(), workflow, prior, nil)
+	if err == nil {
+		t.Fatal("Resume() error = nil, want workflow-mismatch rejection")
+	}
+	if !strings.Contains(err.Error(), "other-workflow") || !strings.Contains(err.Error(), "current-workflow") {
+		t.Fatalf("Resume() error = %q, want both workflow names named", err.Error())
+	}
+}
+
+func TestResumeAcceptsMatchingWorkflowID(t *testing.T) {
+	// bd-0wzkc: matching workflow IDs continue to resume normally so the
+	// happy path is not regressed.
+	tmpDir := t.TempDir()
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "match-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	prior := &ExecutionState{
+		RunID:      "match-run",
+		WorkflowID: "match-workflow",
+		Session:    "match-session",
+		Status:     StatusRunning,
+		Steps:      map[string]StepResult{"step": {StepID: "step", Status: StatusCompleted, Output: "ok"}},
+		Variables:  map[string]interface{}{},
+		StartedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	cfg := DefaultExecutorConfig("match-session")
+	cfg.ProjectDir = tmpDir
+	cfg.DefaultTimeout = 2 * time.Second
+	executor := NewExecutor(cfg)
+	final, err := executor.ResumeWithOptions(context.Background(), workflow, prior, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResumeWithOptions() error: %v", err)
+	}
+	if final.Status != StatusCompleted {
+		t.Fatalf("final.Status = %s, want completed", final.Status)
+	}
+}
+
+func TestResumeAcceptsLegacyEmptyWorkflowID(t *testing.T) {
+	// bd-0wzkc: a legacy state file with no recorded WorkflowID continues to
+	// resume; the validator should only reject explicit non-empty mismatches.
+	tmpDir := t.TempDir()
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "legacy-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps:         []Step{{ID: "step", Command: "true"}},
+	}
+	prior := &ExecutionState{
+		RunID:     "legacy-run",
+		Session:   "legacy-session",
+		Status:    StatusRunning,
+		Steps:     map[string]StepResult{},
+		Variables: map[string]interface{}{},
+		StartedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	cfg := DefaultExecutorConfig("legacy-session")
+	cfg.ProjectDir = tmpDir
+	cfg.DefaultTimeout = 2 * time.Second
+	executor := NewExecutor(cfg)
+	final, err := executor.ResumeWithOptions(context.Background(), workflow, prior, ResumeOptions{
+		Mode:           ResumeModeContinue,
+		KeepState:      true,
+		OnRosterChange: ResumeRosterAbort,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResumeWithOptions() error: %v", err)
+	}
+	if final.WorkflowID != "legacy-workflow" {
+		t.Fatalf("final.WorkflowID = %q, want it backfilled from workflow.Name", final.WorkflowID)
+	}
+}
+
 func TestResumeRosterChangeAbort(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,
