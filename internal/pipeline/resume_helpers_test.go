@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -163,6 +164,14 @@ func TestResumeProgressBookkeepingHelpers(t *testing.T) {
 	}
 	if iterationSucceeded([]StepResult{{Status: StatusCompleted}}, true) != false {
 		t.Fatal("break-controlled iteration was treated as successful")
+	}
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if shouldCompleteForeachIteration(cancelledCtx, nil, false) {
+		t.Fatal("empty cancelled iteration was treated as completed")
+	}
+	if !shouldCompleteForeachIteration(cancelledCtx, []StepResult{{Status: StatusCompleted}}, false) {
+		t.Fatal("completed iteration was not checkpointed after late cancellation")
 	}
 	for _, status := range []ExecutionStatus{StatusFailed, StatusCancelled, StatusRunning, StatusPending} {
 		if iterationSucceeded([]StepResult{{Status: status}}, false) {

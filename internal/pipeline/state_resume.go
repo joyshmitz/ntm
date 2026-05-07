@@ -424,6 +424,16 @@ func iterationSucceeded(results []StepResult, shouldBreak bool) bool {
 	return true
 }
 
+func shouldCompleteForeachIteration(ctx context.Context, results []StepResult, shouldBreak bool) bool {
+	if !iterationSucceeded(results, shouldBreak) {
+		return false
+	}
+	if ctx.Err() == nil {
+		return true
+	}
+	return len(results) > 0
+}
+
 func (e *Executor) beginParallelState(stepID string, total int) {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()

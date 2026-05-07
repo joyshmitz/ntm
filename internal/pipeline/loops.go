@@ -160,13 +160,7 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
-		// bd-xreqm: do NOT mark a foreach iteration completed if the context
-		// was cancelled while executeIteration was about to start its first
-		// nested step. In that path executeIteration returns an empty result
-		// slice with shouldBreak=false, and iterationSucceeded([], false)
-		// returns true — without this guard the iteration would be persisted
-		// to CompletedIterationIDs and silently skipped on resume.
-		if ctx.Err() == nil && iterationSucceeded(iterResult, shouldBreak) {
+		if shouldCompleteForeachIteration(ctx, iterResult, shouldBreak) {
 			le.executor.markForeachIterationCompleted(step.ID, i, total)
 		}
 		le.executor.persistState()
