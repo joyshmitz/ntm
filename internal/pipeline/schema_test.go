@@ -1032,3 +1032,242 @@ func TestOutputDecl_UnmarshalYAML_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalize_Idempotency(t *testing.T) {
+	w := &Workflow{
+		Name:   "test",
+		Inputs: []string{"x", "y"},
+		Steps: []Step{
+			{
+				ID:    "s1",
+				After: AfterRef{"s0"},
+				OnFailure: OnFailureSpec{
+					Action:     "retry",
+					RetryCount: 3,
+				},
+				TemplateParams: map[string]interface{}{"foo": "bar"},
+			},
+		},
+	}
+
+	w.Normalize()
+
+	snap1Steps := make([]Step, len(w.Steps))
+	copy(snap1Steps, w.Steps)
+	snap1Vars := make(map[string]VarDef, len(w.Vars))
+	for k, v := range w.Vars {
+		snap1Vars[k] = v
+	}
+
+	w.Normalize()
+
+	if len(w.Steps) != len(snap1Steps) {
+		t.Fatalf("step count changed on second normalize")
+	}
+	s := w.Steps[0]
+	if len(s.DependsOn) != 1 || s.DependsOn[0] != "s0" {
+		t.Errorf("DependsOn = %v after second normalize, want [s0]", s.DependsOn)
+	}
+	if s.OnError != ErrorActionRetry {
+		t.Errorf("OnError = %q after second normalize, want retry", s.OnError)
+	}
+	if s.RetryCount != 3 {
+		t.Errorf("RetryCount = %d after second normalize, want 3", s.RetryCount)
+	}
+	if len(s.Params) != 1 || s.Params["foo"] != "bar" {
+		t.Errorf("Params = %v after second normalize, want {foo: bar}", s.Params)
+	}
+	if len(w.Vars) != len(snap1Vars) {
+		t.Errorf("Vars count changed: %d vs %d", len(w.Vars), len(snap1Vars))
+	}
+}
+
+func TestNormalize_AfterAlias(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID:        "s1",
+				After:     AfterRef{"a", "b"},
+				DependsOn: []string{"a"},
+			},
+		},
+	}
+	w.Normalize()
+	s := w.Steps[0]
+	if len(s.DependsOn) != 2 {
+		t.Fatalf("DependsOn = %v, want [a, b] (deduped)", s.DependsOn)
+	}
+	if s.DependsOn[0] != "a" || s.DependsOn[1] != "b" {
+		t.Errorf("DependsOn = %v, want [a, b]", s.DependsOn)
+	}
+	if len(s.After) != 0 {
+		t.Errorf("After should be cleared after normalize, got %v", []string(s.After))
+	}
+}
+
+func TestNormalize_OnFailureRetry(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID: "s1",
+				OnFailure: OnFailureSpec{
+					Action:     "retry",
+					RetryCount: 5,
+				},
+			},
+		},
+	}
+	w.Normalize()
+	s := w.Steps[0]
+	if s.OnError != ErrorActionRetry {
+		t.Errorf("OnError = %q, want retry", s.OnError)
+	}
+	if s.RetryCount != 5 {
+		t.Errorf("RetryCount = %d, want 5", s.RetryCount)
+	}
+	if !s.OnFailure.IsZero() {
+		t.Errorf("OnFailure should be cleared, got %+v", s.OnFailure)
+	}
+}
+
+func TestNormalize_OnFailurePreservesNonEnum(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID: "s1",
+				OnFailure: OnFailureSpec{
+					Action: "fallback_to_ntm_inbox",
+				},
+			},
+		},
+	}
+	w.Normalize()
+	s := w.Steps[0]
+	if s.OnError != "" {
+		t.Errorf("OnError should be empty for non-enum, got %q", s.OnError)
+	}
+	if s.OnFailure.Action != "fallback_to_ntm_inbox" {
+		t.Errorf("OnFailure.Action should be preserved, got %q", s.OnFailure.Action)
+	}
+}
+
+func TestNormalize_TemplateParamsMerge(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID:             "s1",
+				Params:         map[string]interface{}{"a": "from-params"},
+				TemplateParams: map[string]interface{}{"a": "from-tp", "b": "only-tp"},
+			},
+		},
+	}
+	w.Normalize()
+	s := w.Steps[0]
+	if s.Params["a"] != "from-params" {
+		t.Errorf("Params[a] = %v, want from-params (Params wins)", s.Params["a"])
+	}
+	if s.Params["b"] != "only-tp" {
+		t.Errorf("Params[b] = %v, want only-tp", s.Params["b"])
+	}
+	if s.TemplateParams != nil {
+		t.Errorf("TemplateParams should be nil after normalize, got %v", s.TemplateParams)
+	}
+}
+
+func TestNormalize_LoopBodyAlias(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID: "s1",
+				Loop: &LoopConfig{
+					Times: 3,
+					Body:  []Step{{ID: "inner"}},
+				},
+			},
+		},
+	}
+	w.Normalize()
+	lc := w.Steps[0].Loop
+	if len(lc.Steps) != 1 || lc.Steps[0].ID != "inner" {
+		t.Errorf("Loop.Steps = %v, want [{ID: inner}]", lc.Steps)
+	}
+	if len(lc.Body) != 0 {
+		t.Errorf("Loop.Body should be cleared, got %v", lc.Body)
+	}
+}
+
+func TestNormalize_ForeachBodyAlias(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID: "s1",
+				Foreach: &ForeachConfig{
+					Items: "${vars.list}",
+					Body:  []Step{{ID: "inner"}},
+					TemplateParams: map[string]interface{}{
+						"key": "val",
+					},
+				},
+			},
+		},
+	}
+	w.Normalize()
+	fc := w.Steps[0].Foreach
+	if len(fc.Steps) != 1 || fc.Steps[0].ID != "inner" {
+		t.Errorf("Foreach.Steps = %v, want [{ID: inner}]", fc.Steps)
+	}
+	if len(fc.Body) != 0 {
+		t.Errorf("Foreach.Body should be cleared, got %v", fc.Body)
+	}
+	if fc.Params["key"] != "val" {
+		t.Errorf("Foreach.Params[key] = %v, want val", fc.Params["key"])
+	}
+	if fc.TemplateParams != nil {
+		t.Errorf("Foreach.TemplateParams should be nil, got %v", fc.TemplateParams)
+	}
+}
+
+func TestNormalize_InputsToVars(t *testing.T) {
+	w := &Workflow{
+		Inputs: []string{"x", "y"},
+		Vars: map[string]VarDef{
+			"x": {Default: "existing"},
+		},
+	}
+	w.Normalize()
+	if _, ok := w.Vars["y"]; !ok {
+		t.Fatal("y not added to Vars")
+	}
+	if !w.Vars["y"].Required {
+		t.Error("y should be Required")
+	}
+	if w.Vars["x"].Default != "existing" {
+		t.Error("existing x var should not be overwritten")
+	}
+}
+
+func TestNormalize_RecursiveParallel(t *testing.T) {
+	w := &Workflow{
+		Steps: []Step{
+			{
+				ID: "outer",
+				Parallel: ParallelSpec{
+					Steps: []Step{
+						{
+							ID:    "inner",
+							After: AfterRef{"other"},
+						},
+					},
+				},
+			},
+		},
+	}
+	w.Normalize()
+	inner := w.Steps[0].Parallel.Steps[0]
+	if len(inner.DependsOn) != 1 || inner.DependsOn[0] != "other" {
+		t.Errorf("nested After not normalized: DependsOn = %v", inner.DependsOn)
+	}
+	if len(inner.After) != 0 {
+		t.Errorf("nested After should be cleared, got %v", []string(inner.After))
+	}
+}
