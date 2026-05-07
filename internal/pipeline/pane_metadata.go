@@ -585,6 +585,54 @@ func (e *Executor) pushPaneMetadataVars(paneRef string) (VariableScope, error) {
 	return BindPaneMetadata(e.state, meta), nil
 }
 
+// bindStepPaneMetadata pushes pane metadata for the given step's pane
+// reference around a single step's dispatch. It is a no-op when the step
+// has no Pane reference, or when an outer foreach iteration has already
+// bound pane vars (cloneInterfaceMap shape stored under paneVariableKey)
+// — foreach assigns pane metadata from the iteration plan and we should
+// not override that with a roster-only lookup that may not know per-
+// iteration overrides.
+//
+// Errors from the lookup are swallowed and the step proceeds without
+// pane vars: the existing strict substitutor surfaces unresolved
+// ${pane.X} references with its own actionable error, so silently
+// dropping the lookup error here matches the existing behavior of
+// substituteVariables when pane data is genuinely missing.
+//
+// Returns a release function the caller must defer to restore the prior
+// scope. The release is always safe to call (no-op when nothing was
+// pushed).
+func (e *Executor) bindStepPaneMetadata(step *Step) func() {
+	if e == nil || step == nil || e.state == nil {
+		return func() {}
+	}
+	paneRef := paneRefFromStep(step)
+	if paneRef == "" {
+		return func() {}
+	}
+
+	e.varMu.RLock()
+	_, alreadyBound := e.state.Variables[paneVariableKey]
+	e.varMu.RUnlock()
+	if alreadyBound {
+		return func() {}
+	}
+
+	scope, err := e.pushPaneMetadataVars(paneRef)
+	if err != nil {
+		slog.Debug("pane metadata lookup failed; ${pane.X} will fall back to substitutor error",
+			"run_id", e.state.RunID,
+			"step_id", step.ID,
+			"pane_ref", paneRef,
+			"error", err,
+		)
+		return func() {}
+	}
+	return func() {
+		e.popPaneMetadataVars(scope)
+	}
+}
+
 func (e *Executor) popPaneMetadataVars(scope VariableScope) {
 	e.varMu.Lock()
 	defer e.varMu.Unlock()
