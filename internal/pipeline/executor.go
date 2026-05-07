@@ -830,7 +830,9 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	}
 
 	if waitCondition == WaitNone {
-		go cmd.Wait()
+		go func() {
+			_ = cmd.Wait()
+		}()
 		result.Status = StatusCompleted
 		result.FinishedAt = time.Now()
 		slog.Info("command step fire-and-forget",
