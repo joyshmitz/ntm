@@ -49,6 +49,17 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 	case err := <-done:
 		return commandCleanupResult{Err: err}
 	case <-ctx.Done():
+		// bd-8fyws: there is a tiny window between ctx.Done() firing and
+		// us sending SIGTERM where the child can exit naturally and Wait
+		// can already have reaped the PID. The kernel can then recycle
+		// that PID for an unrelated process and our `kill(-pid, SIGTERM)`
+		// would target a stranger. Check `done` non-blockingly first so
+		// we skip signaling whenever the child is already gone.
+		select {
+		case err := <-done:
+			return commandCleanupResult{Cancelled: true, Err: err}
+		default:
+		}
 		result := commandCleanupResult{
 			Cancelled:  true,
 			SignalSent: "SIGTERM",
@@ -63,6 +74,16 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 			}
 			return result
 		case <-time.After(commandCancelGracePeriod):
+			// Same race-narrowing check before SIGKILL.
+			select {
+			case err := <-done:
+				result.Err = err
+				if result.Err == nil {
+					result.Err = ctx.Err()
+				}
+				return result
+			default:
+			}
 			result.SignalSent = "SIGTERM,SIGKILL"
 			_ = signalCommandProcessGroup(cmd, syscall.SIGKILL)
 			err := <-done
