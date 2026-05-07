@@ -441,7 +441,9 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 	hasTemplate := step.Template != ""
 	hasParallel := len(step.Parallel.Steps) > 0
 	hasForeach := step.Foreach != nil || step.ForeachPane != nil
-	hasBranch := step.Branch != "" || len(step.Branches) > 0
+	hasBranchPredicate := step.Branch != ""
+	hasBranchesMap := len(step.Branches) > 0
+	hasBranch := hasBranchPredicate || hasBranchesMap
 	hasBeadQuery := step.BeadQuery != nil
 	mailStepKinds := step.mailStepKindNames()
 	hasMailStep := len(mailStepKinds) > 0
@@ -500,6 +502,25 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			Field:   stepField,
 			Message: "step cannot combine bead_query with prompt, command, template, parallel, loop, foreach, branch, or Agent Mail step kinds",
 			Hint:    "bead_query runs a structured br query and stores its result through output_var",
+		})
+	}
+
+	// bd-nz63w: branch steps must have both the selector predicate and a
+	// branches map. The executor only dispatches when step.Branch is set, so
+	// a step with branches: but no branch: would silently fall through to
+	// resolvePrompt and fail with a misleading missing-prompt error.
+	if hasBranchesMap && !hasBranchPredicate {
+		result.addError(ParseError{
+			Field:   stepField + ".branch",
+			Message: "step has branches but no branch predicate; the runtime cannot pick a branch without one",
+			Hint:    "Set branch: <shell command whose stdout selects a branches[] entry> or remove the branches map.",
+		})
+	}
+	if hasBranchPredicate && !hasBranchesMap {
+		result.addError(ParseError{
+			Field:   stepField + ".branches",
+			Message: "step has branch predicate but no branches map; the predicate would have nothing to select from",
+			Hint:    "Add a branches: map with at least one entry (or a default key) keyed by the predicate's stdout.",
 		})
 	}
 

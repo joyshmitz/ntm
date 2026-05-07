@@ -381,9 +381,35 @@ func TestValidate_StepKindMutualExclusivityAndRequiredWork(t *testing.T) {
 			wantValid: true,
 		},
 		{
-			name:      "branch only is valid",
-			step:      Step{ID: "s1", Branch: "echo yes"},
+			name: "branch with branches map is valid",
+			step: Step{
+				ID:     "s1",
+				Branch: "echo yes",
+				Branches: map[string]interface{}{
+					"yes": map[string]interface{}{"command": "echo selected"},
+				},
+			},
 			wantValid: true,
+		},
+		{
+			// bd-nz63w: a branches map alone has no predicate so the runtime
+			// cannot pick a branch; lint must reject it instead of silently
+			// passing and failing later with a missing-prompt error.
+			name: "branches without branch predicate is invalid",
+			step: Step{
+				ID: "s1",
+				Branches: map[string]interface{}{
+					"default": map[string]interface{}{"command": "echo fallback"},
+				},
+			},
+			wantErrSubstr: "step has branches but no branch predicate",
+		},
+		{
+			// bd-nz63w: a branch predicate with no branches map has nothing
+			// to select and would error at runtime; lint should catch it.
+			name:          "branch predicate without branches map is invalid",
+			step:          Step{ID: "s1", Branch: "echo yes"},
+			wantErrSubstr: "step has branch predicate but no branches map",
 		},
 		{
 			name:          "empty step has no work",
