@@ -63,6 +63,40 @@ func (r *IterationSourceResolver) ResolveItems(_ context.Context, expr string, v
 	return []interface{}{expr}, nil
 }
 
+// ResolveModels expands a foreach.Models field into model-family slugs.
+//
+// Inline list form is returned as-is after trimming empty whitespace. A
+// single string can either be a literal slug ("cc") or a shell command
+// source, detected by "$(...)" or pipe syntax, whose output is parsed as one
+// slug per non-empty line.
+func (r *IterationSourceResolver) ResolveModels(ctx context.Context, models StringOrList) ([]string, error) {
+	if len(models) == 0 {
+		return []string{}, nil
+	}
+
+	if len(models) > 1 {
+		return compactStringList(models), nil
+	}
+
+	expr := strings.TrimSpace(models[0])
+	if expr == "" {
+		return []string{}, nil
+	}
+	if !looksLikeShellModelSource(expr) {
+		return []string{expr}, nil
+	}
+
+	shellCmd := expr
+	if inner, ok := stripShellInvocation(expr); ok {
+		shellCmd = inner
+	}
+	out, err := r.runShell(ctx, shellCmd)
+	if err != nil {
+		return nil, fmt.Errorf("models shell command failed: %w", err)
+	}
+	return parseModelShellOutput(out), nil
+}
+
 // ResolveBeads expands a foreach.Beads expression to a list of bead records.
 //
 // Two input forms:
@@ -140,6 +174,42 @@ func parseBeadsShellOutput(out []byte) ([]interface{}, error) {
 		items = append(items, line)
 	}
 	return items, nil
+}
+
+func compactStringList(values []string) []string {
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			items = append(items, value)
+		}
+	}
+	return items
+}
+
+func looksLikeShellModelSource(expr string) bool {
+	if _, ok := stripShellInvocation(expr); ok {
+		return true
+	}
+	return strings.Contains(expr, "|") || strings.Contains(expr, "$(")
+}
+
+func parseModelShellOutput(out []byte) []string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return []string{}
+	}
+	lines := strings.Split(trimmed, "\n")
+	models := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, `"'`)
+		if line == "" {
+			continue
+		}
+		models = append(models, line)
+	}
+	return models
 }
 
 func parseItemsJSONLiteral(expr string) ([]interface{}, error) {

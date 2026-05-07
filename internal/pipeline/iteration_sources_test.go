@@ -342,6 +342,69 @@ func TestResolveItems_VarsScalarReferenceErrors(t *testing.T) {
 	}
 }
 
+func TestResolveModels_InlineList(t *testing.T) {
+	r := &IterationSourceResolver{}
+
+	got, err := r.ResolveModels(context.Background(), StringOrList{"cc", "cod"})
+	if err != nil {
+		t.Fatalf("ResolveModels: %v", err)
+	}
+	want := []string{"cc", "cod"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveModels_ShellForm(t *testing.T) {
+	r := &IterationSourceResolver{
+		RunShell: func(_ context.Context, cmd string) ([]byte, error) {
+			if cmd != `printf 'cc\ncod\ngmi\n'` {
+				t.Fatalf("shell cmd = %q", cmd)
+			}
+			return []byte("cc\ncod\ngmi\n"), nil
+		},
+	}
+
+	got, err := r.ResolveModels(context.Background(), StringOrList{`$(printf 'cc\ncod\ngmi\n')`})
+	if err != nil {
+		t.Fatalf("ResolveModels: %v", err)
+	}
+	want := []string{"cc", "cod", "gmi"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveModels_LiteralSlug(t *testing.T) {
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) {
+			t.Fatal("literal slug must not invoke shell")
+			return nil, nil
+		},
+	}
+
+	got, err := r.ResolveModels(context.Background(), StringOrList{"cc"})
+	if err != nil {
+		t.Fatalf("ResolveModels: %v", err)
+	}
+	want := []string{"cc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveModels_ShellErrorPropagates(t *testing.T) {
+	want := errors.New("model command failed")
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return nil, want },
+	}
+
+	_, err := r.ResolveModels(context.Background(), StringOrList{"printf cc | sort"})
+	if err == nil || !errors.Is(err, want) {
+		t.Fatalf("err = %v, want wrap of %v", err, want)
+	}
+}
+
 func TestResolvePairs_ParsesThreeWellFormedLines(t *testing.T) {
 	const stdout = `DEBATE-001|H-001|H-002|p1|p2
 DEBATE-002|H-003|H-004|p3|p4
