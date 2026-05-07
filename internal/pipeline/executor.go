@@ -1630,23 +1630,32 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 
 	// Determine final status based on error mode and results
 	if failed > 0 || cancelled {
+		aggregatedErr := aggregateParallelErrors(results, len(results))
 		switch onError {
 		case ErrorActionContinue:
 			result.Status = StatusCompleted
 			result.Output = fmt.Sprintf("Parallel group completed with %d/%d successful", completed, len(results))
+			result.Error = aggregatedErr
 		case ErrorActionFailFast:
 			result.Status = StatusFailed
-			result.Error = &StepError{
-				Type:      "parallel_fail_fast",
-				Message:   fmt.Sprintf("%d failed, %d cancelled (fail_fast mode)", failed, cancelledCount),
-				Timestamp: time.Now(),
+			result.Error = aggregatedErr
+			if result.Error == nil {
+				result.Error = &StepError{
+					Type:      "parallel_fail_fast",
+					Message:   fmt.Sprintf("%d failed, %d cancelled (fail_fast mode)", failed, cancelledCount),
+					Timestamp: time.Now(),
+				}
 			}
+			result.Error.Type = "parallel_fail_fast"
 		default: // ErrorActionFail or ErrorActionRetry after step-level retries are exhausted
 			result.Status = StatusFailed
-			result.Error = &StepError{
-				Type:      "parallel",
-				Message:   fmt.Sprintf("%d of %d parallel steps failed", failed, len(results)),
-				Timestamp: time.Now(),
+			result.Error = aggregatedErr
+			if result.Error == nil {
+				result.Error = &StepError{
+					Type:      "parallel",
+					Message:   fmt.Sprintf("%d of %d parallel steps failed", failed, len(results)),
+					Timestamp: time.Now(),
+				}
 			}
 		}
 	} else if ctx.Err() == context.DeadlineExceeded {

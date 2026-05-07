@@ -114,11 +114,13 @@ func (e *Executor) executeForeach(ctx context.Context, step *Step, workflow *Wor
 	total, dispatched, skipped, failed := countForeachIterations(iterations)
 	result.Output = fmt.Sprintf("Foreach completed: %d/%d dispatched, %d skipped, %d failed", dispatched, total, skipped, failed)
 	result.FinishedAt = time.Now()
-	if failed > 0 && onError != ErrorActionContinue {
-		result.Status = StatusFailed
-		result.Error = firstForeachError(iterations, step.ID)
-		e.emitProgress("step_error", step.ID, result.Error.Message, e.calculateProgress())
-		return result
+	if failed > 0 {
+		result.Error = aggregateForeachErrors(iterations, step.ID, total)
+		if onError != ErrorActionContinue {
+			result.Status = StatusFailed
+			e.emitProgress("step_error", step.ID, result.Error.Message, e.calculateProgress())
+			return result
+		}
 	}
 	if ctx.Err() != nil {
 		result.Status = StatusCancelled
@@ -339,6 +341,12 @@ func (e *Executor) executeForeachIterationsSequential(ctx context.Context, paren
 		if iterResult.Control == LoopControlBreak {
 			for _, remaining := range plans[i+1:] {
 				results = append(results, foreachBreakSkippedIteration(remaining))
+			}
+			break
+		}
+		if iterResult.failed() && onError == ErrorActionFailFast {
+			for _, remaining := range plans[i+1:] {
+				results = append(results, cancelledForeachIteration(remaining))
 			}
 			break
 		}
