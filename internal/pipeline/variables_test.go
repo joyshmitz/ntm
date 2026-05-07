@@ -384,9 +384,7 @@ func TestSubstitutor_Substitute(t *testing.T) {
 }
 
 func TestSubstitutor_EnvVars(t *testing.T) {
-	// Set test env var
-	os.Setenv("TEST_VAR", "test_value")
-	defer os.Unsetenv("TEST_VAR")
+	t.Setenv("TEST_VAR", "test_value")
 
 	state := &ExecutionState{
 		Variables: map[string]interface{}{},
@@ -401,11 +399,71 @@ func TestSubstitutor_EnvVars(t *testing.T) {
 	if got != "Env: test_value" {
 		t.Errorf("Substitute() = %q, want %q", got, "Env: test_value")
 	}
+}
 
-	// Unset env var returns empty string
-	got2, _ := sub.Substitute("Missing: ${env.NONEXISTENT_VAR_123}")
-	if got2 != "Missing: " {
-		t.Errorf("Missing env var should return empty, got %q", got2)
+func TestSubstitutor_EnvHome(t *testing.T) {
+	t.Setenv("HOME", "/tmp/ntm-home")
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+	}
+
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	got, err := sub.Substitute("Home: ${env.HOME}")
+	if err != nil {
+		t.Fatalf("Substitute() error = %v", err)
+	}
+	if got != "Home: /tmp/ntm-home" {
+		t.Errorf("Substitute() = %q, want %q", got, "Home: /tmp/ntm-home")
+	}
+}
+
+func TestSubstitutor_EnvMissingErrors(t *testing.T) {
+	t.Setenv("NONEXISTENT_VAR_123", "")
+	os.Unsetenv("NONEXISTENT_VAR_123")
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+	}
+
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	got, err := sub.Substitute("Missing: ${env.NONEXISTENT_VAR_123}")
+	if err == nil {
+		t.Fatal("expected missing environment variable error")
+	}
+	if got != "Missing: ${env.NONEXISTENT_VAR_123}" {
+		t.Errorf("Substitute() = %q, want unresolved env reference", got)
+	}
+	subErr, ok := err.(*SubstitutionError)
+	if !ok {
+		t.Fatalf("error = %T, want *SubstitutionError", err)
+	}
+	if subErr.VarRef != "env.NONEXISTENT_VAR_123" {
+		t.Errorf("VarRef = %q, want env.NONEXISTENT_VAR_123", subErr.VarRef)
+	}
+	if !strings.Contains(subErr.Message, "environment variable NONEXISTENT_VAR_123 not set") {
+		t.Errorf("Message = %q, want missing env explanation", subErr.Message)
+	}
+}
+
+func TestSubstitutor_EnvMissingDefault(t *testing.T) {
+	t.Setenv("OPTIONAL_ENV_VAR_123", "")
+	os.Unsetenv("OPTIONAL_ENV_VAR_123")
+
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+	}
+
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	got, err := sub.Substitute("Optional: ${env.OPTIONAL_ENV_VAR_123 | fallback}")
+	if err != nil {
+		t.Fatalf("Substitute() error = %v", err)
+	}
+	if got != "Optional: fallback" {
+		t.Errorf("Substitute() = %q, want %q", got, "Optional: fallback")
 	}
 }
 

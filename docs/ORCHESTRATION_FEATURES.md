@@ -915,6 +915,10 @@ Extract structured data from step outputs:
 | `${env.X}` | `${env.HOME}` | Environment variable |
 | `${session}` | `myproject` | Session name |
 
+Environment variables expose the runner's process environment to the workflow.
+Missing values fail substitution unless the expression includes a default such as
+`${env.OPTIONAL_TOKEN | ""}`.
+
 ### Error Handling
 
 Per-step configuration:

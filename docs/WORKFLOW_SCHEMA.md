@@ -403,6 +403,10 @@ Variables can be referenced throughout the workflow using `${...}` syntax.
 | `${run_id}` | `abc123` | Pipeline run ID |
 | `${workflow}` | `my-workflow` | Workflow name |
 
+Environment variables expose the runner's process environment to the pipeline.
+Missing environment variables are substitution errors unless a default is supplied,
+for example `${env.OPTIONAL_TOKEN | ""}`.
+
 ### Default Values
 
 Provide fallback values for undefined variables:

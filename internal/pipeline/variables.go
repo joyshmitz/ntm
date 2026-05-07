@@ -559,10 +559,10 @@ func (s *Substitutor) resolveEnv(parts []string) (interface{}, error) {
 	}
 
 	envName := parts[0]
-	value := os.Getenv(envName)
-
-	// Note: We return empty string if env var is not set.
-	// Use default syntax ${env.X | "fallback"} for required env vars.
+	value, ok := os.LookupEnv(envName)
+	if !ok {
+		return nil, fmt.Errorf("environment variable %s not set", envName)
+	}
 	return value, nil
 }
 
