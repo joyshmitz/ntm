@@ -2765,6 +2765,12 @@ func (e *Executor) clearStepVariables(stepID string) {
 }
 
 func (e *Executor) snapshotState() *ExecutionState {
+	// Hold both varMu and stateMu across the struct copy: `snapshot := *e.state`
+	// reads every field in one shot, including the Variables / ScopeStack
+	// fields protected by varMu. Acquiring varMu first matches the convention
+	// in substituteVariablesStrict (bd-xuxev: legacy executeForEach race).
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
 	e.stateMu.RLock()
 	if e.state == nil {
 		e.stateMu.RUnlock()
@@ -2804,7 +2810,6 @@ func (e *Executor) snapshotState() *ExecutionState {
 	}
 	e.stateMu.RUnlock()
 
-	e.varMu.RLock()
 	if e.state.Variables != nil {
 		snapshot.Variables = make(map[string]interface{}, len(e.state.Variables))
 		for key, value := range e.state.Variables {
@@ -2823,7 +2828,6 @@ func (e *Executor) snapshotState() *ExecutionState {
 			}
 		}
 	}
-	e.varMu.RUnlock()
 
 	return &snapshot
 }
