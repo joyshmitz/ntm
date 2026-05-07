@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,10 +16,10 @@ const SchemaVersion = "2.0"
 // Workflow represents a complete workflow definition loaded from YAML/TOML
 type Workflow struct {
 	// Metadata
-	SchemaVersion string `yaml:"schema_version" toml:"schema_version" json:"schema_version"`
-	Name          string `yaml:"name" toml:"name" json:"name"`
-	Description   string `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
-	Version       string `yaml:"version,omitempty" toml:"version,omitempty" json:"version,omitempty"`
+	SchemaVersion string       `yaml:"schema_version" toml:"schema_version" json:"schema_version"`
+	Name          string       `yaml:"name" toml:"name" json:"name"`
+	Description   string       `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
+	Version       string       `yaml:"version,omitempty" toml:"version,omitempty" json:"version,omitempty"`
 	Notes         StringOrList `yaml:"notes,omitempty" toml:"notes,omitempty" json:"notes,omitempty"` // Free-form authoring notes — accepts either a single string or a list of strings.
 
 	// Variable definitions
@@ -99,6 +100,46 @@ func (o *OutputDecl) UnmarshalYAML(unmarshal func(interface{}) error) error {
 			o.Path = tv
 		case nil:
 			// Bare-name declaration with no path; preserve as-is.
+		default:
+			o.Path = fmt.Sprintf("%v", tv)
+		}
+	}
+	return nil
+}
+
+// UnmarshalJSON accepts the same shorthand forms as YAML: a bare string path,
+// the full structured object, or a single-key {name: path} object.
+func (o *OutputDecl) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*o = OutputDecl{}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		o.Path = s
+		return nil
+	}
+
+	type rawDecl OutputDecl
+	var raw rawDecl
+	if err := json.Unmarshal(data, &raw); err == nil && (raw.Name != "" || raw.Path != "" || raw.Description != "") {
+		*o = OutputDecl(raw)
+		return nil
+	}
+
+	var generic map[string]interface{}
+	if err := json.Unmarshal(data, &generic); err != nil {
+		return fmt.Errorf("output declaration must be a string, mapping, or {name: path}: %w", err)
+	}
+	if len(generic) != 1 {
+		return fmt.Errorf("output single-key shorthand must have exactly one key, got %d", len(generic))
+	}
+	for k, v := range generic {
+		o.Name = k
+		switch tv := v.(type) {
+		case string:
+			o.Path = tv
+		case nil:
 		default:
 			o.Path = fmt.Sprintf("%v", tv)
 		}
@@ -306,6 +347,29 @@ func (s *StringOrList) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// UnmarshalJSON accepts either a single string or a list of strings.
+func (s *StringOrList) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*s = nil
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		if single != "" {
+			*s = []string{single}
+		} else {
+			*s = nil
+		}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return fmt.Errorf("expected string or list of strings: %w", err)
+	}
+	*s = list
+	return nil
+}
+
 // PaneSpec is a step's `pane:` selector. The canonical form is an integer
 // pane index; brennerbot-style pipelines pass `${defaults.triage_pane}` style
 // template references, which arrive as strings during YAML parse and are
@@ -329,6 +393,34 @@ func (p *PaneSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return fmt.Errorf("pane: must be int or template string: %w", err)
 	}
 	p.Expr = s
+	return nil
+}
+
+// UnmarshalJSON accepts int, string, or the canonical struct object emitted by
+// encoding/json.
+func (p *PaneSpec) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*p = PaneSpec{}
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		p.Index = n
+		p.Expr = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		p.Index = 0
+		p.Expr = s
+		return nil
+	}
+	type raw PaneSpec
+	var obj raw
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("pane: must be int or template string: %w", err)
+	}
+	*p = PaneSpec(obj)
 	return nil
 }
 
@@ -358,15 +450,7 @@ type OnFailureSpec struct {
 func (o *OnFailureSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var s string
 	if err := unmarshal(&s); err == nil {
-		o.Action = s
-		// Detect `retry:N` shorthand.
-		if strings.HasPrefix(s, "retry:") {
-			rest := strings.TrimPrefix(s, "retry:")
-			if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
-				o.RetryCount = n
-				o.Action = "retry"
-			}
-		}
+		o.setActionString(s)
 		return nil
 	}
 	var m map[string]interface{}
@@ -375,6 +459,56 @@ func (o *OnFailureSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	o.Fallback = m
 	return nil
+}
+
+// UnmarshalJSON accepts the same forms as YAML: a string action or retry:N
+// shorthand, a structured fallback object, or the canonical struct object
+// emitted by encoding/json.
+func (o *OnFailureSpec) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*o = OnFailureSpec{}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		o.setActionString(s)
+		return nil
+	}
+
+	var rawFields struct {
+		Action     string                 `json:"Action"`
+		RetryCount int                    `json:"RetryCount"`
+		Fallback   map[string]interface{} `json:"Fallback"`
+	}
+	if err := json.Unmarshal(data, &rawFields); err == nil &&
+		(rawFields.Action != "" || rawFields.RetryCount != 0 || rawFields.Fallback != nil || jsonObjectHasAnyKey(data, "Action", "RetryCount", "Fallback")) {
+		o.Action = rawFields.Action
+		o.RetryCount = rawFields.RetryCount
+		o.Fallback = rawFields.Fallback
+		return nil
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("on_failure: must be string or mapping: %w", err)
+	}
+	o.Action = ""
+	o.RetryCount = 0
+	o.Fallback = m
+	return nil
+}
+
+func (o *OnFailureSpec) setActionString(s string) {
+	o.Action = s
+	o.RetryCount = 0
+	o.Fallback = nil
+	if strings.HasPrefix(s, "retry:") {
+		rest := strings.TrimPrefix(s, "retry:")
+		if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+			o.RetryCount = n
+			o.Action = "retry"
+		}
+	}
 }
 
 // MarshalYAML round-trips the form we read.
@@ -420,6 +554,34 @@ func (i *IntOrExpr) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// UnmarshalJSON accepts int, string, or the canonical struct object emitted by
+// encoding/json.
+func (i *IntOrExpr) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*i = IntOrExpr{}
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		i.Value = n
+		i.Expr = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		i.Value = 0
+		i.Expr = s
+		return nil
+	}
+	type raw IntOrExpr
+	var obj raw
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("expected integer or template expression: %w", err)
+	}
+	*i = IntOrExpr(obj)
+	return nil
+}
+
 // MarshalYAML emits literal int when set, otherwise the expression.
 func (i IntOrExpr) MarshalYAML() (interface{}, error) {
 	if i.Expr != "" {
@@ -447,6 +609,29 @@ func (a *AfterRef) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	var list []string
 	if err := unmarshal(&list); err != nil {
+		return fmt.Errorf("after: must be a string or list of strings: %w", err)
+	}
+	*a = list
+	return nil
+}
+
+// UnmarshalJSON accepts either a single string or a list of strings.
+func (a *AfterRef) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*a = nil
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		if s != "" {
+			*a = []string{s}
+		} else {
+			*a = nil
+		}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("after: must be a string or list of strings: %w", err)
 	}
 	*a = list
@@ -484,6 +669,34 @@ func (p *ParallelSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// UnmarshalJSON accepts bool, []Step, or the canonical struct object emitted
+// by encoding/json.
+func (p *ParallelSpec) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*p = ParallelSpec{}
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		p.Flag = b
+		p.Steps = nil
+		return nil
+	}
+	var steps []Step
+	if err := json.Unmarshal(data, &steps); err == nil {
+		p.Flag = false
+		p.Steps = steps
+		return nil
+	}
+	type raw ParallelSpec
+	var obj raw
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+	}
+	*p = ParallelSpec(obj)
+	return nil
+}
+
 // MarshalYAML mirrors the input form — emit a bool when only Flag is set,
 // emit the list otherwise. Keeps round-tripping clean for tooling.
 func (p ParallelSpec) MarshalYAML() (interface{}, error) {
@@ -502,6 +715,23 @@ func (p ParallelSpec) IsZero() bool { return !p.Flag && len(p.Steps) == 0 }
 // Len returns the number of inline parallel sub-steps. The Flag form has Len 0.
 func (p ParallelSpec) Len() int { return len(p.Steps) }
 
+func isJSONNull(data []byte) bool {
+	return strings.TrimSpace(string(data)) == "null"
+}
+
+func jsonObjectHasAnyKey(data []byte, keys ...string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := obj[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ForeachConfig drives per-iteration fan-out. Items is the iterable
 // (`${vars.hypothesis_active}`, `${ntm.panes}`, etc.); As is the loop var;
 // Template / Steps describe what to dispatch per iteration. PaneStrategy
@@ -509,12 +739,12 @@ func (p ParallelSpec) Len() int { return len(p.Steps) }
 type ForeachConfig struct {
 	Items          string                 `yaml:"items,omitempty" toml:"items,omitempty" json:"items,omitempty"`
 	As             string                 `yaml:"as,omitempty" toml:"as,omitempty" json:"as,omitempty"`
-	Beads          string                 `yaml:"beads,omitempty" toml:"beads,omitempty" json:"beads,omitempty"`     // Convenience: iterate beads matching a label query (e.g. `hypothesis,state:active`).
-	Pairs          string                 `yaml:"pairs,omitempty" toml:"pairs,omitempty" json:"pairs,omitempty"`     // Convenience: iterate paired items produced by a generator command (e.g., debate-pair generation). Mutually exclusive with Items/Beads.
-	Debates        string                 `yaml:"debates,omitempty" toml:"debates,omitempty" json:"debates,omitempty"` // Convenience: iterate DEBATE-* beads (typically scoped by state).
-	Models         StringOrList           `yaml:"models,omitempty" toml:"models,omitempty" json:"models,omitempty"`   // Convenience: iterate distinct model families in the roster. Accepts either an inline list (`["cc", "cod"]`) or a single shell command that emits one family per line.
+	Beads          string                 `yaml:"beads,omitempty" toml:"beads,omitempty" json:"beads,omitempty"`                // Convenience: iterate beads matching a label query (e.g. `hypothesis,state:active`).
+	Pairs          string                 `yaml:"pairs,omitempty" toml:"pairs,omitempty" json:"pairs,omitempty"`                // Convenience: iterate paired items produced by a generator command (e.g., debate-pair generation). Mutually exclusive with Items/Beads.
+	Debates        string                 `yaml:"debates,omitempty" toml:"debates,omitempty" json:"debates,omitempty"`          // Convenience: iterate DEBATE-* beads (typically scoped by state).
+	Models         StringOrList           `yaml:"models,omitempty" toml:"models,omitempty" json:"models,omitempty"`             // Convenience: iterate distinct model families in the roster. Accepts either an inline list (`["cc", "cod"]`) or a single shell command that emits one family per line.
 	MaxRounds      IntOrExpr              `yaml:"max_rounds,omitempty" toml:"max_rounds,omitempty" json:"max_rounds,omitempty"` // Per-iteration round cap for orchestration patterns that internally iterate (e.g., debate rounds).
-	Filter         string                 `yaml:"filter,omitempty" toml:"filter,omitempty" json:"filter,omitempty"` // Convenience predicate over the resolved iteration set, e.g. `role==proposer` or `state==active`. Applied after Items/Beads expansion.
+	Filter         string                 `yaml:"filter,omitempty" toml:"filter,omitempty" json:"filter,omitempty"`             // Convenience predicate over the resolved iteration set, e.g. `role==proposer` or `state==active`. Applied after Items/Beads expansion.
 	PaneStrategy   string                 `yaml:"pane_assignment_strategy,omitempty" toml:"pane_assignment_strategy,omitempty" json:"pane_assignment_strategy,omitempty"`
 	Template       string                 `yaml:"template,omitempty" toml:"template,omitempty" json:"template,omitempty"`
 	TemplateParams map[string]interface{} `yaml:"template_params,omitempty" toml:"template_params,omitempty" json:"template_params,omitempty"`
@@ -553,6 +783,28 @@ type OutputParse struct {
 // UnmarshalText allows OutputParse to be specified as a simple string
 func (o *OutputParse) UnmarshalText(text []byte) error {
 	o.Type = string(text)
+	return nil
+}
+
+// UnmarshalJSON accepts the string shorthand used by text unmarshalling and
+// the canonical object emitted by encoding/json.
+func (o *OutputParse) UnmarshalJSON(data []byte) error {
+	if isJSONNull(data) {
+		*o = OutputParse{}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		o.Type = s
+		o.Pattern = ""
+		return nil
+	}
+	type raw OutputParse
+	var obj raw
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("output_parse: must be a string or object: %w", err)
+	}
+	*o = OutputParse(obj)
 	return nil
 }
 
