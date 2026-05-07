@@ -369,7 +369,7 @@ Examples:
 			}
 
 			fmt.Printf("✓ Validated workflow: %s (%d steps)\n", workflow.Name, len(workflow.Steps))
-			if desc := strings.TrimSpace(workflow.Description); desc != "" {
+			if desc := pipeline.SanitizeDescriptionForTerminal(strings.TrimSpace(workflow.Description)); desc != "" {
 				fmt.Printf("   Description: %s\n", desc)
 			}
 			fmt.Println()

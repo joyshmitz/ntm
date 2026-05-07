@@ -323,3 +323,44 @@ func TestNormalizeJSONNumbersHandlesNonNumberPassthrough(t *testing.T) {
 	}
 }
 
+// TestSanitizeDescriptionForTerminal covers bd-lqz30: workflow / step
+// description strings can be YAML-controlled text and must be scrubbed of
+// terminal control sequences before they reach a TTY.
+func TestSanitizeDescriptionForTerminal(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "hello world", "hello world"},
+		{"keeps tabs and newlines", "a\tb\nc", "a\tb\nc"},
+		{"strips_BEL", "alert\x07now", "alert?now"},
+		{"strips_DEL", "drop\x7Fme", "drop?me"},
+		{"strips_NUL", "null\x00byte", "null?byte"},
+		{"strips_CSI_clear_screen", "before\x1B[2Jafter", "before?after"},
+		{"strips_OSC_clipboard_BEL_terminator", "x\x1B]52;c;abcd\x07y", "x?y"},
+		{"strips_OSC_with_ST_terminator", "x\x1B]0;title\x1B\\y", "x?y"},
+		{"strips_charset_select", "x\x1B(0y", "x?y"},
+		{"replaces_each_escape_run", "a\x1B[31mb\x1B[0mc", "a?b?c"},
+		{"keeps_unicode", "héllo é world", "héllo é world"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeDescriptionForTerminal(tc.in)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShortDescriptionStripsEscapes(t *testing.T) {
+	got := shortDescription("\x1B[2Jpwn\x07")
+	if strings.ContainsAny(got, "\x1B\x07") {
+		t.Errorf("shortDescription leaked control bytes: %q", got)
+	}
+	if !strings.Contains(got, "pwn") {
+		t.Errorf("shortDescription dropped readable text: %q", got)
+	}
+}

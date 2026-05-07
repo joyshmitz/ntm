@@ -843,6 +843,14 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		return executeMailStep(step)
 	}
 
+	// bd-2xka8: bind pane metadata for the step's tmux pane before
+	// substitution so ${pane.role}, ${pane.model}, ${pane.domain}, etc.
+	// resolve against the configured pane on a normal (non-foreach) step
+	// dispatch. No-op when step.Pane is unset or when an outer foreach
+	// iteration has already bound pane vars.
+	releasePaneVars := e.bindStepPaneMetadata(step)
+	defer releasePaneVars()
+
 	// Get prompt (from prompt or prompt_file)
 	prompt, err := e.resolvePrompt(step)
 	if err != nil {
@@ -1021,6 +1029,11 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		StartedAt: time.Now(),
 		AgentType: "command",
 	}
+
+	// bd-2xka8: bind pane metadata before substitution so ${pane.X} in the
+	// command body or args resolves against the step's configured pane.
+	releasePaneVars := e.bindStepPaneMetadata(step)
+	defer releasePaneVars()
 
 	expandedCmd, err := e.substituteVariablesStrict(step.Command)
 	if err != nil {
@@ -1279,6 +1292,12 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		StartedAt: time.Now(),
 		AgentType: "template",
 	}
+
+	// bd-2xka8: bind pane metadata before rendering+substitution so
+	// ${pane.X} inside the template body or params resolves against the
+	// step's configured pane.
+	releasePaneVars := e.bindStepPaneMetadata(step)
+	defer releasePaneVars()
 
 	templatePath := e.resolveTemplatePath(step.Template)
 	if templatePath == "" {
@@ -2617,7 +2636,78 @@ func dryRunDispatchLine(step *Step) string {
 }
 
 func shortDescription(desc string) string {
-	return truncatePrompt(strings.TrimSpace(desc), 80)
+	return truncatePrompt(SanitizeDescriptionForTerminal(strings.TrimSpace(desc)), 80)
+}
+
+// SanitizeDescriptionForTerminal scrubs YAML-controlled description strings
+// before they are printed to a terminal. It strips ANSI/OSC escape sequences
+// (ESC … terminator) plus C0 control bytes other than tab/newline/carriage-
+// return, replacing each one with `?`. This stops a workflow author from
+// embedding ESC[2J, OSC 52 clipboard sequences, BEL, etc. in
+// workflow.Description / step.Description and hijacking the operator's
+// terminal during ntm pipeline run / dry-run output (bd-lqz30).
+func SanitizeDescriptionForTerminal(desc string) string {
+	if desc == "" {
+		return desc
+	}
+	var b strings.Builder
+	b.Grow(len(desc))
+	runes := []rune(desc)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == 0x1B:
+			// Replace the whole escape run with a single '?' so the
+			// operator can see something was stripped.
+			b.WriteByte('?')
+			if i+1 >= len(runes) {
+				break
+			}
+			i++
+			intro := runes[i]
+			switch intro {
+			case '[':
+				// CSI introducer: skip parameter bytes (0x30-0x3F) and
+				// intermediate bytes (0x20-0x2F) until a final byte
+				// (0x40-0x7E).
+				for i+1 < len(runes) {
+					i++
+					rr := runes[i]
+					if rr >= 0x40 && rr <= 0x7E {
+						break
+					}
+				}
+			case ']':
+				// OSC introducer: terminate on BEL (\x07) or ST (ESC \\).
+				for i+1 < len(runes) {
+					i++
+					rr := runes[i]
+					if rr == 0x07 {
+						break
+					}
+					if rr == 0x1B && i+1 < len(runes) && runes[i+1] == '\\' {
+						i++
+						break
+					}
+				}
+			case '(', ')', '*', '+', '-', '.', '/':
+				// Charset designator: consume one final byte.
+				if i+1 < len(runes) {
+					i++
+				}
+			default:
+				// Plain two-byte escape (e.g. ESC c, ESC =, ESC >). intro
+				// itself is the final byte and was already consumed above.
+			}
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7F:
+			b.WriteByte('?')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // describeForeach builds a one-line summary of a ForeachConfig for dry-run
