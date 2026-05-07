@@ -194,6 +194,26 @@ func TestBeadQueryFilterOperators(t *testing.T) {
 	}
 }
 
+func TestBeadQueryFilterRejectsParens(t *testing.T) {
+	// bd-3at8h: the string-split parser cannot honor parens, so silently
+	// chopping `(label==hypothesis || label==phase-4)` into clauses with
+	// the parens attached (`(label==hypothesis` / `label==phase-4)`) used
+	// to either return an unknown-field error or, worse, the wrong result
+	// set. Reject parens up front with a clear hint instead of producing
+	// a misleading match. (Replacing matchBeadFilter with the foreach
+	// filter parser is tracked for a follow-up.)
+	records := []BeadRecord{
+		{ID: "bd-1", Labels: []string{"hypothesis"}, Status: "open"},
+	}
+	_, err := filterBeadRecords(records, `status==open && (label==hypothesis || label==phase-4)`)
+	if err == nil {
+		t.Fatal("filterBeadRecords() error = nil, want parens-rejection error")
+	}
+	if !strings.Contains(err.Error(), "parenthesized expressions") {
+		t.Fatalf("filterBeadRecords() error = %q, want parens hint", err.Error())
+	}
+}
+
 func TestBeadQuerySubstitutesVariablesInArgsAndFilter(t *testing.T) {
 	// bead_query is meant to replace shell-piped br|jq commands. Without
 	// variable substitution, fields like label/status/filter would be sent

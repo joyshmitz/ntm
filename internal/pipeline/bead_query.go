@@ -265,6 +265,18 @@ func filterBeadRecords(records []BeadRecord, filter string) ([]BeadRecord, error
 }
 
 func matchBeadFilter(record BeadRecord, expr string) (bool, error) {
+	// bd-3at8h: the existing string-split parser cannot handle the
+	// parenthesized E2.6 filter shapes the docs imply (e.g.
+	// `status==open && (label==hypothesis || label==phase-4)`). Splitting
+	// on `||` first chops the parens into clauses like `(label==hypothesis`
+	// and `label==phase-4)` that then fail with confusing field/value
+	// errors or silently match the wrong record set. Reject parentheses
+	// up front with an actionable error so authors don't get a wrong-set
+	// surprise; the deeper "reuse foreach filter parser" path is tracked
+	// for a follow-up.
+	if strings.ContainsAny(expr, "()") {
+		return false, fmt.Errorf("bead_query.filter does not yet support parenthesized expressions (got %q): rewrite without grouping (e.g. status==open && label==hypothesis || status==open && label==phase-4) or pre-narrow with bead_query.labels/status", expr)
+	}
 	orParts := strings.Split(expr, "||")
 	for _, orPart := range orParts {
 		andParts := strings.Split(orPart, "&&")
