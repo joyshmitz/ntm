@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -222,4 +223,201 @@ func (e *Executor) executeBranch(ctx context.Context, step *Step, workflow *Work
 	result.Output = strings.Join(outputs, "\n")
 	result.FinishedAt = time.Now()
 	return result
+}
+
+// executeOnFailureRecovery dispatches a structured on_failure fallback:
+//
+//	on_failure:
+//	  pane: 1
+//	  template: recover.md
+//	  params: {KEY: value}
+//
+// The original failed result remains failed unless suppress_failure is true
+// and the recovery template dispatch completes successfully.
+func (e *Executor) executeOnFailureRecovery(ctx context.Context, step *Step, workflow *Workflow, failed StepResult) StepResult {
+	if step == nil || len(step.OnFailure.Fallback) == 0 {
+		return failed
+	}
+
+	recoveryStep, suppressFailure, err := e.recoveryStepFromFallback(step)
+	if err != nil {
+		return e.recordRecoveryFailure(failed, step.ID, err)
+	}
+
+	e.stepLogger(step).Info(EventOnFailureFire,
+		FieldRecoveryPane, recoveryStep.Pane.Index,
+		FieldRecoveryTemplate, recoveryStep.Template,
+	)
+
+	recoveryResult := e.executeTemplate(ctx, recoveryStep, workflow)
+	e.stateMu.Lock()
+	e.state.Steps[recoveryStep.ID] = recoveryResult
+	e.stateMu.Unlock()
+
+	if recoveryResult.Status != StatusCompleted {
+		return e.recordRecoveryFailure(failed, step.ID, recoveryResultError(recoveryResult))
+	}
+	if suppressFailure {
+		failed.Status = StatusCompleted
+		failed.Error = nil
+		failed.Output = recoveryResult.Output
+		failed.FinishedAt = time.Now()
+	}
+	return failed
+}
+
+func (e *Executor) recoveryStepFromFallback(step *Step) (*Step, bool, error) {
+	fallback := step.OnFailure.Fallback
+	template, ok := recoveryStringValue(fallback["template"])
+	if !ok || strings.TrimSpace(template) == "" {
+		return nil, false, fmt.Errorf("on_failure recovery requires non-empty template")
+	}
+	template = e.substituteVariables(template)
+
+	pane, err := e.recoveryPaneSpec(fallback["pane"])
+	if err != nil {
+		return nil, false, err
+	}
+
+	params, err := e.recoveryParams(fallback["params"])
+	if err != nil {
+		return nil, false, err
+	}
+
+	wait := WaitNone
+	if rawWait, ok := recoveryStringValue(fallback["wait"]); ok && strings.TrimSpace(rawWait) != "" {
+		wait = WaitCondition(e.substituteVariables(rawWait))
+	}
+
+	return &Step{
+		ID:       step.ID + ".on_failure",
+		Name:     "on_failure recovery for " + step.ID,
+		Template: template,
+		Pane:     pane,
+		Params:   params,
+		Wait:     wait,
+	}, recoveryBoolValue(fallback["suppress_failure"]), nil
+}
+
+func (e *Executor) recoveryPaneSpec(raw interface{}) (PaneSpec, error) {
+	switch v := raw.(type) {
+	case int:
+		if v > 0 {
+			return PaneSpec{Index: v}, nil
+		}
+	case int64:
+		if v > 0 {
+			return PaneSpec{Index: int(v)}, nil
+		}
+	case float64:
+		if v > 0 && v == float64(int(v)) {
+			return PaneSpec{Index: int(v)}, nil
+		}
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil && n > 0 {
+			return PaneSpec{Index: int(n)}, nil
+		}
+	case string:
+		resolved := strings.TrimSpace(e.substituteVariables(v))
+		n, err := strconv.Atoi(resolved)
+		if err == nil && n > 0 {
+			return PaneSpec{Index: n}, nil
+		}
+		return PaneSpec{}, fmt.Errorf("on_failure pane %q must resolve to a positive pane index", v)
+	}
+	return PaneSpec{}, fmt.Errorf("on_failure recovery requires positive pane index")
+}
+
+func (e *Executor) recoveryParams(raw interface{}) (map[string]interface{}, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	params, ok := raw.(map[string]interface{})
+	if !ok {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return nil, fmt.Errorf("on_failure params must be a mapping: %w", err)
+		}
+		if err := json.Unmarshal(data, &params); err != nil {
+			return nil, fmt.Errorf("on_failure params must be a mapping: %w", err)
+		}
+	}
+
+	resolved := make(map[string]interface{}, len(params))
+	for key, val := range params {
+		resolved[key] = e.recoveryParamValue(val)
+	}
+	return resolved, nil
+}
+
+func (e *Executor) recoveryParamValue(val interface{}) interface{} {
+	switch v := val.(type) {
+	case string:
+		return e.substituteVariables(v)
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = e.recoveryParamValue(item)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for key, item := range v {
+			out[key] = e.recoveryParamValue(item)
+		}
+		return out
+	default:
+		return val
+	}
+}
+
+func (e *Executor) recordRecoveryFailure(failed StepResult, stepID string, err error) StepResult {
+	msg := fmt.Sprintf("on_failure recovery failed: %v", err)
+	e.stateMu.Lock()
+	e.state.Errors = append(e.state.Errors, ExecutionError{
+		StepID:    stepID,
+		Type:      "on_failure",
+		Message:   msg,
+		Timestamp: time.Now(),
+		Fatal:     false,
+	})
+	e.stateMu.Unlock()
+
+	if failed.Error == nil {
+		failed.Error = &StepError{
+			Type:      "on_failure",
+			Message:   msg,
+			Timestamp: time.Now(),
+		}
+		return failed
+	}
+	if failed.Error.Details != "" {
+		failed.Error.Details += "\n"
+	}
+	failed.Error.Details += msg
+	return failed
+}
+
+func recoveryResultError(result StepResult) error {
+	if result.Error != nil {
+		return fmt.Errorf("%s", result.Error.Message)
+	}
+	return fmt.Errorf("recovery step %s ended with status %s", result.StepID, result.Status)
+}
+
+func recoveryStringValue(raw interface{}) (string, bool) {
+	s, ok := raw.(string)
+	return s, ok
+}
+
+func recoveryBoolValue(raw interface{}) bool {
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
 }

@@ -2,8 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // ---------------------------------------------------------------------------
@@ -386,5 +389,151 @@ func TestExecuteBranch_VariableScopeCleanup(t *testing.T) {
 
 	if e.state.Variables["keep_me"] != "preserved" {
 		t.Errorf("pre-existing variable lost after branch execution")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// on_failure recovery dispatch tests (bd-w6nth.4)
+// ---------------------------------------------------------------------------
+
+func TestOnFailureRecoveryDispatchesTemplateToPane(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(tmpDir+"/recover.md", []byte("Recover <CAUSE>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	t.Cleanup(mock.Reset)
+
+	cfg := DefaultExecutorConfig("recovery-session")
+	cfg.ProjectDir = tmpDir
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(mock)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "recovery-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:      "fail",
+			Command: "exit 7",
+			OnFailure: OnFailureSpec{Fallback: map[string]interface{}{
+				"pane":     1,
+				"template": "recover.md",
+				"params": map[string]interface{}{
+					"CAUSE": "${vars.reason}",
+				},
+			}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, map[string]interface{}{"reason": "broken"}, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want original step failure")
+	}
+
+	result := state.Steps["fail"]
+	if result.Status != StatusFailed {
+		t.Fatalf("original step status = %s, want failed", result.Status)
+	}
+	recovery := state.Steps["fail.on_failure"]
+	if recovery.Status != StatusCompleted {
+		t.Fatalf("recovery status = %s, want completed; error=%+v", recovery.Status, recovery.Error)
+	}
+
+	history, err := mock.PasteHistory("%1")
+	if err != nil {
+		t.Fatalf("PasteHistory() error = %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("PasteHistory length = %d, want 1", len(history))
+	}
+	if history[0].Content != "Recover broken" {
+		t.Fatalf("recovery paste = %q, want %q", history[0].Content, "Recover broken")
+	}
+}
+
+func TestOnFailureRecoveryFailureIsRecorded(t *testing.T) {
+	tmpDir := t.TempDir()
+	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	t.Cleanup(mock.Reset)
+
+	cfg := DefaultExecutorConfig("recovery-session")
+	cfg.ProjectDir = tmpDir
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(mock)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "recovery-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:      "fail",
+			Command: "exit 9",
+			OnFailure: OnFailureSpec{Fallback: map[string]interface{}{
+				"pane":     1,
+				"template": "missing.md",
+			}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want original step failure")
+	}
+
+	recovery := state.Steps["fail.on_failure"]
+	if recovery.Status != StatusFailed {
+		t.Fatalf("recovery status = %s, want failed", recovery.Status)
+	}
+	if len(state.Errors) == 0 {
+		t.Fatal("state.Errors empty, want recovery failure record")
+	}
+	if state.Errors[len(state.Errors)-1].Type != "on_failure" {
+		t.Fatalf("last error type = %q, want on_failure", state.Errors[len(state.Errors)-1].Type)
+	}
+	if result := state.Steps["fail"]; result.Error == nil || !strings.Contains(result.Error.Details, "on_failure recovery failed") {
+		t.Fatalf("original error details = %+v, want recovery failure details", result.Error)
+	}
+}
+
+func TestOnFailureRecoveryCanSuppressOriginalFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(tmpDir+"/recover.md", []byte("Recover now"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex})
+	t.Cleanup(mock.Reset)
+
+	cfg := DefaultExecutorConfig("recovery-session")
+	cfg.ProjectDir = tmpDir
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(mock)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "recovery-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:      "fail",
+			Command: "exit 11",
+			OnFailure: OnFailureSpec{Fallback: map[string]interface{}{
+				"pane":             1,
+				"template":         "recover.md",
+				"suppress_failure": true,
+			}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil after suppress_failure recovery", err)
+	}
+	if state.Status != StatusCompleted {
+		t.Fatalf("workflow status = %s, want completed", state.Status)
+	}
+	if result := state.Steps["fail"]; result.Status != StatusCompleted || result.Error != nil {
+		t.Fatalf("original step result = %+v, want completed without error", result)
 	}
 }

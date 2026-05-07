@@ -602,8 +602,18 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 
 	result.Status = StatusFailed
 	result.FinishedAt = time.Now()
+	result = e.executeOnFailureRecovery(ctx, step, workflow, result)
+	if result.Status == StatusCompleted {
+		e.emitProgress("step_complete", step.ID,
+			stepProgressMessage("Step completed after on_failure recovery", step, ""), e.calculateProgress())
+		return result
+	}
+	errorMessage := "unknown error"
+	if result.Error != nil {
+		errorMessage = result.Error.Message
+	}
 	e.emitProgress("step_error", step.ID,
-		fmt.Sprintf("Step %s failed after %d attempts: %s", step.ID, result.Attempts, result.Error.Message),
+		fmt.Sprintf("Step %s failed after %d attempts: %s", step.ID, result.Attempts, errorMessage),
 		e.calculateProgress())
 
 	return result
