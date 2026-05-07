@@ -109,3 +109,52 @@ func TestByModelFamilyErrorsWhenNoPaneMatches(t *testing.T) {
 		t.Fatalf("byModelFamily() = %q, want empty pane", got)
 	}
 }
+
+func TestByModelFamilyDifferenceReturnsDifferentFamilyPane(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "cod"},
+	}
+
+	got, warned, err := byModelFamilyDifference(panes, "cc")
+	if err != nil {
+		t.Fatalf("byModelFamilyDifference() error = %v", err)
+	}
+	if warned {
+		t.Fatal("byModelFamilyDifference() warned, want no warning")
+	}
+	if got != "p2" {
+		t.Fatalf("byModelFamilyDifference() = %q, want p2", got)
+	}
+}
+
+func TestByModelFamilyDifferenceFallsBackWhenAllPanesShareFamily(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "cc"},
+	}
+
+	got, warned, err := byModelFamilyDifference(panes, "cc")
+	if err != nil {
+		t.Fatalf("byModelFamilyDifference() error = %v", err)
+	}
+	if !warned {
+		t.Fatal("byModelFamilyDifference() warned = false, want true")
+	}
+	if got != "p1" {
+		t.Fatalf("byModelFamilyDifference() = %q, want p1", got)
+	}
+}
+
+func TestByModelFamilyDifferenceErrorsWhenNoPanesAvailable(t *testing.T) {
+	got, warned, err := byModelFamilyDifference(nil, "cc")
+	if !errors.Is(err, errNoPaneForStrategy) {
+		t.Fatalf("byModelFamilyDifference() error = %v, want %v", err, errNoPaneForStrategy)
+	}
+	if warned {
+		t.Fatal("byModelFamilyDifference() warned = true, want false")
+	}
+	if got != "" {
+		t.Fatalf("byModelFamilyDifference() = %q, want empty pane", got)
+	}
+}

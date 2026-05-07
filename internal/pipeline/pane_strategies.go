@@ -6,6 +6,7 @@ import (
 
 var errNoAdjudicatorPane = errors.New("no available adjudicator pane")
 var errNoModelFamilyPane = errors.New("no pane matches model family")
+var errNoPaneForStrategy = errors.New("no pane available for assignment strategy")
 
 type paneStrategyPane struct {
 	ID          string
@@ -70,4 +71,26 @@ func byModelFamily(orderedPanes []paneStrategyPane, modelFamily string) (string,
 		}
 	}
 	return "", errNoModelFamilyPane
+}
+
+// byModelFamilyDifference chooses the first pane whose model family differs
+// from the item's authoring family. If every pane has the same family, it
+// falls back to the first available pane and reports warnFallback=true.
+func byModelFamilyDifference(orderedPanes []paneStrategyPane, authorModelFamily string) (paneID string, warnFallback bool, err error) {
+	firstPane := ""
+	for _, pane := range orderedPanes {
+		if pane.ID == "" {
+			continue
+		}
+		if firstPane == "" {
+			firstPane = pane.ID
+		}
+		if pane.ModelFamily != authorModelFamily {
+			return pane.ID, false, nil
+		}
+	}
+	if firstPane == "" {
+		return "", false, errNoPaneForStrategy
+	}
+	return firstPane, true, nil
 }
