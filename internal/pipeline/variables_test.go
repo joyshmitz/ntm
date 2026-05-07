@@ -1727,6 +1727,56 @@ func TestResolveSteps_OutputNestedField(t *testing.T) {
 	}
 }
 
+func TestResolveSteps_OutputBracketAccessOnDeeperSegment(t *testing.T) {
+	// bd-et0k5: bracket suffixes must work on every path segment, not just
+	// the first field. The documented shapes are
+	// ${steps.fetch.output.items[0].title} and
+	// ${steps.fetch.data[user][profile][name]}.
+	state := &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"fetch": {
+				StepID: "fetch",
+				Status: StatusCompleted,
+				ParsedData: map[string]interface{}{
+					"items": []interface{}{
+						map[string]interface{}{"title": "ok"},
+						map[string]interface{}{"title": "second"},
+					},
+					"user": map[string]interface{}{
+						"profile": map[string]interface{}{
+							"name": "Alice",
+						},
+					},
+					"list": []interface{}{"a", "b", "c", "d"},
+				},
+			},
+		},
+	}
+
+	sub := NewSubstitutor(state, "test-session", "test-workflow")
+
+	cases := []struct {
+		template string
+		want     string
+	}{
+		{"${steps.fetch.output.items[0].title}", "ok"},
+		{"${steps.fetch.output.items[1].title}", "second"},
+		{"${steps.fetch.data[user][profile][name]}", "Alice"},
+		{"${steps.fetch.parsed_data.list[3]}", "d"},
+	}
+	for _, tc := range cases {
+		got, err := sub.Substitute(tc.template)
+		if err != nil {
+			t.Errorf("Substitute(%q) error = %v", tc.template, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Substitute(%q) = %q, want %q", tc.template, got, tc.want)
+		}
+	}
+}
+
 func TestResolveSteps_OutputNestedNoParsedData(t *testing.T) {
 
 	state := &ExecutionState{

@@ -802,10 +802,29 @@ func (s *Substitutor) resolveItem(parts []string) (interface{}, error) {
 	return navigateNested(item, parts)
 }
 
+// expandBracketParts splits any path segment that ends in [N] / [key] /
+// [a][b] suffixes into separate tokens, so navigateNested can traverse
+// `items[0].title` / `data[user][profile][name]` as `items 0 title` /
+// `data user profile name`. This mirrors the splitBracketAccess pre-pass
+// resolveSteps already runs on its first field segment (bd-et0k5).
+func expandBracketParts(parts []string) []string {
+	expanded := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if base, indexes, ok := splitBracketAccess(part); ok {
+			expanded = append(expanded, base)
+			expanded = append(expanded, indexes...)
+			continue
+		}
+		expanded = append(expanded, part)
+	}
+	return expanded
+}
+
 // navigateNested traverses nested data structures using dot notation.
 // Supports maps and arrays (with numeric indices).
 func navigateNested(value interface{}, parts []string) (interface{}, error) {
 	current := value
+	parts = expandBracketParts(parts)
 
 	for _, part := range parts {
 		if current == nil {
