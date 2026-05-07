@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,7 @@ with dependencies, conditionals, and variable substitution.
 
 Subcommands:
   run      Run a workflow from a YAML/TOML file
+  lint     Parse, normalize, and validate a workflow file
   resume   Resume a workflow from saved state
   status   Check the status of a running pipeline
   list     List all tracked pipelines
@@ -44,6 +46,9 @@ Examples:
 
   # Run with variables
   ntm pipeline run workflow.yaml --session proj --var env=prod --var debug=true
+
+  # Lint without requiring a tmux session
+  ntm pipeline lint workflow.yaml
 
   # Check status
   ntm pipeline status run-20241230-123456-abcd
@@ -63,6 +68,7 @@ Examples:
 
 	cmd.AddCommand(
 		newPipelineRunCmd(),
+		newPipelineLintCmd(),
 		newPipelineStatusCmd(),
 		newPipelineListCmd(),
 		newPipelineCancelCmd(),
@@ -72,6 +78,160 @@ Examples:
 	)
 
 	return cmd
+}
+
+type pipelineLintOutput struct {
+	Success            bool                    `json:"success"`
+	WorkflowFile       string                  `json:"workflow_file"`
+	Workflow           string                  `json:"workflow,omitempty"`
+	Valid              bool                    `json:"valid"`
+	StepCount          int                     `json:"step_count,omitempty"`
+	Error              string                  `json:"error,omitempty"`
+	ErrorCode          string                  `json:"error_code,omitempty"`
+	Errors             []pipeline.ParseError   `json:"errors,omitempty"`
+	Warnings           []pipeline.ParseError   `json:"warnings,omitempty"`
+	NormalizedWorkflow *pipeline.Workflow      `json:"normalized_workflow,omitempty"`
+	Summary            pipelineLintSummaryJSON `json:"summary"`
+}
+
+type pipelineLintSummaryJSON struct {
+	Errors   int `json:"errors"`
+	Warnings int `json:"warnings"`
+}
+
+// newPipelineLintCmd creates the "pipeline lint" subcommand.
+func newPipelineLintCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "lint <workflow-file>",
+		Short:         "Parse, normalize, and validate a workflow file",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		Long: `Parse, normalize, and validate a workflow file without requiring a
+tmux session or dispatching any work.
+
+The --json flag includes the normalized workflow so authoring tools can inspect
+the canonical form that ntm would execute.
+
+Examples:
+  ntm pipeline lint workflow.yaml
+  ntm --json pipeline lint workflow.yaml`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPipelineLint(args[0], cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+
+	return cmd
+}
+
+func runPipelineLint(workflowFile string, out io.Writer, errOut io.Writer) error {
+	workflowPath := workflowFile
+	if abs, err := filepath.Abs(workflowFile); err == nil {
+		workflowPath = abs
+	}
+
+	workflow, result, err := pipeline.LoadAndValidate(workflowPath)
+	if err != nil {
+		lintResult := pipelineLintOutput{
+			Success:      false,
+			WorkflowFile: workflowPath,
+			Valid:        false,
+			Error:        err.Error(),
+			ErrorCode:    "PARSE_FAILED",
+			Summary: pipelineLintSummaryJSON{
+				Errors: 1,
+			},
+		}
+
+		var parseErr *pipeline.ParseError
+		if errors.As(err, &parseErr) {
+			lintResult.Errors = []pipeline.ParseError{*parseErr}
+		}
+
+		if jsonOutput {
+			if encodeErr := json.NewEncoder(out).Encode(lintResult); encodeErr != nil {
+				return encodeErr
+			}
+		} else {
+			fmt.Fprintf(errOut, "Pipeline lint failed: %s\n", workflowPath)
+			printPipelineLintErrors(errOut, lintResult.Errors)
+			if len(lintResult.Errors) == 0 {
+				fmt.Fprintf(errOut, "  %s\n", err)
+			}
+		}
+		return fmt.Errorf("pipeline lint failed")
+	}
+
+	lintResult := pipelineLintOutput{
+		Success:            result.Valid,
+		WorkflowFile:       workflowPath,
+		Workflow:           workflow.Name,
+		Valid:              result.Valid,
+		StepCount:          len(workflow.Steps),
+		Errors:             result.Errors,
+		Warnings:           result.Warnings,
+		NormalizedWorkflow: workflow,
+		Summary: pipelineLintSummaryJSON{
+			Errors:   len(result.Errors),
+			Warnings: len(result.Warnings),
+		},
+	}
+	if !result.Valid {
+		lintResult.Error = "workflow validation failed"
+		lintResult.ErrorCode = "VALIDATION_FAILED"
+	}
+
+	if jsonOutput {
+		if err := json.NewEncoder(out).Encode(lintResult); err != nil {
+			return err
+		}
+		if !result.Valid {
+			return fmt.Errorf("workflow validation failed")
+		}
+		return nil
+	}
+
+	fmt.Fprintf(out, "Pipeline lint: %s\n", workflowPath)
+	fmt.Fprintf(out, "Workflow: %s\n", workflow.Name)
+	fmt.Fprintf(out, "Steps: %d\n", len(workflow.Steps))
+	fmt.Fprintf(out, "Warnings: %d\n", len(result.Warnings))
+
+	if len(result.Warnings) > 0 {
+		fmt.Fprintln(out, "\nWarnings:")
+		printPipelineLintErrors(out, result.Warnings)
+	}
+
+	if !result.Valid {
+		fmt.Fprintln(errOut, "\nValidation failed:")
+		printPipelineLintErrors(errOut, result.Errors)
+		return fmt.Errorf("workflow validation failed")
+	}
+
+	fmt.Fprintln(out, "Validation: ok")
+	return nil
+}
+
+func printPipelineLintErrors(w io.Writer, errs []pipeline.ParseError) {
+	for _, e := range errs {
+		location := e.Field
+		if e.File != "" {
+			location = e.File
+			if e.Line > 0 {
+				location = fmt.Sprintf("%s:%d", location, e.Line)
+			}
+			if e.Field != "" {
+				location = fmt.Sprintf("%s:%s", location, e.Field)
+			}
+		}
+		if location != "" {
+			fmt.Fprintf(w, "  - %s: %s\n", location, e.Message)
+		} else {
+			fmt.Fprintf(w, "  - %s\n", e.Message)
+		}
+		if e.Hint != "" {
+			fmt.Fprintf(w, "    Hint: %s\n", e.Hint)
+		}
+	}
 }
 
 // newPipelineRunCmd creates the "pipeline run" subcommand

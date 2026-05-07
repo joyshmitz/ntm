@@ -573,6 +573,97 @@ func TestResolvePipelineProjectDirForSessionRejectsInvalidSessionName(t *testing
 	}
 }
 
+func TestPipelineLintCmdValidWorkflowDoesNotRequireSession(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	path := writePipelineLintWorkflow(t, `
+schema_version: "2.0"
+name: lint-workflow
+steps:
+  - id: step1
+    agent: claude
+    prompt: Do something
+`)
+
+	cmd := newPipelineCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"lint", path})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("pipeline lint returned error: %v; stderr=%q", err, errOut.String())
+	}
+	if got := out.String(); !strings.Contains(got, "Validation: ok") || !strings.Contains(got, "Workflow: lint-workflow") {
+		t.Fatalf("unexpected lint output: %q", got)
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errOut.String())
+	}
+}
+
+func TestPipelineLintCmdJSONIncludesNormalizedWorkflowOnValidationFailure(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	path := writePipelineLintWorkflow(t, `
+schema_version: "2.0"
+steps:
+  - id: step1
+    agent: claude
+    prompt: Do something
+`)
+
+	cmd := newPipelineCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"lint", path})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("pipeline lint returned nil error for invalid workflow")
+	}
+
+	var result struct {
+		Success            bool            `json:"success"`
+		ErrorCode          string          `json:"error_code"`
+		Errors             []any           `json:"errors"`
+		NormalizedWorkflow json.RawMessage `json:"normalized_workflow"`
+	}
+	if decodeErr := json.Unmarshal(out.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("json.Unmarshal() error = %v; output=%q", decodeErr, out.String())
+	}
+	if result.Success {
+		t.Fatalf("success = true, want false; result=%+v", result)
+	}
+	if result.ErrorCode != "VALIDATION_FAILED" {
+		t.Fatalf("error_code = %q, want VALIDATION_FAILED", result.ErrorCode)
+	}
+	if len(result.NormalizedWorkflow) == 0 || string(result.NormalizedWorkflow) == "null" {
+		t.Fatal("normalized_workflow is empty")
+	}
+	if len(result.Errors) == 0 {
+		t.Fatal("expected validation errors")
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("unexpected stderr in json mode: %q", errOut.String())
+	}
+}
+
+func writePipelineLintWorkflow(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "workflow.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write workflow: %v", err)
+	}
+	return path
+}
+
 func TestResolveRobotSessionProjectScopeNormalizesExplicitPrefix(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
