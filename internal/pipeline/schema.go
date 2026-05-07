@@ -1281,6 +1281,12 @@ type StepResult struct {
 	SkipReason string          `json:"skip_reason,omitempty"` // If skipped due to 'when' condition
 	SkipKind   SkipKind        `json:"skip_kind,omitempty"`   // Structured classifier for SkipReason
 	Attempts   int             `json:"attempts,omitempty"`    // Number of retry attempts
+	// RerunOnResume marks a step for re-execution on resume even when its
+	// persisted Status is Completed. WaitNone (fire-and-forget) commands
+	// whose background process was killed by cancellation cleanup after the
+	// synchronous Completed return set this so resume relaunches the sidecar
+	// instead of skipping it (bd-yrnue).
+	RerunOnResume bool `json:"rerun_on_resume,omitempty"`
 }
 
 // StepError contains detailed error information for a failed step

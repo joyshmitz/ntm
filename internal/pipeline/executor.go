@@ -1222,19 +1222,28 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	}
 
 	if waitCondition == WaitNone {
+		startedAt := result.StartedAt
+		stepID := step.ID
+		workflowName := workflow.Name
 		go func() {
 			cleanup := waitCommandWithProcessGroupCleanup(ctx, cmd)
-			if cleanup.Cancelled {
-				slog.Warn(EventCommandCancelled,
-					"run_id", e.runIDForLog(),
-					"workflow", workflow.Name,
-					"step_id", step.ID,
-					"agent_type", "command",
-					FieldDurationMS, time.Since(result.StartedAt).Milliseconds(),
-					"bytes_captured", stdoutBuf.Len(),
-					FieldSignalSent, cleanup.SignalSent,
-				)
+			if !cleanup.Cancelled {
+				return
 			}
+			slog.Warn(EventCommandCancelled,
+				"run_id", e.runIDForLog(),
+				"workflow", workflowName,
+				"step_id", stepID,
+				"agent_type", "command",
+				FieldDurationMS, time.Since(startedAt).Milliseconds(),
+				"bytes_captured", stdoutBuf.Len(),
+				FieldSignalSent, cleanup.SignalSent,
+			)
+			// bd-yrnue: the synchronous return below recorded StatusCompleted,
+			// but the background process has now been killed by cancellation
+			// cleanup. Mark the persisted step result for rerun so resume
+			// relaunches the sidecar instead of skipping it.
+			e.markFireAndForgetCancelled(stepID, workflowName)
 		}()
 		result.Status = StatusCompleted
 		result.FinishedAt = time.Now()
@@ -3007,6 +3016,12 @@ func (e *Executor) applyResumeState() {
 }
 
 func shouldRerunStep(result StepResult) bool {
+	// bd-yrnue: WaitNone fire-and-forget commands killed by cancellation
+	// cleanup after the synchronous Completed return must rerun on resume
+	// so the background sidecar/server process is relaunched.
+	if result.RerunOnResume {
+		return true
+	}
 	switch result.Status {
 	case StatusFailed, StatusCancelled, StatusRunning, StatusPending:
 		return true
@@ -3140,6 +3155,45 @@ func (e *Executor) persistState() {
 
 	if err := SaveState(projectDir, snapshot); err != nil && e.config.Verbose {
 		log.Printf("pipeline: state persistence failed: %v", err)
+	}
+}
+
+// markFireAndForgetCancelled flags a WaitNone (fire-and-forget) command's
+// persisted step result for rerun on resume. The synchronous WaitNone return
+// records StatusCompleted, but if cancellation cleanup later kills the
+// background process the persisted Completed status no longer reflects a live
+// sidecar; without this marker, applyResumeState would skip relaunching it on
+// resume. The goroutine that calls this races with executeWorkflow's write of
+// the Completed result, so we briefly retry the lookup before giving up
+// (bd-yrnue).
+func (e *Executor) markFireAndForgetCancelled(stepID, workflowName string) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		e.stateMu.Lock()
+		if e.state == nil {
+			e.stateMu.Unlock()
+			return
+		}
+		existing, ok := e.state.Steps[stepID]
+		if ok {
+			if !existing.RerunOnResume {
+				existing.RerunOnResume = true
+				e.state.Steps[stepID] = existing
+			}
+			e.stateMu.Unlock()
+			e.persistState()
+			return
+		}
+		e.stateMu.Unlock()
+		if time.Now().After(deadline) {
+			slog.Warn("WaitNone cleanup found no recorded step result; rerun-on-resume not flagged",
+				"run_id", e.runIDForLog(),
+				"workflow", workflowName,
+				"step_id", stepID,
+			)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

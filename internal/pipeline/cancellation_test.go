@@ -101,6 +101,76 @@ func TestExecutor_Run_GlobalTimeoutRunsOnCancelSteps(t *testing.T) {
 	}
 }
 
+// TestExecuteCommand_WaitNoneCancellation_MarksRerunOnResume covers
+// bd-yrnue: when a fire-and-forget (WaitNone) command's background process
+// is killed by cancellation cleanup AFTER executeCommand has returned
+// StatusCompleted, the persisted step result must be flagged for rerun on
+// resume so the sidecar gets relaunched instead of skipped.
+func TestExecuteCommand_WaitNoneCancellation_MarksRerunOnResume(t *testing.T) {
+	e := newCommandTestExecutor(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	step := &Step{
+		ID:      "sidecar",
+		Command: "sleep 30",
+		Wait:    WaitNone,
+	}
+
+	result := e.executeCommand(ctx, step, &Workflow{Name: "test"})
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q (WaitNone returns Completed synchronously)", result.Status, StatusCompleted)
+	}
+	if result.RerunOnResume {
+		t.Fatalf("RerunOnResume = true on synchronous return; want false (no cancellation yet)")
+	}
+
+	// Simulate executeWorkflow recording the result before cancellation fires.
+	e.stateMu.Lock()
+	e.state.Steps[step.ID] = result
+	e.stateMu.Unlock()
+
+	cancel()
+
+	// The cleanup goroutine acquires stateMu, sets RerunOnResume, and persists.
+	// Allow up to 5s for waitCommandWithProcessGroupCleanup + grace period.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		e.stateMu.RLock()
+		flagged := e.state.Steps[step.ID].RerunOnResume
+		e.stateMu.RUnlock()
+		if flagged {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	e.stateMu.RLock()
+	got := e.state.Steps[step.ID]
+	e.stateMu.RUnlock()
+	if !got.RerunOnResume {
+		t.Fatalf("RerunOnResume = false after cancellation; want true so resume relaunches sidecar")
+	}
+	if !shouldRerunStep(got) {
+		t.Fatalf("shouldRerunStep(%+v) = false; want true so applyResumeState reruns the sidecar", got)
+	}
+}
+
+// TestShouldRerunStep_RerunOnResumeFlagWins covers the resume contract for
+// fire-and-forget commands flagged after cancellation cleanup: the explicit
+// RerunOnResume flag overrides the stale persisted Completed status.
+func TestShouldRerunStep_RerunOnResumeFlagWins(t *testing.T) {
+	completed := StepResult{Status: StatusCompleted}
+	if shouldRerunStep(completed) {
+		t.Fatalf("shouldRerunStep(plain completed) = true; want false")
+	}
+	flagged := StepResult{Status: StatusCompleted, RerunOnResume: true}
+	if !shouldRerunStep(flagged) {
+		t.Fatalf("shouldRerunStep(completed+RerunOnResume) = false; want true")
+	}
+}
+
 // TestExecutor_RunOnCancelSteps_HungCleanupRespectsTimeout covers
 // bd-new9w: a misbehaving cleanup step (sleep N seconds) must not block
 // the executor forever. The OnCancelTimeout caps each cleanup step's
