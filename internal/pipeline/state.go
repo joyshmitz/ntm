@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/util"
@@ -23,6 +24,27 @@ func pipelineStateDir(projectDir string) string {
 	return filepath.Join(projectDir, ".ntm", pipelineStateDirName)
 }
 
+// validateRunID rejects run IDs that would escape the pipeline state
+// directory. Generated run IDs are basename-shaped (e.g.
+// "run-20260507-143015-abcd1234"); CLI/from-state inputs and any injected
+// ExecutorConfig.RunID flow through here before they touch disk so a
+// hostile or malformed value cannot reach LoadState/SaveState. Rejects
+// path separators (`/`, `\\`), NUL bytes, and the special parents
+// "." / "..", and is intentionally stricter than filepath.Clean so a
+// platform-specific separator quirk cannot smuggle a traversal through.
+func validateRunID(runID string) error {
+	if runID == "" {
+		return fmt.Errorf("run id is required")
+	}
+	if runID == "." || runID == ".." {
+		return fmt.Errorf("invalid run id %q: reserved path component", runID)
+	}
+	if strings.ContainsAny(runID, "/\\\x00") {
+		return fmt.Errorf("invalid run id %q: must not contain path separators or NUL", runID)
+	}
+	return nil
+}
+
 func pipelineStatePath(projectDir, runID string) string {
 	return filepath.Join(pipelineStateDir(projectDir), fmt.Sprintf("%s.json", runID))
 }
@@ -32,8 +54,8 @@ func SaveState(projectDir string, state *ExecutionState) error {
 	if state == nil {
 		return fmt.Errorf("state is nil")
 	}
-	if state.RunID == "" {
-		return fmt.Errorf("run id is required")
+	if err := validateRunID(state.RunID); err != nil {
+		return err
 	}
 
 	dir := pipelineStateDir(projectDir)
@@ -57,8 +79,8 @@ func SaveState(projectDir string, state *ExecutionState) error {
 
 // LoadState loads execution state from .ntm/pipelines/<run-id>.json.
 func LoadState(projectDir, runID string) (*ExecutionState, error) {
-	if runID == "" {
-		return nil, fmt.Errorf("run id is required")
+	if err := validateRunID(runID); err != nil {
+		return nil, err
 	}
 
 	path := pipelineStatePath(projectDir, runID)

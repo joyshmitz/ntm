@@ -202,3 +202,72 @@ func TestSaveStateConcurrentWritersLeaveValidJSON(t *testing.T) {
 		t.Fatalf("state_schema_version = %d, want %d", got, PipelineStateSchemaVersion)
 	}
 }
+
+func TestSaveStateRejectsTraversalRunID(t *testing.T) {
+	// bd-2zi98: a hostile or malformed RunID containing path separators or
+	// "../" components must not let SaveState write outside the pipeline
+	// state directory. Validate every escape shape we can think of.
+	tmpDir := t.TempDir()
+	hostile := []string{
+		"../escape",
+		"sub/escape",
+		"../../etc/passwd",
+		"a\\b",
+		".",
+		"..",
+		"with\x00null",
+	}
+	for _, runID := range hostile {
+		state := &ExecutionState{
+			RunID:      runID,
+			WorkflowID: "wf",
+			Status:     StatusRunning,
+		}
+		if err := SaveState(tmpDir, state); err == nil {
+			t.Errorf("SaveState(runID=%q) succeeded, want validation error", runID)
+		}
+	}
+
+	// Sanity: nothing leaked outside the project's .ntm/pipelines tree.
+	if entries, err := os.ReadDir(tmpDir); err == nil {
+		for _, entry := range entries {
+			if entry.Name() != ".ntm" {
+				t.Fatalf("unexpected sibling %q created in project dir", entry.Name())
+			}
+		}
+	}
+}
+
+func TestLoadStateRejectsTraversalRunID(t *testing.T) {
+	tmpDir := t.TempDir()
+	hostile := []string{"../escape", "sub/escape", "..", ".", "with\x00null", "a\\b"}
+	for _, runID := range hostile {
+		if _, err := LoadState(tmpDir, runID); err == nil {
+			t.Errorf("LoadState(runID=%q) returned nil error", runID)
+		}
+	}
+}
+
+func TestValidateRunIDAcceptsGeneratedShape(t *testing.T) {
+	// Generated run IDs from GenerateRunID() (run-<timestamp>-<hex>) and
+	// other plausible basename shapes must remain valid.
+	good := []string{
+		"run-20260507-143015-deadbeef",
+		"my-custom-run",
+		"run_42",
+		"v1.2.3",
+		"a",
+	}
+	for _, runID := range good {
+		if err := validateRunID(runID); err != nil {
+			t.Errorf("validateRunID(%q) returned error: %v", runID, err)
+		}
+	}
+
+	bad := []string{"", "..", ".", "a/b", "a\\b", "a\x00b", "../x"}
+	for _, runID := range bad {
+		if err := validateRunID(runID); err == nil {
+			t.Errorf("validateRunID(%q) returned nil, want error", runID)
+		}
+	}
+}
