@@ -581,7 +581,15 @@ func newPipelineCancelCmd() *cobra.Command {
 
 // newPipelineResumeCmd creates the "pipeline resume" subcommand
 func newPipelineResumeCmd() *cobra.Command {
-	var session string
+	var (
+		session        string
+		mode           string
+		keepState      bool
+		maxResumeAge   string
+		onRosterChange string
+		stepID         string
+		iteration      int
+	)
 
 	cmd := &cobra.Command{
 		Use:   "resume <run-id>",
@@ -599,6 +607,20 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runID := args[0]
+			resumeOpts := pipeline.ResumeOptions{
+				Mode:           pipeline.ResumeMode(mode),
+				KeepState:      keepState,
+				OnRosterChange: pipeline.ResumeRosterChangePolicy(onRosterChange),
+				StepID:         stepID,
+				Iteration:      iteration,
+			}
+			if maxResumeAge != "" {
+				age, err := parseDuration(maxResumeAge)
+				if err != nil {
+					return fmt.Errorf("--max-resume-age: %w", err)
+				}
+				resumeOpts.MaxResumeAge = age
+			}
 
 			resolvedSession := strings.TrimSpace(session)
 			if resolvedSession != "" {
@@ -703,9 +725,9 @@ Examples:
 			execCfg.RunID = state.RunID
 			execCfg.ProjectDir = projectDir
 			execCfg.WorkflowFile = workflowFile
+			execCfg.ResumeOptions = resumeOpts
 			executor := pipeline.NewExecutor(execCfg)
 
-			state.Session = session
 			state.WorkflowFile = workflowFile
 
 			ctx := context.Background()
@@ -734,12 +756,16 @@ Examples:
 					"status":   string(finalState.Status),
 					"workflow": workflow.Name,
 					"session":  session,
+					"mode":     string(resumeOpts.Mode),
 				}
 				return json.NewEncoder(os.Stdout).Encode(result)
 			}
 
 			fmt.Printf("📋 Resuming pipeline: %s\n", runID)
 			fmt.Printf("   Session: %s\n", session)
+			if resumeOpts.Mode != "" {
+				fmt.Printf("   Mode: %s\n", resumeOpts.Mode)
+			}
 			fmt.Printf("   Status: %s\n", state.Status)
 			if state.CurrentStep != "" {
 				fmt.Printf("   Current step: %s\n", state.CurrentStep)
@@ -797,6 +823,12 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&session, "session", "s", "", "Tmux session name (uses saved session if not specified)")
+	cmd.Flags().StringVar(&mode, "mode", string(pipeline.ResumeModeContinue), "Resume mode: continue, restart-failed, force-iter")
+	cmd.Flags().BoolVar(&keepState, "keep-state", true, "Preserve completed step outputs while resuming")
+	cmd.Flags().StringVar(&maxResumeAge, "max-resume-age", "", "Refuse to resume state older than this duration (for example 7d, 24h)")
+	cmd.Flags().StringVar(&onRosterChange, "on-roster-change", string(pipeline.ResumeRosterAbort), "Roster-change policy: abort or proceed")
+	cmd.Flags().StringVar(&stepID, "step-id", "", "Step ID used with --mode=force-iter")
+	cmd.Flags().IntVar(&iteration, "iteration", 0, "Iteration index used with --mode=force-iter")
 
 	return cmd
 }

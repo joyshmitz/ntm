@@ -1269,6 +1269,14 @@ type ExecutionState struct {
 	Steps        map[string]StepResult  `json:"steps"`
 	Variables    map[string]interface{} `json:"variables"` // Runtime variables including step outputs
 	Errors       []ExecutionError       `json:"errors,omitempty"`
+
+	// Phase-B resume metadata. This is ntm's internal persisted execution
+	// format and may change between pipeline schema revisions.
+	LastCheckpointAt time.Time                        `json:"last_checkpoint_at,omitempty"`
+	ForeachState     map[string]ForeachIterationState `json:"foreach_state,omitempty"`
+	ParallelState    map[string]ParallelGroupState    `json:"parallel_state,omitempty"`
+	ScopeStack       []ScopeFrame                     `json:"scope_stack,omitempty"`
+	InFlightSteps    map[string]InFlightStepState     `json:"in_flight_steps,omitempty"`
 }
 
 // ExecutionError represents an error that occurred during execution

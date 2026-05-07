@@ -135,8 +135,12 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	le.executor.emitProgress("loop_start", step.ID,
 		fmt.Sprintf("Starting for-each loop with %d items", total), le.executor.calculateProgress())
 
+	startIndex := le.executor.beginForeachState(step.ID, total)
+	le.executor.persistState()
+
 	// Iterate over items
-	for i, item := range items {
+	for i := startIndex; i < len(items); i++ {
+		item := items[i]
 		select {
 		case <-ctx.Done():
 			result.Status = StatusCancelled
@@ -145,14 +149,23 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		default:
 		}
 
+		le.executor.markForeachIterationStarted(step.ID, i, total)
+		le.executor.markStepInFlight(loopIterationID(step.ID, i), StepKindLoop, i)
+		le.executor.persistState()
+
 		scope := le.pushLoopVars(varName, item, i, total)
 
 		// Execute nested steps
 		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
 		le.popLoopVars(scope)
+		le.executor.clearStepInFlight(loopIterationID(step.ID, i))
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
+		if iterationSucceeded(iterResult, shouldBreak) {
+			le.executor.markForeachIterationCompleted(step.ID, i, total)
+		}
+		le.executor.persistState()
 
 		// Collect output if configured
 		if loop.Collect != "" && len(iterResult) > 0 {
@@ -627,6 +640,18 @@ func (le *LoopExecutor) pushLoopVars(varName string, item interface{}, index, to
 	defer le.executor.varMu.Unlock()
 	scope := CaptureVariableScope(le.executor.state.Variables, loopScopeKeys(varName)...)
 	SetLoopVars(le.executor.state, varName, item, index, total)
+	le.executor.pushScopeFrameLocked(ScopeFrame{
+		Kind: StepKindLoop,
+		Name: varName,
+		Variables: map[string]interface{}{
+			"loop." + varName: item,
+			"loop.item":       item,
+			"loop.index":      index,
+			"loop.count":      total,
+			"loop.first":      index == 0,
+			"loop.last":       index == total-1,
+		},
+	})
 	return scope
 }
 
@@ -635,6 +660,7 @@ func (le *LoopExecutor) popLoopVars(scope VariableScope) {
 	le.executor.varMu.Lock()
 	defer le.executor.varMu.Unlock()
 	scope.Restore(le.executor.state.Variables)
+	le.executor.popScopeFrameLocked()
 }
 
 // storeCollected stores collected loop results in a variable.

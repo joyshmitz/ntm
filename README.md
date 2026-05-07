@@ -231,9 +231,14 @@ ntm template show fix-bug
 ntm pipeline run .ntm/pipelines/review.yaml --session payments
 ntm pipeline status run-20241230-123456-abcd
 ntm pipeline list
-ntm pipeline resume run-20241230-123456-abcd
+ntm pipeline resume run-20241230-123456-abcd --mode=continue
 ntm pipeline cleanup --older=7d
 ```
+
+Pipeline resume preserves completed step outputs by default and re-runs the first incomplete
+step or loop iteration. Commands, templates, and foreach/loop iteration bodies should be
+idempotent when resumed, or operators should resume with `--keep-state=false` or
+`--mode=force-iter --step-id=<id> --iteration=<n>` to deliberately re-run work.
 
 ### 7. Durable State, Audit, and Recovery
 
