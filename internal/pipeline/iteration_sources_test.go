@@ -384,6 +384,64 @@ func TestResolvePairs_ShellErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestResolveDebates_ParsesLineDelimitedIDs(t *testing.T) {
+	const stdout = `DEBATE-001
+DEBATE-002
+DEBATE-003
+`
+	r := &IterationSourceResolver{
+		RunShell: func(_ context.Context, cmd string) ([]byte, error) {
+			if !strings.Contains(cmd, "br list") {
+				t.Fatalf("unexpected shell cmd: %q", cmd)
+			}
+			return []byte(stdout), nil
+		},
+	}
+	got, err := r.ResolveDebates(context.Background(), `$(br list --label=debate --status=open --json | jq -r '.issues[].id')`)
+	if err != nil {
+		t.Fatalf("ResolveDebates: %v", err)
+	}
+	want := []interface{}{"DEBATE-001", "DEBATE-002", "DEBATE-003"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolveDebates_EmptyOutputZeroIterations(t *testing.T) {
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return []byte("\n  \n"), nil },
+	}
+	got, err := r.ResolveDebates(context.Background(), "$(true)")
+	if err != nil {
+		t.Fatalf("ResolveDebates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d items, want 0", len(got))
+	}
+}
+
+func TestResolveDebates_ShellErrorPropagates(t *testing.T) {
+	want := errors.New("br missing")
+	r := &IterationSourceResolver{
+		RunShell: func(context.Context, string) ([]byte, error) { return nil, want },
+	}
+	_, err := r.ResolveDebates(context.Background(), "$(br list)")
+	if err == nil || !errors.Is(err, want) {
+		t.Fatalf("err = %v, want wrap of %v", err, want)
+	}
+}
+
+func TestResolveDebates_RequiresShellForm(t *testing.T) {
+	r := &IterationSourceResolver{}
+	_, err := r.ResolveDebates(context.Background(), "DEBATE-001,DEBATE-002")
+	if err == nil {
+		t.Fatal("expected error for non-shell expression")
+	}
+	if !strings.Contains(err.Error(), "must be a shell expression") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestStripShellInvocation(t *testing.T) {
 	cases := map[string]struct {
 		in     string

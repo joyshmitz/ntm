@@ -240,6 +240,27 @@ func parsePairsOutput(out []byte) []interface{} {
 	return items
 }
 
+// ResolveDebates expands a foreach.Debates expression into a list of
+// DEBATE-* bead-ID strings. The input is a "$(...)" shell command whose
+// stdout is one ID per line. JSON-array stdout is also supported (so
+// `jq '.issues|map(.id)'`-style commands work). Empty stdout yields zero
+// iterations.
+func (r *IterationSourceResolver) ResolveDebates(ctx context.Context, expr string) ([]interface{}, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return []interface{}{}, nil
+	}
+	shellCmd, ok := stripShellInvocation(expr)
+	if !ok {
+		return nil, fmt.Errorf("debates source must be a shell expression of the form $(...): %q", expr)
+	}
+	out, err := r.runShell(ctx, shellCmd)
+	if err != nil {
+		return nil, fmt.Errorf("debates shell command failed: %w", err)
+	}
+	return parseBeadsShellOutput(out)
+}
+
 // runShell executes a shell command, defaulting to /bin/sh -c in ProjectDir.
 func (r *IterationSourceResolver) runShell(ctx context.Context, shellCmd string) ([]byte, error) {
 	if r.RunShell != nil {
