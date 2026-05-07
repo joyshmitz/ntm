@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,6 +282,148 @@ func TestValidate_BothPromptAndParallel(t *testing.T) {
 	if result.Valid {
 		t.Error("expected validation to fail for both prompt and parallel")
 	}
+}
+
+func TestValidate_StepKindMutualExclusivityAndRequiredWork(t *testing.T) {
+	tests := []struct {
+		name          string
+		step          Step
+		wantValid     bool
+		wantErrSubstr string
+	}{
+		{
+			name:          "prompt and command conflict",
+			step:          Step{ID: "s1", Prompt: "ask an agent", Command: "echo no"},
+			wantErrSubstr: "both prompt and command",
+		},
+		{
+			name:          "prompt and template conflict",
+			step:          Step{ID: "s1", Prompt: "ask an agent", Template: "MO-test.md"},
+			wantErrSubstr: "both prompt and template",
+		},
+		{
+			name:          "command and template conflict",
+			step:          Step{ID: "s1", Command: "echo no", Template: "MO-test.md"},
+			wantErrSubstr: "both command and template",
+		},
+		{
+			name: "prompt and parallel steps conflict",
+			step: Step{
+				ID:     "s1",
+				Prompt: "ask an agent",
+				Parallel: ParallelSpec{Steps: []Step{
+					{ID: "parallel_inner", Prompt: "parallel work"},
+				}},
+			},
+			wantErrSubstr: "both prompt and parallel",
+		},
+		{
+			name:      "prompt only is valid",
+			step:      Step{ID: "s1", Prompt: "ask an agent"},
+			wantValid: true,
+		},
+		{
+			name:      "command only is valid",
+			step:      Step{ID: "s1", Command: "echo ok"},
+			wantValid: true,
+		},
+		{
+			name:      "template only is valid",
+			step:      Step{ID: "s1", Template: "MO-test.md"},
+			wantValid: true,
+		},
+		{
+			name: "foreach only is valid",
+			step: Step{
+				ID: "s1",
+				Foreach: &ForeachConfig{
+					Items: "[\"a\"]",
+					Steps: []Step{{ID: "foreach_inner", Prompt: "per item"}},
+				},
+			},
+			wantValid: true,
+		},
+		{
+			name:      "branch only is valid",
+			step:      Step{ID: "s1", Branch: "echo yes"},
+			wantValid: true,
+		},
+		{
+			name:          "empty step has no work",
+			step:          Step{ID: "s1"},
+			wantErrSubstr: "must have prompt, prompt_file, command, template, parallel, loop, foreach, or branch",
+		},
+		{
+			name: "loop with until only is valid",
+			step: Step{
+				ID: "s1",
+				Loop: &LoopConfig{
+					Until: "test -f done",
+					Steps: []Step{{ID: "loop_inner", Prompt: "loop body"}},
+				},
+			},
+			wantValid: true,
+		},
+		{
+			name: "loop without items while until or times fails",
+			step: Step{
+				ID: "s1",
+				Loop: &LoopConfig{
+					Steps: []Step{{ID: "loop_inner", Prompt: "loop body"}},
+				},
+			},
+			wantErrSubstr: "loop must specify items, while, until, or times",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, logs := validateWithCapturedSlog(t, workflowWithSingleStep(tt.step))
+			if logs != "" {
+				t.Fatalf("Validate emitted slog output for parser-only validation: %s", logs)
+			}
+			if result.Valid != tt.wantValid {
+				t.Fatalf("Validate().Valid = %v, want %v; errors: %+v", result.Valid, tt.wantValid, result.Errors)
+			}
+			if tt.wantErrSubstr == "" {
+				return
+			}
+			if !validationErrorContains(result, tt.wantErrSubstr) {
+				t.Fatalf("Validate() errors = %+v, want message containing %q", result.Errors, tt.wantErrSubstr)
+			}
+		})
+	}
+}
+
+func workflowWithSingleStep(step Step) *Workflow {
+	return &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "test",
+		Steps:         []Step{step},
+	}
+}
+
+func validateWithCapturedSlog(t *testing.T, w *Workflow) (ValidationResult, string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+	})
+
+	result := Validate(w)
+	return result, buf.String()
+}
+
+func validationErrorContains(result ValidationResult, substr string) bool {
+	for _, err := range result.Errors {
+		if strings.Contains(err.Message, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidate_MultipleAgentSelectionMethods(t *testing.T) {
