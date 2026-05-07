@@ -57,6 +57,54 @@ func TestParsePipelineRunVariablesErrors(t *testing.T) {
 	}
 }
 
+func TestParsePipelineRunVariablesRejectsNullVarFile(t *testing.T) {
+	// A var file containing top-level "null" decodes into a nil map without
+	// returning a JSON error, which would panic on subsequent --var writes.
+	// Reject it with a user-facing validation error instead of crashing the
+	// CLI / robot path.
+	nullFile := filepath.Join(t.TempDir(), "null.json")
+	if err := os.WriteFile(nullFile, []byte(`null`), 0o644); err != nil {
+		t.Fatalf("write null var file: %v", err)
+	}
+
+	_, err := parsePipelineRunVariables(nullFile, []string{"foo=bar"})
+	if err == nil {
+		t.Fatal("parsePipelineRunVariables() error = nil, want null-var-file rejection")
+	}
+	if !strings.Contains(err.Error(), "null") {
+		t.Fatalf("error = %v, want it to mention the null shape", err)
+	}
+}
+
+func TestParsePipelineRunVariablesRejectsNonObjectVarFile(t *testing.T) {
+	// A non-object var file (array, number, string at top level) cannot be
+	// merged with --var key=value flags. Surface a clear error instead of
+	// allowing it through the legacy json.Unmarshal-into-map path.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "array", body: `[1,2,3]`},
+		{name: "number", body: `42`},
+		{name: "string", body: `"hello"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vars.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatalf("write var file: %v", err)
+			}
+			_, err := parsePipelineRunVariables(path, nil)
+			if err == nil {
+				t.Fatal("parsePipelineRunVariables() error = nil, want non-object rejection")
+			}
+			if !strings.Contains(err.Error(), "JSON object") {
+				t.Fatalf("error = %v, want it to mention the expected JSON object shape", err)
+			}
+		})
+	}
+}
+
 func TestPipelineRunVariablesValidateDeclaredTypes(t *testing.T) {
 	varFile := filepath.Join(t.TempDir(), "vars.json")
 	if err := os.WriteFile(varFile, []byte(`{"n":5,"arr":["x","y"],"flag":false}`), 0o644); err != nil {

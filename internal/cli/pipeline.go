@@ -476,9 +476,22 @@ func parsePipelineRunVariables(varsFile string, varsFlag []string) (map[string]i
 		if err != nil {
 			return nil, fmt.Errorf("failed to read var file: %w", err)
 		}
-		if err := json.Unmarshal(data, &vars); err != nil {
+		// json.Unmarshal of a top-level "null" decodes into a nil map without
+		// returning an error, which would panic on subsequent --var writes.
+		// Decode into an interface{} first so we can validate the shape and
+		// surface a user-facing error for null/non-object var files.
+		var raw interface{}
+		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("failed to parse var file: %w", err)
 		}
+		if raw == nil {
+			return nil, fmt.Errorf("var file %q decoded to null; expected a JSON object of variable names to values", varsFile)
+		}
+		obj, ok := raw.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("var file %q decoded to %T; expected a JSON object of variable names to values", varsFile, raw)
+		}
+		vars = obj
 	}
 
 	for _, v := range varsFlag {
