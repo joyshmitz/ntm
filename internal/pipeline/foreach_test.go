@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -210,6 +212,173 @@ func TestExecuteForeachFilterExcludesIterationsBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestExecuteForeachNestedAliasesExposeOuterAndInnerItems(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-nested-aliases",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "outer_fanout",
+		Foreach: &ForeachConfig{
+			Items: `[{"id":"H1","evidence_ids":[{"id":"E1"},{"id":"E2"}]},{"id":"H2","evidence_ids":[{"id":"E3"}]}]`,
+			As:    "outer",
+			Steps: []Step{{
+				ID: "inner_fanout",
+				Foreach: &ForeachConfig{
+					Items: `${outer.evidence_ids}`,
+					As:    "inner",
+					Steps: []Step{{
+						ID:      "echo",
+						Command: `printf '%s/%s' '${outer.id}' '${inner.id}'`,
+					}},
+				},
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	outputs := foreachLeafOutputs(result)
+	if got, want := strings.Join(outputs, ","), "H1/E1,H1/E2,H2/E3"; got != want {
+		t.Fatalf("nested outputs = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteForeachNestedDefaultItemShadowsOuterItem(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(previousLogger)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-nested-shadow",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "outer_fanout",
+		Foreach: &ForeachConfig{
+			Items: `[{"id":"outer","children":[{"id":"inner"}]}]`,
+			Steps: []Step{{
+				ID: "inner_fanout",
+				Foreach: &ForeachConfig{
+					Items: `${item.children}`,
+					Steps: []Step{{
+						ID:      "echo",
+						Command: `printf '%s' '${item.id}'`,
+					}},
+				},
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	outputs := foreachLeafOutputs(result)
+	if got, want := strings.Join(outputs, ","), "inner"; got != want {
+		t.Fatalf("nested default item output = %q, want %q", got, want)
+	}
+	if !strings.Contains(logs.String(), "shadows outer item") {
+		t.Fatalf("debug log = %q, want shadowing warning", logs.String())
+	}
+}
+
+func TestExecuteForeachNestedAliasesSupportThreeLevels(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-nested-three-levels",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "outer_fanout",
+		Foreach: &ForeachConfig{
+			Items: `[{"id":"O","middles":[{"id":"M","inners":[{"id":"I"}]}]}]`,
+			As:    "outer",
+			Steps: []Step{{
+				ID: "middle_fanout",
+				Foreach: &ForeachConfig{
+					Items: `${outer.middles}`,
+					As:    "middle",
+					Steps: []Step{{
+						ID: "inner_fanout",
+						Foreach: &ForeachConfig{
+							Items: `${middle.inners}`,
+							As:    "inner",
+							Steps: []Step{{
+								ID:      "echo",
+								Command: `printf '%s/%s/%s' '${outer.id}' '${middle.id}' '${inner.id}'`,
+							}},
+						},
+					}},
+				},
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	outputs := foreachLeafOutputs(result)
+	if got, want := strings.Join(outputs, ","), "O/M/I"; got != want {
+		t.Fatalf("three-level outputs = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteForeachParallelOuterSequentialInnerKeepsAliasesIsolated(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-parallel-nested-isolation",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "outer_fanout",
+		Foreach: &ForeachConfig{
+			Items:         `[{"id":"O1","children":[{"id":"A"}]},{"id":"O2","children":[{"id":"B"}]}]`,
+			As:            "outer",
+			Parallel:      true,
+			MaxConcurrent: 2,
+			Steps: []Step{{
+				ID: "inner_fanout",
+				Foreach: &ForeachConfig{
+					Items: `${outer.children}`,
+					As:    "inner",
+					Steps: []Step{{
+						ID:      "echo",
+						Command: `printf '%s/%s' '${outer.id}' '${inner.id}'`,
+					}},
+				},
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	outputs := foreachLeafOutputs(result)
+	if got, want := strings.Join(outputs, ","), "O1/A,O2/B"; got != want {
+		t.Fatalf("parallel nested outputs = %q, want %q", got, want)
+	}
+}
+
 func foreachIterationsFromResult(t *testing.T, result StepResult) []foreachIterationResult {
 	t.Helper()
 	iterations, ok := result.ParsedData.([]foreachIterationResult)
@@ -217,4 +386,25 @@ func foreachIterationsFromResult(t *testing.T, result StepResult) []foreachItera
 		t.Fatalf("ParsedData type = %T, want []foreachIterationResult", result.ParsedData)
 	}
 	return iterations
+}
+
+func foreachLeafOutputs(result StepResult) []string {
+	var outputs []string
+	appendForeachLeafOutputs(&outputs, result)
+	return outputs
+}
+
+func appendForeachLeafOutputs(outputs *[]string, result StepResult) {
+	iterations, ok := result.ParsedData.([]foreachIterationResult)
+	if !ok {
+		if result.Output != "" {
+			*outputs = append(*outputs, result.Output)
+		}
+		return
+	}
+	for _, iteration := range iterations {
+		for _, nested := range iteration.Results {
+			appendForeachLeafOutputs(outputs, nested)
+		}
+	}
 }
