@@ -60,3 +60,52 @@ func TestRotateAdjudicatorUsesLongestHistoryGap(t *testing.T) {
 		t.Fatalf("rotateAdjudicator() = %q, want p5", got)
 	}
 }
+
+func TestByModelFamilyReturnsFirstMatchingPane(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "cc"},
+		{ID: "p3", ModelFamily: "cod"},
+		{ID: "p4", ModelFamily: "gmi"},
+	}
+
+	got, err := byModelFamily(panes, "cc")
+	if err != nil {
+		t.Fatalf("byModelFamily() error = %v", err)
+	}
+	if got != "p1" {
+		t.Fatalf("byModelFamily() = %q, want p1", got)
+	}
+}
+
+func TestByModelFamilyReturnsSingleMatchingPane(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "cc"},
+		{ID: "p3", ModelFamily: "cod"},
+		{ID: "p4", ModelFamily: "gmi"},
+	}
+
+	got, err := byModelFamily(panes, "cod")
+	if err != nil {
+		t.Fatalf("byModelFamily() error = %v", err)
+	}
+	if got != "p3" {
+		t.Fatalf("byModelFamily() = %q, want p3", got)
+	}
+}
+
+func TestByModelFamilyErrorsWhenNoPaneMatches(t *testing.T) {
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "cod"},
+	}
+
+	got, err := byModelFamily(panes, "ollama")
+	if !errors.Is(err, errNoModelFamilyPane) {
+		t.Fatalf("byModelFamily() error = %v, want %v", err, errNoModelFamilyPane)
+	}
+	if got != "" {
+		t.Fatalf("byModelFamily() = %q, want empty pane", got)
+	}
+}

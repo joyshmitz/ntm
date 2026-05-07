@@ -5,6 +5,13 @@ import (
 )
 
 var errNoAdjudicatorPane = errors.New("no available adjudicator pane")
+var errNoModelFamilyPane = errors.New("no pane matches model family")
+
+type paneStrategyPane struct {
+	ID          string
+	ModelFamily string
+	Domains     []string
+}
 
 // rotateAdjudicator chooses an adjudicator pane from orderedPanes while
 // excluding the current debate champions. Among eligible panes, it picks the
@@ -48,4 +55,19 @@ func rotateAdjudicator(orderedPanes []string, champions []string, adjudicatorHis
 		return "", errNoAdjudicatorPane
 	}
 	return bestPane, nil
+}
+
+// byModelFamily chooses the first pane whose model family matches the current
+// foreach item. The ordered input preserves deterministic routing when several
+// panes share a family.
+func byModelFamily(orderedPanes []paneStrategyPane, modelFamily string) (string, error) {
+	if modelFamily == "" {
+		return "", errNoModelFamilyPane
+	}
+	for _, pane := range orderedPanes {
+		if pane.ID != "" && pane.ModelFamily == modelFamily {
+			return pane.ID, nil
+		}
+	}
+	return "", errNoModelFamilyPane
 }
