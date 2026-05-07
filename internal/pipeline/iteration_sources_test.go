@@ -203,27 +203,27 @@ func TestParseStructuredBeadsQuery_Translations(t *testing.T) {
 		{
 			name: "single label",
 			expr: "hypothesis",
-			want: []string{"list", "--json", "--label", "hypothesis"},
+			want: []string{"list", "--json", "--limit", "0", "--label", "hypothesis"},
 		},
 		{
 			name: "label and status alias",
 			expr: "hypothesis,state:active",
-			want: []string{"list", "--json", "--label", "hypothesis", "--status", "active"},
+			want: []string{"list", "--json", "--limit", "0", "--label", "hypothesis", "--status", "active"},
 		},
 		{
 			name: "explicit label key",
 			expr: "label:foo,status:open",
-			want: []string{"list", "--json", "--label", "foo", "--status", "open"},
+			want: []string{"list", "--json", "--limit", "0", "--label", "foo", "--status", "open"},
 		},
 		{
 			name: "type/priority/assignee",
 			expr: "type:bug,priority:1,assignee:alice",
-			want: []string{"list", "--json", "--type", "bug", "--priority", "1", "--assignee", "alice"},
+			want: []string{"list", "--json", "--limit", "0", "--type", "bug", "--priority", "1", "--assignee", "alice"},
 		},
 		{
 			name: "skips empty terms",
 			expr: ",hypothesis,,state:open,",
-			want: []string{"list", "--json", "--label", "hypothesis", "--status", "open"},
+			want: []string{"list", "--json", "--limit", "0", "--label", "hypothesis", "--status", "open"},
 		},
 	}
 
@@ -254,6 +254,35 @@ func TestParseStructuredBeadsQuery_RejectsEmptyValue(t *testing.T) {
 	_, err := parseStructuredBeadsQuery("status:")
 	if err == nil {
 		t.Fatal("expected error for empty value")
+	}
+}
+
+// bd-ftsqw: foreach beads queries must request unlimited results so large
+// hypothesis/debate/backlog iteration sets are not silently truncated to
+// br list's default page size.
+func TestParseStructuredBeadsQuery_AlwaysIncludesUnlimitedLimit(t *testing.T) {
+	cases := []string{
+		"hypothesis",
+		"hypothesis,state:active",
+		"type:bug,priority:1",
+	}
+	for _, expr := range cases {
+		t.Run(expr, func(t *testing.T) {
+			args, err := parseStructuredBeadsQuery(expr)
+			if err != nil {
+				t.Fatalf("parseStructuredBeadsQuery(%q): %v", expr, err)
+			}
+			var foundLimitZero bool
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--limit" && args[i+1] == "0" {
+					foundLimitZero = true
+					break
+				}
+			}
+			if !foundLimitZero {
+				t.Fatalf("args = %v, want --limit 0 to disable br pagination", args)
+			}
+		})
 	}
 }
 

@@ -339,8 +339,12 @@ func normalizeJSONNumbers(value interface{}) interface{} {
 // parseStructuredBeadsQuery turns "label1,label2,key:value,..." into the
 // argv for `br list --json`. Bare tokens become --label flags (AND logic).
 // Recognised key:value forms: status/state, type, priority, assignee.
+//
+// `--limit 0` is appended unconditionally so the foreach iteration set is the
+// complete match — without it `br list` returns its default page size and
+// foreach silently skips every bead beyond the first page (bd-ftsqw).
 func parseStructuredBeadsQuery(expr string) ([]string, error) {
-	args := []string{"list", "--json"}
+	args := []string{"list", "--json", "--limit", "0"}
 	for _, raw := range strings.Split(expr, ",") {
 		term := strings.TrimSpace(raw)
 		if term == "" {
