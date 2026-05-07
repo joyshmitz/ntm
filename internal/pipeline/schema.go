@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,15 +19,91 @@ type Workflow struct {
 	Name          string `yaml:"name" toml:"name" json:"name"`
 	Description   string `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
 	Version       string `yaml:"version,omitempty" toml:"version,omitempty" json:"version,omitempty"`
+	Notes         StringOrList `yaml:"notes,omitempty" toml:"notes,omitempty" json:"notes,omitempty"` // Free-form authoring notes — accepts either a single string or a list of strings.
 
 	// Variable definitions
 	Vars map[string]VarDef `yaml:"vars,omitempty" toml:"vars,omitempty" json:"vars,omitempty"`
+
+	// Inputs is a simpler list-of-name form for declared inputs. Each name in
+	// Inputs is normalized into Vars during Workflow.Normalize() so downstream
+	// passes only need to consult Vars. Useful for pipelines that just need to
+	// declare "I take these inputs" without per-input metadata.
+	Inputs []string `yaml:"inputs,omitempty" toml:"inputs,omitempty" json:"inputs,omitempty"`
+
+	// Defaults is a workflow-level map of default values that downstream steps
+	// can reference via ${defaults.foo}. Mostly used by orchestration-heavy
+	// pipelines to factor out shared constants (model_mix, hard_caps, etc.).
+	Defaults map[string]interface{} `yaml:"defaults,omitempty" toml:"defaults,omitempty" json:"defaults,omitempty"`
+
+	// Outputs declares the names of artifacts/values this workflow produces.
+	// Currently informational; the executor doesn't enforce them.
+	Outputs []OutputDecl `yaml:"outputs,omitempty" toml:"outputs,omitempty" json:"outputs,omitempty"`
 
 	// Global settings
 	Settings WorkflowSettings `yaml:"settings,omitempty" toml:"settings,omitempty" json:"settings,omitempty"`
 
 	// Step definitions
 	Steps []Step `yaml:"steps" toml:"steps" json:"steps"`
+
+	// PostPipelineSteps run after the main step graph completes successfully.
+	// Failures here are reported but don't retroactively fail the pipeline.
+	PostPipelineSteps []Step `yaml:"post_pipeline_steps,omitempty" toml:"post_pipeline_steps,omitempty" json:"post_pipeline_steps,omitempty"`
+}
+
+// OutputDecl is a workflow-level declaration of a produced output. The string
+// form (a bare path) is also accepted for brevity.
+type OutputDecl struct {
+	Name        string `yaml:"name,omitempty" toml:"name,omitempty" json:"name,omitempty"`
+	Description string `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
+	Path        string `yaml:"path,omitempty" toml:"path,omitempty" json:"path,omitempty"`
+}
+
+// UnmarshalYAML accepts three input forms:
+//
+//	outputs:
+//	  - deliverables/HANDBACK.md                  # bare-string path
+//	  - {name: report, path: ...}                 # full struct
+//	  - workspace: ${workspace_path}              # single-key shorthand
+//
+// The single-key shorthand is convenient for pipelines that use the output
+// list as a name-to-path table (so you can both name the output AND give it
+// a path inline without repeating the name). Same callback-based unmarshal
+// interface as internal/ensemble Confidence.
+func (o *OutputDecl) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err == nil {
+		o.Path = s
+		return nil
+	}
+	// Try the structured form first (so an explicit {name, path, description}
+	// mapping with no extra keys takes precedence).
+	type rawDecl OutputDecl
+	var raw rawDecl
+	if err := unmarshal(&raw); err == nil && (raw.Name != "" || raw.Path != "" || raw.Description != "") {
+		*o = OutputDecl(raw)
+		return nil
+	}
+	// Fallback: single-key shorthand. The key becomes Name; the value (when
+	// scalar) becomes Path.
+	var generic map[string]interface{}
+	if err := unmarshal(&generic); err != nil {
+		return fmt.Errorf("output declaration must be a string, mapping, or {name: path}: %w", err)
+	}
+	if len(generic) != 1 {
+		return fmt.Errorf("output single-key shorthand must have exactly one key, got %d", len(generic))
+	}
+	for k, v := range generic {
+		o.Name = k
+		switch tv := v.(type) {
+		case string:
+			o.Path = tv
+		case nil:
+			// Bare-name declaration with no path; preserve as-is.
+		default:
+			o.Path = fmt.Sprintf("%v", tv)
+		}
+	}
+	return nil
 }
 
 // VarDef defines a workflow variable with optional default and type info
@@ -62,11 +140,28 @@ type Duration struct {
 	time.Duration
 }
 
-// UnmarshalText implements encoding.TextUnmarshaler for Duration
+// UnmarshalText implements encoding.TextUnmarshaler for Duration.
+// Accepts both Go's time.ParseDuration form ("5m", "30s") and bare integers
+// interpreted as seconds (so "300" parses as 5 minutes). The bare-integer form
+// is convenient in YAML where operators routinely write `timeout: 300` without
+// thinking about units.
 func (d *Duration) UnmarshalText(text []byte) error {
-	var err error
-	d.Duration, err = time.ParseDuration(string(text))
-	return err
+	s := strings.TrimSpace(string(text))
+	if s == "" {
+		d.Duration = 0
+		return nil
+	}
+	// Try canonical Go duration first (preserves sub-second precision).
+	if dur, err := time.ParseDuration(s); err == nil {
+		d.Duration = dur
+		return nil
+	}
+	// Fall back to bare-integer-seconds parse.
+	if n, err := strconv.Atoi(s); err == nil {
+		d.Duration = time.Duration(n) * time.Second
+		return nil
+	}
+	return fmt.Errorf("invalid duration %q (want '5m'/'30s' format or bare integer seconds)", s)
 }
 
 // MarshalText implements encoding.TextMarshaler for Duration
@@ -90,14 +185,45 @@ type Step struct {
 	ID   string `yaml:"id" toml:"id" json:"id"`                                     // Required, unique identifier
 	Name string `yaml:"name,omitempty" toml:"name,omitempty" json:"name,omitempty"` // Human-readable name
 
+	// Description is a free-form authoring note. The executor doesn't use it.
+	// Exists for symmetry with workflow-level Description and to let pipelines
+	// document each step inline.
+	Description string `yaml:"description,omitempty" toml:"description,omitempty" json:"description,omitempty"`
+
 	// Agent selection (choose one)
 	Agent string          `yaml:"agent,omitempty" toml:"agent,omitempty" json:"agent,omitempty"` // Agent type: claude, codex, gemini, cursor, windsurf, aider, ollama
-	Pane  int             `yaml:"pane,omitempty" toml:"pane,omitempty" json:"pane,omitempty"`    // Specific pane index
+	Pane  PaneSpec        `yaml:"pane,omitempty" toml:"pane,omitempty" json:"pane,omitempty"`    // Specific pane index (int) OR template expression (string)
 	Route RoutingStrategy `yaml:"route,omitempty" toml:"route,omitempty" json:"route,omitempty"` // Routing strategy
 
 	// Prompt (choose one)
 	Prompt     string `yaml:"prompt,omitempty" toml:"prompt,omitempty" json:"prompt,omitempty"`
 	PromptFile string `yaml:"prompt_file,omitempty" toml:"prompt_file,omitempty" json:"prompt_file,omitempty"`
+
+	// Command is a shell command to execute as the step body. Mutually
+	// exclusive with Prompt/PromptFile. The command runs via /bin/sh -c, so
+	// pipelines and globs work normally. Stdout is captured for OutputVar /
+	// OutputParse just like agent prompts. Wait/timeout/retry/on_error
+	// behavior is identical to the agent-prompt path.
+	Command string `yaml:"command,omitempty" toml:"command,omitempty" json:"command,omitempty"`
+
+	// Args is a key-value bag whose meaning depends on the step kind:
+	//   - For Command steps: each entry becomes an environment variable.
+	//   - For Template steps: each entry becomes a template-substitution param.
+	// Values are stringified (numbers and bools become their string form).
+	Args map[string]interface{} `yaml:"args,omitempty" toml:"args,omitempty" json:"args,omitempty"`
+
+	// Template names a marching-order or prompt template to render. The
+	// executor reads the file, substitutes Params, and dispatches the rendered
+	// text as the step's prompt. Mutually exclusive with Prompt/PromptFile.
+	Template string `yaml:"template,omitempty" toml:"template,omitempty" json:"template,omitempty"`
+
+	// Params are template-substitution parameters. Equivalent to Args for
+	// template steps; offered as a separate field for readability.
+	Params map[string]interface{} `yaml:"params,omitempty" toml:"params,omitempty" json:"params,omitempty"`
+
+	// TemplateParams is a third spelling some pipelines use. Normalized into
+	// Params during Workflow.Normalize().
+	TemplateParams map[string]interface{} `yaml:"template_params,omitempty" toml:"template_params,omitempty" json:"template_params,omitempty"`
 
 	// Wait configuration
 	Wait    WaitCondition `yaml:"wait,omitempty" toml:"wait,omitempty" json:"wait,omitempty"` // completion, idle, time, none
@@ -106,27 +232,297 @@ type Step struct {
 	// Dependencies
 	DependsOn []string `yaml:"depends_on,omitempty" toml:"depends_on,omitempty" json:"depends_on,omitempty"`
 
+	// After is an alias for DependsOn that accepts either a single step ID
+	// (string) or a list of step IDs. Normalized into DependsOn during
+	// Workflow.Normalize(). Many orchestration-style pipelines find `after:`
+	// reads more naturally than `depends_on:`.
+	After AfterRef `yaml:"after,omitempty" toml:"after,omitempty" json:"after,omitempty"`
+
 	// Error handling
-	OnError      ErrorAction `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"`
-	RetryCount   int         `yaml:"retry_count,omitempty" toml:"retry_count,omitempty" json:"retry_count,omitempty"`
-	RetryDelay   Duration    `yaml:"retry_delay,omitempty" toml:"retry_delay,omitempty" json:"retry_delay,omitempty"`
-	RetryBackoff string      `yaml:"retry_backoff,omitempty" toml:"retry_backoff,omitempty" json:"retry_backoff,omitempty"` // linear, exponential, none
+	OnError      ErrorAction   `yaml:"on_error,omitempty" toml:"on_error,omitempty" json:"on_error,omitempty"`
+	OnFailure    OnFailureSpec `yaml:"on_failure,omitempty" toml:"on_failure,omitempty" json:"on_failure,omitempty"` // Alias/extension for OnError; supports values like "fallback_to_ntm_inbox" or `retry:N` or `{pane, template}` recovery dispatches.
+	OnSuccess    []Step        `yaml:"on_success,omitempty" toml:"on_success,omitempty" json:"on_success,omitempty"`
+	RetryCount   int           `yaml:"retry_count,omitempty" toml:"retry_count,omitempty" json:"retry_count,omitempty"`
+	RetryDelay   Duration      `yaml:"retry_delay,omitempty" toml:"retry_delay,omitempty" json:"retry_delay,omitempty"`
+	RetryBackoff string        `yaml:"retry_backoff,omitempty" toml:"retry_backoff,omitempty" json:"retry_backoff,omitempty"` // linear, exponential, none
 
 	// Conditionals
 	When string `yaml:"when,omitempty" toml:"when,omitempty" json:"when,omitempty"` // Skip if evaluates to false
+
+	// Branch is a shell command (or template expression) whose stdout selects
+	// which entry of Branches to execute. Equivalent to a switch statement
+	// over the command's output. When Branch is set, Branches must be a
+	// map keyed by the possible output values. Currently parsed but not yet
+	// executed by the canonical executor — orchestration-style pipelines
+	// declare this for structural hint and the operator dispatches manually.
+	Branch   string                 `yaml:"branch,omitempty" toml:"branch,omitempty" json:"branch,omitempty"`
+	Branches map[string]interface{} `yaml:"branches,omitempty" toml:"branches,omitempty" json:"branches,omitempty"`
 
 	// Output handling
 	OutputVar   string      `yaml:"output_var,omitempty" toml:"output_var,omitempty" json:"output_var,omitempty"`       // Store output in variable
 	OutputParse OutputParse `yaml:"output_parse,omitempty" toml:"output_parse,omitempty" json:"output_parse,omitempty"` // none, json, yaml, lines, first_line, regex
 
-	// Parallel execution (mutually exclusive with Prompt)
-	Parallel []Step `yaml:"parallel,omitempty" toml:"parallel,omitempty" json:"parallel,omitempty"`
+	// Parallel execution. Two forms accepted:
+	//   - parallel: [<step>, <step>, ...]  — explicit inline sub-steps
+	//   - parallel: true                   — flag indicating "this step's
+	//     foreach/loop body should fan out across panes concurrently"
+	// Both are parsed via the ParallelSpec wrapper.
+	Parallel ParallelSpec `yaml:"parallel,omitempty" toml:"parallel,omitempty" json:"parallel,omitempty"`
 
 	// Loop execution
 	Loop *LoopConfig `yaml:"loop,omitempty" toml:"loop,omitempty" json:"loop,omitempty"`
 
 	// Loop control: break or continue (only valid inside loops)
 	LoopControl LoopControl `yaml:"loop_control,omitempty" toml:"loop_control,omitempty" json:"loop_control,omitempty"`
+
+	// Foreach is a step-level fan-out: iterate `Items` (typically pane
+	// indices, bead IDs, or model families) and run `Steps` (or `Template`)
+	// per iteration. Distinct from Loop because Foreach has explicit
+	// per-iteration pane assignment (PaneStrategy). For per-pane fan-out
+	// where each iteration goes to a different pane index, use ForeachPane.
+	Foreach     *ForeachConfig `yaml:"foreach,omitempty" toml:"foreach,omitempty" json:"foreach,omitempty"`
+	ForeachPane *ForeachConfig `yaml:"foreach_pane,omitempty" toml:"foreach_pane,omitempty" json:"foreach_pane,omitempty"`
+}
+
+// StringOrList accepts either a single string or a list of strings. Used for
+// fields like `notes:` where authors sometimes write a single line and
+// sometimes a bulleted list.
+type StringOrList []string
+
+// UnmarshalYAML accepts both forms.
+func (s *StringOrList) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var single string
+	if err := unmarshal(&single); err == nil {
+		if single != "" {
+			*s = []string{single}
+		}
+		return nil
+	}
+	var list []string
+	if err := unmarshal(&list); err != nil {
+		return fmt.Errorf("expected string or list of strings: %w", err)
+	}
+	*s = list
+	return nil
+}
+
+// PaneSpec is a step's `pane:` selector. The canonical form is an integer
+// pane index; brennerbot-style pipelines pass `${defaults.triage_pane}` style
+// template references, which arrive as strings during YAML parse and are
+// resolved by the executor's variable substitution before pane selection.
+// PaneSpec preserves both: Index is set when the input is a literal integer,
+// Expr is set when the input is a string.
+type PaneSpec struct {
+	Index int    // 0 means "unset" (matches the prior int-only behavior)
+	Expr  string // template expression resolved at execution time, e.g. "${defaults.triage_pane}"
+}
+
+// UnmarshalYAML accepts int or string.
+func (p *PaneSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var n int
+	if err := unmarshal(&n); err == nil {
+		p.Index = n
+		return nil
+	}
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return fmt.Errorf("pane: must be int or template string: %w", err)
+	}
+	p.Expr = s
+	return nil
+}
+
+// MarshalYAML emits the literal int when set, otherwise the expression.
+func (p PaneSpec) MarshalYAML() (interface{}, error) {
+	if p.Expr != "" {
+		return p.Expr, nil
+	}
+	return p.Index, nil
+}
+
+// IsZero lets `omitempty` strip empty PaneSpec values.
+func (p PaneSpec) IsZero() bool { return p.Index == 0 && p.Expr == "" }
+
+// OnFailureSpec accepts the canonical ErrorAction string ("retry", "continue",
+// etc.), retry-with-count shorthand ("retry:1"), or a structured fallback
+// like `{pane: 3, template: MO-recovery.md}`. The Action / RetryCount fields
+// are populated for known string forms; Fallback holds the structured form
+// for the executor to interpret.
+type OnFailureSpec struct {
+	Action     string                 // raw value as written, for downstream branching
+	RetryCount int                    // populated when value is "retry:N"
+	Fallback   map[string]interface{} // populated for structured form
+}
+
+// UnmarshalYAML accepts string or map.
+func (o *OnFailureSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err == nil {
+		o.Action = s
+		// Detect `retry:N` shorthand.
+		if strings.HasPrefix(s, "retry:") {
+			rest := strings.TrimPrefix(s, "retry:")
+			if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+				o.RetryCount = n
+				o.Action = "retry"
+			}
+		}
+		return nil
+	}
+	var m map[string]interface{}
+	if err := unmarshal(&m); err != nil {
+		return fmt.Errorf("on_failure: must be string or mapping: %w", err)
+	}
+	o.Fallback = m
+	return nil
+}
+
+// MarshalYAML round-trips the form we read.
+func (o OnFailureSpec) MarshalYAML() (interface{}, error) {
+	if len(o.Fallback) > 0 {
+		return o.Fallback, nil
+	}
+	if o.Action == "retry" && o.RetryCount > 0 {
+		return fmt.Sprintf("retry:%d", o.RetryCount), nil
+	}
+	if o.Action != "" {
+		return o.Action, nil
+	}
+	return nil, nil
+}
+
+// IsZero lets `omitempty` strip empty OnFailureSpec values.
+func (o OnFailureSpec) IsZero() bool {
+	return o.Action == "" && o.RetryCount == 0 && len(o.Fallback) == 0
+}
+
+// IntOrExpr is an integer that may also be supplied as a template
+// expression resolved at execution time. Used for fields like
+// `max_iterations:` where pipelines pass `${defaults.hard_caps.foo}` so the
+// limit is configurable per-run.
+type IntOrExpr struct {
+	Value int
+	Expr  string
+}
+
+// UnmarshalYAML accepts int or string.
+func (i *IntOrExpr) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var n int
+	if err := unmarshal(&n); err == nil {
+		i.Value = n
+		return nil
+	}
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return fmt.Errorf("expected integer or template expression: %w", err)
+	}
+	i.Expr = s
+	return nil
+}
+
+// MarshalYAML emits literal int when set, otherwise the expression.
+func (i IntOrExpr) MarshalYAML() (interface{}, error) {
+	if i.Expr != "" {
+		return i.Expr, nil
+	}
+	return i.Value, nil
+}
+
+// IsZero lets `omitempty` strip empty IntOrExpr values.
+func (i IntOrExpr) IsZero() bool { return i.Value == 0 && i.Expr == "" }
+
+// AfterRef accepts either a string or a list of strings, normalizing both
+// into a slice. Lets pipelines write `after: spawn` or `after: [spawn, audit]`.
+type AfterRef []string
+
+// UnmarshalYAML implements yaml.Unmarshaler so AfterRef accepts both the
+// string and list-of-strings forms.
+func (a *AfterRef) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err == nil {
+		if s != "" {
+			*a = []string{s}
+		}
+		return nil
+	}
+	var list []string
+	if err := unmarshal(&list); err != nil {
+		return fmt.Errorf("after: must be a string or list of strings: %w", err)
+	}
+	*a = list
+	return nil
+}
+
+// (Branch/Branches are shell-driven switch statements; see Step.Branch +
+// Step.Branches above. Each map value is either a single step or a list of
+// steps; structurally `interface{}` so we accept both shapes without forcing
+// a custom unmarshaller. The executor treats this as a no-op for now and
+// orchestration-style pipelines use it as structural documentation.)
+
+// ParallelSpec is parallel: in either of two forms — a list of sub-steps to
+// run concurrently, or a boolean `true` meaning "this step (foreach/loop)
+// should fan out concurrently rather than serially." Bool form is preserved
+// in Flag; list form populates Steps. The two are mutually exclusive in
+// practice.
+type ParallelSpec struct {
+	Flag  bool
+	Steps []Step
+}
+
+// UnmarshalYAML lets ParallelSpec decode from either bool or []Step.
+func (p *ParallelSpec) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var b bool
+	if err := unmarshal(&b); err == nil {
+		p.Flag = b
+		return nil
+	}
+	var steps []Step
+	if err := unmarshal(&steps); err != nil {
+		return fmt.Errorf("parallel: must be bool or list of steps: %w", err)
+	}
+	p.Steps = steps
+	return nil
+}
+
+// MarshalYAML mirrors the input form — emit a bool when only Flag is set,
+// emit the list otherwise. Keeps round-tripping clean for tooling.
+func (p ParallelSpec) MarshalYAML() (interface{}, error) {
+	if len(p.Steps) > 0 {
+		return p.Steps, nil
+	}
+	if p.Flag {
+		return true, nil
+	}
+	return nil, nil
+}
+
+// IsZero lets `omitempty` strip empty ParallelSpec values from output.
+func (p ParallelSpec) IsZero() bool { return !p.Flag && len(p.Steps) == 0 }
+
+// Len returns the number of inline parallel sub-steps. The Flag form has Len 0.
+func (p ParallelSpec) Len() int { return len(p.Steps) }
+
+// ForeachConfig drives per-iteration fan-out. Items is the iterable
+// (`${vars.hypothesis_active}`, `${ntm.panes}`, etc.); As is the loop var;
+// Template / Steps describe what to dispatch per iteration. PaneStrategy
+// optionally selects a target pane per iteration.
+type ForeachConfig struct {
+	Items          string                 `yaml:"items,omitempty" toml:"items,omitempty" json:"items,omitempty"`
+	As             string                 `yaml:"as,omitempty" toml:"as,omitempty" json:"as,omitempty"`
+	Beads          string                 `yaml:"beads,omitempty" toml:"beads,omitempty" json:"beads,omitempty"`     // Convenience: iterate beads matching a label query (e.g. `hypothesis,state:active`).
+	Pairs          string                 `yaml:"pairs,omitempty" toml:"pairs,omitempty" json:"pairs,omitempty"`     // Convenience: iterate paired items produced by a generator command (e.g., debate-pair generation). Mutually exclusive with Items/Beads.
+	Debates        string                 `yaml:"debates,omitempty" toml:"debates,omitempty" json:"debates,omitempty"` // Convenience: iterate DEBATE-* beads (typically scoped by state).
+	Models         StringOrList           `yaml:"models,omitempty" toml:"models,omitempty" json:"models,omitempty"`   // Convenience: iterate distinct model families in the roster. Accepts either an inline list (`["cc", "cod"]`) or a single shell command that emits one family per line.
+	MaxRounds      IntOrExpr              `yaml:"max_rounds,omitempty" toml:"max_rounds,omitempty" json:"max_rounds,omitempty"` // Per-iteration round cap for orchestration patterns that internally iterate (e.g., debate rounds).
+	Filter         string                 `yaml:"filter,omitempty" toml:"filter,omitempty" json:"filter,omitempty"` // Convenience predicate over the resolved iteration set, e.g. `role==proposer` or `state==active`. Applied after Items/Beads expansion.
+	PaneStrategy   string                 `yaml:"pane_assignment_strategy,omitempty" toml:"pane_assignment_strategy,omitempty" json:"pane_assignment_strategy,omitempty"`
+	Template       string                 `yaml:"template,omitempty" toml:"template,omitempty" json:"template,omitempty"`
+	TemplateParams map[string]interface{} `yaml:"template_params,omitempty" toml:"template_params,omitempty" json:"template_params,omitempty"`
+	Params         map[string]interface{} `yaml:"params,omitempty" toml:"params,omitempty" json:"params,omitempty"`
+	Steps          []Step                 `yaml:"steps,omitempty" toml:"steps,omitempty" json:"steps,omitempty"`
+	Body           []Step                 `yaml:"body,omitempty" toml:"body,omitempty" json:"body,omitempty"` // Alias for Steps.
+	Parallel       bool                   `yaml:"parallel,omitempty" toml:"parallel,omitempty" json:"parallel,omitempty"`
+	MaxConcurrent  int                    `yaml:"max_concurrent,omitempty" toml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`
 }
 
 // RoutingStrategy defines how to select an agent for a step
@@ -169,18 +565,30 @@ type LoopConfig struct {
 	// While loop: repeat until condition is false
 	While string `yaml:"while,omitempty" toml:"while,omitempty" json:"while,omitempty"` // Condition expression
 
+	// Until is a predicate-based exit: a shell command that runs after each
+	// iteration; when it exits 0 the loop stops. Mutually exclusive with While
+	// and Times. Supports the common orchestration pattern "loop until this
+	// convergence script reports CONVERGED" without forcing the author to
+	// invert the condition. Example: `until: ./scripts/convergence-check.sh`.
+	Until string `yaml:"until,omitempty" toml:"until,omitempty" json:"until,omitempty"`
+
 	// Times loop: repeat N times
 	Times int `yaml:"times,omitempty" toml:"times,omitempty" json:"times,omitempty"` // Number of iterations
 
 	// Safety and timing
-	MaxIterations int      `yaml:"max_iterations,omitempty" toml:"max_iterations,omitempty" json:"max_iterations,omitempty"` // Safety limit (default: 100, required for while loops)
-	Delay         Duration `yaml:"delay,omitempty" toml:"delay,omitempty" json:"delay,omitempty"`                            // Delay between iterations
+	MaxIterations IntOrExpr `yaml:"max_iterations,omitempty" toml:"max_iterations,omitempty" json:"max_iterations,omitempty"` // Safety limit (default: 100, required for while loops). May be a template expression like `${defaults.hard_caps.foo}` to defer the value until run time.
+	Delay         Duration  `yaml:"delay,omitempty" toml:"delay,omitempty" json:"delay,omitempty"`                            // Delay between iterations
 
 	// Result collection
 	Collect string `yaml:"collect,omitempty" toml:"collect,omitempty" json:"collect,omitempty"` // Variable name to store array of results
 
 	// Steps to execute per iteration
 	Steps []Step `yaml:"steps,omitempty" toml:"steps,omitempty" json:"steps,omitempty"`
+
+	// Body is an alias for Steps (some pipelines find `body:` reads more
+	// naturally inside a `loop:` block). Workflow.Normalize() copies Body into
+	// Steps after parse, so the executor only consults Steps.
+	Body []Step `yaml:"body,omitempty" toml:"body,omitempty" json:"body,omitempty"`
 }
 
 // LoopControl defines special control flow within loops
@@ -332,5 +740,114 @@ func IsValidAgentType(t string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// Normalize folds the alias / convenience fields into their canonical
+// counterparts so the rest of the executor only needs to consult one form.
+// Idempotent — calling Normalize() twice is the same as calling it once.
+//
+// Specifically:
+//   - Step.After is appended into Step.DependsOn (deduplicated).
+//   - Step.OnFailure is mapped to Step.OnError (canonical) when OnError is
+//     unset; brennerbot-specific values that don't match an ErrorAction enum
+//     value are preserved verbatim and surfaced via the OnFailure field for
+//     downstream branching.
+//   - Step.TemplateParams is merged into Step.Params (Params wins on conflict).
+//   - LoopConfig.Body is appended into LoopConfig.Steps when Steps is empty.
+//   - ForeachConfig.Body is appended into ForeachConfig.Steps when Steps is
+//     empty.
+//   - Workflow.Inputs entries are added to Workflow.Vars as bare-required
+//     declarations when not already present.
+func (w *Workflow) Normalize() {
+	for _, name := range w.Inputs {
+		if w.Vars == nil {
+			w.Vars = make(map[string]VarDef)
+		}
+		if _, exists := w.Vars[name]; !exists {
+			w.Vars[name] = VarDef{Required: true}
+		}
+	}
+	normalizeSteps(w.Steps)
+	normalizeSteps(w.PostPipelineSteps)
+}
+
+// normalizeSteps applies Step-level Normalize transformations recursively
+// (parallel / loop / foreach sub-steps).
+func normalizeSteps(steps []Step) {
+	for i := range steps {
+		s := &steps[i]
+		// After → DependsOn (preserve any pre-existing DependsOn entries; dedupe).
+		if len(s.After) > 0 {
+			seen := make(map[string]bool, len(s.DependsOn)+len(s.After))
+			for _, d := range s.DependsOn {
+				seen[d] = true
+			}
+			for _, a := range s.After {
+				if !seen[a] {
+					s.DependsOn = append(s.DependsOn, a)
+					seen[a] = true
+				}
+			}
+			s.After = nil
+		}
+		// OnFailure → OnError when OnError is unset and the value is a known enum.
+		if s.OnFailure.Action != "" && s.OnError == "" {
+			switch ErrorAction(s.OnFailure.Action) {
+			case ErrorActionFail, ErrorActionFailFast, ErrorActionContinue, ErrorActionRetry:
+				s.OnError = ErrorAction(s.OnFailure.Action)
+				if s.OnFailure.RetryCount > 0 && s.RetryCount == 0 {
+					s.RetryCount = s.OnFailure.RetryCount
+				}
+				s.OnFailure = OnFailureSpec{}
+			}
+			// Non-enum values (e.g. "fallback_to_ntm_inbox") and structured
+			// fallbacks stay in OnFailure for the executor to interpret.
+		}
+		// TemplateParams → Params merge (Params wins on conflict).
+		if len(s.TemplateParams) > 0 {
+			if s.Params == nil {
+				s.Params = make(map[string]interface{}, len(s.TemplateParams))
+			}
+			for k, v := range s.TemplateParams {
+				if _, exists := s.Params[k]; !exists {
+					s.Params[k] = v
+				}
+			}
+			s.TemplateParams = nil
+		}
+		// Loop.Body → Loop.Steps (alias).
+		if s.Loop != nil {
+			if len(s.Loop.Steps) == 0 && len(s.Loop.Body) > 0 {
+				s.Loop.Steps = s.Loop.Body
+				s.Loop.Body = nil
+			}
+			normalizeSteps(s.Loop.Steps)
+		}
+		// Foreach.Body → Foreach.Steps (alias). Same for ForeachPane.
+		for _, fc := range []*ForeachConfig{s.Foreach, s.ForeachPane} {
+			if fc == nil {
+				continue
+			}
+			if len(fc.Steps) == 0 && len(fc.Body) > 0 {
+				fc.Steps = fc.Body
+				fc.Body = nil
+			}
+			if len(fc.Params) == 0 && len(fc.TemplateParams) > 0 {
+				fc.Params = fc.TemplateParams
+				fc.TemplateParams = nil
+			}
+			normalizeSteps(fc.Steps)
+		}
+		// Recurse into parallel sub-steps and nested branches.
+		if len(s.Parallel.Steps) > 0 {
+			normalizeSteps(s.Parallel.Steps)
+		}
+		if len(s.OnSuccess) > 0 {
+			normalizeSteps(s.OnSuccess)
+		}
+		// Branches now hold heterogeneous values (single step or list of
+		// steps as `interface{}`); execution-time interpretation is deferred,
+		// so no normalize-time recursion is required for them today.
 	}
 }

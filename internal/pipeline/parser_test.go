@@ -271,7 +271,7 @@ func TestValidate_BothPromptAndParallel(t *testing.T) {
 			{
 				ID:       "s1",
 				Prompt:   "test",
-				Parallel: []Step{{ID: "p1", Prompt: "parallel"}},
+				Parallel: ParallelSpec{Steps: []Step{{ID: "p1", Prompt: "parallel"}}},
 			},
 		},
 	}
@@ -291,7 +291,7 @@ func TestValidate_MultipleAgentSelectionMethods(t *testing.T) {
 			{
 				ID:     "s1",
 				Agent:  "claude",
-				Pane:   1,
+				Pane:   PaneSpec{Index: 1},
 				Prompt: "test",
 			},
 		},
@@ -545,10 +545,10 @@ func TestValidate_ParallelSteps(t *testing.T) {
 		Steps: []Step{
 			{
 				ID: "parallel_work",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "p1", Agent: "claude", Prompt: "Task 1"},
 					{ID: "p2", Agent: "codex", Prompt: "Task 2"},
-				},
+				}},
 			},
 			{
 				ID:        "combine",
@@ -634,7 +634,7 @@ func TestValidate_LoopNegativeMaxIterations(t *testing.T) {
 				Loop: &LoopConfig{
 					Items:         "${vars.list}",
 					As:            "item",
-					MaxIterations: -1,
+					MaxIterations: IntOrExpr{Value: -1},
 					Steps:         []Step{{ID: "inner", Prompt: "test"}},
 				},
 			},
@@ -747,9 +747,9 @@ func TestValidate_VariableReferencesInParallelSubsteps(t *testing.T) {
 		Steps: []Step{
 			{
 				ID: "par_step",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "inner", Prompt: "Process ${unknown.ref}"},
-				},
+				}},
 			},
 		},
 	}
@@ -1198,9 +1198,9 @@ func TestValidate_StepWithPromptAndParallel(t *testing.T) {
 			{
 				ID:     "s1",
 				Prompt: "do something",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "p1", Agent: "cc", Prompt: "parallel task"},
-				},
+				}},
 			},
 		},
 	}
@@ -1312,7 +1312,7 @@ func TestValidate_StepWithMultipleAgentMethods(t *testing.T) {
 			{
 				ID:     "s1",
 				Agent:  "claude",
-				Pane:   1,
+				Pane:   PaneSpec{Index: 1},
 				Route:  "least-loaded",
 				Prompt: "test",
 			},

@@ -117,7 +117,7 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	total := len(items)
 
 	// Calculate max iterations
-	maxIterations := loop.MaxIterations
+	maxIterations := loop.MaxIterations.Value
 	if maxIterations <= 0 {
 		maxIterations = DefaultMaxIterations
 	}
@@ -221,7 +221,7 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 	}
 
 	// While loops require max_iterations for safety
-	maxIterations := loop.MaxIterations
+	maxIterations := loop.MaxIterations.Value
 	if maxIterations <= 0 {
 		maxIterations = DefaultMaxIterations
 	}
@@ -362,7 +362,7 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 	}
 
 	// Apply max iterations limit
-	maxIterations := loop.MaxIterations
+	maxIterations := loop.MaxIterations.Value
 	if maxIterations <= 0 {
 		maxIterations = DefaultMaxIterations
 	}

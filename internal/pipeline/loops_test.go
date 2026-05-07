@@ -231,7 +231,7 @@ func TestLoopConfigValidation(t *testing.T) {
 		},
 		{
 			name:   "while loop",
-			config: LoopConfig{While: "${vars.count} > 0", MaxIterations: 50},
+			config: LoopConfig{While: "${vars.count} > 0", MaxIterations: IntOrExpr{Value: 50}},
 			valid:  true,
 		},
 		{
@@ -317,7 +317,7 @@ func TestLoopTimesExceedsMaxIterations(t *testing.T) {
 		ID: "test-step",
 		Loop: &LoopConfig{
 			Times:         200, // Exceeds default 100
-			MaxIterations: 50,  // Explicit limit
+			MaxIterations: IntOrExpr{Value: 50},  // Explicit limit
 		},
 	}
 
@@ -460,7 +460,7 @@ func TestExecuteWhile_DryRun_ImmediateFalse(t *testing.T) {
 		Prompt: "While iteration",
 		Loop: &LoopConfig{
 			While:         "${vars.condition}",
-			MaxIterations: 10,
+			MaxIterations: IntOrExpr{Value: 10},
 		},
 	}
 
@@ -491,7 +491,7 @@ func TestExecuteWhile_Cancelled(t *testing.T) {
 		Prompt: "While cancel test",
 		Loop: &LoopConfig{
 			While:         "${vars.running}",
-			MaxIterations: 100,
+			MaxIterations: IntOrExpr{Value: 100},
 		},
 	}
 

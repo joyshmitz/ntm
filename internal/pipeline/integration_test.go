@@ -121,8 +121,8 @@ steps:
 	}
 
 	parallelStep := workflow.Steps[0]
-	if len(parallelStep.Parallel) != 3 {
-		t.Errorf("len(parallelStep.Parallel) = %d, want 3", len(parallelStep.Parallel))
+	if len(parallelStep.Parallel.Steps) != 3 {
+		t.Errorf("len(parallelStep.Parallel.Steps) = %d, want 3", len(parallelStep.Parallel.Steps))
 	}
 }
 

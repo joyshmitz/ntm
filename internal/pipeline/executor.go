@@ -468,7 +468,7 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 	}
 
 	// Handle parallel steps
-	if len(step.Parallel) > 0 {
+	if len(step.Parallel.Steps) > 0 {
 		return e.executeParallel(ctx, step, workflow)
 	}
 
@@ -548,6 +548,49 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		StepID:    step.ID,
 		Status:    StatusRunning,
 		StartedAt: time.Now(),
+	}
+
+	// Phase-A graceful handling for step kinds whose execution semantics
+	// are still under development: `command:`, `template:`, `foreach:`,
+	// `foreach_pane:`, and `branch:`. These steps parse and validate, but
+	// the executor doesn't yet know how to dispatch them. In dry-run mode
+	// we report what we *would* do; in real-run mode we surface a clear
+	// error so the operator can drive that step manually.
+	if step.Command != "" || step.Template != "" ||
+		step.Foreach != nil || step.ForeachPane != nil ||
+		step.Branch != "" {
+		var kind, summary string
+		switch {
+		case step.Command != "":
+			kind = "command"
+			summary = truncatePrompt(step.Command, 80)
+		case step.Template != "":
+			kind = "template"
+			summary = step.Template
+		case step.Foreach != nil:
+			kind = "foreach"
+			summary = describeForeach(step.Foreach)
+		case step.ForeachPane != nil:
+			kind = "foreach_pane"
+			summary = describeForeach(step.ForeachPane)
+		case step.Branch != "":
+			kind = "branch"
+			summary = truncatePrompt(step.Branch, 80)
+		}
+		if e.config.DryRun {
+			result.Status = StatusCompleted
+			result.Output = fmt.Sprintf("[DRY RUN] Would execute %s step: %s", kind, summary)
+			result.FinishedAt = time.Now()
+			return result
+		}
+		// Real-run path: not yet implemented. Mark skipped (not failed) so the
+		// rest of the workflow can proceed, and surface the situation through
+		// SkipReason for the operator to act on manually.
+		result.Status = StatusSkipped
+		result.SkipReason = fmt.Sprintf("%s steps are not yet executed by ntm pipeline runner; dispatch %q manually (%s)", kind, step.ID, summary)
+		result.FinishedAt = time.Now()
+		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
+		return result
 	}
 
 	// Get prompt (from prompt or prompt_file)
@@ -716,11 +759,11 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	defer cancelParallel()
 
 	e.emitProgress("parallel_start", step.ID,
-		fmt.Sprintf("Starting parallel group with %d steps (on_error=%s)", len(step.Parallel), onError),
+		fmt.Sprintf("Starting parallel group with %d steps (on_error=%s)", len(step.Parallel.Steps), onError),
 		e.calculateProgress())
 
 	var wg sync.WaitGroup
-	results := make([]StepResult, len(step.Parallel))
+	results := make([]StepResult, len(step.Parallel.Steps))
 	var mu sync.Mutex
 	var firstError error
 	var cancelled bool
@@ -732,7 +775,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	// Semaphore to limit concurrency (max 8 parallel steps)
 	sem := make(chan struct{}, 8)
 
-	for i, pStep := range step.Parallel {
+	for i, pStep := range step.Parallel.Steps {
 		wg.Add(1)
 		go func(idx int, ps Step) {
 			defer wg.Done()
@@ -895,7 +938,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 	}
 
 	// Check for unsupported nested structures
-	if len(step.Parallel) > 0 || step.Loop != nil {
+	if len(step.Parallel.Steps) > 0 || step.Loop != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
 			Type:      "validation",
@@ -1154,14 +1197,21 @@ func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, pane
 		return "dry-run-pane", "dry-run-agent", nil
 	}
 
-	// Explicit pane selection bypasses exclusion
-	if step.Pane > 0 {
+	// Explicit pane selection bypasses exclusion. Pane.Expr (template form
+	// like ${defaults.triage_pane}) requires variable substitution before
+	// resolution; the executor's variable layer expands it elsewhere and
+	// fills Pane.Index. If we reach this path with a non-empty Expr but
+	// Index still 0, surface a clear error.
+	if step.Pane.Expr != "" && step.Pane.Index == 0 {
+		return "", "", fmt.Errorf("pane expression %q not yet resolved at pane-selection time", step.Pane.Expr)
+	}
+	if step.Pane.Index > 0 {
 		panes, err := tmux.GetPanes(e.config.Session)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to get panes: %w", err)
 		}
 		for _, p := range panes {
-			if p.Index == step.Pane {
+			if p.Index == step.Pane.Index {
 				// We still need to mark it as used to prevent others from picking it via auto-selection
 				panesMu.Lock()
 				usedPanes[p.ID] = true
@@ -1169,7 +1219,7 @@ func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, pane
 				return p.ID, string(p.Type), nil
 			}
 		}
-		return "", "", fmt.Errorf("pane %d not found", step.Pane)
+		return "", "", fmt.Errorf("pane %d not found", step.Pane.Index)
 	}
 
 	// Use ScoreAgents to get all scored agents (slow operation, do outside lock)
@@ -1252,18 +1302,23 @@ func (e *Executor) selectPane(step *Step) (paneID string, agentType string, err 
 		return "dry-run-pane", "dry-run-agent", nil
 	}
 
-	// Explicit pane selection
-	if step.Pane > 0 {
+	// Explicit pane selection. Pane.Expr (template form) needs variable
+	// substitution before this path; surface a clear error if we got here
+	// with an unresolved expression.
+	if step.Pane.Expr != "" && step.Pane.Index == 0 {
+		return "", "", fmt.Errorf("pane expression %q not yet resolved at pane-selection time", step.Pane.Expr)
+	}
+	if step.Pane.Index > 0 {
 		panes, err := tmux.GetPanes(e.config.Session)
 		if err != nil {
 			return "", "", fmt.Errorf("failed to get panes: %w", err)
 		}
 		for _, p := range panes {
-			if p.Index == step.Pane {
+			if p.Index == step.Pane.Index {
 				return p.ID, string(p.Type), nil
 			}
 		}
-		return "", "", fmt.Errorf("pane %d not found", step.Pane)
+		return "", "", fmt.Errorf("pane %d not found", step.Pane.Index)
 	}
 
 	// Use ScoreAgents to get all scored agents
@@ -1491,6 +1546,37 @@ func (e *Executor) sendNotification(ctx context.Context, workflow *Workflow, eve
 
 // truncatePrompt truncates a prompt for display, respecting UTF-8 boundaries.
 // Ensures the returned string is at most n bytes.
+// describeForeach builds a one-line summary of a ForeachConfig for dry-run
+// output and skip-reason messages. Picks the most-specific iteration source
+// available so the operator can see at a glance what the step would loop over.
+func describeForeach(fc *ForeachConfig) string {
+	if fc == nil {
+		return "(empty foreach)"
+	}
+	src := ""
+	switch {
+	case fc.Items != "":
+		src = "items=" + truncatePrompt(fc.Items, 40)
+	case fc.Beads != "":
+		src = "beads=" + truncatePrompt(fc.Beads, 40)
+	case fc.Pairs != "":
+		src = "pairs=" + truncatePrompt(fc.Pairs, 40)
+	case fc.Debates != "":
+		src = "debates=" + truncatePrompt(fc.Debates, 40)
+	case len(fc.Models) > 0:
+		src = "models=[" + strings.Join(fc.Models, ",") + "]"
+	default:
+		src = "(no iteration source)"
+	}
+	if fc.PaneStrategy != "" {
+		src += " strategy=" + fc.PaneStrategy
+	}
+	if fc.Template != "" {
+		src += " template=" + fc.Template
+	}
+	return src
+}
+
 func truncatePrompt(s string, n int) string {
 	// Replace newlines with spaces for single-line display
 	s = strings.ReplaceAll(s, "\n", " ")

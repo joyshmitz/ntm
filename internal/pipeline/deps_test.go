@@ -346,10 +346,10 @@ func TestDependencyGraph_ParallelSubsteps(t *testing.T) {
 		Steps: []Step{
 			{
 				ID: "parallel_group",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "p1", Prompt: "parallel 1"},
 					{ID: "p2", Prompt: "parallel 2"},
-				},
+				}},
 			},
 			{ID: "after", Prompt: "after", DependsOn: []string{"parallel_group"}},
 		},

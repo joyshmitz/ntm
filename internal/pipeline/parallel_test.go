@@ -20,11 +20,11 @@ func createTestExecutor() (*Executor, *Workflow) {
 		Name:          "test-workflow",
 		Settings:      DefaultWorkflowSettings(),
 		Steps: []Step{
-			{ID: "parallel_group", Parallel: []Step{
+			{ID: "parallel_group", Parallel: ParallelSpec{Steps: []Step{
 				{ID: "step1", Prompt: "Task 1"},
 				{ID: "step2", Prompt: "Task 2"},
 				{ID: "step3", Prompt: "Task 3"},
-			}},
+			}}},
 		},
 	}
 
@@ -50,11 +50,11 @@ func TestExecuteParallel_BasicExecution(t *testing.T) {
 	// Create a parallel group with 3 steps
 	step := &Step{
 		ID: "parallel_group",
-		Parallel: []Step{
+		Parallel: ParallelSpec{Steps: []Step{
 			{ID: "step1", Prompt: "Do task 1"},
 			{ID: "step2", Prompt: "Do task 2"},
 			{ID: "step3", Prompt: "Do task 3"},
-		},
+		}},
 	}
 
 	result := e.executeParallel(context.Background(), step, workflow)
@@ -108,10 +108,10 @@ func TestExecuteParallel_ErrorModes(t *testing.T) {
 
 			step := &Step{
 				ID: "parallel_group",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "step1", Prompt: "Do task 1"},
 					{ID: "step2", Prompt: "Do task 2"},
-				},
+				}},
 			}
 
 			result := e.executeParallel(context.Background(), step, workflow)
@@ -130,14 +130,14 @@ func TestExecuteParallel_UsesWorkflowRetryPolicyForSubsteps(t *testing.T) {
 
 	step := &Step{
 		ID: "parallel_group",
-		Parallel: []Step{
+		Parallel: ParallelSpec{Steps: []Step{
 			{
 				ID:         "step1",
 				PromptFile: "/nonexistent/prompt.txt",
 				RetryCount: 2,
 				RetryDelay: Duration{Duration: time.Millisecond},
 			},
-		},
+		}},
 	}
 
 	result := e.executeParallel(context.Background(), step, workflow)
@@ -168,9 +168,9 @@ func TestExecuteParallel_GroupTimeout(t *testing.T) {
 	step := &Step{
 		ID:      "parallel_group",
 		Timeout: Duration{Duration: 5 * time.Second},
-		Parallel: []Step{
+		Parallel: ParallelSpec{Steps: []Step{
 			{ID: "step1", Prompt: "Do task 1"},
-		},
+		}},
 	}
 
 	result := e.executeParallel(context.Background(), step, workflow)
@@ -187,10 +187,10 @@ func TestExecuteParallel_ContextCancellation(t *testing.T) {
 
 	step := &Step{
 		ID: "parallel_group",
-		Parallel: []Step{
+		Parallel: ParallelSpec{Steps: []Step{
 			{ID: "step1", Prompt: "Do task 1"},
 			{ID: "step2", Prompt: "Do task 2"},
-		},
+		}},
 	}
 
 	// Create a pre-cancelled context
@@ -215,10 +215,10 @@ func TestExecuteParallel_ResultAggregation(t *testing.T) {
 		Name:          "test-workflow",
 		Settings:      DefaultWorkflowSettings(),
 		Steps: []Step{
-			{ID: "parallel_group", Parallel: []Step{
+			{ID: "parallel_group", Parallel: ParallelSpec{Steps: []Step{
 				{ID: "task_a", Prompt: "Do task A"},
 				{ID: "task_b", Prompt: "Do task B"},
-			}},
+			}}},
 		},
 	}
 	// Rebuild graph for this workflow
@@ -226,10 +226,10 @@ func TestExecuteParallel_ResultAggregation(t *testing.T) {
 
 	step := &Step{
 		ID: "parallel_group",
-		Parallel: []Step{
+		Parallel: ParallelSpec{Steps: []Step{
 			{ID: "task_a", Prompt: "Do task A"},
 			{ID: "task_b", Prompt: "Do task B"},
-		},
+		}},
 	}
 
 	result := e.executeParallel(context.Background(), step, workflow)
@@ -282,7 +282,7 @@ func TestExecuteParallel_Concurrency(t *testing.T) {
 		Name:          "test-workflow",
 		Settings:      DefaultWorkflowSettings(),
 		Steps: []Step{
-			{ID: "parallel_group", Parallel: parallelSteps},
+			{ID: "parallel_group", Parallel: ParallelSpec{Steps: parallelSteps}},
 		},
 	}
 
@@ -301,7 +301,7 @@ func TestExecuteParallel_Concurrency(t *testing.T) {
 
 	step := &Step{
 		ID:       "parallel_group",
-		Parallel: parallelSteps,
+		Parallel: ParallelSpec{Steps: parallelSteps},
 	}
 
 	// Run multiple times to catch potential race conditions
@@ -370,9 +370,9 @@ func TestExecuteParallelStep_WithCondition(t *testing.T) {
 		Name:          "test-workflow",
 		Settings:      DefaultWorkflowSettings(),
 		Steps: []Step{
-			{ID: "parallel_group", Parallel: []Step{
+			{ID: "parallel_group", Parallel: ParallelSpec{Steps: []Step{
 				{ID: "conditional_step", Prompt: "This should be skipped", When: "${vars.skip_this}"},
-			}},
+			}}},
 		},
 	}
 

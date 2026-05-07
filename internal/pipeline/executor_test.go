@@ -1792,10 +1792,10 @@ func TestExecutor_Run_DryRun_WithParallel(t *testing.T) {
 			{ID: "step1", Prompt: "Task 1"},
 			{
 				ID: "step2",
-				Parallel: []Step{
+				Parallel: ParallelSpec{Steps: []Step{
 					{ID: "parallel-a", Prompt: "Parallel task A"},
 					{ID: "parallel-b", Prompt: "Parallel task B"},
-				},
+				}},
 			},
 			{ID: "step3", Prompt: "Task 3", DependsOn: []string{"step2"}},
 		},
@@ -2274,7 +2274,7 @@ func TestExecutor_Run_DryRun_WithWhileLoop(t *testing.T) {
 				Prompt: "While loop iteration ${loop.index}",
 				Loop: &LoopConfig{
 					While:         "${vars.running}",
-					MaxIterations: 10,
+					MaxIterations: IntOrExpr{Value: 10},
 				},
 			},
 		},

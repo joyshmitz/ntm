@@ -49,14 +49,18 @@ func TestDuration_UnmarshalText(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "missing unit",
-			input:   "30",
-			wantErr: true,
+			// Bare-integer form is now accepted as seconds (deliberate
+			// extension; matches author convenience in YAML where
+			// `timeout: 300` is a frequent shorthand). Use "invalid"
+			// above for the negative-format test.
+			name:  "bare integer means seconds",
+			input: "30",
+			want:  30 * time.Second,
 		},
 		{
-			name:    "empty string",
-			input:   "",
-			wantErr: true,
+			name:  "empty string parses to zero",
+			input: "",
+			want:  0,
 		},
 	}
 

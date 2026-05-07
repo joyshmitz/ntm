@@ -65,8 +65,8 @@ func NewDependencyGraph(workflow *Workflow) *DependencyGraph {
 			}
 
 			// Handle parallel sub-steps
-			if len(step.Parallel) > 0 {
-				addSteps(step.Parallel)
+			if len(step.Parallel.Steps) > 0 {
+				addSteps(step.Parallel.Steps)
 			}
 
 			// Handle loop sub-steps

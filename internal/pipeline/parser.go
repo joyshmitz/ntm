@@ -115,6 +115,9 @@ func ParseFile(path string) (*Workflow, error) {
 		}
 	}
 
+	// Fold alias / convenience fields into their canonical counterparts so
+	// downstream validation, deps, and execution only need one path.
+	workflow.Normalize()
 	return &workflow, nil
 }
 
@@ -150,6 +153,7 @@ func ParseString(content string, format string) (*Workflow, error) {
 		}
 	}
 
+	workflow.Normalize()
 	return &workflow, nil
 }
 
@@ -262,9 +266,16 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 		stepIDs[step.ID] = true
 	}
 
-	// Check for parallel vs prompt mutual exclusivity
+	// Check for parallel vs prompt mutual exclusivity. Each step must do one
+	// (and only one) of: agent prompt, shell command, template render, foreach
+	// fan-out, parallel sub-steps, loop, or branch dispatch. Treat `parallel:
+	// true` as a flag rather than work; only inline parallel sub-steps count.
 	hasPrompt := step.Prompt != "" || step.PromptFile != ""
-	hasParallel := len(step.Parallel) > 0
+	hasCommand := step.Command != ""
+	hasTemplate := step.Template != ""
+	hasParallel := len(step.Parallel.Steps) > 0
+	hasForeach := step.Foreach != nil || step.ForeachPane != nil
+	hasBranch := step.Branch != "" || len(step.Branches) > 0
 
 	if hasPrompt && hasParallel {
 		result.addError(ParseError{
@@ -273,12 +284,34 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			Hint:    "Use prompt for single-agent steps, parallel for concurrent steps",
 		})
 	}
-
-	if !hasPrompt && !hasParallel && step.Loop == nil {
+	if hasPrompt && hasCommand {
 		result.addError(ParseError{
 			Field:   stepField,
-			Message: "step must have prompt, prompt_file, parallel, or loop",
-			Hint:    "Add a prompt, parallel steps, or loop for this step",
+			Message: "step cannot have both prompt and command",
+			Hint:    "Use prompt for agent dispatch, command for shell execution",
+		})
+	}
+	if hasPrompt && hasTemplate {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: "step cannot have both prompt and template",
+			Hint:    "Use prompt for inline text, template for an MO file rendered with --params",
+		})
+	}
+	if hasCommand && hasTemplate {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: "step cannot have both command and template",
+			Hint:    "Pick one: command runs a shell command; template renders an MO and dispatches it",
+		})
+	}
+
+	if !hasPrompt && !hasParallel && !hasCommand && !hasTemplate &&
+		!hasForeach && !hasBranch && step.Loop == nil {
+		result.addError(ParseError{
+			Field:   stepField,
+			Message: "step must have prompt, prompt_file, command, template, parallel, loop, foreach, or branch",
+			Hint:    "Pick the step kind that matches the work you want done.",
 		})
 	}
 
@@ -294,7 +327,7 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			})
 		}
 	}
-	if step.Pane > 0 {
+	if !step.Pane.IsZero() {
 		agentMethods++
 	}
 	if step.Route != "" {
@@ -354,20 +387,20 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 	}
 
 	// Validate parallel sub-steps
-	for j, pStep := range step.Parallel {
+	for j, pStep := range step.Parallel.Steps {
 		validateStep(&pStep, fmt.Sprintf("%s.parallel[%d]", stepField, j), stepIDs, result)
 	}
 
 	// Validate loop configuration
 	if step.Loop != nil {
-		if step.Loop.Items == "" && step.Loop.While == "" && step.Loop.Times <= 0 {
+		if step.Loop.Items == "" && step.Loop.While == "" && step.Loop.Until == "" && step.Loop.Times <= 0 {
 			result.addError(ParseError{
 				Field:   stepField + ".loop",
-				Message: "loop must specify items, while, or times",
-				Hint:    "Set items for for-each, while for condition loop, or times for count loop",
+				Message: "loop must specify items, while, until, or times",
+				Hint:    "Set items for for-each, while for condition loop, until for predicate-exit loop, or times for count loop",
 			})
 		}
-		if step.Loop.MaxIterations < 0 {
+		if step.Loop.MaxIterations.Value < 0 {
 			result.addError(ParseError{
 				Field:   stepField + ".loop.max_iterations",
 				Message: "max_iterations cannot be negative",
@@ -389,8 +422,8 @@ func detectCycles(steps []Step) [][]string {
 		for _, step := range steps {
 			graph[step.ID] = step.DependsOn
 			// Include parallel sub-steps
-			if len(step.Parallel) > 0 {
-				addToGraph(step.Parallel)
+			if len(step.Parallel.Steps) > 0 {
+				addToGraph(step.Parallel.Steps)
 			}
 			// Include loop sub-steps
 			if step.Loop != nil {
@@ -502,8 +535,8 @@ func validateVariableRefs(w *Workflow, result *ValidationResult) {
 				checkString(step.When, stepField+".when")
 			}
 			// Check parallel sub-steps
-			if len(step.Parallel) > 0 {
-				checkSteps(step.Parallel, stepField+".parallel")
+			if len(step.Parallel.Steps) > 0 {
+				checkSteps(step.Parallel.Steps, stepField+".parallel")
 			}
 			// Check loop sub-steps
 			if step.Loop != nil {
