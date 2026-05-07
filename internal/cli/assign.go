@@ -4304,8 +4304,11 @@ func (w *WatchLoop) handleCompletion(event completion.CompletionEvent) error {
 	w.totalCompleted++
 	w.logf("Completion: %s by pane %d (%s, %v)", event.BeadID, event.Pane, event.AgentType, duration)
 
-	// Check for delay between assignments
-	if w.delay > 0 && !w.lastAssignmentAt.IsZero() {
+	dryRun := w.opts != nil && w.opts.DryRun
+
+	// Check for delay between assignments. In dry-run mode the loop dispatches
+	// nothing, so there's no point throttling between previews.
+	if !dryRun && w.delay > 0 && !w.lastAssignmentAt.IsZero() {
 		elapsed := time.Since(w.lastAssignmentAt)
 		if elapsed < w.delay {
 			sleepTime := w.delay - elapsed
@@ -4331,15 +4334,15 @@ func (w *WatchLoop) handleCompletion(event completion.CompletionEvent) error {
 		}
 
 		// Log assignments. In dry-run mode the planner output is real but
-		// nothing has been dispatched — distinguish the log line so operators
-		// don't mistake the preview for live execution.
-		dryRun := w.opts != nil && w.opts.DryRun
+		// nothing has been dispatched — distinguish the log line and skip the
+		// counter/lastAssignmentAt updates so the end-of-session Summary()
+		// doesn't claim work happened that didn't.
 		for _, assigned := range result.Assignments {
-			w.totalAssigned++
-			w.lastAssignmentAt = time.Now()
 			if dryRun {
 				w.logf("Would assign (dry-run): %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
 			} else {
+				w.totalAssigned++
+				w.lastAssignmentAt = time.Now()
 				w.logf("Assigned: %s -> pane %d (%s)", assigned.BeadID, assigned.Pane, assigned.AgentType)
 			}
 
@@ -4395,8 +4398,12 @@ func (w *WatchLoop) Summary() string {
 	defer w.mu.Unlock()
 
 	duration := time.Since(w.startTime).Round(time.Second)
-	return fmt.Sprintf("Watch session: %d assigned, %d completed, %d failed in %v",
-		w.totalAssigned, w.totalCompleted, w.totalFailed, duration)
+	suffix := ""
+	if w.opts != nil && w.opts.DryRun {
+		suffix = " [dry-run: no panes were dispatched]"
+	}
+	return fmt.Sprintf("Watch session: %d assigned, %d completed, %d failed in %v%s",
+		w.totalAssigned, w.totalCompleted, w.totalFailed, duration, suffix)
 }
 
 // runWatchMode implements the --watch flag for continuous auto-assignment
