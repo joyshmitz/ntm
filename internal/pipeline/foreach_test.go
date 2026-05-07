@@ -206,6 +206,58 @@ func TestExecuteForeachWorkflowContinueKeepsBodyStepsAfterFailure(t *testing.T) 
 	}
 }
 
+// bd-ljx8s: when only the parent foreach step has on_error: continue (workflow
+// default stays at fail), nested body steps without their own on_error must
+// inherit the parent's continue policy. Otherwise a per-item failure stops
+// later body steps in the same iteration even though the pipeline author
+// scoped continue semantics to that exact foreach.
+func TestExecuteForeachParentStepContinueKeepsBodyStepsAfterFailure(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-parent-continue",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	// Workflow default stays at fail; only the parent foreach asks for continue.
+	step := &Step{
+		ID:      "parent_continue_fanout",
+		OnError: ErrorActionContinue,
+		Foreach: &ForeachConfig{
+			Items: `["one"]`,
+			Steps: []Step{
+				{
+					ID:      "fail",
+					Command: `echo failed; exit 7`,
+				},
+				{
+					ID:      "after",
+					Command: `printf 'after-%s' '${item}'`,
+				},
+			},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 1 {
+		t.Fatalf("iterations = %d, want 1", len(iterations))
+	}
+	if got := len(iterations[0].Results); got != 2 {
+		t.Fatalf("iteration results = %d, want failed body step plus follow-up", got)
+	}
+	if iterations[0].Results[0].Status != StatusFailed {
+		t.Fatalf("first body status = %s, want failed", iterations[0].Results[0].Status)
+	}
+	if iterations[0].Results[1].Status != StatusCompleted || iterations[0].Results[1].Output != "after-one" {
+		t.Fatalf("second body result = %#v, want completed after-one", iterations[0].Results[1])
+	}
+}
+
 func TestExecuteForeachFilterExcludesIterationsBeforeDispatch(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,

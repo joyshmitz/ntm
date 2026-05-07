@@ -435,7 +435,7 @@ func (e *Executor) executeForeachIterationsSequential(ctx context.Context, paren
 			progress.iterationFinished()
 			continue
 		}
-		iterResult := e.executeForeachIteration(ctx, parent, workflow, plan)
+		iterResult := e.executeForeachIteration(ctx, parent, workflow, plan, onError)
 		results = append(results, iterResult)
 		progress.iterationFinished()
 		if iterResult.Control == LoopControlBreak {
@@ -504,7 +504,7 @@ func (e *Executor) executeForeachIterationsParallel(ctx context.Context, parent 
 				}
 				return
 			}
-			iterResult := e.executeForeachIteration(runCtx, parent, workflow, plan)
+			iterResult := e.executeForeachIteration(runCtx, parent, workflow, plan, onError)
 			if isBreak() && foreachIterationCancelled(iterResult) {
 				iterResult.SkipKind = SkipKindForeachBreak
 				iterResult.SkipReason = "loop break"
@@ -524,7 +524,12 @@ func (e *Executor) executeForeachIterationsParallel(ctx context.Context, parent 
 	return results
 }
 
-func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, workflow *Workflow, plan foreachIterationPlan) (iterResult foreachIterationResult) {
+// executeForeachIteration runs the body for a single foreach plan. parentOnError
+// is the parent foreach step's resolved error action (already merged with the
+// workflow default by the caller); nested body steps without their own
+// on_error inherit it so a foreach with on_error: continue does not stall on
+// the workflow default of fail (bd-ljx8s).
+func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, workflow *Workflow, plan foreachIterationPlan, parentOnError ErrorAction) (iterResult foreachIterationResult) {
 	iterResult = foreachIterationResult{
 		Index:   plan.Index,
 		Item:    plan.Item,
@@ -619,7 +624,7 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		}
 
 		if result.Status == StatusFailed || result.Status == StatusCancelled {
-			if resolveErrorAction(step.OnError, workflow.Settings.OnError) != ErrorActionContinue {
+			if resolveErrorAction(step.OnError, parentOnError) != ErrorActionContinue {
 				iterResult.Error = resultErrorMessage(result)
 				return iterResult
 			}
