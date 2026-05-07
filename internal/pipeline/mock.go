@@ -1,10 +1,13 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -48,8 +51,9 @@ type mockTmuxPaneState struct {
 
 // MockTmuxClient is a deterministic in-memory tmux substitute for executor tests.
 type MockTmuxClient struct {
-	mu    sync.Mutex
-	panes map[string]*mockTmuxPaneState
+	mu       sync.Mutex
+	panes    map[string]*mockTmuxPaneState
+	scripter *AgentScripter
 }
 
 // NewMockTmuxClient creates a mock with optional global pane fixtures.
@@ -71,6 +75,13 @@ func (m *MockTmuxClient) AddPane(session string, pane tmux.Pane) {
 	m.panes[pane.ID] = &mockTmuxPaneState{session: session, pane: pane}
 }
 
+// SetAgentScripter installs scripted responses for future PasteKeys calls.
+func (m *MockTmuxClient) SetAgentScripter(scripter *AgentScripter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scripter = scripter
+}
+
 // Reset clears captured output and paste history while preserving pane fixtures.
 func (m *MockTmuxClient) Reset() {
 	m.mu.Lock()
@@ -78,6 +89,9 @@ func (m *MockTmuxClient) Reset() {
 	for _, state := range m.panes {
 		state.output = ""
 		state.pastes = nil
+	}
+	if m.scripter != nil {
+		m.scripter.Reset()
 	}
 }
 
@@ -142,9 +156,29 @@ func (m *MockTmuxClient) GetPanes(session string) ([]tmux.Pane, error) {
 // PasteKeys records the prompt and appends it to the target pane's output.
 func (m *MockTmuxClient) PasteKeys(target, content string, enter bool) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	_, ok := m.panes[target]
+	scripter := m.scripter
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("mock tmux pane %q not found", target)
+	}
+
+	var response string
+	var delay time.Duration
+	hasScriptedResponse := false
+	if scripter != nil {
+		var err error
+		response, delay, err = scripter.nextResponse(content)
+		if err != nil {
+			return err
+		}
+		hasScriptedResponse = true
+	}
+
+	m.mu.Lock()
 	state, ok := m.panes[target]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("mock tmux pane %q not found", target)
 	}
 	state.pastes = append(state.pastes, MockTmuxPaste{
@@ -155,6 +189,11 @@ func (m *MockTmuxClient) PasteKeys(target, content string, enter bool) error {
 	state.output += content
 	if enter {
 		state.output += "\n"
+	}
+	m.mu.Unlock()
+
+	if hasScriptedResponse {
+		m.deliverScriptedResponse(target, response, delay, scripter)
 	}
 	return nil
 }
@@ -168,6 +207,24 @@ func (m *MockTmuxClient) CapturePaneOutput(target string, lines int) (string, er
 		return "", fmt.Errorf("mock tmux pane %q not found", target)
 	}
 	return tailMockLines(state.output, lines), nil
+}
+
+func (m *MockTmuxClient) deliverScriptedResponse(target, response string, delay time.Duration, scripter *AgentScripter) {
+	deliver := func() {
+		if err := m.AppendPaneOutput(target, response); err == nil {
+			scripter.markProduced()
+		}
+	}
+	if delay <= 0 {
+		deliver()
+		return
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		<-timer.C
+		deliver()
+	}()
 }
 
 func (m *MockTmuxClient) ensure() {
@@ -198,4 +255,154 @@ func tailMockLines(output string, lines int) string {
 		return output
 	}
 	return strings.Join(parts[len(parts)-lines:], "")
+}
+
+type agentScriptMatchKind int
+
+const (
+	agentScriptSubstring agentScriptMatchKind = iota
+	agentScriptRegex
+)
+
+type agentScriptRule struct {
+	kind     agentScriptMatchKind
+	pattern  string
+	regex    *regexp.Regexp
+	response string
+	used     bool
+}
+
+// AgentScripter provides scriptable mock-agent responses for MockTmuxClient.
+type AgentScripter struct {
+	mu              sync.Mutex
+	rules           []agentScriptRule
+	defaultResponse string
+	hasDefault      bool
+	delay           time.Duration
+	produced        int
+}
+
+// NewAgentScripter creates an empty script table.
+func NewAgentScripter() *AgentScripter {
+	return &AgentScripter{}
+}
+
+// Match adds a one-shot substring response rule.
+func (s *AgentScripter) Match(pattern, response string) *AgentScripter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rules = append(s.rules, agentScriptRule{
+		kind:     agentScriptSubstring,
+		pattern:  pattern,
+		response: response,
+	})
+	return s
+}
+
+// MatchRegex adds a one-shot regular-expression response rule.
+func (s *AgentScripter) MatchRegex(pattern, response string) error {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rules = append(s.rules, agentScriptRule{
+		kind:     agentScriptRegex,
+		pattern:  pattern,
+		regex:    re,
+		response: response,
+	})
+	return nil
+}
+
+// Default sets the fallback response used when no one-shot rule matches.
+func (s *AgentScripter) Default(response string) *AgentScripter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaultResponse = response
+	s.hasDefault = true
+	return s
+}
+
+// Delay sets the delay before future scripted responses are appended.
+func (s *AgentScripter) Delay(delay time.Duration) *AgentScripter {
+	if delay < 0 {
+		delay = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delay = delay
+	return s
+}
+
+// Reset marks all one-shot rules unused and resets the produced-response count.
+func (s *AgentScripter) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.rules {
+		s.rules[i].used = false
+	}
+	s.produced = 0
+}
+
+// Wait blocks until at least count scripted responses have been appended.
+func (s *AgentScripter) Wait(ctx context.Context, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		s.mu.Lock()
+		produced := s.produced
+		s.mu.Unlock()
+		if produced >= count {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for %d scripted responses: produced %d: %w", count, produced, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *AgentScripter) nextResponse(prompt string) (string, time.Duration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.rules {
+		rule := &s.rules[i]
+		if rule.used {
+			continue
+		}
+		if rule.matches(prompt) {
+			rule.used = true
+			return rule.response, s.delay, nil
+		}
+	}
+	if s.hasDefault {
+		return s.defaultResponse, s.delay, nil
+	}
+	return "", 0, fmt.Errorf("mock agent script has no response for prompt %q", truncatePrompt(prompt, 120))
+}
+
+func (s *AgentScripter) markProduced() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.produced++
+}
+
+func (r agentScriptRule) matches(prompt string) bool {
+	switch r.kind {
+	case agentScriptRegex:
+		return r.regex != nil && r.regex.MatchString(prompt)
+	default:
+		return strings.Contains(prompt, r.pattern)
+	}
 }
