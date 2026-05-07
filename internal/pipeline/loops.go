@@ -197,13 +197,13 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		scope := le.pushLoopVars(varName, item, i, total)
 
 		// Execute nested steps
-		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		iterResult, shouldBreak, shouldContinue, completedAllSteps := le.executeIteration(ctx, step, loop, workflow, i)
 		le.popLoopVars(scope)
 		le.executor.clearStepInFlight(loopIterationID(step.ID, i))
 
 		result.Results = append(result.Results, iterResult...)
 		result.Iterations++
-		if shouldCompleteForeachIteration(ctx, iterResult, shouldBreak) {
+		if shouldCompleteForeachIteration(ctx, iterResult, shouldBreak, completedAllSteps) {
 			le.executor.markForeachIterationCompleted(step.ID, i, total)
 		}
 		le.executor.persistState()
@@ -333,8 +333,10 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 
 		scope := le.pushLoopVars(varName, i, i, maxIterations)
 
-		// Execute nested steps
-		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		// Execute nested steps. while/times do not persist iteration
+		// completion records, so the bd-vq8bc completedAllSteps signal is
+		// not consulted here.
+		iterResult, shouldBreak, shouldContinue, _ := le.executeIteration(ctx, step, loop, workflow, i)
 		le.popLoopVars(scope)
 
 		result.Results = append(result.Results, iterResult...)
@@ -467,8 +469,10 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 
 		scope := le.pushLoopVars(varName, i, i, times)
 
-		// Execute nested steps
-		iterResult, shouldBreak, shouldContinue := le.executeIteration(ctx, step, loop, workflow, i)
+		// Execute nested steps. while/times do not persist iteration
+		// completion records, so the bd-vq8bc completedAllSteps signal is
+		// not consulted here.
+		iterResult, shouldBreak, shouldContinue, _ := le.executeIteration(ctx, step, loop, workflow, i)
 		le.popLoopVars(scope)
 
 		result.Results = append(result.Results, iterResult...)
@@ -592,14 +596,22 @@ func (le *LoopExecutor) substituteIntExpr(expr string) (string, error) {
 }
 
 // executeIteration executes a single loop iteration (all nested steps).
-// Returns the step results, whether to break, and whether to continue.
-func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *LoopConfig, workflow *Workflow, iterIndex int) ([]StepResult, bool, bool) {
+// Returns the step results, whether to break, whether to continue, and
+// whether every nested step in loop.Steps was actually processed.
+//
+// bd-vq8bc: the completedAllSteps signal lets shouldCompleteForeachIteration
+// distinguish a fully-executed iteration that observed late ctx cancellation
+// from a partial iteration cancelled mid-body. Without it, an iteration
+// whose first body step succeeded before ctx.Done() fires would be marked
+// complete and resume would silently skip the remaining body steps.
+func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *LoopConfig, workflow *Workflow, iterIndex int) ([]StepResult, bool, bool, bool) {
 	results := make([]StepResult, 0, len(loop.Steps))
 
 	for _, nestedStep := range loop.Steps {
 		select {
 		case <-ctx.Done():
-			return results, false, false
+			// Mid-iteration cancellation: more body steps remain to run.
+			return results, false, false, false
 		default:
 		}
 
@@ -615,14 +627,14 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 				// Surface a failed control-condition like other failures: log
 				// and stop the iteration. Mirrors foreach behaviour for
 				// failed when-condition evaluation on a control-only step.
-				return results, true, false
+				return results, true, false, false
 			}
 			if applies {
 				switch control {
 				case LoopControlBreak:
-					return results, true, false
+					return results, true, false, false
 				case LoopControlContinue:
-					return results, false, true
+					return results, false, true, false
 				}
 			}
 			continue
@@ -648,7 +660,7 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 			switch onError {
 			case ErrorActionFail, ErrorActionFailFast:
 				// Stop loop on failure
-				return results, true, false
+				return results, true, false, false
 			case ErrorActionContinue:
 				// Continue with next step in iteration
 			}
@@ -661,15 +673,18 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 			if control, applies := foreachLoopControlValue(nestedStep); applies {
 				switch control {
 				case LoopControlBreak:
-					return results, true, false
+					return results, true, false, false
 				case LoopControlContinue:
-					return results, false, true
+					return results, false, true, false
 				}
 			}
 		}
 	}
 
-	return results, false, false
+	// Walked every step in loop.Steps without an early return: this
+	// iteration's body fully completed (whether or not ctx was cancelled
+	// after the last step finished).
+	return results, false, false, true
 }
 
 // loopControlAppliesForStep evaluates a control-only step's optional when

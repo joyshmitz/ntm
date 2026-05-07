@@ -1043,6 +1043,88 @@ func TestForceResumeIteration_TruncatesCollectedOutputs(t *testing.T) {
 	}
 }
 
+// TestExecuteIteration_CompletedAllStepsSignal covers bd-vq8bc: the
+// fourth return value from executeIteration must report whether every
+// step in loop.Steps was processed. shouldCompleteForeachIteration uses
+// it to distinguish a fully-completed iteration from a partial iteration
+// cancelled mid-body — without this signal, partial iterations get
+// silently marked complete and resume drops the unfinished body steps.
+func TestExecuteIteration_CompletedAllStepsSignal(t *testing.T) {
+	// Pre-cancelled context: executeIteration's top-of-loop ctx check
+	// triggers immediately, so completedAllSteps must be false even
+	// though zero body steps have been observed.
+	t.Run("cancelled before any step runs", func(t *testing.T) {
+		cfg := DefaultExecutorConfig("vq8bc-test-session")
+		cfg.DryRun = true
+		executor := NewExecutor(cfg)
+		executor.state = &ExecutionState{
+			Variables: map[string]interface{}{},
+			Steps:     map[string]StepResult{},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		step := &Step{ID: "fanout"}
+		loop := &LoopConfig{
+			Steps: []Step{
+				{ID: "first", Command: "true"},
+				{ID: "second", Command: "true"},
+			},
+		}
+		results, shouldBreak, shouldContinue, completedAll := executor.loopExec.executeIteration(ctx, step, loop, &Workflow{Settings: DefaultWorkflowSettings()}, 0)
+		if completedAll {
+			t.Fatal("completedAllSteps = true after pre-cancelled ctx; want false")
+		}
+		if shouldBreak || shouldContinue {
+			t.Fatalf("shouldBreak=%v shouldContinue=%v after pre-cancellation; want both false", shouldBreak, shouldContinue)
+		}
+		if len(results) != 0 {
+			t.Fatalf("results = %#v after pre-cancellation; want empty", results)
+		}
+	})
+
+	// Clean context: every body step processes naturally so the signal
+	// must report completion.
+	t.Run("clean run sets completedAllSteps", func(t *testing.T) {
+		cfg := DefaultExecutorConfig("vq8bc-test-session")
+		cfg.DryRun = true
+		executor := NewExecutor(cfg)
+		executor.state = &ExecutionState{
+			Variables: map[string]interface{}{},
+			Steps:     map[string]StepResult{},
+		}
+		// graph required by executeStep; build from the workflow.
+		workflow := &Workflow{
+			SchemaVersion: SchemaVersion,
+			Name:          "vq8bc-clean",
+			Settings:      DefaultWorkflowSettings(),
+			Steps: []Step{
+				{
+					ID: "fanout",
+					Loop: &LoopConfig{
+						Times: 1,
+						Steps: []Step{
+							{ID: "first", Command: "true"},
+							{ID: "second", Command: "true"},
+						},
+					},
+				},
+			},
+		}
+		executor.graph = NewDependencyGraph(workflow)
+		step := &workflow.Steps[0]
+		results, shouldBreak, shouldContinue, completedAll := executor.loopExec.executeIteration(context.Background(), step, step.Loop, workflow, 0)
+		if !completedAll {
+			t.Fatalf("completedAllSteps = false after clean run; want true (results=%#v)", results)
+		}
+		if shouldBreak || shouldContinue {
+			t.Fatalf("shouldBreak=%v shouldContinue=%v after clean run; want both false", shouldBreak, shouldContinue)
+		}
+		if len(results) != 2 {
+			t.Fatalf("results = %#v; want 2 entries (one per body step)", results)
+		}
+	})
+}
+
 // TestComputeForeachItemsFingerprint_StableAndDivergent verifies the
 // fingerprint is deterministic for equivalent inputs and diverges for
 // reordered or modified inputs (bd-3awat).

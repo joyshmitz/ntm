@@ -619,14 +619,24 @@ func iterationSucceeded(results []StepResult, shouldBreak bool) bool {
 	return true
 }
 
-func shouldCompleteForeachIteration(ctx context.Context, results []StepResult, shouldBreak bool) bool {
+// shouldCompleteForeachIteration decides whether to record an iteration
+// as durably complete. completedAllSteps (bd-vq8bc) is the explicit signal
+// from executeIteration that every nested step in loop.Steps was processed,
+// distinguishing a fully-executed iteration that observed late ctx
+// cancellation (safe to checkpoint) from a partial iteration cancelled
+// mid-body (must rerun on resume so the unfinished body steps still run).
+//
+// Replaces the previous len(results)>0 heuristic, which silently dropped
+// remaining body steps when ctx fired between the success of step N and
+// the dispatch of step N+1 — see bd-vq8bc impact analysis.
+func shouldCompleteForeachIteration(ctx context.Context, results []StepResult, shouldBreak, completedAllSteps bool) bool {
 	if !iterationSucceeded(results, shouldBreak) {
 		return false
 	}
 	if ctx.Err() == nil {
 		return true
 	}
-	return len(results) > 0
+	return completedAllSteps
 }
 
 func (e *Executor) beginParallelState(stepID string, total int) {

@@ -212,11 +212,25 @@ func TestResumeProgressBookkeepingHelpers(t *testing.T) {
 	}
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if shouldCompleteForeachIteration(cancelledCtx, nil, false) {
+	if shouldCompleteForeachIteration(cancelledCtx, nil, false, false) {
 		t.Fatal("empty cancelled iteration was treated as completed")
 	}
-	if !shouldCompleteForeachIteration(cancelledCtx, []StepResult{{Status: StatusCompleted}}, false) {
+	// bd-vq8bc: late cancellation after every nested step ran
+	// (completedAllSteps=true) is still safe to checkpoint.
+	if !shouldCompleteForeachIteration(cancelledCtx, []StepResult{{Status: StatusCompleted}}, false, true) {
 		t.Fatal("completed iteration was not checkpointed after late cancellation")
+	}
+	// bd-vq8bc: mid-iteration cancellation after a successful body step
+	// must NOT mark the iteration complete; resume needs to rerun the
+	// remaining body steps. The previous len(results)>0 heuristic
+	// returned true for this case and silently dropped work.
+	if shouldCompleteForeachIteration(cancelledCtx, []StepResult{{Status: StatusCompleted}}, false, false) {
+		t.Fatal("partial cancelled iteration was treated as complete (bd-vq8bc regression)")
+	}
+	// Clean (non-cancelled) ctx with an intentional break/continue keeps
+	// existing semantics — break is rejected via iterationSucceeded.
+	if shouldCompleteForeachIteration(context.Background(), []StepResult{{Status: StatusCompleted}}, true, false) {
+		t.Fatal("break-controlled iteration treated as complete")
 	}
 	for _, status := range []ExecutionStatus{StatusFailed, StatusCancelled, StatusRunning, StatusPending} {
 		if iterationSucceeded([]StepResult{{Status: status}}, false) {
