@@ -656,32 +656,8 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		return e.executeBeadQuery(ctx, step, workflow)
 	}
 
-	// Phase-A graceful handling for step kinds whose execution semantics
-	// are still under development: `foreach:` and `foreach_pane:`.
-	// These steps parse and validate, but the executor doesn't yet know
-	// how to dispatch them.
 	if step.Foreach != nil || step.ForeachPane != nil {
-		var kind, summary string
-		switch {
-		case step.Foreach != nil:
-			kind = "foreach"
-			summary = describeForeach(step.Foreach)
-		case step.ForeachPane != nil:
-			kind = "foreach_pane"
-			summary = describeForeach(step.ForeachPane)
-		}
-		if e.config.DryRun {
-			result.Status = StatusCompleted
-			result.Output = dryRunOutput(step, fmt.Sprintf("Would execute %s step: %s", kind, summary))
-			result.FinishedAt = time.Now()
-			return result
-		}
-		result.Status = StatusSkipped
-		result.SkipReason = fmt.Sprintf("%s steps are not yet executed by ntm pipeline runner; dispatch %q manually (%s)", kind, step.ID, summary)
-		result.SkipKind = SkipKindNotImplemented
-		result.FinishedAt = time.Now()
-		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
-		return result
+		return e.executeForeach(ctx, step, workflow)
 	}
 
 	// Get prompt (from prompt or prompt_file)
