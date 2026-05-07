@@ -83,6 +83,8 @@ type Executor struct {
 	defaults map[string]interface{}
 	limits   LimitsConfig
 	tmux     TmuxClient
+	paneMeta *PaneMetadataLoader
+	paneMu   sync.Mutex
 	graph    *DependencyGraph
 	progress chan<- ProgressEvent
 	cancelFn context.CancelFunc
@@ -115,6 +117,7 @@ func (e *Executor) SetTmuxClient(client TmuxClient) {
 		client = realTmuxClient{}
 	}
 	e.tmux = client
+	e.resetPaneMetadataLoader()
 }
 
 func (e *Executor) tmuxClient() TmuxClient {
@@ -190,6 +193,7 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 
 	e.defaults = workflow.Defaults
 	e.limits = workflow.Settings.Limits.EffectiveLimits()
+	e.resetPaneMetadataLoader()
 
 	e.persistState()
 

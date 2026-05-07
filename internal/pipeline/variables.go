@@ -421,6 +421,7 @@ func parseDefault(expr string) (varPath, defaultVal string, hasDefault bool) {
 //   - steps.id.output, steps.id.data.field
 //   - steps.id.pane, steps.id.duration, steps.id.status, steps.id.agent
 //   - env.NAME
+//   - pane.role, pane.model, pane.domain, pane.index
 //   - session, timestamp, run_id, workflow
 //   - loop.item, loop.index, loop.count, loop.first, loop.last
 func (s *Substitutor) resolveVar(path string) (interface{}, error) {
@@ -444,6 +445,8 @@ func (s *Substitutor) resolveVar(path string) (interface{}, error) {
 		return s.resolveDefaults(parts[1:])
 	case "item":
 		return s.resolveItem(parts[1:])
+	case "pane":
+		return s.resolvePane(parts[1:])
 	case "session":
 		return s.session, nil
 	case "run_id":
