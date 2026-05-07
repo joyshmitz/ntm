@@ -493,10 +493,7 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 			if step.LoopControl == LoopControlBreak || step.LoopControl == LoopControlContinue {
 				continue
 			}
-			iterResult.Skipped = true
-			iterResult.SkipKind = result.SkipKind
-			iterResult.SkipReason = result.SkipReason
-			slog.Info("foreach iteration skipped by body step",
+			slog.Info("foreach body step skipped",
 				"run_id", e.state.RunID,
 				"workflow", workflow.Name,
 				"step_id", parent.ID,
@@ -505,7 +502,7 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 				"body_step_id", step.ID,
 				"skip_kind", result.SkipKind,
 			)
-			return iterResult
+			continue
 		}
 
 		if result.Status == StatusFailed || result.Status == StatusCancelled {
@@ -515,7 +512,28 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 			}
 		}
 	}
-	return iterResult
+	return markForeachIterationSkippedIfAllResultsSkipped(iterResult)
+}
+
+func markForeachIterationSkippedIfAllResultsSkipped(result foreachIterationResult) foreachIterationResult {
+	if len(result.Results) == 0 || result.Error != "" || result.Control != LoopControlNone {
+		return result
+	}
+	var skipKind SkipKind
+	var skipReason string
+	for _, stepResult := range result.Results {
+		if stepResult.Status != StatusSkipped {
+			return result
+		}
+		if skipKind == "" {
+			skipKind = stepResult.SkipKind
+			skipReason = stepResult.SkipReason
+		}
+	}
+	result.Skipped = true
+	result.SkipKind = skipKind
+	result.SkipReason = skipReason
+	return result
 }
 
 func (e *Executor) foreachLoopControl(step Step) (LoopControl, bool) {
