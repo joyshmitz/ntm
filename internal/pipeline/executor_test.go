@@ -3915,6 +3915,173 @@ func TestExecutor_ValidateDeclaredOutputs_DryRunSkipped(t *testing.T) {
 	}
 }
 
+// bd-6lkqr.9: ${steps.X.parsed_data} + dotted-path access to structured outputs.
+
+func TestSubstituteVariables_ParsedDataDottedPath(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-parsed",
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"fetch": {
+				StepID: "fetch",
+				Status: StatusCompleted,
+				Output: `{"foo":"bar","items":[10,20,30]}`,
+				ParsedData: map[string]interface{}{
+					"foo": "bar",
+					"items": []interface{}{
+						10,
+						20,
+						30,
+					},
+					"user": map[string]interface{}{"name": "alice"},
+				},
+			},
+		},
+	}
+
+	cases := []struct {
+		template string
+		want     string
+	}{
+		{"${steps.fetch.parsed_data.foo}", "bar"},
+		{"${steps.fetch.parsed_data.items[1]}", "20"},
+		{"${steps.fetch.parsed_data.user.name}", "alice"},
+	}
+	for _, tc := range cases {
+		got := e.substituteVariables(tc.template)
+		if got != tc.want {
+			t.Errorf("substituteVariables(%q) = %q, want %q", tc.template, got, tc.want)
+		}
+	}
+}
+
+func TestSubstituteVariables_ParsedDataArrayIndex(t *testing.T) {
+	// bd-6lkqr.9 acceptance: array-index access ${steps.X.parsed_data[N]}
+	// when ParsedData itself is an array (not a field within an object).
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-array",
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"list": {
+				StepID:     "list",
+				Status:     StatusCompleted,
+				ParsedData: []interface{}{"alpha", "beta", "gamma"},
+			},
+		},
+	}
+
+	cases := []struct {
+		template string
+		want     string
+	}{
+		{"${steps.list.parsed_data[0]}", "alpha"},
+		{"${steps.list.parsed_data[2]}", "gamma"},
+	}
+	for _, tc := range cases {
+		got := e.substituteVariables(tc.template)
+		if got != tc.want {
+			t.Errorf("substituteVariables(%q) = %q, want %q", tc.template, got, tc.want)
+		}
+	}
+}
+
+func TestSubstituteVariables_ParsedDataMissingErrors(t *testing.T) {
+	// bd-6lkqr.9 acceptance: missing parsed_data (step without output_parse)
+	// must surface a clear error rather than silently substituting the literal.
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-missing-parsed",
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"raw": {
+				StepID:     "raw",
+				Status:     StatusCompleted,
+				Output:     "hello",
+				ParsedData: nil,
+			},
+		},
+	}
+
+	_, err := e.substituteVariablesStrict("${steps.raw.parsed_data}")
+	if err == nil {
+		t.Fatal("expected error for ${steps.raw.parsed_data} when ParsedData is nil")
+	}
+	if !strings.Contains(err.Error(), "parsed") && !strings.Contains(err.Error(), "data") {
+		t.Errorf("error %q should mention parsed/data", err.Error())
+	}
+}
+
+func TestSubstituteVariables_ParsedDataComplexJSONStringify(t *testing.T) {
+	// bd-6lkqr.9: arrays/maps stringify as JSON when used as a whole.
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-stringify",
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"step": {
+				StepID:     "step",
+				Status:     StatusCompleted,
+				ParsedData: []interface{}{"a", "b"},
+			},
+		},
+	}
+
+	got := e.substituteVariables("${steps.step.parsed_data}")
+	// formatValue JSON-encodes complex types.
+	if got != `["a","b"]` {
+		t.Errorf("substituteVariables = %q, want JSON array", got)
+	}
+}
+
+func TestExecutor_CommandStep_OutputParseJSON_DownstreamSubstitution(t *testing.T) {
+	// bd-6lkqr.9 acceptance: end-to-end — command step with output_parse: json
+	// produces ParsedData; downstream ${steps.X.parsed_data.foo} substitution
+	// resolves into the parsed structure.
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = false
+	e := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "json-pipeline",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID:          "produce",
+				Command:     `printf '{"foo":"bar","n":7}'`,
+				OutputParse: OutputParse{Type: "json"},
+				OutputVar:   "produced",
+			},
+			{
+				ID:        "consume",
+				DependsOn: []string{"produce"},
+				Command:   `echo got=${steps.produce.parsed_data.foo} n=${steps.produce.parsed_data.n}`,
+			},
+		},
+	}
+
+	state, err := e.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	consume, ok := state.Steps["consume"]
+	if !ok {
+		t.Fatalf("missing consume step result")
+	}
+	if !strings.Contains(consume.Output, "got=bar") {
+		t.Errorf("consume.Output=%q should contain got=bar", consume.Output)
+	}
+	if !strings.Contains(consume.Output, "n=7") {
+		t.Errorf("consume.Output=%q should contain n=7", consume.Output)
+	}
+}
+
 func TestExecutor_Run_PopulatesOutputValidation(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "deliverable.md")
