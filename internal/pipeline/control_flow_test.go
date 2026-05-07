@@ -537,3 +537,83 @@ func TestOnFailureRecoveryCanSuppressOriginalFailure(t *testing.T) {
 		t.Fatalf("original step result = %+v, want completed without error", result)
 	}
 }
+
+func TestOnFailureActionSetsRuntimeVariableAndSkipsOriginalFailure(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("runtime-failure-session"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "runtime-failure-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID:        "register_mail",
+				Command:   "exit 4",
+				OnFailure: OnFailureSpec{Action: "fallback_to_ntm_inbox"},
+			},
+			{
+				ID:        "use_fallback",
+				Command:   "echo fallback",
+				DependsOn: []string{"register_mail"},
+				When:      `${runtime.register_mail_failure_action} == "fallback_to_ntm_inbox"`,
+			},
+		},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil after handled on_failure action", err)
+	}
+
+	register := state.Steps["register_mail"]
+	if register.Status != StatusSkipped {
+		t.Fatalf("register_mail status = %s, want skipped", register.Status)
+	}
+	if register.Error != nil {
+		t.Fatalf("register_mail error = %+v, want nil after handled on_failure action", register.Error)
+	}
+	if !strings.Contains(register.SkipReason, "${runtime.register_mail_failure_action}") {
+		t.Fatalf("register_mail SkipReason = %q, want runtime variable reference", register.SkipReason)
+	}
+	if got := state.Variables["runtime.register_mail_failure_action"]; got != "fallback_to_ntm_inbox" {
+		t.Fatalf("runtime failure action = %v, want fallback_to_ntm_inbox", got)
+	}
+	if result := state.Steps["use_fallback"]; result.Status != StatusCompleted {
+		t.Fatalf("use_fallback status = %s, want completed; error=%+v", result.Status, result.Error)
+	}
+}
+
+func TestOnFailureActionNotSetOnSuccessSkipsRuntimeGuardedStep(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("runtime-failure-session"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "runtime-failure-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID:        "register_mail",
+				Command:   "echo ok",
+				OnFailure: OnFailureSpec{Action: "fallback_to_ntm_inbox"},
+			},
+			{
+				ID:        "use_fallback",
+				Command:   "echo fallback",
+				DependsOn: []string{"register_mail"},
+				When:      `${runtime.register_mail_failure_action} == "fallback_to_ntm_inbox"`,
+			},
+		},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	if _, ok := state.Variables["runtime.register_mail_failure_action"]; ok {
+		t.Fatalf("runtime failure action set after successful step: %v", state.Variables["runtime.register_mail_failure_action"])
+	}
+	if result := state.Steps["use_fallback"]; result.Status != StatusSkipped {
+		t.Fatalf("use_fallback status = %s, want skipped", result.Status)
+	}
+}

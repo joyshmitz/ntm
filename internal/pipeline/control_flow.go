@@ -266,6 +266,91 @@ func (e *Executor) executeOnFailureRecovery(ctx context.Context, step *Step, wor
 	return failed
 }
 
+func (e *Executor) executeOnFailureAction(step *Step, failed StepResult) StepResult {
+	if step == nil {
+		return failed
+	}
+	action := strings.TrimSpace(step.OnFailure.Action)
+	if action == "" || knownFailureAction(action) {
+		return failed
+	}
+
+	key := runtimeFailureActionKey(step.ID)
+	variableRef := "runtime." + key
+
+	e.varMu.Lock()
+	if e.state.Variables == nil {
+		e.state.Variables = make(map[string]interface{})
+	}
+	e.state.Variables[variableRef] = action
+	runtimeVars, _ := e.state.Variables["runtime"].(map[string]interface{})
+	if runtimeVars == nil {
+		runtimeVars = make(map[string]interface{})
+		e.state.Variables["runtime"] = runtimeVars
+	}
+	runtimeVars[key] = action
+	e.varMu.Unlock()
+
+	e.stepLogger(step).Info(EventOnFailureFire,
+		FieldRuntimeVariable, variableRef,
+		FieldFailureAction, action,
+	)
+
+	failed.Status = StatusSkipped
+	failed.Error = nil
+	failed.SkipReason = fmt.Sprintf("on_failure set ${%s}=%q", variableRef, action)
+	failed.FinishedAt = time.Now()
+	return failed
+}
+
+func (e *Executor) substituteRuntimeVariables(s string) string {
+	escaped := escapedPattern.ReplaceAllString(s, escapePlaceholder)
+	result := varPattern.ReplaceAllStringFunc(escaped, func(match string) string {
+		expr := strings.TrimSpace(match[2 : len(match)-1])
+		varPath, defaultVal, hasDefault := parseDefault(expr)
+		if !strings.HasPrefix(varPath, "runtime.") {
+			return match
+		}
+		key := strings.TrimPrefix(varPath, "runtime.")
+		if value, ok := e.runtimeVariable(key); ok {
+			return formatValue(value)
+		}
+		if hasDefault {
+			return defaultVal
+		}
+		return ""
+	})
+	return strings.ReplaceAll(result, escapePlaceholder, `\${`)
+}
+
+func (e *Executor) runtimeVariable(key string) (interface{}, bool) {
+	if e.state == nil || e.state.Variables == nil {
+		return nil, false
+	}
+	if value, ok := e.state.Variables["runtime."+key]; ok {
+		return value, true
+	}
+	runtimeVars, ok := e.state.Variables["runtime"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	value, ok := runtimeVars[key]
+	return value, ok
+}
+
+func runtimeFailureActionKey(stepID string) string {
+	return stepID + "_failure_action"
+}
+
+func knownFailureAction(action string) bool {
+	switch ErrorAction(action) {
+	case ErrorActionFail, ErrorActionFailFast, ErrorActionContinue, ErrorActionRetry:
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Executor) recoveryStepFromFallback(step *Step) (*Step, bool, error) {
 	fallback := step.OnFailure.Fallback
 	template, ok := recoveryStringValue(fallback["template"])

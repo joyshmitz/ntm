@@ -38,6 +38,7 @@ type ExecutorConfig struct {
 	DryRun           bool          // If true, validate but don't execute
 	Verbose          bool          // Enable verbose logging
 	RunID            string        // Optional: pre-generated run ID (if empty, one is generated)
+	BeadQueryRunBr   func(ctx context.Context, args []string) ([]byte, error)
 
 	// StartFromStep, when non-empty, instructs Run() to mark every transitive
 	// dependency of this step as StatusSkipped and begin actual execution at
@@ -606,6 +607,11 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 
 	result.Status = StatusFailed
 	result.FinishedAt = time.Now()
+	result = e.executeOnFailureAction(step, result)
+	if result.Status == StatusSkipped {
+		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
+		return result
+	}
 	result = e.executeOnFailureRecovery(ctx, step, workflow, result)
 	if result.Status == StatusCompleted {
 		e.emitProgress("step_complete", step.ID,
@@ -644,6 +650,11 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	// Dispatch branch steps to resolveBranch + lookupBranch.
 	if step.Branch != "" {
 		return e.executeBranch(ctx, step, workflow)
+	}
+
+	// Dispatch structured br query steps.
+	if step.BeadQuery != nil {
+		return e.executeBeadQuery(ctx, step, workflow)
 	}
 
 	// Phase-A graceful handling for step kinds whose execution semantics
@@ -2029,6 +2040,7 @@ func (e *Executor) substituteVariables(s string) string {
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
+	s = e.substituteRuntimeVariables(s)
 	result, _ := sub.Substitute(s)
 	return result
 }
@@ -2050,6 +2062,7 @@ func (e *Executor) evaluateCondition(condition string) (bool, error) {
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
+	condition = e.substituteRuntimeVariables(condition)
 	return EvaluateCondition(condition, sub)
 }
 

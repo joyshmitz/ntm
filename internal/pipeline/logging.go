@@ -49,6 +49,8 @@ const (
 	FieldSubstitutionResolved = "substitution_resolved"
 	FieldRecoveryPane         = "recovery_pane"
 	FieldRecoveryTemplate     = "recovery_template"
+	FieldRuntimeVariable      = "runtime_variable"
+	FieldFailureAction        = "failure_action"
 )
 
 const (
