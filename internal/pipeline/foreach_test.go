@@ -157,6 +157,52 @@ func TestExecuteForeachContinueKeepsOtherIterationsAfterFailure(t *testing.T) {
 	}
 }
 
+func TestExecuteForeachWorkflowContinueKeepsBodyStepsAfterFailure(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-workflow-continue",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	workflow.Settings.OnError = ErrorActionContinue
+	step := &Step{
+		ID: "workflow_continue_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["one"]`,
+			Steps: []Step{
+				{
+					ID:      "fail",
+					Command: `echo failed; exit 7`,
+				},
+				{
+					ID:      "after",
+					Command: `printf 'after-%s' '${item}'`,
+				},
+			},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 1 {
+		t.Fatalf("iterations = %d, want 1", len(iterations))
+	}
+	if got := len(iterations[0].Results); got != 2 {
+		t.Fatalf("iteration results = %d, want failed body step plus follow-up", got)
+	}
+	if iterations[0].Results[0].Status != StatusFailed {
+		t.Fatalf("first body status = %s, want failed", iterations[0].Results[0].Status)
+	}
+	if iterations[0].Results[1].Status != StatusCompleted || iterations[0].Results[1].Output != "after-one" {
+		t.Fatalf("second body result = %#v, want completed after-one", iterations[0].Results[1])
+	}
+}
+
 func TestExecuteForeachFilterExcludesIterationsBeforeDispatch(t *testing.T) {
 	workflow := &Workflow{
 		SchemaVersion: SchemaVersion,

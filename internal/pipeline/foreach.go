@@ -509,7 +509,7 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		}
 
 		if result.Status == StatusFailed || result.Status == StatusCancelled {
-			if resolveErrorAction(step.OnError, "") != ErrorActionContinue {
+			if resolveErrorAction(step.OnError, workflow.Settings.OnError) != ErrorActionContinue {
 				iterResult.Error = resultErrorMessage(result)
 				return iterResult
 			}
