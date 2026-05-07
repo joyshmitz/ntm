@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -117,10 +118,7 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	total := len(items)
 
 	// Calculate max iterations
-	maxIterations := loop.MaxIterations.Value
-	if maxIterations <= 0 {
-		maxIterations = DefaultMaxIterations
-	}
+	maxIterations := le.resolveMaxIterations(step, loop)
 	if total > maxIterations {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -230,10 +228,7 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 	}
 
 	// While loops require max_iterations for safety
-	maxIterations := loop.MaxIterations.Value
-	if maxIterations <= 0 {
-		maxIterations = DefaultMaxIterations
-	}
+	maxIterations := le.resolveMaxIterations(step, loop)
 
 	varName := loop.As
 	if varName == "" {
@@ -366,10 +361,7 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 	}
 
 	// Apply max iterations limit
-	maxIterations := loop.MaxIterations.Value
-	if maxIterations <= 0 {
-		maxIterations = DefaultMaxIterations
-	}
+	maxIterations := le.resolveMaxIterations(step, loop)
 	if times > maxIterations {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -461,6 +453,63 @@ func (le *LoopExecutor) executeTimes(ctx context.Context, step *Step, loop *Loop
 		le.executor.calculateProgress())
 
 	return result
+}
+
+func (le *LoopExecutor) resolveMaxIterations(step *Step, loop *LoopConfig) int {
+	if loop == nil {
+		return DefaultMaxIterations
+	}
+	return le.resolveIntOrExpr(step, "loop.max_iterations", &loop.MaxIterations, DefaultMaxIterations)
+}
+
+func (le *LoopExecutor) resolveIntOrExpr(step *Step, field string, value *IntOrExpr, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	if value.Expr == "" {
+		if value.Value > 0 {
+			return value.Value
+		}
+		value.Value = fallback
+		return fallback
+	}
+
+	resolved, err := le.substituteIntExpr(value.Expr)
+	if err == nil {
+		parsed, parseErr := strconv.Atoi(strings.TrimSpace(resolved))
+		if parseErr != nil {
+			err = fmt.Errorf("parse %q as positive integer: %w", resolved, parseErr)
+		} else if parsed <= 0 {
+			err = fmt.Errorf("parse %q as positive integer: value must be greater than zero", resolved)
+		} else {
+			value.Value = parsed
+			return parsed
+		}
+	}
+
+	le.executor.stepLogger(step).Warn(EventSubstWarn,
+		FieldSubstitutionKey, field,
+		FieldSubstitutionResolved, value.Expr,
+		"fallback", fallback,
+		"error", err,
+	)
+	value.Value = fallback
+	return fallback
+}
+
+func (le *LoopExecutor) substituteIntExpr(expr string) (string, error) {
+	le.executor.varMu.RLock()
+	defer le.executor.varMu.RUnlock()
+	le.executor.stateMu.RLock()
+	defer le.executor.stateMu.RUnlock()
+
+	workflowID := ""
+	if le.executor.state != nil {
+		workflowID = le.executor.state.WorkflowID
+	}
+	sub := NewSubstitutor(le.executor.state, le.executor.config.Session, workflowID)
+	sub.SetDefaults(le.executor.defaults)
+	return sub.SubstituteStrict(le.executor.substituteRuntimeVariables(expr))
 }
 
 // executeIteration executes a single loop iteration (all nested steps).

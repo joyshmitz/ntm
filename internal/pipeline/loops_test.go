@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -329,6 +330,115 @@ func TestLoopTimesExceedsMaxIterations(t *testing.T) {
 	if result.Error == nil || result.Error.Type != "loop" {
 		t.Error("expected loop error for exceeding max_iterations")
 	}
+}
+
+func TestLoopMaxIterationsExprResolvesDefaults(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{Session: "test", DryRun: true})
+	executor.defaults = map[string]interface{}{
+		"hard_caps": map[string]interface{}{
+			"foo": 10,
+		},
+	}
+	executor.state = &ExecutionState{
+		RunID:      "run-max-expr",
+		WorkflowID: "workflow-max-expr",
+		Variables: map[string]interface{}{
+			"items": []interface{}{"a", "b", "c"},
+		},
+		Steps: make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID: "max-expr-step",
+		Loop: &LoopConfig{
+			Items:         "${vars.items}",
+			MaxIterations: IntOrExpr{Expr: "${defaults.hard_caps.foo}"},
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %v, want %v; error=%v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Iterations != 3 {
+		t.Fatalf("Iterations = %d, want 3", result.Iterations)
+	}
+	if got := step.Loop.MaxIterations.Value; got != 10 {
+		t.Fatalf("MaxIterations.Value = %d, want 10", got)
+	}
+}
+
+func TestLoopMaxIterationsLiteralStillWorks(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{Session: "test", DryRun: true})
+	executor.state = &ExecutionState{
+		RunID:      "run-max-literal",
+		WorkflowID: "workflow-max-literal",
+		Variables:  make(map[string]interface{}),
+		Steps:      make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID: "max-literal-step",
+		Loop: &LoopConfig{
+			Times:         6,
+			MaxIterations: IntOrExpr{Value: 6},
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %v, want %v; error=%v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Iterations != 6 {
+		t.Fatalf("Iterations = %d, want 6", result.Iterations)
+	}
+	if got := step.Loop.MaxIterations.Value; got != 6 {
+		t.Fatalf("MaxIterations.Value = %d, want 6", got)
+	}
+}
+
+func TestLoopMaxIterationsExprFallbackWarns(t *testing.T) {
+	var buf bytes.Buffer
+	restore := capturePipelineLogs(t, &buf)
+	defer restore()
+
+	executor := NewExecutor(ExecutorConfig{Session: "test", DryRun: true})
+	executor.defaults = map[string]interface{}{}
+	executor.state = &ExecutionState{
+		RunID:      "run-max-fallback",
+		WorkflowID: "workflow-max-fallback",
+		Variables:  make(map[string]interface{}),
+		Steps:      make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID: "max-fallback-step",
+		Loop: &LoopConfig{
+			Times:         3,
+			MaxIterations: IntOrExpr{Expr: "${defaults.unknown}"},
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %v, want %v; error=%v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Iterations != 3 {
+		t.Fatalf("Iterations = %d, want 3", result.Iterations)
+	}
+	if got := step.Loop.MaxIterations.Value; got != DefaultMaxIterations {
+		t.Fatalf("MaxIterations.Value = %d, want %d", got, DefaultMaxIterations)
+	}
+
+	events := parseJSONLEvents(t, &buf)
+	assertEvent(t, events, EventSubstWarn,
+		FieldStepID, "max-fallback-step",
+		FieldSubstitutionKey, "loop.max_iterations",
+		"fallback", "100",
+	)
 }
 
 func TestLoopCancelledContext(t *testing.T) {
