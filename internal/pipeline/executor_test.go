@@ -3171,3 +3171,187 @@ func TestExecuteCommand_MultilineOutput(t *testing.T) {
 		t.Errorf("Output = %q, want to contain line1 and line3", result.Output)
 	}
 }
+
+func TestExecuteTemplate_DryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	templateFile := filepath.Join(tmpDir, "test-template.md")
+	if err := os.WriteFile(templateFile, []byte("Hello <NAME>, this is a test."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultExecutorConfig("test-tpl")
+	cfg.ProjectDir = tmpDir
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-tpl-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+
+	step := &Step{
+		ID:       "tpl-step",
+		Template: "test-template.md",
+		Params:   map[string]interface{}{"NAME": "Alice"},
+		Pane:     PaneSpec{Index: 1},
+	}
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if !strings.Contains(result.Output, "[DRY RUN]") {
+		t.Errorf("Output = %q, want [DRY RUN]", result.Output)
+	}
+}
+
+func TestExecuteTemplate_MissingFile(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-tpl")
+	cfg.ProjectDir = t.TempDir()
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-tpl-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+
+	step := &Step{ID: "tpl-step", Template: "nonexistent.md"}
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusFailed)
+	}
+	if result.Error == nil || result.Error.Type != "template" {
+		t.Errorf("expected template error, got %+v", result.Error)
+	}
+}
+
+func TestExecuteTemplate_UnresolvedDeclaredPlaceholder(t *testing.T) {
+	tmpDir := t.TempDir()
+	content := "**Parameters:** <NAME>, <ROLE>\nHello <NAME>, role: <ROLE>"
+	if err := os.WriteFile(filepath.Join(tmpDir, "tpl.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultExecutorConfig("test-tpl")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-tpl-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+
+	step := &Step{
+		ID:       "tpl-step",
+		Template: "tpl.md",
+		Params:   map[string]interface{}{"NAME": "Alice"},
+		Pane:     PaneSpec{Index: 1},
+	}
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusFailed)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "ROLE") {
+		t.Errorf("expected error mentioning ROLE, got %+v", result.Error)
+	}
+}
+
+func TestExecuteTemplate_ResolveFromWorkflowDir(t *testing.T) {
+	workflowDir := t.TempDir()
+	projectDir := t.TempDir()
+	templateFile := filepath.Join(workflowDir, "my-template.md")
+	if err := os.WriteFile(templateFile, []byte("Template content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultExecutorConfig("test-tpl")
+	cfg.ProjectDir = projectDir
+	cfg.WorkflowFile = filepath.Join(workflowDir, "workflow.yaml")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-tpl-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+
+	step := &Step{
+		ID:       "tpl-step",
+		Template: "my-template.md",
+		Pane:     PaneSpec{Index: 1},
+	}
+	result := e.executeTemplate(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+}
+
+func TestExecuteTemplate_DispatchLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "tpl.md"), []byte("rendered content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultExecutorConfig("test-tpl")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-tpl-test",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+
+	e.writeDispatchLog("test-step", "rendered content here")
+
+	entries, err := os.ReadDir(filepath.Join(tmpDir, "session-logs"))
+	if err != nil {
+		t.Fatalf("session-logs dir not created: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 dispatch log, got %d", len(entries))
+	}
+	if !strings.HasPrefix(entries[0].Name(), "dispatch-") {
+		t.Errorf("log file name = %q, want prefix dispatch-", entries[0].Name())
+	}
+}
+
+func TestResolveTemplatePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "exists.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultExecutorConfig("test")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+
+	tests := []struct {
+		name     string
+		template string
+		wantOK   bool
+	}{
+		{"relative found in project dir", "exists.md", true},
+		{"relative not found", "nope.md", false},
+		{"absolute found", filepath.Join(tmpDir, "exists.md"), true},
+		{"absolute not found", "/nonexistent/path.md", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := e.resolveTemplatePath(tt.template)
+			if tt.wantOK && got == "" {
+				t.Errorf("resolveTemplatePath(%q) = empty, want found", tt.template)
+			}
+			if !tt.wantOK && got != "" {
+				t.Errorf("resolveTemplatePath(%q) = %q, want empty", tt.template, got)
+			}
+		})
+	}
+}

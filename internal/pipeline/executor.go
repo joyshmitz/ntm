@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -560,20 +561,21 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		return e.executeCommand(ctx, step, workflow)
 	}
 
+	// Dispatch template steps to executeTemplate.
+	if step.Template != "" {
+		return e.executeTemplate(ctx, step, workflow)
+	}
+
 	// Phase-A graceful handling for step kinds whose execution semantics
-	// are still under development: `template:`, `foreach:`,
-	// `foreach_pane:`, and `branch:`. These steps parse and validate, but
-	// the executor doesn't yet know how to dispatch them. In dry-run mode
-	// we report what we *would* do; in real-run mode we surface a clear
-	// error so the operator can drive that step manually.
-	if step.Template != "" ||
-		step.Foreach != nil || step.ForeachPane != nil ||
+	// are still under development: `foreach:`, `foreach_pane:`, and
+	// `branch:`. These steps parse and validate, but the executor doesn't
+	// yet know how to dispatch them. In dry-run mode we report what we
+	// *would* do; in real-run mode we surface a clear error so the
+	// operator can drive that step manually.
+	if step.Foreach != nil || step.ForeachPane != nil ||
 		step.Branch != "" {
 		var kind, summary string
 		switch {
-		case step.Template != "":
-			kind = "template"
-			summary = step.Template
 		case step.Foreach != nil:
 			kind = "foreach"
 			summary = describeForeach(step.Foreach)
@@ -776,10 +778,16 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					return os.ErrProcessDone
+				}
+				return cmd.Process.Kill()
+			}
 		}
 		return nil
 	}
+	cmd.WaitDelay = time.Second
 
 	if e.config.ProjectDir != "" {
 		cmd.Dir = e.config.ProjectDir
@@ -918,6 +926,235 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		"step_id", step.ID,
 	)
 	return result
+}
+
+// executeTemplate reads a template file, substitutes <KEY> placeholders with
+// step Params/Args, validates declared placeholders, and dispatches the
+// rendered text to a pane. Wait/timeout behavior mirrors the prompt path.
+func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Workflow) StepResult {
+	result := StepResult{
+		StepID:    step.ID,
+		Status:    StatusRunning,
+		StartedAt: time.Now(),
+		AgentType: "template",
+	}
+
+	templatePath := e.resolveTemplatePath(step.Template)
+	if templatePath == "" {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "template",
+			Message:   fmt.Sprintf("template file not found: %s", step.Template),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	content, err := os.ReadFile(templatePath)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "template",
+			Message:   fmt.Sprintf("failed to read template: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	reserved := ReservedPlaceholders(e.config.ProjectDir, e.config.Session)
+	rendered, err := RenderTemplate(string(content), step.Params, step.Args, reserved)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "template",
+			Message:   fmt.Sprintf("template rendering failed: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	rendered = e.substituteVariables(rendered)
+
+	paneID, agentType, err := e.selectPane(step)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "routing",
+			Message:   fmt.Sprintf("failed to select pane: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+	result.PaneUsed = paneID
+	result.AgentType = agentType
+
+	if e.config.DryRun {
+		result.Status = StatusCompleted
+		result.Output = fmt.Sprintf("[DRY RUN] Would dispatch template %s (%d chars) to pane %s",
+			step.Template, len(rendered), paneID)
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	slog.Info("template step starting",
+		"run_id", e.state.RunID,
+		"workflow", workflow.Name,
+		"step_id", step.ID,
+		"agent_type", "template",
+		"pane_id", paneID,
+		"template", step.Template,
+	)
+
+	e.writeDispatchLog(step.ID, rendered)
+
+	beforeOutput, _ := tmux.CapturePaneOutput(paneID, 2000)
+
+	if err := tmux.PasteKeys(paneID, rendered, true); err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "send",
+			Message:   fmt.Sprintf("failed to send rendered template: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	waitCondition := step.Wait
+	if waitCondition == "" {
+		waitCondition = WaitCompletion
+	}
+
+	timeout := e.config.DefaultTimeout
+	if step.Timeout.Duration > 0 {
+		timeout = step.Timeout.Duration
+	}
+
+	switch waitCondition {
+	case WaitNone:
+		result.Status = StatusCompleted
+		result.FinishedAt = time.Now()
+		return result
+
+	case WaitTime:
+		select {
+		case <-ctx.Done():
+			result.Status = StatusCancelled
+			result.FinishedAt = time.Now()
+			return result
+		case <-time.After(timeout):
+			result.Status = StatusCompleted
+			result.FinishedAt = time.Now()
+		}
+
+	case WaitCompletion, WaitIdle:
+		if err := e.waitForIdle(ctx, paneID, timeout); err != nil {
+			if ctx.Err() == context.Canceled {
+				result.Status = StatusCancelled
+			} else {
+				result.Status = StatusFailed
+				result.Error = &StepError{
+					Type:       "timeout",
+					Message:    fmt.Sprintf("timeout waiting for completion: %v", err),
+					PaneOutput: e.captureErrorContext(paneID, 50),
+					AgentState: e.detectAgentState(paneID),
+					Timestamp:  time.Now(),
+				}
+			}
+			result.FinishedAt = time.Now()
+			return result
+		}
+	}
+
+	afterOutput, err := tmux.CapturePaneOutput(paneID, 2000)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = &StepError{
+			Type:      "capture",
+			Message:   fmt.Sprintf("failed to capture output: %v", err),
+			Timestamp: time.Now(),
+		}
+		result.FinishedAt = time.Now()
+		return result
+	}
+
+	result.Output = util.ExtractNewOutput(beforeOutput, afterOutput)
+
+	if step.OutputVar != "" && step.OutputParse.Type != "" && step.OutputParse.Type != "none" {
+		parsed, err := e.parseOutput(result.Output, step.OutputParse)
+		if err != nil {
+			e.stateMu.Lock()
+			e.state.Errors = append(e.state.Errors, ExecutionError{
+				StepID:    step.ID,
+				Type:      "parse",
+				Message:   fmt.Sprintf("failed to parse output: %v", err),
+				Timestamp: time.Now(),
+				Fatal:     false,
+			})
+			e.stateMu.Unlock()
+		} else {
+			result.ParsedData = parsed
+		}
+	}
+
+	result.Status = StatusCompleted
+	result.FinishedAt = time.Now()
+	slog.Info("template step completed",
+		"run_id", e.state.RunID,
+		"step_id", step.ID,
+		"pane_id", paneID,
+	)
+	return result
+}
+
+// resolveTemplatePath resolves a template reference to an absolute file path.
+// Searches: workflow file directory, then ProjectDir, then treats it as absolute.
+func (e *Executor) resolveTemplatePath(template string) string {
+	if filepath.IsAbs(template) {
+		if _, err := os.Stat(template); err == nil {
+			return template
+		}
+		return ""
+	}
+
+	if e.config.WorkflowFile != "" {
+		candidate := filepath.Join(filepath.Dir(e.config.WorkflowFile), template)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	if e.config.ProjectDir != "" {
+		candidate := filepath.Join(e.config.ProjectDir, template)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// writeDispatchLog writes the rendered template content to session-logs/ for
+// audit trail consistency. Best-effort; failures are logged but not fatal.
+func (e *Executor) writeDispatchLog(stepID, rendered string) {
+	dir := e.config.ProjectDir
+	if dir == "" {
+		return
+	}
+	logDir := filepath.Join(dir, "session-logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		slog.Warn("failed to create session-logs dir", "error", err)
+		return
+	}
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	filename := filepath.Join(logDir, fmt.Sprintf("dispatch-%s-%s.log", ts, stepID))
+	if err := os.WriteFile(filename, []byte(rendered), 0o644); err != nil {
+		slog.Warn("failed to write dispatch log", "error", err, "path", filename)
+	}
 }
 
 // executeParallel runs parallel sub-steps concurrently.
