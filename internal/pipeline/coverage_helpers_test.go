@@ -10,9 +10,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
-type coverageStringer string
+type coverageHelperStringer string
 
-func (s coverageStringer) String() string {
+func (s coverageHelperStringer) String() string {
 	return string(s)
 }
 
@@ -22,7 +22,7 @@ type coverageFilterItem struct {
 	Enabled bool
 }
 
-func TestCoverageForeachPaneAssignmentHelpers(t *testing.T) {
+func TestCoverageHelpersForeachPaneAssignmentHelpers(t *testing.T) {
 	panes := []tmux.Pane{
 		{ID: "%1", Index: 1, NTMIndex: 11, Type: tmux.AgentCodex, Variant: "codex", Tags: []string{"model=codex", "domain=api,db"}},
 		{ID: "%2", Index: 2, NTMIndex: 12, Type: tmux.AgentClaude, Variant: "opus", Tags: []string{"model=opus", "domain=docs"}},
@@ -88,11 +88,11 @@ func TestCoverageForeachPaneAssignmentHelpers(t *testing.T) {
 	}
 }
 
-func TestCoverageForeachItemHelpers(t *testing.T) {
+func TestCoverageHelpersForeachItemHelpers(t *testing.T) {
 	if got := foreachItemString("direct", "id"); got != "direct" {
 		t.Fatalf("string item = %q, want direct", got)
 	}
-	if got := foreachItemString(coverageStringer("from-stringer"), "id"); got != "from-stringer" {
+	if got := foreachItemString(coverageHelperStringer("from-stringer"), "id"); got != "from-stringer" {
 		t.Fatalf("stringer item = %q, want from-stringer", got)
 	}
 	if got := foreachItemString(map[string]interface{}{"title": "fallback"}, "id", "title"); got != "fallback" {
@@ -124,7 +124,7 @@ func TestCoverageForeachItemHelpers(t *testing.T) {
 	}
 }
 
-func TestCoverageForeachBodyAndSubstitutionHelpers(t *testing.T) {
+func TestCoverageHelpersForeachBodyAndSubstitutionHelpers(t *testing.T) {
 	workflow := &Workflow{SchemaVersion: SchemaVersion, Name: "coverage", Settings: DefaultWorkflowSettings()}
 	executor := createForeachTestExecutor(t, workflow)
 	executor.state.Variables["name"] = "Ada"
@@ -171,7 +171,7 @@ func TestCoverageForeachBodyAndSubstitutionHelpers(t *testing.T) {
 	}
 }
 
-func TestCoverageFilterHelperBranches(t *testing.T) {
+func TestCoverageHelpersFilterHelperBranches(t *testing.T) {
 	ctx := FilterContext{
 		Item: coverageFilterItem{Role: "lead", Score: 3, Enabled: true},
 		Pane: map[string]interface{}{"model": "opus", "healthy": "true"},
@@ -224,7 +224,7 @@ func TestCoverageFilterHelperBranches(t *testing.T) {
 	}
 }
 
-func TestCoverageErrorAggregationHelpers(t *testing.T) {
+func TestCoverageHelpersErrorAggregationHelpers(t *testing.T) {
 	cancelled := foreachIterationResult{
 		Index: 4,
 		Results: []StepResult{{
@@ -261,7 +261,7 @@ func TestCoverageErrorAggregationHelpers(t *testing.T) {
 	}
 }
 
-func TestCoverageForeachErrorFormattingHelpers(t *testing.T) {
+func TestCoverageHelpersForeachErrorFormattingHelpers(t *testing.T) {
 	failed := finishForeachFailure(StepResult{StepID: "fanout"}, "source", "missing source")
 	if failed.Status != StatusFailed || failed.Error == nil || failed.Error.Type != "source" {
 		t.Fatalf("finishForeachFailure = %#v, want source failure", failed)
@@ -291,7 +291,7 @@ func TestCoverageForeachErrorFormattingHelpers(t *testing.T) {
 	}
 }
 
-func TestCoverageSelectForeachPaneNoAvailablePanes(t *testing.T) {
+func TestCoverageHelpersSelectForeachPaneNoAvailablePanes(t *testing.T) {
 	_, _, _, err := selectForeachPane("round_robin", []paneStrategyPane{{ID: "%1", Excluded: true}}, nil, nil, -10)
 	if !errors.Is(err, errNoPaneForStrategy) {
 		t.Fatalf("round_robin unavailable error = %v, want errNoPaneForStrategy", err)
