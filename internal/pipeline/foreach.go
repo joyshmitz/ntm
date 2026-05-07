@@ -302,6 +302,15 @@ func (e *Executor) prepareForeachIterations(ctx context.Context, parent *Step, c
 }
 
 func (e *Executor) materializeForeachSteps(parent *Step, config *ForeachConfig, body []Step, plan foreachIterationPlan, total int) ([]Step, error) {
+	// bd-htmpq: serialize the push-substitute-pop sequence so concurrent
+	// foreach materializations (parallel outer + sequential inner, etc.)
+	// cannot race on the shared alias keys (foreachVarName, loop.*,
+	// paneVariableKey) in state.Variables. Without this, two inner
+	// materializations interleave their pushes against the same global
+	// keys and the substitution sees the other goroutine's iteration value.
+	e.foreachMaterializeMu.Lock()
+	defer e.foreachMaterializeMu.Unlock()
+
 	varName := foreachVarName(config)
 
 	scope := e.pushForeachVars(varName, plan.Item, plan.Index, total, plan.PaneVars)

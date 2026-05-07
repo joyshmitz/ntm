@@ -105,6 +105,15 @@ type Executor struct {
 	// foreach iterations within the run rather than being reset per step.
 	adjudicatorMu      sync.Mutex
 	adjudicatorHistory []string
+
+	// foreachMaterializeMu serializes the push-substitute-pop sequence in
+	// materializeForeachSteps so concurrent inner foreach materializations
+	// (e.g. parallel outer + sequential inner) cannot race on the shared
+	// alias keys in state.Variables (varName, loop.*, paneVariableKey).
+	// Materialization is fast template substitution, not the workload
+	// bottleneck — actual iteration body execution still runs in parallel
+	// after materialize returns (bd-htmpq).
+	foreachMaterializeMu sync.Mutex
 }
 
 // NewExecutor creates a new workflow executor
