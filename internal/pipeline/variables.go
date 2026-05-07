@@ -334,18 +334,56 @@ var varPattern = regexp.MustCompile(`(?s)\$\{([^}]+)\}`)
 // escapedPattern matches escaped variable references: \${...}
 var escapedPattern = regexp.MustCompile(`\\\$\{`)
 
-// placeholder for escaped sequences during substitution
+// escapedDollarPattern matches escaped literal dollar signs: \$.
+var escapedDollarPattern = regexp.MustCompile(`\\\$`)
+
+// placeholder for escaped variable starts during substitution
 const escapePlaceholder = "\x00ESC_VAR\x00"
+
+// placeholder for escaped literal dollar signs during substitution
+const escapedDollarPlaceholder = "\x00ESC_DOLLAR\x00"
 
 // Substitute replaces all ${...} variable references in the template string.
 // Returns the substituted string and any errors encountered.
 func (s *Substitutor) Substitute(template string) (string, error) {
-	// First, replace escaped \${...} with placeholder to preserve them
-	escaped := escapedPattern.ReplaceAllString(template, escapePlaceholder)
-
+	result := protectEscapedSubstitutions(template)
 	var firstErr error
 
-	result := varPattern.ReplaceAllStringFunc(escaped, func(match string) string {
+	for depth := 0; depth < DefaultMaxSubstitutionDepth; depth++ {
+		next, err, resolved := s.substituteOnce(result)
+		next = protectEscapedSubstitutions(next)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return restoreEscapedSubstitutions(next), firstErr
+		}
+
+		result = next
+		if !varPattern.MatchString(result) {
+			return restoreEscapedSubstitutions(result), firstErr
+		}
+		if resolved == 0 {
+			return restoreEscapedSubstitutions(result), firstErr
+		}
+	}
+
+	match := varPattern.FindString(result)
+	varRef := match
+	if strings.HasPrefix(match, "${") && strings.HasSuffix(match, "}") {
+		varRef = strings.TrimSpace(match[2 : len(match)-1])
+	}
+	return restoreEscapedSubstitutions(result), &SubstitutionError{
+		VarRef:  varRef,
+		Message: fmt.Sprintf("substitution recursion depth exceeded after %d passes", DefaultMaxSubstitutionDepth),
+	}
+}
+
+func (s *Substitutor) substituteOnce(template string) (string, error, int) {
+	var firstErr error
+	resolved := 0
+
+	result := varPattern.ReplaceAllStringFunc(template, func(match string) string {
 		// Extract expression between ${ and }
 		expr := match[2 : len(match)-1]
 
@@ -364,13 +402,21 @@ func (s *Substitutor) Substitute(template string) (string, error) {
 			return match // Leave unsubstituted if resolution fails
 		}
 
+		resolved++
 		return formatValue(value)
 	})
 
-	// Restore escaped ${...} sequences
-	result = strings.ReplaceAll(result, escapePlaceholder, "${")
+	return result, firstErr, resolved
+}
 
-	return result, firstErr
+func protectEscapedSubstitutions(template string) string {
+	result := escapedPattern.ReplaceAllString(template, escapePlaceholder)
+	return escapedDollarPattern.ReplaceAllString(result, escapedDollarPlaceholder)
+}
+
+func restoreEscapedSubstitutions(template string) string {
+	result := strings.ReplaceAll(template, escapePlaceholder, "${")
+	return strings.ReplaceAll(result, escapedDollarPlaceholder, "$")
 }
 
 // SubstituteStrict is like Substitute but returns an error if any variable is undefined.
