@@ -101,7 +101,16 @@ vars:
 ```bash
 ntm pipeline run workflow.yaml --var project_name=myapp --var max_files=50
 ntm pipeline run workflow.yaml --var-file vars.yaml
+ntm pipeline run workflow.yaml --var file_patterns=internal,cmd,docs
 ```
+
+Variable precedence is deterministic. Loop-local values such as `${item.X}` and
+`${pane.X}` are innermost during foreach execution. Runtime `--var` values
+override `--var-file` values, and both override `vars:` defaults. Defaults are
+applied only when no runtime value was provided, and defaults may reference
+other defaults with `${vars.X}` as long as they do not form a cycle. Declared
+types are validated before execution; array-typed `--var` values use
+comma-separated input.
 
 ## Settings
 
