@@ -459,29 +459,21 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		default:
 		}
 
-		if control, applies := e.foreachLoopControl(plan.Steps[i]); applies {
-			iterResult.Control = control
-			switch control {
-			case LoopControlBreak:
-				slog.Info("foreach iteration requested break",
-					"run_id", e.state.RunID,
-					"workflow", workflow.Name,
-					"step_id", parent.ID,
-					"agent_type", "foreach",
-					"iteration", plan.Index,
-					"pane_id", plan.PaneID,
-				)
-			case LoopControlContinue:
-				slog.Debug("foreach iteration requested continue",
-					"run_id", e.state.RunID,
-					"workflow", workflow.Name,
-					"step_id", parent.ID,
-					"agent_type", "foreach",
-					"iteration", plan.Index,
-					"pane_id", plan.PaneID,
-				)
+		if foreachControlOnlyStep(plan.Steps[i]) {
+			control, applies, err := e.foreachLoopControlDecision(plan.Steps[i])
+			if err != nil {
+				failed := failedForeachLoopControlCondition(plan.Steps[i], err)
+				iterResult.Results = append(iterResult.Results, failed)
+				e.storeForeachNestedResult(&plan.Steps[i], failed)
+				iterResult.Error = resultErrorMessage(failed)
+				return iterResult
 			}
-			return iterResult
+			if applies {
+				iterResult.Control = control
+				e.logForeachLoopControl(control, workflow, parent, plan)
+				return iterResult
+			}
+			continue
 		}
 
 		step := plan.Steps[i]
@@ -511,6 +503,14 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 				return iterResult
 			}
 		}
+
+		if result.Status == StatusCompleted {
+			if control, applies := foreachLoopControlValue(step); applies {
+				iterResult.Control = control
+				e.logForeachLoopControl(control, workflow, parent, plan)
+				return iterResult
+			}
+		}
 	}
 	return markForeachIterationSkippedIfAllResultsSkipped(iterResult)
 }
@@ -537,19 +537,88 @@ func markForeachIterationSkippedIfAllResultsSkipped(result foreachIterationResul
 }
 
 func (e *Executor) foreachLoopControl(step Step) (LoopControl, bool) {
-	switch step.LoopControl {
-	case LoopControlBreak, LoopControlContinue:
-	default:
-		return LoopControlNone, false
+	control, applies, _ := e.foreachLoopControlDecision(step)
+	return control, applies
+}
+
+func (e *Executor) foreachLoopControlDecision(step Step) (LoopControl, bool, error) {
+	control, ok := foreachLoopControlValue(step)
+	if !ok {
+		return LoopControlNone, false, nil
 	}
 	if step.When == "" {
-		return step.LoopControl, true
+		return control, true, nil
 	}
 	skip, err := e.evaluateCondition(step.When)
 	if err != nil || skip {
+		return LoopControlNone, false, err
+	}
+	return control, true, nil
+}
+
+func foreachLoopControlValue(step Step) (LoopControl, bool) {
+	switch step.LoopControl {
+	case LoopControlBreak, LoopControlContinue:
+		return step.LoopControl, true
+	default:
 		return LoopControlNone, false
 	}
-	return step.LoopControl, true
+}
+
+func foreachControlOnlyStep(step Step) bool {
+	if _, ok := foreachLoopControlValue(step); !ok {
+		return false
+	}
+	return step.Command == "" &&
+		step.Template == "" &&
+		step.Prompt == "" &&
+		step.PromptFile == "" &&
+		step.Branch == "" &&
+		len(step.Branches) == 0 &&
+		len(step.Parallel.Steps) == 0 &&
+		step.Loop == nil &&
+		step.Foreach == nil &&
+		step.ForeachPane == nil &&
+		step.BeadQuery == nil &&
+		len(step.mailStepKindNames()) == 0
+}
+
+func failedForeachLoopControlCondition(step Step, err error) StepResult {
+	now := time.Now()
+	return StepResult{
+		StepID:     step.ID,
+		Status:     StatusFailed,
+		StartedAt:  now,
+		FinishedAt: now,
+		Error: &StepError{
+			Type:      "condition",
+			Message:   fmt.Sprintf("failed to evaluate when condition: %v", err),
+			Timestamp: now,
+		},
+	}
+}
+
+func (e *Executor) logForeachLoopControl(control LoopControl, workflow *Workflow, parent *Step, plan foreachIterationPlan) {
+	switch control {
+	case LoopControlBreak:
+		slog.Info("foreach iteration requested break",
+			"run_id", e.state.RunID,
+			"workflow", workflow.Name,
+			"step_id", parent.ID,
+			"agent_type", "foreach",
+			"iteration", plan.Index,
+			"pane_id", plan.PaneID,
+		)
+	case LoopControlContinue:
+		slog.Debug("foreach iteration requested continue",
+			"run_id", e.state.RunID,
+			"workflow", workflow.Name,
+			"step_id", parent.ID,
+			"agent_type", "foreach",
+			"iteration", plan.Index,
+			"pane_id", plan.PaneID,
+		)
+	}
 }
 
 func (e *Executor) executeForeachNestedStep(ctx context.Context, step *Step, workflow *Workflow) StepResult {
