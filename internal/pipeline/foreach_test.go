@@ -379,6 +379,147 @@ func TestExecuteForeachParallelOuterSequentialInnerKeepsAliasesIsolated(t *testi
 	}
 }
 
+func TestExecuteForeachLoopControlBreakSkipsRemainingIterations(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-break",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "break_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["a","b","c","d","e"]`,
+			Steps: []Step{
+				{
+					ID:      "echo",
+					Command: `printf '%s' '${item}'`,
+				},
+				{
+					ID:          "break_on_c",
+					LoopControl: LoopControlBreak,
+					When:        `${item} == "c"`,
+				},
+			},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if len(iterations) != 5 {
+		t.Fatalf("iterations = %d, want 5", len(iterations))
+	}
+	if got, want := strings.Join(foreachLeafOutputs(result), ","), "a,b,c"; got != want {
+		t.Fatalf("outputs before break = %q, want %q", got, want)
+	}
+	for _, iteration := range iterations[3:] {
+		if !iteration.Skipped || iteration.SkipKind != SkipKindForeachBreak {
+			t.Fatalf("remaining iteration = %#v, want loop-break skip", iteration)
+		}
+	}
+}
+
+func TestExecuteForeachLoopControlContinueSkipsRestOfIteration(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-continue",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "continue_fanout",
+		Foreach: &ForeachConfig{
+			Items: `["a","b","c"]`,
+			Steps: []Step{
+				{
+					ID:      "before",
+					Command: `printf 'before-%s' '${item}'`,
+				},
+				{
+					ID:          "continue_on_b",
+					LoopControl: LoopControlContinue,
+					When:        `${item} == "b"`,
+				},
+				{
+					ID:      "after",
+					Command: `printf 'after-%s' '${item}'`,
+				},
+			},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	if got, want := strings.Join(foreachLeafOutputs(result), ","), "before-a,after-a,before-b,before-c,after-c"; got != want {
+		t.Fatalf("outputs with continue = %q, want %q", got, want)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if iterations[1].Control != LoopControlContinue {
+		t.Fatalf("iteration 1 control = %q, want continue", iterations[1].Control)
+	}
+	if len(iterations[1].Results) != 1 || iterations[1].Results[0].Output != "before-b" {
+		t.Fatalf("iteration 1 results = %#v, want only before-b", iterations[1].Results)
+	}
+}
+
+func TestExecuteForeachParallelLoopControlBreakCancelsInFlight(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-parallel-break",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID: "parallel_break_fanout",
+		Foreach: &ForeachConfig{
+			Items:         `["break","slow","later"]`,
+			Parallel:      true,
+			MaxConcurrent: 3,
+			Steps: []Step{
+				{
+					ID:          "break_now",
+					LoopControl: LoopControlBreak,
+					When:        `${item} == "break"`,
+				},
+				{
+					ID:      "slow",
+					Command: `sleep 5; printf '%s' '${item}'`,
+					Timeout: Duration{Duration: 10 * time.Second},
+				},
+			},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("foreach status = %s, error = %#v", result.Status, result.Error)
+	}
+	iterations := foreachIterationsFromResult(t, result)
+	if iterations[0].Control != LoopControlBreak {
+		t.Fatalf("break iteration control = %q, want break", iterations[0].Control)
+	}
+	var breakSkipped int
+	for _, iteration := range iterations {
+		if iteration.SkipKind == SkipKindForeachBreak {
+			breakSkipped++
+		}
+	}
+	if breakSkipped == 0 {
+		t.Fatalf("iterations = %#v, want at least one loop-break skipped/cancelled iteration", iterations)
+	}
+}
+
 func foreachIterationsFromResult(t *testing.T, result StepResult) []foreachIterationResult {
 	t.Helper()
 	iterations, ok := result.ParsedData.([]foreachIterationResult)

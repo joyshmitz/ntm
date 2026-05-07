@@ -29,6 +29,7 @@ type foreachIterationResult struct {
 	Item       interface{}            `json:"item,omitempty"`
 	Pane       map[string]interface{} `json:"pane,omitempty"`
 	Results    []StepResult           `json:"results,omitempty"`
+	Control    LoopControl            `json:"loop_control,omitempty"`
 	Skipped    bool                   `json:"skipped,omitempty"`
 	SkipReason string                 `json:"skip_reason,omitempty"`
 	SkipKind   SkipKind               `json:"skip_kind,omitempty"`
@@ -36,6 +37,9 @@ type foreachIterationResult struct {
 }
 
 func (r foreachIterationResult) failed() bool {
+	if r.SkipKind == SkipKindForeachBreak {
+		return false
+	}
 	for _, result := range r.Results {
 		if result.Status == StatusFailed || result.Status == StatusCancelled {
 			return true
@@ -325,13 +329,19 @@ func (e *Executor) popForeachVars(scope VariableScope) {
 
 func (e *Executor) executeForeachIterationsSequential(ctx context.Context, parent *Step, workflow *Workflow, plans []foreachIterationPlan, onError ErrorAction) []foreachIterationResult {
 	results := make([]foreachIterationResult, 0, len(plans))
-	for _, plan := range plans {
+	for i, plan := range plans {
 		if plan.Skipped {
 			results = append(results, skippedForeachIteration(plan))
 			continue
 		}
 		iterResult := e.executeForeachIteration(ctx, parent, workflow, plan)
 		results = append(results, iterResult)
+		if iterResult.Control == LoopControlBreak {
+			for _, remaining := range plans[i+1:] {
+				results = append(results, foreachBreakSkippedIteration(remaining))
+			}
+			break
+		}
 		if iterResult.failed() && onError != ErrorActionContinue {
 			break
 		}
@@ -349,6 +359,21 @@ func (e *Executor) executeForeachIterationsParallel(ctx context.Context, parent 
 	results := make([]foreachIterationResult, len(plans))
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
+	var controlMu sync.Mutex
+	breakSeen := false
+
+	markBreak := func() {
+		controlMu.Lock()
+		breakSeen = true
+		controlMu.Unlock()
+		cancel()
+	}
+	isBreak := func() bool {
+		controlMu.Lock()
+		defer controlMu.Unlock()
+		return breakSeen
+	}
+
 	for i, plan := range plans {
 		if plan.Skipped {
 			results[i] = skippedForeachIteration(plan)
@@ -361,11 +386,24 @@ func (e *Executor) executeForeachIterationsParallel(ctx context.Context, parent 
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-runCtx.Done():
-				results[i] = cancelledForeachIteration(plan)
+				if isBreak() {
+					results[i] = foreachBreakSkippedIteration(plan)
+				} else {
+					results[i] = cancelledForeachIteration(plan)
+				}
 				return
 			}
 			iterResult := e.executeForeachIteration(runCtx, parent, workflow, plan)
+			if isBreak() && foreachIterationCancelled(iterResult) {
+				iterResult.SkipKind = SkipKindForeachBreak
+				iterResult.SkipReason = "loop break"
+				iterResult.Error = ""
+			}
 			results[i] = iterResult
+			if iterResult.Control == LoopControlBreak {
+				markBreak()
+				return
+			}
 			if iterResult.failed() && onError == ErrorActionFailFast {
 				cancel()
 			}
@@ -413,6 +451,31 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		default:
 		}
 
+		if control, applies := e.foreachLoopControl(plan.Steps[i]); applies {
+			iterResult.Control = control
+			switch control {
+			case LoopControlBreak:
+				slog.Info("foreach iteration requested break",
+					"run_id", e.state.RunID,
+					"workflow", workflow.Name,
+					"step_id", parent.ID,
+					"agent_type", "foreach",
+					"iteration", plan.Index,
+					"pane_id", plan.PaneID,
+				)
+			case LoopControlContinue:
+				slog.Debug("foreach iteration requested continue",
+					"run_id", e.state.RunID,
+					"workflow", workflow.Name,
+					"step_id", parent.ID,
+					"agent_type", "foreach",
+					"iteration", plan.Index,
+					"pane_id", plan.PaneID,
+				)
+			}
+			return iterResult
+		}
+
 		step := plan.Steps[i]
 		result := e.executeForeachNestedStep(ctx, &step, workflow)
 		iterResult.Results = append(iterResult.Results, result)
@@ -426,6 +489,22 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 		}
 	}
 	return iterResult
+}
+
+func (e *Executor) foreachLoopControl(step Step) (LoopControl, bool) {
+	switch step.LoopControl {
+	case LoopControlBreak, LoopControlContinue:
+	default:
+		return LoopControlNone, false
+	}
+	if step.When == "" {
+		return step.LoopControl, true
+	}
+	skip, err := e.evaluateCondition(step.When)
+	if err != nil || skip {
+		return LoopControlNone, false
+	}
+	return step.LoopControl, true
 }
 
 func (e *Executor) executeForeachNestedStep(ctx context.Context, step *Step, workflow *Workflow) StepResult {
@@ -800,6 +879,32 @@ func cancelledForeachIteration(plan foreachIterationPlan) foreachIterationResult
 		}},
 		Error: "foreach iteration cancelled before dispatch",
 	}
+}
+
+func foreachBreakSkippedIteration(plan foreachIterationPlan) foreachIterationResult {
+	return foreachIterationResult{
+		Index:      plan.Index,
+		Item:       plan.Item,
+		Pane:       cloneInterfaceMap(plan.PaneVars),
+		Skipped:    true,
+		SkipReason: "loop break",
+		SkipKind:   SkipKindForeachBreak,
+	}
+}
+
+func foreachIterationCancelled(result foreachIterationResult) bool {
+	if result.SkipKind == SkipKindCancelled {
+		return true
+	}
+	if strings.Contains(strings.ToLower(result.Error), "cancelled") {
+		return true
+	}
+	for _, stepResult := range result.Results {
+		if stepResult.Status == StatusCancelled {
+			return true
+		}
+	}
+	return false
 }
 
 func resultErrorMessage(result StepResult) string {
