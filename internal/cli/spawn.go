@@ -3046,7 +3046,11 @@ func getMemoryContext(projectName, task string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := cmClient.GetRecoveryContext(ctx, queryTask, maxRules, maxSnippets)
+	// `getMemoryContext` is invoked from a path that doesn't carry the absolute
+	// workspace; an empty workspace falls through to CM's unscoped query, which
+	// preserves prior behavior for this surface (the workspace-scoped path is
+	// `loadRecoveryCMMemories`, which carries `workingDir`).
+	result, err := cmClient.GetRecoveryContext(ctx, queryTask, "", maxRules, maxSnippets)
 	if err != nil {
 		// Log warning but don't fail - graceful degradation
 		if !IsJSONOutput() {
@@ -3472,15 +3476,27 @@ func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, s
 }
 
 // loadRecoveryCMMemories loads procedural memories from CM.
+//
+// The absolute `workingDir` is passed through to CM as the workspace scope so
+// same-basename workspaces (e.g. `/clientA/app` and `/clientB/app`) do not
+// share recovery memories — the basename-derived projectName alone would
+// produce identical task text and silently bleed context across unrelated
+// projects (#132).
 func loadRecoveryCMMemories(ctx context.Context, workingDir string) (*RecoveryCMMemories, error) {
 	client := cm.NewCLIClient()
 	if !client.IsInstalled() {
 		return nil, nil // Graceful degradation
 	}
 
-	// Get recovery context with reasonable limits
+	// Get recovery context with reasonable limits. Use the absolute working
+	// directory as the workspace scope so basename collisions across repos
+	// are kept distinct.
 	projectName := filepath.Base(workingDir)
-	result, err := client.GetRecoveryContext(ctx, projectName, 10, 3)
+	absWorkspace := workingDir
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		absWorkspace = abs
+	}
+	result, err := client.GetRecoveryContext(ctx, projectName, absWorkspace, 10, 3)
 	if err != nil {
 		return nil, fmt.Errorf("get recovery context: %w", err)
 	}
