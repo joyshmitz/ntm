@@ -106,6 +106,14 @@ type HealthSummary struct {
 	Unknown int `json:"unknown"` // Agents with unknown status
 }
 
+const (
+	// Keep detection windows small so stale historical messages don't dominate
+	// health classification once an agent has recovered and is back at prompt.
+	rateLimitLookbackLines   = 20
+	errorLookbackLines       = 20
+	processExitLookbackLines = 12
+)
+
 // CheckSession performs health checks on all agents in a session
 func CheckSession(ctx context.Context, session string) (*SessionHealth, error) {
 	panesWithActivity, err := tmux.GetPanesWithActivityContext(ctx, session)
@@ -214,8 +222,10 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 		return agent
 	}
 
+	recentOutput := util.GetLastNLines(output, rateLimitLookbackLines)
+
 	// Check for rate limit and parse wait time (preferred authoritative source)
-	detection := detectRateLimit(output, string(pa.Pane.Type))
+	detection := detectRateLimit(recentOutput, string(pa.Pane.Type))
 	if detection.RateLimited {
 		agent.Issues = append(agent.Issues, Issue{Type: "rate_limit", Message: "Rate limit detected"})
 		agent.RateLimited = true
@@ -223,7 +233,7 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 	}
 
 	// Check for other error patterns (skipping rate limit since we already checked)
-	otherIssues := detectErrors(output)
+	otherIssues := detectErrors(recentOutput)
 	for _, issue := range otherIssues {
 		if issue.Type != "rate_limit" {
 			agent.Issues = append(agent.Issues, issue)
@@ -234,7 +244,7 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 	agent.Activity = detectActivity(output, pa.LastActivity, string(pa.Pane.Type))
 
 	// Determine process status using PID-based check (preferred) with text fallback
-	agent.ProcessStatus = detectProcessStatus(output, pa.Pane.Command, pa.Pane.PID)
+	agent.ProcessStatus = detectProcessStatusForAgent(output, pa.Pane.Command, pa.Pane.PID, string(pa.Pane.Type))
 
 	// Detect work progress
 	agent.Progress = detectProgress(output, agent.Activity, agent.Issues)
@@ -252,6 +262,7 @@ func detectRateLimit(output string, agentType string) ratelimit.RateLimitDetecti
 // detectErrors scans output for error patterns
 func detectErrors(output string) []Issue {
 	var issues []Issue
+	output = util.GetLastNLines(output, errorLookbackLines)
 	errorTypes := status.DetectAllErrorsInOutput(output)
 
 	for _, et := range errorTypes {
@@ -483,6 +494,10 @@ func detectActivity(output string, lastActivity time.Time, agentType string) Act
 // Text-pattern matching is only used as a fallback when no PID is available
 // (e.g. in tests or when tmux doesn't report a PID).
 func detectProcessStatus(output string, command string, shellPID int) ProcessStatus {
+	return detectProcessStatusForAgent(output, command, shellPID, "")
+}
+
+func detectProcessStatusForAgent(output string, command string, shellPID int, agentType string) ProcessStatus {
 	// Primary: PID-based liveness check (reliable, no false positives).
 	if shellPID > 0 {
 		if process.HasChildAlive(shellPID) {
@@ -492,13 +507,19 @@ func detectProcessStatus(output string, command string, shellPID int) ProcessSta
 		return ProcessExited
 	}
 
+	// If the pane is clearly at prompt for this agent type, treat as running.
+	// This prevents stale text like "connection closed" from forcing exited.
+	if status.DetectIdleFromOutput(output, agentType) {
+		return ProcessRunning
+	}
+
 	// Fallback: text-based detection when PID is unavailable.
 	exitPatterns := []string{
 		"exit status", "exited with", "process exited",
 		"connection closed", "session ended",
 	}
 
-	outputLower := strings.ToLower(output)
+	outputLower := strings.ToLower(util.GetLastNLines(output, processExitLookbackLines))
 	for _, pattern := range exitPatterns {
 		if strings.Contains(outputLower, pattern) {
 			return ProcessExited

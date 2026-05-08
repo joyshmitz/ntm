@@ -2,6 +2,7 @@ package health
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,19 @@ func TestDetectErrors(t *testing.T) {
 				t.Errorf("detectErrors(%q) did not return type %q", tt.input, tt.wantType)
 			}
 		}
+	}
+}
+
+func TestDetectErrors_IgnoresStaleHistoryBeyondLookback(t *testing.T) {
+	t.Parallel()
+
+	output := "panic: old crash message\n" +
+		strings.Repeat("working normally\n", errorLookbackLines+5) +
+		"claude>\n"
+
+	issues := detectErrors(output)
+	if len(issues) != 0 {
+		t.Fatalf("detectErrors returned %d issue(s) from stale history, want 0: %+v", len(issues), issues)
 	}
 }
 
@@ -376,6 +390,26 @@ func TestDetectProcessStatus_PIDBasedCurrentProcess(t *testing.T) {
 	got := detectProcessStatus("exit status 1", "python", 1)
 	if got != ProcessRunning {
 		t.Errorf("detectProcessStatus with PID 1 (has children) = %v, want ProcessRunning", got)
+	}
+}
+
+func TestDetectProcessStatusForAgent_PromptOverridesExitText(t *testing.T) {
+	t.Parallel()
+
+	output := "connection closed by remote host\nclaude>\n"
+	got := detectProcessStatusForAgent(output, "python", 0, "cc")
+	if got != ProcessRunning {
+		t.Fatalf("detectProcessStatusForAgent(prompt+exit-text) = %v, want %v", got, ProcessRunning)
+	}
+}
+
+func TestDetectProcessStatus_IgnoresStaleExitTextBeyondLookback(t *testing.T) {
+	t.Parallel()
+
+	output := "session ended\n" + strings.Repeat("still running\n", processExitLookbackLines+2)
+	got := detectProcessStatus(output, "python", 0)
+	if got != ProcessRunning {
+		t.Fatalf("detectProcessStatus(stale-exit-history) = %v, want %v", got, ProcessRunning)
 	}
 }
 
