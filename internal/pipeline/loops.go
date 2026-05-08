@@ -566,6 +566,22 @@ func (le *LoopExecutor) resolveIntOrExpr(step *Step, field string, value *IntOrE
 		} else if parsed <= 0 {
 			err = fmt.Errorf("parse %q as positive integer: value must be greater than zero", resolved)
 		} else {
+			// bd-c2l8s: clamp expression-resolved values above the safety
+			// fallback so a misconfigured `loop.max_iterations:
+			// ${vars.from_external}` cannot drive the body unbounded
+			// (parity with bd-ltghx for foreach.max_rounds). Literal values
+			// are not clamped — the workflow author chose them explicitly
+			// and the parser already rejects negatives.
+			if parsed > fallback {
+				le.executor.stepLogger(step).Warn(EventSubstWarn,
+					FieldSubstitutionKey, field,
+					FieldSubstitutionResolved, value.Expr,
+					"requested", parsed,
+					"cap", fallback,
+					"hint", "set max_iterations to a literal integer to opt out of the cap",
+				)
+				parsed = fallback
+			}
 			value.Value = parsed
 			return parsed, nil
 		}

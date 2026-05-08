@@ -370,6 +370,58 @@ func TestLoopMaxIterationsExprResolvesDefaults(t *testing.T) {
 	}
 }
 
+// TestLoopMaxIterations_ExprResolvedAboveCapClampsToDefault covers
+// bd-c2l8s: a max_iterations expression that resolves above
+// DefaultMaxIterations is clamped to that cap, mirroring bd-ltghx's
+// resolveForeachMaxRounds. Without the clamp, a misconfigured
+// `max_iterations: ${vars.from_external}` (or a typoed defaults reference
+// that lands on a giant integer) would drive the loop body unbounded.
+// Literal max_iterations values are NOT clamped — the workflow author
+// chose them explicitly.
+//
+// Test strategy: use a `times` loop where times exceeds DefaultMaxIterations
+// but is far below the unclamped expression value. With the clamp, the
+// resolved cap collapses to DefaultMaxIterations and `times > max_iterations`
+// triggers the existing fail-closed guard with a deterministic error
+// message. The recorded `step.Loop.MaxIterations.Value` also reflects the
+// clamped value, which is the externally observable contract.
+func TestLoopMaxIterations_ExprResolvedAboveCapClampsToDefault(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{Session: "test", DryRun: true})
+	executor.defaults = map[string]interface{}{
+		"hard_caps": map[string]interface{}{
+			"crazy": 999999,
+		},
+	}
+	executor.state = &ExecutionState{
+		RunID:      "run-max-clamp",
+		WorkflowID: "workflow-max-clamp",
+		Variables:  map[string]interface{}{},
+		Steps:      make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID: "max-clamp-step",
+		Loop: &LoopConfig{
+			Times:         500,
+			MaxIterations: IntOrExpr{Expr: "${defaults.hard_caps.crazy}"},
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+
+	// Times(500) > clamped max_iterations(100) → fail-closed at the
+	// times-vs-cap guard with the clamped value in the error message.
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %v, want %v (clamped cap should reject Times=500); error=%+v", result.Status, StatusFailed, result.Error)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "max_iterations (100)") {
+		t.Fatalf("Error.Message = %v, want it to mention max_iterations (100) (the clamped cap)", result.Error)
+	}
+	if got := step.Loop.MaxIterations.Value; got != DefaultMaxIterations {
+		t.Fatalf("MaxIterations.Value = %d, want %d (must record clamped value)", got, DefaultMaxIterations)
+	}
+}
+
 func TestLoopMaxIterationsLiteralStillWorks(t *testing.T) {
 	executor := NewExecutor(ExecutorConfig{Session: "test", DryRun: true})
 	executor.state = &ExecutionState{
