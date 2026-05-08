@@ -91,6 +91,7 @@ func (g *Generator) GenerateFromOutput(sessionName string, output []byte) (*Hand
 		"blocker_count", len(h.Blockers),
 	)
 
+	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
@@ -221,6 +222,7 @@ func (g *Generator) GenerateFromTranscript(sessionName, transcriptPath string) (
 		g.logger.Warn("git enrichment failed", "error", err)
 	}
 
+	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
@@ -548,6 +550,7 @@ func (g *Generator) GenerateAutoHandoff(sessionName, agentType, paneID string, o
 		"goal", truncateGen(h.Goal, 50),
 	)
 
+	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
@@ -703,6 +706,7 @@ func (g *Generator) GenerateHandoff(ctx context.Context, opts GenerateHandoffOpt
 		"status", h.Status,
 	)
 
+	h.UpdateQuality(time.Now())
 	return h, nil
 }
 
