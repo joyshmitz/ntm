@@ -867,6 +867,126 @@ func TestOnSuccessExplicitIDsInsideForeachAreNamespaced(t *testing.T) {
 	}
 }
 
+// TestOnSuccessFiresForTopLevelParallel covers bd-h8lc4: the top-level
+// Parallel dispatch in executeStep early-returns BEFORE the retry-aware
+// OnSuccess hook at line 847, so without the bd-h8lc4 seam at the
+// dispatch site a workflow author writing a parallel step with
+// on_success children saw the schema accept the chain and the runtime
+// silently skip it. Lock the contract: when the parallel group reaches
+// StatusCompleted, every OnSuccess child must run and land in
+// state.Steps under the canonical <parent>_on_success_<child> key.
+func TestOnSuccessFiresForTopLevelParallel(t *testing.T) {
+	cfg := DefaultExecutorConfig("on-success-parallel")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex}))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-parallel-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "fan",
+			Parallel: ParallelSpec{
+				Steps: []Step{
+					{ID: "left", Pane: PaneSpec{Index: 1}, Prompt: "do left"},
+					{ID: "right", Pane: PaneSpec{Index: 1}, Prompt: "do right"},
+				},
+			},
+			OnSuccess: []Step{{ID: "notify", Command: "echo notified"}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := state.Steps["fan"]; got.Status != StatusCompleted {
+		t.Fatalf("parent fan status = %q, want %q", got.Status, StatusCompleted)
+	}
+	got, ok := state.Steps["fan_on_success_notify"]
+	if !ok {
+		t.Fatalf("state.Steps[fan_on_success_notify] missing — top-level Parallel skipped its OnSuccess chain (bd-h8lc4 regression)")
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("on_success step status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+}
+
+// TestOnSuccessSkipsForFailedTopLevelParallel covers the negative leg of
+// bd-h8lc4: when the parallel group is not StatusCompleted (a substep
+// failed under fail_fast / fail), the OnSuccess chain must NOT run. This
+// matches the existing OnSuccess contract for command steps
+// (TestOnSuccessStepsSkipOnParentFailure) and prevents the bd-h8lc4 seam
+// from silently inverting the rule.
+func TestOnSuccessSkipsForFailedTopLevelParallel(t *testing.T) {
+	cfg := DefaultExecutorConfig("on-success-parallel-fail")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex}))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-parallel-fail-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:      "fan",
+			OnError: ErrorActionFailFast,
+			Parallel: ParallelSpec{
+				Steps: []Step{
+					{ID: "ok", Pane: PaneSpec{Index: 1}, Prompt: "ok"},
+					{ID: "boom", Pane: PaneSpec{Index: 1}, PromptFile: "/this/path/does/not/exist.txt"},
+				},
+			},
+			OnSuccess: []Step{{ID: "should_not_run", Command: "echo wrong"}},
+		}},
+	}
+
+	state, _ := executor.Run(context.Background(), workflow, nil, nil)
+	if _, ok := state.Steps["fan_on_success_should_not_run"]; ok {
+		t.Fatalf("on_success step ran despite parallel group failure: %#v", state.Steps["fan_on_success_should_not_run"])
+	}
+}
+
+// TestOnSuccessFiresForTopLevelLoop covers bd-h8lc4 for the Loop dispatch
+// — same shape as the Parallel case. executeLoop early-returns from
+// executeStep before the retry-loop OnSuccess hook, so the bd-h8lc4 seam
+// at the dispatch site is what makes `loop: ... on_success: ...` work.
+func TestOnSuccessFiresForTopLevelLoop(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("on-success-loop"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-loop-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "watch",
+			Loop: &LoopConfig{
+				MaxIterations: IntOrExpr{Value: 1},
+				Steps: []Step{
+					{ID: "tick", Command: "echo tick"},
+				},
+			},
+			OnSuccess: []Step{{ID: "notify", Command: "echo notified"}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := state.Steps["watch"]; got.Status != StatusCompleted {
+		t.Fatalf("parent watch status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+	got, ok := state.Steps["watch_on_success_notify"]
+	if !ok {
+		t.Fatalf("state.Steps[watch_on_success_notify] missing — top-level Loop skipped its OnSuccess chain (bd-h8lc4 regression)")
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("on_success step status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+}
+
 func TestBranchChildrenInsideForeachAreNamespaced(t *testing.T) {
 	executor := NewExecutor(DefaultExecutorConfig("branch-foreach"))
 

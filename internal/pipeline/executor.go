@@ -798,14 +798,31 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		}
 	}
 
-	// Handle parallel steps
+	// Handle parallel steps. bd-h8lc4: top-level Parallel/Loop dispatches
+	// early-return BEFORE the retry-aware OnSuccess hook at line 847, so
+	// without this seam a workflow author writing `parallel: ... on_success:
+	// - id: notify ...` saw the schema accept the chain and the runtime
+	// silently skip it. Branch/BeadQuery/Foreach/Mail do NOT have this gap
+	// because they're dispatched inside executeStepOnce, which is called
+	// from the retry loop and so already funnels through the OnSuccess
+	// hook. Loop body iterations also do not have this gap (loops.go calls
+	// executor.executeStep recursively per iteration; that nested call
+	// reaches the retry-loop hook normally).
 	if len(step.Parallel.Steps) > 0 {
-		return e.executeParallel(ctx, step, workflow)
+		result := e.executeParallel(ctx, step, workflow)
+		if result.Status == StatusCompleted {
+			e.runOnSuccessSteps(ctx, step, workflow)
+		}
+		return result
 	}
 
-	// Handle loop steps
+	// Handle loop steps. Same bd-h8lc4 hook as Parallel above.
 	if step.Loop != nil {
-		return e.executeLoop(ctx, step, workflow)
+		result := e.executeLoop(ctx, step, workflow)
+		if result.Status == StatusCompleted {
+			e.runOnSuccessSteps(ctx, step, workflow)
+		}
+		return result
 	}
 
 	// Calculate retry parameters
