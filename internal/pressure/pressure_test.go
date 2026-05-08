@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -526,6 +527,80 @@ func TestSetMode_Toggles(t *testing.T) {
 	g.SetMode(Mode("garbage"))
 	if g.Mode() != ModeObserve {
 		t.Errorf("after SetMode(garbage), Mode = %s, want observe (sanitized)", g.Mode())
+	}
+}
+
+// bd-qjt3s: SetMode + Gate + Mode + Refresh must be safe to call from
+// many goroutines concurrently. The Go race detector catches the
+// pre-fix unlocked g.mode reads and unlocked g.last access — running
+// this test under `go test -race` exercises the data path that
+// previously raced. The assertion is "no panic, race detector clean";
+// any data-race report from the runtime is a hard failure of the
+// concurrency contract.
+func TestGovernor_ModeAndGateAreRaceFreeUnderConcurrentAccess(t *testing.T) {
+	t.Parallel()
+	fp := NewFakeProvider("cpu",
+		Reading{Source: SourceCPU, Value: 0.5, Unit: "ratio"},
+	)
+	g := newTestGovernor(t, ModeObserve, fp)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Seed a snapshot so Gate has something to read.
+	_ = g.Refresh(ctx)
+
+	const goroutines = 8
+	const iterations = 200
+	var wg sync.WaitGroup
+
+	// Mode flippers.
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if (j+seed)%2 == 0 {
+					g.SetMode(ModeEnforce)
+				} else {
+					g.SetMode(ModeObserve)
+				}
+			}
+		}(i)
+	}
+
+	// Gate readers + Mode readers + Refreshers — all racing the
+	// flippers. Each acquires the same g.mu RWMutex, so the race
+	// detector verifies no unsynchronized read of g.mode or g.last.
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = g.Gate(ActionSwarmSpawn, "session", false)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = g.Mode()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_ = g.Refresh(ctx)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// After all the churn, the governor must still function — Gate
+	// returns a well-formed Result whose Mode is one of the two
+	// canonical values, never a torn read or zero value.
+	res := g.Gate(ActionSwarmSpawn, "session", false)
+	if res.Mode != ModeObserve && res.Mode != ModeEnforce {
+		t.Fatalf("post-race Gate Mode = %q, want observe or enforce", res.Mode)
 	}
 }
 

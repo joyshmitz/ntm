@@ -90,8 +90,14 @@ func New(cfg Config) *Governor {
 	}
 }
 
-// Mode returns the governor's mode.
-func (g *Governor) Mode() Mode { return g.mode }
+// Mode returns the governor's mode. Read under RLock so a concurrent
+// SetMode call observes the Go memory-model happens-before edge
+// established by the matching write under g.mu.Lock (bd-qjt3s).
+func (g *Governor) Mode() Mode {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.mode
+}
 
 // SetMode flips between observe and enforce.
 func (g *Governor) SetMode(m Mode) {
@@ -156,12 +162,26 @@ func (g *Governor) budgetFor(session string) Budget {
 // but the result still records the level the system is at so the caller
 // can log warnings. session may be "" for global-scope checks.
 func (g *Governor) Gate(action Action, session string, urgent bool) Result {
-	snap := g.Latest()
+	// Snapshot both mode and last under a single RLock so the gate
+	// decision is consistent and race-free against a concurrent
+	// SetMode + Refresh (bd-qjt3s). The write paths take Lock; this
+	// RLock establishes the matching happens-before edge so the
+	// observed values reflect the most recent ordered write.
+	g.mu.RLock()
+	mode := g.mode
+	var snap Snapshot
+	if g.last != nil {
+		snap = *g.last
+	} else {
+		snap = Snapshot{TakenAt: g.now()}
+	}
+	g.mu.RUnlock()
+
 	budget := g.budgetFor(session)
 	res := Result{
 		Action:    action,
 		Session:   session,
-		Mode:      g.mode,
+		Mode:      mode,
 		Level:     snap.Overall,
 		LevelText: snap.Overall.String(),
 		Limiting:  snap.Limiting,
@@ -181,7 +201,7 @@ func (g *Governor) Gate(action Action, session string, urgent bool) Result {
 	default:
 		res.Decision = DecisionAllow
 	}
-	if g.mode == ModeObserve && res.Decision != DecisionAllow {
+	if mode == ModeObserve && res.Decision != DecisionAllow {
 		// In observe-only mode we record the decision in logs but the
 		// returned decision is downgraded to Allow so existing call
 		// sites are not throttled.
