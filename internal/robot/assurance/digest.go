@@ -126,6 +126,14 @@ func ComputeDigest(in DigestInput) Digest {
 		Quiescence:  in.Quiescence.State,
 	}
 
+	// Filter and dedupe DegradedSources up front so the status
+	// decision below and the serialized DegradedSources field use the
+	// SAME cleaned view. Pre-fix the status switch read the raw input
+	// while the output ran it through uniqueSortedDigest, so a
+	// caller passing [""] could flip status to degraded while the
+	// JSON had no surfaced source (bd-6e26q).
+	cleanedDegradedSources := uniqueSortedDigest(in.DegradedSources)
+
 	// Tally findings.
 	for _, f := range in.CoordinationFindings {
 		switch f.Severity {
@@ -143,7 +151,7 @@ func ComputeDigest(in DigestInput) Digest {
 	case out.Counts.Critical > 0 || in.Quiescence.State == QuiescenceUnsafeToStandDown:
 		out.HighestSeverity = DigestSeverityCritical
 		out.Status = DigestStatusUnsafe
-	case out.Counts.Warning > 0 || len(in.DegradedSources) > 0 ||
+	case out.Counts.Warning > 0 || len(cleanedDegradedSources) > 0 ||
 		in.Quiescence.State == QuiescenceBlockedByPeer ||
 		in.Quiescence.State == QuiescenceSaturatedReviewLoop ||
 		(sloUnhealthy(in.SLO)):
@@ -169,19 +177,18 @@ func ComputeDigest(in DigestInput) Digest {
 		}
 		codeSet[ReasonCode("digest."+f.Source+"."+f.Code)] = struct{}{}
 	}
-	for _, s := range in.DegradedSources {
-		if s = strings.TrimSpace(s); s != "" {
-			codeSet[ReasonCode("digest.source_degraded."+strings.ToLower(s))] = struct{}{}
-		}
+	for _, s := range cleanedDegradedSources {
+		codeSet[ReasonCode("digest.source_degraded."+strings.ToLower(s))] = struct{}{}
 	}
 	if sloUnhealthy(in.SLO) {
 		codeSet[ReasonCode("digest.slo.unhealthy")] = struct{}{}
 	}
 	out.ReasonCodes = sortedReasonCodes(codeSet)
 
-	// Degraded source list: dedupe + sort for stable JSON.
-	if len(in.DegradedSources) > 0 {
-		out.DegradedSources = uniqueSortedDigest(in.DegradedSources)
+	// Degraded source list: reuse the cleaned slice computed up front
+	// so status and serialized output stay in lock-step.
+	if len(cleanedDegradedSources) > 0 {
+		out.DegradedSources = cleanedDegradedSources
 	}
 
 	out.SuggestedNextAction = chooseDigestNextAction(in, out)

@@ -79,6 +79,49 @@ func TestComputeDigest_DegradedSourcesAlone(t *testing.T) {
 	}
 }
 
+// bd-6e26q: status and serialized DegradedSources must agree. A
+// caller passing only empty/whitespace strings must NOT flip the
+// status to degraded; both views see the same cleaned slice.
+func TestComputeDigest_EmptyOnlyDegradedSourcesDoesNotFlipStatus(t *testing.T) {
+	t.Parallel()
+	in := DigestInput{
+		Now:             fixedDigestClock(),
+		SLO:             DigestSLO{Healthy: true},
+		DegradedSources: []string{"", "  ", "\t"},
+	}
+	d := ComputeDigest(in)
+	if d.Status != DigestStatusHealthy {
+		t.Errorf("Status = %s, want healthy (empty-only DegradedSources must not flip status)", d.Status)
+	}
+	if len(d.DegradedSources) != 0 {
+		t.Errorf("DegradedSources = %v, want nil/empty", d.DegradedSources)
+	}
+	for _, c := range d.ReasonCodes {
+		if strings.HasPrefix(string(c), "digest.source_degraded.") {
+			t.Errorf("ReasonCodes leaked source_degraded entry from empty input: %q", c)
+		}
+	}
+}
+
+// Companion: a mixed input with one real entry plus empties must
+// surface ONLY the real entry — and the status reflects the cleaned
+// view, not the raw input length.
+func TestComputeDigest_MixedDegradedSourcesUsesCleanedView(t *testing.T) {
+	t.Parallel()
+	in := DigestInput{
+		Now:             fixedDigestClock(),
+		SLO:             DigestSLO{Healthy: true},
+		DegradedSources: []string{"", "mail", "  "},
+	}
+	d := ComputeDigest(in)
+	if d.Status != DigestStatusDegraded {
+		t.Errorf("Status = %s, want degraded (one real source after cleaning)", d.Status)
+	}
+	if !equalStringSlice(d.DegradedSources, []string{"mail"}) {
+		t.Errorf("DegradedSources = %v, want [mail]", d.DegradedSources)
+	}
+}
+
 func TestComputeDigest_CriticalFindingForcesUnsafe(t *testing.T) {
 	t.Parallel()
 	in := DigestInput{
