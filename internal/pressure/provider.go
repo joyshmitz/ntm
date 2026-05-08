@@ -121,8 +121,22 @@ func readMemoryRatio() (float64, bool) {
 	if err != nil {
 		return 0, false
 	}
+	return parseMemoryRatio(string(raw))
+}
+
+// parseMemoryRatio is the pure /proc/meminfo parser separated from the
+// file-reading wrapper so unit tests can exercise the missing-field
+// shapes that show up on stripped /proc mounts (containers, sandboxes,
+// pre-3.14 kernels) without touching the real filesystem (bd-mmzvs).
+//
+// Returns (used, true) only when BOTH MemTotal and MemAvailable were
+// observed and total>0. A missing MemAvailable line — common on old
+// kernels and minimal containers — must return (0, false), NOT silently
+// produce used=1.0 from an absent-equals-zero numerator.
+func parseMemoryRatio(raw string) (float64, bool) {
 	var totalKB, availableKB float64
-	for _, line := range strings.Split(string(raw), "\n") {
+	var haveAvailable bool
+	for _, line := range strings.Split(raw, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -136,9 +150,10 @@ func readMemoryRatio() (float64, bool) {
 			totalKB = value
 		case "MemAvailable":
 			availableKB = value
+			haveAvailable = true
 		}
 	}
-	if totalKB <= 0 || availableKB < 0 {
+	if totalKB <= 0 || !haveAvailable {
 		return 0, false
 	}
 	used := 1 - (availableKB / totalKB)
