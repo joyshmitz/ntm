@@ -131,8 +131,17 @@ func TestBuildQueueDryRecommendationsActionable(t *testing.T) {
 }
 
 func TestQueueDryReservationTimeoutIsInteractive(t *testing.T) {
-	if queueDryReservationTimeout != 2*time.Second {
-		t.Fatalf("queueDryReservationTimeout = %s, want 2s", queueDryReservationTimeout)
+	// queue-dry is interactive — the operator runs `ntm work queue-dry`
+	// and expects sub-second feedback. Guard the *intent* rather than
+	// the literal value so future tuning (e.g. 1.5s, configurable) does
+	// not break the test for no reason. The 5s ceiling matches the
+	// agent-mail unhealthy-pause threshold; the >0 floor catches an
+	// accidental zero (which would disable the timeout entirely).
+	if queueDryReservationTimeout <= 0 {
+		t.Fatalf("queueDryReservationTimeout = %s, must be positive", queueDryReservationTimeout)
+	}
+	if queueDryReservationTimeout >= 5*time.Second {
+		t.Fatalf("queueDryReservationTimeout = %s, must be < 5s for an interactive diagnostic", queueDryReservationTimeout)
 	}
 }
 
