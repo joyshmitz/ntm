@@ -222,8 +222,15 @@ func LiveBottleneck(opts BottleneckOptions) BottleneckSnapshot {
 // rose by at least changeMs is "up"; otherwise "stable".
 //
 // changeMs <= 0 disables the threshold (any non-zero delta classifies
-// as up/down).
+// as up/down). bd-2eif6: a negative changeMs is clamped to 0 to honor
+// the "<=0 disables" contract — without the clamp, raw `d > changeMs`
+// and `-d > changeMs` against a negative threshold misclassify small
+// drops and zero-deltas as "up".
 func ComputeTrend(current, prior BottleneckSnapshot, changeMs float64) BottleneckSnapshot {
+	threshold := changeMs
+	if threshold < 0 {
+		threshold = 0
+	}
 	priorMap := make(map[string]float64, len(prior.Hotspots))
 	for _, h := range prior.Hotspots {
 		priorMap[hotspotKey(h)] = h.TotalMs
@@ -242,9 +249,9 @@ func ComputeTrend(current, prior BottleneckSnapshot, changeMs float64) Bottlenec
 			d := h.TotalMs - prevMs
 			annotated[i].DeltaMs = &d
 			switch {
-			case d > changeMs:
+			case d > threshold:
 				annotated[i].Trend = "up"
-			case -d > changeMs:
+			case -d > threshold:
 				annotated[i].Trend = "down"
 			default:
 				annotated[i].Trend = "stable"

@@ -230,6 +230,51 @@ func TestComputeTrend_NewUpDownStable(t *testing.T) {
 	}
 }
 
+// bd-2eif6: ComputeTrend's godoc says "changeMs <= 0 disables the
+// threshold (any non-zero delta classifies as up/down)". The 0 case
+// works correctly; pre-fix the negative case did not — `d > changeMs`
+// against a negative threshold misclassified small drops and zero
+// deltas as "up". This test pins the contract for negative changeMs
+// values so a future refactor cannot reintroduce the inversion.
+func TestComputeTrend_NegativeChangeMsTreatedAsZeroDisabled(t *testing.T) {
+	t.Parallel()
+	prior := BottleneckSnapshot{Hotspots: []BottleneckHotspot{
+		{Name: "drop", Phase: "robot", TotalMs: 100},
+		{Name: "rise", Phase: "robot", TotalMs: 50},
+		{Name: "flat", Phase: "robot", TotalMs: 30},
+	}}
+	curr := BottleneckSnapshot{Hotspots: []BottleneckHotspot{
+		{Name: "drop", Phase: "robot", TotalMs: 90},  // d = -10
+		{Name: "rise", Phase: "robot", TotalMs: 60},  // d = +10
+		{Name: "flat", Phase: "robot", TotalMs: 30},  // d = 0
+	}}
+
+	// Pre-fix this would misclassify "drop" as "up" and "flat" as "up"
+	// because `d > -1` and `0 > -1` are both true.
+	got := ComputeTrend(curr, prior, -1)
+	want := map[string]string{
+		"drop": "down",   // any non-zero negative delta → down
+		"rise": "up",     // any non-zero positive delta → up
+		"flat": "stable", // exactly zero → stable
+	}
+	for _, h := range got.Hotspots {
+		if h.Trend != want[h.Name] {
+			t.Errorf("Trend[%s] with changeMs=-1 = %q, want %q (negative changeMs must behave like 0-disable)",
+				h.Name, h.Trend, want[h.Name])
+		}
+	}
+
+	// And again with changeMs = -1000 to confirm the clamp covers
+	// arbitrary-magnitude negative inputs.
+	got = ComputeTrend(curr, prior, -1000)
+	for _, h := range got.Hotspots {
+		if h.Trend != want[h.Name] {
+			t.Errorf("Trend[%s] with changeMs=-1000 = %q, want %q (any negative changeMs clamps to 0)",
+				h.Name, h.Trend, want[h.Name])
+		}
+	}
+}
+
 // Integration-style test: feed a synthetic workload through the
 // global profiler, take a snapshot, and assert the schema.
 func TestLiveBottleneck_AfterSyntheticWorkload(t *testing.T) {
