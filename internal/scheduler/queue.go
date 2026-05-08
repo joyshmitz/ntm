@@ -201,8 +201,16 @@ func (q *JobQueue) Remove(id string) *SpawnJob {
 	}
 
 	q.stats.CurrentSize = len(q.jobs)
+	// bd-o35sn: mirror Dequeue's delete-when-zero cleanup so removed
+	// priorities/types don't leave dangling 0 entries in Stats() output.
 	q.stats.ByPriority[job.Priority]--
+	if q.stats.ByPriority[job.Priority] <= 0 {
+		delete(q.stats.ByPriority, job.Priority)
+	}
 	q.stats.ByType[job.Type]--
+	if q.stats.ByType[job.Type] <= 0 {
+		delete(q.stats.ByType, job.Type)
+	}
 
 	return job
 }
@@ -313,6 +321,10 @@ func (q *JobQueue) Clear() []*SpawnJob {
 	q.batchCounts = make(map[string]int)
 	q.sessionCounts = make(map[string]int)
 	q.stats.CurrentSize = 0
+	// bd-o35sn: also reset the per-priority and per-type breakdowns so
+	// Stats() does not report ghost counts after Clear emptied the queue.
+	q.stats.ByPriority = make(map[JobPriority]int)
+	q.stats.ByType = make(map[JobType]int)
 
 	return removed
 }
@@ -342,13 +354,23 @@ func (q *JobQueue) CancelSession(sessionName string) []*SpawnJob {
 		// the cross-axis batchCounts so a follow-up CountByBatch does
 		// not return phantom counts for jobs that no longer exist.
 		// Mirrors the Dequeue/Remove pattern.
+		// bd-o35sn: same for the per-priority and per-type stats
+		// breakdowns Stats() exposes — pre-fix Stats().ByPriority kept
+		// reporting the cancelled jobs.
 		for _, job := range cancelled {
-			if job.BatchID == "" {
-				continue
+			if job.BatchID != "" {
+				q.batchCounts[job.BatchID]--
+				if q.batchCounts[job.BatchID] <= 0 {
+					delete(q.batchCounts, job.BatchID)
+				}
 			}
-			q.batchCounts[job.BatchID]--
-			if q.batchCounts[job.BatchID] <= 0 {
-				delete(q.batchCounts, job.BatchID)
+			q.stats.ByPriority[job.Priority]--
+			if q.stats.ByPriority[job.Priority] <= 0 {
+				delete(q.stats.ByPriority, job.Priority)
+			}
+			q.stats.ByType[job.Type]--
+			if q.stats.ByType[job.Type] <= 0 {
+				delete(q.stats.ByType, job.Type)
 			}
 		}
 		delete(q.sessionCounts, sessionName)
@@ -383,10 +405,20 @@ func (q *JobQueue) CancelBatch(batchID string) []*SpawnJob {
 		// the cross-axis sessionCounts so a follow-up CountBySession
 		// does not return phantom counts for jobs that no longer exist.
 		// Mirrors the Dequeue/Remove pattern.
+		// bd-o35sn: same for the per-priority and per-type stats
+		// breakdowns Stats() exposes.
 		for _, job := range cancelled {
 			q.sessionCounts[job.SessionName]--
 			if q.sessionCounts[job.SessionName] <= 0 {
 				delete(q.sessionCounts, job.SessionName)
+			}
+			q.stats.ByPriority[job.Priority]--
+			if q.stats.ByPriority[job.Priority] <= 0 {
+				delete(q.stats.ByPriority, job.Priority)
+			}
+			q.stats.ByType[job.Type]--
+			if q.stats.ByType[job.Type] <= 0 {
+				delete(q.stats.ByType, job.Type)
 			}
 		}
 		delete(q.batchCounts, batchID)

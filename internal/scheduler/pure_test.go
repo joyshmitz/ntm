@@ -1561,3 +1561,116 @@ func TestSpawnJob_RetryLifecycle(t *testing.T) {
 		t.Error("CanRetry() = true at retry count == MaxRetries, want false")
 	}
 }
+
+// bd-o35sn: CancelSession / CancelBatch / Clear / Remove must keep
+// stats.ByPriority and stats.ByType in sync — pre-fix the cancel paths
+// didn't decrement either map and Clear didn't reset them, so Stats()
+// reported phantom counts after queue mutations.
+func TestJobQueue_CancelSession_DecrementsStatsByPriorityAndType(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	mk := func(id, sess string, pri JobPriority) *SpawnJob {
+		j := NewSpawnJob(id, JobTypeSession, sess)
+		j.Priority = pri
+		return j
+	}
+	q.Enqueue(mk("j1", "foo", PriorityHigh))
+	q.Enqueue(mk("j2", "foo", PriorityHigh))
+	q.Enqueue(mk("j3", "foo", PriorityNormal))
+	q.Enqueue(mk("j4", "bar", PriorityNormal))
+
+	pre := q.Stats()
+	if pre.ByPriority[PriorityHigh] != 2 || pre.ByPriority[PriorityNormal] != 2 {
+		t.Fatalf("pre-cancel stats = %+v", pre.ByPriority)
+	}
+
+	q.CancelSession("foo")
+
+	post := q.Stats()
+	if got := post.ByPriority[PriorityHigh]; got != 0 {
+		t.Errorf("post-cancel ByPriority[High] = %d, want 0 (j1+j2 cancelled)", got)
+	}
+	if _, ok := post.ByPriority[PriorityHigh]; ok {
+		t.Errorf("post-cancel ByPriority[High] entry should have been deleted, still present")
+	}
+	if got := post.ByPriority[PriorityNormal]; got != 1 {
+		t.Errorf("post-cancel ByPriority[Normal] = %d, want 1 (j4 remains)", got)
+	}
+	if got := post.ByType[JobTypeSession]; got != 1 {
+		t.Errorf("post-cancel ByType[session] = %d, want 1", got)
+	}
+}
+
+func TestJobQueue_CancelBatch_DecrementsStatsByPriorityAndType(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	mk := func(id, sess, batch string, pri JobPriority) *SpawnJob {
+		j := NewSpawnJob(id, JobTypeSession, sess)
+		j.BatchID = batch
+		j.Priority = pri
+		return j
+	}
+	q.Enqueue(mk("j1", "foo", "batch-A", PriorityHigh))
+	q.Enqueue(mk("j2", "bar", "batch-A", PriorityNormal))
+	q.Enqueue(mk("j3", "foo", "batch-B", PriorityNormal))
+
+	q.CancelBatch("batch-A")
+
+	post := q.Stats()
+	if got := post.ByPriority[PriorityHigh]; got != 0 {
+		t.Errorf("post-cancel ByPriority[High] = %d, want 0", got)
+	}
+	if _, ok := post.ByPriority[PriorityHigh]; ok {
+		t.Errorf("post-cancel ByPriority[High] entry should have been deleted")
+	}
+	if got := post.ByPriority[PriorityNormal]; got != 1 {
+		t.Errorf("post-cancel ByPriority[Normal] = %d, want 1 (j3 remains)", got)
+	}
+}
+
+func TestJobQueue_Clear_ResetsStatsByPriorityAndType(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	mk := func(id string, pri JobPriority) *SpawnJob {
+		j := NewSpawnJob(id, JobTypeSession, "s")
+		j.Priority = pri
+		return j
+	}
+	q.Enqueue(mk("j1", PriorityHigh))
+	q.Enqueue(mk("j2", PriorityNormal))
+
+	q.Clear()
+
+	post := q.Stats()
+	if post.CurrentSize != 0 {
+		t.Errorf("CurrentSize = %d, want 0", post.CurrentSize)
+	}
+	if len(post.ByPriority) != 0 {
+		t.Errorf("ByPriority = %+v, want empty after Clear", post.ByPriority)
+	}
+	if len(post.ByType) != 0 {
+		t.Errorf("ByType = %+v, want empty after Clear", post.ByType)
+	}
+}
+
+func TestJobQueue_Remove_DeletesZeroEntriesFromStats(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j := NewSpawnJob("j1", JobTypeSession, "s")
+	j.Priority = PriorityHigh
+	q.Enqueue(j)
+
+	q.Remove("j1")
+
+	post := q.Stats()
+	if _, ok := post.ByPriority[PriorityHigh]; ok {
+		t.Errorf("post-remove ByPriority[High] entry should have been deleted, still present with value %d", post.ByPriority[PriorityHigh])
+	}
+	if _, ok := post.ByType[JobTypeSession]; ok {
+		t.Errorf("post-remove ByType[session] entry should have been deleted")
+	}
+}
