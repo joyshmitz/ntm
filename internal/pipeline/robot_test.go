@@ -1600,14 +1600,42 @@ func TestPrintPipelineRun_DryRun(t *testing.T) {
 
 	workflowContent := `schema_version: "1.0"
 name: dry-run-test
+outputs:
+  - name: report
+    path: artifacts/report.md
+settings:
+  on_cancel:
+    - id: cleanup
+      command: "echo cleanup"
 steps:
   - id: step1
     prompt: "Hello world"
     agent: claude
   - id: step2
-    prompt: "Second step"
-    agent: codex
+    command: "go test ./internal/pipeline"
     depends_on: [step1]
+  - id: notify
+    mail_send:
+      project_key: /data/projects/ntm
+      agent_name: YellowBluff
+      to: TealCrane
+      subject: "[bd-fxj4f.6] preview"
+      body: "dry-run"
+      thread_id: bd-fxj4f.6
+    depends_on: [step2]
+  - id: reserve
+    file_reservation_paths:
+      project_key: /data/projects/ntm
+      agent_name: YellowBluff
+      paths: ["internal/pipeline/*.go"]
+      exclusive: true
+    depends_on: [notify]
+post_pipeline_steps:
+  - id: release
+    file_reservation_release:
+      project_key: /data/projects/ntm
+      agent_name: YellowBluff
+      paths: ["internal/pipeline/*.go"]
 `
 	workflowPath := tmpDir + "/test.yaml"
 	if err := os.WriteFile(workflowPath, []byte(workflowContent), 0644); err != nil {
@@ -1645,6 +1673,27 @@ steps:
 	}
 	if result.Status != "completed" {
 		t.Errorf("Status = %q, want %q", result.Status, "completed")
+	}
+	if result.SideEffects == nil {
+		t.Fatal("SideEffects should be present in dry-run response")
+	}
+	if got := result.SideEffects.Summary.ByKind[sideEffectKindTmuxSend]; got != 1 {
+		t.Errorf("tmux side-effect count = %d, want 1", got)
+	}
+	if got := result.SideEffects.Summary.ByKind[sideEffectKindShellCommand]; got != 2 {
+		t.Errorf("shell side-effect count = %d, want 2", got)
+	}
+	if got := result.SideEffects.Summary.ByKind[sideEffectKindAgentMailSend]; got != 1 {
+		t.Errorf("mail_send side-effect count = %d, want 1", got)
+	}
+	if got := result.SideEffects.Summary.ByKind[sideEffectKindAgentMailReservation]; got != 1 {
+		t.Errorf("reservation side-effect count = %d, want 1", got)
+	}
+	if got := result.SideEffects.Summary.ByKind[sideEffectKindFilesystemWrite]; got != 1 {
+		t.Errorf("filesystem side-effect count = %d, want 1", got)
+	}
+	if len(result.SideEffects.RollbackPreview) != 2 {
+		t.Fatalf("RollbackPreview length = %d, want 2; preview=%#v", len(result.SideEffects.RollbackPreview), result.SideEffects.RollbackPreview)
 	}
 }
 

@@ -372,6 +372,9 @@ Examples:
 			if desc := pipeline.SanitizeDescriptionForTerminal(strings.TrimSpace(workflow.Description)); desc != "" {
 				fmt.Printf("   Description: %s\n", desc)
 			}
+			if dryRun {
+				fmt.Print(pipeline.RenderSideEffectManifestText(pipeline.BuildSideEffectManifest(workflow)))
+			}
 			fmt.Println()
 
 			// Create executor

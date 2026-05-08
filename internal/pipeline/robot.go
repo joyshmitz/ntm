@@ -121,14 +121,15 @@ type PipelineRunOptions struct {
 // PipelineRunOutput is the response for --robot-pipeline-run
 type PipelineRunOutput struct {
 	RobotResponse
-	RunID      string           `json:"run_id"`
-	WorkflowID string           `json:"workflow_id"`
-	Session    string           `json:"session"`
-	Status     string           `json:"status"`
-	DryRun     bool             `json:"dry_run,omitempty"`
-	Warnings   []ParseError     `json:"warnings,omitempty"`
-	Progress   PipelineProgress `json:"progress,omitempty"`
-	AgentHints *PipelineHints   `json:"_agent_hints,omitempty"`
+	RunID       string              `json:"run_id"`
+	WorkflowID  string              `json:"workflow_id"`
+	Session     string              `json:"session"`
+	Status      string              `json:"status"`
+	DryRun      bool                `json:"dry_run,omitempty"`
+	Warnings    []ParseError        `json:"warnings,omitempty"`
+	Progress    PipelineProgress    `json:"progress,omitempty"`
+	SideEffects *SideEffectManifest `json:"side_effect_manifest,omitempty"`
+	AgentHints  *PipelineHints      `json:"_agent_hints,omitempty"`
 }
 
 // PipelineStatusOutput is the response for --robot-pipeline=run-id
@@ -303,6 +304,10 @@ func PrintPipelineRun(opts PipelineRunOptions) int {
 	if varValidation != nil {
 		opts.Variables = varValidation.Variables
 		output.Warnings = varValidation.Warnings
+	}
+	if opts.DryRun {
+		manifest := BuildSideEffectManifest(workflow)
+		output.SideEffects = &manifest
 	}
 
 	// Create executor

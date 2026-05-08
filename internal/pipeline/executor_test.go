@@ -1343,6 +1343,140 @@ func TestExecutor_Run_DryRun(t *testing.T) {
 	}
 }
 
+func TestBuildSideEffectManifestExtractsStepKindsAndRollbackPreview(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "manifest-workflow",
+		Outputs: []OutputDecl{
+			{Name: "report", Path: "artifacts/report.md"},
+		},
+		Steps: []Step{
+			{ID: "prompt", Prompt: "Draft report", Agent: "claude"},
+			{ID: "command", Command: "go test ./internal/pipeline"},
+			{ID: "template", Template: "MO-review.md", Pane: PaneSpec{Index: 2}},
+			{
+				ID: "notify",
+				MailSend: &MailSendStep{
+					ProjectKey: "/data/projects/ntm",
+					AgentName:  "YellowBluff",
+					To:         StringOrList{"TealCrane"},
+					Subject:    "[bd-fxj4f.6] dry-run",
+					ThreadID:   "bd-fxj4f.6",
+				},
+			},
+			{
+				ID: "reserve",
+				FileReservationPaths: &FileReservationPathsStep{
+					ProjectKey: "/data/projects/ntm",
+					AgentName:  "YellowBluff",
+					Paths:      StringOrList{"internal/pipeline/*.go"},
+					Exclusive:  true,
+				},
+			},
+		},
+		PostPipelineSteps: []Step{
+			{
+				ID: "release",
+				FileReservationRelease: &FileReservationReleaseStep{
+					ProjectKey: "/data/projects/ntm",
+					AgentName:  "YellowBluff",
+					Paths:      StringOrList{"internal/pipeline/*.go"},
+				},
+			},
+		},
+		Settings: WorkflowSettings{
+			OnCancel: []Step{
+				{ID: "cleanup", Command: "scripts/cleanup.sh"},
+			},
+		},
+	}
+
+	manifest := BuildSideEffectManifest(workflow)
+
+	expectedKinds := map[string]int{
+		sideEffectKindTmuxSend:             1,
+		sideEffectKindShellCommand:         2,
+		sideEffectKindTemplateDispatch:     1,
+		sideEffectKindAgentMailSend:        1,
+		sideEffectKindAgentMailReservation: 1,
+		sideEffectKindAgentMailRelease:     1,
+		sideEffectKindFilesystemWrite:      1,
+	}
+	if manifest.Summary.Total != 8 {
+		t.Fatalf("Summary.Total = %d, want 8; effects=%#v", manifest.Summary.Total, manifest.Effects)
+	}
+	for kind, want := range expectedKinds {
+		if got := manifest.Summary.ByKind[kind]; got != want {
+			t.Errorf("Summary.ByKind[%q] = %d, want %d", kind, got, want)
+		}
+	}
+
+	notify := findSideEffect(t, manifest.Effects, "notify", sideEffectKindAgentMailSend)
+	if notify.Target != "/data/projects/ntm" || notify.Subject != "[bd-fxj4f.6] dry-run" || notify.ThreadID != "bd-fxj4f.6" {
+		t.Fatalf("notify effect missing Agent Mail metadata: %#v", notify)
+	}
+	if len(notify.Recipients) != 1 || notify.Recipients[0] != "TealCrane" {
+		t.Fatalf("notify Recipients = %#v, want TealCrane", notify.Recipients)
+	}
+
+	report := findSideEffect(t, manifest.Effects, "report", sideEffectKindFilesystemWrite)
+	if report.Target != "artifacts/report.md" {
+		t.Fatalf("report Target = %q, want artifacts/report.md", report.Target)
+	}
+
+	release := findSideEffect(t, manifest.RollbackPreview, "release", sideEffectKindAgentMailRelease)
+	if !release.Cleanup || release.Rollback {
+		t.Fatalf("release cleanup/rollback flags = cleanup:%v rollback:%v, want cleanup only", release.Cleanup, release.Rollback)
+	}
+	cleanup := findSideEffect(t, manifest.RollbackPreview, "cleanup", sideEffectKindShellCommand)
+	if !cleanup.Cleanup || !cleanup.Rollback {
+		t.Fatalf("cleanup flags = cleanup:%v rollback:%v, want both true", cleanup.Cleanup, cleanup.Rollback)
+	}
+}
+
+func TestRenderSideEffectManifestTextConcise(t *testing.T) {
+	manifest := SideEffectManifest{}
+	manifest.add(SideEffectEntry{
+		StepID:      "build",
+		Phase:       sideEffectPhaseMain,
+		Kind:        sideEffectKindShellCommand,
+		Description: "Run build",
+		Command:     "go build ./cmd/ntm",
+	})
+	manifest.add(SideEffectEntry{
+		StepID:      "release",
+		Phase:       sideEffectPhasePostPipeline,
+		Kind:        sideEffectKindAgentMailRelease,
+		Description: "Release reservations",
+		Paths:       []string{"internal/pipeline/*.go"},
+		Cleanup:     true,
+	})
+
+	text := RenderSideEffectManifestText(manifest)
+	for _, want := range []string{
+		"Side effects: 2 planned",
+		"shell_command=1",
+		"[build] shell_command: go build ./cmd/ntm",
+		"Rollback/cleanup: 1 action(s)",
+		"[release] agent_mail_release: internal/pipeline/*.go",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("RenderSideEffectManifestText() missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+func findSideEffect(t *testing.T, entries []SideEffectEntry, stepID, kind string) SideEffectEntry {
+	t.Helper()
+	for _, entry := range entries {
+		if entry.StepID == stepID && entry.Kind == kind {
+			return entry
+		}
+	}
+	t.Fatalf("missing side effect step_id=%q kind=%q in %#v", stepID, kind, entries)
+	return SideEffectEntry{}
+}
+
 func TestExecutor_Run_DryRun_RendersStepDescription(t *testing.T) {
 	cfg := DefaultExecutorConfig("test-session")
 	cfg.DryRun = true
