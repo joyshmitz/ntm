@@ -30,8 +30,8 @@ func TestBuildCausalityOutput_SortsDeterministically(t *testing.T) {
 		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "s", Source: "session_timeline", Type: "working", ts: t1}}, nil
 		},
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
-			return []CausalityEvent{{ID: "p", Source: "pipeline_state", Type: "pipeline_finished", ts: t2}}, nil
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return []CausalityEvent{{ID: "p", Source: "pipeline_state", Type: "pipeline_finished", ts: t2}}, nil, nil
 		},
 	}
 
@@ -77,7 +77,7 @@ func TestBuildCausalityOutput_FiltersByWindowAndFields(t *testing.T) {
 			return nil, []CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 0}}, nil
 		},
 		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -120,7 +120,7 @@ func TestBuildCausalityOutput_SessionFilterKeepsSessionAgnosticMailEvents(t *tes
 				nil
 		},
 		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -158,8 +158,8 @@ func TestBuildCausalityOutput_MissingSourceDegrades(t *testing.T) {
 		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, errors.New("timeline missing")
 		},
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
-			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", ts: t0}}, nil
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", ts: t0}}, nil, nil
 		},
 	}
 
@@ -208,8 +208,8 @@ func TestBuildCausalityOutput_BeadChainMiniWorkflow(t *testing.T) {
 		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, nil
 		},
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
-			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", BeadID: beadID, ChainID: "run-xyz", ts: t2}}, nil
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", BeadID: beadID, ChainID: "run-xyz", ts: t2}}, nil, nil
 		},
 	}
 
@@ -246,7 +246,7 @@ func TestBuildCausalityOutput_FilterCountsReflectReturnedLimit(t *testing.T) {
 			return nil, nil, nil
 		},
 		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -383,9 +383,9 @@ func TestBuildCausalityOutput_LoadersReceiveSinceUntil(t *testing.T) {
 			sawSessionSince, sawSessionUntil = since, until
 			return nil, nil
 		},
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
 			sawPipelineSince, sawPipelineUntil = since, until
-			return nil, nil
+			return nil, nil, nil
 		},
 	}
 
@@ -504,5 +504,69 @@ func TestLoadAgentMailCausalityEvents_NoProjectSetReturnsBothStatuses(t *testing
 	}
 	if len(warnings) == 0 {
 		t.Error("warnings empty when project missing")
+	}
+}
+
+// bd-0d9n6: pipeline state files that fail to read (oversized,
+// corrupt) must surface a warning, not be silently dropped.
+func TestLoadPipelineCausalityEvents_OversizedFileSurfacesWarning(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pipelineDir := filepath.Join(dir, ".ntm", "pipelines")
+	if err := os.MkdirAll(pipelineDir, 0o755); err != nil {
+		t.Fatalf("mkdir pipelines: %v", err)
+	}
+
+	// Write a bigger-than-cap dummy file.
+	bigPath := filepath.Join(pipelineDir, "huge.json")
+	big := make([]byte, maxCausalityPipelineStateBytes+1)
+	for i := range big {
+		big[i] = '{'
+	}
+	if err := os.WriteFile(bigPath, big, 0o644); err != nil {
+		t.Fatalf("write big: %v", err)
+	}
+
+	events, warnings, err := loadPipelineCausalityEvents(CausalityOptions{
+		Project: dir,
+		Session: "any",
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("events = %d, want 0 (file dropped)", len(events))
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1 (skip notice)", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "huge.json") {
+		t.Errorf("warning = %q, want filename mention", warnings[0])
+	}
+}
+
+func TestBuildCausalityOutput_PipelineWarningsAppearInEnvelope(t *testing.T) {
+	t.Parallel()
+	loaders := causalityLoaders{
+		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return nil, nil
+		},
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+			return nil, nil, nil
+		},
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return nil, nil
+		},
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return nil, []string{"pipeline_state run-1.json skipped: simulated"}, nil
+		},
+	}
+	out := buildCausalityOutput(CausalityOptions{Session: "x", Limit: 10}, loaders)
+	if !out.Success {
+		t.Fatalf("expected success, got error=%q", out.Error)
+	}
+	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "run-1.json") {
+		t.Fatalf("Warnings = %v, want one mentioning run-1.json", out.Warnings)
 	}
 }

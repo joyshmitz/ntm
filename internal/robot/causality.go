@@ -95,7 +95,7 @@ type causalityLoaders struct {
 	audit    func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
 	mail     func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string)
 	session  func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
-	pipeline func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
+	pipeline func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, []string, error)
 }
 
 func defaultCausalityLoaders() causalityLoaders {
@@ -212,13 +212,14 @@ func buildCausalityOutput(opts CausalityOptions, loaders causalityLoaders) Causa
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "session_timeline", Available: true, Events: len(sessionEvents)})
 	}
 
-	pipelineEvents, err := loaders.pipeline(opts, since, until)
+	pipelineEvents, pipelineWarnings, err := loaders.pipeline(opts, since, until)
 	if err != nil {
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "pipeline_state", Available: false, Error: err.Error()})
 		output.Warnings = append(output.Warnings, "pipeline_state unavailable: "+err.Error())
 	} else {
 		all = append(all, pipelineEvents...)
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "pipeline_state", Available: true, Events: len(pipelineEvents)})
+		output.Warnings = append(output.Warnings, pipelineWarnings...)
 	}
 
 	all = dedupeCausalityEvents(all)
@@ -581,12 +582,12 @@ func loadSessionTimelineCausalityEvents(opts CausalityOptions, since, until *tim
 	return out, nil
 }
 
-func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
 	project := strings.TrimSpace(opts.Project)
 	if project == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		project = cwd
 	}
@@ -595,12 +596,13 @@ func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []CausalityEvent{}, nil
+			return []CausalityEvent{}, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	out := make([]CausalityEvent, 0, len(entries)*3)
+	var warnings []string
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -612,6 +614,9 @@ func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time)
 
 		st, err := readPipelineStateFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
+			// Surface the skip so operators don't silently lose runs
+			// (especially the bd-w3ft1 16MB cap or corrupt-JSON cases).
+			warnings = append(warnings, fmt.Sprintf("pipeline_state %s skipped: %s", entry.Name(), err.Error()))
 			continue
 		}
 		if opts.Session != "" && st.Session != "" && st.Session != opts.Session {
@@ -686,7 +691,7 @@ func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time)
 		}
 	}
 
-	return out, nil
+	return out, warnings, nil
 }
 
 type causalityPipelineState struct {
