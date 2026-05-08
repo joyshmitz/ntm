@@ -1899,7 +1899,7 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	var mu sync.Mutex
 	var firstError error
 	var cancelled bool
-	completionOrder := make([]string, 0, len(step.Parallel.Steps))
+	var completionOrder []string
 
 	// Track used panes to coordinate agent selection
 	usedPanes := make(map[string]bool)
@@ -2480,7 +2480,7 @@ func resolveErrorAction(stepOnError, workflowOnError ErrorAction) ErrorAction {
 // substitutor so unresolved ${defaults.X} / ${vars.X} references fail
 // loudly at this seam (bd-6lkqr.4).
 func (e *Executor) resolvePaneExpr(step *Step) error {
-	return e.resolvePaneExprCtx(nil, step)
+	return e.resolvePaneExprCtx(context.TODO(), step)
 }
 
 // resolvePaneExprCtx is the ctx-aware form of resolvePaneExpr.
@@ -2749,14 +2749,14 @@ func (e *Executor) substituteVariablesCtx(ctx context.Context, s string) string 
 // surfaces on the StepResult instead of leaking unresolved placeholders into
 // shell exec or agent prompts.
 func (e *Executor) substituteVariablesStrict(s string) (string, error) {
-	return e.substituteVariablesStrictCtx(nil, s)
+	return e.substituteVariablesStrictCtx(context.TODO(), s)
 }
 
 // substituteVariablesStrictCtx is the ctx-aware form of substituteVariablesStrict.
 // When ctx carries round overrides (bd-2ubxp.20), they are passed to the
 // Substitutor as localOverrides so per-iteration ${round}/${loop.round}
 // values resolve from the call's ctx instead of shared state.Variables.
-// A nil ctx is equivalent to no overrides.
+// A context without round overrides is equivalent to no overrides.
 func (e *Executor) substituteVariablesStrictCtx(ctx context.Context, s string) (string, error) {
 	e.varMu.RLock()
 	defer e.varMu.RUnlock()
@@ -2789,7 +2789,7 @@ func (e *Executor) substituteCommandArgs(args map[string]interface{}) map[string
 // the child shell (bd-bhcz7). Returns the first substitution error
 // encountered while still producing a partial map for diagnostics.
 func (e *Executor) substituteCommandArgsStrict(args map[string]interface{}) (map[string]interface{}, error) {
-	return e.substituteCommandArgsStrictCtx(nil, args)
+	return e.substituteCommandArgsStrictCtx(context.TODO(), args)
 }
 
 // substituteCommandArgsStrictCtx is the ctx-aware form of
@@ -2843,7 +2843,7 @@ func (e *Executor) substituteCommandArgsStrictCtx(ctx context.Context, args map[
 // - Type coercion for numeric comparisons
 // Thread-safe: acquires read locks on Variables and Steps for concurrent access during parallel execution.
 func (e *Executor) evaluateCondition(condition string) (bool, error) {
-	return e.evaluateConditionCtx(nil, condition)
+	return e.evaluateConditionCtx(context.TODO(), condition)
 }
 
 // evaluateConditionCtx is the ctx-aware form of evaluateCondition. Round
