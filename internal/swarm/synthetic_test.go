@@ -86,6 +86,9 @@ func TestSyntheticHarnessShortScenario(t *testing.T) {
 	if result.Metrics.GoroutinesLeaked < 0 {
 		t.Fatalf("GoroutinesLeaked = %d, want non-negative", result.Metrics.GoroutinesLeaked)
 	}
+	if result.Metrics.Goroutines <= 0 {
+		t.Fatalf("Goroutines = %d, want positive (absolute count after run)", result.Metrics.Goroutines)
+	}
 
 	data, err := json.Marshal(result)
 	if err != nil {
@@ -93,6 +96,15 @@ func TestSyntheticHarnessShortScenario(t *testing.T) {
 	}
 	if !json.Valid(data) {
 		t.Fatal("result did not marshal to valid JSON")
+	}
+	// bd-0ewtl: both the absolute-count and the delta keys must appear so
+	// pre-bd-75unj artifacts and consumers reading either name keep working.
+	jsonText := string(data)
+	if !strings.Contains(jsonText, `"goroutines":`) {
+		t.Fatalf(`marshalled result missing "goroutines" key: %s`, jsonText)
+	}
+	if !strings.Contains(jsonText, `"goroutines_leaked":`) {
+		t.Fatalf(`marshalled result missing "goroutines_leaked" key: %s`, jsonText)
 	}
 
 	logText := logs.String()
