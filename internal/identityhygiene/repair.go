@@ -366,8 +366,17 @@ func safeAbs(p string) (string, bool) {
 
 // pathInsideAny returns true if path is equal to or a descendant of
 // at least one root. Uses filepath.Rel and rejects any candidate whose
-// relative path begins with ".." (escapes the root).
+// relative path is or starts with a ".." path component.
+//
+// bd-0ji1i: the previous string-prefix check on bare ".." also matched
+// filenames that legitimately START with two dots (e.g. "..bashrc.bak"
+// or "..stale.json") and silently classified them as escaping the
+// root. The corrected check requires either rel == ".." (one level up,
+// no further) or rel starting with ".." followed by the OS path
+// separator — that's the only shape filepath.Rel emits for an actual
+// escape, and it cannot be confused with a leading-dot-dot basename.
 func pathInsideAny(path string, roots []string) bool {
+	sep := string(filepath.Separator)
 	for _, root := range roots {
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -377,11 +386,9 @@ func pathInsideAny(path string, roots []string) bool {
 			// Path equals the root itself — never delete a root.
 			return false
 		}
-		if strings.HasPrefix(rel, "..") {
+		if rel == ".." || strings.HasPrefix(rel, ".."+sep) {
 			continue
 		}
-		// On unix `filepath.Rel` cannot produce "..\x" but on windows
-		// the separator differs; both prefixes are caught above.
 		return true
 	}
 	return false

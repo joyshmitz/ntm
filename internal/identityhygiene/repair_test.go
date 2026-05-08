@@ -326,3 +326,90 @@ func TestRepair_DeterministicActionOrderForAuditTrail(t *testing.T) {
 		}
 	}
 }
+
+// bd-0ji1i: pathInsideAny must NOT classify a file whose basename
+// starts with two literal dots (e.g. "..stale.json") as escaping the
+// root. The pre-fix string-prefix check on bare ".." matched any
+// such basename and silently flagged the candidate skipped_out_of_
+// bounds even though the file lived inside the AllowedRoot.
+func TestRepair_LeadingDotDotBasenameIsNotTreatedAsEscape(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stale := time.Now().Add(-90 * time.Minute)
+
+	// File with a leading-dot-dot basename, INSIDE the AllowedRoot.
+	// POSIX permits this naming; Repair should treat it the same as
+	// any other identity record.
+	dotDotPath := filepath.Join(dir, "..stale.json")
+	if err := os.WriteFile(dotDotPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chtimes(dotDotPath, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	rep := Repair(RepairInputs{
+		Inputs: Inputs{
+			Identities: []IdentityRecord{{
+				Path:       dotDotPath,
+				AgentName:  "alice",
+				PaneID:     "%dead-leading-dotdot",
+				ModifiedAt: stale,
+			}},
+		},
+		AllowedRoots: []string{dir},
+		DryRun:       false,
+	})
+
+	if rep.Summary.SkippedOutOfBounds != 0 {
+		t.Fatalf("leading-dot-dot basename was rejected as out_of_bounds; SkippedOutOfBounds=%d, actions=%+v",
+			rep.Summary.SkippedOutOfBounds, rep.Actions)
+	}
+	if rep.Summary.Removed != 1 {
+		t.Errorf("Removed = %d, want 1 (the file is inside the root and should be removable)", rep.Summary.Removed)
+	}
+	if _, err := os.Stat(dotDotPath); !os.IsNotExist(err) {
+		t.Errorf("leading-dot-dot file still exists after Repair: %v", err)
+	}
+}
+
+// Companion: an actual ../escape path traversal MUST still be
+// rejected as out_of_bounds (preserves the existing safety contract).
+func TestRepair_ActualEscapeStillRejectedAfterDotDotFix(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	parent := filepath.Dir(root)
+	stale := time.Now().Add(-90 * time.Minute)
+
+	escapingFile := filepath.Join(parent, "outside-bd-0ji1i.json")
+	if err := os.WriteFile(escapingFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	defer os.Remove(escapingFile)
+	if err := os.Chtimes(escapingFile, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	traversal := filepath.Join(root, "..", "outside-bd-0ji1i.json")
+	rep := Repair(RepairInputs{
+		Inputs: Inputs{
+			Identities: []IdentityRecord{{
+				Path:       traversal,
+				PaneID:     "%dead-escape",
+				ModifiedAt: stale,
+			}},
+		},
+		AllowedRoots: []string{root},
+		DryRun:       false,
+	})
+
+	if rep.Summary.Removed != 0 {
+		t.Fatalf("traversal escaped after bd-0ji1i fix; Removed=%d", rep.Summary.Removed)
+	}
+	if rep.Summary.SkippedOutOfBounds == 0 {
+		t.Fatalf("real escape no longer rejected: %+v", rep.Summary)
+	}
+	if _, err := os.Stat(escapingFile); err != nil {
+		t.Errorf("real escape file deleted: %v", err)
+	}
+}
