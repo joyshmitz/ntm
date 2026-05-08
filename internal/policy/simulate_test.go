@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSimulatePlanAllowBlockApprovalAndInvalid(t *testing.T) {
 	report := SimulatePlan(DefaultPolicy(), []string{
@@ -88,6 +91,55 @@ func TestSimulatePlanEmptyPlanIsUnsafe(t *testing.T) {
 	}
 	if len(report.Notes) == 0 {
 		t.Fatal("expected explanatory note for empty plan")
+	}
+}
+
+// bd-gg7x4: the destructive-reset suggestion list must offer a backup
+// pattern that captures the WORKING TREE (uncommitted edits), not just
+// committed state. The previous worktree-add HEAD suggestion was broken
+// because git worktree only checks out HEAD — uncommitted edits would
+// be lost the moment the user proceeded with the destructive operation.
+// Also, no suggestion may use a fixed /tmp path (collides on a second
+// concurrent invocation), and stash is forbidden by project policy.
+func TestSimulatePlanResetHardSuggestsWorkingTreeBackup(t *testing.T) {
+	report := SimulatePlan(DefaultPolicy(), []string{"git reset --hard HEAD~1"})
+	if len(report.Steps) == 0 {
+		t.Fatal("no steps reported")
+	}
+	step := report.Steps[0]
+	if step.Decision != SimulationDecisionBlock {
+		t.Fatalf("decision = %q, want %q", step.Decision, SimulationDecisionBlock)
+	}
+	if len(step.SaferAlternatives) == 0 {
+		t.Fatalf("missing safer alternatives: %+v", step)
+	}
+
+	joined := strings.Join(step.SaferAlternatives, "\n")
+
+	// Stash is forbidden by project policy and must not be suggested.
+	if strings.Contains(joined, "git stash") {
+		t.Errorf("safer alternatives suggest forbidden 'git stash': %v", step.SaferAlternatives)
+	}
+
+	// Fixed /tmp/safety-backup path would collide between agents — the
+	// suggestion must use a unique path. Allow the timestamped variant.
+	for _, alt := range step.SaferAlternatives {
+		if strings.Contains(alt, "/tmp/safety-backup ") || strings.HasSuffix(alt, "/tmp/safety-backup") {
+			t.Errorf("safer alternative uses fixed collision-prone path: %q", alt)
+		}
+	}
+
+	// At least one suggestion must actually back up the WORKING TREE
+	// (not just committed state). git-worktree-add HEAD does NOT count.
+	hasWorkingTreeBackup := false
+	for _, alt := range step.SaferAlternatives {
+		if strings.Contains(alt, "cp ") || strings.Contains(alt, "tar ") || strings.Contains(alt, "rsync ") {
+			hasWorkingTreeBackup = true
+			break
+		}
+	}
+	if !hasWorkingTreeBackup {
+		t.Errorf("no suggestion backs up the working tree (cp/tar/rsync); only had: %v", step.SaferAlternatives)
 	}
 }
 

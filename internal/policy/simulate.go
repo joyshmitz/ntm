@@ -159,7 +159,13 @@ func saferAlternatives(command string, match *Match) []string {
 		return []string{
 			"git status",
 			"git diff",
-			"git worktree add /tmp/safety-backup HEAD",
+			// Capture the WORKING TREE (uncommitted edits + staged changes)
+			// to a unique /tmp path before the destructive operation.
+			// 'git worktree add HEAD' would only capture committed state;
+			// 'git stash' is forbidden by project policy. cp -a preserves
+			// timestamps and modes; the timestamped path avoids colliding
+			// with a parallel agent's backup in another pane.
+			"cp -a . /tmp/ntm-safety-backup-$(date +%s)",
 			"git reset --soft <ref>",
 		}
 	case strings.Contains(lower, "git clean"):
