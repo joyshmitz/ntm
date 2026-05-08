@@ -336,11 +336,12 @@ func normalizeArrayVar(name string, value interface{}) (interface{}, error) {
 // Substitutor handles variable substitution in workflow prompts and conditions.
 // It supports multiple variable types: vars, steps, env, and context variables.
 type Substitutor struct {
-	state    *ExecutionState
-	session  string
-	workflow string
-	defaults map[string]interface{}
-	maxDepth int
+	state          *ExecutionState
+	session        string
+	workflow       string
+	defaults       map[string]interface{}
+	maxDepth       int
+	localOverrides map[string]interface{}
 }
 
 // NewSubstitutor creates a new substitutor with the given execution context.
@@ -355,6 +356,16 @@ func NewSubstitutor(state *ExecutionState, session, workflow string) *Substituto
 // SetDefaults sets the workflow-level defaults map for ${defaults.X} resolution.
 func (s *Substitutor) SetDefaults(d map[string]interface{}) {
 	s.defaults = d
+}
+
+// SetLocalOverrides registers a per-call overlay map keyed by full variable
+// path (e.g. "round", "rounds_remaining", "loop.round"). Lookups consult this
+// map BEFORE state.Variables, so callers can supply per-goroutine values for
+// keys that would otherwise race on the shared state map. Used by foreach
+// max_rounds (bd-2ubxp.20) to bind ${round}/${loop.round} per-iteration
+// without writing to state.Variables.
+func (s *Substitutor) SetLocalOverrides(o map[string]interface{}) {
+	s.localOverrides = o
 }
 
 // SetMaxDepth sets the maximum recursion depth for nested substitutions.
@@ -590,6 +601,22 @@ func (s *Substitutor) resolveVar(path string) (interface{}, error) {
 
 	if len(parts) == 0 || parts[0] == "" {
 		return nil, fmt.Errorf("empty variable reference")
+	}
+
+	// bd-2ubxp.20: per-call overrides take precedence over state.Variables so
+	// parallel foreach iterations can each see their own ${round} value
+	// without racing on the shared map. Matches by full path first (so
+	// ${loop.round} hits "loop.round" in the overlay) and falls back to the
+	// bare top-level key for ${round}/${rounds_remaining}.
+	if s.localOverrides != nil {
+		if v, ok := s.localOverrides[path]; ok {
+			return v, nil
+		}
+		if len(parts) > 1 {
+			if v, ok := s.localOverrides[parts[0]]; ok {
+				return navigateNested(v, parts[1:])
+			}
+		}
 	}
 
 	switch parts[0] {

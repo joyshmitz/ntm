@@ -610,15 +610,20 @@ func (e *Executor) executeForeachIteration(ctx context.Context, parent *Step, wo
 	}
 
 	for round := 1; round <= maxRounds; round++ {
-		releaseRound := e.pushRoundVars(round, maxRounds)
+		// bd-2ubxp.20: bind round/rounds_remaining/loop.round on a derived
+		// context instead of writing to shared state.Variables, so parallel
+		// iterations don't race on each other's round values.
+		roundCtx := ctx
+		if maxRounds > 1 {
+			roundCtx = withRoundOverrides(ctx, buildRoundOverrides(round, maxRounds))
+		}
 
 		stepsForRound := plan.Steps
 		if maxRounds > 1 {
 			stepsForRound = rewriteRoundStepIDs(plan.Steps, round)
 		}
 
-		exit := e.runForeachIterationRound(ctx, parent, workflow, plan, parentOnError, stepsForRound, &iterResult)
-		releaseRound()
+		exit := e.runForeachIterationRound(roundCtx, parent, workflow, plan, parentOnError, stepsForRound, &iterResult)
 		if exit {
 			return iterResult
 		}
@@ -658,7 +663,7 @@ func (e *Executor) runForeachIterationRound(ctx context.Context, parent *Step, w
 		}
 
 		if foreachControlOnlyStep(stepsForRound[i]) {
-			control, applies, err := e.foreachLoopControlDecision(stepsForRound[i])
+			control, applies, err := e.foreachLoopControlDecision(ctx, stepsForRound[i])
 			if err != nil {
 				failed := failedForeachLoopControlCondition(stepsForRound[i], err)
 				iterResult.Results = append(iterResult.Results, failed)
@@ -734,12 +739,7 @@ func markForeachIterationSkippedIfAllResultsSkipped(result foreachIterationResul
 	return result
 }
 
-func (e *Executor) foreachLoopControl(step Step) (LoopControl, bool) {
-	control, applies, _ := e.foreachLoopControlDecision(step)
-	return control, applies
-}
-
-func (e *Executor) foreachLoopControlDecision(step Step) (LoopControl, bool, error) {
+func (e *Executor) foreachLoopControlDecision(ctx context.Context, step Step) (LoopControl, bool, error) {
 	control, ok := foreachLoopControlValue(step)
 	if !ok {
 		return LoopControlNone, false, nil
@@ -747,7 +747,7 @@ func (e *Executor) foreachLoopControlDecision(step Step) (LoopControl, bool, err
 	if step.When == "" {
 		return control, true, nil
 	}
-	skip, err := e.evaluateCondition(step.When)
+	skip, err := e.evaluateConditionCtx(ctx, step.When)
 	if err != nil || skip {
 		return LoopControlNone, false, err
 	}
@@ -821,7 +821,7 @@ func (e *Executor) logForeachLoopControl(control LoopControl, workflow *Workflow
 
 func (e *Executor) executeForeachNestedStep(ctx context.Context, step *Step, workflow *Workflow) StepResult {
 	if step.When != "" {
-		skip, err := e.evaluateCondition(step.When)
+		skip, err := e.evaluateConditionCtx(ctx, step.When)
 		if err != nil {
 			return StepResult{
 				StepID:     step.ID,

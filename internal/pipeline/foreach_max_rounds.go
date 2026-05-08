@@ -1,10 +1,50 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+// roundOverridesCtxKey scopes per-iteration round/rounds_remaining bindings
+// onto a context.Context so parallel foreach iterations can each carry their
+// own values without racing on shared state.Variables (bd-2ubxp.20).
+type roundOverridesCtxKey struct{}
+
+// withRoundOverrides returns a derived context that exposes the supplied
+// round-binding overlay to substitution call sites. Pass nil to clear.
+func withRoundOverrides(ctx context.Context, overrides map[string]interface{}) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, roundOverridesCtxKey{}, overrides)
+}
+
+// roundOverridesFromCtx returns the round-binding overlay attached to ctx, or
+// nil if none. The map should be treated as read-only by callers.
+func roundOverridesFromCtx(ctx context.Context) map[string]interface{} {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(roundOverridesCtxKey{}).(map[string]interface{})
+	return v
+}
+
+// buildRoundOverrides constructs the overlay map for a single round of a
+// foreach iteration. Keys mirror the historical pushRoundVars bindings:
+// `round` / `rounds_remaining` (top-level shortcuts) and `loop.round` /
+// `loop.rounds_remaining` (loop-namespaced form). Values are int so the
+// substitutor's formatValue handles printing identically to the prior path.
+func buildRoundOverrides(round, maxRounds int) map[string]interface{} {
+	rem := maxRounds - round
+	return map[string]interface{}{
+		"round":                 round,
+		"rounds_remaining":      rem,
+		"loop.round":            round,
+		"loop.rounds_remaining": rem,
+	}
+}
 
 // resolveForeachMaxRounds returns the resolved max_rounds for a foreach step.
 // Returns 1 when MaxRounds is unset (single round, the historical default
@@ -56,53 +96,11 @@ func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 	return parsed, nil
 }
 
-// pushRoundVars exposes ${round} (1-based) and ${rounds_remaining} as
-// loop-local variables for an iteration's body steps. The values are stored
-// under both bare ("round") and loop-namespaced ("loop.round") keys so
-// authors can reference either ${round} or ${loop.round}, matching the dual
-// shape used for ${item} / ${loop.item}.
-//
-// Returns a release function that restores the previous bindings (or removes
-// the keys entirely if they were absent before). Safe to call exactly once
-// (matches the pushPaneMetadataVars / popPaneMetadataVars contract).
-func (e *Executor) pushRoundVars(round, maxRounds int) func() {
-	if e == nil || e.state == nil {
-		return func() {}
-	}
-	e.varMu.Lock()
-	if e.state.Variables == nil {
-		e.state.Variables = make(map[string]interface{})
-	}
-	keys := []string{"round", "rounds_remaining", "loop.round", "loop.rounds_remaining"}
-	prev := make(map[string]interface{}, len(keys))
-	had := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		if v, ok := e.state.Variables[k]; ok {
-			prev[k] = v
-			had[k] = true
-		}
-	}
-	e.state.Variables["round"] = round
-	e.state.Variables["rounds_remaining"] = maxRounds - round
-	e.state.Variables["loop.round"] = round
-	e.state.Variables["loop.rounds_remaining"] = maxRounds - round
-	e.varMu.Unlock()
-
-	return func() {
-		if e == nil || e.state == nil {
-			return
-		}
-		e.varMu.Lock()
-		defer e.varMu.Unlock()
-		for _, k := range keys {
-			if had[k] {
-				e.state.Variables[k] = prev[k]
-			} else {
-				delete(e.state.Variables, k)
-			}
-		}
-	}
-}
+// Per-iteration round bindings are no longer written to state.Variables.
+// Instead, the round loop in executeForeachIteration derives a child ctx
+// via withRoundOverrides; substitution helpers consult that ctx and pass
+// the overlay to Substitutor.SetLocalOverrides. This keeps parallel
+// iterations from racing on shared state.Variables["round"] (bd-2ubxp.20).
 
 // rewriteRoundStepIDs deep-clones an iteration's body steps and suffixes each
 // step's ID with `_round<N>` so per-round results land under unique keys in

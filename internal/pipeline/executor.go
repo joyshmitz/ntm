@@ -1131,7 +1131,7 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	releasePaneVars := e.bindStepPaneMetadata(step)
 	defer releasePaneVars()
 
-	expandedCmd, err := e.substituteVariablesStrict(step.Command)
+	expandedCmd, err := e.substituteVariablesStrictCtx(ctx, step.Command)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "command", "substitution",
@@ -1144,7 +1144,7 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	// bd-zfdjd.7: substitute ${X} placeholders in Stdin before piping. The
 	// expanded payload is set on cmd.Stdin below, after cmd is constructed.
-	expandedStdin, stdinErr := e.substituteVariablesStrict(step.Stdin)
+	expandedStdin, stdinErr := e.substituteVariablesStrictCtx(ctx, step.Stdin)
 	if stdinErr != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "command", "substitution",
@@ -1160,7 +1160,7 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	// are exported as environment variables. Without this, args:
 	// {TOKEN: "${env.API_TOKEN}"} ships the literal text instead of the
 	// runtime value.
-	expandedArgs, argSubErr := e.substituteCommandArgsStrict(step.Args)
+	expandedArgs, argSubErr := e.substituteCommandArgsStrictCtx(ctx, step.Args)
 	if argSubErr != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "command", "substitution",
@@ -1516,7 +1516,7 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		return result
 	}
 
-	rendered, err = e.substituteVariablesStrict(rendered)
+	rendered, err = e.substituteVariablesStrictCtx(ctx, rendered)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "template", "substitution",
@@ -2617,6 +2617,15 @@ func (e *Executor) substituteVariables(s string) string {
 // surfaces on the StepResult instead of leaking unresolved placeholders into
 // shell exec or agent prompts.
 func (e *Executor) substituteVariablesStrict(s string) (string, error) {
+	return e.substituteVariablesStrictCtx(nil, s)
+}
+
+// substituteVariablesStrictCtx is the ctx-aware form of substituteVariablesStrict.
+// When ctx carries round overrides (bd-2ubxp.20), they are passed to the
+// Substitutor as localOverrides so per-iteration ${round}/${loop.round}
+// values resolve from the call's ctx instead of shared state.Variables.
+// A nil ctx is equivalent to no overrides.
+func (e *Executor) substituteVariablesStrictCtx(ctx context.Context, s string) (string, error) {
 	e.varMu.RLock()
 	defer e.varMu.RUnlock()
 	e.stateMu.RLock()
@@ -2624,6 +2633,9 @@ func (e *Executor) substituteVariablesStrict(s string) (string, error) {
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
 	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
+	if overrides := roundOverridesFromCtx(ctx); overrides != nil {
+		sub.SetLocalOverrides(overrides)
+	}
 	s = e.substituteRuntimeVariables(s)
 	return sub.Substitute(s)
 }
@@ -2645,6 +2657,14 @@ func (e *Executor) substituteCommandArgs(args map[string]interface{}) map[string
 // the child shell (bd-bhcz7). Returns the first substitution error
 // encountered while still producing a partial map for diagnostics.
 func (e *Executor) substituteCommandArgsStrict(args map[string]interface{}) (map[string]interface{}, error) {
+	return e.substituteCommandArgsStrictCtx(nil, args)
+}
+
+// substituteCommandArgsStrictCtx is the ctx-aware form of
+// substituteCommandArgsStrict; it propagates round overrides from ctx to
+// every per-value substitution so foreach max_rounds bindings (bd-2ubxp.20)
+// resolve correctly inside Args under parallel: true.
+func (e *Executor) substituteCommandArgsStrictCtx(ctx context.Context, args map[string]interface{}) (map[string]interface{}, error) {
 	if len(args) == 0 {
 		return args, nil
 	}
@@ -2658,14 +2678,14 @@ func (e *Executor) substituteCommandArgsStrict(args map[string]interface{}) (map
 	for k, v := range args {
 		switch typed := v.(type) {
 		case string:
-			expanded, err := e.substituteVariablesStrict(typed)
+			expanded, err := e.substituteVariablesStrictCtx(ctx, typed)
 			captureErr(err)
 			out[k] = expanded
 		case []interface{}:
 			expanded := make([]interface{}, len(typed))
 			for i, item := range typed {
 				if s, ok := item.(string); ok {
-					exp, err := e.substituteVariablesStrict(s)
+					exp, err := e.substituteVariablesStrictCtx(ctx, s)
 					captureErr(err)
 					expanded[i] = exp
 				} else {
@@ -2691,6 +2711,15 @@ func (e *Executor) substituteCommandArgsStrict(args map[string]interface{}) (map
 // - Type coercion for numeric comparisons
 // Thread-safe: acquires read locks on Variables and Steps for concurrent access during parallel execution.
 func (e *Executor) evaluateCondition(condition string) (bool, error) {
+	return e.evaluateConditionCtx(nil, condition)
+}
+
+// evaluateConditionCtx is the ctx-aware form of evaluateCondition. Round
+// overrides from ctx are passed to the Substitutor so a body step's
+// `when: ${round} == 2` predicate (bd-2ubxp.20) resolves against the
+// caller's per-iteration round value, not whatever value happens to be in
+// state.Variables when the parallel goroutine runs.
+func (e *Executor) evaluateConditionCtx(ctx context.Context, condition string) (bool, error) {
 	e.varMu.RLock()
 	defer e.varMu.RUnlock()
 	e.stateMu.RLock()
@@ -2698,6 +2727,9 @@ func (e *Executor) evaluateCondition(condition string) (bool, error) {
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
 	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
+	if overrides := roundOverridesFromCtx(ctx); overrides != nil {
+		sub.SetLocalOverrides(overrides)
+	}
 	condition = e.substituteRuntimeVariables(condition)
 	return EvaluateCondition(condition, sub)
 }
