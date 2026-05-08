@@ -412,7 +412,12 @@ func outputActivityError(session string, err error) error {
 
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	if encErr := encoder.Encode(output); encErr != nil {
+		return encErr
+	}
+	// bd-usgfy: signal non-zero exit after writing the success:false envelope so
+	// `ntm activity --json` automation can gate on $? without re-parsing JSON.
+	return jsonFailureExit()
 }
 
 func renderActivityTUI(result *activityResult, watchMode bool) error {

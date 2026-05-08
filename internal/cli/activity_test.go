@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -232,5 +236,37 @@ func TestActivityAgentTypeColor(t *testing.T) {
 				t.Fatalf("activityAgentTypeColor(%q) = %q, want %q", tc.agentType, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestOutputActivityError_ReturnsJSONFailureSentinel covers bd-usgfy: after
+// outputActivityError successfully encodes a `success: false` envelope, it
+// must return errJSONFailure so root.Execute() exits non-zero. Without this,
+// `ntm activity --json` automation that gates on `$?` silently misses
+// outages.
+func TestOutputActivityError_ReturnsJSONFailureSentinel(t *testing.T) {
+	t.Helper()
+
+	// Redirect stdout so the encoded envelope doesn't pollute test output.
+	origStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe error = %v", pipeErr)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = origStdout }()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		close(done)
+	}()
+
+	err := outputActivityError("test-session", fmt.Errorf("synthetic activity failure"))
+	_ = w.Close()
+	<-done
+
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("outputActivityError returned %v, want errJSONFailure", err)
 	}
 }

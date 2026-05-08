@@ -253,23 +253,31 @@ func runAdopt(opts AdoptOptions) error {
 		return err
 	}
 
+	// bd-usgfy: emitAdoptFailure writes the success:false JSON envelope and
+	// signals non-zero exit via errJSONFailure so automation scripts gating
+	// on `$?` don't treat the failure as success (parity with #125).
+	emitAdoptFailure := func(result *AdoptResult) error {
+		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+			return encErr
+		}
+		return jsonFailureExit()
+	}
+
 	if !tmux.SessionExists(opts.Session) {
-		result := &AdoptResult{
+		return emitAdoptFailure(&AdoptResult{
 			Success: false,
 			Session: opts.Session,
 			Error:   fmt.Sprintf("session '%s' not found", opts.Session),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	panes, err := tmux.GetPanes(opts.Session)
 	if err != nil {
-		result := &AdoptResult{
+		return emitAdoptFailure(&AdoptResult{
 			Success: false,
 			Session: opts.Session,
 			Error:   fmt.Sprintf("failed to get panes: %v", err),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	paneByIndex := make(map[int]*tmux.Pane)
@@ -278,8 +286,7 @@ func runAdopt(opts AdoptOptions) error {
 	}
 
 	if err := validateAdoptAssignments(opts.PaneAssignments); err != nil {
-		result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		return emitAdoptFailure(&AdoptResult{Success: false, Session: opts.Session, Error: err.Error()})
 	}
 
 	adoptedPanes := []AdoptedPaneInfo{}
@@ -323,7 +330,7 @@ func runAdopt(opts AdoptOptions) error {
 	for _, spec := range supportedAdoptTypes {
 		if err := adoptType(opts.PaneAssignments[spec.AgentType], spec.AgentType); err != nil {
 			result := &AdoptResult{Success: false, Session: opts.Session, Error: err.Error()}
-			return output.New(output.WithJSON(jsonOutput)).Output(result)
+			return emitAdoptFailure(result)
 		}
 	}
 
