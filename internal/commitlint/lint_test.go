@@ -247,6 +247,15 @@ func TestPathMatchesReservation_Patterns(t *testing.T) {
 		{"internal/auth/sub/file.go", "internal/auth/*", false},
 		{"foo.go", "*.go", true},
 		{"foo.go", "", false},
+
+		// bd-r1563: bare "**" must be a catch-all just like "/**".
+		// Pre-fix, pathMatchesReservation("internal/foo.go", "**")
+		// returned false because HasSuffix("**", "/**") is false and
+		// path.Match's `*` cannot cross `/`.
+		{"foo/bar.go", "**", true},
+		{"deep/nested/file.go", "**", true},
+		{"anyfile.go", "**", true},
+		{"foo/bar.go", "/**", true}, // pin existing behavior
 	}
 	for _, c := range cases {
 		got := pathMatchesReservation(c.path, c.pattern)

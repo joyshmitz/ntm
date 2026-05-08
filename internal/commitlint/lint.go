@@ -358,6 +358,14 @@ func pathMatchesReservation(p, pattern string) bool {
 	if p == pattern {
 		return true
 	}
+	// bd-r1563: bare "**" is a catch-all just like "/**".
+	// strings.HasSuffix("**", "/**") returns false (candidate is shorter
+	// than the suffix), so a bare "**" reservation pattern would fall
+	// through every branch and never cover any slash-bearing path.
+	// Mirror of bd-6286k (reservationsim) and bd-397fv (contentionforecast).
+	if pattern == "**" {
+		return true
+	}
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := strings.TrimSuffix(pattern, "/**")
 		if prefix == "" {
