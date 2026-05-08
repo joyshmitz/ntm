@@ -54,10 +54,10 @@ type LaneEligibility struct {
 
 // Inputs is the full evidence Detect reduces.
 type Inputs struct {
-	Dispatches    []Dispatch
-	Lanes         []LaneEligibility
-	WindowStart   time.Time
-	WindowEnd     time.Time
+	Dispatches  []Dispatch
+	Lanes       []LaneEligibility
+	WindowStart time.Time
+	WindowEnd   time.Time
 	// MonopolyRatioWarn is the per-agent-type dispatch fraction that
 	// triggers a warning. Default 0.70 (one type taking 70 %+ of
 	// dispatches). Set 0 to disable.
@@ -81,9 +81,9 @@ type LaneStats struct {
 
 // AgentTypeStats is per-agent-type dispatch share over the window.
 type AgentTypeStats struct {
-	AgentType string  `json:"agent_type"`
-	Dispatches int    `json:"dispatches"`
-	Share     float64 `json:"share"` // [0, 1]
+	AgentType  string  `json:"agent_type"`
+	Dispatches int     `json:"dispatches"`
+	Share      float64 `json:"share"` // [0, 1]
 }
 
 // Finding is one detected fairness risk.
@@ -97,13 +97,13 @@ type Finding struct {
 
 // Report is the full assessment.
 type Report struct {
-	GeneratedAt   time.Time         `json:"generated_at"`
-	WindowStart   time.Time         `json:"window_start,omitempty"`
-	WindowEnd     time.Time         `json:"window_end,omitempty"`
-	Total         int               `json:"total_dispatches"`
-	Lanes         []LaneStats       `json:"lanes,omitempty"`
-	AgentTypes    []AgentTypeStats  `json:"agent_types,omitempty"`
-	Findings      []Finding         `json:"findings,omitempty"`
+	GeneratedAt time.Time        `json:"generated_at"`
+	WindowStart time.Time        `json:"window_start,omitempty"`
+	WindowEnd   time.Time        `json:"window_end,omitempty"`
+	Total       int              `json:"total_dispatches"`
+	Lanes       []LaneStats      `json:"lanes,omitempty"`
+	AgentTypes  []AgentTypeStats `json:"agent_types,omitempty"`
+	Findings    []Finding        `json:"findings,omitempty"`
 }
 
 // Detect reduces inputs into a Report. Pure: no I/O.
@@ -215,17 +215,22 @@ func computeAgentTypeStats(dispatches []Dispatch) []AgentTypeStats {
 		return nil
 	}
 	count := make(map[string]int)
+	total := 0
 	for _, d := range dispatches {
 		t := strings.TrimSpace(d.AgentType)
 		if t == "" {
 			continue
 		}
 		count[t]++
+		total++
+	}
+	if total == 0 {
+		return nil
 	}
 	out := make([]AgentTypeStats, 0, len(count))
-	total := float64(len(dispatches))
+	typedTotal := float64(total)
 	for t, c := range count {
-		share := float64(c) / total
+		share := float64(c) / typedTotal
 		out = append(out, AgentTypeStats{
 			AgentType:  t,
 			Dispatches: c,

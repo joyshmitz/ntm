@@ -103,6 +103,32 @@ func TestDetect_AgentTypeMonopolyCriticalAt95Percent(t *testing.T) {
 	}
 }
 
+func TestDetect_AgentTypeMonopolyIgnoresUntypedDispatchesInShare(t *testing.T) {
+	t.Parallel()
+	dispatches := make([]Dispatch, 0, 20)
+	for i := 0; i < 9; i++ {
+		dispatches = append(dispatches, Dispatch{Lane: "auth", AgentType: "cc", At: at(time.Duration(i) * time.Minute)})
+	}
+	dispatches = append(dispatches, Dispatch{Lane: "auth", AgentType: "cod", At: at(9 * time.Minute)})
+	for i := 0; i < 10; i++ {
+		dispatches = append(dispatches, Dispatch{Lane: "auth", At: at(time.Duration(10+i) * time.Minute)})
+	}
+
+	r := Detect(Inputs{Now: clock(), Dispatches: dispatches})
+	if r.Total != 20 {
+		t.Fatalf("Total = %d, want all observed dispatches", r.Total)
+	}
+	if len(r.AgentTypes) != 2 {
+		t.Fatalf("AgentTypes = %d, want 2 typed agent buckets: %+v", len(r.AgentTypes), r.AgentTypes)
+	}
+	if got := r.AgentTypes[0]; got.AgentType != "cc" || got.Share != 0.9 {
+		t.Fatalf("top agent type = %+v, want cc share 0.9 from typed dispatches only", got)
+	}
+	if !findHasCode(r.Findings, "agent_type_monopoly_critical") {
+		t.Fatalf("missing monopoly_critical finding with blank AgentType padding: %+v", r.Findings)
+	}
+}
+
 func TestDetect_AgentTypeMonopolyWarningBetween70And90(t *testing.T) {
 	t.Parallel()
 	// 8 cc, 2 cod = 80% cc share -> warning, not critical.
@@ -144,8 +170,8 @@ func TestDetect_WindowFilterDropsOutOfRange(t *testing.T) {
 		WindowStart: at(2 * time.Minute),
 		WindowEnd:   at(4 * time.Minute),
 		Dispatches: []Dispatch{
-			{Lane: "x", AgentType: "cc", At: at(0)},                  // before window
-			{Lane: "x", AgentType: "cc", At: at(3 * time.Minute)},    // in window
+			{Lane: "x", AgentType: "cc", At: at(0)},                 // before window
+			{Lane: "x", AgentType: "cc", At: at(3 * time.Minute)},   // in window
 			{Lane: "x", AgentType: "cod", At: at(10 * time.Minute)}, // after window
 		},
 	}
