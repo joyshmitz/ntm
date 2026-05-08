@@ -22,15 +22,15 @@ func TestBuildCausalityOutput_SortsDeterministically(t *testing.T) {
 				{ID: "a", Source: "robot_audit", Type: "command", ts: t0},
 			}, nil
 		},
-		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return []CausalityEvent{
 				{ID: "m1", Source: "agentmail_inbox", Type: "message", ts: t1},
 			}, []CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 1}}, nil
 		},
-		session: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "s", Source: "session_timeline", Type: "working", ts: t1}}, nil
 		},
-		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "p", Source: "pipeline_state", Type: "pipeline_finished", ts: t2}}, nil
 		},
 	}
@@ -73,11 +73,11 @@ func TestBuildCausalityOutput_FiltersByWindowAndFields(t *testing.T) {
 				{ID: "3", Source: "robot_audit", Type: "send", Session: "myproj", Pane: "1", BeadID: "bd-1", ChainID: "c1", ts: t2},
 			}, nil
 		},
-		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return nil, []CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 0}}, nil
 		},
-		session:  func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
+		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -111,7 +111,7 @@ func TestBuildCausalityOutput_SessionFilterKeepsSessionAgnosticMailEvents(t *tes
 		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, nil
 		},
-		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return []CausalityEvent{
 					{ID: "m1", Source: "agentmail_inbox", Type: "message", Session: "", ts: t0},
 					{ID: "m2", Source: "agentmail_inbox", Type: "message", Session: "other-session", ts: t0.Add(1 * time.Second)},
@@ -119,8 +119,8 @@ func TestBuildCausalityOutput_SessionFilterKeepsSessionAgnosticMailEvents(t *tes
 				[]CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 2}},
 				nil
 		},
-		session:  func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
+		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -150,15 +150,15 @@ func TestBuildCausalityOutput_MissingSourceDegrades(t *testing.T) {
 		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, errors.New("audit unavailable")
 		},
-		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return nil,
 				[]CausalitySourceStatus{{Name: "agentmail_reservations", Available: false, Error: "mail down"}},
 				[]string{"agentmail down"}
 		},
-		session: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, errors.New("timeline missing")
 		},
-		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", ts: t0}}, nil
 		},
 	}
@@ -199,16 +199,16 @@ func TestBuildCausalityOutput_BeadChainMiniWorkflow(t *testing.T) {
 		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "a1", Source: "robot_audit", Type: "command", BeadID: beadID, Pane: "2", ChainID: "cmd-100", ts: t0}}, nil
 		},
-		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			events := []CausalityEvent{{ID: "m1", Source: "agentmail_reservations", Type: "reservation_active", BeadID: beadID, Agent: "BlueLake", ts: t1}}
 			return events,
 				[]CausalitySourceStatus{{Name: "agentmail_reservations", Available: true, Events: 1}},
 				nil
 		},
-		session: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return nil, nil
 		},
-		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) {
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 			return []CausalityEvent{{ID: "p1", Source: "pipeline_state", Type: "pipeline_started", BeadID: beadID, ChainID: "run-xyz", ts: t2}}, nil
 		},
 	}
@@ -228,6 +228,48 @@ func TestBuildCausalityOutput_BeadChainMiniWorkflow(t *testing.T) {
 	joined := strings.Join(gotSources, ",")
 	if joined != "robot_audit,agentmail_reservations,pipeline_state" {
 		t.Fatalf("unexpected source order: %s", joined)
+	}
+}
+
+func TestBuildCausalityOutput_FilterCountsReflectReturnedLimit(t *testing.T) {
+	t0 := time.Date(2026, 5, 8, 16, 30, 0, 0, time.UTC)
+
+	loaders := causalityLoaders{
+		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return []CausalityEvent{
+				{ID: "a1", Source: "robot_audit", Type: "command", ts: t0},
+				{ID: "a2", Source: "robot_audit", Type: "command", ts: t0.Add(1 * time.Second)},
+				{ID: "a3", Source: "robot_audit", Type: "command", ts: t0.Add(2 * time.Second)},
+			}, nil
+		},
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+			return nil, nil, nil
+		},
+		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+	}
+
+	out := buildCausalityOutput(CausalityOptions{
+		Session: "myproj",
+		Limit:   2,
+	}, loaders)
+	if !out.Success {
+		t.Fatalf("expected success=true, got error=%q", out.Error)
+	}
+	if out.Total != 3 {
+		t.Fatalf("total = %d, want 3", out.Total)
+	}
+	if out.Available != 3 {
+		t.Fatalf("available = %d, want 3", out.Available)
+	}
+	if out.Filtered != 2 {
+		t.Fatalf("filtered = %d, want 2", out.Filtered)
+	}
+	if !out.Truncated {
+		t.Fatal("expected truncated=true")
+	}
+	if len(out.Events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(out.Events))
 	}
 }
 
@@ -264,5 +306,156 @@ func TestReadPipelineStateFileWithLimit_AllowsSmallValidFile(t *testing.T) {
 	}
 	if state == nil || state.RunID != "run-1" {
 		t.Fatalf("unexpected state: %+v", state)
+	}
+}
+
+// bd-ogpsf: since/until must be threaded into mail/session/pipeline
+// loaders so they can short-circuit out-of-window data at the source
+// rather than load everything and discard at filter time.
+
+func TestBuildCausalityOutput_LoadersReceiveSinceUntil(t *testing.T) {
+	t0 := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	wantSince := t0.Add(-1 * time.Hour)
+	wantUntil := t0.Add(1 * time.Hour)
+
+	var sawAuditSince, sawAuditUntil *time.Time
+	var sawMailSince, sawMailUntil *time.Time
+	var sawSessionSince, sawSessionUntil *time.Time
+	var sawPipelineSince, sawPipelineUntil *time.Time
+
+	loaders := causalityLoaders{
+		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			sawAuditSince, sawAuditUntil = since, until
+			return nil, nil
+		},
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+			sawMailSince, sawMailUntil = since, until
+			return nil, nil, nil
+		},
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			sawSessionSince, sawSessionUntil = since, until
+			return nil, nil
+		},
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			sawPipelineSince, sawPipelineUntil = since, until
+			return nil, nil
+		},
+	}
+
+	out := buildCausalityOutput(CausalityOptions{
+		Session: "myproj",
+		Since:   wantSince.Format(time.RFC3339),
+		Until:   wantUntil.Format(time.RFC3339),
+		Limit:   10,
+	}, loaders)
+	if !out.Success {
+		t.Fatalf("expected success, got error=%q", out.Error)
+	}
+
+	for name, gotSince := range map[string]*time.Time{
+		"audit":    sawAuditSince,
+		"mail":     sawMailSince,
+		"session":  sawSessionSince,
+		"pipeline": sawPipelineSince,
+	} {
+		if gotSince == nil {
+			t.Errorf("%s loader: since was nil", name)
+			continue
+		}
+		if !gotSince.Equal(wantSince) {
+			t.Errorf("%s loader: since = %v, want %v", name, gotSince, wantSince)
+		}
+	}
+	for name, gotUntil := range map[string]*time.Time{
+		"audit":    sawAuditUntil,
+		"mail":     sawMailUntil,
+		"session":  sawSessionUntil,
+		"pipeline": sawPipelineUntil,
+	} {
+		if gotUntil == nil {
+			t.Errorf("%s loader: until was nil", name)
+			continue
+		}
+		if !gotUntil.Equal(wantUntil) {
+			t.Errorf("%s loader: until = %v, want %v", name, gotUntil, wantUntil)
+		}
+	}
+}
+
+func TestWithinCausalityWindow_BoundsAndZeroPassthrough(t *testing.T) {
+	t.Parallel()
+	mid := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	before := mid.Add(-1 * time.Hour)
+	after := mid.Add(1 * time.Hour)
+
+	cases := []struct {
+		name             string
+		ts               time.Time
+		since, until     *time.Time
+		want             bool
+	}{
+		{"both nil", mid, nil, nil, true},
+		{"in window", mid, &before, &after, true},
+		{"before since", before.Add(-time.Minute), &before, &after, false},
+		{"after until", after.Add(time.Minute), &before, &after, false},
+		{"only since, in", mid, &before, nil, true},
+		{"only since, out", before.Add(-time.Minute), &before, nil, false},
+		{"only until, in", mid, nil, &after, true},
+		{"only until, out", after.Add(time.Minute), nil, &after, false},
+		{"zero ts is in", time.Time{}, &before, &after, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := withinCausalityWindow(c.ts, c.since, c.until); got != c.want {
+				t.Errorf("withinCausalityWindow(%v, %v, %v) = %v, want %v",
+					c.ts, c.since, c.until, got, c.want)
+			}
+		})
+	}
+}
+
+func TestPipelineRunIntersectsWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	before := now.Add(-1 * time.Hour)
+	after := now.Add(1 * time.Hour)
+
+	if pipelineRunIntersectsWindow(nil, &before, &after) {
+		t.Error("nil state must not intersect")
+	}
+
+	st := &causalityPipelineState{StartedAt: now}
+	if !pipelineRunIntersectsWindow(st, nil, nil) {
+		t.Error("nil bounds must intersect")
+	}
+	if !pipelineRunIntersectsWindow(st, &before, &after) {
+		t.Error("started_at in window must intersect")
+	}
+
+	// All timestamps before the since cutoff.
+	stOld := &causalityPipelineState{StartedAt: before.Add(-time.Hour), FinishedAt: before.Add(-30 * time.Minute)}
+	if pipelineRunIntersectsWindow(stOld, &before, &after) {
+		t.Error("all timestamps outside window must not intersect")
+	}
+
+	// CancelledAt brings it in window.
+	cancelTime := now
+	stCancelled := &causalityPipelineState{StartedAt: before.Add(-time.Hour), CancelledAt: &cancelTime}
+	if !pipelineRunIntersectsWindow(stCancelled, &before, &after) {
+		t.Error("CancelledAt in window must intersect")
+	}
+}
+
+func TestLoadAgentMailCausalityEvents_NoProjectSetReturnsBothStatuses(t *testing.T) {
+	t.Parallel()
+	events, statuses, warnings := loadAgentMailCausalityEvents(CausalityOptions{}, nil, nil)
+	if len(events) != 0 {
+		t.Errorf("events = %d, want 0", len(events))
+	}
+	if len(statuses) != 2 {
+		t.Errorf("statuses = %d, want 2", len(statuses))
+	}
+	if len(warnings) == 0 {
+		t.Error("warnings empty when project missing")
 	}
 }

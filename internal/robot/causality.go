@@ -80,12 +80,14 @@ type CausalitySourceStatus struct {
 // CausalityOutput is the structured response for --robot-causality.
 type CausalityOutput struct {
 	RobotResponse
-	Query    CausalityQuery          `json:"query"`
-	Events   []CausalityEvent        `json:"events"`
-	Sources  []CausalitySourceStatus `json:"sources"`
-	Total    int                     `json:"total"`
-	Filtered int                     `json:"filtered"`
-	Warnings []string                `json:"warnings,omitempty"`
+	Query     CausalityQuery          `json:"query"`
+	Events    []CausalityEvent        `json:"events"`
+	Sources   []CausalitySourceStatus `json:"sources"`
+	Total     int                     `json:"total"`
+	Available int                     `json:"available"`
+	Filtered  int                     `json:"filtered"`
+	Truncated bool                    `json:"truncated,omitempty"`
+	Warnings  []string                `json:"warnings,omitempty"`
 }
 
 type causalityLoaders struct {
@@ -232,10 +234,12 @@ func buildCausalityOutput(opts CausalityOptions, loaders causalityLoaders) Causa
 	output.Total = len(all)
 
 	filtered := filterCausalityEvents(all, opts, since, until)
-	output.Filtered = len(filtered)
+	output.Available = len(filtered)
 	if len(filtered) > limit {
 		filtered = filtered[:limit]
 	}
+	output.Filtered = len(filtered)
+	output.Truncated = output.Available > output.Filtered
 	output.Events = filtered
 
 	for i := range output.Events {
@@ -493,8 +497,13 @@ func loadAgentMailCausalityEvents(opts CausalityOptions, since, until *time.Time
 		return events, statuses, warnings
 	}
 
-	statuses = append(statuses, CausalitySourceStatus{Name: "agentmail_inbox", Available: true, Events: len(inbox)})
+	kept := 0
 	for _, msg := range inbox {
+		ts := msg.CreatedTS.Time.UTC()
+		if !withinCausalityWindow(ts, since, until) {
+			continue
+		}
+		kept++
 		thread := ""
 		if msg.ThreadID != nil {
 			thread = strings.TrimSpace(*msg.ThreadID)
@@ -504,7 +513,7 @@ func loadAgentMailCausalityEvents(opts CausalityOptions, since, until *time.Time
 			ID:        fmt.Sprintf("am-msg:%d", msg.ID),
 			Source:    "agentmail_inbox",
 			Type:      "message",
-			Timestamp: msg.CreatedTS.Time.UTC().Format(time.RFC3339Nano),
+			Timestamp: ts.Format(time.RFC3339Nano),
 			Agent:     msg.From,
 			BeadID:    bead,
 			ChainID:   thread,
@@ -514,14 +523,15 @@ func loadAgentMailCausalityEvents(opts CausalityOptions, since, until *time.Time
 				"ack_required": msg.AckRequired,
 				"kind":         msg.Kind,
 			},
-			ts: msg.CreatedTS.Time.UTC(),
+			ts: ts,
 		})
 	}
+	statuses = append(statuses, CausalitySourceStatus{Name: "agentmail_inbox", Available: true, Events: kept})
 
 	return events, statuses, warnings
 }
 
-func loadSessionTimelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent, error) {
+func loadSessionTimelineCausalityEvents(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 	persister, err := state.GetDefaultTimelinePersister()
 	if err != nil {
 		return nil, err
@@ -537,6 +547,10 @@ func loadSessionTimelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent
 
 	out := make([]CausalityEvent, 0, len(events))
 	for i, ev := range events {
+		ts := ev.Timestamp.UTC()
+		if !withinCausalityWindow(ts, since, until) {
+			continue
+		}
 		pane := causalityFirstNonEmpty(valueStringFromStringMap(ev.Details, "pane"), valueStringFromStringMap(ev.Details, "pane_id"), valueStringFromStringMap(ev.Details, "pane_index"))
 		bead := findBeadID(valueStringFromStringMap(ev.Details, "bead_id"), ev.Trigger, valueStringFromStringMap(ev.Details, "reason"))
 		chain := causalityFirstNonEmpty(valueStringFromStringMap(ev.Details, "correlation_id"), valueStringFromStringMap(ev.Details, "run_id"))
@@ -547,7 +561,7 @@ func loadSessionTimelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent
 			ID:        fmt.Sprintf("session:%s:%d", opts.Session, i),
 			Source:    "session_timeline",
 			Type:      string(ev.State),
-			Timestamp: ev.Timestamp.UTC().Format(time.RFC3339Nano),
+			Timestamp: ts.Format(time.RFC3339Nano),
 			Session:   causalityFirstNonEmpty(ev.SessionID, opts.Session),
 			Pane:      pane,
 			Agent:     ev.AgentID,
@@ -559,14 +573,14 @@ func loadSessionTimelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent
 				"agent_type": ev.AgentType,
 				"trigger":    ev.Trigger,
 			},
-			ts: ev.Timestamp.UTC(),
+			ts: ts,
 		})
 	}
 
 	return out, nil
 }
 
-func loadPipelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent, error) {
+func loadPipelineCausalityEvents(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
 	project := strings.TrimSpace(opts.Project)
 	if project == "" {
 		cwd, err := os.Getwd()
@@ -602,11 +616,17 @@ func loadPipelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent, error
 		if opts.Session != "" && st.Session != "" && st.Session != opts.Session {
 			continue
 		}
+		// Skip the entire run when none of its timestamps fall in the
+		// caller's window — saves us from emitting events the
+		// post-merge filter would discard anyway.
+		if !pipelineRunIntersectsWindow(st, since, until) {
+			continue
+		}
 
 		bead := findBeadID(valueString(st.Variables, "bead_id"), valueString(st.Variables, "bead"), valueString(st.Variables, "thread_id"))
 		sessionName := causalityFirstNonEmpty(st.Session, opts.Session)
 
-		if !st.StartedAt.IsZero() {
+		if !st.StartedAt.IsZero() && withinCausalityWindow(st.StartedAt.UTC(), since, until) {
 			out = append(out, CausalityEvent{
 				ID:        fmt.Sprintf("pipeline:%s:start", runID),
 				Source:    "pipeline_state",
@@ -625,7 +645,7 @@ func loadPipelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent, error
 			})
 		}
 
-		if !st.UpdatedAt.IsZero() && !st.UpdatedAt.Equal(st.StartedAt) {
+		if !st.UpdatedAt.IsZero() && !st.UpdatedAt.Equal(st.StartedAt) && withinCausalityWindow(st.UpdatedAt.UTC(), since, until) {
 			out = append(out, CausalityEvent{
 				ID:        fmt.Sprintf("pipeline:%s:update", runID),
 				Source:    "pipeline_state",
@@ -645,7 +665,7 @@ func loadPipelineCausalityEvents(opts CausalityOptions) ([]CausalityEvent, error
 		}
 
 		endAt, endType := pipelineRunEnd(st)
-		if !endAt.IsZero() {
+		if !endAt.IsZero() && withinCausalityWindow(endAt, since, until) {
 			out = append(out, CausalityEvent{
 				ID:        fmt.Sprintf("pipeline:%s:end", runID),
 				Source:    "pipeline_state",
@@ -720,6 +740,50 @@ func pipelineRunEnd(st *causalityPipelineState) (time.Time, string) {
 		return st.FinishedAt.UTC(), "pipeline_finished"
 	}
 	return time.Time{}, ""
+}
+
+// withinCausalityWindow returns true when ts falls inside [since, until].
+// Either bound may be nil to mean "open ended". A zero ts (which the
+// underlying source rendered as missing) is treated as in-window so we
+// do not silently drop events that lack a timestamp; downstream
+// filtering can still reject them by other criteria.
+func withinCausalityWindow(ts time.Time, since, until *time.Time) bool {
+	if ts.IsZero() {
+		return true
+	}
+	if since != nil && ts.Before(*since) {
+		return false
+	}
+	if until != nil && ts.After(*until) {
+		return false
+	}
+	return true
+}
+
+// pipelineRunIntersectsWindow returns true when any of the run's
+// recorded timestamps (started/updated/finished/cancelled) lies inside
+// the caller's window. Used by loadPipelineCausalityEvents to skip
+// reading an entire run early when none of its events would survive.
+func pipelineRunIntersectsWindow(st *causalityPipelineState, since, until *time.Time) bool {
+	if st == nil {
+		return false
+	}
+	if since == nil && until == nil {
+		return true
+	}
+	candidates := []time.Time{st.StartedAt, st.UpdatedAt, st.FinishedAt}
+	if st.CancelledAt != nil {
+		candidates = append(candidates, *st.CancelledAt)
+	}
+	for _, t := range candidates {
+		if t.IsZero() {
+			continue
+		}
+		if withinCausalityWindow(t.UTC(), since, until) {
+			return true
+		}
+	}
+	return false
 }
 
 func valueString(m map[string]interface{}, key string) string {
