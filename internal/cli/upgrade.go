@@ -1067,6 +1067,14 @@ func verifyChecksum(filePath string, expectedHash string) error {
 // the bomb-detection path without authoring a 1GB fixture.
 var maxArchiveEntryBytes int64 = 1 << 30 // 1 GB
 
+// archiveModeMask is stripped from archive-supplied mode bits during
+// extraction. setuid/setgid/sticky from a release tarball must never
+// persist onto disk: a compromised release pipeline could otherwise ship
+// a setuid binary that, once moved into root-owned /usr/local/bin by an
+// upgrade run as sudo, escalates privilege for every later invocation
+// (bd-o7fx1).
+const archiveModeMask = os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+
 // extractTarGz extracts a tar.gz file and returns the path to the ntm binary
 func extractTarGz(archivePath, destDir string) (string, error) {
 	f, err := os.Open(archivePath)
@@ -1110,7 +1118,14 @@ func extractTarGz(archivePath, destDir string) (string, error) {
 				binaryPath = target
 			}
 
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
+			// bd-o7fx1: defense-in-depth — strip setuid/setgid/sticky.
+			// Currently os.FileMode(header.Mode) (a uint32 cast) does
+			// not flip the Go-level ModeSetuid bit, so os.OpenFile
+			// already drops those bits during its syscall translation.
+			// But anyone refactoring to header.FileInfo().Mode() would
+			// reintroduce the gap; this mask guards against that.
+			outMode := os.FileMode(header.Mode) &^ archiveModeMask
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, outMode)
 			if err != nil {
 				return "", err
 			}
@@ -1174,7 +1189,12 @@ func extractZip(archivePath, destDir string) (string, error) {
 			return "", err
 		}
 
-		outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, f.Mode())
+		// bd-o7fx1: zip's f.Mode() translates external_attr to os.FileMode
+		// with ModeSetuid/Setgid/Sticky set. Without masking, os.OpenFile
+		// would honor them and produce a setuid binary on disk — which a
+		// later sudo-driven rename into /usr/local/bin/ntm escalates.
+		outMode := f.Mode() &^ archiveModeMask
+		outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, outMode)
 		if err != nil {
 			return "", err
 		}
