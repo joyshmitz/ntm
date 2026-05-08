@@ -106,6 +106,11 @@ func isolateSessionAgentStorage(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	// bd-ev740 / bd-jba66 precedent: clear ambient NTM_CONFIG so
+	// state.DefaultPath does not route the state DB into a hostile or
+	// non-writable path that an outer CI/agent shell may have exported
+	// (e.g. /nonexistent/config.toml).
+	t.Setenv("NTM_CONFIG", "")
 }
 
 func createCLIWorkspaceProjectRoot(t *testing.T) (string, string) {
