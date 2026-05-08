@@ -125,7 +125,9 @@ func SetRedactionConfig(cfg *redaction.Config) {
 		redactionCfg = redaction.Config{}
 		return
 	}
-	redactionCfg = *cfg
+	// bd-pmdpn: deep-copy reference-typed fields so a caller
+	// mutating cfg after Set cannot reach into stored state.
+	redactionCfg = cfg.DeepCopy()
 	redactionCfgSet = true
 }
 

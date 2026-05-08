@@ -105,7 +105,9 @@ func SetRedactionConfig(cfg *redaction.Config) {
 	redactionMu.Lock()
 	defer redactionMu.Unlock()
 	if cfg != nil {
-		c := *cfg
+		// bd-pmdpn: deep-copy reference-typed fields so a caller
+		// mutating cfg after Set cannot reach into stored state.
+		c := cfg.DeepCopy()
 		redactionConfig = &c
 	} else {
 		redactionConfig = nil
@@ -113,13 +115,15 @@ func SetRedactionConfig(cfg *redaction.Config) {
 }
 
 // GetRedactionConfig returns the current redaction config (or nil if unset).
+// Returned value is independent of the stored config — mutating its
+// reference-typed fields does not leak into future Get/Set calls.
 func GetRedactionConfig() *redaction.Config {
 	redactionMu.RLock()
 	defer redactionMu.RUnlock()
 	if redactionConfig == nil {
 		return nil
 	}
-	c := *redactionConfig
+	c := redactionConfig.DeepCopy()
 	return &c
 }
 

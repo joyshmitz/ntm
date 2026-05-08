@@ -76,6 +76,57 @@ func TestGetRedactionConfig_SetAndGet(t *testing.T) {
 	}
 }
 
+// bd-pmdpn: Get/Set must deep-copy the reference-typed fields on
+// redaction.Config so a caller mutating Allowlist/ExtraPatterns/
+// DisabledCategories on either input or output cannot reach into the
+// stored state. Pre-fix the existing TestGetRedactionConfig_SetAndGet
+// only exercised the Mode value-type field; the slice/map fields
+// were aliased.
+func TestGetRedactionConfig_DeepCopiesSliceMapFields(t *testing.T) {
+	SetRedactionConfig(nil)
+	t.Cleanup(func() { SetRedactionConfig(nil) })
+
+	original := &redaction.Config{
+		Mode:               redaction.ModeRedact,
+		Allowlist:          []string{"^foo$"},
+		ExtraPatterns:      map[redaction.Category][]string{"api_key": {"^xyz$"}},
+		DisabledCategories: []redaction.Category{"email"},
+	}
+	SetRedactionConfig(original)
+
+	// Mutate the input AFTER Set — must not leak into the stored config.
+	original.Allowlist[0] = "MUTATED_INPUT"
+	original.ExtraPatterns["api_key"][0] = "MUTATED_INPUT"
+	original.DisabledCategories[0] = "MUTATED_INPUT"
+
+	got := GetRedactionConfig()
+	if got.Allowlist[0] != "^foo$" {
+		t.Errorf("Set leaked input mutation into Allowlist[0]: %q", got.Allowlist[0])
+	}
+	if got.ExtraPatterns["api_key"][0] != "^xyz$" {
+		t.Errorf("Set leaked input mutation into ExtraPatterns: %q", got.ExtraPatterns["api_key"][0])
+	}
+	if got.DisabledCategories[0] != "email" {
+		t.Errorf("Set leaked input mutation into DisabledCategories[0]: %q", got.DisabledCategories[0])
+	}
+
+	// Mutate the returned copy — must not leak into the stored config.
+	got.Allowlist[0] = "MUTATED_OUTPUT"
+	got.ExtraPatterns["api_key"][0] = "MUTATED_OUTPUT"
+	got.DisabledCategories[0] = "MUTATED_OUTPUT"
+
+	got2 := GetRedactionConfig()
+	if got2.Allowlist[0] != "^foo$" {
+		t.Errorf("Get leaked output mutation into Allowlist[0]: %q", got2.Allowlist[0])
+	}
+	if got2.ExtraPatterns["api_key"][0] != "^xyz$" {
+		t.Errorf("Get leaked output mutation into ExtraPatterns: %q", got2.ExtraPatterns["api_key"][0])
+	}
+	if got2.DisabledCategories[0] != "email" {
+		t.Errorf("Get leaked output mutation into DisabledCategories[0]: %q", got2.DisabledCategories[0])
+	}
+}
+
 // =============================================================================
 // Storage.GitPatchPath (bd-9czd7)
 // =============================================================================
