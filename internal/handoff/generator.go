@@ -21,7 +21,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 )
 
-const defaultCASSLimit = 5
+const (
+	defaultCASSLimit   = 5
+	defaultCASSTimeout = 3 * time.Second
+)
 
 // CASSSearcher defines the minimal CASS client surface needed for handoff enrichment.
 type CASSSearcher interface {
@@ -624,6 +627,9 @@ type GenerateHandoffOptions struct {
 	// CASSSince scopes CASS search recency (default: 30d)
 	CASSSince string
 
+	// CASSTimeout bounds CASS search time when creating a default client (default: 3s).
+	CASSTimeout time.Duration
+
 	// TransferTTLSeconds refreshes reservation TTL when preparing transfer instructions.
 	TransferTTLSeconds int
 
@@ -987,7 +993,7 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 
 	client := opts.CASSClient
 	if client == nil {
-		client = cass.NewClient(cass.WithTimeout(15 * time.Second))
+		client = cass.NewClient(cass.WithTimeout(resolveCASSTimeout(opts.CASSTimeout)))
 	}
 	if client == nil || !client.IsInstalled() {
 		g.logger.Debug("CASS not installed, skipping enrichment")
@@ -1045,6 +1051,13 @@ func (g *Generator) enrichWithCASS(ctx context.Context, h *Handoff, opts Generat
 	)
 
 	return nil
+}
+
+func resolveCASSTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultCASSTimeout
+	}
+	return timeout
 }
 
 func buildCASSQuery(h *Handoff) string {

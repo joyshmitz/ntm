@@ -247,3 +247,23 @@ func TestBuildCASSQuery_PrefersNowGoalNextBead(t *testing.T) {
 		t.Fatalf("query missing bead id: %q", query)
 	}
 }
+
+func TestResolveCASSTimeout_Default(t *testing.T) {
+	t.Parallel()
+
+	if got := resolveCASSTimeout(0); got != defaultCASSTimeout {
+		t.Fatalf("resolveCASSTimeout(0) = %v, want %v", got, defaultCASSTimeout)
+	}
+	if got := resolveCASSTimeout(-1 * time.Second); got != defaultCASSTimeout {
+		t.Fatalf("resolveCASSTimeout(-1s) = %v, want %v", got, defaultCASSTimeout)
+	}
+}
+
+func TestResolveCASSTimeout_Override(t *testing.T) {
+	t.Parallel()
+
+	want := 1500 * time.Millisecond
+	if got := resolveCASSTimeout(want); got != want {
+		t.Fatalf("resolveCASSTimeout(%v) = %v, want %v", want, got, want)
+	}
+}
