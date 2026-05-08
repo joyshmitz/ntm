@@ -953,11 +953,9 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 
 	// Agent Mail step kinds (mail_send, file_reservation_paths,
 	// mail_inbox_check, file_reservation_release) execute via MCP Agent Mail
-	// rather than tmux pane dispatch. Until MCP integration lands, surface
-	// a structured "not implemented" skip instead of falling through to
-	// resolvePrompt, which would produce a misleading prompt error.
+	// rather than tmux pane dispatch.
 	if step.hasMailStep() {
-		return executeMailStep(step)
+		return e.executeMailStep(ctx, step)
 	}
 
 	// bd-2xka8: bind pane metadata for the step's tmux pane before
@@ -2218,7 +2216,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 	// Agent Mail step kinds inside a parallel block: short-circuit before
 	// pane selection because they don't dispatch through tmux (bd-hz1tl).
 	if step.hasMailStep() {
-		return executeMailStep(step)
+		return e.executeMailStep(ctx, step)
 	}
 
 	// Select pane with coordination to avoid reusing agents

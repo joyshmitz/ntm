@@ -1,9 +1,13 @@
 package pipeline
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
 
 // MailSendStep describes a first-class MCP Agent Mail send operation.
@@ -59,19 +63,251 @@ func (s *Step) hasMailStep() bool {
 }
 
 // executeMailStep is the executor dispatch branch for Agent Mail step kinds.
-// MCP Agent Mail integration is pending (bd-b5l8d follow-on); until then the
-// step is recorded as Skipped with SkipKindNotImplemented and a SkipReason
-// naming the kinds the author requested.
-func executeMailStep(step *Step) StepResult {
+// These steps execute through MCP Agent Mail rather than tmux pane dispatch.
+func (e *Executor) executeMailStep(ctx context.Context, step *Step) StepResult {
 	now := time.Now()
 	result := StepResult{
-		StepID:     step.ID,
-		Status:     StatusSkipped,
-		StartedAt:  now,
-		FinishedAt: now,
-		SkipKind:   SkipKindNotImplemented,
-		SkipReason: fmt.Sprintf("Agent Mail step kinds (%s) are validated but not yet executed; pending MCP integration.",
-			strings.Join(step.mailStepKindNames(), ",")),
+		StepID:    step.ID,
+		Status:    StatusRunning,
+		StartedAt: now,
+	}
+
+	if err := ctx.Err(); err != nil {
+		result.Status = StatusCancelled
+		result.FinishedAt = time.Now()
+		result.SkipKind = SkipKindCancelled
+		result.SkipReason = err.Error()
+		return result
+	}
+
+	if e.config.DryRun {
+		return e.completeMailStep(step, result, "dry_run", map[string]interface{}{
+			"action": "dry_run",
+			"kinds":  step.mailStepKindNames(),
+		})
+	}
+
+	switch {
+	case step.MailSend != nil:
+		return e.executeMailSendStep(ctx, step, result)
+	case step.FileReservationPaths != nil:
+		return e.executeFileReservationPathsStep(ctx, step, result)
+	case step.MailInboxCheck != nil:
+		return e.executeMailInboxCheckStep(ctx, step, result)
+	case step.FileReservationRelease != nil:
+		return e.executeFileReservationReleaseStep(ctx, step, result)
+	default:
+		result.Status = StatusFailed
+		result.FinishedAt = time.Now()
+		result.Error = &StepError{
+			Type:      "agent_mail",
+			Message:   "Agent Mail step has no configured kind",
+			Timestamp: time.Now(),
+		}
+		return result
+	}
+}
+
+func (e *Executor) executeMailSendStep(ctx context.Context, step *Step, result StepResult) StepResult {
+	send := step.MailSend
+	projectKey, err := e.resolveMailStepString(ctx, send.ProjectKey)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send project_key: %v", err))
+	}
+	agentName, err := e.resolveMailStepString(ctx, send.AgentName)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send agent_name: %v", err))
+	}
+	to, err := e.resolveMailStepList(ctx, send.To)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send to: %v", err))
+	}
+	subject, err := e.resolveMailStepString(ctx, send.Subject)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send subject: %v", err))
+	}
+	body, err := e.resolveMailStepString(ctx, send.Body)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send body: %v", err))
+	}
+	threadID, err := e.resolveMailStepString(ctx, send.ThreadID)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_send thread_id: %v", err))
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	sent, err := client.SendMessage(ctx, agentmail.SendMessageOptions{
+		ProjectKey:  projectKey,
+		SenderName:  agentName,
+		To:          to,
+		Subject:     subject,
+		BodyMD:      body,
+		ThreadID:    threadID,
+		AckRequired: send.AckRequired,
+	})
+	if err != nil {
+		return failMailStep(result, "agent_mail", fmt.Sprintf("mail_send failed: %v", err))
+	}
+
+	return e.completeMailStep(step, result, "mail_send", map[string]interface{}{
+		"action":    "mail_send",
+		"result":    sent,
+		"sent":      sent.Count,
+		"thread_id": threadID,
+	})
+}
+
+func (e *Executor) executeFileReservationPathsStep(ctx context.Context, step *Step, result StepResult) StepResult {
+	reserve := step.FileReservationPaths
+	projectKey, err := e.resolveMailStepString(ctx, reserve.ProjectKey)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_paths project_key: %v", err))
+	}
+	agentName, err := e.resolveMailStepString(ctx, reserve.AgentName)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_paths agent_name: %v", err))
+	}
+	paths, err := e.resolveMailStepList(ctx, reserve.Paths)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_paths paths: %v", err))
+	}
+	reason, err := e.resolveMailStepString(ctx, reserve.Reason)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_paths reason: %v", err))
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	reservation, err := client.ReservePaths(ctx, agentmail.FileReservationOptions{
+		ProjectKey: projectKey,
+		AgentName:  agentName,
+		Paths:      paths,
+		TTLSeconds: reserve.TTLSeconds,
+		Exclusive:  reserve.Exclusive,
+		Reason:     reason,
+	})
+	if err != nil {
+		return failMailStep(result, "agent_mail", fmt.Sprintf("file_reservation_paths failed: %v", err))
+	}
+
+	return e.completeMailStep(step, result, "file_reservation_paths", map[string]interface{}{
+		"action":         "file_reservation_paths",
+		"result":         reservation,
+		"granted_count":  len(reservation.Granted),
+		"conflict_count": len(reservation.Conflicts),
+	})
+}
+
+func (e *Executor) executeMailInboxCheckStep(ctx context.Context, step *Step, result StepResult) StepResult {
+	inbox := step.MailInboxCheck
+	projectKey, err := e.resolveMailStepString(ctx, inbox.ProjectKey)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_inbox_check project_key: %v", err))
+	}
+	agentName, err := e.resolveMailStepString(ctx, inbox.AgentName)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("mail_inbox_check agent_name: %v", err))
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	messages, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
+		ProjectKey: projectKey,
+		AgentName:  agentName,
+	})
+	if err != nil {
+		return failMailStep(result, "agent_mail", fmt.Sprintf("mail_inbox_check failed: %v", err))
+	}
+
+	ackRequired := 0
+	for _, msg := range messages {
+		if msg.AckRequired {
+			ackRequired++
+		}
+	}
+
+	return e.completeMailStep(step, result, "mail_inbox_check", map[string]interface{}{
+		"action":              "mail_inbox_check",
+		"messages":            messages,
+		"message_count":       len(messages),
+		"ack_required_count":  ackRequired,
+		"until_ack_count":     inbox.UntilAckCount,
+		"until_ack_count_met": inbox.UntilAckCount == 0 || ackRequired >= inbox.UntilAckCount,
+	})
+}
+
+func (e *Executor) executeFileReservationReleaseStep(ctx context.Context, step *Step, result StepResult) StepResult {
+	release := step.FileReservationRelease
+	projectKey, err := e.resolveMailStepString(ctx, release.ProjectKey)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_release project_key: %v", err))
+	}
+	agentName, err := e.resolveMailStepString(ctx, release.AgentName)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_release agent_name: %v", err))
+	}
+	paths, err := e.resolveMailStepList(ctx, release.Paths)
+	if err != nil {
+		return failMailStep(result, "substitution", fmt.Sprintf("file_reservation_release paths: %v", err))
+	}
+
+	client := agentmail.NewClient(agentmail.WithProjectKey(projectKey))
+	released, err := client.ReleaseReservations(ctx, projectKey, agentName, paths, nil)
+	if err != nil {
+		return failMailStep(result, "agent_mail", fmt.Sprintf("file_reservation_release failed: %v", err))
+	}
+
+	return e.completeMailStep(step, result, "file_reservation_release", map[string]interface{}{
+		"action": "file_reservation_release",
+		"result": released,
+	})
+}
+
+func (e *Executor) resolveMailStepString(ctx context.Context, value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	return e.substituteVariablesStrictCtx(ctx, value)
+}
+
+func (e *Executor) resolveMailStepList(ctx context.Context, values StringOrList) ([]string, error) {
+	resolved := make([]string, len(values))
+	for i, value := range values {
+		item, err := e.resolveMailStepString(ctx, value)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		resolved[i] = item
+	}
+	return resolved, nil
+}
+
+func (e *Executor) completeMailStep(step *Step, result StepResult, action string, payload interface{}) StepResult {
+	output, err := json.Marshal(payload)
+	if err != nil {
+		return failMailStep(result, "agent_mail", fmt.Sprintf("%s output marshal failed: %v", action, err))
+	}
+
+	result.Status = StatusCompleted
+	result.Output = string(output)
+	result.FinishedAt = time.Now()
+
+	if step.OutputParse.Type != "" && step.OutputParse.Type != "none" {
+		parsed, err := e.parseOutput(result.Output, step.OutputParse)
+		if err != nil {
+			return failMailStep(result, "output_parse", fmt.Sprintf("failed to parse mail step output: %v", err))
+		}
+		result.ParsedData = parsed
+	}
+
+	return result
+}
+
+func failMailStep(result StepResult, errType, message string) StepResult {
+	result.Status = StatusFailed
+	result.FinishedAt = time.Now()
+	result.Error = &StepError{
+		Type:      errType,
+		Message:   message,
+		Timestamp: time.Now(),
 	}
 	return result
 }
