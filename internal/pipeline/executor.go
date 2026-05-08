@@ -771,9 +771,13 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 		return result
 	}
 
-	// Check conditional execution
+	// Check conditional execution. bd-ypo73: ctx-aware so foreach
+	// max_rounds round overlays from withRoundOverrides reach a `when:`
+	// expression on a top-level step dispatched by executeStep — including
+	// loop body steps nested inside a max_rounds foreach body, where
+	// loops.go calls executor.executeStep with the round-overlay ctx.
 	if step.When != "" {
-		skip, err := e.evaluateCondition(step.When)
+		skip, err := e.evaluateConditionCtx(ctx, step.When)
 		if err != nil {
 			result.Status = StatusFailed
 			result.Error = &StepError{

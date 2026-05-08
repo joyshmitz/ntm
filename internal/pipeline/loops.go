@@ -312,8 +312,10 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 		default:
 		}
 
-		// Evaluate while condition
-		shouldSkip, err := le.executor.evaluateCondition(loop.While)
+		// Evaluate while condition. bd-ypo73: ctx-aware so a `loop.while`
+		// expression nested inside a foreach max_rounds body sees the
+		// round overlay from withRoundOverrides.
+		shouldSkip, err := le.executor.evaluateConditionCtx(ctx, loop.While)
 		if err != nil {
 			result.Status = StatusFailed
 			result.Error = &StepError{
@@ -379,8 +381,9 @@ func (le *LoopExecutor) executeWhile(ctx context.Context, step *Step, loop *Loop
 
 	// Check if we hit max iterations without condition becoming false
 	if result.Iterations >= maxIterations {
-		// Evaluate condition one more time to see if it's still true
-		shouldSkip, _ := le.executor.evaluateCondition(loop.While)
+		// Evaluate condition one more time to see if it's still true.
+		// bd-ypo73: ctx-aware for the same max_rounds overlay reasoning.
+		shouldSkip, _ := le.executor.evaluateConditionCtx(ctx, loop.While)
 		if !shouldSkip {
 			// Condition is still true, we hit the limit
 			result.Error = &StepError{
@@ -638,7 +641,7 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 		// loop_control no longer silently masks intended side effects
 		// (matches the foreach contract from bd-9yuk0 / bd-1iabq).
 		if foreachControlOnlyStep(nestedStep) {
-			control, applies, condErr := loopControlAppliesForStep(nestedStep, le.executor)
+			control, applies, condErr := loopControlAppliesForStep(ctx, nestedStep, le.executor)
 			if condErr != nil {
 				// Surface a failed control-condition like other failures: log
 				// and stop the iteration. Mirrors foreach behaviour for
@@ -707,7 +710,12 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 // condition and reports whether the directive should fire. evaluateCondition
 // returns "should skip" semantics (true means condition was false), so the
 // control fires only when the condition resolves truthy (skip == false).
-func loopControlAppliesForStep(step Step, e *Executor) (LoopControl, bool, error) {
+//
+// bd-ypo73: takes ctx so a control-only step nested inside a foreach
+// max_rounds body can resolve ${round}/${loop.round} from the round
+// overlay attached by withRoundOverrides. Without it, a `loop_control`
+// directive guarded by `when: "${round} > 1"` cannot resolve.
+func loopControlAppliesForStep(ctx context.Context, step Step, e *Executor) (LoopControl, bool, error) {
 	control, ok := foreachLoopControlValue(step)
 	if !ok {
 		return LoopControlNone, false, nil
@@ -715,7 +723,7 @@ func loopControlAppliesForStep(step Step, e *Executor) (LoopControl, bool, error
 	if step.When == "" {
 		return control, true, nil
 	}
-	skip, err := e.evaluateCondition(step.When)
+	skip, err := e.evaluateConditionCtx(ctx, step.When)
 	if err != nil {
 		return LoopControlNone, false, err
 	}

@@ -501,6 +501,64 @@ func buildExpectedRoundStepID(round int) string {
 	return "fanout_iter0_echo_round_round" + intToString(round)
 }
 
+// TestForeachMaxRounds_NestedLoopWhenResolvesRoundOverlay covers bd-ypo73:
+// a loop nested inside a foreach max_rounds body whose body step carries
+// `when: ${round} == N` must see the round overlay carried on ctx by
+// withRoundOverrides. The loop dispatcher routes body steps through
+// executor.executeStep, whose When evaluation previously called the
+// non-ctx evaluateCondition variant — so `${round}` was unresolvable
+// and the body step failed with "round not set".
+//
+// Test shape: max_rounds=3, inner `loop.times: 1` so the body executes
+// exactly once per round, body step gated on `when: ${round} == 2`. With
+// the bd-ypo73 fix, no recorded step result surfaces a "round not set"
+// error; the gated body completes for round 2 and skips for rounds 1/3.
+func TestForeachMaxRounds_NestedLoopWhenResolvesRoundOverlay(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("max-rounds-nested-when"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "max-rounds-nested-when-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "fanout",
+			Foreach: &ForeachConfig{
+				Items:     `["only"]`,
+				As:        "item",
+				MaxRounds: IntOrExpr{Value: 3},
+				Steps: []Step{{
+					ID: "nested_loop",
+					Loop: &LoopConfig{
+						Times:         1,
+						MaxIterations: IntOrExpr{Value: 1},
+						Steps: []Step{{
+							ID:      "gated",
+							When:    "${round} == 2",
+							Command: "echo gated",
+						}},
+					},
+				}},
+			},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	// Walk every recorded step result and assert no substitution error
+	// escaped from a non-ctx evaluateCondition call. Without the bd-ypo73
+	// fix, the loop body step's when on `${round}` would have surfaced
+	// "round not set" as a step error because executeStep called the
+	// non-ctx evaluateCondition variant for top-level when checks.
+	for id, sr := range state.Steps {
+		if sr.Error != nil && strings.Contains(sr.Error.Message, "round not set") {
+			t.Fatalf("state.Steps[%q] surfaced %q — bd-ypo73 fix did not thread ctx through executeStep.When", id, sr.Error.Message)
+		}
+	}
+}
+
 func stringForRound(round, maxRounds int) string {
 	return "round=" + intToString(round) + "/" + intToString(maxRounds-round)
 }
