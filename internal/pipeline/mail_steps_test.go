@@ -484,6 +484,205 @@ func TestExecuteMailStep_DispatchesThroughAgentMail(t *testing.T) {
 	}
 }
 
+func TestExecutorRun_AgentMailStepsUseRuntimeFixture(t *testing.T) {
+	server, requests := newAgentMailRuntimeFixture(t, "")
+	defer server.Close()
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "agent-mail-runtime",
+		Steps: []Step{
+			{
+				ID: "send",
+				MailSend: &MailSendStep{
+					ProjectKey:  "${vars.project}",
+					AgentName:   "${vars.agent}",
+					To:          StringOrList{"${vars.recipient}"},
+					Subject:     "[${vars.thread}] status",
+					Body:        "ready for ${vars.thread}",
+					ThreadID:    "${vars.thread}",
+					AckRequired: true,
+				},
+				OutputVar:   "sent",
+				OutputParse: OutputParse{Type: "json"},
+			},
+			{
+				ID:        "reserve",
+				DependsOn: []string{"send"},
+				FileReservationPaths: &FileReservationPathsStep{
+					ProjectKey: "${vars.project}",
+					AgentName:  "${vars.agent}",
+					Paths:      StringOrList{"${vars.path}"},
+					TTLSeconds: 60,
+					Exclusive:  true,
+					Reason:     "${vars.sent_parsed.thread_id}",
+				},
+				OutputVar:   "reservation",
+				OutputParse: OutputParse{Type: "json"},
+			},
+			{
+				ID:        "inbox",
+				DependsOn: []string{"reserve"},
+				MailInboxCheck: &MailInboxCheckStep{
+					ProjectKey:    "${vars.project}",
+					AgentName:     "${vars.agent}",
+					UntilAckCount: 1,
+				},
+				OutputVar:   "inbox",
+				OutputParse: OutputParse{Type: "json"},
+			},
+			{
+				ID:        "release",
+				DependsOn: []string{"inbox"},
+				FileReservationRelease: &FileReservationReleaseStep{
+					ProjectKey: "${vars.project}",
+					AgentName:  "${vars.agent}",
+					Paths:      StringOrList{"${vars.path}"},
+				},
+				OutputVar:   "release",
+				OutputParse: OutputParse{Type: "json"},
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("agent-mail-runtime")
+	cfg.ProjectDir = t.TempDir()
+	executor := NewExecutor(cfg)
+	state, err := executor.Run(t.Context(), workflow, map[string]interface{}{
+		"project":   "/data/projects/ntm",
+		"agent":     "YellowBluff",
+		"recipient": "SageFern",
+		"thread":    "bd-fxj4f.2",
+		"path":      "internal/pipeline/mail_steps_test.go",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if state.Status != StatusCompleted {
+		t.Fatalf("workflow Status = %q, want %q; errors=%+v", state.Status, StatusCompleted, state.Errors)
+	}
+	for _, stepID := range []string{"send", "reserve", "inbox", "release"} {
+		if got := state.Steps[stepID].Status; got != StatusCompleted {
+			t.Fatalf("step %s Status = %q, want %q; result=%+v", stepID, got, StatusCompleted, state.Steps[stepID])
+		}
+	}
+
+	gotRequests := requests()
+	wantTools := []string{"send_message", "file_reservation_paths", "fetch_inbox", "release_file_reservations"}
+	if len(gotRequests) != len(wantTools) {
+		t.Fatalf("request count = %d, want %d; requests=%+v", len(gotRequests), len(wantTools), gotRequests)
+	}
+	for i, want := range wantTools {
+		if gotRequests[i].name != want {
+			t.Fatalf("request[%d] tool = %q, want %q; requests=%+v", i, gotRequests[i].name, want, gotRequests)
+		}
+	}
+	if got := gotRequests[1].args["reason"]; got != "bd-fxj4f.2" {
+		t.Fatalf("reservation reason = %#v, want thread from sent output_var parsed data", got)
+	}
+	if got := gotRequests[3].args["paths"]; !reflect.DeepEqual(got, []interface{}{"internal/pipeline/mail_steps_test.go"}) {
+		t.Fatalf("release paths = %#v, want substituted path", got)
+	}
+
+	sentParsed, ok := state.Variables["sent_parsed"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("sent_parsed = %#v, want parsed JSON map", state.Variables["sent_parsed"])
+	}
+	if got := sentParsed["thread_id"]; got != "bd-fxj4f.2" {
+		t.Fatalf("sent_parsed.thread_id = %#v, want bd-fxj4f.2", got)
+	}
+	inboxParsed, ok := state.Variables["inbox_parsed"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("inbox_parsed = %#v, want parsed JSON map", state.Variables["inbox_parsed"])
+	}
+	if got := inboxParsed["ack_required_count"]; got != float64(1) {
+		t.Fatalf("inbox_parsed.ack_required_count = %#v, want 1", got)
+	}
+}
+
+func TestExecutorRun_AgentMailDryRunDoesNotCallFixture(t *testing.T) {
+	var calledMu sync.Mutex
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledMu.Lock()
+		called = true
+		calledMu.Unlock()
+		http.Error(w, "dry-run should not call Agent Mail", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "agent-mail-dry-run",
+		Steps: []Step{
+			{
+				ID:        "send",
+				MailSend:  validMailSendStep(),
+				OutputVar: "dry_result",
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("agent-mail-dry-run")
+	cfg.ProjectDir = t.TempDir()
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	state, err := executor.Run(t.Context(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	calledMu.Lock()
+	wasCalled := called
+	calledMu.Unlock()
+	if wasCalled {
+		t.Fatal("dry-run workflow called Agent Mail fixture")
+	}
+	if state.Status != StatusCompleted {
+		t.Fatalf("workflow Status = %q, want completed; errors=%+v", state.Status, state.Errors)
+	}
+	output, ok := state.Variables["dry_result"].(string)
+	if !ok || !strings.Contains(output, "dry_run") {
+		t.Fatalf("dry_result = %#v, want dry_run output string", state.Variables["dry_result"])
+	}
+}
+
+func TestExecutorRun_AgentMailStepErrorPath(t *testing.T) {
+	server, _ := newAgentMailRuntimeFixture(t, "send_message")
+	defer server.Close()
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "agent-mail-error",
+		Steps: []Step{
+			{
+				ID:       "send",
+				MailSend: validMailSendStep(),
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("agent-mail-error")
+	cfg.ProjectDir = t.TempDir()
+	executor := NewExecutor(cfg)
+	state, err := executor.Run(t.Context(), workflow, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want Agent Mail fixture failure")
+	}
+	if state.Status != StatusFailed {
+		t.Fatalf("workflow Status = %q, want failed", state.Status)
+	}
+	result := state.Steps["send"]
+	if result.Status != StatusFailed {
+		t.Fatalf("send Status = %q, want failed; result=%+v", result.Status, result)
+	}
+	if result.Error == nil || result.Error.Type != "agent_mail" || !strings.Contains(result.Error.Message, "fixture failure for send_message") {
+		t.Fatalf("send error = %+v, want structured Agent Mail fixture failure", result.Error)
+	}
+}
+
 func TestExecuteMailStep_DryRunDoesNotCallAgentMail(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -508,6 +707,133 @@ func TestExecuteMailStep_DryRunDoesNotCallAgentMail(t *testing.T) {
 	if !strings.Contains(result.Output, "dry_run") {
 		t.Fatalf("Output = %q, want dry_run marker", result.Output)
 	}
+}
+
+type mailRuntimeFixtureRequest struct {
+	name string
+	args map[string]interface{}
+}
+
+func newAgentMailRuntimeFixture(t *testing.T, failTool string) (*httptest.Server, func() []mailRuntimeFixtureRequest) {
+	t.Helper()
+
+	var requestsMu sync.Mutex
+	requests := make([]mailRuntimeFixtureRequest, 0, 4)
+	record := func(name string, args map[string]interface{}) {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		requests = append(requests, mailRuntimeFixtureRequest{name: name, args: args})
+	}
+	snapshot := func() []mailRuntimeFixtureRequest {
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		return append([]mailRuntimeFixtureRequest(nil), requests...)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var req struct {
+			JSONRPC string                 `json:"jsonrpc"`
+			ID      interface{}            `json:"id"`
+			Method  string                 `json:"method"`
+			Params  map[string]interface{} `json:"params"`
+		}
+		body := http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "tools/call" {
+			t.Fatalf("method = %s, want tools/call", req.Method)
+		}
+		toolName, _ := req.Params["name"].(string)
+		rawArgs, _ := req.Params["arguments"].(map[string]interface{})
+		args := make(map[string]interface{}, len(rawArgs))
+		for k, v := range rawArgs {
+			args[k] = v
+		}
+		record(toolName, args)
+
+		w.Header().Set("Content-Type", "application/json")
+		if failTool != "" && toolName == failTool {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error": map[string]interface{}{
+					"code":    -32000,
+					"message": "fixture failure for " + toolName,
+				},
+			}); err != nil {
+				t.Fatalf("encode error response: %v", err)
+			}
+			return
+		}
+
+		var result interface{}
+		switch toolName {
+		case "send_message":
+			result = map[string]interface{}{
+				"count": 1,
+				"deliveries": []map[string]interface{}{
+					{
+						"project": args["project_key"],
+						"payload": map[string]interface{}{
+							"id":         101,
+							"subject":    args["subject"],
+							"body_md":    args["body_md"],
+							"from":       args["sender_name"],
+							"to":         args["to"],
+							"thread_id":  args["thread_id"],
+							"created_ts": "2026-05-08T00:00:00Z",
+						},
+					},
+				},
+			}
+		case "file_reservation_paths":
+			result = map[string]interface{}{
+				"granted": []map[string]interface{}{
+					{
+						"id":           202,
+						"path_pattern": "internal/pipeline/mail_steps_test.go",
+						"exclusive":    args["exclusive"],
+						"reason":       args["reason"],
+						"expires_ts":   "2026-05-08T10:00:00Z",
+					},
+				},
+				"conflicts": []interface{}{},
+			}
+		case "fetch_inbox":
+			result = []map[string]interface{}{
+				{
+					"id":           303,
+					"subject":      "please ack",
+					"from":         "SageFern",
+					"created_ts":   "2026-05-08T00:00:00Z",
+					"importance":   "normal",
+					"ack_required": true,
+					"kind":         "message",
+				},
+			}
+		case "release_file_reservations":
+			result = map[string]interface{}{
+				"released":    1,
+				"released_at": "2026-05-08T00:00:00Z",
+			}
+		default:
+			t.Fatalf("unexpected tool %q", toolName)
+		}
+
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  result,
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+
+	return server, snapshot
 }
 
 func newMailStepTestExecutor() *Executor {
