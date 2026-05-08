@@ -56,12 +56,17 @@ func buildRoundOverrides(round, maxRounds int) map[string]interface{} {
 // resolved against the executor's substitutor with workflow defaults applied,
 // matching LoopExecutor.resolveIntOrExpr's contract for max_iterations.
 //
-// bd-ltghx: a resolved value above DefaultMaxRounds is clamped to that cap
+// bd-ltghx: a resolved value above the configured cap is clamped to it
 // with a Warn-level slog event so a misconfigured `max_rounds:
 // ${vars.from_external}` cannot drive the body loop unbounded. Literal
 // values are NOT clamped — the workflow author chose them explicitly and
 // parser validation has already rejected negative literals; if a workflow
-// genuinely needs >100 rounds it can spell that out with an integer.
+// genuinely needs more rounds it can spell that out with an integer.
+//
+// bd-iz5hd: the cap is sourced from `limits.max_foreach_rounds` (default
+// DefaultMaxRounds=100), so operators with a legitimate need >100 can raise
+// it in workflow settings without rewriting expression-driven workflows
+// into literals.
 func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 	fc := parent.Foreach
 	if fc == nil {
@@ -101,17 +106,21 @@ func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 	if parsed <= 0 {
 		return 0, fmt.Errorf("resolve max_rounds expression %q: value %d must be > 0", mr.Expr, parsed)
 	}
-	if parsed > DefaultMaxRounds {
+	roundsCap := e.limits.MaxForeachRounds
+	if roundsCap <= 0 {
+		roundsCap = DefaultMaxRounds
+	}
+	if parsed > roundsCap {
 		slog.Warn("foreach.max_rounds clamped to safety cap",
 			"run_id", e.runIDForLog(),
 			"step_id", parent.ID,
 			"agent_type", "foreach",
 			"requested", parsed,
-			"cap", DefaultMaxRounds,
+			"cap", roundsCap,
 			"expression", mr.Expr,
-			"hint", "set max_rounds to a literal integer to opt out of the cap",
+			"hint", "raise limits.max_foreach_rounds in workflow settings to opt into a higher cap, or use a literal integer max_rounds",
 		)
-		parsed = DefaultMaxRounds
+		parsed = roundsCap
 	}
 	return parsed, nil
 }

@@ -352,6 +352,57 @@ func TestForeachMaxRounds_ExprResolvedAboveCapClampsToDefault(t *testing.T) {
 	}
 }
 
+// TestForeachMaxRounds_OperatorOverrideRaisesCap covers bd-iz5hd: operators
+// who legitimately need >DefaultMaxRounds expression-driven rounds can raise
+// `limits.max_foreach_rounds` in workflow settings, and the resolver clamps
+// to the configured value rather than the constant. The expression resolves
+// well above the operator's chosen cap so we observe the clamp at the new
+// boundary instead of at DefaultMaxRounds.
+func TestForeachMaxRounds_OperatorOverrideRaisesCap(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("max-rounds-override"))
+
+	settings := DefaultWorkflowSettings()
+	settings.Limits.MaxForeachRounds = 250
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "max-rounds-override-workflow",
+		Settings:      settings,
+		Defaults: map[string]interface{}{
+			"hard_caps": map[string]interface{}{
+				"crazy_rounds": 999999,
+			},
+		},
+		Steps: []Step{{
+			ID: "fanout",
+			Foreach: &ForeachConfig{
+				Items:     `["only"]`,
+				As:        "item",
+				MaxRounds: IntOrExpr{Expr: "${defaults.hard_caps.crazy_rounds}"},
+				Steps: []Step{{
+					ID:      "noop",
+					Command: "true",
+				}},
+			},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	rounds := 0
+	for k := range state.Steps {
+		if strings.HasPrefix(k, "fanout_iter0_noop_round") {
+			rounds++
+		}
+	}
+	if rounds != 250 {
+		t.Fatalf("body ran %d rounds, want 250 (operator-configured cap, not the default %d)", rounds, DefaultMaxRounds)
+	}
+}
+
 // buildExpectedRoundStepID returns the state.Steps key for round N's
 // echo_round body step in the single-iteration max_rounds test fixtures
 // (parent=fanout, iter=0, body step=echo_round).

@@ -235,6 +235,7 @@ type LimitsConfig struct {
 	MaxCommandStdoutBytes int64 `yaml:"max_command_stdout_bytes,omitempty" toml:"max_command_stdout_bytes,omitempty" json:"max_command_stdout_bytes,omitempty"`
 	MaxCommandStderrBytes int64 `yaml:"max_command_stderr_bytes,omitempty" toml:"max_command_stderr_bytes,omitempty" json:"max_command_stderr_bytes,omitempty"`
 	MaxCommandStdinBytes  int64 `yaml:"max_command_stdin_bytes,omitempty" toml:"max_command_stdin_bytes,omitempty" json:"max_command_stdin_bytes,omitempty"`
+	MaxForeachRounds      int   `yaml:"max_foreach_rounds,omitempty" toml:"max_foreach_rounds,omitempty" json:"max_foreach_rounds,omitempty"`
 	MaxTemplateBytes      int64 `yaml:"max_template_bytes,omitempty" toml:"max_template_bytes,omitempty" json:"max_template_bytes,omitempty"`
 	MaxStepCountTotal     int   `yaml:"max_step_count_total,omitempty" toml:"max_step_count_total,omitempty" json:"max_step_count_total,omitempty"`
 	MaxSubstitutionDepth  int   `yaml:"max_substitution_recursion,omitempty" toml:"max_substitution_recursion,omitempty" json:"max_substitution_recursion,omitempty"`
@@ -267,6 +268,9 @@ func (lc LimitsConfig) EffectiveLimits() LimitsConfig {
 	}
 	if lc.MaxCommandStdinBytes <= 0 {
 		lc.MaxCommandStdinBytes = DefaultMaxCommandStdinBytes
+	}
+	if lc.MaxForeachRounds <= 0 {
+		lc.MaxForeachRounds = DefaultMaxRounds
 	}
 	if lc.MaxTemplateBytes <= 0 {
 		lc.MaxTemplateBytes = DefaultMaxTemplateBytes
@@ -1246,12 +1250,13 @@ type LoopContext struct {
 // DefaultMaxIterations is the default safety limit for loops
 const DefaultMaxIterations = 100
 
-// DefaultMaxRounds is the upper safety cap for foreach.max_rounds (bd-ltghx).
-// It mirrors DefaultMaxIterations: a misconfigured workflow that resolves
-// max_rounds from an expression (e.g. ${vars.from_external}) cannot drive
-// the body loop unbounded — the resolver clamps and emits a Warn-level
-// slog.Warn so misuse surfaces loudly rather than silently chewing through
-// rounds.
+// DefaultMaxRounds is the default upper safety cap for foreach.max_rounds.
+// Operators can raise (or lower) this via `limits.max_foreach_rounds` in
+// workflow settings (bd-iz5hd); the constant is the fallback used when
+// EffectiveLimits sees a zero/unset value. The cap clamps expression-resolved
+// values (bd-ltghx); literal max_rounds values are not clamped because the
+// workflow author chose them explicitly and the parser already rejects
+// negative literals.
 const DefaultMaxRounds = 100
 
 // ExecutionStatus represents the current state of workflow execution
