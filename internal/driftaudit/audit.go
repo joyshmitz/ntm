@@ -48,6 +48,13 @@ const (
 // "robot-status"). Whitespace and case are normalized by Compare.
 type SurfaceSet struct {
 	// Surface identifies which surface this set was extracted from.
+	// When set, Compare validates it matches the slot the caller
+	// passed the SurfaceSet into (Inputs.Capabilities must hold a set
+	// labeled SurfaceCapabilities, and so on). A mismatch produces a
+	// mislabeled_set finding so a wiring bug — e.g. routing the help
+	// extractor's output into the Capabilities slot — is surfaced
+	// instead of silently misclassified. Leave empty to opt out of
+	// the check (the slot then trusts itself).
 	Surface Surface
 	// Names is the list of canonical names. Order does not matter;
 	// duplicates are folded.
@@ -114,6 +121,14 @@ func Compare(in Inputs) Report {
 	cont := normalizeSet(in.Contract.Names)
 	ignored := normalizeSet(in.IgnoredNames)
 
+	// Validate SurfaceSet.Surface labels against the slot they were
+	// passed into. Empty Surface opts out (the slot trusts itself).
+	// A mismatch is a wiring bug: the data still flows through the
+	// slot's normal classification, but the mislabeled_set finding
+	// announces the contract violation so the operator can fix the
+	// caller (bd-i5da4).
+	mislabelFindings := validateSurfaceLabels(in)
+
 	all := make(map[string]struct{})
 	for n := range caps {
 		all[n] = struct{}{}
@@ -155,6 +170,7 @@ func Compare(in Inputs) Report {
 		}
 		report.Findings = append(report.Findings, *f)
 	}
+	report.Findings = append(report.Findings, mislabelFindings...)
 	report.Drift = len(report.Findings)
 
 	sort.SliceStable(report.Findings, func(i, j int) bool {
@@ -204,6 +220,46 @@ func classify(name string, caps, help, docs, cont map[string]struct{}) *Finding 
 		Missing:  missing,
 		Summary:  buildSummary(name, missing),
 	}
+}
+
+// validateSurfaceLabels reports each Inputs slot whose SurfaceSet.Surface
+// label disagrees with the slot it was passed into. Empty Surface fields
+// are silently accepted — the field is opt-in so existing callers that
+// don't set it remain valid.
+//
+// Each mismatch produces a Finding with Severity=Critical and a
+// _mislabeled_set:<slot> Name so the existing severity-then-name sort
+// surfaces the wiring bug at the top of the report. The Present /
+// Missing fields carry the slot's expected vs. observed label so a
+// dashboard can render "this set claimed to be Help but landed in
+// Capabilities".
+func validateSurfaceLabels(in Inputs) []Finding {
+	type slotCheck struct {
+		slot     Surface
+		observed Surface
+	}
+	checks := []slotCheck{
+		{SurfaceCapabilities, in.Capabilities.Surface},
+		{SurfaceHelp, in.Help.Surface},
+		{SurfaceDocs, in.Docs.Surface},
+		{SurfaceContract, in.Contract.Surface},
+	}
+	var findings []Finding
+	for _, c := range checks {
+		if c.observed == "" || c.observed == c.slot {
+			continue
+		}
+		findings = append(findings, Finding{
+			Name:     "_mislabeled_set:" + string(c.slot),
+			Severity: SeverityCritical,
+			Present:  []Surface{c.observed},
+			Missing:  []Surface{c.slot},
+			Summary: "set passed into the " + string(c.slot) +
+				" slot self-identifies as " + string(c.observed) +
+				"; data still flows through this slot, but the wiring is wrong",
+		})
+	}
+	return findings
 }
 
 // highestSeverity returns the severity of the worst-missing surface.

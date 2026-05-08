@@ -35,6 +35,118 @@ func TestCompare_AlignedSurfacesProduceNoDrift(t *testing.T) {
 	}
 }
 
+// bd-i5da4: SurfaceSet.Surface, when set, must match the slot the set
+// is passed into. A mismatch surfaces a critical _mislabeled_set:<slot>
+// finding. Empty Surface (the existing default in many test fixtures)
+// is silently accepted so older code paths stay valid.
+func TestCompare_MislabeledSurfaceSetEmitsCriticalFinding(t *testing.T) {
+	t.Parallel()
+	in := alignedSet()
+	// Caller put a Help-labeled set into the Capabilities slot.
+	in.Capabilities = SurfaceSet{Surface: SurfaceHelp, Names: []string{"robot-status", "robot-send", "robot-tail"}}
+
+	r := Compare(in)
+	var mislabel *Finding
+	for i, f := range r.Findings {
+		if f.Name == "_mislabeled_set:capabilities" {
+			mislabel = &r.Findings[i]
+			break
+		}
+	}
+	if mislabel == nil {
+		t.Fatalf("expected _mislabeled_set:capabilities finding, got: %+v", r.Findings)
+	}
+	if mislabel.Severity != SeverityCritical {
+		t.Errorf("Severity = %s, want critical", mislabel.Severity)
+	}
+	if len(mislabel.Present) != 1 || mislabel.Present[0] != SurfaceHelp {
+		t.Errorf("Present = %v, want [help] (the observed mislabel)", mislabel.Present)
+	}
+	if len(mislabel.Missing) != 1 || mislabel.Missing[0] != SurfaceCapabilities {
+		t.Errorf("Missing = %v, want [capabilities] (the slot it should have been)", mislabel.Missing)
+	}
+}
+
+// The slot's data still flows through normal classification — the
+// caller's wiring bug is announced, not silently dropped, so other
+// findings against the audit corpus remain visible.
+func TestCompare_MislabeledSurfaceDataStillFlowsThroughClassification(t *testing.T) {
+	t.Parallel()
+	in := Inputs{
+		// caps slot mislabeled as Help, but its data ("robot-status")
+		// still ends up in the capabilities map, so an aligned Help
+		// slot containing the same name produces no drift on that name.
+		Capabilities: SurfaceSet{Surface: SurfaceHelp, Names: []string{"robot-status"}},
+		Help:         SurfaceSet{Surface: SurfaceHelp, Names: []string{"robot-status"}},
+		Docs:         SurfaceSet{Surface: SurfaceDocs, Names: []string{"robot-status"}},
+		Contract:     SurfaceSet{Surface: SurfaceContract, Names: []string{"robot-status"}},
+		Now:          clock(),
+	}
+	r := Compare(in)
+	// One critical mislabel finding; no per-name findings (robot-status
+	// is everywhere).
+	for _, f := range r.Findings {
+		if f.Name == "robot-status" {
+			t.Errorf("robot-status should not appear as drift when present in every slot map: %+v", f)
+		}
+	}
+	if !findingExists(r.Findings, "_mislabeled_set:capabilities") {
+		t.Errorf("expected mislabel finding for capabilities slot: %+v", r.Findings)
+	}
+}
+
+// Empty SurfaceSet.Surface (the existing default in many fixtures)
+// must not trigger a mislabeled finding — the field is opt-in.
+func TestCompare_EmptySurfaceFieldIsSilentlyAccepted(t *testing.T) {
+	t.Parallel()
+	in := Inputs{
+		// Surface field unset everywhere — pre-bd-i5da4 fixtures looked
+		// exactly like this and must continue to work.
+		Capabilities: SurfaceSet{Names: []string{"robot-status"}},
+		Help:         SurfaceSet{Names: []string{"robot-status"}},
+		Docs:         SurfaceSet{Names: []string{"robot-status"}},
+		Contract:     SurfaceSet{Names: []string{"robot-status"}},
+		Now:          clock(),
+	}
+	r := Compare(in)
+	for _, f := range r.Findings {
+		if strings.HasPrefix(f.Name, "_mislabeled_set:") {
+			t.Errorf("empty Surface must not trigger mislabel: got %+v", f)
+		}
+	}
+}
+
+// Multiple mislabels at once each surface their own critical finding.
+func TestCompare_MultipleMislabelsAreEachReported(t *testing.T) {
+	t.Parallel()
+	in := Inputs{
+		Capabilities: SurfaceSet{Surface: SurfaceHelp, Names: []string{"x"}},
+		Help:         SurfaceSet{Surface: SurfaceCapabilities, Names: []string{"x"}},
+		Docs:         SurfaceSet{Surface: SurfaceDocs, Names: []string{"x"}},
+		Contract:     SurfaceSet{Surface: SurfaceContract, Names: []string{"x"}},
+		Now:          clock(),
+	}
+	r := Compare(in)
+	if !findingExists(r.Findings, "_mislabeled_set:capabilities") {
+		t.Errorf("missing capabilities mislabel: %+v", r.Findings)
+	}
+	if !findingExists(r.Findings, "_mislabeled_set:help") {
+		t.Errorf("missing help mislabel: %+v", r.Findings)
+	}
+	if findingExists(r.Findings, "_mislabeled_set:docs") {
+		t.Errorf("docs slot is correctly labeled, should not have mislabel: %+v", r.Findings)
+	}
+}
+
+func findingExists(findings []Finding, name string) bool {
+	for _, f := range findings {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Acceptance criterion: "a focused test or check command that fails
 // on an intentionally missing sample in test fixtures."
 func TestCompare_IntentionallyMissingFromCapabilitiesIsCritical(t *testing.T) {
