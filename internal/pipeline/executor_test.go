@@ -1576,7 +1576,7 @@ func TestExecutor_selectPane_DryRun(t *testing.T) {
 	e := NewExecutor(cfg)
 
 	step := &Step{ID: "step1", Prompt: "test prompt"}
-	paneID, agentType, err := e.selectPane(step)
+	paneID, agentType, err := e.selectPane(context.Background(), step)
 
 	if err != nil {
 		t.Fatalf("selectPane() returned error: %v", err)

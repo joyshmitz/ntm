@@ -959,8 +959,11 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 		return result
 	}
 
-	// Substitute variables in prompt
-	prompt, err = e.substituteVariablesStrict(prompt)
+	// Substitute variables in prompt. bd-s2edh: use ctx-aware variant so
+	// foreach max_rounds round overlays from withRoundOverrides reach
+	// agent-step prompts. Without this, agent body steps inside a
+	// `parallel: true + max_rounds > 1` foreach can't resolve ${round}.
+	prompt, err = e.substituteVariablesStrictCtx(ctx, prompt)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -972,7 +975,7 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	}
 
 	// Find target pane
-	paneID, agentType, err := e.selectPane(step)
+	paneID, agentType, err := e.selectPane(ctx, step)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -1527,7 +1530,7 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 		return result
 	}
 
-	paneID, agentType, err := e.selectPane(step)
+	paneID, agentType, err := e.selectPane(ctx, step)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "template", "routing",
@@ -1878,8 +1881,13 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 		existing, hasExisting := e.state.Steps[pStep.ID]
 		e.stateMu.RUnlock()
 		if hasExisting && !shouldRerunStep(existing) && existing.Status == StatusCompleted {
+			// bd-e60zk: pair with mu to match the goroutine append contract
+			// below. Without it, this append races the goroutine appends
+			// from prior fresh children that are still running.
+			mu.Lock()
 			results[i] = existing
 			completionOrder = append(completionOrder, existing.StepID)
+			mu.Unlock()
 			e.markParallelSubstepFinished(step.ID, pStep.ID, existing.Status)
 			continue
 		}
@@ -2104,9 +2112,10 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		return result
 	}
 
-	// Evaluate condition if present
+	// Evaluate condition if present. bd-s2edh: ctx-aware so foreach
+	// max_rounds overlays reach parallel sub-step When conditions.
 	if step.When != "" {
-		skip, err := e.evaluateCondition(step.When)
+		skip, err := e.evaluateConditionCtx(ctx, step.When)
 		if err != nil {
 			result.Status = StatusFailed
 			result.Error = &StepError{
@@ -2134,7 +2143,7 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 
 	// Select pane with coordination to avoid reusing agents
 	// We select once and reuse for retries to avoid "self-exclusion" issues
-	paneID, agentType, err := e.selectAndMarkPane(step, usedPanes, panesMu)
+	paneID, agentType, err := e.selectAndMarkPane(ctx, step, usedPanes, panesMu)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -2199,7 +2208,9 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 			goto HANDLE_RESULT
 		}
 
-		prompt, err = e.substituteVariablesStrict(prompt)
+		// bd-s2edh: ctx-aware so foreach max_rounds overlays reach
+		// parallel sub-step prompt substitution (and its retries).
+		prompt, err = e.substituteVariablesStrictCtx(ctx, prompt)
 		if err != nil {
 			result.Status = StatusFailed
 			result.Error = &StepError{
@@ -2371,10 +2382,18 @@ func resolveErrorAction(stepOnError, workflowOnError ErrorAction) ErrorAction {
 // substitutor so unresolved ${defaults.X} / ${vars.X} references fail
 // loudly at this seam (bd-6lkqr.4).
 func (e *Executor) resolvePaneExpr(step *Step) error {
+	return e.resolvePaneExprCtx(nil, step)
+}
+
+// resolvePaneExprCtx is the ctx-aware form of resolvePaneExpr.
+// bd-s2edh: foreach max_rounds round overlays attached to ctx must be
+// honoured when resolving Pane.Expr inside a body step, otherwise
+// pane.expr=${round} cannot resolve under parallel: true + max_rounds > 1.
+func (e *Executor) resolvePaneExprCtx(ctx context.Context, step *Step) error {
 	if step == nil || step.Pane.Expr == "" || step.Pane.Index != 0 {
 		return nil
 	}
-	resolved, err := e.substituteVariablesStrict(step.Pane.Expr)
+	resolved, err := e.substituteVariablesStrictCtx(ctx, step.Pane.Expr)
 	if err != nil {
 		return fmt.Errorf("resolve pane expression %q: %w", step.Pane.Expr, err)
 	}
@@ -2394,7 +2413,7 @@ func (e *Executor) resolvePaneExpr(step *Step) error {
 
 // selectAndMarkPane selects a pane for a step and marks it as used atomically.
 // This prevents race conditions where multiple parallel steps select the same agent.
-func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, panesMu *sync.Mutex) (paneID string, agentType string, err error) {
+func (e *Executor) selectAndMarkPane(ctx context.Context, step *Step, usedPanes map[string]bool, panesMu *sync.Mutex) (paneID string, agentType string, err error) {
 	// In dry run mode, return dummy pane info
 	if e.config.DryRun {
 		return "dry-run-pane", "dry-run-agent", nil
@@ -2404,7 +2423,9 @@ func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, pane
 	// ${defaults.triage_pane}) into PaneSpec.Index before looking up the
 	// pane. Foreach materialization handles its own pane assignment; this
 	// path covers normal step dispatch.
-	if err := e.resolvePaneExpr(step); err != nil {
+	// bd-s2edh: ctx variant so foreach max_rounds round overlays reach
+	// pane.expr substitution.
+	if err := e.resolvePaneExprCtx(ctx, step); err != nil {
 		return "", "", err
 	}
 	if step.Pane.Index > 0 {
@@ -2498,7 +2519,7 @@ func (e *Executor) selectAndMarkPane(step *Step, usedPanes map[string]bool, pane
 }
 
 // selectPane finds the appropriate pane for a step
-func (e *Executor) selectPane(step *Step) (paneID string, agentType string, err error) {
+func (e *Executor) selectPane(ctx context.Context, step *Step) (paneID string, agentType string, err error) {
 	// In dry run mode, return dummy pane info
 	if e.config.DryRun {
 		return "dry-run-pane", "dry-run-agent", nil
@@ -2508,7 +2529,9 @@ func (e *Executor) selectPane(step *Step) (paneID string, agentType string, err 
 	// ${defaults.triage_pane}) into PaneSpec.Index before looking up the
 	// pane. Mirrors selectAndMarkPane so both single and parallel dispatch
 	// paths accept dynamic pane references.
-	if err := e.resolvePaneExpr(step); err != nil {
+	// bd-s2edh: ctx variant so foreach max_rounds round overlays reach
+	// pane.expr substitution.
+	if err := e.resolvePaneExprCtx(ctx, step); err != nil {
 		return "", "", err
 	}
 	if step.Pane.Index > 0 {

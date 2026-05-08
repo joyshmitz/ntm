@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -182,7 +183,7 @@ func TestSelectPane_ResolvesPaneExprBeforeLookup(t *testing.T) {
 	}
 
 	step := &Step{ID: "tpl", Pane: PaneSpec{Expr: "${defaults.triage_pane}"}}
-	paneID, agentType, err := e.selectPane(step)
+	paneID, agentType, err := e.selectPane(context.Background(), step)
 	if err != nil {
 		t.Fatalf("selectPane() error = %v", err)
 	}
