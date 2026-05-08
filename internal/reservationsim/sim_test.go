@@ -304,6 +304,16 @@ func TestPatternsOverlap_GlobMatrix(t *testing.T) {
 		{"foo.go", "bar.go", false},
 		{"a/**", "a", true},
 		{"", "a/**", false},
+
+		// bd-6286k: bare "**" must be a catch-all just like "/**".
+		// Pre-fix, patternsOverlap("**", "foo/bar.go") returned false
+		// because HasSuffix("**", "/**") is false and path.Match's `*`
+		// cannot cross `/`.
+		{"**", "foo/bar.go", true},
+		{"**", "deep/nested/file.go", true},
+		{"**", "anyfile.go", true},
+		{"foo/bar.go", "**", true}, // symmetric
+		{"/**", "foo/bar.go", true}, // already worked — pin it
 	}
 	for _, c := range cases {
 		got := patternsOverlap(c.a, c.b)

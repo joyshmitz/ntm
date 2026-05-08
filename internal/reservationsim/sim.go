@@ -336,10 +336,18 @@ func patternCovers(p, q string) bool {
 	if p == q {
 		return true
 	}
+	// bd-6286k: bare "**" is a catch-all just like "/**". Without this,
+	// strings.HasSuffix("**", "/**") returns false (the pattern is
+	// shorter than the suffix), and path.Match("**", "foo/bar.go")
+	// returns false too (path.Match's `*` cannot cross `/`), so plain
+	// `**` would silently fail to overlap deep paths.
+	if p == "**" {
+		return true
+	}
 	if strings.HasSuffix(p, "/**") {
 		prefix := strings.TrimSuffix(p, "/**")
 		if prefix == "" {
-			return true // p == "**" or "/**"
+			return true // p == "/**"
 		}
 		// Strip any trailing wildcard from q so we compare prefixes.
 		qp := strings.TrimSuffix(q, "/**")
