@@ -145,6 +145,7 @@ func TestEnvelope_EnsembleSynthesize(t *testing.T) {
 func TestGetEnsemble_UsesPersistedStateWhenSessionOffline(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NTM_CONFIG", "")
 	ensemble.CloseDefaultStateStore()
 	t.Cleanup(ensemble.CloseDefaultStateStore)
 
@@ -180,6 +181,7 @@ func TestGetEnsemble_UsesPersistedStateWhenSessionOffline(t *testing.T) {
 func TestGetEnsembleStop_MarksOfflineActiveStateStopped(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NTM_CONFIG", "")
 	ensemble.CloseDefaultStateStore()
 	t.Cleanup(ensemble.CloseDefaultStateStore)
 

@@ -37,6 +37,11 @@ func TestGetEnsembleSynthesize_EmptySession(t *testing.T) {
 
 func TestGetEnsembleSynthesize_NonexistentSession(t *testing.T) {
 	t.Log("TEST: TestGetEnsembleSynthesize_NonexistentSession - starting")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NTM_CONFIG", "")
+	ensemble.CloseDefaultStateStore()
+	t.Cleanup(ensemble.CloseDefaultStateStore)
 
 	output, err := GetEnsembleSynthesize(EnsembleSynthesizeOptions{
 		Session: "nonexistent-session-xyz",
@@ -79,6 +84,7 @@ func TestGetEnsembleSynthesize_InvalidFormat(t *testing.T) {
 func TestGetEnsembleSynthesize_UsesSavedOutputsWhenSessionOffline(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NTM_CONFIG", "")
 	ensemble.CloseDefaultStateStore()
 	t.Cleanup(ensemble.CloseDefaultStateStore)
 
