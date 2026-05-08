@@ -277,22 +277,33 @@ func TestInvalidTransition(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	store := NewStore("test-session")
-	_, _ = store.Assign("bd-123", "Test bead", 1, "claude", "", "")
+	if _, err := store.Assign("bd-123", "Test bead", 1, "claude", "", ""); err != nil {
+		t.Fatalf("Assign() error = %v", err)
+	}
+
+	// Move to a terminal state first. `assigned -> completed` is now valid
+	// (#124) because beads can close externally before the store ever
+	// observed a `working` transition; we use that valid transition here as
+	// setup so we can then assert the *terminal -> non-terminal* transition
+	// is still rejected.
+	if err := store.UpdateStatus("bd-123", StatusCompleted); err != nil {
+		t.Fatalf("setup: assigned -> completed should be valid, got: %v", err)
+	}
 
 	// Invalid transition: completed -> assigned (terminal -> any).
-	// `assigned -> completed` is now valid (#124) because beads can close
-	// externally before the store ever observed a `working` transition.
-	_ = store.UpdateStatus("bd-123", StatusCompleted)
 	err := store.UpdateStatus("bd-123", StatusAssigned)
 	if err == nil {
-		t.Error("expected error for invalid transition completed->assigned, got nil")
+		t.Fatal("expected error for invalid transition completed->assigned, got nil")
 	}
 	if _, ok := err.(*InvalidTransitionError); !ok {
-		t.Errorf("expected InvalidTransitionError, got %T", err)
+		t.Errorf("expected InvalidTransitionError, got %T (%v)", err, err)
 	}
 
 	// Status should remain completed
 	a := store.Get("bd-123")
+	if a == nil {
+		t.Fatal("Get(bd-123) returned nil")
+	}
 	if a.Status != StatusCompleted {
 		t.Errorf("expected status to remain completed, got %s", a.Status)
 	}
