@@ -124,7 +124,7 @@ type SyntheticMetrics struct {
 	LatencyMaxMicros        int64  `json:"latency_max_micros"`
 	SyntheticDurationMicros int64  `json:"synthetic_duration_micros"`
 	MemoryGrowthBytes       int64  `json:"memory_growth_bytes"`
-	Goroutines              int    `json:"goroutines"`
+	GoroutinesLeaked        int    `json:"goroutines_leaked"`
 }
 
 // Run executes a deterministic in-memory scenario.
@@ -154,6 +154,7 @@ func (h *SyntheticHarness) Run(ctx context.Context, scenario SyntheticScenario) 
 
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
+	goroutinesBefore := runtime.NumGoroutine()
 
 	result := &SyntheticRunResult{
 		Scenario:  scenario,
@@ -218,6 +219,7 @@ func (h *SyntheticHarness) Run(ctx context.Context, scenario SyntheticScenario) 
 
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
+	goroutinesAfter := runtime.NumGoroutine()
 
 	result.CompletedAt = startedAt.Add(time.Duration(seq) * time.Millisecond)
 	result.Metrics = SyntheticMetrics{
@@ -231,8 +233,8 @@ func (h *SyntheticHarness) Run(ctx context.Context, scenario SyntheticScenario) 
 		LatencyP95Micros:        syntheticPercentile(latencies, 95),
 		LatencyMaxMicros:        syntheticPercentile(latencies, 100),
 		SyntheticDurationMicros: int64(result.CompletedAt.Sub(result.StartedAt) / time.Microsecond),
-		MemoryGrowthBytes:       int64(after.Alloc) - int64(before.Alloc),
-		Goroutines:              runtime.NumGoroutine(),
+		MemoryGrowthBytes:       nonNegativeMemoryGrowth(before, after),
+		GoroutinesLeaked:        nonNegativeIntDelta(goroutinesBefore, goroutinesAfter),
 	}
 
 	logger.Info("synthetic_swarm_complete",
@@ -244,7 +246,7 @@ func (h *SyntheticHarness) Run(ctx context.Context, scenario SyntheticScenario) 
 		"command_count", result.Metrics.CommandCount,
 		"latency_p95_micros", result.Metrics.LatencyP95Micros,
 		"memory_growth_bytes", result.Metrics.MemoryGrowthBytes,
-		"goroutines", result.Metrics.Goroutines)
+		"goroutines_leaked", result.Metrics.GoroutinesLeaked)
 
 	return result, nil
 }
@@ -434,6 +436,21 @@ func syntheticPercentile(values []int64, percentile float64) int64 {
 		index = len(sorted) - 1
 	}
 	return sorted[index]
+}
+
+func nonNegativeMemoryGrowth(before, after runtime.MemStats) int64 {
+	growth := int64(after.Alloc) - int64(before.Alloc)
+	if growth < 0 {
+		return 0
+	}
+	return growth
+}
+
+func nonNegativeIntDelta(before, after int) int {
+	if after <= before {
+		return 0
+	}
+	return after - before
 }
 
 func sanitizeSyntheticID(value string) string {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,8 +80,11 @@ func TestSyntheticHarnessShortScenario(t *testing.T) {
 	if result.Metrics.LatencyP95Micros < result.Metrics.LatencyP50Micros {
 		t.Fatalf("LatencyP95Micros = %d before p50 %d", result.Metrics.LatencyP95Micros, result.Metrics.LatencyP50Micros)
 	}
-	if result.Metrics.Goroutines <= 0 {
-		t.Fatalf("Goroutines = %d, want positive", result.Metrics.Goroutines)
+	if result.Metrics.MemoryGrowthBytes < 0 {
+		t.Fatalf("MemoryGrowthBytes = %d, want non-negative", result.Metrics.MemoryGrowthBytes)
+	}
+	if result.Metrics.GoroutinesLeaked < 0 {
+		t.Fatalf("GoroutinesLeaked = %d, want non-negative", result.Metrics.GoroutinesLeaked)
 	}
 
 	data, err := json.Marshal(result)
@@ -174,5 +178,34 @@ func TestSyntheticHarnessLargeOptInWritesArtifact(t *testing.T) {
 	}
 	if decoded.Metrics.EventCount != 500 {
 		t.Fatalf("artifact event count = %d, want 500", decoded.Metrics.EventCount)
+	}
+}
+
+func TestNonNegativeMemoryGrowth(t *testing.T) {
+	t.Parallel()
+
+	before := runtime.MemStats{Alloc: 4096}
+	afterLower := runtime.MemStats{Alloc: 1024}
+	if got := nonNegativeMemoryGrowth(before, afterLower); got != 0 {
+		t.Fatalf("nonNegativeMemoryGrowth(lower alloc) = %d, want 0", got)
+	}
+
+	afterHigher := runtime.MemStats{Alloc: 6144}
+	if got := nonNegativeMemoryGrowth(before, afterHigher); got != 2048 {
+		t.Fatalf("nonNegativeMemoryGrowth(higher alloc) = %d, want 2048", got)
+	}
+}
+
+func TestNonNegativeIntDelta(t *testing.T) {
+	t.Parallel()
+
+	if got := nonNegativeIntDelta(10, 7); got != 0 {
+		t.Fatalf("nonNegativeIntDelta(10,7) = %d, want 0", got)
+	}
+	if got := nonNegativeIntDelta(10, 10); got != 0 {
+		t.Fatalf("nonNegativeIntDelta(10,10) = %d, want 0", got)
+	}
+	if got := nonNegativeIntDelta(10, 15); got != 5 {
+		t.Fatalf("nonNegativeIntDelta(10,15) = %d, want 5", got)
 	}
 }
