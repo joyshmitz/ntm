@@ -48,6 +48,55 @@ func TestLoadReplayManifest_RejectsDuplicateFixtureName(t *testing.T) {
 	}
 }
 
+// bd-abujf: LoadReplayManifest must accept additive forward-compatible
+// fields at the same schema_version (per ReplaySchemaVersion docstring).
+// StrictLoadReplayManifest pins the canonical shape for golden tests.
+func TestLoadReplayManifest_AcceptsUnknownAdditiveFields(t *testing.T) {
+	t.Parallel()
+	manifest := `{
+		"schema_version": 1,
+		"description": "future-shape manifest",
+		"future_top_level": "additive",
+		"fixtures": [
+			{"name":"a","mode":"success","exit_code":0,"command":"ntm x","capture_id":"cap-2026-05-08","stdout":{"success":true,"timestamp":"2026-05-08T12:00:00Z"}}
+		]
+	}`
+	tmp := writeManifest(t, manifest)
+	mf, err := LoadReplayManifest(tmp)
+	if err != nil {
+		t.Fatalf("LoadReplayManifest must accept additive fields, got: %v", err)
+	}
+	if len(mf.Fixtures) != 1 || mf.Fixtures[0].Name != "a" {
+		t.Errorf("manifest decoded oddly: %+v", mf)
+	}
+}
+
+func TestStrictLoadReplayManifest_RejectsUnknownAdditiveFields(t *testing.T) {
+	t.Parallel()
+	manifest := `{
+		"schema_version": 1,
+		"future_top_level": "additive",
+		"fixtures": [
+			{"name":"a","mode":"success","exit_code":0,"command":"ntm x","stdout":{"success":true,"timestamp":"2026-05-08T12:00:00Z"}}
+		]
+	}`
+	tmp := writeManifest(t, manifest)
+	if _, err := StrictLoadReplayManifest(tmp); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("StrictLoadReplayManifest should reject unknown fields; got err=%v", err)
+	}
+}
+
+// Pre-existing strict-mode behaviors must continue to fire under
+// StrictLoadReplayManifest just as they did under the old strict-only
+// LoadReplayManifest.
+func TestStrictLoadReplayManifest_RejectsWrongSchemaVersion(t *testing.T) {
+	t.Parallel()
+	tmp := writeManifest(t, `{"schema_version": 99, "fixtures": [{"name":"x","mode":"success","stdout":{"success":true}}]}`)
+	if _, err := StrictLoadReplayManifest(tmp); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("err = %v, want schema_version mismatch from StrictLoadReplayManifest", err)
+	}
+}
+
 func TestLoadReplayManifest_RejectsInvalidMode(t *testing.T) {
 	t.Parallel()
 	manifest := `{

@@ -76,13 +76,35 @@ type ReplayManifest struct {
 
 // LoadReplayManifest reads and decodes a manifest file. The schema
 // version must equal ReplaySchemaVersion.
+//
+// Forward-compat policy: ReplaySchemaVersion documents that "additive
+// fields keep the same value." This loader honors that — unknown
+// top-level fields and unknown Fixture fields are silently ignored so
+// a manifest authored against a newer build still loads cleanly. Use
+// StrictLoadReplayManifest for the canonical golden suite where any
+// drift from the known schema should fail loudly (bd-abujf).
 func LoadReplayManifest(path string) (*ReplayManifest, error) {
+	return loadReplayManifest(path, false)
+}
+
+// StrictLoadReplayManifest behaves like LoadReplayManifest but rejects
+// any unknown field. Intended for golden-fixture tests that want the
+// canonical schema_version=1 shape pinned exactly; production callers
+// (the running harness, dashboards, telemetry consumers) should use
+// LoadReplayManifest so additive fields don't break the pipeline.
+func StrictLoadReplayManifest(path string) (*ReplayManifest, error) {
+	return loadReplayManifest(path, true)
+}
+
+func loadReplayManifest(path string, strict bool) (*ReplayManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("LoadReplayManifest: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	var m ReplayManifest
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("LoadReplayManifest: decode %s: %w", path, err)
