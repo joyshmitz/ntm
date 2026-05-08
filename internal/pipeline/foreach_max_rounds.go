@@ -178,6 +178,9 @@ func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 //     KeepsRoundUnique.)
 //   - Loop:   loops.go does `step.ID + "_iter" + N + "_" + nested.ID`, same
 //     chaining rule.
+//   - OnSuccess: runOnSuccessSteps derives `<parent.ID>_on_success_<child.ID>`
+//     (or `<parent.ID>_on_success_<N>` for anonymous children), so explicit
+//     on_success IDs inside a foreach body inherit the materialized parent ID.
 //
 // Branch and Parallel dispatchers do NOT chain parent.ID into nested keys
 // today (see executeBranch / executeParallel), so a Branch or Parallel block

@@ -305,6 +305,19 @@ func withOnSuccessDepth(ctx context.Context, depth int) context.Context {
 	return context.WithValue(ctx, onSuccessDepthKey{}, depth)
 }
 
+func onSuccessChildStepID(parentID, childID string, ordinal int) string {
+	if parentID == "" {
+		if childID != "" {
+			return childID
+		}
+		return fmt.Sprintf("on_success_%d", ordinal)
+	}
+	if childID == "" {
+		return fmt.Sprintf("%s_on_success_%d", parentID, ordinal)
+	}
+	return fmt.Sprintf("%s_on_success_%s", parentID, childID)
+}
+
 // runOnSuccessSteps walks Step.OnSuccess sequentially after a parent
 // step has reached StatusCompleted. Each child runs through executeStep
 // (so its own OnSuccess chain fires recursively) up to maxOnSuccessDepth
@@ -333,9 +346,7 @@ func (e *Executor) runOnSuccessSteps(ctx context.Context, parent *Step, workflow
 
 	for i := range parent.OnSuccess {
 		child := parent.OnSuccess[i]
-		if child.ID == "" {
-			child.ID = fmt.Sprintf("%s_on_success_%d", parent.ID, i+1)
-		}
+		child.ID = onSuccessChildStepID(parent.ID, child.ID, i+1)
 
 		result := e.executeStep(childCtx, &child, workflow)
 		if result.FinishedAt.IsZero() {

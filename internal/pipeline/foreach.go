@@ -901,7 +901,11 @@ func (e *Executor) executeForeachNestedStep(ctx context.Context, step *Step, wor
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		result = e.executeForeachNestedStepOnce(ctx, step, workflow)
 		result.Attempts = attempt
-		if result.Status == StatusCompleted || result.Status == StatusSkipped || result.Status == StatusCancelled {
+		if result.Status == StatusCompleted {
+			e.runOnSuccessSteps(ctx, step, workflow)
+			return result
+		}
+		if result.Status == StatusSkipped || result.Status == StatusCancelled {
 			return result
 		}
 		if attempt < maxAttempts {
@@ -1162,6 +1166,9 @@ func (e *Executor) substituteForeachStepFieldsProtected(step *Step, protected ma
 	}
 	for i := range step.Parallel.Steps {
 		e.substituteForeachStepFieldsProtected(&step.Parallel.Steps[i], protected)
+	}
+	for i := range step.OnSuccess {
+		e.substituteForeachStepFieldsProtected(&step.OnSuccess[i], protected)
 	}
 	if step.Loop != nil {
 		for i := range step.Loop.Steps {

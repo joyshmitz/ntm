@@ -735,7 +735,7 @@ func TestOnSuccessStepsRunOnParentSuccess(t *testing.T) {
 	if main := state.Steps["main"]; main.Status != StatusCompleted {
 		t.Fatalf("main status = %q, want %q", main.Status, StatusCompleted)
 	}
-	for _, id := range []string{"notify", "log"} {
+	for _, id := range []string{"main_on_success_notify", "main_on_success_log"} {
 		got, ok := state.Steps[id]
 		if !ok {
 			t.Errorf("state.Steps[%q] missing — on_success step did not run", id)
@@ -806,14 +806,64 @@ func TestOnSuccessChildFailureDoesNotFlipParentStatus(t *testing.T) {
 	if main := state.Steps["main"]; main.Status != StatusCompleted {
 		t.Fatalf("main status = %q, want completed despite OnSuccess child failure", main.Status)
 	}
-	if state.Steps["ok_first"].Status != StatusCompleted {
+	if state.Steps["main_on_success_ok_first"].Status != StatusCompleted {
 		t.Errorf("ok_first did not run before the broken sibling")
 	}
-	if state.Steps["broken"].Status != StatusFailed {
-		t.Errorf("broken status = %q, want failed", state.Steps["broken"].Status)
+	if state.Steps["main_on_success_broken"].Status != StatusFailed {
+		t.Errorf("broken status = %q, want failed", state.Steps["main_on_success_broken"].Status)
 	}
-	if state.Steps["ok_third"].Status != StatusCompleted {
+	if state.Steps["main_on_success_ok_third"].Status != StatusCompleted {
 		t.Errorf("ok_third did not run after the broken sibling")
+	}
+}
+
+func TestOnSuccessExplicitIDsInsideForeachAreNamespaced(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("on-success-foreach"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-foreach-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "outer",
+			Foreach: &ForeachConfig{
+				Items: `["alpha","beta"]`,
+				As:    "item",
+				Steps: []Step{{
+					ID:      "body",
+					Command: "echo body-${item}",
+					OnSuccess: []Step{{
+						ID:      "notify",
+						Command: "echo notified-${item}",
+					}},
+				}},
+			},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if _, ok := state.Steps["notify"]; ok {
+		t.Fatalf("state.Steps[notify] present — explicit on_success ID was not namespaced")
+	}
+
+	expected := map[string]string{
+		"outer_iter0_body_on_success_notify": "notified-alpha",
+		"outer_iter1_body_on_success_notify": "notified-beta",
+	}
+	for id, wantOutput := range expected {
+		got, ok := state.Steps[id]
+		if !ok {
+			t.Fatalf("state.Steps[%q] missing — on_success result collided or did not run", id)
+		}
+		if got.Status != StatusCompleted {
+			t.Fatalf("%s status = %q, want completed; error=%+v", id, got.Status, got.Error)
+		}
+		if !strings.Contains(got.Output, wantOutput) {
+			t.Fatalf("%s output = %q, want to contain %q", id, got.Output, wantOutput)
+		}
 	}
 }
 
