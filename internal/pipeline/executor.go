@@ -1926,13 +1926,15 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 		existing, hasExisting := e.state.Steps[pStep.ID]
 		e.stateMu.RUnlock()
 		if hasExisting && !shouldRerunStep(existing) && existing.Status == StatusCompleted {
-			// bd-e60zk: pair with mu to match the goroutine append contract
-			// below. Without it, this append races the goroutine appends
-			// from prior fresh children that are still running.
-			mu.Lock()
+			// bd-vlqhu: results[i] is per-iteration (each iteration owns a
+			// distinct slice index, so no mutex needed for the write
+			// alone). completionOrder is no longer appended during the run
+			// — it is built deterministically after wg.Wait by sorting on
+			// FinishedAt, so adopted-on-resume entries sort by their
+			// recorded prior-run timestamp instead of interleaving
+			// non-deterministically with goroutine appends from concurrent
+			// children that are still running.
 			results[i] = existing
-			completionOrder = append(completionOrder, existing.StepID)
-			mu.Unlock()
 			e.markParallelSubstepFinished(step.ID, pStep.ID, existing.Status)
 			continue
 		}
@@ -1971,9 +1973,12 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 			e.persistState()
 			pResult := e.executeParallelStep(parallelCtx, &ps, workflow, usedPanes, &panesMu)
 
+			// bd-vlqhu: completionOrder is no longer appended live — see
+			// the post-wg.Wait reconstruction below. The mutex still
+			// guards firstError / cancelled writes plus the e.state.Steps
+			// mutation paired with persistState.
 			mu.Lock()
 			results[idx] = pResult
-			completionOrder = append(completionOrder, pResult.StepID)
 			e.stateMu.Lock()
 			e.state.Steps[ps.ID] = pResult
 			e.state.UpdatedAt = time.Now()
@@ -1996,6 +2001,17 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 
 	wg.Wait()
 	e.completeParallelState(step.ID)
+
+	// bd-vlqhu: build completionOrder deterministically from FinishedAt
+	// timestamps now that all goroutines have settled. Live appending
+	// during the run interleaved adopted-on-resume entries (main loop,
+	// iteration order) with goroutine completions (actual finish order)
+	// in a way that varied across resumes of the same persisted state, so
+	// OutputVarMode=last consumers could resolve to different substeps.
+	// FinishedAt ordering with substep-index tie-breaker gives the same
+	// "last finished" semantics deterministically. Substeps with an empty
+	// StepID (never dispatched, e.g. early fail_fast cancel) are skipped.
+	completionOrder = buildParallelCompletionOrder(results)
 
 	// Aggregate results
 	completed := 0
@@ -2404,6 +2420,40 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 		result = e.executeOnFailureRecovery(ctx, step, workflow, result)
 	}
 	return result
+}
+
+// buildParallelCompletionOrder returns the substep StepIDs in the order
+// they finished, using FinishedAt as the sort key with the substep's
+// position in results[] as a stable tie-breaker. Adopted-on-resume entries
+// and goroutine-completed entries land at the same place across two runs
+// of the same persisted state, so OutputVarMode=last consumers
+// (output_var_collision.lastCompletedParallelResult) resolve to the same
+// substep deterministically. Entries with an empty StepID (never
+// dispatched, e.g. early fail_fast cancel) are skipped (bd-vlqhu).
+func buildParallelCompletionOrder(results []StepResult) []string {
+	type entry struct {
+		index      int
+		finishedAt time.Time
+		stepID     string
+	}
+	entries := make([]entry, 0, len(results))
+	for i, r := range results {
+		if r.StepID == "" {
+			continue
+		}
+		entries = append(entries, entry{index: i, finishedAt: r.FinishedAt, stepID: r.StepID})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].finishedAt.Equal(entries[j].finishedAt) {
+			return entries[i].index < entries[j].index
+		}
+		return entries[i].finishedAt.Before(entries[j].finishedAt)
+	})
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.stepID
+	}
+	return out
 }
 
 func resolveErrorAction(stepOnError, workflowOnError ErrorAction) ErrorAction {

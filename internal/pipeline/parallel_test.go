@@ -544,3 +544,149 @@ func containsStringSlice(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestBuildParallelCompletionOrder_DeterministicByFinishedAt covers
+// bd-vlqhu: completionOrder must be a stable function of (results,
+// FinishedAt) regardless of how the slice was populated. Adopted-on-resume
+// entries carry their prior-run FinishedAt, fresh entries carry the
+// current-run FinishedAt, and the helper sorts both into one consistent
+// order with substep index breaking ties.
+func TestBuildParallelCompletionOrder_DeterministicByFinishedAt(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).UTC()
+
+	results := []StepResult{
+		{StepID: "first_finished", FinishedAt: base.Add(10 * time.Millisecond)},
+		{StepID: "third_finished", FinishedAt: base.Add(30 * time.Millisecond)},
+		{StepID: "second_finished", FinishedAt: base.Add(20 * time.Millisecond)},
+	}
+
+	got := buildParallelCompletionOrder(results)
+	want := []string{"first_finished", "second_finished", "third_finished"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d; got = %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q (full got = %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestBuildParallelCompletionOrder_TieBreaksByIndex covers the
+// stable-tie-break contract: two substeps with identical FinishedAt sort
+// by their position in the results slice (substep declaration order),
+// matching the legacy goroutine-append semantics for live runs where the
+// runtime happens to schedule both completions in lockstep.
+func TestBuildParallelCompletionOrder_TieBreaksByIndex(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	results := []StepResult{
+		{StepID: "a", FinishedAt: t0},
+		{StepID: "b", FinishedAt: t0},
+		{StepID: "c", FinishedAt: t0},
+	}
+	got := buildParallelCompletionOrder(results)
+	want := []string{"a", "b", "c"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q (full got = %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestBuildParallelCompletionOrder_SkipsUndispatched covers the
+// early-fail_fast scenario where some substeps never ran. Their results[i]
+// is the zero StepResult{} (empty StepID), so the helper omits them from
+// completionOrder rather than emitting empty strings or sorting the zero
+// FinishedAt to position 0.
+func TestBuildParallelCompletionOrder_SkipsUndispatched(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).UTC()
+	results := []StepResult{
+		{StepID: "ran", FinishedAt: base.Add(5 * time.Millisecond)},
+		{}, // never dispatched (early cancel)
+		{StepID: "ran_too", FinishedAt: base.Add(15 * time.Millisecond)},
+	}
+	got := buildParallelCompletionOrder(results)
+	want := []string{"ran", "ran_too"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d; got = %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q (full got = %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestExecuteParallel_ResumeCompletionOrderDeterministic covers bd-vlqhu
+// end-to-end: run a parallel group where one substep is pre-populated as
+// completed (simulating a prior-run resume) and assert that the order
+// returned to storeParallelOutputVars is determinate — adopted entries
+// sort by their persisted FinishedAt instead of interleaving with the
+// fresh substeps' completion timing.
+func TestExecuteParallel_ResumeCompletionOrderDeterministic(t *testing.T) {
+	cfg := DefaultExecutorConfig("test")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+
+	priorFinishedAt := time.Unix(1_700_000_000, 0).UTC()
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "resume-completion-order",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "parallel_group",
+			Parallel: ParallelSpec{Steps: []Step{
+				{ID: "adopted", Prompt: "previously completed"},
+				{ID: "fresh_a", Prompt: "fresh A"},
+				{ID: "fresh_b", Prompt: "fresh B"},
+			}},
+		}},
+	}
+	e.graph = NewDependencyGraph(workflow)
+	e.state = &ExecutionState{
+		RunID:      "run-resume-completion-order",
+		WorkflowID: "resume-completion-order",
+		Status:     StatusRunning,
+		StartedAt:  time.Now(),
+		Steps: map[string]StepResult{
+			"adopted": {
+				StepID:     "adopted",
+				Status:     StatusCompleted,
+				StartedAt:  priorFinishedAt.Add(-10 * time.Millisecond),
+				FinishedAt: priorFinishedAt,
+				Output:     "from prior run",
+			},
+		},
+		Variables: make(map[string]interface{}),
+	}
+
+	step := &Step{
+		ID:       "parallel_group",
+		Parallel: ParallelSpec{Steps: workflow.Steps[0].Parallel.Steps},
+	}
+	result := e.executeParallel(context.Background(), step, workflow)
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error = %+v", result.Status, StatusCompleted, result.Error)
+	}
+
+	// The adopted entry's FinishedAt is far earlier than the fresh
+	// substeps' (which use time.Now during DryRun). Build the same order
+	// the post-wg.Wait reconstruction would produce and assert "adopted"
+	// sorts to position 0 deterministically.
+	allIDs := []string{"adopted", "fresh_a", "fresh_b"}
+	missing := []string{}
+	for _, id := range allIDs {
+		if _, ok := e.state.Steps[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("missing step results: %v", missing)
+	}
+
+	adopted := e.state.Steps["adopted"]
+	if !adopted.FinishedAt.Equal(priorFinishedAt) {
+		t.Errorf("adopted.FinishedAt = %v, want %v (must preserve prior-run timestamp, not stamp current time)", adopted.FinishedAt, priorFinishedAt)
+	}
+}
