@@ -195,9 +195,13 @@ func (ws *WorktreeService) CleanupSessionWorktrees(ctx context.Context, sessionN
 				agentType := parts[0]
 				sessionID := parts[1]
 
-				// Extract session name from session ID (format: sessionName-agentType-num)
-				// Ensure we match the full session name prefix (avoid matching "app" with "app2").
-				if sessionName != "" && strings.HasPrefix(sessionID, sessionName+"-") {
+				// bd-y9ndb: sessionID format is <sessionName>-<agentType>-<num>.
+				// HasPrefix(sessionID, sessionName+"-") alone matched
+				// "my-app-claude-1" against sessionName="my", causing cleanup
+				// of "my-app"'s worktree (data loss). Anchor on the known
+				// agentType and require the trailing portion to be all
+				// digits so "my" cannot match a "my-app-..." sessionID.
+				if sessionMatchesWorktree(sessionName, agentType, sessionID) {
 					// This worktree belongs to our session
 					if err := manager.RemoveWorktree(ctx, agentType, sessionID); err != nil {
 						log.Printf("Warning: failed to remove worktree for %s: %v", sessionID, err)
@@ -235,8 +239,11 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 			parts := strings.SplitN(wt.Branch[6:], "/", 2)
 
 			if len(parts) >= 2 {
+				agentType := parts[0]
 				sessionID := parts[1]
-				if sessionName != "" && strings.HasPrefix(sessionID, sessionName+"-") {
+				// bd-y9ndb: anchor match on known agentType + all-digit
+				// suffix to avoid sessionName="my" matching "my-app-…".
+				if sessionMatchesWorktree(sessionName, agentType, sessionID) {
 					sessionWorktrees[wt.Agent] = wt
 				}
 			}
@@ -247,6 +254,35 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 }
 
 // Helper methods
+
+// sessionMatchesWorktree reports whether sessionID corresponds to a
+// worktree owned by (sessionName, agentType). The sessionID format is
+// "<sessionName>-<agentType>-<agentNum>" (see ProvisionWorktree call
+// site at AutoProvisionSession). bd-y9ndb: a plain
+// HasPrefix(sessionID, sessionName+"-") matches "my-app-claude-1"
+// against sessionName="my", which causes cleanup to destroy unrelated
+// sessions' worktrees. Anchor on the known agentType and require the
+// trailing component to be all digits so the full sessionID parses
+// unambiguously back to (sessionName, agentType, agentNum).
+func sessionMatchesWorktree(sessionName, agentType, sessionID string) bool {
+	if sessionName == "" || agentType == "" {
+		return false
+	}
+	expectedPrefix := sessionName + "-" + agentType + "-"
+	if !strings.HasPrefix(sessionID, expectedPrefix) {
+		return false
+	}
+	rest := sessionID[len(expectedPrefix):]
+	if rest == "" {
+		return false
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // getManager gets or creates a worktree manager for a project.
 // Thread-safe: protects the managers map with a mutex.
