@@ -323,6 +323,36 @@ func TestStatusResponseUnmarshalCurrentStatusSchema(t *testing.T) {
 	}
 }
 
+func TestStatusResponseUnmarshalCurrentStatusSchema_OpenSkippedImpliesCountsSkipped(t *testing.T) {
+	jsonData := `{
+		"status": "healthy",
+		"healthy": true,
+		"index": {
+			"exists": true,
+			"status": "ready",
+			"fresh": true
+		},
+		"database": {
+			"exists": true,
+			"opened": false,
+			"open_skipped": true,
+			"path": "/home/user/.local/share/coding-agent-search/agent_search.db"
+		}
+	}`
+
+	var resp StatusResponse
+	if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if !resp.Database.OpenSkipped {
+		t.Fatal("Database.OpenSkipped should parse from current cass status schema")
+	}
+	if !resp.Database.CountsSkipped {
+		t.Error("Database.CountsSkipped should be true when open_skipped=true and counts_skipped is absent")
+	}
+}
+
 func TestCapabilitiesUnmarshal(t *testing.T) {
 	jsonData := `{
 		"crate_version": "0.5.0",

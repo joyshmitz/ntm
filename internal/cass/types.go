@@ -247,6 +247,12 @@ func (s *StatusResponse) UnmarshalJSON(data []byte) error {
 	if s.Database.IsUsable() {
 		s.Database.Healthy = true
 	}
+	// Older/current CASS schemas can report open_skipped without the newer
+	// counts_skipped flag. In that case, counts are unknown and callers should
+	// omit conversations/messages rather than surfacing misleading zeros.
+	if s.Database.OpenSkipped {
+		s.Database.CountsSkipped = true
+	}
 	if s.LastIndexedAt.IsZero() {
 		s.LastIndexedAt = FlexTime{Time: s.Index.EffectiveLastIndexedAt(FlexTime{})}
 	}
