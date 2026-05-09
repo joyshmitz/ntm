@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -488,6 +491,139 @@ func TestQueueDryIdeationCreateBeadsRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestQueueDryIdeationTempWorkspaceGate(t *testing.T) {
+	requireQueueDryGateCommand(t, "br")
+	requireQueueDryGateCommand(t, "bv")
+	requireQueueDryGateCommand(t, "git")
+
+	const scenarioID = "queue-dry-temp-workspace-gate"
+	projectDir := t.TempDir()
+	artifactPath := filepath.Join(projectDir, "queue-dry-gate-report.json")
+	failurePath := filepath.Join(projectDir, "failure.txt")
+	mustWriteFile(t, filepath.Join(projectDir, "AGENTS.md"), []byte("# Test agent instructions\n"))
+	mustWriteFile(t, filepath.Join(projectDir, "README.md"), []byte("# Queue dry temp workspace\n"))
+	runQueueDryGateCommand(t, projectDir, failurePath, "git", "init")
+	runQueueDryGateCommand(t, projectDir, failurePath, "git", "config", "user.email", "queue-dry@example.test")
+	runQueueDryGateCommand(t, projectDir, failurePath, "git", "config", "user.name", "Queue Dry Test")
+	runQueueDryGateCommand(t, projectDir, failurePath, "git", "add", "AGENTS.md", "README.md")
+	runQueueDryGateCommand(t, projectDir, failurePath, "git", "commit", "-m", "seed queue dry fixture")
+	runQueueDryGateCommand(t, projectDir, failurePath, "br", "init", "--json")
+
+	closedID := createQueueDryGateBead(t, projectDir, failurePath, "Closed idea-wizard family")
+	runQueueDryGateCommand(t, projectDir, failurePath, "br", "close", closedID, "--reason", "seeded closed family")
+	runQueueDryGateCommand(t, projectDir, failurePath, "br", "sync", "--flush-only")
+	if ready := queueDryGateReadyIDs(t, projectDir, failurePath); len(ready) != 0 {
+		t.Fatalf("ready before dry-run=%v, want empty queue", ready)
+	}
+
+	report := collectQueueDryReport(projectDir, time.Now().UTC(), 24*time.Hour, 0, time.Minute, 5)
+	if !report.QueueDry {
+		t.Fatalf("QueueDry=false, evidence=%+v warnings=%v errors=%v", report.Evidence, report.Warnings, report.Errors)
+	}
+	dryRun := collectQueueDryIdeationReport(projectDir, report, QueueDryIdeationOptions{
+		Requested:   true,
+		PlanVersion: scenarioID + "-dry-run",
+	})
+	if dryRun.Roadmap == nil || dryRun.Roadmap.RenderedCount == 0 {
+		t.Fatalf("dry-run roadmap=%+v, want rendered candidates", dryRun.Roadmap)
+	}
+	if dryRun.Creation == nil || !dryRun.Creation.DryRun || len(dryRun.Creation.RemainingCommands) == 0 {
+		t.Fatalf("dry-run creation=%+v, want non-mutating command preview", dryRun.Creation)
+	}
+	if !containsWarning(dryRun.Warnings, "agent_mail:reservations") {
+		t.Fatalf("warnings=%v, want degraded Agent Mail source marker", dryRun.Warnings)
+	}
+	if ready := queueDryGateReadyIDs(t, projectDir, failurePath); len(ready) != 0 {
+		t.Fatalf("ready after dry-run=%v, want no Beads mutation", ready)
+	}
+
+	blocked := collectQueueDryIdeationReport(projectDir, report, QueueDryIdeationOptions{
+		Requested:     true,
+		CreateBeads:   true,
+		ConfirmCreate: true,
+		PlanVersion:   scenarioID + "-blocked-create",
+	})
+	if blocked.Status != "creation_blocked" || !containsQueueDryCreationError(blocked.Creation, "creation_blocked_by_guard") {
+		t.Fatalf("blocked status=%q creation=%+v, want guard-blocked degraded creation", blocked.Status, blocked.Creation)
+	}
+	if ready := queueDryGateReadyIDs(t, projectDir, failurePath); len(ready) != 0 {
+		t.Fatalf("ready after degraded create=%v, want no Beads mutation", ready)
+	}
+
+	creation := ideaplan.RunBeadCreation(context.Background(), queueDryGateCreationPlan(), ideaplan.BeadCreationOptions{
+		ProjectDir:      projectDir,
+		PlanVersion:     scenarioID + "-confirmed-create",
+		CreateRequested: true,
+		Confirmed:       true,
+		AllowCreate:     true,
+	})
+	if !creation.Success || len(creation.Created) != 1 {
+		t.Fatalf("creation=%+v, want one created bead and skipped duplicate", creation)
+	}
+	if len(creation.SkippedCandidates) != 1 {
+		t.Fatalf("skipped=%v, want one duplicate candidate skipped", creation.SkippedCandidates)
+	}
+	readyAfterCreate := queueDryGateReadyIDs(t, projectDir, failurePath)
+	if !containsStringSlice(readyAfterCreate, creation.Created[0].BeadID) {
+		t.Fatalf("ready after create=%v, want created bead %s", readyAfterCreate, creation.Created[0].BeadID)
+	}
+	cycles := queueDryGateDependencyCycles(t, projectDir, failurePath)
+	if cycles.Count != 0 {
+		t.Fatalf("dependency cycles=%+v, want none", cycles)
+	}
+	triage := queueDryGateBVTriage(t, projectDir, failurePath)
+	if triage.Triage.QuickRef.ActionableCount == 0 {
+		t.Fatalf("bv actionable count=0, want created bead visible in triage")
+	}
+	if triage.Triage.ProjectHealth.Graph.HasCycles {
+		t.Fatalf("bv graph reports cycles after controlled creation")
+	}
+
+	readyID := createQueueDryGateBead(t, projectDir, failurePath, "Existing ready work wins")
+	runQueueDryGateCommand(t, projectDir, failurePath, "br", "sync", "--flush-only")
+	nonDryReady := queueDryGateReadyIDs(t, projectDir, failurePath)
+	if !containsStringSlice(nonDryReady, readyID) {
+		t.Fatalf("ready after non-dry seed=%v, want %s", nonDryReady, readyID)
+	}
+	nonDryReport := queueDryGateNonDryReport(projectDir, nonDryReady)
+	if nonDryReport.QueueDry {
+		t.Fatalf("QueueDry=true after ready bead %s, want non-dry queue", readyID)
+	}
+	skipped := collectQueueDryIdeationReport(projectDir, nonDryReport, QueueDryIdeationOptions{
+		Requested:     true,
+		CreateBeads:   true,
+		ConfirmCreate: true,
+	})
+	if skipped.Status != "skipped_ready_work" || skipped.Creation != nil {
+		t.Fatalf("skipped=%+v, want ready work to win without creation", skipped)
+	}
+
+	artifact := map[string]any{
+		"scenario_id":                scenarioID,
+		"command":                    "ntm work queue-dry --ideate --format=json",
+		"exit_code":                  0,
+		"rendered_candidate_count":   dryRun.Roadmap.RenderedCount,
+		"created_bead_count":         len(creation.Created),
+		"duplicate_suppressed_count": dryRun.Guard.DuplicateSuppressedCount + len(creation.SkippedCandidates),
+		"artifact_path":              artifactPath,
+	}
+	data, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, data, 0644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	t.Logf("scenario_id=%s command=%q exit_code=0 rendered_candidate_count=%d created_bead_count=%d duplicate_suppressed_count=%d artifact=%s",
+		scenarioID,
+		artifact["command"],
+		dryRun.Roadmap.RenderedCount,
+		len(creation.Created),
+		artifact["duplicate_suppressed_count"],
+		artifactPath,
+	)
+}
+
 func TestApplyCommitLintReportCopiesFindings(t *testing.T) {
 	report := CommitReadyResponse{
 		Success: true,
@@ -622,6 +758,187 @@ func mustChtimes(t *testing.T, path string, atime, mtime time.Time) {
 	t.Helper()
 	if err := os.Chtimes(path, atime, mtime); err != nil {
 		t.Fatalf("Chtimes(%q): %v", path, err)
+	}
+}
+
+func requireQueueDryGateCommand(t *testing.T, name string) {
+	t.Helper()
+	if _, err := exec.LookPath(name); err != nil {
+		t.Skipf("%s not available: %v", name, err)
+	}
+}
+
+func runQueueDryGateCommand(t *testing.T, dir, failurePath, name string, args ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return output
+	}
+	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
+	exitCode := queueDryGateExitCode(err)
+	contents := strings.Join([]string{
+		"command: " + command,
+		"exit_code: " + strconv.Itoa(exitCode),
+		"error: " + err.Error(),
+		"output:",
+		string(output),
+	}, "\n")
+	if writeErr := os.WriteFile(failurePath, []byte(contents), 0644); writeErr != nil {
+		t.Logf("write failure artifact %s: %v", failurePath, writeErr)
+	}
+	t.Fatalf("command failed: %s\nexit_code=%d\nartifact=%s\noutput:\n%s", command, exitCode, failurePath, string(output))
+	return nil
+}
+
+func queueDryGateExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func createQueueDryGateBead(t *testing.T, dir, failurePath, title string) string {
+	t.Helper()
+	output := runQueueDryGateCommand(t, dir, failurePath, "br", "create", title, "-t", "task", "-p", "2", "--json")
+	id, err := parseQueueDryGateCreatedID(output)
+	if err != nil {
+		t.Fatalf("parse created bead: %v\noutput:\n%s", err, string(output))
+	}
+	return id
+}
+
+func parseQueueDryGateCreatedID(output []byte) (string, error) {
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(output, &issue); err == nil && issue.ID != "" {
+		return issue.ID, nil
+	}
+	var issues []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(output, &issues); err == nil && len(issues) > 0 && issues[0].ID != "" {
+		return issues[0].ID, nil
+	}
+	return "", errors.New("br create JSON did not include id")
+}
+
+func queueDryGateReadyIDs(t *testing.T, dir, failurePath string) []string {
+	t.Helper()
+	output := runQueueDryGateCommand(t, dir, failurePath, "br", "ready", "--json")
+	var issues []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(output, &issues); err != nil {
+		t.Fatalf("parse br ready JSON: %v\noutput:\n%s", err, string(output))
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue.ID != "" {
+			ids = append(ids, issue.ID)
+		}
+	}
+	return ids
+}
+
+type queueDryGateCycles struct {
+	Count int `json:"count"`
+}
+
+func queueDryGateDependencyCycles(t *testing.T, dir, failurePath string) queueDryGateCycles {
+	t.Helper()
+	output := runQueueDryGateCommand(t, dir, failurePath, "br", "dep", "cycles", "--json")
+	var cycles queueDryGateCycles
+	if err := json.Unmarshal(output, &cycles); err != nil {
+		t.Fatalf("parse br dep cycles JSON: %v\noutput:\n%s", err, string(output))
+	}
+	return cycles
+}
+
+type queueDryGateTriage struct {
+	Triage struct {
+		QuickRef struct {
+			ActionableCount int `json:"actionable_count"`
+		} `json:"quick_ref"`
+		ProjectHealth struct {
+			Graph struct {
+				HasCycles bool `json:"has_cycles"`
+			} `json:"graph"`
+		} `json:"project_health"`
+	} `json:"triage"`
+}
+
+func queueDryGateBVTriage(t *testing.T, dir, failurePath string) queueDryGateTriage {
+	t.Helper()
+	output := runQueueDryGateCommand(t, dir, failurePath, "bv", "--robot-triage")
+	var triage queueDryGateTriage
+	if err := json.Unmarshal(output, &triage); err != nil {
+		t.Fatalf("parse bv triage JSON: %v\noutput:\n%s", err, string(output))
+	}
+	return triage
+}
+
+func queueDryGateNonDryReport(projectDir string, readyIDs []string) QueueDryResponse {
+	report := QueueDryResponse{
+		Success:  true,
+		Project:  projectDir,
+		QueueDry: false,
+		Evidence: QueueDryEvidence{
+			OpenCount:       len(readyIDs),
+			ActionableCount: len(readyIDs),
+			ReadyCount:      len(readyIDs),
+			CountsVerified:  true,
+			TriageTopIDs:    append([]string(nil), readyIDs...),
+			Reservations:    QueueDryReservations{Available: true},
+		},
+	}
+	report.Recommendations = buildQueueDryRecommendations(report)
+	return report
+}
+
+func queueDryGateCreationPlan() ideaplan.RoadmapPlan {
+	return ideaplan.RoadmapPlan{
+		PlanID:        "queue-dry-temp-workspace-gate",
+		DryRun:        true,
+		Decision:      ideaplan.RankingDecisionIdeate,
+		Summary:       "controlled temp workspace creation plan",
+		RenderedCount: 2,
+		ProposedBeads: []ideaplan.ProposedBead{
+			{
+				Ref:                  "${BEAD_ID_TEMP_GATE}",
+				CandidateID:          "temp-workspace-gate",
+				Rank:                 1,
+				Score:                3.2,
+				Title:                "Queue-dry temp workspace creation gate",
+				IssueType:            "task",
+				Priority:             2,
+				Labels:               []string{"idea-wizard", "queue-dry", "testing"},
+				Description:          "Validate explicit queue-dry bead creation against an isolated temp workspace.",
+				AcceptanceCriteria:   []string{"created bead is visible to br ready", "bv triage reports no graph cycles"},
+				VerificationCommands: []string{"br ready --json", "bv --robot-triage"},
+				NonGoals:             []string{"do not write outside the temp workspace"},
+				Overlap:              ideaplan.OverlapVerdict{Kind: ideaplan.OverlapNovel, Confidence: 0.9},
+			},
+			{
+				Ref:                  "${BEAD_ID_DUPLICATE}",
+				CandidateID:          "duplicate-temp-workspace-gate",
+				Rank:                 2,
+				Score:                1.0,
+				Title:                "Duplicate temp workspace gate",
+				IssueType:            "task",
+				Priority:             2,
+				Description:          "Duplicate candidate that must not be created.",
+				AcceptanceCriteria:   []string{"duplicate candidate is skipped"},
+				VerificationCommands: []string{"br ready --json"},
+				Overlap:              ideaplan.OverlapVerdict{Kind: ideaplan.OverlapLikelyDuplicate, Confidence: 0.95},
+			},
+		},
 	}
 }
 
