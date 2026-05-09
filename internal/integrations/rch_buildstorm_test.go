@@ -66,8 +66,8 @@ func TestBuildStormInputFromRCHStatusCountsWorkers(t *testing.T) {
 	if input.BusyWorkers != 3 {
 		t.Fatalf("BusyWorkers = %d, want 3", input.BusyWorkers)
 	}
-	if input.QueueDepth != 6 {
-		t.Fatalf("QueueDepth = %d, want 6", input.QueueDepth)
+	if input.QueueDepth != 2 {
+		t.Fatalf("QueueDepth = %d, want 2 (available+healthy workers only)", input.QueueDepth)
 	}
 	if strings.Compare(input.Session, "proj") != 0 || input.SessionRunningBuilds != 1 || input.MaxBuildsPerSession != 3 {
 		t.Fatalf("scheduler fields not preserved: %+v", input)
@@ -101,6 +101,39 @@ func TestBuildStormInputFromRCHStatusDerivesHealthyFromWorkersWhenSummaryMissing
 	}
 	if input.BusyWorkers != 1 {
 		t.Fatalf("BusyWorkers = %d, want 1", input.BusyWorkers)
+	}
+}
+
+func TestBuildStormInputFromRCHStatusDoesNotOverrideExplicitUnavailableAvailability(t *testing.T) {
+	t.Parallel()
+
+	input := BuildStormInputFromRCHStatus(&tools.RCHStatus{
+		Enabled:      true,
+		WorkerCount:  3,
+		HealthyCount: 3,
+		Workers: []tools.RCHWorker{
+			{Name: "w1", Available: true, Healthy: true},
+			{Name: "w2", Available: true, Healthy: true},
+			{Name: "w3", Available: true, Healthy: true},
+		},
+	}, &tools.RCHAvailability{
+		Available:  false,
+		Compatible: false,
+	}, RCHBuildStormOptions{})
+
+	if input.RCHAvailable {
+		t.Fatalf("RCHAvailable = true, want false when availability explicitly reports unavailable")
+	}
+	if input.RCHCompatible {
+		t.Fatalf("RCHCompatible = true, want false when availability explicitly reports incompatible")
+	}
+
+	report := pressure.EvaluateBuildStorm(input)
+	if strings.Compare(string(report.Decision), string(pressure.BuildStormAdmit)) != 0 {
+		t.Fatalf("Decision = %s, want admit when rch is explicitly unavailable with local headroom", report.Decision)
+	}
+	if strings.Compare(report.Reason, "rch_unavailable_local_headroom") != 0 {
+		t.Fatalf("Reason = %q, want rch_unavailable_local_headroom", report.Reason)
 	}
 }
 
@@ -181,5 +214,45 @@ func TestEvaluateRCHBuildStormReturnsReaderErrors(t *testing.T) {
 	_, err := EvaluateRCHBuildStorm(context.Background(), reader, RCHBuildStormOptions{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestEvaluateRCHBuildStormIgnoresUnavailableWorkerQueueForPressure(t *testing.T) {
+	t.Parallel()
+
+	reader := &fakeRCHBuildStormReader{
+		availability: &tools.RCHAvailability{
+			Available:    true,
+			Compatible:   true,
+			WorkerCount:  3,
+			HealthyCount: 2,
+		},
+		status: &tools.RCHStatus{
+			Enabled:      true,
+			WorkerCount:  3,
+			HealthyCount: 2,
+			Workers: []tools.RCHWorker{
+				{Name: "w1", Available: true, Healthy: true},
+				{Name: "w2", Available: true, Healthy: true},
+				{Name: "w3", Available: false, Healthy: true, Queue: 50},
+			},
+		},
+	}
+
+	report, err := EvaluateRCHBuildStorm(context.Background(), reader, RCHBuildStormOptions{
+		Now:             time.Date(2026, 5, 9, 8, 45, 0, 0, time.UTC),
+		RequestedBuilds: 1,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRCHBuildStorm returned error: %v", err)
+	}
+	if report.QueueDepth != 0 {
+		t.Fatalf("QueueDepth = %d, want 0 when only unavailable workers are queued", report.QueueDepth)
+	}
+	if strings.Compare(string(report.Decision), string(pressure.BuildStormOffload)) != 0 {
+		t.Fatalf("Decision = %s, want offload", report.Decision)
+	}
+	if strings.Compare(report.Reason, "remote_headroom_available") != 0 {
+		t.Fatalf("Reason = %q, want remote_headroom_available", report.Reason)
 	}
 }

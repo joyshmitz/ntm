@@ -69,7 +69,11 @@ func BuildStormInputFromRCHStatus(status *tools.RCHStatus, availability *tools.R
 	if status == nil {
 		return in
 	}
-	in.RCHAvailable = status.Enabled || in.RCHAvailable
+	if availability == nil {
+		// Without an availability probe, status.Enabled is the best signal we
+		// have for whether remote offload can be considered.
+		in.RCHAvailable = status.Enabled
+	}
 	if availability == nil {
 		in.RCHCompatible = in.RCHAvailable
 	}
@@ -95,13 +99,13 @@ func BuildStormInputFromRCHStatus(status *tools.RCHStatus, availability *tools.R
 	healthyFromWorkers := 0
 	queueDepth := 0
 	for _, worker := range status.Workers {
-		if worker.Queue > 0 {
-			queueDepth += worker.Queue
-		}
 		if !worker.Available || !worker.Healthy {
 			continue
 		}
 		healthyFromWorkers++
+		if worker.Queue > 0 {
+			queueDepth += worker.Queue
+		}
 		if rchWorkerBusy(worker) {
 			busy++
 		}
