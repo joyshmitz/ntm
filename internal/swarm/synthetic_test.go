@@ -356,10 +356,12 @@ func TestSyntheticExperimentSummaryIsRobotReadable(t *testing.T) {
 	pass.ScenarioID = "b"
 	pass.Gate = SyntheticExperimentGateBenchmark
 	pass.Comparison = SyntheticExperimentComparison{Result: SyntheticExperimentPass}
+	pass.ArtifactPaths = SyntheticExperimentPaths{Root: "/tmp/pass"}
 	missing := syntheticExperimentFixture("missing", 8, 800, 0, 120)
 	missing.ScenarioID = "a"
 	missing.Gate = SyntheticExperimentGateShort
 	missing.Comparison = SyntheticExperimentComparison{Result: SyntheticExperimentMissingBaseline}
+	missing.ArtifactPaths = SyntheticExperimentPaths{Root: "/tmp/missing"}
 
 	summary := BuildSyntheticExperimentSummary([]SyntheticExperimentArtifact{pass, missing}, now)
 	if !summary.Success {
@@ -370,6 +372,11 @@ func TestSyntheticExperimentSummaryIsRobotReadable(t *testing.T) {
 	}
 	if len(summary.Results) != 2 || summary.Results[0].ScenarioID != "a" {
 		t.Fatalf("results not sorted for robot readers: %+v", summary.Results)
+	}
+	if len(summary.ArtifactPaths) != 2 ||
+		strings.Compare(summary.ArtifactPaths[0].Root, missing.ArtifactPaths.Root) != 0 ||
+		strings.Compare(summary.ArtifactPaths[1].Root, pass.ArtifactPaths.Root) != 0 {
+		t.Fatalf("artifact_paths not aligned with sorted results: %+v", summary.ArtifactPaths)
 	}
 	if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0], "missing baseline") {
 		t.Fatalf("warnings = %+v, want missing baseline warning", summary.Warnings)

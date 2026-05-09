@@ -637,11 +637,22 @@ func BuildSyntheticExperimentSummary(artifacts []SyntheticExperimentArtifact, no
 	if now == nil {
 		now = time.Now
 	}
-	rows := make([]SyntheticExperimentRow, 0, len(artifacts))
-	paths := make([]SyntheticExperimentPaths, 0, len(artifacts))
+	ordered := append([]SyntheticExperimentArtifact(nil), artifacts...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].ScenarioID != ordered[j].ScenarioID {
+			return ordered[i].ScenarioID < ordered[j].ScenarioID
+		}
+		if ordered[i].Gate != ordered[j].Gate {
+			return ordered[i].Gate < ordered[j].Gate
+		}
+		return ordered[i].TestRunID < ordered[j].TestRunID
+	})
+
+	rows := make([]SyntheticExperimentRow, 0, len(ordered))
+	paths := make([]SyntheticExperimentPaths, 0, len(ordered))
 	warnings := make([]string, 0)
 	success := true
-	for _, artifact := range artifacts {
+	for _, artifact := range ordered {
 		rows = append(rows, SyntheticExperimentRow{
 			TestRunID:    artifact.TestRunID,
 			ScenarioID:   artifact.ScenarioID,
@@ -660,12 +671,6 @@ func BuildSyntheticExperimentSummary(artifacts []SyntheticExperimentArtifact, no
 			warnings = append(warnings, artifact.ScenarioID+": missing baseline")
 		}
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].ScenarioID != rows[j].ScenarioID {
-			return rows[i].ScenarioID < rows[j].ScenarioID
-		}
-		return rows[i].Gate < rows[j].Gate
-	})
 	return SyntheticExperimentSummary{
 		Success:       success,
 		SchemaVersion: SyntheticExperimentSchemaVersion,
