@@ -114,7 +114,7 @@ func TestSnapshotRobotAndDashboardSerialization(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal snapshot: %v", err)
 	}
-	for _, field := range []string{"success", "generated_at", "decision", "reason_codes", "surfaces", "warnings", "coalescing_recommendations", "log_rows"} {
+	for _, field := range []string{"success", "generated_at", "decision", "reason_codes", "surfaces", "warnings", "coalescing_recommendations", "load_shedding", "heatmap", "log_rows"} {
 		if _, ok := decoded[field]; !ok {
 			t.Fatalf("snapshot JSON missing %q: %s", field, raw)
 		}
@@ -125,6 +125,7 @@ func TestSnapshotRobotAndDashboardSerialization(t *testing.T) {
 	requireEqual(t, dashboard.SurfaceCount, 1)
 	requireEqual(t, dashboard.WarningCount, 0)
 	requireEqual(t, len(dashboard.RecommendedActions), 2)
+	requireEqual(t, dashboard.HeatmapBuckets, 1)
 }
 
 func fixedClock() func() time.Time {

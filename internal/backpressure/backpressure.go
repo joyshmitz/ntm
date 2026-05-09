@@ -162,6 +162,8 @@ type BackpressureSnapshot struct {
 	Surfaces                  []SurfaceSnapshot          `json:"surfaces"`
 	Warnings                  []MissingSourceWarning     `json:"warnings"`
 	CoalescingRecommendations []CoalescingRecommendation `json:"coalescing_recommendations"`
+	LoadShedding              LoadSheddingContract       `json:"load_shedding"`
+	Heatmap                   OperatorHeatmap            `json:"heatmap"`
 	LogRows                   []LogRow                   `json:"log_rows"`
 }
 
@@ -172,6 +174,7 @@ type DashboardSummary struct {
 	SurfaceCount       int          `json:"surface_count"`
 	WarningCount       int          `json:"warning_count"`
 	RecommendedActions []string     `json:"recommended_actions"`
+	HeatmapBuckets     int          `json:"heatmap_buckets"`
 }
 
 // Evaluate normalizes raw surface inputs into a deterministic snapshot.
@@ -243,6 +246,8 @@ func Evaluate(inputs []SurfaceInput, opts SnapshotOptions) BackpressureSnapshot 
 	if overall == DecisionDefer || overall == DecisionDegrade {
 		snapshot.ErrorCode = "RESOURCE_BUSY"
 	}
+	snapshot.LoadShedding = snapshot.LoadSheddingContract()
+	snapshot.Heatmap = snapshot.OperatorHeatmap()
 	return snapshot
 }
 
@@ -253,12 +258,17 @@ func (s BackpressureSnapshot) Dashboard() DashboardSummary {
 		actions = append(actions, rec.Action)
 	}
 	sort.Strings(actions)
+	heatmap := s.Heatmap
+	if len(heatmap.Buckets) == 0 && !heatmap.Empty {
+		heatmap = s.OperatorHeatmap()
+	}
 	return DashboardSummary{
 		Decision:           s.Decision,
 		ReasonCodes:        append([]ReasonCode(nil), s.ReasonCodes...),
 		SurfaceCount:       len(s.Surfaces),
 		WarningCount:       len(s.Warnings),
 		RecommendedActions: actions,
+		HeatmapBuckets:     len(heatmap.Buckets),
 	}
 }
 
