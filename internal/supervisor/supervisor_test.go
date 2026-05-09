@@ -269,6 +269,74 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+func TestGetDaemonReturnsSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	s, err := New(Config{
+		SessionID:  "test-session",
+		ProjectDir: tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer s.Shutdown()
+
+	spec := DaemonSpec{
+		Name:      "snapshot-daemon",
+		Command:   "sleep",
+		Args:      []string{"10"},
+		HealthCmd: []string{"echo", "ok"},
+		Env:       []string{"SNAPSHOT_ORIGINAL=1"},
+	}
+	if err := s.Start(spec); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	spec.Args[0] = "mutated-input"
+	spec.HealthCmd[0] = "mutated-input"
+	spec.Env[0] = "mutated-input"
+
+	first, exists := s.GetDaemon("snapshot-daemon")
+	if !exists {
+		t.Fatal("GetDaemon() returned false")
+	}
+	if first.Spec.Args[0] != "10" {
+		t.Fatalf("GetDaemon() saw mutated input Args = %q, want %q", first.Spec.Args[0], "10")
+	}
+	if first.Spec.HealthCmd[0] != "echo" {
+		t.Fatalf("GetDaemon() saw mutated input HealthCmd = %q, want %q", first.Spec.HealthCmd[0], "echo")
+	}
+	if first.Spec.Env[0] != "SNAPSHOT_ORIGINAL=1" {
+		t.Fatalf("GetDaemon() saw mutated input Env = %q, want %q", first.Spec.Env[0], "SNAPSHOT_ORIGINAL=1")
+	}
+
+	first.State = StateFailed
+	first.OwnerID = "mutated-owner"
+	first.Spec.Args[0] = "mutated-snapshot"
+	first.Spec.HealthCmd[0] = "mutated-snapshot"
+	first.Spec.Env[0] = "mutated-snapshot"
+
+	second, exists := s.GetDaemon("snapshot-daemon")
+	if !exists {
+		t.Fatal("GetDaemon() returned false after snapshot mutation")
+	}
+	if second.State == StateFailed {
+		t.Fatal("mutating GetDaemon() snapshot changed daemon state")
+	}
+	if second.OwnerID != "test-session" {
+		t.Fatalf("mutating GetDaemon() snapshot changed owner = %q", second.OwnerID)
+	}
+	if second.Spec.Args[0] != "10" {
+		t.Fatalf("mutating GetDaemon() snapshot changed Args = %q", second.Spec.Args[0])
+	}
+	if second.Spec.HealthCmd[0] != "echo" {
+		t.Fatalf("mutating GetDaemon() snapshot changed HealthCmd = %q", second.Spec.HealthCmd[0])
+	}
+	if second.Spec.Env[0] != "SNAPSHOT_ORIGINAL=1" {
+		t.Fatalf("mutating GetDaemon() snapshot changed Env = %q", second.Spec.Env[0])
+	}
+}
+
 func TestPIDFile(t *testing.T) {
 	tmpDir := t.TempDir()
 

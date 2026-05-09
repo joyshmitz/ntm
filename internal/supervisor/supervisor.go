@@ -227,7 +227,7 @@ func (s *Supervisor) Start(spec DaemonSpec) error {
 	}
 
 	daemon := &ManagedDaemon{
-		Spec:       spec,
+		Spec:       copyDaemonSpec(spec),
 		State:      StateStarting,
 		PID:        cmd.Process.Pid,
 		Port:       port,
@@ -331,41 +331,53 @@ func (s *Supervisor) Status() map[string]*ManagedDaemon {
 	result := make(map[string]*ManagedDaemon, len(s.daemons))
 	for name, d := range s.daemons {
 		d.mu.RLock()
-		// Deep copy slice fields to prevent data races
-		specCopy := d.Spec
-		if d.Spec.Args != nil {
-			specCopy.Args = make([]string, len(d.Spec.Args))
-			copy(specCopy.Args, d.Spec.Args)
-		}
-		if d.Spec.HealthCmd != nil {
-			specCopy.HealthCmd = make([]string, len(d.Spec.HealthCmd))
-			copy(specCopy.HealthCmd, d.Spec.HealthCmd)
-		}
-		if d.Spec.Env != nil {
-			specCopy.Env = make([]string, len(d.Spec.Env))
-			copy(specCopy.Env, d.Spec.Env)
-		}
-		result[name] = &ManagedDaemon{
-			Spec:       specCopy,
-			State:      d.State,
-			PID:        d.PID,
-			Port:       d.Port,
-			StartedAt:  d.StartedAt,
-			LastHealth: d.LastHealth,
-			Restarts:   d.Restarts,
-			OwnerID:    d.OwnerID,
-		}
+		result[name] = snapshotDaemonLocked(d)
 		d.mu.RUnlock()
 	}
 	return result
 }
 
-// GetDaemon returns a daemon by name.
+// GetDaemon returns a snapshot of a daemon by name.
 func (s *Supervisor) GetDaemon(name string) (*ManagedDaemon, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	d, ok := s.daemons[name]
-	return d, ok
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return snapshotDaemonLocked(d), true
+}
+
+func snapshotDaemonLocked(d *ManagedDaemon) *ManagedDaemon {
+	return &ManagedDaemon{
+		Spec:       copyDaemonSpec(d.Spec),
+		State:      d.State,
+		PID:        d.PID,
+		Port:       d.Port,
+		StartedAt:  d.StartedAt,
+		LastHealth: d.LastHealth,
+		Restarts:   d.Restarts,
+		OwnerID:    d.OwnerID,
+	}
+}
+
+func copyDaemonSpec(spec DaemonSpec) DaemonSpec {
+	spec.Args = copyStringSlice(spec.Args)
+	spec.HealthCmd = copyStringSlice(spec.HealthCmd)
+	spec.Env = copyStringSlice(spec.Env)
+	return spec
+}
+
+func copyStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	copied := make([]string, len(values))
+	copy(copied, values)
+	return copied
 }
 
 // stopDaemon stops a single daemon.
