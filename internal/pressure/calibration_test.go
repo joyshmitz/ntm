@@ -162,6 +162,38 @@ func TestCalibrateHostCapacityLowConfidenceDoesNotApply(t *testing.T) {
 	}
 }
 
+func TestCalibrateHostCapacityMixedEvidenceUsesPerPathConfidence(t *testing.T) {
+	t.Parallel()
+	report := CalibrateHostCapacity(HostCapacityCalibrationInput{
+		ProfileID: "mixed-host",
+		Baseline: map[Source]Thresholds{
+			SourcePaneActivity: {Elevated: 40, High: 80, Critical: 120},
+		},
+		Evidence: []CalibrationEvidence{
+			{Source: SourcePaneActivity, Value: 140, Unit: "panes", Stable: true, Confidence: 0.95, SampleCount: 100, Reason: "stable_run"},
+			{Source: SourcePaneActivity, Value: 60, Unit: "panes", Stable: false, Confidence: 0.10, SampleCount: 2, Reason: "noisy_run"},
+		},
+		MinConfidence: 0.35,
+	})
+
+	if len(report.Recommendations) != 1 {
+		t.Fatalf("recommendations = %d, want 1", len(report.Recommendations))
+	}
+	rec := report.Recommendations[0]
+	if !rec.Apply {
+		t.Fatalf("Apply = false, want true")
+	}
+	if recommendationReasonBase(rec.Reason) != "stable_capacity_observed" {
+		t.Fatalf("Reason = %q, want stable_capacity_observed-prefixed reason", rec.Reason)
+	}
+	if rec.ObservedCapacity != 140 {
+		t.Fatalf("ObservedCapacity = %.3f, want 140", rec.ObservedCapacity)
+	}
+	if rec.Recommended.High <= rec.Current.High {
+		t.Fatalf("recommended high = %.3f, want above current %.3f", rec.Recommended.High, rec.Current.High)
+	}
+}
+
 func TestCalibrateHostCapacityNoThresholdChangeWarningCode(t *testing.T) {
 	t.Parallel()
 	report := CalibrateHostCapacity(HostCapacityCalibrationInput{

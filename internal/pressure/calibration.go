@@ -98,9 +98,10 @@ type calibrationBucket struct {
 	current      Thresholds
 	stableMax    float64
 	hasStable    bool
+	stableConf   float64
 	unstableMin  float64
 	hasUnstable  bool
-	confidence   float64
+	unstableConf float64
 	samples      int
 	unit         string
 	testRunIDs   []string
@@ -149,9 +150,6 @@ func CalibrateHostCapacity(in HostCapacityCalibrationInput) HostCapacityCalibrat
 			conf = confidenceFromSamples(samples)
 		}
 		b.samples += samples
-		if conf > b.confidence {
-			b.confidence = conf
-		}
 		if ev.Reason != "" {
 			b.reasonParts = append(b.reasonParts, ev.Reason)
 		}
@@ -162,11 +160,17 @@ func CalibrateHostCapacity(in HostCapacityCalibrationInput) HostCapacityCalibrat
 			b.testRunIDs = append(b.testRunIDs, id)
 		}
 		if ev.Stable {
+			if conf > b.stableConf {
+				b.stableConf = conf
+			}
 			if !b.hasStable || ev.Value > b.stableMax {
 				b.stableMax = ev.Value
 				b.hasStable = true
 			}
 			continue
+		}
+		if conf > b.unstableConf {
+			b.unstableConf = conf
 		}
 		if ev.Value < b.unstableMin {
 			b.unstableMin = ev.Value
@@ -210,7 +214,7 @@ func CalibrateHostCapacity(in HostCapacityCalibrationInput) HostCapacityCalibrat
 		out.Profile.Sources = append(out.Profile.Sources, CalibrationSourceRow{
 			Source:     string(source),
 			Samples:    b.samples,
-			Confidence: round3Float(b.confidence),
+			Confidence: rec.Confidence,
 			Reason:     rec.Reason,
 		})
 		if rec.Apply {
@@ -234,30 +238,36 @@ func recommendationFromBucket(b calibrationBucket, minConfidence float64) Thresh
 		Current:     b.current,
 		Unit:        b.unit,
 		Recommended: b.current,
-		Confidence:  round3Float(b.confidence),
 		Samples:     b.samples,
 		TestRunIDs:  uniqueSortedStrings(b.testRunIDs),
 		Apply:       true,
 	}
+	stableConf := clamp01(b.stableConf)
+	unstableConf := clamp01(b.unstableConf)
+	unstableEligible := b.hasUnstable && unstableConf >= minConfidence
+	stableEligible := b.hasStable && stableConf >= minConfidence
+
 	switch {
-	case b.hasUnstable:
+	case unstableEligible:
 		rec.ObservedCapacity = round3Float(b.unstableMin)
-	case b.hasStable:
-		rec.ObservedCapacity = round3Float(b.stableMax)
-	}
-	switch {
-	case b.confidence < minConfidence:
-		rec.Apply = false
-		rec.Reason = "low_confidence"
-	case b.hasUnstable:
+		rec.Confidence = round3Float(unstableConf)
 		rec.Recommended = lowerThresholdsForInstability(b.current, b.unstableMin, b.source)
 		rec.Reason = "unstable_before_current_limit"
-	case b.hasStable:
+	case stableEligible:
+		rec.ObservedCapacity = round3Float(b.stableMax)
+		rec.Confidence = round3Float(stableConf)
 		rec.Recommended = raiseThresholdsForStableCapacity(b.current, b.stableMax, b.source)
 		rec.Reason = "stable_capacity_observed"
 	default:
 		rec.Apply = false
-		rec.Reason = "no_usable_evidence"
+		rec.Confidence = round3Float(math.Max(stableConf, unstableConf))
+		rec.Reason = "low_confidence"
+		switch {
+		case b.hasUnstable && unstableConf >= stableConf:
+			rec.ObservedCapacity = round3Float(b.unstableMin)
+		case b.hasStable:
+			rec.ObservedCapacity = round3Float(b.stableMax)
+		}
 	}
 	if rec.Recommended == rec.Current {
 		rec.Apply = false
