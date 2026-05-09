@@ -12,6 +12,24 @@ import (
 	"time"
 )
 
+func isAlreadySafeWorktreeKey(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			// allowed as-is
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func canonicalWorktreeKey(value, fallback string) string {
 	if value == "" {
 		return fallback
@@ -56,6 +74,12 @@ func canonicalWorktreeKey(value, fallback string) string {
 // The previous 8-char truncation caused alias collisions across distinct
 // sessions/panes (bd-l542u).
 func canonicalSessionKey(sessionID string) string {
+	// Session IDs are typically already restricted to [A-Za-z0-9_-].
+	// Preserve that safe form exactly so distinct safe IDs don't alias
+	// through dash-collapsing canonicalization (bd-iz9ss).
+	if isAlreadySafeWorktreeKey(sessionID) {
+		return sessionID
+	}
 	return canonicalWorktreeKey(sessionID, "session")
 }
 

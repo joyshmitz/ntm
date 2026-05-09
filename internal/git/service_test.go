@@ -164,6 +164,8 @@ func TestSessionMatchesWorktree(t *testing.T) {
 			"foo", "codex", canonicalSessionKey("foo-bar-codex-1"), false},
 		{"same first 8 chars but different session identity must not match",
 			"alpha-team-x", "claude", canonicalSessionKey("alpha-team-y-claude-1"), false},
+		{"single-dash session must not match double-dash worktree id",
+			"alpha-team", "claude", canonicalSessionKey("alpha--team-claude-1"), false},
 
 		// Happy paths.
 		{"autoprovisioned short session matches",
@@ -174,6 +176,8 @@ func TestSessionMatchesWorktree(t *testing.T) {
 			"proj", "codex", canonicalSessionKey("proj-codex-12"), true},
 		{"deeply hyphenated session matches",
 			"a-b-c-d", "gemini", canonicalSessionKey("a-b-c-d-gemini-3"), true},
+		{"double-dash session matches its own worktree id",
+			"alpha--team", "claude", canonicalSessionKey("alpha--team-claude-1"), true},
 		{"same session/type different pane matches only exact pane suffix",
 			"alpha-team", "claude", canonicalSessionKey("alpha-team-claude-2"), true},
 
@@ -196,7 +200,7 @@ func TestSessionMatchesWorktree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := sessionMatchesWorktree(tc.sessionName, tc.agentType, tc.sessionID)
-			if got != tc.want {
+			if (got && !tc.want) || (!got && tc.want) {
 				t.Errorf("sessionMatchesWorktree(%q, %q, %q) = %v, want %v",
 					tc.sessionName, tc.agentType, tc.sessionID, got, tc.want)
 			}

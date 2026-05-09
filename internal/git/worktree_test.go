@@ -76,6 +76,7 @@ func TestCanonicalSessionKey(t *testing.T) {
 	}{
 		{"empty falls back", "", "session", ""},
 		{"preserves identity-bearing suffix", "alpha-team-claude-12", "alpha-team-claude-12", ""},
+		{"preserves repeated safe separators", "alpha--team-claude-1", "alpha--team-claude-1", ""},
 		{"normalizes disallowed characters", "alpha team/claude:12", "alpha-team-claude-12", ""},
 		{"collapses repeated separators", "alpha---team***claude", "alpha-team-claude", ""},
 		{"distinct pane IDs remain distinct", "alpha-team-claude-1", "alpha-team-claude-1", "alpha-team-claude-2"},
