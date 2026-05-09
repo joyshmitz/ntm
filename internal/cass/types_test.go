@@ -280,6 +280,45 @@ func TestStatusResponseUnmarshal(t *testing.T) {
 	}
 }
 
+func TestStatusResponseUnmarshalCurrentStatusSchema(t *testing.T) {
+	jsonData := `{
+		"status": "healthy",
+		"healthy": true,
+		"recommended_action": "Lexical search is ready",
+		"index": {
+			"exists": true,
+			"status": "ready",
+			"fresh": true,
+			"last_indexed_at": "2026-05-09T00:02:48.355+00:00",
+			"rebuilding": false
+		},
+		"database": {
+			"exists": true,
+			"opened": true,
+			"path": "/home/user/.local/share/coding-agent-search/agent_search.db",
+			"open_skipped": true
+		},
+		"pending": {
+			"sessions": 0
+		}
+	}`
+
+	var resp StatusResponse
+	if err := json.Unmarshal([]byte(jsonData), &resp); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if !resp.IsHealthy() {
+		t.Error("IsHealthy() should accept current cass status schema")
+	}
+	if !resp.Index.IsReady() {
+		t.Error("Index.IsReady() should use fresh ready current status fields")
+	}
+	if resp.Index.EffectiveLastIndexedAt(resp.LastIndexedAt).IsZero() {
+		t.Error("EffectiveLastIndexedAt() should use index.last_indexed_at")
+	}
+}
+
 func TestCapabilitiesUnmarshal(t *testing.T) {
 	jsonData := `{
 		"crate_version": "0.5.0",
