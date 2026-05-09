@@ -18,6 +18,7 @@ const (
 	SourceSupportBundle SourceKind = "support_bundle"
 	SourceGit           SourceKind = "git"
 	SourceManual        SourceKind = "manual"
+	SourceEffectiveness SourceKind = "effectiveness"
 )
 
 type WorkStatus string

@@ -249,6 +249,7 @@ func candidateFactors(snapshot IdeaEvidenceSnapshot, candidate IdeaCandidate) Ra
 	if evidenceCount == 0 {
 		degradedRisk += 0.35
 	}
+	degradedRisk += effectivenessValidationRisk(candidate.ValidationNotes)
 
 	return RankFactors{
 		Robustness:         keywordFactor(words, "robust", "safety", "safe", "resilience", "guard", "recovery"),
@@ -262,6 +263,21 @@ func candidateFactors(snapshot IdeaEvidenceSnapshot, candidate IdeaCandidate) Ra
 		DegradedSourceRisk: clamp(degradedRisk, 0, 1),
 		Overlap:            overlapFactor(candidate),
 	}
+}
+
+func effectivenessValidationRisk(notes []ValidationNote) float64 {
+	risk := 0.0
+	for _, note := range notes {
+		switch note.Code {
+		case "effectiveness_churn_history":
+			risk += 0.25
+		case "effectiveness_low_yield_source":
+			risk += 0.2
+		case "effectiveness_operator_rejection":
+			risk += 0.15
+		}
+	}
+	return clamp(risk, 0, 0.45)
 }
 
 func rankReasons(candidate IdeaCandidate, factors RankFactors) []string {

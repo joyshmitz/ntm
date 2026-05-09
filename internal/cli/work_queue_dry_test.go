@@ -361,6 +361,9 @@ func TestQueueDryIdeationDryQueueRendersRoadmap(t *testing.T) {
 	if got.Creation == nil || !got.Creation.DryRun || len(got.Creation.RemainingCommands) == 0 {
 		t.Fatalf("Creation=%+v, want dry-run creation preview", got.Creation)
 	}
+	if got.Effectiveness == nil || got.Effectiveness.CandidateGeneratedCount != 1 || got.Effectiveness.RenderedCount != 1 {
+		t.Fatalf("Effectiveness=%+v, want generated/rendered counts", got.Effectiveness)
+	}
 	if !containsQueueDryRecommendation(got.NextActions, "inspect_dry_run_bead_preview") {
 		t.Fatalf("next actions=%+v, want dry-run preview action", got.NextActions)
 	}
@@ -438,7 +441,7 @@ func TestQueueDryIdeationJSONOutputContainsDryRunPreview(t *testing.T) {
 		t.Fatalf("MarshalIndent failed: %v", err)
 	}
 	got := string(data)
-	for _, want := range []string{`"dry_run": true`, `"command_preview"`, "br create --dry-run", `"guard"`} {
+	for _, want := range []string{`"dry_run": true`, `"command_preview"`, "br create --dry-run", `"guard"`, `"effectiveness"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("JSON missing %q\n%s", want, got)
 		}
@@ -452,7 +455,7 @@ func TestQueueDryIdeationMarkdownOutputContainsRoadmap(t *testing.T) {
 
 	got := queueDryMarkdown(report)
 
-	for _, want := range []string{"# Queue-Dry Diagnostic", "# Queue-Dry Ideation Dry Run", "queue-dry-ideation-dry-run", "Creation allowed: true", "br create --dry-run"} {
+	for _, want := range []string{"# Queue-Dry Diagnostic", "# Queue-Dry Ideation Dry Run", "queue-dry-ideation-dry-run", "Creation allowed: true", "Effectiveness generated candidates: 1", "br create --dry-run"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("markdown missing %q\n%s", want, got)
 		}

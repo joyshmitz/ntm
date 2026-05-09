@@ -864,19 +864,20 @@ type QueueDryIdeationOptions struct {
 
 // QueueDryIdeationReport embeds the bd-e7xm1 dry-run planning pipeline in queue-dry output.
 type QueueDryIdeationReport struct {
-	Requested   bool                               `json:"requested"`
-	DryRun      bool                               `json:"dry_run"`
-	Forced      bool                               `json:"forced,omitempty"`
-	Status      string                             `json:"status"`
-	Reason      string                             `json:"reason"`
-	Snapshot    *ideaplan.IdeaEvidenceSnapshot     `json:"snapshot,omitempty"`
-	Ranking     *ideaplan.RankingResult            `json:"ranking,omitempty"`
-	Guard       *ideaplan.NoveltyGuardAssessment   `json:"guard,omitempty"`
-	Refinement  *ideaplan.CreationRefinementReport `json:"refinement,omitempty"`
-	Roadmap     *ideaplan.RoadmapPlan              `json:"roadmap,omitempty"`
-	Creation    *ideaplan.BeadCreationReport       `json:"creation,omitempty"`
-	NextActions []QueueDryRecommendation           `json:"next_actions"`
-	Warnings    []string                           `json:"warnings,omitempty"`
+	Requested     bool                               `json:"requested"`
+	DryRun        bool                               `json:"dry_run"`
+	Forced        bool                               `json:"forced,omitempty"`
+	Status        string                             `json:"status"`
+	Reason        string                             `json:"reason"`
+	Snapshot      *ideaplan.IdeaEvidenceSnapshot     `json:"snapshot,omitempty"`
+	Ranking       *ideaplan.RankingResult            `json:"ranking,omitempty"`
+	Guard         *ideaplan.NoveltyGuardAssessment   `json:"guard,omitempty"`
+	Effectiveness *ideaplan.EffectivenessReport      `json:"effectiveness,omitempty"`
+	Refinement    *ideaplan.CreationRefinementReport `json:"refinement,omitempty"`
+	Roadmap       *ideaplan.RoadmapPlan              `json:"roadmap,omitempty"`
+	Creation      *ideaplan.BeadCreationReport       `json:"creation,omitempty"`
+	NextActions   []QueueDryRecommendation           `json:"next_actions"`
+	Warnings      []string                           `json:"warnings,omitempty"`
 }
 
 // QueueDryEvidence stores collected evidence for queue-dry analysis.
@@ -1469,6 +1470,10 @@ func buildQueueDryIdeationReport(report QueueDryResponse, snapshot ideaplan.Idea
 		Confirmed:       opts.ConfirmCreate,
 		AllowCreate:     guard.CreationAllowed && (report.QueueDry || opts.Force),
 	})
+	effectiveness := ideaplan.BuildEffectivenessReport(
+		ideaplan.EffectivenessEventsFromArtifacts(ranking, refinedRoadmap, creation),
+		ideaplan.EffectivenessOptions{ScenarioID: "queue-dry-ideation"},
+	)
 
 	status := "rendered"
 	reason := "queue is dry; rendered duplicate-aware dry-run roadmap"
@@ -1482,19 +1487,20 @@ func buildQueueDryIdeationReport(report QueueDryResponse, snapshot ideaplan.Idea
 	}
 
 	return QueueDryIdeationReport{
-		Requested:   true,
-		DryRun:      true,
-		Forced:      opts.Force,
-		Status:      status,
-		Reason:      reason,
-		Snapshot:    &snapshot,
-		Ranking:     &ranking,
-		Guard:       &guard,
-		Refinement:  &refinement,
-		Roadmap:     &refinedRoadmap,
-		Creation:    &creation,
-		NextActions: queueDryIdeationNextActions(report, guard, refinedRoadmap, creation),
-		Warnings:    queueDryIdeationWarnings(snapshot, report),
+		Requested:     true,
+		DryRun:        true,
+		Forced:        opts.Force,
+		Status:        status,
+		Reason:        reason,
+		Snapshot:      &snapshot,
+		Ranking:       &ranking,
+		Guard:         &guard,
+		Effectiveness: &effectiveness,
+		Refinement:    &refinement,
+		Roadmap:       &refinedRoadmap,
+		Creation:      &creation,
+		NextActions:   queueDryIdeationNextActions(report, guard, refinedRoadmap, creation),
+		Warnings:      queueDryIdeationWarnings(snapshot, report),
 	}
 }
 
@@ -2203,6 +2209,19 @@ func queueDryIdeationMarkdown(report QueueDryIdeationReport) string {
 	if report.Refinement != nil {
 		fmt.Fprintf(&b, "- Refinement passes: %d\n", report.Refinement.Passes)
 		fmt.Fprintf(&b, "- Refinement changed plan: %t\n", report.Refinement.Changed)
+	}
+	if report.Effectiveness != nil {
+		fmt.Fprintf(&b, "- Effectiveness generated candidates: %d\n", report.Effectiveness.CandidateGeneratedCount)
+		fmt.Fprintf(&b, "- Effectiveness rendered candidates: %d\n", report.Effectiveness.RenderedCount)
+		if len(report.Effectiveness.CleanFamilyIDs) > 0 {
+			fmt.Fprintf(&b, "- Clean families: %s\n", strings.Join(report.Effectiveness.CleanFamilyIDs, ", "))
+		}
+		if len(report.Effectiveness.ChurnFamilyIDs) > 0 {
+			fmt.Fprintf(&b, "- Churn families: %s\n", strings.Join(report.Effectiveness.ChurnFamilyIDs, ", "))
+		}
+		if len(report.Effectiveness.LowYieldSourceIDs) > 0 {
+			fmt.Fprintf(&b, "- Low-yield sources: %s\n", strings.Join(report.Effectiveness.LowYieldSourceIDs, ", "))
+		}
 	}
 	if report.Creation != nil {
 		fmt.Fprintf(&b, "- Creation requested: %t\n", report.Creation.CreateRequested)
