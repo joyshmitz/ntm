@@ -1,7 +1,7 @@
 package agentmail
 
 import (
-	"crypto/sha1" // nolint:gosec // Not cryptographic; path namespace only.
+	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"os"

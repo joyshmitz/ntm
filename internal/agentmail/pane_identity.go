@@ -29,7 +29,7 @@
 package agentmail
 
 import (
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // Not cryptographic; path namespace only.
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -214,7 +214,7 @@ func configBaseDir() string {
 // projectSha1Short returns the lowercase hex SHA-1 of the project key,
 // truncated to projectHashLen characters. Matches the Rust implementation.
 func projectSha1Short(projectKey string) string {
-	h := sha1.Sum([]byte(projectKey)) // nolint:gosec // Not cryptographic; path namespace only.
+	h := sha1.Sum([]byte(projectKey)) //nolint:gosec // Not cryptographic; path namespace only.
 	full := hex.EncodeToString(h[:])
 	if len(full) < projectHashLen {
 		return full
