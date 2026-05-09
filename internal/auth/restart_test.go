@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -269,6 +270,19 @@ func TestPromptBrowserAuth(t *testing.T) {
 	}
 }
 
+func TestPromptBrowserAuthRequiresExplicitEnter(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	err := promptBrowserAuth(strings.NewReader(""), &out, "backup@example.com")
+	if err == nil {
+		t.Fatal("expected promptBrowserAuth to fail on EOF without ENTER confirmation")
+	}
+	if !strings.Contains(err.Error(), "confirmation") {
+		t.Fatalf("promptBrowserAuth error %q missing confirmation context", err)
+	}
+}
+
 func TestOrchestrator_ExecuteRestartStrategyPromptsBeforeStarting(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Claude = "claude --model {{.Model}}"
@@ -336,6 +350,48 @@ func TestOrchestrator_ExecuteRestartStrategyPromptsBeforeStarting(t *testing.T) 
 	}
 	if promptIndex > startIndex {
 		t.Fatalf("prompt should happen before start, events: %v", events)
+	}
+}
+
+func TestOrchestrator_ExecuteRestartStrategyPromptFailureStopsRestart(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Claude = "claude --model {{.Model}}"
+
+	orch := NewOrchestrator(cfg)
+	orch.sleep = func(time.Duration) {}
+	orch.captureOutput = func(string, int) (string, error) {
+		return "$ ", nil
+	}
+	orch.sendKeys = func(string, string, bool) error { return nil }
+	orch.sendInterrupt = func(string) error { return nil }
+	orch.promptBrowserAuth = func(string) error {
+		return io.EOF
+	}
+	orch.sanitizePaneCommand = func(cmd string) (string, error) { return cmd, nil }
+	orch.buildPaneCommand = func(_, cmd string) (string, error) { return cmd, nil }
+
+	started := false
+	orch.sendKeysForAgent = func(string, string, bool, tmux.AgentType) error {
+		started = true
+		return nil
+	}
+
+	err := orch.ExecuteRestartStrategy(RestartContext{
+		PaneID:      "%1",
+		Provider:    "claude",
+		TargetEmail: "backup@example.com",
+		SessionName: "proj",
+		PaneIndex:   1,
+		ProjectDir:  "/data/projects/ntm",
+	})
+	if err == nil {
+		t.Fatal("expected ExecuteRestartStrategy to fail when browser confirmation fails")
+	}
+	if !strings.Contains(err.Error(), "browser auth prompt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if started {
+		t.Fatal("replacement agent started despite prompt failure")
 	}
 }
 

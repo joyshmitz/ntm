@@ -164,7 +164,10 @@ func promptBrowserAuth(input io.Reader, output io.Writer, email string) error {
 	fmt.Fprintf(output, "  Switch your browser to: %s\n", target)
 	fmt.Fprintln(output, "  Press ENTER to continue after the browser account is ready.")
 
-	if _, err := bufio.NewReader(input).ReadString('\n'); err != nil && !errors.Is(err, io.EOF) {
+	if _, err := bufio.NewReader(input).ReadString('\n'); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("browser account confirmation not received")
+		}
 		return err
 	}
 	return nil
