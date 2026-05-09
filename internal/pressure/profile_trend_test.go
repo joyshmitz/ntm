@@ -173,6 +173,37 @@ func TestHostProfileTrendRedactsMachineFingerprint(t *testing.T) {
 	}
 }
 
+func TestSanitizeMachineFingerprintIsIdempotentForUnknownSentinel(t *testing.T) {
+	t.Parallel()
+
+	// bd-kpojx: SanitizeMachineFingerprint("") returns "machine:unknown",
+	// but a second pass over a stored "machine:unknown" must not silently
+	// hash it into "machine:<sha>" — that produced phantom drift on every
+	// MigrateHostProfileTrendRecord reload of an empty-fingerprint record.
+	first := SanitizeMachineFingerprint("")
+	if profileTrendTestNotEqual(first, "machine:unknown") {
+		t.Fatalf("first sanitize = %q, want %q", first, "machine:unknown")
+	}
+	second := SanitizeMachineFingerprint(first)
+	if profileTrendTestNotEqual(second, first) {
+		t.Fatalf("sanitize is not idempotent: first=%q second=%q", first, second)
+	}
+	third := SanitizeMachineFingerprint(second)
+	if profileTrendTestNotEqual(third, second) {
+		t.Fatalf("sanitize drifted on third pass: third=%q second=%q", third, second)
+	}
+
+	record := HostProfileTrendRecord{
+		SchemaVersion:      HostProfileTrendSchemaVersion,
+		ProfileID:          "p",
+		MachineFingerprint: "machine:unknown",
+	}
+	migrated := MigrateHostProfileTrendRecord(record)
+	if profileTrendTestNotEqual(migrated.MachineFingerprint, "machine:unknown") {
+		t.Fatalf("Migrate rewrote the unknown sentinel: %q", migrated.MachineFingerprint)
+	}
+}
+
 func testTrendRecord(profileID, rawHost string, thresholds map[Source]Thresholds) HostProfileTrendRecord {
 	profile := HostCapacityProfile{
 		ProfileID:  profileID,

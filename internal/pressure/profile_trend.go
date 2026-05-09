@@ -125,10 +125,19 @@ func BuildHostProfileTrendRecord(in HostProfileTrendRecordInput) HostProfileTren
 }
 
 // SanitizeMachineFingerprint returns a stable non-reversible machine token.
+//
+// "machine:unknown" is treated as a valid sanitized sentinel so that
+// SanitizeMachineFingerprint is idempotent for empty inputs across reloads.
+// Without this carve-out a stored fingerprint of "machine:unknown" would be
+// re-sanitized into a sha256-derived hash on the next migrate pass and trigger
+// phantom drift in EvaluateHostProfileTrend.
 func SanitizeMachineFingerprint(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if profileTrendValueEqual(trimmed, "") {
 		return "machine:unknown"
+	}
+	if profileTrendValueEqual(trimmed, "machine:unknown") {
+		return trimmed
 	}
 	if isSanitizedMachineFingerprint(trimmed) {
 		return trimmed
