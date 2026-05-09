@@ -533,6 +533,7 @@ type WSHub struct {
 	register     chan *WSClient
 	unregister   chan *WSClient
 	broadcast    chan *WSEvent
+	dropped      atomic.Int64
 	seq          int64
 	seqMu        sync.Mutex
 	done         chan struct{}
@@ -627,8 +628,8 @@ func (h *WSHub) broadcastEvent(event *WSEvent) {
 			select {
 			case client.send <- data:
 			default:
-				// Client buffer full, skip
-				log.Printf("ws client buffer full id=%s", client.id)
+				dropped := h.dropped.Add(1)
+				log.Printf("ws client buffer full id=%s surface=websocket session= pane= queue_depth=%d dropped_count=%d latency_ms=0 decision=coalesce reason_codes=queue_depth,dropped_output", client.id, len(client.send), dropped)
 			}
 		}
 	}
@@ -675,7 +676,8 @@ func (h *WSHub) Publish(topic, eventType string, data interface{}) {
 		return
 	case h.broadcast <- event:
 	default:
-		log.Printf("ws broadcast buffer full, dropping event topic=%s", topic)
+		dropped := h.dropped.Add(1)
+		log.Printf("ws broadcast buffer full, dropping event topic=%s surface=websocket session= pane= queue_depth=%d dropped_count=%d latency_ms=0 decision=coalesce reason_codes=queue_depth,dropped_output", topic, len(h.broadcast), dropped)
 	}
 }
 
