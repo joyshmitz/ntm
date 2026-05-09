@@ -348,18 +348,7 @@ func (e *Engine) WaitForApproval(ctx context.Context, id string, timeout time.Du
 	e.waiters[id] = append(e.waiters[id], waitCh)
 	e.waitersMu.Unlock()
 
-	// Clean up on exit
-	defer func() {
-		e.waitersMu.Lock()
-		waiters := e.waiters[id]
-		for i, ch := range waiters {
-			if ch == waitCh {
-				e.waiters[id] = append(waiters[:i], waiters[i+1:]...)
-				break
-			}
-		}
-		e.waitersMu.Unlock()
-	}()
+	defer e.removeWaiter(id, waitCh)
 
 	// Check current status AFTER registering — closes the race window.
 	approval, err := e.Check(baseCtx, id)
@@ -384,6 +373,24 @@ func (e *Engine) WaitForApproval(ctx context.Context, id string, timeout time.Du
 		// Timeout - check final status
 		return e.Check(baseCtx, id)
 	}
+}
+
+func (e *Engine) removeWaiter(id string, waitCh chan struct{}) {
+	e.waitersMu.Lock()
+	defer e.waitersMu.Unlock()
+
+	waiters := e.waiters[id]
+	for i, ch := range waiters {
+		if ch == waitCh {
+			waiters = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(waiters) == 0 {
+		delete(e.waiters, id)
+		return
+	}
+	e.waiters[id] = waiters
 }
 
 // ListPending returns all pending approval requests.

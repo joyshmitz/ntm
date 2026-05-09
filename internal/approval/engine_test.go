@@ -341,6 +341,7 @@ func TestWaitForApproval(t *testing.T) {
 	if result.Status != state.ApprovalApproved {
 		t.Errorf("Status should be approved, got %s", result.Status)
 	}
+	assertNoWaiterBucket(t, engine, approval.ID)
 }
 
 func TestWaitForApprovalWakesWhenLateApproveExpiresRequest(t *testing.T) {
@@ -421,6 +422,45 @@ func TestWaitForApprovalTimeout(t *testing.T) {
 	if result.Status != state.ApprovalPending {
 		t.Errorf("Status should be pending after timeout, got %s", result.Status)
 	}
+	assertNoWaiterBucket(t, engine, approval.ID)
+}
+
+func TestWaitForApprovalCleansWaiterBucketOnImmediateReturn(t *testing.T) {
+	store := setupTestStore(t)
+	engine := New(store, nil, nil, DefaultConfig())
+
+	ctx := context.Background()
+	approval, err := engine.Request(ctx, RequestParams{
+		Action:      "test_action",
+		Resource:    "test_resource",
+		RequestedBy: "requester",
+	})
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	if err := engine.Approve(ctx, approval.ID, "approver"); err != nil {
+		t.Fatalf("Approve failed: %v", err)
+	}
+
+	result, err := engine.WaitForApproval(ctx, approval.ID, time.Second)
+	if err != nil {
+		t.Fatalf("WaitForApproval failed: %v", err)
+	}
+	if result.Status != state.ApprovalApproved {
+		t.Fatalf("status = %s, want approved", result.Status)
+	}
+	assertNoWaiterBucket(t, engine, approval.ID)
+}
+
+func TestWaitForApprovalCleansWaiterBucketOnCheckError(t *testing.T) {
+	store := setupTestStore(t)
+	engine := New(store, nil, nil, DefaultConfig())
+
+	const missingID = "missing-approval"
+	if _, err := engine.WaitForApproval(context.Background(), missingID, time.Second); err == nil {
+		t.Fatal("WaitForApproval returned nil error for missing approval")
+	}
+	assertNoWaiterBucket(t, engine, missingID)
 }
 
 // bd-e2qk2: pre-fix, WaitForApproval did Check-then-register. If
@@ -483,6 +523,16 @@ func TestWaitForApproval_NoRaceWithApproveBetweenCheckAndRegister(t *testing.T) 
 			t.Errorf("iter %d: WaitForApproval took %v, want < %v (race not closed?)",
 				i, elapsed, acceptable)
 		}
+	}
+}
+
+func assertNoWaiterBucket(t *testing.T, engine *Engine, id string) {
+	t.Helper()
+
+	engine.waitersMu.Lock()
+	defer engine.waitersMu.Unlock()
+	if waiters, ok := engine.waiters[id]; ok {
+		t.Fatalf("waiter bucket for %q still present with %d waiters", id, len(waiters))
 	}
 }
 
