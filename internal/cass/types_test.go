@@ -141,6 +141,38 @@ func TestStatusResponseIsHealthy(t *testing.T) {
 	if unhealthy.IsHealthy() {
 		t.Error("IsHealthy() should return false when index unhealthy")
 	}
+
+	pathOnlyDB := StatusResponse{
+		Healthy:  true,
+		Index:    IndexInfo{Healthy: true},
+		Database: DBInfo{Path: "/tmp/cass.db"},
+	}
+	if pathOnlyDB.IsHealthy() {
+		t.Error("IsHealthy() should return false when database is path-only but not opened/healthy")
+	}
+}
+
+func TestDBInfoIsUsable(t *testing.T) {
+	tests := []struct {
+		name string
+		db   DBInfo
+		want bool
+	}{
+		{name: "legacy healthy", db: DBInfo{Healthy: true}, want: true},
+		{name: "opened database", db: DBInfo{Opened: true, Path: "/tmp/cass.db"}, want: true},
+		{name: "existing database path", db: DBInfo{Exists: true, Path: "/tmp/cass.db"}, want: true},
+		{name: "path only is not usable", db: DBInfo{Path: "/tmp/cass.db"}, want: false},
+		{name: "empty database info", db: DBInfo{}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.db.IsUsable()
+			if got != tt.want {
+				t.Errorf("IsUsable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestCapabilitiesHasFeature(t *testing.T) {

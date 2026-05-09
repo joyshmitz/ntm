@@ -200,7 +200,7 @@ func (d DBInfo) SizeMB() float64 {
 // IsUsable returns true when either the legacy or current CASS status schema
 // reports that the canonical database can be opened.
 func (d DBInfo) IsUsable() bool {
-	return d.Healthy || d.Opened || (d.Exists && d.Path != "") || d.Path != ""
+	return d.Healthy || d.Opened || (d.Exists && d.Path != "")
 }
 
 // Pending tracks items waiting to be indexed
