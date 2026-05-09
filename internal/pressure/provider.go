@@ -72,6 +72,11 @@ type SystemProvider struct {
 	CPUSampleInterval time.Duration
 }
 
+const (
+	processCountPerCPU   = 256
+	minProcessCountLimit = 4096
+)
+
 // NewSystemProvider creates the default host-pressure provider.
 func NewSystemProvider() *SystemProvider {
 	return &SystemProvider{CPUSampleInterval: 50 * time.Millisecond}
@@ -89,6 +94,9 @@ func (p *SystemProvider) Read(ctx context.Context) ([]Reading, error) {
 	}
 	if v, ok := readMemoryRatio(); ok {
 		readings = append(readings, Reading{Source: SourceMemory, Value: v, Unit: "ratio"})
+	}
+	if v, ok := readProcessCountRatio(); ok {
+		readings = append(readings, Reading{Source: SourceProcCount, Value: v, Unit: "ratio"})
 	}
 	if v, ok := sampleCPURatio(ctx, p.CPUSampleInterval); ok {
 		readings = append(readings, Reading{Source: SourceCPU, Value: v, Unit: "ratio"})
@@ -114,6 +122,57 @@ func readLoadRatio() (float64, bool) {
 		return 0, false
 	}
 	return load1 / float64(cpus), true
+}
+
+func readProcessCountRatio() (float64, bool) {
+	raw, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0, false
+	}
+	total, ok := parseProcessTotalFromLoadavg(string(raw))
+	if !ok {
+		return 0, false
+	}
+	return processCountRatio(total, defaultProcessCountLimit())
+}
+
+func parseProcessTotalFromLoadavg(raw string) (int, bool) {
+	fields := strings.Fields(raw)
+	if len(fields) < 4 {
+		return 0, false
+	}
+	parts := strings.Split(fields[3], "/")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	total, err := strconv.Atoi(parts[1])
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+func processCountRatio(total, limit int) (float64, bool) {
+	if total < 0 || limit <= 0 {
+		return 0, false
+	}
+	ratio := float64(total) / float64(limit)
+	if ratio > 1 {
+		ratio = 1
+	}
+	return ratio, true
+}
+
+func defaultProcessCountLimit() int {
+	cpus := runtime.NumCPU()
+	if cpus < 1 {
+		cpus = 1
+	}
+	limit := cpus * processCountPerCPU
+	if limit < minProcessCountLimit {
+		return minProcessCountLimit
+	}
+	return limit
 }
 
 func readMemoryRatio() (float64, bool) {

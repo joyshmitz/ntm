@@ -94,3 +94,57 @@ func TestParseMemoryRatio_IgnoresMalformedLines(t *testing.T) {
 		t.Errorf("used = %v, want 0.5 (4 GiB used of 8 GiB)", got)
 	}
 }
+
+func TestParseProcessTotalFromLoadavg(t *testing.T) {
+	t.Parallel()
+	got, ok := parseProcessTotalFromLoadavg("0.10 0.20 0.30 4/2048 12345\n")
+	if !ok {
+		t.Fatal("ok=false, want process total from loadavg")
+	}
+	if got != 2048 {
+		t.Fatalf("process total=%d, want 2048", got)
+	}
+}
+
+func TestParseProcessTotalFromLoadavgRejectsMalformedInput(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"",
+		"0.10 0.20 0.30",
+		"0.10 0.20 0.30 running-total 12345",
+		"0.10 0.20 0.30 4/not-a-number 12345",
+	} {
+		if got, ok := parseProcessTotalFromLoadavg(raw); ok || got != 0 {
+			t.Fatalf("parseProcessTotalFromLoadavg(%q) = (%d,%v), want (0,false)", raw, got, ok)
+		}
+	}
+}
+
+func TestProcessCountRatioClampsAtOne(t *testing.T) {
+	t.Parallel()
+	got, ok := processCountRatio(1500, 1000)
+	if !ok {
+		t.Fatal("ok=false, want valid ratio")
+	}
+	if got != 1 {
+		t.Fatalf("ratio=%v, want clamp to 1", got)
+	}
+}
+
+func TestProcessCountRatioRejectsInvalidLimit(t *testing.T) {
+	t.Parallel()
+	if got, ok := processCountRatio(10, 0); ok || got != 0 {
+		t.Fatalf("processCountRatio invalid limit = (%v,%v), want (0,false)", got, ok)
+	}
+}
+
+func TestDefaultProcessCountLimitKeepsSwarmHostHeadroom(t *testing.T) {
+	t.Parallel()
+	got := defaultProcessCountLimit()
+	if got < minProcessCountLimit {
+		t.Fatalf("defaultProcessCountLimit=%d, want at least %d", got, minProcessCountLimit)
+	}
+	if got%processCountPerCPU != 0 && got != minProcessCountLimit {
+		t.Fatalf("defaultProcessCountLimit=%d, want CPU-scaled multiple of %d or minimum", got, processCountPerCPU)
+	}
+}
