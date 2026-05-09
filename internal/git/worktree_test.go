@@ -254,22 +254,15 @@ func TestWorktreeManager_getWorktreeInfo_UsesCommandContextForBranchLookup(t *te
 
 	fakeDir := t.TempDir()
 	fakeGit := filepath.Join(fakeDir, "git")
-	script := "#!/bin/sh\nsleep 1\n"
+	// Simulate a long-running git call; CommandContext should bound it via
+	// worktreeGitCommandTimeout without mutating shared timeout globals.
+	script := "#!/bin/sh\nsleep 30\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}
 
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+oldPath)
-
-	prevTimeout := worktreeGitCommandTimeout
-	prevWaitDelay := worktreeGitCommandWaitDelay
-	worktreeGitCommandTimeout = 50 * time.Millisecond
-	worktreeGitCommandWaitDelay = 20 * time.Millisecond
-	t.Cleanup(func() {
-		worktreeGitCommandTimeout = prevTimeout
-		worktreeGitCommandWaitDelay = prevWaitDelay
-	})
 
 	start := time.Now()
 	_, err := wm.getWorktreeInfo(worktreeName)
@@ -280,8 +273,9 @@ func TestWorktreeManager_getWorktreeInfo_UsesCommandContextForBranchLookup(t *te
 	if !strings.Contains(err.Error(), "failed to get branch") {
 		t.Fatalf("error = %q, want branch lookup failure", err.Error())
 	}
-	if elapsed > time.Second {
-		t.Fatalf("getWorktreeInfo elapsed %v, expected command timeout around %v", elapsed, worktreeGitCommandTimeout)
+	maxExpected := worktreeGitCommandTimeout + 2*time.Second
+	if elapsed > maxExpected {
+		t.Fatalf("getWorktreeInfo elapsed %v, expected timeout-bounded return within %v", elapsed, maxExpected)
 	}
 }
 
