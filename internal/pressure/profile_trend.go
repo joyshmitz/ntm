@@ -250,6 +250,7 @@ func (r *HostProfileTrendReport) compareThreshold(metric string, oldValue, newVa
 
 func (r *HostProfileTrendReport) compareDependencies(current, baseline HostProfileTrendRecord) {
 	baselineDeps := hostProfileDependenciesByName(baseline.Dependencies)
+	currentDeps := hostProfileDependenciesByName(current.Dependencies)
 	for _, dep := range current.Dependencies {
 		oldVersion, ok := baselineDeps[dep.Name]
 		if !ok || profileTrendValueEqual(oldVersion, dep.Version) {
@@ -267,6 +268,29 @@ func (r *HostProfileTrendReport) compareDependencies(current, baseline HostProfi
 			NewValue:    dep.Version,
 			Severity:    severity,
 			Reason:      "dependency_drift",
+		})
+	}
+	removedNames := make([]string, 0)
+	for name := range baselineDeps {
+		if _, present := currentDeps[name]; present {
+			continue
+		}
+		removedNames = append(removedNames, name)
+	}
+	sort.Strings(removedNames)
+	for _, name := range removedNames {
+		severity := "warning"
+		if strings.Contains(name, "rch") {
+			severity = "critical"
+		}
+		r.appendWarning(HostProfileDriftWarning{
+			ProfileID:   current.ProfileID,
+			BaselineID:  baseline.ProfileID,
+			DriftMetric: "dependency." + name,
+			OldValue:    baselineDeps[name],
+			NewValue:    "",
+			Severity:    severity,
+			Reason:      "dependency_removed",
 		})
 	}
 }

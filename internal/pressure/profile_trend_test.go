@@ -99,6 +99,58 @@ func TestHostProfileTrendDetectsRCHFleetDrift(t *testing.T) {
 	}
 }
 
+func TestHostProfileTrendDetectsRemovedDependency(t *testing.T) {
+	t.Parallel()
+	baseline := testTrendRecord("baseline", "host-a", map[Source]Thresholds{
+		SourceRchQueue: {Elevated: 0.60, High: 0.80, Critical: 0.95},
+	})
+	baseline.Dependencies = []HostProfileDependency{
+		{Name: "rch_fleet", Version: "8-workers"},
+		{Name: "go_runtime", Version: "1.25"},
+	}
+	current := baseline
+	current.ProfileID = "current"
+	current.BaselineID = baseline.ProfileID
+	current.Dependencies = []HostProfileDependency{
+		{Name: "go_runtime", Version: "1.25"},
+	}
+
+	report := EvaluateHostProfileTrend(HostProfileTrendInput{
+		Current:  current,
+		Baseline: &baseline,
+	})
+
+	if !trendHasWarning(report, "dependency.rch_fleet", "critical", "dependency_removed") {
+		t.Fatalf("missing rch_fleet dependency_removed warning: %+v", report.Warnings)
+	}
+	if profileTrendTestNotEqual(report.Decision, "critical") {
+		t.Fatalf("Decision = %q, want critical", report.Decision)
+	}
+}
+
+func TestHostProfileTrendRemovedNonRchDependencyIsWarning(t *testing.T) {
+	t.Parallel()
+	baseline := testTrendRecord("baseline", "host-a", map[Source]Thresholds{
+		SourceCPU: {Elevated: 0.60, High: 0.80, Critical: 0.92},
+	})
+	baseline.Dependencies = []HostProfileDependency{
+		{Name: "libfoo", Version: "1.2.3"},
+	}
+	current := baseline
+	current.ProfileID = "current"
+	current.BaselineID = baseline.ProfileID
+	current.Dependencies = []HostProfileDependency{}
+
+	report := EvaluateHostProfileTrend(HostProfileTrendInput{
+		Current:  current,
+		Baseline: &baseline,
+	})
+
+	if !trendHasWarning(report, "dependency.libfoo", "warning", "dependency_removed") {
+		t.Fatalf("missing libfoo dependency_removed warning: %+v", report.Warnings)
+	}
+}
+
 func TestHostProfileTrendMissingBaseline(t *testing.T) {
 	t.Parallel()
 	current := testTrendRecord("current", "host-a", map[Source]Thresholds{
