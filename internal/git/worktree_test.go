@@ -81,6 +81,8 @@ func TestCanonicalSessionKey(t *testing.T) {
 		{"normalizes trailing dot for git-ref safety", "alpha--team-claude-1.", "alpha--team-claude-1", ""},
 		{"normalizes disallowed characters", "alpha team/claude:12", "alpha-team-claude-12", ""},
 		{"collapses repeated separators", "alpha---team***claude", "alpha-team-claude", ""},
+		{"normalizes invalid git ref dot run", "alpha..team", "alpha-team", ""},
+		{"normalizes invalid git ref .lock suffix", "alpha-team.lock", "alpha-team-lock", ""},
 		{"distinct pane IDs remain distinct", "alpha-team-claude-1", "alpha-team-claude-1", "alpha-team-claude-2"},
 	}
 
@@ -112,6 +114,8 @@ func TestCanonicalAgentKey(t *testing.T) {
 		{"normalizes leading/trailing dot for git-ref safety", ".alpha--team.", "alpha--team", ""},
 		{"normalizes path separators", "../evil/type", "evil-type", ""},
 		{"collapses punctuation", "***codex///agent***", "codex-agent", ""},
+		{"normalizes invalid git ref dot run", "alpha..team", "alpha-team", ""},
+		{"normalizes invalid git ref .lock suffix", "alpha.lock", "alpha-lock", ""},
 		{"distinct safe IDs remain distinct", "alpha--team", "alpha--team", "alpha-team"},
 	}
 
@@ -143,6 +147,25 @@ func TestWorktreeManager_ProvisionWorktreeSanitizesAgentName(t *testing.T) {
 	assertStringEqual(t, filepath.Base(info.Path), "agent-evil-type-sess-one")
 	assertStringEqual(t, info.Branch, "agent/evil-type/sess-one")
 	assertStringEqual(t, info.Agent, "evil-type")
+}
+
+// bd-2gutl: even after character canonicalization, ref components like ".."
+// and ".lock" remain git-invalid and must be normalized before branch creation.
+func TestWorktreeManager_ProvisionWorktreeNormalizesInvalidRefComponentPatterns(t *testing.T) {
+	repo := setupGitRepo(t)
+	wm, err := NewWorktreeManager(repo)
+	if err != nil {
+		t.Fatalf("NewWorktreeManager: %v", err)
+	}
+
+	info, err := wm.ProvisionWorktree(context.Background(), "alpha..team.lock", "sess..one.lock")
+	if err != nil {
+		t.Fatalf("ProvisionWorktree: %v", err)
+	}
+
+	assertStringEqual(t, filepath.Base(info.Path), "agent-alpha-team-lock-sess-one-lock")
+	assertStringEqual(t, info.Branch, "agent/alpha-team-lock/sess-one-lock")
+	assertStringEqual(t, info.Agent, "alpha-team-lock")
 }
 
 func TestWorktreeManager_ProvisionWorktreeDistinctSafeAgentKeysDoNotAlias(t *testing.T) {

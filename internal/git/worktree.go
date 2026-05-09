@@ -16,6 +16,11 @@ func isAlreadySafeWorktreeKey(value string) bool {
 	if value == "" || value == "." || value == ".." {
 		return false
 	}
+	// Git ref components cannot contain ".." or end in ".lock".
+	// If either appears, force canonicalization instead of preserving as-is.
+	if strings.Contains(value, "..") || strings.HasSuffix(value, ".lock") {
+		return false
+	}
 	// Even if characters are otherwise safe, leading/trailing dots are
 	// invalid in git ref components. Keep those on the canonicalization path.
 	if strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
@@ -33,6 +38,16 @@ func isAlreadySafeWorktreeKey(value string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeRefComponentPatterns(value string) string {
+	for strings.Contains(value, "..") {
+		value = strings.ReplaceAll(value, "..", "-")
+	}
+	if strings.HasSuffix(value, ".lock") {
+		value = strings.TrimSuffix(value, ".lock") + "-lock"
+	}
+	return value
 }
 
 func canonicalWorktreeKey(value, fallback string) string {
@@ -68,6 +83,8 @@ func canonicalWorktreeKey(value, fallback string) string {
 	}
 
 	key := strings.Trim(b.String(), "-.")
+	key = normalizeRefComponentPatterns(key)
+	key = strings.Trim(key, "-.")
 	if key == "" {
 		return fallback
 	}
