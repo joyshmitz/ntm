@@ -188,7 +188,7 @@ func (ws *WorktreeService) CleanupSessionWorktrees(ctx context.Context, sessionN
 	for _, wt := range worktrees {
 		// Check if this worktree is associated with the session
 		// Branch format: agent/<agent-type>/<session-id>
-		if len(wt.Branch) > 6 && wt.Branch[:6] == "agent/" {
+		if strings.HasPrefix(wt.Branch, "agent/") {
 			parts := strings.SplitN(wt.Branch[6:], "/", 2)
 
 			if len(parts) >= 2 {
@@ -235,7 +235,7 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 
 	for _, wt := range worktrees {
 		// Check if this worktree belongs to the session
-		if len(wt.Branch) > 6 && wt.Branch[:6] == "agent/" {
+		if strings.HasPrefix(wt.Branch, "agent/") {
 			parts := strings.SplitN(wt.Branch[6:], "/", 2)
 
 			if len(parts) >= 2 {
@@ -256,23 +256,31 @@ func (ws *WorktreeService) GetSessionWorktreeStatus(ctx context.Context, session
 // Helper methods
 
 // sessionMatchesWorktree reports whether sessionID corresponds to a
-// worktree owned by (sessionName, agentType). The sessionID format is
-// "<sessionName>-<agentType>-<agentNum>" (see ProvisionWorktree call
-// site at AutoProvisionSession). bd-y9ndb: a plain
-// HasPrefix(sessionID, sessionName+"-") matches "my-app-claude-1"
-// against sessionName="my", which causes cleanup to destroy unrelated
-// sessions' worktrees. Anchor on the known agentType and require the
-// trailing component to be all digits so the full sessionID parses
-// unambiguously back to (sessionName, agentType, agentNum).
+// worktree owned by (sessionName, agentType). AutoProvisionSession
+// builds "<sessionName>-<agentType>-<agentNum>", then ProvisionWorktree
+// stores safeSessionPrefix(...) in the branch path. Match against the
+// stored prefix form, but keep the bd-y9ndb safety property that
+// sessionName="my" must not match a "my-app-..." worktree.
 func sessionMatchesWorktree(sessionName, agentType, sessionID string) bool {
-	if sessionName == "" || agentType == "" {
+	if sessionName == "" || agentType == "" || sessionID == "" {
 		return false
 	}
-	expectedPrefix := sessionName + "-" + agentType + "-"
-	if !strings.HasPrefix(sessionID, expectedPrefix) {
+
+	expectedBase := sessionName + "-" + agentType + "-"
+
+	// safeSessionPrefix stores the first 8 chars when the source is long.
+	// In the common case, the "<agentNum>" tail is truncated, so the only
+	// stable match key is the exact truncated prefix.
+	if len(expectedBase) >= 8 {
+		return strings.Compare(sessionID, expectedBase[:8]) == 0
+	}
+
+	// For very short IDs (<8 chars before agent num), the stored value may
+	// include an all-digit suffix from agentNum and/or zero padding.
+	if !strings.HasPrefix(sessionID, expectedBase) {
 		return false
 	}
-	rest := sessionID[len(expectedPrefix):]
+	rest := sessionID[len(expectedBase):]
 	if rest == "" {
 		return false
 	}
@@ -282,6 +290,15 @@ func sessionMatchesWorktree(sessionName, agentType, sessionID string) bool {
 		}
 	}
 	return true
+}
+
+func isUserAgentType(agentType tmux.AgentType) bool {
+	switch agentType {
+	case tmux.AgentUser:
+		return true
+	default:
+		return false
+	}
 }
 
 // getManager gets or creates a worktree manager for a project.
@@ -317,8 +334,8 @@ func (ws *WorktreeService) detectAgentPanes(sessionName string) ([]AgentPane, er
 	var agentPanes []AgentPane
 
 	for _, pane := range panes {
-		// Skip user panes or panes that didn't parse as NTM agents
-		if pane.Type == tmux.AgentUser || pane.NTMIndex == 0 {
+		// Skip user panes or panes that didn't parse as NTM agents.
+		if isUserAgentType(pane.Type) || pane.NTMIndex == 0 {
 			continue
 		}
 

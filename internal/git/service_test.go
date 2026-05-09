@@ -142,10 +142,9 @@ func TestWorktreeService_CleanupStaleWorktrees_WithManagers(t *testing.T) {
 	}
 }
 
-// bd-y9ndb: HasPrefix(sessionID, sessionName+"-") allowed sessionName="my"
-// to match sessionID="my-app-claude-1", which would have caused
-// CleanupSessionWorktrees to destroy the unrelated "my-app" session's
-// worktree. The fix anchors on agentType and requires an all-digit suffix.
+// bd-y9ndb + bd-p0526: matching must avoid prefix overlap ("my" vs
+// "my-app") and still match the value actually stored in worktree
+// branches: safeSessionPrefix("<session>-<agent>-<num>").
 func TestSessionMatchesWorktree(t *testing.T) {
 	t.Parallel()
 
@@ -156,35 +155,37 @@ func TestSessionMatchesWorktree(t *testing.T) {
 		sessionID   string
 		want        bool
 	}{
-		// Pre-fix data-loss cases — these MUST be false.
+		// Pre-fix data-loss case, now in stored (truncated) branch format.
 		{"shorter session must not match longer-named worktree",
-			"my", "claude", "my-app-claude-1", false},
+			"my", "claude", safeSessionPrefix("my-app-claude-1"), false},
 		{"prefix-overlap with same agent type must not match",
-			"app", "claude", "app2-claude-1", false},
+			"app", "claude", safeSessionPrefix("app2-claude-1"), false},
 		{"shared prefix with different middle segment must not match",
-			"foo", "codex", "foo-bar-codex-1", false},
+			"foo", "codex", safeSessionPrefix("foo-bar-codex-1"), false},
 
-		// Happy paths — exact owner match.
-		{"plain session-agent-num matches",
-			"my", "claude", "my-claude-1", true},
+		// Happy paths — stored worktree IDs are safeSessionPrefix values.
+		{"autoprovisioned short session matches",
+			"my", "claude", safeSessionPrefix("my-claude-1"), true},
 		{"hyphenated session matches its own worktree",
-			"my-app", "claude", "my-app-claude-1", true},
+			"my-app", "claude", safeSessionPrefix("my-app-claude-1"), true},
 		{"multi-digit agent num matches",
-			"proj", "codex", "proj-codex-12", true},
+			"proj", "codex", safeSessionPrefix("proj-codex-12"), true},
 		{"deeply hyphenated session matches",
-			"a-b-c-d", "gemini", "a-b-c-d-gemini-3", true},
+			"a-b-c-d", "gemini", safeSessionPrefix("a-b-c-d-gemini-3"), true},
 
 		// Negative paths — wrong agent type, missing num, etc.
 		{"wrong agent type does not match",
-			"my", "codex", "my-claude-1", false},
+			"my", "codex", safeSessionPrefix("my-claude-1"), false},
 		{"missing trailing num does not match",
-			"my", "claude", "my-claude-", false},
-		{"non-digit suffix does not match",
-			"my", "claude", "my-claude-abc", false},
+			"zz", "cc", "zz-cc-", false},
+		{"non-digit suffix for short base does not match",
+			"zz", "cc", "zz-cc-ab", false},
 		{"empty session never matches",
-			"", "claude", "x-claude-1", false},
+			"", "claude", safeSessionPrefix("x-claude-1"), false},
 		{"empty agent never matches",
-			"my", "", "my-claude-1", false},
+			"my", "", safeSessionPrefix("my-claude-1"), false},
+		{"empty session id never matches",
+			"my", "claude", "", false},
 	}
 
 	for _, tc := range tests {
