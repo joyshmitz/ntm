@@ -28,7 +28,12 @@ const (
 	FormatZip   ExportFormat = "zip"
 )
 
-var maxImportEntrySize int64 = 100 << 20
+const errImportArchiveTooLarge = "archive contents too large"
+
+var (
+	maxImportEntrySize    int64 = 100 << 20
+	maxImportArchiveBytes int64 = 1 << 30
+)
 
 // ExportOptions configures checkpoint export.
 type ExportOptions struct {
@@ -156,23 +161,30 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 
 	// Collect files to export
 	var files []string
-	files = append(files, MetadataFile)
-	files = append(files, SessionFile)
+	seenFiles := make(map[string]struct{})
+	addFile := func(file string) {
+		if file == "" {
+			return
+		}
+		if _, ok := seenFiles[file]; ok {
+			return
+		}
+		seenFiles[file] = struct{}{}
+		files = append(files, file)
+	}
+	addFile(MetadataFile)
+	addFile(SessionFile)
 
 	if opts.IncludeScrollback {
 		for _, pane := range cp.Session.Panes {
-			if pane.ScrollbackFile != "" {
-				files = append(files, pane.ScrollbackFile)
-			}
+			addFile(pane.ScrollbackFile)
 		}
 	}
 
-	if opts.IncludeGitPatch && cp.Git.PatchFile != "" {
-		files = append(files, cp.Git.PatchFile)
+	if opts.IncludeGitPatch {
+		addFile(cp.Git.PatchFile)
 	}
-	if cp.Git.StatusFile != "" {
-		files = append(files, cp.Git.StatusFile)
-	}
+	addFile(cp.Git.StatusFile)
 
 	// Create manifest
 	manifest := &ExportManifest{
@@ -458,6 +470,7 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (result *C
 	var manifest *ExportManifest
 	var cp *Checkpoint
 	fileContents := make(map[string][]byte)
+	var totalBytes int64
 
 	for {
 		header, err := tr.Next()
@@ -467,16 +480,24 @@ func (s *Storage) importTarGz(archivePath string, opts ImportOptions) (result *C
 		if err != nil {
 			return nil, fmt.Errorf("failed to read tar entry: %w", err)
 		}
+		skipEntry, err := validateTarImportEntry(header)
+		if err != nil {
+			return nil, err
+		}
+		if skipEntry {
+			continue
+		}
+		if _, exists := fileContents[header.Name]; exists {
+			return nil, fmt.Errorf("archive contains duplicate entry: %s", header.Name)
+		}
 
 		data, err := readImportEntryLimited(tr, header.Name, maxImportEntrySize)
 		if err != nil {
 			return nil, err
 		}
-
-		if _, exists := fileContents[header.Name]; exists {
-			return nil, fmt.Errorf("archive contains duplicate entry: %s", header.Name)
+		if err := storeImportEntry(fileContents, &totalBytes, header.Name, data); err != nil {
+			return nil, err
 		}
-		fileContents[header.Name] = data
 
 		switch header.Name {
 		case "MANIFEST.json":
@@ -610,8 +631,20 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (result *Che
 	var manifest *ExportManifest
 	var cp *Checkpoint
 	fileContents := make(map[string][]byte)
+	var totalBytes int64
 
 	for _, f := range zr.File {
+		skipEntry, err := validateZipImportEntry(f)
+		if err != nil {
+			return nil, err
+		}
+		if skipEntry {
+			continue
+		}
+		if _, exists := fileContents[f.Name]; exists {
+			return nil, fmt.Errorf("archive contains duplicate entry: %s", f.Name)
+		}
+
 		rc, err := f.Open()
 		if err != nil {
 			return nil, fmt.Errorf("failed to open %s: %w", f.Name, err)
@@ -625,11 +658,9 @@ func (s *Storage) importZip(archivePath string, opts ImportOptions) (result *Che
 		if closeErr != nil {
 			return nil, fmt.Errorf("failed to close %s: %w", f.Name, closeErr)
 		}
-
-		if _, exists := fileContents[f.Name]; exists {
-			return nil, fmt.Errorf("archive contains duplicate entry: %s", f.Name)
+		if err := storeImportEntry(fileContents, &totalBytes, f.Name, data); err != nil {
+			return nil, err
 		}
-		fileContents[f.Name] = data
 
 		switch f.Name {
 		case "MANIFEST.json":
@@ -774,6 +805,63 @@ func writeZipEntry(zw *zip.Writer, name string, data []byte) error {
 	if _, err := w.Write(data); err != nil {
 		return fmt.Errorf("failed to write zip content for %s: %w", name, err)
 	}
+	return nil
+}
+
+func validateTarImportEntry(header *tar.Header) (bool, error) {
+	if header == nil {
+		return false, fmt.Errorf("archive contains nil tar header")
+	}
+	if err := validateImportEntryName(header.Name); err != nil {
+		return false, err
+	}
+	switch header.Typeflag {
+	case tar.TypeReg, tar.TypeRegA:
+		return false, nil
+	case tar.TypeDir:
+		return true, nil
+	default:
+		return false, fmt.Errorf("archive contains non-regular entry: %s", header.Name)
+	}
+}
+
+func validateZipImportEntry(f *zip.File) (bool, error) {
+	if f == nil {
+		return false, fmt.Errorf("archive contains nil zip entry")
+	}
+	if err := validateImportEntryName(f.Name); err != nil {
+		return false, err
+	}
+	info := f.FileInfo()
+	if info.IsDir() {
+		return true, nil
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("archive contains non-regular entry: %s", f.Name)
+	}
+	return false, nil
+}
+
+func validateImportEntryName(name string) error {
+	if name == "" {
+		return fmt.Errorf("archive contains empty entry name")
+	}
+	if filepath.IsAbs(name) {
+		return fmt.Errorf("invalid path in archive (absolute path): %s", name)
+	}
+	if !isPathWithinDir(".", name) {
+		return fmt.Errorf("invalid path in archive (path traversal attempt): %s", name)
+	}
+	return nil
+}
+
+func storeImportEntry(fileContents map[string][]byte, totalBytes *int64, name string, data []byte) error {
+	nextTotal := *totalBytes + int64(len(data))
+	if nextTotal > maxImportArchiveBytes {
+		return fmt.Errorf("%s: exceeds %d bytes", errImportArchiveTooLarge, maxImportArchiveBytes)
+	}
+	fileContents[name] = data
+	*totalBytes = nextTotal
 	return nil
 }
 
@@ -1093,7 +1181,10 @@ func validateImportedArchiveFiles(fileContents map[string][]byte, cp *Checkpoint
 func isPathWithinDir(baseDir, targetPath string) bool {
 	// Clean and make absolute
 	cleanBase := filepath.Clean(baseDir)
-	fullPath := filepath.Join(cleanBase, targetPath)
+	fullPath := targetPath
+	if !filepath.IsAbs(fullPath) {
+		fullPath = filepath.Join(cleanBase, targetPath)
+	}
 	cleanPath := filepath.Clean(fullPath)
 
 	// The clean path must be within or equal to the base directory
@@ -1103,8 +1194,7 @@ func isPathWithinDir(baseDir, targetPath string) bool {
 		return false
 	}
 
-	// If the relative path starts with "..", it's outside the base
-	return !strings.HasPrefix(rel, "..")
+	return !pathEscapesBase(rel)
 }
 
 // isPathWithinDirResolved validates a path after resolving symlinks to prevent TOCTOU attacks.
@@ -1123,7 +1213,10 @@ func isPathWithinDirResolved(baseDir, targetPath string) (string, error) {
 	}
 
 	// Build the full path
-	fullPath := filepath.Join(resolvedBase, targetPath)
+	fullPath := targetPath
+	if !filepath.IsAbs(fullPath) {
+		fullPath = filepath.Join(resolvedBase, targetPath)
+	}
 
 	// For the target, resolve parent directories but not the final component
 	// (since we're about to create it). This catches symlink attacks in intermediate dirs.
@@ -1134,7 +1227,7 @@ func isPathWithinDirResolved(baseDir, targetPath string) (string, error) {
 	if err == nil {
 		// Verify the resolved parent is still within base
 		relParent, err := filepath.Rel(resolvedBase, resolvedParent)
-		if err != nil || strings.HasPrefix(relParent, "..") {
+		if err != nil || pathEscapesBase(relParent) {
 			return "", fmt.Errorf("symlink escape detected in path: %s", targetPath)
 		}
 		// Reconstruct full path with resolved parent
@@ -1144,9 +1237,13 @@ func isPathWithinDirResolved(baseDir, targetPath string) (string, error) {
 	// Final validation: clean path must be within resolved base
 	cleanPath := filepath.Clean(fullPath)
 	rel, err := filepath.Rel(resolvedBase, cleanPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || pathEscapesBase(rel) {
 		return "", fmt.Errorf("resolved path escapes base directory: %s", targetPath)
 	}
 
 	return cleanPath, nil
+}
+
+func pathEscapesBase(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
 }

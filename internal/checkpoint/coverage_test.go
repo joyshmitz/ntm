@@ -1171,6 +1171,66 @@ func TestImportZip_RejectsOversizedEntry(t *testing.T) {
 	}
 }
 
+func TestImportTarGz_RejectsOversizedArchiveContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "oversized-total-tar-session", "oversized-total-tar-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
+	oldLimit := maxImportArchiveBytes
+	maxImportArchiveBytes = int64(len(cpJSON) + len(sessionJSON) - 1)
+	t.Cleanup(func() {
+		maxImportArchiveBytes = oldLimit
+	})
+
+	archive := filepath.Join(tmpDir, "oversized-total.tar.gz")
+	buildTarGzEntries(t, archive, []struct {
+		name string
+		data []byte
+	}{
+		{name: MetadataFile, data: cpJSON},
+		{name: SessionFile, data: sessionJSON},
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected oversized archive content to fail import")
+	}
+	if !strings.Contains(err.Error(), errImportArchiveTooLarge) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportZip_RejectsOversizedArchiveContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cpJSON := validCheckpointJSON(t, "oversized-total-zip-session", "oversized-total-zip-cp")
+	sessionJSON := validSessionJSON(t, SessionState{})
+	oldLimit := maxImportArchiveBytes
+	maxImportArchiveBytes = int64(len(cpJSON) + len(sessionJSON) - 1)
+	t.Cleanup(func() {
+		maxImportArchiveBytes = oldLimit
+	})
+
+	archive := filepath.Join(tmpDir, "oversized-total.zip")
+	buildZipEntries(t, archive, []struct {
+		name string
+		data []byte
+	}{
+		{name: MetadataFile, data: cpJSON},
+		{name: SessionFile, data: sessionJSON},
+	})
+
+	_, err := storage.Import(archive, ImportOptions{VerifyChecksums: false})
+	if err == nil {
+		t.Fatal("expected oversized archive content to fail import")
+	}
+	if !strings.Contains(err.Error(), errImportArchiveTooLarge) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestImportTarGz_RejectsUnexpectedArchiveFile(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

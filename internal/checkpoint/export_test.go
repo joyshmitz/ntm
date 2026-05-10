@@ -384,6 +384,84 @@ func TestExport_TarGz_RedactsCompressedScrollback(t *testing.T) {
 	assertExportRedactsCompressedScrollback(t, FormatTarGz, "test-export-redact-gzip.tar.gz", readTarGzEntry)
 }
 
+func TestExportImport_DeduplicatesSharedScrollbackArtifact(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		format      ExportFormat
+		archiveName string
+		readEntry   func(*testing.T, string, string) []byte
+	}{
+		{name: "zip", format: FormatZip, archiveName: "shared-scrollback.zip", readEntry: readZipEntry},
+		{name: "tar.gz", format: FormatTarGz, archiveName: "shared-scrollback.tar.gz", readEntry: readTarGzEntry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			exportStorage := NewStorageWithDir(filepath.Join(tmpDir, "export"))
+			importStorage := NewStorageWithDir(filepath.Join(tmpDir, "import"))
+
+			sessionName := "shared-scrollback-session"
+			checkpointID := "20251210-143052-shared-scrollback"
+			cp := &Checkpoint{
+				Version:     CurrentVersion,
+				ID:          checkpointID,
+				SessionName: sessionName,
+				CreatedAt:   time.Now(),
+				Session: SessionState{
+					Panes: []PaneState{
+						{ID: "%0", Index: 0},
+						{ID: "%1", Index: 1},
+					},
+				},
+				PaneCount: 2,
+			}
+			if err := exportStorage.Save(cp); err != nil {
+				t.Fatalf("Save failed: %v", err)
+			}
+			scrollbackFile, err := exportStorage.SaveScrollback(sessionName, checkpointID, "%0", "shared scrollback")
+			if err != nil {
+				t.Fatalf("SaveScrollback failed: %v", err)
+			}
+			cp.Session.Panes[0].ScrollbackFile = scrollbackFile
+			cp.Session.Panes[1].ScrollbackFile = scrollbackFile
+			if err := exportStorage.Save(cp); err != nil {
+				t.Fatalf("Save with shared scrollback reference failed: %v", err)
+			}
+
+			outputPath := filepath.Join(tmpDir, tc.archiveName)
+			opts := DefaultExportOptions()
+			opts.Format = tc.format
+			if _, err := exportStorage.Export(sessionName, checkpointID, outputPath, opts); err != nil {
+				t.Fatalf("Export failed: %v", err)
+			}
+
+			manifestData := tc.readEntry(t, outputPath, "MANIFEST.json")
+			var manifest ExportManifest
+			if err := json.Unmarshal(manifestData, &manifest); err != nil {
+				t.Fatalf("failed to parse manifest: %v", err)
+			}
+			seen := 0
+			for _, file := range manifest.Files {
+				if file.Path == scrollbackFile {
+					seen++
+				}
+			}
+			if seen != 1 {
+				t.Fatalf("manifest listed shared scrollback %d times, want 1", seen)
+			}
+
+			imported, err := importStorage.Import(outputPath, DefaultImportOptions())
+			if err != nil {
+				t.Fatalf("Import failed: %v", err)
+			}
+			for _, pane := range imported.Session.Panes {
+				if pane.ScrollbackFile != scrollbackFile {
+					t.Fatalf("imported pane %s ScrollbackFile = %q, want %q", pane.ID, pane.ScrollbackFile, scrollbackFile)
+				}
+			}
+		})
+	}
+}
+
 func assertExportRedactsCompressedScrollback(t *testing.T, format ExportFormat, archiveName string, readEntry func(*testing.T, string, string) []byte) {
 	t.Helper()
 
@@ -1396,6 +1474,10 @@ func TestIsPathWithinDir(t *testing.T) {
 		{"traversal attack", "/base", "../../../etc/passwd", false},
 		{"double dot in middle", "/base", "sub/../other/file.txt", true},
 		{"absolute escape", "/base", "../../outside", false},
+		{"absolute inside base", "/base", "/base/file.txt", true},
+		{"absolute outside base", "/base", "/etc/passwd", false},
+		{"sibling prefix escape", "/base", "/base-other/file.txt", false},
+		{"dotdot prefix file", "/base", "..safe/file.txt", true},
 		{"current dir", "/base", ".", true},
 	}
 
