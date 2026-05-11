@@ -1070,6 +1070,9 @@ func verifyImportChecksums(fileContents map[string][]byte, manifest *ExportManif
 	if manifest == nil {
 		return fmt.Errorf("checksum verification requested but archive missing MANIFEST.json")
 	}
+	if err := validateImportManifestEntries(fileContents, manifest); err != nil {
+		return err
+	}
 
 	for file, data := range fileContents {
 		if file == "MANIFEST.json" {
@@ -1091,6 +1094,53 @@ func verifyImportChecksums(fileContents map[string][]byte, manifest *ExportManif
 		}
 		if _, ok := fileContents[file]; !ok {
 			return fmt.Errorf("manifest lists missing file: %s", file)
+		}
+	}
+
+	return nil
+}
+
+func validateImportManifestEntries(fileContents map[string][]byte, manifest *ExportManifest) error {
+	if len(manifest.Files) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(manifest.Files))
+	for _, entry := range manifest.Files {
+		if entry.Path == "MANIFEST.json" {
+			return fmt.Errorf("manifest must not list MANIFEST.json")
+		}
+		if err := validateImportEntryName(entry.Path); err != nil {
+			return fmt.Errorf("invalid manifest entry path %q: %w", entry.Path, err)
+		}
+		if _, ok := seen[entry.Path]; ok {
+			return fmt.Errorf("manifest contains duplicate file entry: %s", entry.Path)
+		}
+		seen[entry.Path] = struct{}{}
+
+		expectedSum, ok := manifest.Checksums[entry.Path]
+		if !ok {
+			return fmt.Errorf("manifest file entry missing checksum map entry for %s", entry.Path)
+		}
+		if entry.Checksum != expectedSum {
+			return fmt.Errorf("manifest entry checksum mismatch for %s: files entry has %s, checksums map has %s", entry.Path, entry.Checksum, expectedSum)
+		}
+
+		data, ok := fileContents[entry.Path]
+		if !ok {
+			return fmt.Errorf("manifest lists missing file: %s", entry.Path)
+		}
+		if entry.Size != int64(len(data)) {
+			return fmt.Errorf("manifest entry size mismatch for %s: expected %d, got %d", entry.Path, entry.Size, len(data))
+		}
+	}
+
+	for file := range manifest.Checksums {
+		if file == "MANIFEST.json" {
+			continue
+		}
+		if _, ok := seen[file]; !ok {
+			return fmt.Errorf("manifest checksums missing file entry for %s", file)
 		}
 	}
 

@@ -505,6 +505,58 @@ func TestImportZip_VerifyChecksumsRejectsUncheckedArchiveFiles(t *testing.T) {
 	}
 }
 
+func TestImportZip_VerifyChecksumsRejectsDriftedManifestFileEntry(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	sessionName := "drifted-manifest-session"
+	checkpointID := "drifted-manifest-cp"
+	cpJSON := validCheckpointJSON(t, sessionName, checkpointID)
+	sessionJSON := validSessionJSON(t, SessionState{})
+
+	manifest := &ExportManifest{
+		Version:      1,
+		SessionName:  sessionName,
+		CheckpointID: checkpointID,
+		Checksums: map[string]string{
+			MetadataFile: sha256sum(cpJSON),
+			SessionFile:  sha256sum(sessionJSON),
+		},
+		Files: []ManifestEntry{
+			{
+				Path:     MetadataFile,
+				Size:     int64(len(cpJSON)),
+				Checksum: strings.Repeat("0", 64),
+			},
+			{
+				Path:     SessionFile,
+				Size:     int64(len(sessionJSON)),
+				Checksum: sha256sum(sessionJSON),
+			},
+		},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(tmpDir, "drifted-manifest.zip")
+	buildZip(t, archive, map[string][]byte{
+		MetadataFile:    cpJSON,
+		SessionFile:     sessionJSON,
+		"MANIFEST.json": manifestJSON,
+	})
+
+	_, err = storage.Import(archive, ImportOptions{VerifyChecksums: true})
+	if err == nil {
+		t.Fatal("expected error for manifest files entry that disagrees with checksum map")
+	}
+	if !strings.Contains(err.Error(), "manifest entry checksum mismatch for "+MetadataFile) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // =============================================================================
 // Import: manifest lists file not in archive
 // =============================================================================
