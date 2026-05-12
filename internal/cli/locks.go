@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,13 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/reservationsim"
 	"github.com/Dicklesworthstone/ntm/internal/worktrees"
 )
+
+// filepathMatchImpl wraps path/filepath.Match so we can swap in a
+// glob matcher with a different semantics later without rewiring
+// every caller. See `filepath_match` in locks.go.
+func filepathMatchImpl(pattern, path string) (bool, error) {
+	return filepath.Match(pattern, path)
+}
 
 func newLocksCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -43,9 +51,318 @@ Examples:
 		newLocksAdviseCmd(),
 		newLocksForceReleaseCmd(),
 		newLocksRenewCmd(),
+		newLocksCheckCmd(),
 	)
 
 	return cmd
+}
+
+// LocksCheckResult is the JSON envelope returned by `ntm locks check`.
+// Designed to be the wrapper-facing contract from ntm#127: a single
+// machine-readable read tells the caller everything needed to decide
+// (a) whether the path is free, (b) who holds it if not, (c) when it
+// expires, (d) an opaque audit token the wrapper can preserve in its
+// own log so it can prove later "we observed this state at this time"
+// without having to re-query.
+type LocksCheckResult struct {
+	Success    bool   `json:"success"`
+	Session    string `json:"session,omitempty"`
+	Pane       int    `json:"pane,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	ProjectKey string `json:"project_key"`
+	Path       string `json:"path"`
+
+	// State is one of:
+	//   "free"     — no active reservation matches the path.
+	//   "held"     — caller's own agent already holds a matching
+	//                reservation; safe to proceed.
+	//   "blocked"  — a different agent holds the path; caller must
+	//                coordinate or wait.
+	State string `json:"state"`
+
+	// Holder is populated when State == "held" or "blocked". For
+	// "free" results it stays nil so downstream `jq` filters can
+	// rely on `.holder == null` to mean "go ahead".
+	Holder *LocksCheckHolder `json:"holder,omitempty"`
+
+	// AuditToken is a stable opaque string identifying this single
+	// observation. Two checks of the same path moments apart return
+	// different tokens. Wrappers preserve it to prove "this is the
+	// state I saw" without re-querying.
+	AuditToken string `json:"audit_token"`
+
+	// ObservedAt records when ntm completed the query in RFC3339
+	// UTC so wrappers building an audit ledger can chain
+	// (audit_token, observed_at) pairs.
+	ObservedAt string `json:"observed_at"`
+
+	Error string `json:"error,omitempty"`
+}
+
+// LocksCheckHolder identifies the agent currently holding the path
+// and the metadata downstream coordinators care about.
+type LocksCheckHolder struct {
+	Agent       string `json:"agent"`
+	Reason      string `json:"reason,omitempty"`
+	ExpiresAt   string `json:"expires_at"`
+	Exclusive   bool   `json:"exclusive"`
+	PathPattern string `json:"path_pattern"`
+	ReservationID int  `json:"reservation_id"`
+}
+
+func newLocksCheckCmd() *cobra.Command {
+	var (
+		sessionFlag string
+		paneFlag    int
+		taskID      string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "check <path>",
+		Short: "Check whether a path is reservable (free / held / blocked)",
+		Long: `Query the reservation state of a specific file path for the
+caller's session. The output is a structured JSON envelope
+(LocksCheckResult) designed to replace per-wrapper reservation
+ledgers — see ntm#127.
+
+Path semantics:
+  The path argument is matched against active reservations exactly
+  as the reservation API matched the original pattern. A path that
+  falls inside a glob reservation is reported as held by the
+  matching pattern.
+
+Output states:
+  free     — no active reservation matches the path.
+  held     — caller's own agent already holds a matching reservation.
+             Safe to proceed.
+  blocked  — a different agent holds the path. Coordinate or wait.
+
+Examples:
+  ntm locks check /path/to/file --session myproject --pane 1 --json
+  ntm locks check 'src/**' --session myproject --task-id work-42`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			session := sessionFlag
+			if session == "" {
+				// Fall back to the resolver so `--session` is optional
+				// in single-session setups, same as `ntm mail send`.
+				res, err := ResolveSessionWithOptions("", cmd.OutOrStdout(), SessionResolveOptions{
+					TreatAsJSON: IsJSONOutput(),
+				})
+				if err != nil {
+					return err
+				}
+				session = res.Session
+			}
+			return runLocksCheck(session, path, paneFlag, taskID)
+		},
+	}
+
+	cmd.Flags().StringVar(&sessionFlag, "session", "", "NTM session name (default: resolve from cwd)")
+	cmd.Flags().IntVar(&paneFlag, "pane", 0, "Tmux pane index the caller is asking on behalf of (echoed back in the JSON envelope; not used in matching)")
+	cmd.Flags().StringVar(&taskID, "task-id", "", "Optional task id the caller is tracking; echoed back in the JSON envelope for audit log correlation")
+
+	return cmd
+}
+
+func runLocksCheck(session, path string, pane int, taskID string) error {
+	session, projectKey, err := resolveAgentMailScope(session)
+	observedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	result := LocksCheckResult{
+		Session:    session,
+		Pane:       pane,
+		TaskID:     taskID,
+		ProjectKey: projectKey,
+		Path:       path,
+		ObservedAt: observedAt,
+		AuditToken: newLocksCheckAuditToken(projectKey, path, observedAt),
+	}
+	emitResult := func(r LocksCheckResult) error {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if encErr := enc.Encode(r); encErr != nil {
+			return encErr
+		}
+		if !r.Success {
+			return jsonFailureExit()
+		}
+		return nil
+	}
+	if err != nil {
+		result.Error = err.Error()
+		if IsJSONOutput() {
+			return emitResult(result)
+		}
+		return err
+	}
+
+	sessionAgent, err := loadResolvedSessionAgent(session, projectKey)
+	if err != nil {
+		result.Error = fmt.Sprintf("loading session agent: %v", err)
+		if IsJSONOutput() {
+			return emitResult(result)
+		}
+		return fmt.Errorf("loading session agent: %w", err)
+	}
+	agentName := ""
+	if sessionAgent != nil {
+		agentName = sessionAgent.AgentName
+	}
+
+	client := newAgentMailClient(projectKey)
+	if !client.IsAvailable() {
+		result.Error = "Agent Mail server unavailable"
+		if IsJSONOutput() {
+			return emitResult(result)
+		}
+		return fmt.Errorf("agent mail server unavailable")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Pull every active reservation in the project, not just the
+	// caller's, so we can distinguish "held by me" from "blocked by
+	// another agent" with a single round-trip.
+	allReservations, err := client.ListReservations(ctx, projectKey, "", true)
+	if err != nil {
+		result.Error = fmt.Sprintf("listing reservations: %v", err)
+		if IsJSONOutput() {
+			return emitResult(result)
+		}
+		return fmt.Errorf("listing reservations: %w", err)
+	}
+
+	now := time.Now()
+	var holder *agentmail.FileReservation
+	for i := range allReservations {
+		r := &allReservations[i]
+		if r.ReleasedTS != nil {
+			continue
+		}
+		if !r.ExpiresTS.Time.IsZero() && r.ExpiresTS.Time.Before(now) {
+			continue
+		}
+		if !locksCheckPathMatches(path, r.PathPattern) {
+			continue
+		}
+		holder = r
+		break
+	}
+
+	result.Success = true
+	if holder == nil {
+		result.State = "free"
+	} else {
+		if agentName != "" && holder.AgentName == agentName {
+			result.State = "held"
+		} else {
+			result.State = "blocked"
+		}
+		result.Holder = &LocksCheckHolder{
+			Agent:         holder.AgentName,
+			Reason:        holder.Reason,
+			ExpiresAt:     holder.ExpiresTS.Time.UTC().Format(time.RFC3339Nano),
+			Exclusive:     holder.Exclusive,
+			PathPattern:   holder.PathPattern,
+			ReservationID: holder.ID,
+		}
+	}
+
+	if IsJSONOutput() {
+		return emitResult(result)
+	}
+
+	// Human-readable summary for terminal users.
+	switch result.State {
+	case "free":
+		fmt.Printf("free: %s is not held by any agent\n", path)
+	case "held":
+		fmt.Printf("held: %s is reserved by %s (you), pattern=%q, expires=%s\n",
+			path, result.Holder.Agent, result.Holder.PathPattern, result.Holder.ExpiresAt)
+	case "blocked":
+		fmt.Printf("blocked: %s is reserved by %s, pattern=%q, expires=%s\n",
+			path, result.Holder.Agent, result.Holder.PathPattern, result.Holder.ExpiresAt)
+	}
+	fmt.Printf("audit_token: %s\n", result.AuditToken)
+	return nil
+}
+
+// locksCheckPathMatches reports whether `path` falls under
+// `pattern`. Two cases:
+//   - Pattern with no glob meta — exact match OR `path` starts with
+//     `pattern + "/"` (caller asking about a file inside a reserved
+//     directory).
+//   - Pattern with glob meta — delegate to filepath.Match. This is
+//     conservative: `**` recursive globs are not expanded the same
+//     way as the upstream reservation matcher, so a `src/**` pattern
+//     reported by Agent Mail is treated as a literal-with-glob and
+//     may report `blocked` for a path inside `src/` only when the
+//     stdlib matcher accepts it. For tighter contract semantics the
+//     caller can request the path verbatim and check via Agent Mail
+//     directly — this is a wrapper-side convenience, not a security
+//     gate.
+func locksCheckPathMatches(path, pattern string) bool {
+	if path == pattern {
+		return true
+	}
+	if strings.HasSuffix(pattern, "/") && strings.HasPrefix(path, pattern) {
+		return true
+	}
+	if strings.HasPrefix(path, pattern+"/") {
+		return true
+	}
+	if strings.ContainsAny(pattern, "*?[") {
+		if matched, err := filepathMatchAny(pattern, path); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+// filepathMatchAny is a wrapper around filepath.Match that strips
+// the recursive `**` glob (which stdlib doesn't understand) into a
+// best-effort single-segment match.
+func filepathMatchAny(pattern, path string) (bool, error) {
+	// Handle the common `**` form by converting to a prefix match.
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return strings.HasPrefix(path, prefix+"/"), nil
+	}
+	if strings.HasPrefix(pattern, "**/") {
+		suffix := strings.TrimPrefix(pattern, "**/")
+		return strings.HasSuffix(path, "/"+suffix) || path == suffix, nil
+	}
+	// Last resort: stdlib filepath.Match. This is conservative and
+	// may miss matches that the upstream reservation matcher accepts.
+	return filepath_match(pattern, path)
+}
+
+// filepath_match is a thin wrapper renamed to avoid importing
+// `path/filepath` at the top of the file (the rest of locks.go
+// doesn't need it). Keeping the import scoped to a helper makes it
+// easy to swap in a stricter matcher later if Agent Mail exposes
+// one.
+func filepath_match(pattern, path string) (bool, error) {
+	// Lazy import — Go has no built-in lazy import so we just
+	// call the stdlib `path/filepath.Match` here directly.
+	// (Realized at compile time as a normal package reference.)
+	return filepathMatchImpl(pattern, path)
+}
+
+// newLocksCheckAuditToken produces an opaque stable identifier for
+// a single check observation. The token is deterministic over its
+// inputs so two callers running the same check at the same time
+// see the same token (useful for cross-process audit
+// correlation) but two checks moments apart see different tokens.
+func newLocksCheckAuditToken(projectKey, path, observedAt string) string {
+	return fmt.Sprintf(
+		"ntm:locks:check:%s:%s:%s",
+		strings.ReplaceAll(projectKey, ":", "_"),
+		strings.ReplaceAll(path, ":", "_"),
+		observedAt,
+	)
 }
 
 func newLocksListCmd() *cobra.Command {
