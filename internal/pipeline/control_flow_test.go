@@ -1135,6 +1135,59 @@ func TestRunFailsAfterRetryExhaustion(t *testing.T) {
 	}
 }
 
+func TestFailedTopLevelParallelPreservesStructuredResultData(t *testing.T) {
+	cfg := DefaultExecutorConfig("failed-parallel-data")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	executor.SetTmuxClient(NewMockTmuxClient(tmux.Pane{ID: "%1", Index: 1, Type: tmux.AgentCodex}))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "failed-parallel-data-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "fan",
+			Parallel: ParallelSpec{
+				Steps: []Step{
+					{ID: "ok", Pane: PaneSpec{Index: 1}, Prompt: "ok"},
+					{ID: "boom", Pane: PaneSpec{Index: 1}, PromptFile: "/this/path/does/not/exist.txt"},
+				},
+			},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err == nil {
+		t.Fatal("Run() error = nil, want failed parallel group")
+	}
+
+	fan := state.Steps["fan"]
+	if fan.Status != StatusFailed {
+		t.Fatalf("fan status = %s, want failed", fan.Status)
+	}
+
+	groupOutputs, ok := fan.ParsedData.(map[string]interface{})
+	if !ok {
+		t.Fatalf("fan ParsedData type = %T, want grouped parallel outputs", fan.ParsedData)
+	}
+
+	okEntry, ok := groupOutputs["fan_ok"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("fan_ok entry missing from ParsedData: %#v", groupOutputs)
+	}
+	if okEntry["status"] != string(StatusCompleted) {
+		t.Fatalf("fan_ok status = %v, want %s", okEntry["status"], StatusCompleted)
+	}
+
+	boomEntry, ok := groupOutputs["fan_boom"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("fan_boom entry missing from ParsedData: %#v", groupOutputs)
+	}
+	if boomEntry["status"] != string(StatusFailed) {
+		t.Fatalf("fan_boom status = %v, want %s", boomEntry["status"], StatusFailed)
+	}
+}
+
 // TestOnSuccessFiresForBranchBodyChild covers bd-2g48y: a branch body
 // step reaches its dispatcher via executeBranch -> executeStepOnce, which
 // bypasses executeStep's common success tail. Without the bd-2g48y seam,

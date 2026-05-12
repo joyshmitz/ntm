@@ -852,8 +852,21 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 			return result
 		}
 
-		// Step failed
-		result.Error = stepResult.Error
+		if stepResult.Status == StatusSkipped {
+			result = stepResult
+			result.Attempts = attempt
+			if result.FinishedAt.IsZero() {
+				result.FinishedAt = time.Now()
+			}
+			e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
+			return result
+		}
+
+		// Step failed. Preserve the full failed result so structured
+		// diagnostics from composite steps, partial outputs, and pane
+		// metadata survive retry exhaustion and on_failure recovery.
+		result = stepResult
+		result.Attempts = attempt
 
 		if attempt < maxAttempts {
 			// Wait before retry
