@@ -734,7 +734,10 @@ func (e *Executor) executeWorkflow(ctx context.Context, workflow *Workflow) erro
 				case ErrorActionContinue:
 					// Continue to next step, dependents will be skipped
 				case ErrorActionRetry:
-					// Retry is handled within executeStep
+					if result.Error != nil {
+						return fmt.Errorf("step %s failed after %d attempts: %s", stepID, result.Attempts, result.Error.Message)
+					}
+					return fmt.Errorf("step %s failed after %d attempts", stepID, result.Attempts)
 				}
 			}
 
@@ -798,33 +801,6 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 			e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
 			return result
 		}
-	}
-
-	// Handle parallel steps. bd-h8lc4: top-level Parallel/Loop dispatches
-	// early-return BEFORE the retry-aware OnSuccess hook at line 847, so
-	// without this seam a workflow author writing `parallel: ... on_success:
-	// - id: notify ...` saw the schema accept the chain and the runtime
-	// silently skip it. Branch/BeadQuery/Foreach/Mail do NOT have this gap
-	// because they're dispatched inside executeStepOnce, which is called
-	// from the retry loop and so already funnels through the OnSuccess
-	// hook. Loop body iterations also do not have this gap (loops.go calls
-	// executor.executeStep recursively per iteration; that nested call
-	// reaches the retry-loop hook normally).
-	if len(step.Parallel.Steps) > 0 {
-		result := e.executeParallel(ctx, step, workflow)
-		if result.Status == StatusCompleted {
-			e.runOnSuccessSteps(ctx, step, workflow)
-		}
-		return result
-	}
-
-	// Handle loop steps. Same bd-h8lc4 hook as Parallel above.
-	if step.Loop != nil {
-		result := e.executeLoop(ctx, step, workflow)
-		if result.Status == StatusCompleted {
-			e.runOnSuccessSteps(ctx, step, workflow)
-		}
-		return result
 	}
 
 	// Calculate retry parameters
@@ -899,15 +875,8 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 
 	result.Status = StatusFailed
 	result.FinishedAt = time.Now()
-	result = e.executeOnFailureAction(step, result)
-	if result.Status == StatusSkipped {
-		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
-		return result
-	}
-	result = e.executeOnFailureRecovery(ctx, step, workflow, result)
-	if result.Status == StatusCompleted {
-		e.emitProgress("step_complete", step.ID,
-			stepProgressMessage("Step completed after on_failure recovery", step, ""), e.calculateProgress())
+	result = e.finalizeFailedStep(ctx, step, workflow, result)
+	if result.Status != StatusFailed {
 		return result
 	}
 	errorMessage := "unknown error"
@@ -921,12 +890,43 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 	return result
 }
 
+func (e *Executor) finalizeFailedStep(ctx context.Context, step *Step, workflow *Workflow, result StepResult) StepResult {
+	if result.Status != StatusFailed {
+		return result
+	}
+
+	result = e.executeOnFailureAction(step, result)
+	if result.Status == StatusSkipped {
+		e.emitProgress("step_skip", step.ID, result.SkipReason, e.calculateProgress())
+		return result
+	}
+
+	result = e.executeOnFailureRecovery(ctx, step, workflow, result)
+	if result.Status == StatusCompleted {
+		e.emitProgress("step_complete", step.ID,
+			stepProgressMessage("Step completed after on_failure recovery", step, ""), e.calculateProgress())
+		return result
+	}
+
+	return result
+}
+
 // executeStepOnce executes a step once without retry logic
 func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Workflow) StepResult {
 	result := StepResult{
 		StepID:    step.ID,
 		Status:    StatusRunning,
 		StartedAt: time.Now(),
+	}
+
+	// Keep composite steps inside executeStep's retry/failure tail.
+	// Branch, foreach, bead-query, and mail steps already follow this path.
+	if len(step.Parallel.Steps) > 0 {
+		return e.executeParallel(ctx, step, workflow)
+	}
+
+	if step.Loop != nil {
+		return e.executeLoop(ctx, step, workflow)
 	}
 
 	// Dispatch command steps to executeCommand.
@@ -2410,14 +2410,11 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 			e.varMu.Unlock()
 
 			// bd-2g48y: parallel substeps run through this inlined dispatch
-			// path (not the executeStep retry loop), so the OnSuccess hook
-			// at executor.go:847 was never fired for an on_success chain
-			// attached to a parallel substep. Fire it here on the same
-			// Completed contract (matches command-step parents, bd-h8lc4's
-			// top-level Parallel/Loop fix, and the bd-2g48y branch case).
-			// step.ID is already namespaced via scopedChildStepID at the
-			// dispatcher (executor.go:1919) so OnSuccess child results
-			// land at <parent>_<substep>_on_success_<...>.
+			// path, so they need their own OnSuccess hook on the same
+			// Completed contract as executeStep's common success tail.
+			// step.ID is already namespaced via scopedChildStepID, so
+			// OnSuccess child results land at
+			// <parent>_<substep>_on_success_<...>.
 			e.runOnSuccessSteps(ctx, step, workflow)
 
 			return result
