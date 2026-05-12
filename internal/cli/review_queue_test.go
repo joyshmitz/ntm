@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -533,5 +535,32 @@ func TestReviewQueue_NonJSONLeavesSlogIntact(t *testing.T) {
 			"expected the start telemetry record in non-JSON mode; got %q",
 			buf.String(),
 		)
+	}
+}
+
+func TestOutputReviewQueueErrorReturnsJSONFailureSentinel(t *testing.T) {
+	out, err := captureStdout(t, func() error {
+		return outputReviewQueueError("demo-session", "boom")
+	})
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("outputReviewQueueError returned %v, want errJSONFailure", err)
+	}
+
+	var envelope struct {
+		Success bool   `json:"success"`
+		Session string `json:"session"`
+		Error   string `json:"error"`
+	}
+	if unmarshalErr := json.Unmarshal([]byte(out), &envelope); unmarshalErr != nil {
+		t.Fatalf("outputReviewQueueError wrote invalid JSON %q: %v", out, unmarshalErr)
+	}
+	if envelope.Success {
+		t.Fatal("expected success=false")
+	}
+	if envelope.Session != "demo-session" {
+		t.Fatalf("session = %q", envelope.Session)
+	}
+	if envelope.Error != "boom" {
+		t.Fatalf("error = %q", envelope.Error)
 	}
 }

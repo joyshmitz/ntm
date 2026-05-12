@@ -464,10 +464,11 @@ func outputReviewQueueError(session, errMsg string) error {
 		Error:               errMsg,
 	}
 	data, err := json.MarshalIndent(resp, "", "  ")
-	if err == nil {
-		fmt.Println(string(data))
+	if err != nil {
+		return err
 	}
-	return fmt.Errorf("%s", errMsg)
+	fmt.Println(string(data))
+	return errJSONFailure
 }
 
 func outputReviewQueueJSON(v interface{}) error {
