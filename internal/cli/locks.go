@@ -293,13 +293,10 @@ func selectLocksCheckHolder(reservations []agentmail.FileReservation, agentName,
 	var otherHolder *agentmail.FileReservation
 	for i := range reservations {
 		r := &reservations[i]
-		if r.ReleasedTS != nil {
-			continue
-		}
 		if !r.Exclusive {
 			continue
 		}
-		if !r.ExpiresTS.IsZero() && r.ExpiresTS.Before(now) {
+		if !locksReservationActiveAt(*r, now) {
 			continue
 		}
 		matchPattern := locksComparableReservationPath(r.PathPattern, projectKey)
@@ -318,6 +315,16 @@ func selectLocksCheckHolder(reservations []agentmail.FileReservation, agentName,
 		return ownHolder
 	}
 	return otherHolder
+}
+
+func locksReservationActiveAt(reservation agentmail.FileReservation, now time.Time) bool {
+	if reservation.ReleasedTS != nil {
+		return false
+	}
+	if reservation.ExpiresTS.IsZero() {
+		return false
+	}
+	return !now.After(reservation.ExpiresTS.Time)
 }
 
 // locksCheckPathMatches reports whether `path` falls under

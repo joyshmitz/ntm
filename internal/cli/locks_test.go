@@ -280,6 +280,42 @@ func TestSelectLocksCheckHolder_PrefersOwnExclusiveReservation(t *testing.T) {
 	}
 }
 
+func TestSelectLocksCheckHolder_IgnoresInactiveReservations(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	future := agentmail.FlexTime{Time: now.Add(time.Hour)}
+	past := agentmail.FlexTime{Time: now.Add(-time.Minute)}
+	releasedAt := agentmail.FlexTime{Time: now.Add(-30 * time.Second)}
+	reservations := []agentmail.FileReservation{
+		{
+			ID:          1,
+			PathPattern: "internal/**",
+			AgentName:   "MissingExpiry",
+			Exclusive:   true,
+		},
+		{
+			ID:          2,
+			PathPattern: "internal/**",
+			AgentName:   "Expired",
+			Exclusive:   true,
+			ExpiresTS:   past,
+		},
+		{
+			ID:          3,
+			PathPattern: "internal/**",
+			AgentName:   "Released",
+			Exclusive:   true,
+			ExpiresTS:   future,
+			ReleasedTS:  &releasedAt,
+		},
+	}
+
+	holder := selectLocksCheckHolder(reservations, "BlueLake", "internal/cli/locks.go", "/data/projects/ntm", now)
+	if holder != nil {
+		t.Fatalf("inactive reservations must not decide locks check state; got holder %+v", *holder)
+	}
+}
+
 // Pin the JSON envelope's contract: the four wrapper-facing fields
 // (state, holder, audit_token, observed_at) are present in the
 // stable shape, and `holder == null` cleanly distinguishes the
