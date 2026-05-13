@@ -182,6 +182,22 @@ func TestLocksComparableReservationPath_ProjectRelativeMatching(t *testing.T) {
 			wantPattern: "internal/**/*.go",
 		},
 		{
+			name:        "dotdot_query_matches_relative_pattern",
+			path:        "/data/projects/ntm/internal/../go.mod",
+			pattern:     "go.mod",
+			wantMatch:   true,
+			wantPath:    "go.mod",
+			wantPattern: "go.mod",
+		},
+		{
+			name:        "dot_segments_absolute_pattern_cleans_before_project_relative_compare",
+			path:        "internal/cli/locks.go",
+			pattern:     "/data/projects/ntm/./internal/cli/../cli/*.go",
+			wantMatch:   true,
+			wantPath:    "internal/cli/locks.go",
+			wantPattern: "internal/cli/*.go",
+		},
+		{
 			name:        "absolute_query_outside_project_stays_absolute",
 			path:        "/tmp/ntm/internal/cli/locks.go",
 			pattern:     "internal/**",
@@ -204,6 +220,63 @@ func TestLocksComparableReservationPath_ProjectRelativeMatching(t *testing.T) {
 				t.Fatalf("locksCheckPathMatches(%q, %q) = %v, want %v", gotPath, gotPattern, got, tc.wantMatch)
 			}
 		})
+	}
+}
+
+func TestSelectLocksCheckHolder_IgnoresSharedReservations(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	future := agentmail.FlexTime{Time: now.Add(time.Hour)}
+	reservations := []agentmail.FileReservation{
+		{
+			ID:          1,
+			PathPattern: "internal/**",
+			AgentName:   "OtherAgent",
+			Exclusive:   false,
+			ExpiresTS:   future,
+		},
+		{
+			ID:          2,
+			PathPattern: "internal/cli/*.go",
+			AgentName:   "BlueLake",
+			Exclusive:   false,
+			ExpiresTS:   future,
+		},
+	}
+
+	holder := selectLocksCheckHolder(reservations, "BlueLake", "internal/cli/locks.go", "/data/projects/ntm", now)
+	if holder != nil {
+		t.Fatalf("shared reservations must not decide locks check state; got holder %+v", *holder)
+	}
+}
+
+func TestSelectLocksCheckHolder_PrefersOwnExclusiveReservation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	future := agentmail.FlexTime{Time: now.Add(time.Hour)}
+	reservations := []agentmail.FileReservation{
+		{
+			ID:          1,
+			PathPattern: "internal/**",
+			AgentName:   "OtherAgent",
+			Exclusive:   true,
+			ExpiresTS:   future,
+		},
+		{
+			ID:          2,
+			PathPattern: "/data/projects/ntm/internal/cli/locks.go",
+			AgentName:   "BlueLake",
+			Exclusive:   true,
+			ExpiresTS:   future,
+		},
+	}
+
+	holder := selectLocksCheckHolder(reservations, "BlueLake", "internal/cli/locks.go", "/data/projects/ntm", now)
+	if holder == nil {
+		t.Fatal("holder = nil, want caller's own exclusive reservation")
+	}
+	if holder.ID != 2 {
+		t.Fatalf("holder.ID = %d, want caller's own exclusive reservation ID 2", holder.ID)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -227,48 +228,9 @@ func runLocksCheck(session, path string, pane int, taskID string) error {
 		return fmt.Errorf("listing reservations: %w", err)
 	}
 
-	// Two-pass match: prefer the caller's own reservation over any
-	// other-agent's. Without this, the loop would break on the first
-	// matching reservation, which may be from another agent who
-	// reserved the path first — incorrectly reporting `blocked` even
-	// when the caller also has a valid matching reservation. The
-	// expected semantics for wrappers (ntm#127) is `held` when the
-	// caller has a matching reservation, regardless of whether
-	// another agent also has one.
 	now := time.Now()
-	matchPath := locksComparableReservationPath(path, projectKey)
-	var ownHolder *agentmail.FileReservation
-	var otherHolder *agentmail.FileReservation
-	for i := range allReservations {
-		r := &allReservations[i]
-		if r.ReleasedTS != nil {
-			continue
-		}
-		if !r.ExpiresTS.IsZero() && r.ExpiresTS.Before(now) {
-			continue
-		}
-		matchPattern := locksComparableReservationPath(r.PathPattern, projectKey)
-		if !locksCheckPathMatches(matchPath, matchPattern) {
-			continue
-		}
-		if agentName != "" && r.AgentName == agentName {
-			// Caller owns this reservation — definitive `held` result.
-			// Stop here; nothing further can change the verdict.
-			ownHolder = r
-			break
-		}
-		if otherHolder == nil {
-			// First other-agent match. Remember but keep scanning in
-			// case the caller has a later matching reservation.
-			otherHolder = r
-		}
-	}
-
 	result.Success = true
-	holder := ownHolder
-	if holder == nil {
-		holder = otherHolder
-	}
+	holder := selectLocksCheckHolder(allReservations, agentName, path, projectKey, now)
 	if holder == nil {
 		result.State = "free"
 	} else {
@@ -318,6 +280,46 @@ func runLocksCheck(session, path string, pane int, taskID string) error {
 	return nil
 }
 
+// selectLocksCheckHolder returns the exclusive reservation that decides
+// `ntm locks check` state for a path. Shared reservations are observe-only:
+// they are useful in list/advice output, but they neither authorize writes
+// for the caller nor block other agents.
+func selectLocksCheckHolder(reservations []agentmail.FileReservation, agentName, path, projectKey string, now time.Time) *agentmail.FileReservation {
+	// Prefer the caller's own exclusive reservation over any other-agent's.
+	// Without this priority, the first matching reservation could report
+	// `blocked` even when the caller also has a valid exclusive match.
+	matchPath := locksComparableReservationPath(path, projectKey)
+	var ownHolder *agentmail.FileReservation
+	var otherHolder *agentmail.FileReservation
+	for i := range reservations {
+		r := &reservations[i]
+		if r.ReleasedTS != nil {
+			continue
+		}
+		if !r.Exclusive {
+			continue
+		}
+		if !r.ExpiresTS.IsZero() && r.ExpiresTS.Before(now) {
+			continue
+		}
+		matchPattern := locksComparableReservationPath(r.PathPattern, projectKey)
+		if !locksCheckPathMatches(matchPath, matchPattern) {
+			continue
+		}
+		if agentName != "" && r.AgentName == agentName {
+			ownHolder = r
+			break
+		}
+		if otherHolder == nil {
+			otherHolder = r
+		}
+	}
+	if ownHolder != nil {
+		return ownHolder
+	}
+	return otherHolder
+}
+
 // locksCheckPathMatches reports whether `path` falls under
 // `pattern`. Two cases:
 //   - Pattern with no glob meta — exact match OR `path` starts with
@@ -363,8 +365,11 @@ func locksCheckPathMatches(path, pattern string) bool {
 
 func locksNormalizeReservationPath(value string) string {
 	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
 	value = filepath.ToSlash(value)
-	return strings.TrimPrefix(value, "./")
+	return pathpkg.Clean(value)
 }
 
 // locksComparableReservationPath maps absolute paths inside projectKey
