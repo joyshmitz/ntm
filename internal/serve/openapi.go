@@ -388,11 +388,15 @@ func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 
 	spec := GenerateOpenAPISpec("dev", serverURL)
 
+	specBytes, err := json.Marshal(spec)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if err := json.NewEncoder(w).Encode(spec); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	w.Write(specBytes)
 }
 
 // handleSwaggerUI serves the Swagger UI HTML page.

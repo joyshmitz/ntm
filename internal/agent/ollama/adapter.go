@@ -147,9 +147,6 @@ func NewAdapterFromEnv() *Adapter {
 
 // Connect establishes a connection to the Ollama server
 func (a *Adapter) Connect(host string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
 	if host == "" {
 		host = DefaultHost
 	}
@@ -160,13 +157,11 @@ func (a *Adapter) Connect(host string) error {
 		host = "http://" + host
 	}
 
-	a.host = host
-
 	// Test connection with a simple API call
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", a.host+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", host+"/api/tags", nil)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrConnectionFailed, err)
 	}
@@ -181,7 +176,10 @@ func (a *Adapter) Connect(host string) error {
 		return fmt.Errorf("%w: server returned %d", ErrConnectionFailed, resp.StatusCode)
 	}
 
+	a.mu.Lock()
+	a.host = host
 	a.connected = true
+	a.mu.Unlock()
 	return nil
 }
 

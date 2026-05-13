@@ -88,7 +88,7 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return "", fmt.Errorf("bv timed out after %v", timeout)
+			return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), remaining)
@@ -112,7 +112,7 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 		stdoutStr := stdout.String()
 
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("bv timed out after %v", timeout)
+			return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 		}
 
 		if strings.Contains(stderrStr, "No baseline found") {
@@ -125,7 +125,7 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 			strings.Contains(stderrStr, "database is busy")) {
 			backoff := transientBeadsDBBackoff(attempt)
 			if time.Until(deadline) <= backoff {
-				return "", fmt.Errorf("bv timed out after %v", timeout)
+				return "", fmt.Errorf("bv timed out after %v: %w", timeout, ErrTimeout)
 			}
 			time.Sleep(backoff)
 			continue
