@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,7 +100,7 @@ func (t *Tracker) Update(detected []Alert, failedChecks []string) {
 	for id, alert := range t.active {
 		if !seenIDs[id] {
 			// If the check for this source failed, assume the alert might still be active
-			if failedSet[alert.Source] {
+			if alertSourceFailed(alert.Source, failedSet) {
 				continue
 			}
 
@@ -112,6 +113,17 @@ func (t *Tracker) Update(detected []Alert, failedChecks []string) {
 
 	// Prune old resolved alerts
 	t.pruneResolved(now)
+}
+
+func alertSourceFailed(source string, failedSet map[string]bool) bool {
+	source = strings.TrimSpace(source)
+	if failedSet[source] {
+		return true
+	}
+	if strings.HasPrefix(source, "agents:") && failedSet["agents"] {
+		return true
+	}
+	return false
 }
 
 // GetActive returns all currently active alerts

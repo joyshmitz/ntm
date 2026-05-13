@@ -159,6 +159,32 @@ func TestTrackerResolution(t *testing.T) {
 	}
 }
 
+func TestTrackerUpdate_AgentWideFailurePreservesSessionScopedAlerts(t *testing.T) {
+	cfg := DefaultConfig()
+	tracker := NewTracker(cfg)
+
+	tracker.Update([]Alert{
+		{ID: "agent-pane", Source: "agents:proj", Type: AlertAgentError, Severity: SeverityError, Message: "pane error"},
+		{ID: "disk", Source: "disk", Type: AlertDiskLow, Severity: SeverityWarning, Message: "disk low"},
+	}, nil)
+
+	tracker.Update(nil, []string{"agents"})
+
+	active, resolved := tracker.GetAll()
+	if len(active) != 1 {
+		t.Fatalf("expected only the session-scoped agent alert to stay active, got %d active: %+v", len(active), active)
+	}
+	if active[0].ID != "agent-pane" {
+		t.Fatalf("active alert = %q, want agent-pane", active[0].ID)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("expected unrelated disk alert to resolve, got %d resolved: %+v", len(resolved), resolved)
+	}
+	if resolved[0].ID != "disk" {
+		t.Fatalf("resolved alert = %q, want disk", resolved[0].ID)
+	}
+}
+
 func TestTrackerRefresh(t *testing.T) {
 	cfg := DefaultConfig()
 	tracker := NewTracker(cfg)
