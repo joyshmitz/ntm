@@ -483,12 +483,11 @@ func TestWaitForApproval_NoRaceWithApproveBetweenCheckAndRegister(t *testing.T) 
 
 	const iterations = 200
 	const waitTimeout = 200 * time.Millisecond
-	// Acceptable upper bound on per-iteration wait. Pre-fix, when the
-	// race triggers, elapsed approaches waitTimeout (200ms). Post-fix,
-	// the second Check catches the decision so elapsed stays in the
-	// few-ms range. Set the threshold well below waitTimeout so a
-	// single pre-fix race-trigger fails the test cleanly.
-	const acceptable = 50 * time.Millisecond
+	// Acceptable delay after Approve has committed the decision. Pre-fix,
+	// when the race triggered, Approve completed promptly but WaitForApproval
+	// still slept until waitTimeout. Do not measure from before the goroutine
+	// is scheduled; busy CI can legitimately delay the approving goroutine.
+	const acceptableAfterApprove = 50 * time.Millisecond
 
 	for i := 0; i < iterations; i++ {
 		approval, err := engine.Request(ctx, RequestParams{
@@ -500,28 +499,41 @@ func TestWaitForApproval_NoRaceWithApproveBetweenCheckAndRegister(t *testing.T) 
 			t.Fatalf("iter %d Request: %v", i, err)
 		}
 
+		type approveResult struct {
+			at  time.Time
+			err error
+		}
+		approved := make(chan approveResult, 1)
+
 		// Race: approve immediately, no delay. Half the time this fires
 		// before WaitForApproval registers the waitCh; the fix makes
 		// the second Check catch the decision.
 		go func(id string) {
-			_ = engine.Approve(ctx, id, "approver")
+			err := engine.Approve(ctx, id, "approver")
+			approved <- approveResult{at: time.Now(), err: err}
 		}(approval.ID)
 
 		start := time.Now()
 		result, err := engine.WaitForApproval(ctx, approval.ID, waitTimeout)
+		returnedAt := time.Now()
 		elapsed := time.Since(start)
 		if err != nil {
 			t.Fatalf("iter %d WaitForApproval: %v", i, err)
+		}
+		approve := <-approved
+		if approve.err != nil {
+			t.Fatalf("iter %d Approve: %v", i, approve.err)
 		}
 		if result.Status != state.ApprovalApproved {
 			t.Errorf("iter %d: status = %s, want approved", i, result.Status)
 		}
 		// Pre-fix: when the race triggered, this would equal waitTimeout.
-		// Post-fix: always returns promptly because the second Check
-		// catches the just-made decision.
-		if elapsed > acceptable {
-			t.Errorf("iter %d: WaitForApproval took %v, want < %v (race not closed?)",
-				i, elapsed, acceptable)
+		// Post-fix: after Approve commits, WaitForApproval returns promptly
+		// because the second Check catches the decision or the waiter is
+		// notified. A slow approval goroutine is not itself a missed-wakeup bug.
+		if afterApprove := returnedAt.Sub(approve.at); afterApprove > acceptableAfterApprove {
+			t.Errorf("iter %d: WaitForApproval returned %v after Approve completed (total %v), want < %v",
+				i, afterApprove, elapsed, acceptableAfterApprove)
 		}
 	}
 }
