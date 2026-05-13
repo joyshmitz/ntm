@@ -410,9 +410,12 @@ const escapePlaceholder = "\x00ESC_VAR\x00"
 // placeholder for escaped literal dollar signs during substitution
 const escapedDollarPlaceholder = "\x00ESC_DOLLAR\x00"
 
-// Substitute replaces all ${...} variable references in the template string.
-// Returns the substituted string and any errors encountered.
-func (s *Substitutor) Substitute(template string) (string, error) {
+// SubstituteRetainingSeals is like Substitute but does not call
+// restoreEscapedSubstitutions on the final output. This allows the returned
+// string to be safely passed through another substitution pass (e.g. during
+// foreach materialization -> execution) without exposing sealed terminal values
+// to double-substitution.
+func (s *Substitutor) SubstituteRetainingSeals(template string) (string, error) {
 	result := protectEscapedSubstitutions(template)
 	maxDepth := s.effectiveMaxDepth()
 
@@ -420,15 +423,15 @@ func (s *Substitutor) Substitute(template string) (string, error) {
 		next, resolved, err := s.substituteOnce(result)
 		next = protectEscapedSubstitutions(next)
 		if err != nil {
-			return restoreEscapedSubstitutions(next), err
+			return next, err
 		}
 
 		result = next
 		if !varPattern.MatchString(result) {
-			return restoreEscapedSubstitutions(result), nil
+			return result, nil
 		}
 		if resolved == 0 {
-			return restoreEscapedSubstitutions(result), nil
+			return result, nil
 		}
 	}
 
@@ -437,10 +440,36 @@ func (s *Substitutor) Substitute(template string) (string, error) {
 	if strings.HasPrefix(match, "${") && strings.HasSuffix(match, "}") {
 		varRef = strings.TrimSpace(match[2 : len(match)-1])
 	}
-	return restoreEscapedSubstitutions(result), &SubstitutionError{
+	return result, &SubstitutionError{
 		VarRef:  varRef,
 		Message: fmt.Sprintf("substitution recursion depth exceeded after %d passes", maxDepth),
 	}
+}
+
+// SubstituteRetainingSealsStrict is like SubstituteRetainingSeals but returns an error if any variable is undefined.
+func (s *Substitutor) SubstituteRetainingSealsStrict(template string) (string, error) {
+	result, err := s.SubstituteRetainingSeals(template)
+	if err != nil {
+		return "", err
+	}
+
+	// Check for any remaining unsubstituted variables
+	if varPattern.MatchString(result) {
+		matches := varPattern.FindAllString(result, -1)
+		return "", &SubstitutionError{
+			VarRef:  matches[0],
+			Message: "undefined variable (no default provided)",
+		}
+	}
+
+	return result, nil
+}
+
+// Substitute replaces all ${...} variable references in the template string.
+// Returns the substituted string and any errors encountered.
+func (s *Substitutor) Substitute(template string) (string, error) {
+	res, err := s.SubstituteRetainingSeals(template)
+	return restoreEscapedSubstitutions(res), err
 }
 
 func (s *Substitutor) substituteOnce(template string) (string, int, error) {
@@ -542,21 +571,21 @@ func restoreEscapedSubstitutions(template string) string {
 
 // SubstituteStrict is like Substitute but returns an error if any variable is undefined.
 func (s *Substitutor) SubstituteStrict(template string) (string, error) {
-	result, err := s.Substitute(template)
+	result, err := s.SubstituteRetainingSeals(template)
 	if err != nil {
-		return "", err
+		return restoreEscapedSubstitutions(result), err
 	}
 
 	// Check for any remaining unsubstituted variables
 	if varPattern.MatchString(result) {
 		matches := varPattern.FindAllString(result, -1)
-		return "", &SubstitutionError{
+		return restoreEscapedSubstitutions(result), &SubstitutionError{
 			VarRef:  matches[0],
 			Message: "undefined variable (no default provided)",
 		}
 	}
 
-	return result, nil
+	return restoreEscapedSubstitutions(result), nil
 }
 
 // parseDefault extracts variable path and optional default value.

@@ -1284,7 +1284,11 @@ func (e *Executor) substituteForeachString(s string, protected map[string]struct
 		value, found, err := e.resolveForeachAlias(varPath)
 		if found {
 			if err == nil {
-				return formatValue(value)
+				formatted := formatValue(value)
+				if isTerminalSubstitutionNamespace(varPath) {
+					formatted = sealTerminalValue(formatted)
+				}
+				return formatted
 			}
 			if hasDefault {
 				return defaultVal
@@ -1294,7 +1298,7 @@ func (e *Executor) substituteForeachString(s string, protected map[string]struct
 		return match
 	})
 
-	out := e.substituteVariables(rewritten)
+	out := e.substituteVariablesRetainingSeals(rewritten)
 	for _, ref := range refs {
 		out = strings.ReplaceAll(out, ref.token, ref.match)
 	}

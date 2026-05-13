@@ -2769,6 +2769,12 @@ func (e *Executor) substituteVariables(s string) string {
 	return result
 }
 
+// substituteVariablesRetainingSeals is like substituteVariables but does not unseal terminal namespaces.
+func (e *Executor) substituteVariablesRetainingSeals(s string) string {
+	result, _ := e.substituteVariablesRetainingSealsCtx(context.TODO(), s)
+	return result
+}
+
 // substituteVariablesCtx is the ctx-aware form of substituteVariables.
 // Errors are silently dropped (the non-strict contract) but ctx-carried
 // round overrides from withRoundOverrides are respected so a branch
@@ -2814,6 +2820,37 @@ func (e *Executor) substituteVariablesStrictCtx(ctx context.Context, s string) (
 	}
 	s = e.substituteRuntimeVariables(s)
 	return sub.Substitute(s)
+}
+
+func (e *Executor) substituteVariablesRetainingSealsCtx(ctx context.Context, s string) (string, error) {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
+	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
+	sub.SetDefaults(e.defaults)
+	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
+	if overrides := roundOverridesFromCtx(ctx); overrides != nil {
+		sub.SetLocalOverrides(overrides)
+	}
+	s = e.substituteRuntimeVariables(s)
+	return sub.SubstituteRetainingSeals(s)
+}
+
+// substituteVariablesRetainingSealsStrictCtx is like substituteVariablesStrictCtx but retains seals.
+func (e *Executor) substituteVariablesRetainingSealsStrictCtx(ctx context.Context, s string) (string, error) {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	e.varMu.RLock()
+	defer e.varMu.RUnlock()
+	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
+	sub.SetDefaults(e.defaults)
+	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
+	if overrides := roundOverridesFromCtx(ctx); overrides != nil {
+		sub.SetLocalOverrides(overrides)
+	}
+	s = e.substituteRuntimeVariables(s)
+	return sub.SubstituteRetainingSealsStrict(s)
 }
 
 // substituteCommandArgs walks a step's Args map and runs the pipeline
