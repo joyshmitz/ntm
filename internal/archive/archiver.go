@@ -93,6 +93,12 @@ func NewArchiver(opts ArchiverOptions) (*Archiver, error) {
 	if opts.OutputDir == "" {
 		opts.OutputDir = util.ExpandPath(DefaultOutputDir)
 	}
+	if opts.Interval < 0 {
+		return nil, fmt.Errorf("interval must be non-negative")
+	}
+	if opts.LinesPerCapture < 0 {
+		return nil, fmt.Errorf("lines per capture must be non-negative")
+	}
 	if opts.Interval == 0 {
 		opts.Interval = DefaultInterval
 	}
@@ -129,6 +135,10 @@ func NewArchiver(opts ArchiverOptions) (*Archiver, error) {
 
 // Run starts the archive loop. It blocks until the context is cancelled.
 func (a *Archiver) Run(ctx context.Context) error {
+	if a.interval <= 0 {
+		return fmt.Errorf("archive interval must be positive")
+	}
+
 	ticker := time.NewTicker(a.interval)
 	defer ticker.Stop()
 
