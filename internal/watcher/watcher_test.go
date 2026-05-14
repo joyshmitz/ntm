@@ -267,6 +267,64 @@ func TestWatcherRecursiveCreateEventAddsNestedDirectories(t *testing.T) {
 	}
 }
 
+func TestWatcherRecursiveTopologyMaintenanceIgnoresDeliveryFilter(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	grandchild := filepath.Join(child, "grandchild")
+	if err := os.MkdirAll(grandchild, 0o755); err != nil {
+		t.Fatalf("mkdir nested tree failed: %v", err)
+	}
+
+	w, err := New(
+		func(events []Event) {},
+		WithRecursive(true),
+		WithEventFilter(Write),
+		WithDebouncer(NewDebouncer(time.Hour)),
+	)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer w.Close()
+	if w.pollMode {
+		t.Skip("fsnotify unavailable")
+	}
+
+	w.handleEvent(fsnotify.Event{Name: child, Op: fsnotify.Create})
+
+	paths := w.WatchedPaths()
+	want := map[string]bool{
+		child:      false,
+		grandchild: false,
+	}
+	for _, path := range paths {
+		if _, ok := want[path]; ok {
+			want[path] = true
+		}
+	}
+	for path, found := range want {
+		if !found {
+			t.Fatalf("write-only recursive watcher did not add %q; watched paths: %v", path, paths)
+		}
+	}
+
+	w.mu.Lock()
+	if len(w.pendingEvents) != 0 {
+		t.Fatalf("write-only watcher queued filtered Create event: %+v", w.pendingEvents)
+	}
+	w.mu.Unlock()
+
+	w.handleEvent(fsnotify.Event{Name: child, Op: fsnotify.Rename})
+
+	paths = w.WatchedPaths()
+	for _, path := range paths {
+		if path == child || path == grandchild {
+			t.Fatalf("write-only recursive watcher left stale watched path %q in %v", path, paths)
+		}
+	}
+}
+
 func TestWatcherEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 

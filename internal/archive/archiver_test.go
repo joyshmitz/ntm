@@ -105,6 +105,38 @@ func TestNewArchiver(t *testing.T) {
 	})
 }
 
+func TestNewArchiverSanitizesSessionNameForArchiveFilename(t *testing.T) {
+	dir := t.TempDir()
+	sessionName := "../escape"
+	a, err := NewArchiver(ArchiverOptions{
+		SessionName: sessionName,
+		OutputDir:   dir,
+	})
+	if err != nil {
+		t.Fatalf("NewArchiver() error: %v", err)
+	}
+	defer a.Close()
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*_*.jsonl"))
+	if err != nil {
+		t.Fatalf("Glob() error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("archive files in output dir = %v, want exactly one sanitized file", matches)
+	}
+
+	filename := filepath.Base(matches[0])
+	if !strings.HasPrefix(filename, util.SanitizeFilename(sessionName)+"_") {
+		t.Fatalf("archive filename = %q, want sanitized session prefix", filename)
+	}
+	if filepath.Dir(matches[0]) != dir {
+		t.Fatalf("archive path escaped output dir: %s", matches[0])
+	}
+	if a.sessionName != sessionName {
+		t.Fatalf("logical session name = %q, want original %q", a.sessionName, sessionName)
+	}
+}
+
 func TestArchiver_WriteRecord(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -492,11 +492,6 @@ func (w *Watcher) runPoll() {
 func (w *Watcher) handleEvent(fsEvent fsnotify.Event) {
 	eventType := eventTypeFromFsnotify(fsEvent.Op)
 
-	// Filter events
-	if eventType&w.eventFilter == 0 {
-		return
-	}
-
 	// Check if it's a directory
 	isDir := false
 	if info, err := os.Stat(fsEvent.Name); err == nil {
@@ -509,7 +504,9 @@ func (w *Watcher) handleEvent(fsEvent fsnotify.Event) {
 		IsDir: isDir,
 	}
 
-	// If recursive and a new directory was created, watch it
+	// Keep recursive watch topology current independent of delivery filtering.
+	// A watcher interested only in Write events still needs Create events for
+	// new subdirectories, otherwise later writes inside them are invisible.
 	if w.recursive && isDir && eventType&Create != 0 {
 		// Check ignores
 		if w.isIgnored(fsEvent.Name) {
@@ -526,6 +523,11 @@ func (w *Watcher) handleEvent(fsEvent fsnotify.Event) {
 		w.mu.Lock()
 		w.removeWatchedPathLocked(fsEvent.Name)
 		w.mu.Unlock()
+	}
+
+	// Filter only user-visible delivery after internal watch maintenance.
+	if eventType&w.eventFilter == 0 {
+		return
 	}
 
 	w.mu.Lock()

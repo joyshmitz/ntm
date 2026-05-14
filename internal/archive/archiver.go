@@ -87,7 +87,7 @@ func DefaultArchiverOptions(sessionName string) ArchiverOptions {
 
 // NewArchiver creates a new Archiver.
 func NewArchiver(opts ArchiverOptions) (*Archiver, error) {
-	if opts.SessionName == "" {
+	if strings.TrimSpace(opts.SessionName) == "" {
 		return nil, fmt.Errorf("session name required")
 	}
 	if opts.OutputDir == "" {
@@ -112,7 +112,7 @@ func NewArchiver(opts ArchiverOptions) (*Archiver, error) {
 	}
 
 	// Create archive file (one per session, append mode)
-	filename := fmt.Sprintf("%s_%s.jsonl", opts.SessionName, time.Now().Format("2006-01-02"))
+	filename := fmt.Sprintf("%s_%s.jsonl", util.SanitizeFilename(opts.SessionName), time.Now().Format("2006-01-02"))
 	filePath := filepath.Join(opts.OutputDir, filename)
 
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
