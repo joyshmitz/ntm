@@ -4096,6 +4096,10 @@ func init() {
 		newEnsembleCmd(),
 		newModesCmd(),
 
+		// Agent-name navigation (ntm#139)
+		newSwitchAgentCmd(),
+		newMappingCmd(),
+
 		// Internal commands
 		newMonitorCmd(),
 
