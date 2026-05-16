@@ -3297,7 +3297,7 @@ func (s *Server) handlePaneInputV1(w http.ResponseWriter, r *http.Request) {
 	// the target is base-index-independent — `<session>:<paneIdx>` looks
 	// like a pane index but tmux interprets it as a window index, which
 	// breaks on hosts with `base-index = 1` (see #141).
-	paneTarget, lookupErr := resolvePaneTargetByIndex(sessionID, paneIdx)
+	paneTarget, lookupErr := resolvePaneTargetByIndex(r.Context(), sessionID, paneIdx)
 	if lookupErr != nil {
 		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound,
 			fmt.Sprintf("pane not found: %v", lookupErr), nil, reqID)
@@ -5905,9 +5905,11 @@ func matchesAttentionFilters(event robot.AttentionEvent, categoryFilter []string
 // target form looks like a pane index but tmux interprets the second
 // component as a *window* index, so hosts with `base-index = 1` see
 // `can't find window: N` (#141). Using the pane ID avoids the entire
-// window/pane ambiguity.
-func resolvePaneTargetByIndex(session string, paneIdx int) (string, error) {
-	panes, err := tmux.GetPanes(session)
+// window/pane ambiguity. The context is honored so the HTTP layer can
+// cancel a slow tmux ListPanes call, matching the rest of the handlers
+// (`handleGetPaneV1` etc.).
+func resolvePaneTargetByIndex(ctx context.Context, session string, paneIdx int) (string, error) {
+	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
 		return "", fmt.Errorf("list panes: %w", err)
 	}
