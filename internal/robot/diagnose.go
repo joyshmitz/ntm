@@ -381,6 +381,22 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 	}
 
 	for _, rec := range diag.Recommendations {
+		// Honor cancellation between iterations. `RespawnPane` /
+		// `SendKeys` themselves aren't context-aware (no Context variant
+		// in the tmux package), so cancellation can't preempt a single
+		// in-flight tmux call — but it does stop us from issuing the
+		// next one. That's the right granularity: each tmux call is
+		// short, and a cancelled CLI shouldn't keep restarting panes
+		// after the user pressed Ctrl-C.
+		if err := ctx.Err(); err != nil {
+			fixReport.Summary = fmt.Sprintf(
+				"Fix loop cancelled (%v); %d issue(s) attempted before cancellation",
+				err, fixedCount+failedCount,
+			)
+			fixReport.Success = false
+			return encodeJSON(fixReport)
+		}
+
 		if !rec.AutoFixable {
 			continue
 		}

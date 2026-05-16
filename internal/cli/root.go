@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -2434,7 +2436,18 @@ Shell Integration:
 
 func Execute() error {
 	defer closeRobotPersistence()
-	err := rootCmd.Execute()
+	// Install a signal-cancellable context at the root so handlers using
+	// `cmd.Context()` (diagnose, swarm, openapi, support_bundle, …) see
+	// cancellation when the user presses Ctrl-C. Without this, `cmd.Context()`
+	// is a background context that never cancels, making any context-aware
+	// API plumbed through cobra effectively non-cancellable. Commands with
+	// their own `signal.Notify`-based shutdown loops (serve, watch, monitor,
+	// send, …) continue to receive the OS signal directly — Go delivers it
+	// to every registered consumer — so adding a root-level consumer does
+	// not interfere with their existing shutdown logic.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := rootCmd.ExecuteContext(ctx)
 	logCommandAuditEnd(err)
 	_ = audit.CloseAll()
 	if err != nil {
