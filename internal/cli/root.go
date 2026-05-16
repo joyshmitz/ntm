@@ -1511,7 +1511,7 @@ Shell Integration:
 				os.Exit(1)
 			}
 			if robotDiagnoseBrief {
-				if err := robot.PrintDiagnoseBrief(session); err != nil {
+				if err := robot.PrintDiagnoseBrief(cmd.Context(), session); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -1522,7 +1522,7 @@ Shell Integration:
 					Fix:     robotDiagnoseFix,
 					Brief:   robotDiagnoseBrief,
 				}
-				if err := robot.PrintDiagnose(opts); err != nil {
+				if err := robot.PrintDiagnose(cmd.Context(), opts); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}

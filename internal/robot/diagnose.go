@@ -3,6 +3,7 @@
 package robot
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -78,7 +79,9 @@ type DiagnoseOptions struct {
 // GetDiagnose collects comprehensive health diagnosis for a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
 // Note: This does not execute fixes; use PrintDiagnose with opts.Fix=true for that.
-func GetDiagnose(opts DiagnoseOptions) (*DiagnoseOutput, error) {
+// The context bounds any tmux ListPanes call so a hung tmux daemon doesn't
+// outlive a cancelled caller.
+func GetDiagnose(ctx context.Context, opts DiagnoseOptions) (*DiagnoseOutput, error) {
 	output := &DiagnoseOutput{
 		RobotResponse:   NewRobotResponse(true),
 		Session:         opts.Session,
@@ -105,7 +108,7 @@ func GetDiagnose(opts DiagnoseOptions) (*DiagnoseOutput, error) {
 	}
 
 	// Get all panes in session
-	panes, err := tmux.GetPanes(opts.Session)
+	panes, err := tmux.GetPanesContext(ctx, opts.Session)
 	if err != nil {
 		output.Success = false
 		output.Error = fmt.Sprintf("failed to get panes: %v", err)
@@ -274,15 +277,17 @@ func GetDiagnose(opts DiagnoseOptions) (*DiagnoseOutput, error) {
 // PrintDiagnose outputs comprehensive health diagnosis for a session.
 // This is a thin wrapper around GetDiagnose() for CLI output.
 // When opts.Fix is true and auto-fix is available, it executes fixes.
-func PrintDiagnose(opts DiagnoseOptions) error {
-	output, err := GetDiagnose(opts)
+// The context bounds tmux calls so a hung daemon doesn't outlive a
+// cancelled caller (e.g. Ctrl-C during CLI execution).
+func PrintDiagnose(ctx context.Context, opts DiagnoseOptions) error {
+	output, err := GetDiagnose(ctx, opts)
 	if err != nil {
 		return err
 	}
 
 	// Handle --fix mode
 	if opts.Fix && output.AutoFixAvail {
-		return executeDiagnoseFix(*output, opts)
+		return executeDiagnoseFix(ctx, *output, opts)
 	}
 
 	return encodeJSON(output)
@@ -336,8 +341,9 @@ func buildRateLimitRecommendation(paneIndex int, session string, check *HealthCh
 	return rec
 }
 
-// executeDiagnoseFix attempts to fix auto-fixable issues
-func executeDiagnoseFix(diag DiagnoseOutput, opts DiagnoseOptions) error {
+// executeDiagnoseFix attempts to fix auto-fixable issues. The context
+// bounds tmux ListPanes so cancellation propagates into the fix loop.
+func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseOptions) error {
 	// Build a fix report
 	type FixAttempt struct {
 		Pane    int    `json:"pane"`
@@ -366,8 +372,9 @@ func executeDiagnoseFix(diag DiagnoseOutput, opts DiagnoseOptions) error {
 	// and dispatch tmux ops against the base-index-independent pane ID
 	// (`%N`) rather than the naive `<session>:<paneIdx>` form, which tmux
 	// interprets as a *window* index and breaks on hosts with
-	// `base-index = 1` (#141).
-	fixPanes, fixPanesErr := tmux.GetPanes(opts.Session)
+	// `base-index = 1` (#141). Context-aware so callers can cancel a hung
+	// tmux daemon (matches the HTTP `handlePaneInputV1` shape).
+	fixPanes, fixPanesErr := tmux.GetPanesContext(ctx, opts.Session)
 	paneIDByIndex := map[int]string{}
 	for _, p := range fixPanes {
 		paneIDByIndex[p.Index] = p.ID
@@ -464,7 +471,7 @@ type DiagnoseBriefOutput struct {
 
 // GetDiagnoseBrief collects a minimal health summary for a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetDiagnoseBrief(session string) (*DiagnoseBriefOutput, error) {
+func GetDiagnoseBrief(ctx context.Context, session string) (*DiagnoseBriefOutput, error) {
 	output := &DiagnoseBriefOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       session,
@@ -480,7 +487,7 @@ func GetDiagnoseBrief(session string) (*DiagnoseBriefOutput, error) {
 	}
 
 	// Get panes and check health
-	panes, err := tmux.GetPanes(session)
+	panes, err := tmux.GetPanesContext(ctx, session)
 	if err != nil {
 		output.Success = false
 		output.Error = fmt.Sprintf("failed to get panes: %v", err)
@@ -562,8 +569,8 @@ func GetDiagnoseBrief(session string) (*DiagnoseBriefOutput, error) {
 
 // PrintDiagnoseBrief outputs a minimal health summary.
 // This is a thin wrapper around GetDiagnoseBrief() for CLI output.
-func PrintDiagnoseBrief(session string) error {
-	output, err := GetDiagnoseBrief(session)
+func PrintDiagnoseBrief(ctx context.Context, session string) error {
+	output, err := GetDiagnoseBrief(ctx, session)
 	if err != nil {
 		return err
 	}
