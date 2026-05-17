@@ -91,27 +91,19 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session := args[0]
 
-			// Cobra commands are reused across tests within the same
-			// process. Reset both the bound variable and the flag's
-			// stored value after execution so omitted flags cannot
-			// leak into the next Execute() call.
+			// Cobra commands are reused by tests and by embedded
+			// callers in the same process. Local flag variables live
+			// in this closure, so reset them after each execution or
+			// omitted flags can leak into the next Execute() call.
 			currentPrepared := preparedRedaction
-			defer resetLocalStringFlag(cmd, "prepared-redaction", &preparedRedaction)
+			defer resetMailSendLocalFlags(cmd, &to, &subject, &threadID, &all, &fromFile, &preparedRedaction)
 
 			// --prepared-redaction is mutually exclusive with positional
 			// body, --file, and the editor flow: the handle IS the body
-			// source. Consume the handle eagerly so an unused handle
-			// doesn't get left in the redaction-handle store.
+			// source.
 			if currentPrepared != "" {
 				if fromFile != "" || len(args) > 1 {
 					return fmt.Errorf("--prepared-redaction is mutually exclusive with --file and positional body")
-				}
-				raw, _, _, err := consumePreparedRedaction(currentPrepared)
-				if err != nil {
-					return err
-				}
-				if strings.TrimSpace(raw) == "" {
-					return fmt.Errorf("prepared redaction handle %q produced empty body", currentPrepared)
 				}
 				// SECURITY: never auto-derive a subject from a
 				// prepared-redaction body. truncateSubject() takes
@@ -121,11 +113,18 @@ Examples:
 				// and email indices whenever the configured
 				// redaction patterns fail to match the user's
 				// specific token shape. Require an explicit
-				// subject (kept off the wrapper's command line if
-				// it is itself sensitive) so the prefix never
-				// silently escapes.
+				// subject before consuming the handle so a user who
+				// forgot --subject can retry without regenerating
+				// the handle.
 				if strings.TrimSpace(subject) == "" {
 					return fmt.Errorf("--prepared-redaction requires an explicit --subject to avoid leaking the raw token prefix as the auto-derived subject")
+				}
+				raw, _, _, err := consumePreparedRedaction(currentPrepared)
+				if err != nil {
+					return err
+				}
+				if strings.TrimSpace(raw) == "" {
+					return fmt.Errorf("prepared redaction handle %q produced empty body", currentPrepared)
 				}
 				return runMailSendOverseer(cmd, session, to, subject, raw, threadID, all)
 			}
@@ -171,11 +170,17 @@ Examples:
 	return cmd
 }
 
-func resetLocalStringFlag(cmd *cobra.Command, name string, target *string) {
-	*target = ""
-	if flag := cmd.Flags().Lookup(name); flag != nil {
-		_ = flag.Value.Set("")
-		flag.Changed = false
+func resetMailSendLocalFlags(cmd *cobra.Command, to *[]string, subject, threadID *string, all *bool, fromFile, preparedRedaction *string) {
+	*to = nil
+	*subject = ""
+	*threadID = ""
+	*all = false
+	*fromFile = ""
+	*preparedRedaction = ""
+	for _, name := range []string{"to", "subject", "thread", "all", "file", "prepared-redaction"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil {
+			flag.Changed = false
+		}
 	}
 }
 

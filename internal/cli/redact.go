@@ -90,9 +90,10 @@ type preparedRedactionPayload struct {
 // are persisted. Uses `$XDG_RUNTIME_DIR/ntm/redaction-handles` when the
 // XDG variable is set (this is a per-user tmpfs cleared on reboot, the
 // right home for short-lived secret material). Falls back to
-// `os.TempDir()/ntm-<uid>/redaction-handles` when the XDG variable is
-// unset so non-systemd platforms still work. The directory is created
-// with 0700 so other users on the host cannot enumerate handles.
+// `os.TempDir()/ntm-<uid>/ntm/redaction-handles` when the XDG variable
+// is unset so non-systemd platforms still work. The directory is
+// created with 0700 so other users on the host cannot enumerate
+// handles.
 func preparedRedactionStorageDir() (string, error) {
 	var base string
 	if x := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); x != "" {
@@ -262,11 +263,12 @@ func newRedactPrepareMailCmd() *cobra.Command {
 		Short: "Prepare an Agent Mail payload with a redaction handle (ntm#126)",
 		Long: `Read sensitive sender/token material from --sender-token-env or
 --sender-token-file, scan it for redaction findings, and return a
-short-lived handle. The raw bytes never leave this process — they are
-never echoed to stdout, never logged, never serialized into the JSON
-envelope. The caller then passes the handle to:
+short-lived handle. The raw bytes are written only to a 0600 handle
+file in the per-user runtime store; they are never echoed to stdout,
+never logged, and never serialized into the command's JSON envelope.
+The caller then passes the handle to:
 
-  ntm mail send <session> --prepared-redaction <handle>
+  ntm mail send <session> --prepared-redaction <handle> --subject "token payload"
 
 …which consumes the handle exactly once. Handles expire after 10
 minutes if not consumed.
@@ -357,7 +359,7 @@ Examples:
 				fmt.Printf("- %s %s\n", f.Category, f.Redacted)
 			}
 			fmt.Println()
-			fmt.Println("Pass the handle to: ntm mail send <session> --prepared-redaction <handle>")
+			fmt.Println("Pass the handle to: ntm mail send <session> --prepared-redaction <handle> --subject \"token payload\"")
 			return nil
 		},
 	}

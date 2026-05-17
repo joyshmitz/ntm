@@ -241,11 +241,12 @@ func TestGetDCGCheckWithOptions_CombinedOptions(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeFakeDCG(t, tmpDir)
 	t.Setenv("PATH", tmpDir)
+	cwd := t.TempDir()
 
 	opts := DCGCheckOptions{
 		Command: "echo test",
 		Context: "Testing combined options",
-		CWD:     "/tmp/project",
+		CWD:     cwd,
 	}
 	out, err := GetDCGCheckWithOptions(opts)
 	if err != nil {
@@ -257,7 +258,7 @@ func TestGetDCGCheckWithOptions_CombinedOptions(t *testing.T) {
 	if out.Context != "Testing combined options" {
 		t.Fatalf("expected context echoed")
 	}
-	if out.CWD != "/tmp/project" {
+	if out.CWD != cwd {
 		t.Fatalf("expected cwd echoed")
 	}
 }

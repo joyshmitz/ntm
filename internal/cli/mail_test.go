@@ -656,6 +656,40 @@ func TestMailSend_PreparedRedactionRequiresExplicitSubject(t *testing.T) {
 	if !strings.Contains(execErr.Error(), "explicit --subject") {
 		t.Fatalf("expected error to mention explicit --subject, got %q", execErr.Error())
 	}
+
+	gotRaw, _, _, err := consumePreparedRedaction(handle)
+	if err != nil {
+		t.Fatalf("missing-subject refusal should leave handle reusable, got consume error: %v", err)
+	}
+	if gotRaw != "aVeryLongSecretValueThatShouldNotLeakIntoTheSubject" {
+		t.Fatalf("unexpected raw handle body after refusal: %q", gotRaw)
+	}
+}
+
+func TestMailSend_LocalFlagsDoNotLeakBetweenExecutions(t *testing.T) {
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	if _, err := execCommand(t, "mail", "send", "mysession", "--to", "BlueLake", "--subject", "prior subject", "ordinary body"); err != nil {
+		t.Fatalf("seed send: %v", err)
+	}
+
+	handle, err := stashPreparedRedaction("freshSecretBody", "[REDACTED]", nil)
+	if err != nil {
+		t.Fatalf("stash: %v", err)
+	}
+
+	out, execErr := execCommand(t, "mail", "send", "mysession", "--to", "BlueLake", "--prepared-redaction", handle)
+	if execErr == nil {
+		t.Fatalf("expected missing explicit subject to fail; out=%q", out)
+	}
+	if !strings.Contains(execErr.Error(), "explicit --subject") {
+		t.Fatalf("expected explicit subject error, got %v", execErr)
+	}
 }
 
 func TestMailSendOverseer_BlockModeRefusesBeforeSend(t *testing.T) {
