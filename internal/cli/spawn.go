@@ -4138,8 +4138,6 @@ type SpawnInitResult struct {
 	AgentsReached int  `json:"agents_reached"`
 }
 
-// waitForAgentsReady waits for spawned agents to show ready/idle prompts.
-// Returns the number of ready agents and any error.
 // codexPreflightDecision is the outcome of the Codex/ChatGPT preflight for a
 // spawn batch that requests a gpt-*-codex model on a ChatGPT-billed login.
 type codexPreflightDecision int
@@ -4299,6 +4297,8 @@ func worktreeAgentName(a FlatAgent, override string) string {
 	return fmt.Sprintf("%s_%d", strings.ToLower(string(a.Type)), a.Index)
 }
 
+// waitForAgentsReady waits for spawned agents to show ready/idle prompts.
+// Returns the number of ready agents and any error.
 func waitForAgentsReady(session string, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 	pollInterval := 2 * time.Second
