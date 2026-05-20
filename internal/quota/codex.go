@@ -18,7 +18,7 @@ var codexUsagePatterns = struct {
 }{
 	Usage:   regexp.MustCompile(`(?i)usage[:\s]+(\d+(?:\.\d+)?)\s*%`),
 	Limit:   regexp.MustCompile(`(?i)limit[:\s]+(\d+(?:\.\d+)?)\s*%`),
-	Limited: regexp.MustCompile(`(?i)(?:rate\s*limit|limited|exceeded|quota)`),
+	Limited: regexp.MustCompile(`(?i)\b(?:rate[\s-]*limit(?:ed)?|limit[\s-]*(?:exceeded|reached)|quota[\s-]*(?:exceeded|exhausted|reached)|exceeded\s+quota)\b`),
 }
 
 var codexStatusPatterns = struct {
