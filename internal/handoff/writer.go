@@ -65,96 +65,104 @@ func normalizeWriterSessionName(sessionName string) (string, error) {
 	return sessionName, nil
 }
 
-// canonicalAncestor returns the deepest ancestor of absPath that exists
-// on disk, with all symlinks resolved. It is used as a trusted anchor:
-// system-level symlinks (e.g. macOS's /var → /private/var, or per-user
-// /tmp -> /private/tmp) are outside ntm's control and must not cause
-// false-positive traversal errors.
-func canonicalAncestor(absPath string) (string, error) {
-	dir := absPath
-	for {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return resolved, nil
-		} else if !os.IsNotExist(err) {
-			return "", fmt.Errorf("eval symlinks %s: %w", dir, err)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return dir, nil
-		}
-		dir = parent
-	}
-}
-
-// ensureNoSymlinkComponents rejects paths where a *project-controlled*
-// component is a symlink. System-level symlinks above the deepest
-// existing ancestor (e.g. macOS's /var → /private/var) are intentionally
-// allowed: ntm cannot police what the OS does to its own filesystem,
-// and rejecting them broke every macOS tempdir-based test for the entire
-// internal/handoff package. See ntm-mac-symlink fix.
+// ensureNoSymlinkComponents rejects paths whose canonical form differs
+// from the lexical absolute form anywhere except a known macOS-style
+// system-level prefix (e.g. /var → /private/var, /tmp → /private/tmp).
 //
-// The check walks only from the trusted ancestor downward, lstat'ing
-// each newly appended component. Any symlink introduced *within* the
-// project tree (a real path-traversal attempt — e.g. someone creates
-// .ntm/handoffs pointing at /etc) still fails.
+// Why this shape: the original implementation lstat'd every component
+// from "/" downward and refused any symlink it saw. That was correct
+// on Linux but unsound on macOS, where /var and /tmp are themselves
+// symlinks to /private/var and /private/tmp respectively — every
+// tempdir used by the tests would (and did) fail the check.
+//
+// The replacement compares the canonical form of `absPath` against the
+// path itself: any in-tree symlink (e.g. .ntm/handoffs/linked pointing
+// at /etc) causes the canonical to diverge somewhere below the
+// system-level prefix and the call rejects. macOS's /var ↔ /private/var
+// substitution is the only divergence we tolerate.
 func ensureNoSymlinkComponents(path string) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
+	absPath = filepath.Clean(absPath)
 
-	anchor, err := canonicalAncestor(absPath)
+	canonical, err := canonicalPath(absPath)
 	if err != nil {
 		return err
 	}
+	canonical = filepath.Clean(canonical)
 
-	// Use the canonical anchor as a trusted root; everything from here
-	// down must not introduce a symlink.
-	rel, err := filepath.Rel(anchor, absPath)
-	if err != nil {
-		// absPath is not under the canonical anchor — this means the
-		// pre-existing prefix itself was a symlink chain that resolved
-		// outside the requested path. Fall back to comparing against
-		// the unresolved absPath prefix to detect any in-tree symlinks.
-		rel = ""
-	}
-
-	sep := string(filepath.Separator)
-	current := anchor
-	if rel == "" || rel == "." {
-		// Whole path already exists and is canonical — verify the leaf
-		// itself isn't a symlink (Lstat just in case EvalSymlinks lied).
-		info, lstatErr := os.Lstat(current)
-		if lstatErr != nil {
-			if os.IsNotExist(lstatErr) {
-				return nil
-			}
-			return fmt.Errorf("lstat %s: %w", current, lstatErr)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %s traverses symlinked component %s", path, current)
-		}
+	if canonical == absPath {
 		return nil
 	}
 
-	for _, part := range strings.Split(rel, sep) {
-		if part == "" || part == "." {
-			continue
+	// Strip the longest common SUFFIX of absPath and canonical; the
+	// remaining prefixes are what differs. If only the known
+	// macOS-shaped system-level prefixes differ, accept.
+	abs := absPath
+	can := canonical
+	for filepath.Base(abs) == filepath.Base(can) {
+		absParent := filepath.Dir(abs)
+		canParent := filepath.Dir(can)
+		if absParent == abs || canParent == can {
+			break
 		}
-		current = filepath.Join(current, part)
-		info, lstatErr := os.Lstat(current)
-		if lstatErr != nil {
-			if os.IsNotExist(lstatErr) {
-				return nil
-			}
-			return fmt.Errorf("lstat %s: %w", current, lstatErr)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %s traverses symlinked component %s", path, current)
+		abs = absParent
+		can = canParent
+	}
+
+	sep := string(filepath.Separator)
+	allowed := []struct{ raw, canon string }{
+		{raw: sep + "var", canon: sep + "private" + sep + "var"},
+		{raw: sep + "tmp", canon: sep + "private" + sep + "tmp"},
+		{raw: sep + "etc", canon: sep + "private" + sep + "etc"},
+	}
+	for _, kp := range allowed {
+		if (abs == kp.raw && can == kp.canon) || (abs == kp.canon && can == kp.raw) {
+			return nil
 		}
 	}
 
-	return nil
+	// Project-controlled symlink (or some other unexpected
+	// substitution): reject. Report the divergence at the *raw* side
+	// so the error names something the caller actually passed in.
+	return fmt.Errorf("path %s traverses symlinked component %s", path, abs)
+}
+
+// canonicalPath resolves all symlinks in absPath. If part of the path
+// does not yet exist, it canonicalises the deepest existing ancestor
+// and re-attaches the missing tail. Returns absPath unchanged if no
+// part of the path exists.
+func canonicalPath(absPath string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return resolved, nil
+	}
+	dir := absPath
+	missing := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			if missing == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, missing), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("eval symlinks %s: %w", dir, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return absPath, nil
+		}
+		base := filepath.Base(dir)
+		if missing == "" {
+			missing = base
+		} else {
+			missing = filepath.Join(base, missing)
+		}
+		dir = parent
+	}
 }
 
 func ensureSafeDir(path string) error {

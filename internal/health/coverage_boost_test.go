@@ -81,12 +81,12 @@ func TestDetectProcessStatus_PIDWithNoChildren(t *testing.T) {
 
 func TestDetectProcessStatus_PIDWithChildren(t *testing.T) {
 	t.Parallel()
-	// Use our own PID + a freshly-spawned child instead of PID 1.
-	// On macOS-latest CI runners, launchd's children are not visible
-	// via pgrep to the unprivileged test user, so HasChildAlive(1)
-	// returns false and this test flipped to ProcessExited. Spawning
-	// our own child guarantees a child is visible regardless of OS.
-	cmd := exec.Command("sleep", "1")
+	// Use our own PID + a long-lived child instead of PID 1. On
+	// macOS-latest CI runners, launchd's children are not visible via
+	// pgrep to the unprivileged test user. The 30s sleep keeps the
+	// child alive well past the detectProcessStatus call even when
+	// the suite is heavily parallel-loaded.
+	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot spawn child for the PID-has-children scenario: %v", err)
 	}

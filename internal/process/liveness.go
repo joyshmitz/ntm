@@ -71,52 +71,100 @@ func IsAlive(pid int) bool {
 // HasChildAlive returns true if the given shell PID has at least one
 // living child process. This is useful for detecting whether an agent
 // launched inside a tmux shell pane is still running.
+//
+// We enumerate ALL children of the parent and return true on the first
+// living one. The original implementation returned only GetChildPID's
+// first-child answer and then checked its liveness; under heavy
+// parallel-test load, that first child could be a zombie of an
+// unrelated parallel test even though plenty of healthy children
+// remained, which flapped TestDetectProcessStatus_PIDWithChildren and
+// TestDetectProcessStatus_PIDBasedCurrentProcess on busy runners.
 func HasChildAlive(shellPID int) bool {
 	if shellPID <= 0 {
 		return false
 	}
-
-	childPID := GetChildPID(shellPID)
-	if childPID <= 0 {
-		return false
+	for _, child := range getChildPIDs(shellPID) {
+		if IsAlive(child) {
+			return true
+		}
 	}
-	return IsAlive(childPID)
+	return false
 }
 
 // GetChildPID returns the first child PID of the given parent, or 0 if
 // no child is found. It reads /proc on Linux and falls back to pgrep.
+// Kept for backward compatibility — callers that need
+// "is at least one child alive" should use HasChildAlive directly.
 func GetChildPID(parentPID int) int {
 	if parentPID <= 0 {
 		return 0
 	}
+	children := getChildPIDs(parentPID)
+	if len(children) == 0 {
+		return 0
+	}
+	return children[0]
+}
 
-	// Try /proc first (Linux).
-	taskPath := fmt.Sprintf("/proc/%d/task/%d/children", parentPID, parentPID)
-	data, err := os.ReadFile(taskPath)
-	if err == nil {
-		parts := strings.Fields(string(data))
-		if len(parts) > 0 {
-			pid, err := strconv.Atoi(parts[0])
-			if err == nil && pid > 0 {
-				return pid
+// getChildPIDs returns every direct child PID of parentPID. It uses
+// /proc on Linux (walking every task/<tid>/children entry to catch
+// children adopted by non-main threads, which Go's runtime can do
+// when ForkExec runs on a non-main goroutine) and falls back to pgrep
+// on systems without /proc.
+func getChildPIDs(parentPID int) []int {
+	if parentPID <= 0 {
+		return nil
+	}
+
+	seen := make(map[int]struct{})
+	var pids []int
+	add := func(pid int) {
+		if pid <= 0 {
+			return
+		}
+		if _, ok := seen[pid]; ok {
+			return
+		}
+		seen[pid] = struct{}{}
+		pids = append(pids, pid)
+	}
+
+	// /proc walk: every thread of the parent can be the recorded
+	// fork() caller in Linux's accounting, so read every
+	// task/<tid>/children file.
+	taskDir := fmt.Sprintf("/proc/%d/task", parentPID)
+	if entries, err := os.ReadDir(taskDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := fmt.Sprintf("%s/%s/children", taskDir, entry.Name())
+			data, rerr := os.ReadFile(path)
+			if rerr != nil {
+				continue
+			}
+			for _, raw := range strings.Fields(string(data)) {
+				if pid, perr := strconv.Atoi(raw); perr == nil {
+					add(pid)
+				}
 			}
 		}
 	}
 
-	// Fallback to pgrep (works on macOS and Linux without /proc/.../children)
-	cmd := exec.Command("pgrep", "-P", strconv.Itoa(parentPID))
-	out, err := cmd.Output()
-	if err == nil {
-		parts := strings.Fields(string(out))
-		if len(parts) > 0 {
-			pid, err := strconv.Atoi(parts[0])
-			if err == nil && pid > 0 {
-				return pid
+	// Fallback / supplement: pgrep also picks up children where the
+	// parent's /proc layout is absent (macOS) or where /proc lists
+	// have raced behind the kernel.
+	if cmd := exec.Command("pgrep", "-P", strconv.Itoa(parentPID)); cmd != nil {
+		if out, err := cmd.Output(); err == nil {
+			for _, raw := range strings.Fields(string(out)) {
+				if pid, perr := strconv.Atoi(raw); perr == nil {
+					add(pid)
+				}
 			}
 		}
 	}
 
-	return 0
+	return pids
 }
 
 // IsChildAlive is an alias for HasChildAlive for backward compatibility.

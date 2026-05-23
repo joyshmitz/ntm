@@ -513,17 +513,16 @@ func TestDetectProcessStatus(t *testing.T) {
 func TestDetectProcessStatus_PIDBasedCurrentProcess(t *testing.T) {
 	t.Parallel()
 
-	// The test process itself almost always has at least one child (the
-	// in-process goroutine scheduler is not a child but compilations,
-	// helper subprocesses, or the lingering exec we just ran below give
-	// us a deterministic one).
+	// We previously used PID 1 here, but on macOS-latest CI runners
+	// launchd's children are not visible via pgrep to the unprivileged
+	// test user, so HasChildAlive(1) returned false and the test
+	// flipped to ProcessExited. Spawning our own long-lived child
+	// guarantees a child is visible regardless of platform.
 	//
-	// We previously used PID 1, but on macOS-latest CI runners launchd's
-	// children are not visible via pgrep to the unprivileged test user,
-	// so HasChildAlive(1) returned false and the test flipped to
-	// ProcessExited. Spawning our own child guarantees a child is visible
-	// regardless of platform.
-	cmd := exec.Command("sleep", "1")
+	// The sleep budget is generous (30s) so that even under heavy
+	// parallel-test load the child survives well past the
+	// detectProcessStatus call.
+	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot spawn child for the PID-has-children scenario: %v", err)
 	}

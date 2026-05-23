@@ -352,7 +352,11 @@ func worktreeCurrentBranch(worktreePath string) (string, error) {
 }
 
 func worktreeListed(output []byte, worktreePath string) bool {
-	target := filepath.Clean(worktreePath)
+	// macOS resolves /var/folders/... to /private/var/folders/... when
+	// git emits worktree paths; the caller usually passes the
+	// pre-resolved form. Normalise both sides via EvalSymlinks so the
+	// comparison survives the substitution.
+	target := canonicalisePath(worktreePath)
 	for _, line := range strings.Split(string(output), "\n") {
 		if !strings.HasPrefix(line, "worktree ") {
 			continue
@@ -361,11 +365,45 @@ func worktreeListed(output []byte, worktreePath string) bool {
 		if listed == "" {
 			continue
 		}
-		if filepath.Clean(listed) == target {
+		if canonicalisePath(listed) == target {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalisePath returns filepath.Clean(p) with all existing symlinks
+// resolved. If the path or an ancestor doesn't exist, it canonicalises
+// the deepest ancestor that does and re-attaches the missing tail —
+// this keeps comparisons stable across the macOS /var → /private/var
+// substitution even for not-yet-created worktree paths.
+func canonicalisePath(p string) string {
+	clean := filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(resolved)
+	}
+	dir := clean
+	missing := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			if missing == "" {
+				return filepath.Clean(resolved)
+			}
+			return filepath.Clean(filepath.Join(resolved, missing))
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return clean
+		}
+		base := filepath.Base(dir)
+		if missing == "" {
+			missing = base
+		} else {
+			missing = filepath.Join(base, missing)
+		}
+		dir = parent
+	}
 }
 
 // GetWorktreeForAgent returns worktree information for a specific agent
