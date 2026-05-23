@@ -3,6 +3,8 @@ package health
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"testing"
@@ -511,13 +513,28 @@ func TestDetectProcessStatus(t *testing.T) {
 func TestDetectProcessStatus_PIDBasedCurrentProcess(t *testing.T) {
 	t.Parallel()
 
-	// Use the current process PID as the "shell". The test runner is our
-	// child, so HasChildAlive should return true for any PID that has
-	// children. We use PID 1 (init/systemd) which always has children.
-	// With a valid shell PID that has children, text patterns are ignored.
-	got := detectProcessStatus("exit status 1", "python", 1)
+	// The test process itself almost always has at least one child (the
+	// in-process goroutine scheduler is not a child but compilations,
+	// helper subprocesses, or the lingering exec we just ran below give
+	// us a deterministic one).
+	//
+	// We previously used PID 1, but on macOS-latest CI runners launchd's
+	// children are not visible via pgrep to the unprivileged test user,
+	// so HasChildAlive(1) returned false and the test flipped to
+	// ProcessExited. Spawning our own child guarantees a child is visible
+	// regardless of platform.
+	cmd := exec.Command("sleep", "1")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn child for the PID-has-children scenario: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	got := detectProcessStatus("exit status 1", "python", os.Getpid())
 	if got != ProcessRunning {
-		t.Errorf("detectProcessStatus with PID 1 (has children) = %v, want ProcessRunning", got)
+		t.Errorf("detectProcessStatus with current PID (has children) = %v, want ProcessRunning", got)
 	}
 }
 

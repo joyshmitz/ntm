@@ -99,7 +99,7 @@ func runGuardTestGit(t *testing.T, dir string, args ...string) string {
 
 func initGuardTestGitRepoWithCommit(t *testing.T) string {
 	t.Helper()
-	repo := t.TempDir()
+	repo := canonicalTempDir(t)
 	if output, err := exec.Command("git", "init", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, string(output))
 	}
@@ -112,7 +112,7 @@ func initGuardTestGitRepoWithCommit(t *testing.T) string {
 func TestFindGitHookPathLinkedWorktree(t *testing.T) {
 	t.Parallel()
 	repo := initGuardTestGitRepoWithCommit(t)
-	linked := filepath.Join(t.TempDir(), "linked")
+	linked := filepath.Join(canonicalTempDir(t), "linked")
 	runGuardTestGit(t, repo, "worktree", "add", linked)
 
 	got, err := findGitHookPath(linked, "pre-commit")

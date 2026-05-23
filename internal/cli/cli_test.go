@@ -149,6 +149,13 @@ func TestShouldInitializeRobotPersistenceSkipsStatelessOverlay(t *testing.T) {
 func isolateSessionAgentStorage(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
+	// Resolve symlinks so production code that canonicalizes paths
+	// (os.Getwd, git rev-parse) matches what tests pass back in.
+	// On macOS, t.TempDir() returns /var/folders/... but os.Getwd
+	// after chdir returns /private/var/folders/... — keep them aligned.
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	// bd-ev740 / bd-jba66 precedent: clear ambient NTM_CONFIG so
@@ -156,6 +163,25 @@ func isolateSessionAgentStorage(t *testing.T) {
 	// non-writable path that an outer CI/agent shell may have exported
 	// (e.g. /nonexistent/config.toml).
 	t.Setenv("NTM_CONFIG", "")
+}
+
+// canonicalTempDir wraps t.TempDir with EvalSymlinks so the returned
+// path matches what production code sees via os.Getwd() or
+// `git rev-parse --show-toplevel`. On macOS, t.TempDir() returns
+// "/var/folders/..." but those calls return the canonical
+// "/private/var/folders/..." form; comparing the two fails only on
+// macOS-latest CI.
+//
+// Use this in any test that constructs a tempdir path and then compares
+// it to a path emitted by code that may have canonicalized it.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
+	}
+	return resolved
 }
 
 func createCLIWorkspaceProjectRoot(t *testing.T) (string, string) {
@@ -330,7 +356,7 @@ func TestResolveMessageScopeRejectsWorkspaceFallbackForExplicitSession(t *testin
 func TestResolveMessageScopeFallsBackToProjectRoot(t *testing.T) {
 	isolateSessionAgentStorage(t)
 
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(projectDir); err != nil {
@@ -355,7 +381,7 @@ func TestResolveMessageScopeInfersLabeledSessionFromCurrentProject(t *testing.T)
 	testutil.RequireTmuxThrottled(t)
 	isolateSessionAgentStorage(t)
 
-	projectsBase := t.TempDir()
+	projectsBase := canonicalTempDir(t)
 	projectDir := filepath.Join(projectsBase, "messageproject")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
@@ -596,7 +622,7 @@ func TestResolvePipelineProjectDirForSessionRejectsWorkspaceFallbackForExplicitS
 }
 
 func TestResolvePipelineProjectDirForSessionFallsBackToProjectRoot(t *testing.T) {
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(projectDir); err != nil {
@@ -982,7 +1008,7 @@ func TestResolveWorktreeScopeRejectsWorkspaceFallbackForExplicitSession(t *testi
 }
 
 func TestResolveWorktreeScopeFallsBackToProjectRoot(t *testing.T) {
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(projectDir); err != nil {
@@ -1005,7 +1031,7 @@ func TestResolveWorktreeScopeFallsBackToProjectRoot(t *testing.T) {
 func TestResolveWorktreeScopeInfersLabeledSessionFromCurrentProject(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	projectsBase := t.TempDir()
+	projectsBase := canonicalTempDir(t)
 	projectDir := filepath.Join(projectsBase, "scopeproject")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
@@ -1105,7 +1131,7 @@ func TestResolveContextBuildScopeRejectsWorkspaceFallbackForExplicitSession(t *t
 }
 
 func TestResolveContextBuildScopeFallsBackToProjectRoot(t *testing.T) {
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 
 	oldWd, _ := os.Getwd()
 	if err := os.Chdir(projectDir); err != nil {
@@ -1128,7 +1154,7 @@ func TestResolveContextBuildScopeFallsBackToProjectRoot(t *testing.T) {
 func TestResolveContextBuildScopeInfersLabeledSessionFromCurrentProject(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	projectsBase := t.TempDir()
+	projectsBase := canonicalTempDir(t)
 	projectDir := filepath.Join(projectsBase, "contextscope")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
@@ -1300,7 +1326,7 @@ func TestResolveEnsembleProjectDirForSessionRejectsInvalidSessionName(t *testing
 }
 
 func TestResolveEnsembleProjectDirForSessionFallsBackToProjectRoot(t *testing.T) {
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0o755); err != nil {
 		t.Fatalf("mkdir ntm dir: %v", err)
 	}
@@ -1786,7 +1812,7 @@ func TestRunEnsembleProvenance_UsesSavedOutputsWhenSessionOffline(t *testing.T) 
 }
 
 func TestResolvePipelineProjectDirForSessionFallsBackToProjectRootFromNestedDir(t *testing.T) {
-	projectDir := t.TempDir()
+	projectDir := canonicalTempDir(t)
 	if err := os.MkdirAll(filepath.Join(projectDir, ".ntm"), 0755); err != nil {
 		t.Fatalf("mkdir ntm root: %v", err)
 	}

@@ -320,9 +320,18 @@ func TestLoadAllCommandHooks_InvalidMainConfigPropagatesError(t *testing.T) {
 
 // --- HookManager tests using temp git repos ---
 
+// initTempGitRepo creates a temp git repo and returns the canonical
+// (symlink-resolved) path. On macOS, t.TempDir returns /var/folders/...
+// but git rev-parse --show-toplevel returns the /private/var/folders/...
+// canonical form, which breaks string equality with the tempdir we
+// originally returned. Resolving symlinks once up-front keeps the
+// expected/actual paths aligned on every platform.
 func initTempGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	cmd := exec.Command("git", "init", dir)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -371,7 +380,11 @@ func TestNewManager(t *testing.T) {
 func TestNewManager_LinkedWorktreeUsesGitHooksDir(t *testing.T) {
 	t.Parallel()
 	repo := initTempGitRepoWithCommit(t)
-	linked := filepath.Join(t.TempDir(), "linked")
+	parent := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		parent = resolved
+	}
+	linked := filepath.Join(parent, "linked")
 	runGit(t, repo, "worktree", "add", linked)
 
 	m, err := NewManager(linked)

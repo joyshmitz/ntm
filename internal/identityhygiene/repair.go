@@ -349,6 +349,15 @@ func canonicalizeRoots(roots []string) []string {
 // safeAbs absolutizes the candidate path, resolving symlinks when
 // possible. Returns false on any error so the caller can short-circuit
 // to skipped_out_of_bounds.
+//
+// If the candidate path doesn't exist (the common "missing file" case
+// the Repair flow exists to handle gracefully), we resolve the deepest
+// existing ancestor and re-attach the missing tail. Without this,
+// macOS's /var → /private/var symlink would cause AllowedRoots
+// (canonicalized to /private/var/...) to mismatch the candidate
+// (still /var/...), and the path would be reported as SkippedOutOfBounds
+// instead of SkippedMissing — which is what the macOS-only test failure
+// in TestRepair_MissingFileIsSkippedNotErrored was about.
 func safeAbs(p string) (string, bool) {
 	if strings.TrimSpace(p) == "" {
 		return "", false
@@ -359,7 +368,30 @@ func safeAbs(p string) (string, bool) {
 	}
 	abs = filepath.Clean(abs)
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = filepath.Clean(resolved)
+		return filepath.Clean(resolved), true
+	}
+	// Path doesn't exist; canonicalize the deepest existing ancestor so
+	// containment checks against canonicalized roots stay correct.
+	dir := abs
+	missing := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			if missing == "" {
+				return filepath.Clean(resolved), true
+			}
+			return filepath.Clean(filepath.Join(resolved, missing)), true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		base := filepath.Base(dir)
+		if missing == "" {
+			missing = base
+		} else {
+			missing = filepath.Join(base, missing)
+		}
+		dir = parent
 	}
 	return abs, true
 }

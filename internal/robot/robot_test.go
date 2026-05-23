@@ -123,7 +123,7 @@ func TestGetMail_PrefersUsableWorkspaceProjectKey(t *testing.T) {
 		}
 	})
 
-	cwdProject := t.TempDir()
+	cwdProject := tempDirCanonical(t)
 	if err := os.MkdirAll(filepath.Join(cwdProject, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +153,13 @@ func TestGetMail_DropsStaleSessionAgentFromDifferentProject(t *testing.T) {
 		}
 	})
 
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Set both HOME and XDG_CONFIG_HOME so session-agent storage lands in
+	// a sandbox on macOS (os.UserConfigDir ignores XDG_CONFIG_HOME there).
+	tmpHome := tempDirCanonical(t)
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
 
-	cwdProject := t.TempDir()
+	cwdProject := tempDirCanonical(t)
 	if err := os.MkdirAll(filepath.Join(cwdProject, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +167,7 @@ func TestGetMail_DropsStaleSessionAgentFromDifferentProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	staleProject := t.TempDir()
+	staleProject := tempDirCanonical(t)
 	if err := os.MkdirAll(filepath.Join(staleProject, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +203,7 @@ func TestGetMail_DegradesOnAgentMailListAgentsError(t *testing.T) {
 		}
 	})
 
-	projectDir := t.TempDir()
+	projectDir := tempDirCanonical(t)
 	if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}

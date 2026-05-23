@@ -119,7 +119,7 @@ func TestResolveWorktreeSyncRootAcceptsProvisionedSiblingWorktree(t *testing.T) 
 
 func setupCLIWorktreeGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	for _, args := range [][]string{
 		{"git", "init"},
 		{"git", "symbolic-ref", "HEAD", "refs/heads/main"},

@@ -2,6 +2,7 @@ package health
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -80,10 +81,23 @@ func TestDetectProcessStatus_PIDWithNoChildren(t *testing.T) {
 
 func TestDetectProcessStatus_PIDWithChildren(t *testing.T) {
 	t.Parallel()
-	// PID 1 (init/systemd) always has children on Linux
-	got := detectProcessStatus("exit status 1", "python", 1)
+	// Use our own PID + a freshly-spawned child instead of PID 1.
+	// On macOS-latest CI runners, launchd's children are not visible
+	// via pgrep to the unprivileged test user, so HasChildAlive(1)
+	// returns false and this test flipped to ProcessExited. Spawning
+	// our own child guarantees a child is visible regardless of OS.
+	cmd := exec.Command("sleep", "1")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn child for the PID-has-children scenario: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	got := detectProcessStatus("exit status 1", "python", os.Getpid())
 	if got != ProcessRunning {
-		t.Errorf("detectProcessStatus(PID 1 with children) = %v, want ProcessRunning", got)
+		t.Errorf("detectProcessStatus(current PID with children) = %v, want ProcessRunning", got)
 	}
 }
 

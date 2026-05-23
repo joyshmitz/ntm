@@ -12,7 +12,14 @@ import (
 
 // IsAlive checks whether a process with the given PID is still running.
 // It uses /proc on Linux for an efficient, non-racy check and falls back
-// to kill(pid, 0) on other platforms.
+// to kill(pid, 0) plus a `ps` zombie-state probe on other platforms.
+//
+// Zombies are deliberately treated as not-alive: a zombie process is
+// terminated but unreaped, and from any practical liveness standpoint
+// (e.g. the memory-daemon supervisor) it is gone. Without this, the
+// kill(pid, 0) fallback used on macOS would happily report a zombie as
+// alive — that's the macOS-only failure in
+// TestCheckMemoryDaemon_ZombiePIDFileIsCleanedUp.
 func IsAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -40,8 +47,25 @@ func IsAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+
+	// Signal 0 succeeded — but on macOS that includes zombies, which
+	// /proc would have rejected on Linux. Cross-check the ps state so
+	// the two platforms agree on what "alive" means.
+	if cmd := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)); cmd != nil {
+		if out, perr := cmd.Output(); perr == nil {
+			state := strings.TrimSpace(string(out))
+			if state != "" {
+				short := string(state[0])
+				if short == "Z" || short == "X" || short == "x" {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // HasChildAlive returns true if the given shell PID has at least one
