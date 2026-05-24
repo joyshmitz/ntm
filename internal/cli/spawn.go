@@ -1772,6 +1772,11 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		model         string // alias
 		resolvedModel string // full name
 		persona       string // persona name when launched from --profile-set/--profiles (ntm#149)
+		// personaPromptSource is the prepared system-prompt file path so the
+		// spawn JSON output can surface *which* prompt source seeded each pane,
+		// not just the persona's display name. Lets orchestrators verify the
+		// persona→pane→prompt mapping after a --profile-set launch (ntm#159).
+		personaPromptSource string
 		command       string
 		promptDelay   time.Duration // Stagger delay before prompt delivery
 	}
@@ -2268,15 +2273,16 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 
 		// Track for resilience monitor
 		launchedAgents = append(launchedAgents, launchedAgent{
-			paneID:        pane.ID,
-			paneIndex:     pane.Index,
-			paneTitle:     title,
-			agentType:     string(agent.Type),
-			model:         agent.Model,
-			resolvedModel: resolvedModel,
-			persona:       personaName,
-			command:       safeAgentCmd,
-			promptDelay:   promptDelay,
+			paneID:              pane.ID,
+			paneIndex:           pane.Index,
+			paneTitle:           title,
+			agentType:           string(agent.Type),
+			model:               agent.Model,
+			resolvedModel:       resolvedModel,
+			persona:             personaName,
+			personaPromptSource: systemPromptFile,
+			command:             safeAgentCmd,
+			promptDelay:         promptDelay,
 		})
 		auditAgentsLaunched = len(launchedAgents)
 
@@ -2467,10 +2473,14 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		// mapping orchestrators need after a --profile-set launch (ntm#149).
 		paneDelays := make(map[int]time.Duration)
 		panePersonas := make(map[int]string)
+		panePersonaPromptSources := make(map[int]string)
 		for _, agent := range launchedAgents {
 			paneDelays[agent.paneIndex] = agent.promptDelay
 			if agent.persona != "" {
 				panePersonas[agent.paneIndex] = agent.persona
+			}
+			if agent.personaPromptSource != "" {
+				panePersonaPromptSources[agent.paneIndex] = agent.personaPromptSource
 			}
 		}
 
@@ -2478,16 +2488,17 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		agentCounts := output.AgentCountsResponse{}
 		for i, p := range finalPanes {
 			paneResponses[i] = output.PaneResponse{
-				Index:         p.Index,
-				Title:         p.Title,
-				Type:          agentTypeToString(p.Type),
-				Variant:       p.Variant, // Model alias or persona name
-				Persona:       panePersonas[p.Index],
-				Active:        p.Active,
-				Width:         p.Width,
-				Height:        p.Height,
-				Command:       p.Command,
-				PromptDelayMs: paneDelays[p.Index].Milliseconds(),
+				Index:               p.Index,
+				Title:               p.Title,
+				Type:                agentTypeToString(p.Type),
+				Variant:             p.Variant, // Model alias or persona name
+				Persona:             panePersonas[p.Index],
+				PersonaPromptSource: panePersonaPromptSources[p.Index],
+				Active:              p.Active,
+				Width:               p.Width,
+				Height:              p.Height,
+				Command:             p.Command,
+				PromptDelayMs:       paneDelays[p.Index].Milliseconds(),
 			}
 			incrementAgentCounts(&agentCounts, p.Type)
 		}

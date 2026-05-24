@@ -70,6 +70,11 @@ type PaneResponse struct {
 	Type           string  `json:"type"`              // claude, codex, gemini, user
 	Variant        string  `json:"variant,omitempty"` // model alias or persona name
 	Persona        string  `json:"persona,omitempty"` // persona name when spawned via --profile-set/--profiles (ntm#149)
+	// PersonaPromptSource is the prepared system-prompt file path used to seed the
+	// persona's role prompt. Lets orchestrators verify *which* prompt source landed
+	// on each pane after a --profile-set launch, not just the persona's display
+	// name. Empty when no persona is attached. (ntm#159)
+	PersonaPromptSource string `json:"persona_prompt_source,omitempty"`
 	Active         bool    `json:"active,omitempty"`
 	Width          int     `json:"width,omitempty"`
 	Height         int     `json:"height,omitempty"`
