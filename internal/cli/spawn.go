@@ -2219,8 +2219,17 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 					// Importantly, this ensures we never send BEFORE the context/recovery steps above.
 					time.Sleep(promptDelay)
 				} else {
-					// Immediate delivery: small delay to ensure shell is ready
-					time.Sleep(200 * time.Millisecond)
+					// Immediate delivery: poll the pane's scrollback until the
+					// agent reaches `idle` (welcome banner has been replaced by
+					// the input prompt) instead of sleeping a fixed 200ms,
+					// which races CC's welcome on cold-cache hosts and gets the
+					// prompt swallowed by the splash screen. Falls back to
+					// fire-and-forget on timeout so we keep the original
+					// "always send" behavior — better to over-deliver than to
+					// silently drop. (#158)
+					if !waitForPaneAgentIdle(paneID, string(agentType), 30*time.Second) && !IsJSONOutput() {
+						fmt.Printf("⚠ Warning: timed out waiting for %s agent %d to become idle; sending prompt anyway\n", agentType, idx)
+					}
 				}
 
 				if err := sendPromptWithDoubleEnterForAgent(paneID, finalPrompt, tmux.AgentType(agentType)); err != nil {
@@ -4396,6 +4405,26 @@ func collectReadyAgentPanes(panes []tmux.Pane, capture func(string) (string, err
 	}
 
 	return readyPanes, agentCount
+}
+
+// waitForPaneAgentIdle polls a single pane's scrollback until the agent
+// reaches "idle" (i.e. its welcome banner has been replaced by the input
+// prompt) or the timeout expires. Returns true if the pane became idle in
+// time. Used by the immediate-prompt path in spawn so we no longer race
+// CC's welcome with a fixed 200ms sleep. (#158)
+func waitForPaneAgentIdle(paneID, agentTypeStr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 200 * time.Millisecond
+	for {
+		scrollback, _ := tmux.CaptureForStatusDetection(paneID)
+		if determineAgentState(scrollback, agentTypeStr) == "idle" {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // runAssignmentPhase executes the assignment phase after spawn.
