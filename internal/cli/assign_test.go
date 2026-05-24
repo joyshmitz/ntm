@@ -1004,6 +1004,33 @@ func TestDetermineAgentState_NormalizesAliasHints(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentTypeAlias(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty string is no filter", raw: "", want: ""},
+		{name: "any is no filter", raw: "any", want: ""},
+		{name: "ANY is no filter", raw: "ANY", want: ""},
+		{name: "all is no filter", raw: "all", want: ""},
+		{name: "star is no filter", raw: "*", want: ""},
+		{name: "whitespace around any", raw: "  any  ", want: ""},
+		{name: "claude resolves to claude", raw: "claude", want: "claude"},
+		{name: "codex alias cod resolves", raw: "cod", want: "codex"},
+		{name: "gemini alias gmi resolves", raw: "gmi", want: "gemini"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeAgentTypeAlias(tc.raw)
+			if got != tc.want {
+				t.Fatalf("normalizeAgentTypeAlias(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParsePriorityString(t *testing.T) {
 
 	tests := []struct {

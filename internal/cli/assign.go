@@ -201,7 +201,7 @@ Examples:
 	cmd.Flags().IntVar(&assignLimit, "limit", 0, "Maximum number of assignments (0 = unlimited)")
 
 	// Agent type filters
-	cmd.Flags().StringVar(&assignAgentType, "agent", "", "Filter by agent type: claude, codex, gemini")
+	cmd.Flags().StringVar(&assignAgentType, "agent", "", "Filter by agent type: any (no filter), claude, codex, gemini")
 	cmd.Flags().BoolVar(&assignCCOnly, "cc-only", false, "Only assign to Claude agents (alias for --agent=claude)")
 	cmd.Flags().BoolVar(&assignCodOnly, "cod-only", false, "Only assign to Codex agents (alias for --agent=codex)")
 	cmd.Flags().BoolVar(&assignGmiOnly, "gmi-only", false, "Only assign to Gemini agents (alias for --agent=gemini)")
@@ -650,7 +650,7 @@ func buildAssignWatchOverlayWarning(key string, err error) string {
 func resolveAgentTypeFilter() string {
 	// Explicit --agent flag takes precedence
 	if assignAgentType != "" {
-		return robot.ResolveAgentType(assignAgentType)
+		return normalizeAgentTypeAlias(assignAgentType)
 	}
 	// Convenience flags
 	if assignCCOnly {
@@ -663,6 +663,130 @@ func resolveAgentTypeFilter() string {
 		return "gemini"
 	}
 	return "" // No filter
+}
+
+// normalizeAgentTypeAlias collapses operator-friendly "no filter" spellings
+// (any/all/*) to the empty string and otherwise resolves provider aliases via
+// robot.ResolveAgentType. Returning "" from this function unambiguously means
+// "do not filter" — callers compare against "" to short-circuit filtering.
+//
+// Without this, `--agent any` propagated as the literal "any" through
+// robot.ResolveAgentType (which is not an alias it recognizes), so every
+// pane's provider was compared to the string "any" and excluded — making
+// mixed-provider sessions report zero idle agents even with idle panes.
+func normalizeAgentTypeAlias(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "any", "all", "*":
+		return ""
+	default:
+		return robot.ResolveAgentType(raw)
+	}
+}
+
+// operatorGatedLabels identifies labels that signal a bead is intentionally
+// held back from automated assignment — pending human/operator action,
+// business input, etc. A bead carrying any of these labels is never returned
+// by triage filtering, even when bv considers it ready.
+var operatorGatedLabels = map[string]bool{
+	"operator-gated":      true,
+	"operator-action":     true,
+	"needs-operator":      true,
+	"human-gated":         true,
+	"human-input":         true,
+	"business-input":      true,
+	"blocked-on-operator": true,
+	"blocked-on-ivan":     true,
+}
+
+// normalizeBeadStatus folds case + delimiter variation (in-progress, In_Progress,
+// IN PROGRESS) into a canonical lowercase underscore form so the assignment
+// classifier can match against a small fixed set of statuses.
+func normalizeBeadStatus(status string) string {
+	canonical := strings.ToLower(strings.TrimSpace(status))
+	canonical = strings.ReplaceAll(canonical, "-", "_")
+	canonical = strings.ReplaceAll(canonical, " ", "_")
+	return canonical
+}
+
+// classifyTriageRecForAssignment decides whether a bv triage recommendation is
+// safe to feed into assign-and-dispatch. Returns nil when the bead is ready to
+// be assigned; otherwise returns a SkippedItem populated with the disqualifying
+// reason. The decision order is intentional: dependency blockers are reported
+// first (most useful diagnostic), then operator gates (visible policy signal),
+// then status, then "already assigned to a live pane in this session." Each
+// later check would be misleading if a higher-precedence reason also applied,
+// so we surface the strongest signal.
+//
+// bv's --robot-triage output is permissive — it includes blocked, in_progress,
+// closed, and operator-gated beads with non-zero scores. Trusting it as
+// "actionable" caused stale assignments and reassignment of in-flight work.
+func classifyTriageRecForAssignment(rec bv.TriageRecommendation, activeAssignments map[string]struct{}) *SkippedItem {
+	if len(rec.BlockedBy) > 0 {
+		return &SkippedItem{
+			BeadID:       rec.ID,
+			BeadTitle:    rec.Title,
+			Reason:       "blocked_by_dependency",
+			BlockedByIDs: rec.BlockedBy,
+		}
+	}
+
+	for _, label := range rec.Labels {
+		if operatorGatedLabels[strings.ToLower(strings.TrimSpace(label))] {
+			return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "operator_gated"}
+		}
+	}
+
+	switch normalizeBeadStatus(rec.Status) {
+	case "", "open", "ready":
+		// assignable status; fall through to active-assignment check
+	case "in_progress":
+		return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "already_in_progress"}
+	case "blocked":
+		return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "blocked_status"}
+	case "closed", "resolved", "done":
+		return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "closed_status"}
+	default:
+		return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "not_open_status"}
+	}
+
+	if _, ok := activeAssignments[rec.ID]; ok {
+		return &SkippedItem{BeadID: rec.ID, BeadTitle: rec.Title, Reason: "already_assigned"}
+	}
+
+	return nil
+}
+
+// loadActiveAssignmentBeadIDs returns the set of bead IDs that have an active
+// assignment record in this session's local assignment store. Used to suppress
+// re-dispatch of beads that have already been claimed by a live pane but whose
+// upstream status (bv/br) hasn't caught up yet.
+//
+// Errors are intentionally swallowed: an unreadable store is treated the same
+// as an empty one (no suppressions), since blocking assignment entirely on a
+// transient store-read failure would be worse than briefly double-dispatching.
+func loadActiveAssignmentBeadIDs(session string) map[string]struct{} {
+	active := make(map[string]struct{})
+	store, err := assignment.LoadStore(session)
+	if err != nil {
+		return active
+	}
+	for _, item := range store.ListActive() {
+		active[item.BeadID] = struct{}{}
+	}
+	return active
+}
+
+// countSkippedByReason counts SkippedItems matching a specific reason. Used to
+// keep BlockedCount in the assignment summary semantically narrow ("blocked by
+// a dependency") even after the broader skipped-reason taxonomy was added.
+func countSkippedByReason(items []SkippedItem, reason string) int {
+	n := 0
+	for i := range items {
+		if items[i].Reason == reason {
+			n++
+		}
+	}
+	return n
 }
 
 func resolveAssignTimeout(timeout time.Duration) time.Duration {
@@ -4420,12 +4544,12 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 
 // getIdleAgents returns a list of idle agents that can take new assignments
 func getIdleAgents(session, agentTypeFilter string, verbose bool) ([]assignAgentInfo, error) {
-	normalizedFilter := ""
-	if agentTypeFilter != "" {
-		normalizedFilter = robot.ResolveAgentType(agentTypeFilter)
-		if normalizedFilter == "" || normalizedFilter == "unknown" || normalizedFilter == "user" {
-			return nil, fmt.Errorf("invalid agent type filter %q", agentTypeFilter)
-		}
+	normalizedFilter := normalizeAgentTypeAlias(agentTypeFilter)
+	// normalizedFilter == "" means "no provider filter" (raw was "", any, all, *).
+	// Reject only the sentinel values robot.ResolveAgentType emits for unknown
+	// or non-agent inputs.
+	if agentTypeFilter != "" && (normalizedFilter == "unknown" || normalizedFilter == "user") {
+		return nil, fmt.Errorf("invalid agent type filter %q", agentTypeFilter)
 	}
 
 	// Get panes from tmux
