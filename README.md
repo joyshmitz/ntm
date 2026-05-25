@@ -527,6 +527,39 @@ ntm deps -v
 NTM can only launch tools that are installed and discoverable in `PATH`.
 Use `ntm deps -v` to check what it sees.
 
+### `claude`, `codex`, or `gemini` not detected over SSH / tmux / non-login shells
+
+NTM discovers agent CLIs via the `PATH` of the **runtime environment it is launched in** —
+not the `PATH` of your interactive login shell. Tools installed under npm-global or
+`~/.local/bin` are often added to `PATH` by your `~/.bashrc` / `~/.zshrc` / `~/.profile`,
+which a non-interactive or non-login shell (a bare SSH command, a detached tmux server, a
+systemd unit, a CI runner) does not source. In that case `ntm deps -v` reports the agents as
+missing even though they work fine in your normal terminal.
+
+First, confirm what *NTM's* environment actually resolves, under the same shell/SSH/tmux
+context where you run NTM:
+
+```bash
+command -v claude
+command -v codex
+command -v gemini
+ntm deps -v
+```
+
+If those `command -v` checks come up empty here but succeed in your interactive shell, the
+fix is to put the missing directories on `PATH` before launching NTM. The most robust option
+is a small wrapper that exports the right `PATH` and then `exec`s NTM (paths vary by host):
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/ntm-wrapper — ensure agent CLIs are on PATH, then hand off to ntm.
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+exec ntm "$@"
+```
+
+Make it executable (`chmod +x ~/bin/ntm-wrapper`) and invoke that instead of `ntm`. Re-run
+`ntm deps -v` through the wrapper to confirm all three CLIs are now detected.
+
 ### A work command has nothing useful to say
 
 `ntm work ...` depends on running inside a repo with Beads/BV data available.

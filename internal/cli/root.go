@@ -128,7 +128,12 @@ Shell Integration:
 			cfg, err = startup.GetConfig()
 			endProfile()
 			if err != nil {
-				// Use defaults if config loading fails
+				// Config loading failed for a genuine reason (e.g. an invalid
+				// global config); an invalid project overlay no longer reaches
+				// here — it is skipped with its own warning inside LoadMerged.
+				// Warn loudly so the user sees the real cause instead of
+				// silently reverting to built-in defaults (issue #162).
+				fmt.Fprintf(os.Stderr, "ntm: warning: config load failed (%v); using built-in defaults\n", err)
 				cfg = config.Default()
 			}
 			activeTheme := theme.Current()
