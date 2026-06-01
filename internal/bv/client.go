@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -340,6 +341,35 @@ func (c *BVClient) workDir() (string, error) {
 	return normalizeTriageDir(c.WorkspacePath)
 }
 
+// nonActionableStatuses are bead statuses that make a recommendation unsafe to
+// treat as ready work even when it carries no dependency blockers — e.g. a bead
+// with status=blocked but an empty blocked_by list. bv's --robot-triage output
+// is permissive (it surfaces blocked/in_progress/closed beads with non-zero
+// scores), so status must be consulted in addition to the blocker list.
+var nonActionableStatuses = map[string]struct{}{
+	"blocked":     {},
+	"in_progress": {},
+	"closed":      {},
+	"resolved":    {},
+	"done":        {},
+}
+
+// isActionableRecommendation reports whether a triage recommendation is ready to
+// act on: it must have no dependency blockers AND not be in a non-actionable
+// status. This keeps the serve API (/api/v1/beads/recommend) and the FilterReady
+// gate consistent with the assignment-side classifier, so a status=blocked bead
+// with an empty blocked_by list is not reported as actionable.
+func isActionableRecommendation(rec TriageRecommendation) bool {
+	if len(rec.BlockedBy) > 0 {
+		return false
+	}
+	canonical := strings.ToLower(strings.TrimSpace(rec.Status))
+	canonical = strings.ReplaceAll(canonical, "-", "_")
+	canonical = strings.ReplaceAll(canonical, " ", "_")
+	_, blocked := nonActionableStatuses[canonical]
+	return !blocked
+}
+
 // convertRecommendation converts a TriageRecommendation to our Recommendation format.
 func (c *BVClient) convertRecommendation(rec TriageRecommendation) Recommendation {
 	r := Recommendation{
@@ -349,7 +379,7 @@ func (c *BVClient) convertRecommendation(rec TriageRecommendation) Recommendatio
 		UnblocksCount: len(rec.UnblocksIDs),
 		UnblocksIDs:   rec.UnblocksIDs,
 		BlockedByIDs:  rec.BlockedBy,
-		IsActionable:  len(rec.BlockedBy) == 0,
+		IsActionable:  isActionableRecommendation(rec),
 		Tags:          rec.Labels,
 		Score:         rec.Score,
 		Action:        rec.Action,

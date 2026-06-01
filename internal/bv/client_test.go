@@ -456,6 +456,39 @@ func TestConvertRecommendationWithBlockers(t *testing.T) {
 	}
 }
 
+// A bead with status=blocked but an empty blocked_by list must still be
+// reported as non-actionable: bv --robot-triage is permissive and can surface
+// blocked/in_progress/closed beads with no dependency blockers, and the serve
+// API + FilterReady gate key off IsActionable.
+func TestConvertRecommendationStatusAware(t *testing.T) {
+	client := NewBVClient()
+
+	cases := []struct {
+		status string
+		want   bool
+	}{
+		{"", true},
+		{"open", true},
+		{"ready", true},
+		{"blocked", false},
+		{"in_progress", false},
+		{"in-progress", false},
+		{"In Progress", false},
+		{"closed", false},
+		{"resolved", false},
+		{"done", false},
+	}
+	for _, tc := range cases {
+		rec := client.convertRecommendation(TriageRecommendation{
+			ID:     "t-" + tc.status,
+			Status: tc.status,
+		})
+		if rec.IsActionable != tc.want {
+			t.Errorf("status=%q: IsActionable=%v, want %v", tc.status, rec.IsActionable, tc.want)
+		}
+	}
+}
+
 func TestBVClientErrorSentinels(t *testing.T) {
 	if ErrTimeout == nil {
 		t.Error("ErrTimeout should not be nil")
