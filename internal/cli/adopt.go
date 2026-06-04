@@ -417,6 +417,14 @@ func runAdopt(opts AdoptOptions) error {
 		ntmIndex[spec.AgentType] = 1
 	}
 
+	// Guard against adopting the same physical pane twice. validateAdoptAssignments
+	// only dedups identical spec strings, so without this a single pane addressed
+	// two different ways (a bare index and its window.pane form, or the same pane
+	// under two agent-type flags) would be renamed and counted twice. Dedup by the
+	// resolved tmux pane ID (%N) restores the cross-type "a pane is adopted at most
+	// once" guarantee (#170).
+	adoptedByPaneID := make(map[string]agentpkg.AgentType)
+
 	adoptType := func(reqs []paneSpec, agentType agentpkg.AgentType) error {
 		canonicalType := agentType.Canonical()
 		for _, req := range reqs {
@@ -424,6 +432,11 @@ func runAdopt(opts AdoptOptions) error {
 			if err != nil {
 				return err
 			}
+			if prev, dup := adoptedByPaneID[pane.ID]; dup {
+				return fmt.Errorf("pane %s (window %d index %d) is assigned more than once (%s and %s); each pane may be adopted only once",
+					req, pane.WindowIndex, pane.Index, prev, canonicalType)
+			}
+			adoptedByPaneID[pane.ID] = canonicalType
 
 			newTitle := tmux.FormatPaneName(opts.Session, canonicalType.String(), ntmIndex[canonicalType], "")
 			info := AdoptedPaneInfo{
@@ -504,9 +517,10 @@ func resolveAdoptPane(req paneSpec, byWinPane map[paneSpec]*tmux.Pane, byBareInd
 func validateAdoptAssignments(assignments map[agentpkg.AgentType][]paneSpec) error {
 	// Track by spec identity (window.pane string) so the same explicit address
 	// can't be claimed twice, and a bare index can't be reused. Bare-vs-window
-	// collisions referencing the same physical pane are caught later at
-	// resolution time (once the session layout is known); here we only need to
-	// reject obvious duplicate specs.
+	// collisions referencing the same physical pane (e.g. `0` and `1.0`) can't
+	// be detected here because the session layout isn't known yet — those are
+	// caught at adoption time by the resolved-pane-ID dedup in runAdopt. Here we
+	// only reject obvious duplicate specs.
 	seen := make(map[string]agentpkg.AgentType)
 	total := 0
 	for _, spec := range supportedAdoptTypes {
