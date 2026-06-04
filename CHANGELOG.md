@@ -16,6 +16,7 @@ NTM is a tmux session management tool for orchestrating multiple AI coding agent
 ### Bug Fixes
 
 - **`ntm codex preflight` no longer captures deep scrollback (#173).** Preflight inlined its own `capture-pane -S -<lines>` (default `LinesFullContext`=500), so a stale `esc to interrupt` footer buried in scrollback on an otherwise-idle pane could resurrect a false-positive `goal-in-progress` verdict. Preflight now routes through the shared `resolveCodexPane` helper, which captures the **visible screen only** (`capture-pane -S 0`) — matching the goal-action codex subcommands and reflecting the pane's real on-screen state. This changes `provenance_hash`/`captured_lines` in the JSON output (intended).
+- **Robot interrupt / smart-restart now fail loud instead of reporting silent success (#172, safe subset).** On multi-window / window-per-agent layouts, a `--panes` filter could resolve to an empty target set yet the top-level robot response still reported `success: true` (interrupting/restarting nothing). Both `--robot-interrupt` and smart-restart now set `success: false` with a remediation hint (and the panes actually found) when the resolved target set is empty or when one or more individual restart/interrupt actions fail. Emitted pane addresses (`robot.go` send-target / smart-restart action) now carry the pane's real window index instead of a hardcoded `0`, so the `W.P` address round-trips. (The full topology-aware pane-matcher/parser refactor remains as follow-up.)
 
 ---
 

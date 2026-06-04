@@ -379,7 +379,7 @@ type selectedPane struct {
 // multi-window session a bare index may match panes in several windows; we
 // include every match so the caller is never silently narrowed to one pane
 // (the dual of the adopt #170 fix). A requested index with no match yields a
-// not-found placeholder so the error surfaces in the response.
+// not-found marker entry so the error surfaces in the response.
 //
 // When `requested` is empty (the "all non-control panes" default), selection is
 // grouped by window: within each window the lowest-index pane is treated as the

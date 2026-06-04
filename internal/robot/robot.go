@@ -3096,12 +3096,13 @@ func getInboxTally(ctx context.Context, client *agentmail.Client, projectKey, ag
 }
 
 type ntmPaneInfo struct {
-	Key       string
-	Label     string
-	Type      string
-	Index     int
-	TmuxIndex int
-	Variant   string
+	Key         string
+	Label       string
+	Type        string
+	Index       int
+	TmuxIndex   int
+	WindowIndex int // tmux window index of the pane (for round-trippable W.P addresses, #172)
+	Variant     string
 }
 
 func parseNTMPanes(panes []tmux.Pane) map[string][]ntmPaneInfo {
@@ -3131,12 +3132,13 @@ func parseNTMPanes(panes []tmux.Pane) map[string][]ntmPaneInfo {
 		}
 
 		out[typ] = append(out[typ], ntmPaneInfo{
-			Key:       key,
-			Label:     fmt.Sprintf("%s_%d", typ, idx),
-			Type:      typ,
-			Index:     idx,
-			TmuxIndex: p.Index,
-			Variant:   p.Variant,
+			Key:         key,
+			Label:       fmt.Sprintf("%s_%d", typ, idx),
+			Type:        typ,
+			Index:       idx,
+			TmuxIndex:   p.Index,
+			WindowIndex: p.WindowIndex,
+			Variant:     p.Variant,
 		})
 	}
 
@@ -4620,7 +4622,10 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 			detection := DetectAgentTypeEnhanced(pane, captured)
 
 			agent := SnapshotAgent{
-				Pane:             fmt.Sprintf("%d.%d", 0, pane.Index),
+				// Emit the pane's real window index (#172) so the W.P address
+				// round-trips on multi-window / window-per-agent layouts;
+				// hardcoding window 0 misaddressed every pane outside window 0.
+				Pane:             fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
 				Type:             detection.Type,
 				Variant:          pane.Variant,
 				TypeConfidence:   detection.Confidence,
@@ -8662,7 +8667,10 @@ func buildCorrelationGraph() *GraphCorrelation {
 							assignmentByAgent[agentName] = a
 						}
 						a.Session = sess.Name
-						a.Pane = fmt.Sprintf("%d.%d", 0, pane.TmuxIndex)
+						// Emit the pane's real window index (#172) so the W.P
+						// address round-trips on multi-window layouts; the prior
+						// hardcoded 0 misaddressed panes outside window 0.
+						a.Pane = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.TmuxIndex)
 						a.Agent = fmt.Sprintf("%s:%s", sess.Name, a.Pane)
 						a.Detected = paneType
 						a.DetectedFrom = "ntm_pane_title"

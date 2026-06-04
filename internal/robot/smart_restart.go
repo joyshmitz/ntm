@@ -4,6 +4,7 @@ package robot
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -257,7 +258,68 @@ func GetSmartRestart(opts SmartRestartOptions) (*SmartRestartOutput, error) {
 		output.Actions[paneStr] = action
 	}
 
+	// Fail loud (#172) instead of silently reporting success:true when the
+	// restart accomplished nothing useful. Two dangerous classes are caught:
+	//
+	//   1. No restartable target resolved. On multi-window / window-per-agent
+	//      layouts a window-local `--panes=N` filter can match nothing (or match
+	//      a pane address that does not exist), leaving the action set empty or
+	//      populated only with not-found error panes. Previously the top-level
+	//      response still said success:true.
+	//   2. One or more individual restart actions FAILED (e.g. executeRestart
+	//      could not find the pane, or the agent never relaunched). Previously
+	//      these were recorded under the action but the envelope stayed
+	//      success:true.
+	//
+	// In dry-run mode no restart is attempted, so a non-empty would-restart set
+	// is a successful preview and must keep success:true.
+	if !opts.DryRun {
+		restartableTargets := output.Summary.Restarted + output.Summary.Failed +
+			output.Summary.Skipped + output.Summary.Waiting
+		switch {
+		case output.Summary.Failed > 0:
+			output.Success = false
+			output.ErrorCode = ErrCodeInternalError
+			output.Error = fmt.Sprintf("%d of %d targeted pane(s) failed to restart", output.Summary.Failed, len(output.Actions))
+			output.Hint = smartRestartTargetingHint(opts, output)
+		case restartableTargets == 0:
+			output.Success = false
+			output.ErrorCode = ErrCodePaneNotFound
+			output.Error = "no restartable panes matched the request"
+			output.Hint = smartRestartTargetingHint(opts, output)
+		}
+	}
+
 	return output, nil
+}
+
+// smartRestartTargetingHint builds an actionable remediation hint for the
+// fail-loud paths. On multi-window layouts a bare pane index is window-local and
+// may need a `window.pane` address; we surface the panes that were actually
+// found so the caller can re-target precisely.
+func smartRestartTargetingHint(opts SmartRestartOptions, output *SmartRestartOutput) string {
+	found := make([]string, 0, len(output.Actions))
+	for paneKey := range output.Actions {
+		found = append(found, paneKey)
+	}
+	sort.Strings(found)
+
+	var b strings.Builder
+	if len(opts.Panes) > 0 {
+		b.WriteString("On multi-window / window-per-agent layouts a bare --panes index is window-local; ")
+		b.WriteString("the pane may need a window.pane address. ")
+	}
+	if len(found) > 0 {
+		b.WriteString("Panes evaluated: ")
+		b.WriteString(strings.Join(found, ", "))
+		b.WriteString(". ")
+	} else {
+		b.WriteString("No panes were evaluated for this session. ")
+	}
+	b.WriteString("Run 'ntm --robot-is-working=")
+	b.WriteString(opts.Session)
+	b.WriteString("' to see live pane addresses and states.")
+	return b.String()
 }
 
 // decideRestart determines whether a pane should be restarted based on its state.
