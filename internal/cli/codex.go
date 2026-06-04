@@ -32,10 +32,205 @@ that overlay state before driving the pane with keystrokes.
 
 Examples:
   ntm codex palette-state --session myproject --pane 1
-  ntm codex palette-state --session myproject --pane 1 --json`,
+  ntm codex palette-state --session myproject --pane 1 --json
+  ntm codex preflight --session myproject --pane 1 --json`,
 	}
 
 	cmd.AddCommand(newCodexPaletteStateCmd())
+	cmd.AddCommand(newCodexPreflightCmd())
+
+	return cmd
+}
+
+// CodexPreflightResult is the JSON output for "ntm codex preflight".
+//
+// It embeds the standard robot envelope and adds the goal-readiness verdict
+// (state + recommended action + reason) plus the same capture provenance shape
+// as PaletteStateResult, so the two codex robot subcommands are consistent.
+type CodexPreflightResult struct {
+	robot.RobotResponse
+
+	// State is the classified preflight state (see internal/codex.PreflightState).
+	State string `json:"state"`
+
+	// RecommendedAction is the closed-set action mapped from State
+	// (proceed / respawn / alternate_pane / wait / refuse).
+	RecommendedAction string `json:"recommended_action"`
+
+	// Reason is a human-readable explanation of the verdict.
+	Reason string `json:"reason"`
+
+	// Session is the resolved tmux session name.
+	Session string `json:"session"`
+
+	// Pane is the pane index that was inspected.
+	Pane int `json:"pane"`
+
+	// ProvenanceHash is the sha256 (hex) of the exact captured content classified.
+	ProvenanceHash string `json:"provenance_hash"`
+
+	// CapturedLines is the number of lines in the captured content.
+	CapturedLines int `json:"captured_lines"`
+
+	// MarkersMatched lists the marker substrings that selected the state.
+	// Always present (empty array, not null).
+	MarkersMatched []string `json:"markers_matched"`
+
+	// TimestampSource documents how the response timestamp was derived.
+	TimestampSource string `json:"timestamp_source"`
+}
+
+func newCodexPreflightCmd() *cobra.Command {
+	var (
+		session    string
+		pane       int
+		jsonOutput bool
+		lines      int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "preflight [session]",
+		Short: "Classify a Codex pane's readiness for goal work (goal-lifecycle preflight)",
+		Long: `Capture a Codex agent pane and classify its readiness to receive goal work.
+
+This is the first layer of the Codex goal-lifecycle cluster (NTM #167). It is a
+SUPERSET of 'ntm codex palette-state': where palette-state answers "which overlay
+is open" for keystroke routing, preflight answers "is it safe to drive this pane
+toward a goal, and if not, what to do instead".
+
+The pane content is captured, hashed (sha256 for provenance), and classified into
+one of:
+
+  codex-live               Live Codex at a quiescent prompt          -> proceed
+  goal-completed           Codex finished a goal, back at the prompt  -> proceed
+  goal-in-progress         Codex is actively working a task          -> wait
+  background-terminal-wait Blocked on a background/long command      -> wait
+  replace-goal-dialog      A replace/overwrite-goal modal is open    -> refuse
+  usage-limit              Account hit a usage/rate/quota limit      -> respawn
+  shell-no-codex           Bare shell, Codex not running here        -> alternate_pane
+  stale-scrollback         Empty/trivial capture, nothing to trust   -> refuse
+  unknown                  No known marker matched                   -> refuse
+
+The session may be passed positionally ('ntm codex preflight myproject') or via
+--session, matching the other codex subcommands.
+
+Examples:
+  ntm codex preflight --session myproject --pane 1
+  ntm codex preflight myproject --pane 1 --json`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := tmux.EnsureInstalled(); err != nil {
+				return err
+			}
+
+			emitJSON := jsonOutput || IsJSONOutput()
+
+			// Accept session positionally (consistent with other ntm commands)
+			// while still honoring --session. An explicit positional arg wins.
+			if len(args) == 1 && args[0] != "" {
+				session = args[0]
+			}
+
+			if session == "" {
+				return robot.RobotError(
+					fmt.Errorf("session is required"),
+					robot.ErrCodeInvalidFlag,
+					"Pass the session positionally ('ntm codex preflight <session>') or via --session; use 'ntm list' to see sessions",
+				)
+			}
+			if pane < 0 {
+				return robot.RobotError(
+					fmt.Errorf("--pane must be >= 0, got %d", pane),
+					robot.ErrCodeInvalidFlag,
+					"Pass a non-negative pane index, e.g. --pane 1",
+				)
+			}
+
+			if !tmux.SessionExists(session) {
+				return robot.RobotError(
+					fmt.Errorf("session '%s' not found", session),
+					robot.ErrCodeSessionNotFound,
+					"Use 'ntm list' to see available sessions",
+				)
+			}
+
+			panes, err := tmux.GetPanes(session)
+			if err != nil {
+				return robot.RobotError(err, robot.ErrCodeInternalError, "Could not enumerate panes for the session")
+			}
+
+			var target *tmux.Pane
+			for i := range panes {
+				if panes[i].Index == pane {
+					target = &panes[i]
+					break
+				}
+			}
+			if target == nil {
+				return robot.RobotError(
+					fmt.Errorf("pane %d not found in session '%s'", pane, session),
+					robot.ErrCodePaneNotFound,
+					"Use 'ntm status <session>' to see available pane indices",
+				)
+			}
+
+			content, err := tmux.CapturePaneOutput(target.ID, lines)
+			if err != nil {
+				return robot.RobotError(err, robot.ErrCodeInternalError, "Failed to capture pane content")
+			}
+
+			// Provenance: hash the exact bytes we classify (same pattern as
+			// palette-state, so output is reproducible/auditable).
+			sum := sha256.Sum256([]byte(content))
+			provenanceHash := hex.EncodeToString(sum[:])
+
+			verdict := codex.Preflight(content)
+
+			markers := verdict.MarkersMatched
+			if markers == nil {
+				markers = []string{}
+			}
+
+			result := CodexPreflightResult{
+				RobotResponse:     robot.NewRobotResponse(true),
+				State:             verdict.State.String(),
+				RecommendedAction: verdict.Action.String(),
+				Reason:            verdict.Reason,
+				Session:           session,
+				Pane:              pane,
+				ProvenanceHash:    provenanceHash,
+				CapturedLines:     countCapturedLines(content),
+				MarkersMatched:    markers,
+				TimestampSource:   "capture_walltime",
+			}
+
+			if emitJSON {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+
+			fmt.Printf("Codex Preflight\n")
+			fmt.Printf("===============\n\n")
+			fmt.Printf("Session: %s\n", result.Session)
+			fmt.Printf("Pane:    %d\n", result.Pane)
+			fmt.Printf("State:   %s\n", result.State)
+			fmt.Printf("Action:  %s\n", result.RecommendedAction)
+			fmt.Printf("Reason:  %s\n", result.Reason)
+			fmt.Printf("Captured: %d lines (sha256 %s)\n", result.CapturedLines, result.ProvenanceHash[:16])
+			if len(result.MarkersMatched) > 0 {
+				fmt.Printf("Markers: %s\n", strings.Join(result.MarkersMatched, ", "))
+			} else {
+				fmt.Printf("Markers: (none)\n")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&session, "session", "", "Target tmux session name (or pass positionally)")
+	cmd.Flags().IntVar(&pane, "pane", 0, "Target pane index within the session")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	cmd.Flags().IntVar(&lines, "lines", tmux.LinesFullContext, "Number of pane lines to capture for classification")
 
 	return cmd
 }
