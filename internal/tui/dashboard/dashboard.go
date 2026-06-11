@@ -154,7 +154,15 @@ func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 			tierLabel(prevTier), tierLabel(m.tier), m.width, m.height)
 	}
 
-	return *m, nil
+	// Force a full clear + repaint on every resize (#186). In alt-screen mode
+	// the renderer's resize repaint only re-emits the new frame's lines; it
+	// erases each line to the right and the area below only when the new frame
+	// has *fewer* lines. Cells painted by the previous (differently sized) frame
+	// that fall outside the new frame's footprint - common when growing the
+	// window, or shrinking then growing - are not guaranteed to be erased,
+	// leaving stale glyphs ("scrambled" UI). tea.ClearScreen issues a hard
+	// EraseEntireScreen before the next render, guaranteeing a clean repaint.
+	return *m, tea.ClearScreen
 }
 
 func (m Model) subscribeToConfig() tea.Cmd {
