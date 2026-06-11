@@ -231,9 +231,19 @@ func ResolveSessionWithOptions(session string, w io.Writer, opts SessionResolveO
 			names = append(names, s.Name)
 		}
 		sort.Strings(names)
+		// Prefer a "real-looking" session as the copy-paste example: names that
+		// start with "_" are typically internal/ephemeral (test fixtures, etc.)
+		// and would make a confusing suggestion. Fall back to the first name.
+		example := names[0]
+		for _, n := range names {
+			if !strings.HasPrefix(n, "_") {
+				example = n
+				break
+			}
+		}
 		return SessionResolution{}, fmt.Errorf(
 			"session name required: %d sessions are running and there's no interactive terminal to show a selector — specify one explicitly (e.g. `%s`). Available: %s",
-			len(names), names[0], strings.Join(names, ", "))
+			len(names), example, strings.Join(names, ", "))
 	}
 
 	// Order sessions so the "best" default is at the top of the selector.
