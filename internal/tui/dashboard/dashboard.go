@@ -255,6 +255,38 @@ func (m *Model) recordVelocitySnapshot() {
 	}
 }
 
+// paneTokenVelocity returns the genuine fresh-token rate (tokens/minute) for a
+// pane, derived from the change in its token count since the previous sample.
+//
+// It stashes the latest (count, timestamp) per pane in m.velocityByPaneID and
+// compares against the prior sample via tokenVelocityRate. The first observation
+// of a pane (or any window where the count did not grow) yields 0, so an idle
+// swarm produces a flat ~0 reading and a flat sparkline; the value only climbs
+// when fresh tokens actually appear. This replaces the old
+// snapshot-size/repaint-age formula that spiked on every redraw at rest.
+func (m *Model) paneTokenVelocity(st status.AgentStatus) float64 {
+	if m == nil {
+		return 0
+	}
+	if m.velocityByPaneID == nil {
+		m.velocityByPaneID = make(map[string]velocitySample)
+	}
+
+	now := time.Now()
+	tokensNow := statusTokenCount(st)
+
+	// Panes are keyed by ID; without one we cannot persist a prior sample, so we
+	// have no window to rate against and must report 0 (never a snapshot spike).
+	if st.PaneID == "" {
+		return 0
+	}
+
+	prev, hasPrev := m.velocityByPaneID[st.PaneID]
+	rate := tokenVelocityRate(prev, hasPrev, tokensNow, now)
+	m.velocityByPaneID[st.PaneID] = velocitySample{tokens: tokensNow, sampledAt: now}
+	return rate
+}
+
 func appendVelocitySample(history []float64, sample float64, limit int) []float64 {
 	history = append(history, sample)
 	if limit > 0 && len(history) > limit {
@@ -2489,7 +2521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					state = "compacted"
 				}
 				ps.State = state
-				ps.TokenVelocity = tokenVelocityFromStatus(st)
+				ps.TokenVelocity = m.paneTokenVelocity(st)
 				m.agentStatuses[st.PaneID] = st
 				if m.recordTimelineStatus(currentPane, st) {
 					timelineUpdated = true
@@ -2671,7 +2703,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ps.State = state
 
 			// Pre-calculate token velocity
-			ps.TokenVelocity = tokenVelocityFromStatus(st)
+			ps.TokenVelocity = m.paneTokenVelocity(st)
 
 			// Local perf snapshot + memory enrichment (Ollama panes only).
 			if pane, ok := paneByID[st.PaneID]; ok && string(pane.Type) == "ollama" {
