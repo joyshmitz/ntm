@@ -41,6 +41,11 @@ type Info struct {
 // ResumeProvider maps an ntm agent type to the casr/provider name used by
 // `casr <provider> resume` and `casr -<flag>`. Returns "" for agent types that
 // have no provider-session resume path (user panes, editor agents, etc.).
+//
+// Note: "gmi"/"gemini" (the retired Gemini CLI) and "agy"/"antigravity" (its
+// successor, the Antigravity CLI) are DISTINCT providers with distinct on-disk
+// session stores under the shared ~/.gemini parent (~/.gemini/tmp for gmi vs
+// ~/.gemini/antigravity-cli for agy). They must never be conflated.
 func ResumeProvider(agentType string) string {
 	switch strings.ToLower(strings.TrimSpace(agentType)) {
 	case "cc", "claude", "claude-code", "claudecode":
@@ -49,6 +54,8 @@ func ResumeProvider(agentType string) string {
 		return "codex"
 	case "gmi", "gemini":
 		return "gemini"
+	case "agy", "antigravity", "antigravity-cli":
+		return "antigravity"
 	default:
 		return ""
 	}
@@ -78,6 +85,8 @@ func Discover(agentType, workDir string) *Info {
 		return discoverCodex(home, workDir)
 	case "gemini":
 		return discoverGemini(home, workDir)
+	case "antigravity":
+		return discoverAntigravity(home, workDir)
 	default:
 		return nil
 	}
@@ -162,6 +171,36 @@ func discoverGemini(home, workDir string) *Info {
 		AgentType:  "gmi",
 		SessionID:  id,
 		Provider:   "gemini",
+		SourcePath: path,
+		UpdatedAt:  mod,
+	}
+}
+
+// discoverAntigravity locates the newest agy conversation database under
+// ~/.gemini/antigravity-cli/conversations/<uuid>.db whose embedded cwd matches
+// workDir. agy stores one stock-SQLite database per conversation and records
+// the working directory inside it; the <uuid> filename stem is exactly the id
+// accepted by `agy --conversation <uuid>`.
+//
+// This path is kept strictly disjoint from discoverGemini: gmi lives in
+// ~/.gemini/tmp/<hash>/chats/session-*.json, agy lives in
+// ~/.gemini/antigravity-cli/conversations/<uuid>.db. The two scans never look in
+// each other's directory, so a gmi session is never reported as agy and vice
+// versa even though both hang off the shared ~/.gemini parent.
+func discoverAntigravity(home, workDir string) *Info {
+	root := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
+	path, mod := newestAntigravityConversationForCwd(root, filepath.Clean(workDir))
+	if path == "" {
+		return nil
+	}
+	id := strings.TrimSuffix(filepath.Base(path), ".db")
+	if id == "" {
+		return nil
+	}
+	return &Info{
+		AgentType:  "agy",
+		SessionID:  id,
+		Provider:   "antigravity",
 		SourcePath: path,
 		UpdatedAt:  mod,
 	}
@@ -275,4 +314,51 @@ func newestGeminiSessionForCwd(root, workDir string) (string, time.Time) {
 		return nil
 	})
 	return bestPath, bestMod
+}
+
+// newestAntigravityConversationForCwd returns the newest *.db directly inside
+// ~/.gemini/antigravity-cli/conversations whose contents reference workDir. agy
+// conversation databases are stock SQLite files that embed the working directory
+// as plain text; we match on that substring as a cheap cwd-affinity check
+// (mirroring the codex/gemini approach) rather than opening the SQLite file. The
+// embedded cwd can appear well past the first few KB, so the whole (small) file
+// is scanned instead of a capped prefix.
+func newestAntigravityConversationForCwd(root, workDir string) (string, time.Time) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", time.Time{}
+	}
+	var bestPath string
+	var bestMod time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".db") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if bestPath != "" && !info.ModTime().After(bestMod) {
+			continue
+		}
+		path := filepath.Join(root, e.Name())
+		if !fileContainsCwd(path, workDir) {
+			continue
+		}
+		bestPath = path
+		bestMod = info.ModTime()
+	}
+	return bestPath, bestMod
+}
+
+// fileContainsCwd reports whether the entire file contains the workDir string.
+// Used for agy conversation databases, where the embedded cwd may live past any
+// reasonable fixed prefix limit. agy conversation DBs are small (sub-MB), so
+// reading the whole file is cheap and avoids missing a deep match.
+func fileContainsCwd(path, workDir string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), workDir)
 }

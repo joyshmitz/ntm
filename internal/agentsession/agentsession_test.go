@@ -10,23 +10,33 @@ import (
 
 func TestResumeProvider(t *testing.T) {
 	cases := map[string]string{
-		"cc":          "claude",
-		"claude":      "claude",
-		"claude-code": "claude",
-		"CC":          "claude",
-		"cod":         "codex",
-		"codex":       "codex",
-		"gmi":         "gemini",
-		"gemini":      "gemini",
-		"user":        "",
-		"cursor":      "",
-		"":            "",
-		"  cc  ":      "claude",
+		"cc":              "claude",
+		"claude":          "claude",
+		"claude-code":     "claude",
+		"CC":              "claude",
+		"cod":             "codex",
+		"codex":           "codex",
+		"gmi":             "gemini",
+		"gemini":          "gemini",
+		"agy":             "antigravity",
+		"antigravity":     "antigravity",
+		"antigravity-cli": "antigravity",
+		"AGY":             "antigravity",
+		"user":            "",
+		"cursor":          "",
+		"":                "",
+		"  cc  ":          "claude",
 	}
 	for in, want := range cases {
 		if got := ResumeProvider(in); got != want {
 			t.Errorf("ResumeProvider(%q) = %q, want %q", in, got, want)
 		}
+	}
+
+	// gmi and agy are distinct providers (shared ~/.gemini parent, different
+	// stores) and must never collapse into the same provider name.
+	if ResumeProvider("gmi") == ResumeProvider("agy") {
+		t.Errorf("gmi and agy must map to distinct providers, both = %q", ResumeProvider("gmi"))
 	}
 }
 
@@ -75,6 +85,8 @@ func TestResumeCommandNative(t *testing.T) {
 		{"claude", "abc-123", true, "claude --resume 'abc-123'"},
 		{"codex", "r1", false, "codex resume 'r1'"},
 		{"gemini", "g9", true, "gemini --resume 'g9'"},
+		{"antigravity", "uuid-9", false, "agy --conversation 'uuid-9' --model 'Gemini 3.1 Pro (High)'"},
+		{"antigravity", "uuid-9", true, "agy --conversation 'uuid-9' --model 'Gemini 3.1 Pro (High)'"},
 		{"claude", "", true, ""},
 		{"unknown", "x", true, ""},
 	}
@@ -104,6 +116,9 @@ func TestResumeCommandCASR(t *testing.T) {
 		{"claude", "abc-123", "casr -cc 'abc-123'"},
 		{"codex", "r1", "casr -cod 'r1'"},
 		{"gemini", "g9", "casr -gmi 'g9'"},
+		// Antigravity has no casr short-flag; even with preferCASR=true and
+		// casr available it must fall through to its native agy command.
+		{"antigravity", "uuid-9", "agy --conversation 'uuid-9' --model 'Gemini 3.1 Pro (High)'"},
 	}
 	for _, c := range cases {
 		if got := ResumeCommand(c.provider, c.id, true); got != c.want {
@@ -114,6 +129,22 @@ func TestResumeCommandCASR(t *testing.T) {
 	// preferCASR=false must still use native even when casr is available.
 	if got := ResumeCommand("claude", "x", false); got != "claude --resume 'x'" {
 		t.Errorf("native override failed: got %q", got)
+	}
+}
+
+func TestResumeLatestCommand(t *testing.T) {
+	cases := map[string]string{
+		"antigravity": "agy --continue --model 'Gemini 3.1 Pro (High)'",
+		"agy":         "", // ResumeLatestCommand takes a provider name, not an agent type alias
+		"gemini":      "", // no id-less native resume for the Gemini CLI
+		"claude":      "",
+		"codex":       "",
+		"":            "",
+	}
+	for in, want := range cases {
+		if got := ResumeLatestCommand(in); got != want {
+			t.Errorf("ResumeLatestCommand(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -250,5 +281,133 @@ func TestDiscoverGemini(t *testing.T) {
 	}
 	if info.SessionID != "42" {
 		t.Errorf("SessionID = %q, want 42", info.SessionID)
+	}
+}
+
+// writeAgyConversation creates a synthetic agy conversation database. Real agy
+// DBs are stock SQLite, but discovery only relies on the cwd appearing as a
+// substring in the file (the cheap cwd-affinity check), so a payload that embeds
+// the cwd faithfully exercises the discovery path without a sqlite dependency.
+func writeAgyConversation(t *testing.T, dir, uuid, cwd string, modAge time.Duration) string {
+	t.Helper()
+	path := filepath.Join(dir, uuid+".db")
+	// Pad before the cwd so it lands past a naive small-prefix scan, matching
+	// real DBs where the path lives ~16KB in.
+	payload := append([]byte("SQLite format 3\x00"), make([]byte, 20*1024)...)
+	payload = append(payload, []byte("...cwd="+cwd+"...")...)
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if modAge != 0 {
+		ts := time.Now().Add(-modAge)
+		if err := os.Chtimes(path, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+func TestDiscoverAntigravity(t *testing.T) {
+	home := t.TempDir()
+	workDir := "/data/projects/agydemo"
+	convDir := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two conversations for the SAME cwd; the newer one (by mtime) must win.
+	writeAgyConversation(t, convDir, "11111111-1111-1111-1111-111111111111", workDir, time.Hour)
+	newer := writeAgyConversation(t, convDir, "22222222-2222-2222-2222-222222222222", workDir, 0)
+	// A conversation for a DIFFERENT cwd must be ignored even though it's newest.
+	writeAgyConversation(t, convDir, "33333333-3333-3333-3333-333333333333", "/some/other/dir", -time.Hour)
+
+	orig := homeDir
+	homeDir = func() (string, error) { return home, nil }
+	defer func() { homeDir = orig }()
+
+	info := Discover("agy", workDir)
+	if info == nil {
+		t.Fatal("expected to discover an agy session, got nil")
+	}
+	if info.SessionID != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("SessionID = %q, want the newer uuid", info.SessionID)
+	}
+	if info.Provider != "antigravity" {
+		t.Errorf("Provider = %q, want antigravity", info.Provider)
+	}
+	if info.AgentType != "agy" {
+		t.Errorf("AgentType = %q, want agy", info.AgentType)
+	}
+	if info.SourcePath != newer {
+		t.Errorf("SourcePath = %q, want %q", info.SourcePath, newer)
+	}
+
+	// A cwd with no matching conversation yields no session.
+	if info := Discover("agy", "/no/such/agy/project"); info != nil {
+		t.Errorf("expected nil for non-matching cwd, got %+v", info)
+	}
+}
+
+// TestDiscoverAgyGmiDisambiguation proves the two providers that share the
+// ~/.gemini parent never leak into each other: a gmi session under
+// ~/.gemini/tmp/<hash>/chats is NOT reported as agy, and an agy conversation
+// under ~/.gemini/antigravity-cli/conversations is NOT reported as gemini.
+func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
+	home := t.TempDir()
+	workDir := "/data/projects/sharedcwd"
+
+	// Lay down a gmi (legacy Gemini CLI) session.
+	gmiChats := filepath.Join(home, ".gemini", "tmp", "deadbeef", "chats")
+	if err := os.MkdirAll(gmiChats, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gmiSess := filepath.Join(gmiChats, "session-77.json")
+	if err := os.WriteFile(gmiSess, []byte(`{"workspace":"`+workDir+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lay down an agy conversation for the SAME cwd.
+	convDir := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAgyConversation(t, convDir, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", workDir, 0)
+
+	orig := homeDir
+	homeDir = func() (string, error) { return home, nil }
+	defer func() { homeDir = orig }()
+
+	// gmi discovery must find ONLY the legacy session, never the agy uuid.
+	gmiInfo := Discover("gmi", workDir)
+	if gmiInfo == nil {
+		t.Fatal("expected gmi to discover its legacy session, got nil")
+	}
+	if gmiInfo.Provider != "gemini" || gmiInfo.SessionID != "77" {
+		t.Errorf("gmi discovery leaked: got provider=%q id=%q, want gemini/77", gmiInfo.Provider, gmiInfo.SessionID)
+	}
+
+	// agy discovery must find ONLY the conversation db, never the gmi session.
+	agyInfo := Discover("agy", workDir)
+	if agyInfo == nil {
+		t.Fatal("expected agy to discover its conversation, got nil")
+	}
+	if agyInfo.Provider != "antigravity" || agyInfo.SessionID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" {
+		t.Errorf("agy discovery leaked: got provider=%q id=%q, want antigravity/uuid", agyInfo.Provider, agyInfo.SessionID)
+	}
+
+	// Cross-check: removing the agy store entirely must NOT make gmi vanish,
+	// and an agy lookup must never pick up the gmi tmp session.
+	gmiOnlyHome := t.TempDir()
+	gmiOnlyChats := filepath.Join(gmiOnlyHome, ".gemini", "tmp", "cafef00d", "chats")
+	if err := os.MkdirAll(gmiOnlyChats, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gmiOnlyChats, "session-99.json"),
+		[]byte(`{"workspace":"`+workDir+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir = func() (string, error) { return gmiOnlyHome, nil }
+	if info := Discover("agy", workDir); info != nil {
+		t.Errorf("agy must not discover a gmi tmp session, got %+v", info)
 	}
 }
