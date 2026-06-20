@@ -953,6 +953,9 @@ func restorableAgentCommand(pane PaneState) string {
 		return "codex"
 	case agent.AgentTypeGemini:
 		return "gemini"
+	case agent.AgentTypeAntigravity:
+		// agy's launch binary is "agy" (distinct from the gemini CLI).
+		return "agy"
 	case agent.AgentTypeCursor:
 		return "cursor"
 	case agent.AgentTypeWindsurf:

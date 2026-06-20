@@ -255,6 +255,7 @@ type SwarmPlanOutput struct {
 	TotalCC         int                `json:"total_cc"`
 	TotalCod        int                `json:"total_cod"`
 	TotalGmi        int                `json:"total_gmi"`
+	TotalAgy        int                `json:"total_agy"`
 	TotalAgents     int                `json:"total_agents"`
 	SessionsPerType int                `json:"sessions_per_type"`
 	PanesPerSession int                `json:"panes_per_session"`
@@ -272,6 +273,7 @@ type AllocationOutput struct {
 	CCAgents    int    `json:"cc_agents"`
 	CodAgents   int    `json:"cod_agents"`
 	GmiAgents   int    `json:"gmi_agents"`
+	AgyAgents   int    `json:"agy_agents"`
 	TotalAgents int    `json:"total_agents"`
 }
 
@@ -522,6 +524,7 @@ func buildSwarmPlanOutput(plan *swarm.SwarmPlan, dryRun bool) SwarmPlanOutput {
 		TotalCC:         plan.TotalCC,
 		TotalCod:        plan.TotalCod,
 		TotalGmi:        plan.TotalGmi,
+		TotalAgy:        plan.TotalAgy,
 		TotalAgents:     plan.TotalAgents,
 		SessionsPerType: plan.SessionsPerType,
 		PanesPerSession: plan.PanesPerSession,
@@ -539,6 +542,7 @@ func buildSwarmPlanOutput(plan *swarm.SwarmPlan, dryRun bool) SwarmPlanOutput {
 			CCAgents:    alloc.CCAgents,
 			CodAgents:   alloc.CodAgents,
 			GmiAgents:   alloc.GmiAgents,
+			AgyAgents:   alloc.AgyAgents,
 			TotalAgents: alloc.TotalAgents,
 		})
 	}
@@ -566,8 +570,8 @@ func buildSwarmPlanOutput(plan *swarm.SwarmPlan, dryRun bool) SwarmPlanOutput {
 func printSwarmPlan(out SwarmPlanOutput) {
 	printSwarmHeader("Swarm Plan")
 	fmt.Printf("  Scan Directory: %s\n", out.ScanDir)
-	fmt.Printf("  Total Agents:   %d (CC: %d, Codex: %d, Gemini: %d)\n",
-		out.TotalAgents, out.TotalCC, out.TotalCod, out.TotalGmi)
+	fmt.Printf("  Total Agents:   %d (CC: %d, Codex: %d, Gemini: %d, Antigravity: %d)\n",
+		out.TotalAgents, out.TotalCC, out.TotalCod, out.TotalGmi, out.TotalAgy)
 	fmt.Printf("  Sessions:       %d per type, %d panes max each\n",
 		out.SessionsPerType, out.PanesPerSession)
 	fmt.Println()
@@ -575,9 +579,9 @@ func printSwarmPlan(out SwarmPlanOutput) {
 	printSwarmHeader("Project Allocations")
 	for _, alloc := range out.Allocations {
 		tierStr := fmt.Sprintf("T%d", alloc.Tier)
-		fmt.Printf("  %-20s [%s] %d beads → CC:%d Cod:%d Gmi:%d\n",
+		fmt.Printf("  %-20s [%s] %d beads → CC:%d Cod:%d Gmi:%d Agy:%d\n",
 			alloc.Project, tierStr, alloc.OpenBeads,
-			alloc.CCAgents, alloc.CodAgents, alloc.GmiAgents)
+			alloc.CCAgents, alloc.CodAgents, alloc.GmiAgents, alloc.AgyAgents)
 	}
 	fmt.Println()
 
@@ -660,7 +664,7 @@ func newSwarmPlanCmd() *cobra.Command {
 	return cmd
 }
 
-var swarmSessionRE = regexp.MustCompile(`^(cc|cod|gmi)_agents_[0-9]+$`)
+var swarmSessionRE = regexp.MustCompile(`^(cc|cod|gmi|agy)_agents_[0-9]+$`)
 
 // Subcommand: swarm status
 func newSwarmStatusCmd() *cobra.Command {
@@ -799,7 +803,7 @@ func newSwarmStopCmd() *cobra.Command {
 		Short: "Stop the swarm and destroy all sessions",
 		Long: `Gracefully stop swarm agent sessions.
 
-By default, discovers and stops all swarm sessions (cc_agents_*, cod_agents_*, gmi_agents_*).
+By default, discovers and stops all swarm sessions (cc_agents_*, cod_agents_*, gmi_agents_*, agy_agents_*).
 Optionally specify session name patterns to stop specific sessions.
 
 The graceful shutdown process:
@@ -826,7 +830,7 @@ Examples:
 
 			// If no patterns specified, use default swarm session patterns
 			if len(patterns) == 0 {
-				patterns = []string{"cc_agents_*", "cod_agents_*", "gmi_agents_*"}
+				patterns = []string{"cc_agents_*", "cod_agents_*", "gmi_agents_*", "agy_agents_*"}
 			}
 
 			// Discover matching sessions
@@ -978,6 +982,7 @@ var swarmAgentTypeToLong = map[string]string{
 	"cc":  "claude",
 	"cod": "codex",
 	"gmi": "gemini",
+	"agy": "antigravity",
 }
 
 // waitForSwarmAgentsReady polls all agent panes in the swarm plan until they
@@ -990,8 +995,8 @@ func waitForSwarmAgentsReady(ctx context.Context, plan *swarm.SwarmPlan, client 
 	// Collect all pane targets: "session:0.index"
 	type paneInfo struct {
 		target    string
-		shortType string // "cc", "cod", "gmi" (for status package)
-		longType  string // "claude", "codex", "gemini" (for robot patterns)
+		shortType string // "cc", "cod", "gmi", "agy" (for status package)
+		longType  string // "claude", "codex", "gemini", "antigravity" (for robot patterns)
 		ready     bool
 	}
 	var panes []paneInfo

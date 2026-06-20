@@ -599,7 +599,7 @@ func normalizeProvider(agentType string) string {
 		return "claude"
 	case agent.AgentTypeCodex:
 		return "openai"
-	case agent.AgentTypeGemini:
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
 		return "google"
 	default:
 		if strings.EqualFold(trimmed, "anthropic") {

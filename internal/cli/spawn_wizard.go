@@ -19,6 +19,7 @@ type SpawnWizardResult struct {
 	CCCount       int
 	CodCount      int
 	GmiCount      int
+	AgyCount      int
 	CursorCount   int
 	WindsurfCount int
 	AiderCount    int
@@ -50,6 +51,7 @@ func wizardAgentSpecs(result SpawnWizardResult) AgentSpecs {
 		{agentType: AgentTypeClaude, count: result.CCCount},
 		{agentType: AgentTypeCodex, count: result.CodCount},
 		{agentType: AgentTypeGemini, count: result.GmiCount},
+		{agentType: AgentTypeAntigravity, count: result.AgyCount},
 		{agentType: AgentTypeCursor, count: result.CursorCount},
 		{agentType: AgentTypeWindsurf, count: result.WindsurfCount},
 		{agentType: AgentTypeAider, count: result.AiderCount},
@@ -70,6 +72,7 @@ func spawnWizardResultFromCounts(counts map[string]int) SpawnWizardResult {
 		CCCount:       counts["cc"],
 		CodCount:      counts["cod"],
 		GmiCount:      counts["gmi"],
+		AgyCount:      counts["agy"],
 		CursorCount:   counts["cursor"],
 		WindsurfCount: counts["windsurf"],
 		AiderCount:    counts["aider"],
@@ -85,6 +88,7 @@ func formatWizardAgentCountSummary(counts map[string]int) string {
 		{key: "cc"},
 		{key: "cod"},
 		{key: "gmi"},
+		{key: "agy"},
 		{key: "cursor"},
 		{key: "windsurf"},
 		{key: "aider"},
@@ -146,7 +150,7 @@ func runSpawnWizard(sessionName string) (SpawnWizardResult, error) {
 func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 	var result SpawnWizardResult
 
-	var ccStr, codStr, gmiStr string
+	var ccStr, codStr, gmiStr, agyStr string
 	var autoRestart bool
 
 	agentForm := huh.NewForm(
@@ -164,10 +168,16 @@ func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 				Value(&codStr).
 				Validate(validateAgentCount),
 			huh.NewInput().
-				Title("Gemini agents (gmi)").
+				Title("Gemini agents (gmi) (legacy)").
 				Description("Number of Google Gemini agents to spawn").
 				Placeholder("0").
 				Value(&gmiStr).
+				Validate(validateAgentCount),
+			huh.NewInput().
+				Title("Antigravity agents (agy)").
+				Description("Number of Antigravity agents to spawn (model pinned to Gemini 3.1 Pro (High))").
+				Placeholder("0").
+				Value(&agyStr).
 				Validate(validateAgentCount),
 		).Title("Agent Configuration"),
 		huh.NewGroup(
@@ -185,16 +195,17 @@ func runManualWizard(sessionName string) (SpawnWizardResult, error) {
 	result.CCCount = parseCount(ccStr)
 	result.CodCount = parseCount(codStr)
 	result.GmiCount = parseCount(gmiStr)
+	result.AgyCount = parseCount(agyStr)
 	result.AutoRestart = autoRestart
 
-	if result.CCCount+result.CodCount+result.GmiCount == 0 {
+	if result.CCCount+result.CodCount+result.GmiCount+result.AgyCount == 0 {
 		return result, fmt.Errorf("no agents specified — at least one agent is required")
 	}
 
 	// Confirmation
-	total := result.CCCount + result.CodCount + result.GmiCount
-	summary := fmt.Sprintf("Spawn %d agent(s) in session %q:\n  Claude: %d, Codex: %d, Gemini: %d",
-		total, sessionName, result.CCCount, result.CodCount, result.GmiCount)
+	total := result.CCCount + result.CodCount + result.GmiCount + result.AgyCount
+	summary := fmt.Sprintf("Spawn %d agent(s) in session %q:\n  Claude: %d, Codex: %d, Gemini: %d, Antigravity: %d",
+		total, sessionName, result.CCCount, result.CodCount, result.GmiCount, result.AgyCount)
 	if result.AutoRestart {
 		summary += "\n  Auto-restart: enabled"
 	}

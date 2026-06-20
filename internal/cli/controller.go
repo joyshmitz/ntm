@@ -258,6 +258,9 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 	case "gemini":
 		agentTypeFull = "gemini"
 		agentCmdTemplate = cfg.Agents.Gemini
+	case "antigravity":
+		agentTypeFull = "antigravity"
+		agentCmdTemplate = cfg.Agents.Antigravity
 	case "cursor":
 		agentTypeFull = "cursor"
 		agentCmdTemplate = cfg.Agents.Cursor

@@ -266,7 +266,9 @@ func agentTypeToProvider(agentType string) string {
 		return "claude"
 	case agent.AgentTypeCodex:
 		return "openai"
-	case agent.AgentTypeGemini:
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
+		// Antigravity (agy) authenticates through Google's OAuth, the same
+		// provider as the legacy Gemini CLI.
 		return "gemini"
 	default:
 		return "unknown"

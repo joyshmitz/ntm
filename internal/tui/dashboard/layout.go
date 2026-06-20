@@ -811,6 +811,8 @@ func agentRowTypePresentation(agentType string, t theme.Theme) (lipgloss.Color, 
 		return t.Codex, "󰘦"
 	case tmux.AgentGemini:
 		return t.Gemini, "󰇮"
+	case tmux.AgentAntigravity:
+		return t.Lavender, "󰇮"
 	default:
 		return t.Green, "󰄛"
 	}
@@ -850,6 +852,8 @@ func RenderPaneDetail(pane tmux.Pane, ps PaneStatus, dims LayoutDimensions, t th
 		typeColor = t.Codex
 	case tmux.AgentGemini:
 		typeColor = t.Gemini
+	case tmux.AgentAntigravity:
+		typeColor = t.Lavender
 	default:
 		typeColor = t.Green
 	}
@@ -1216,6 +1220,8 @@ func AgentBorderColor(agentType string, t theme.Theme) lipgloss.Color {
 		return t.Codex
 	case tmux.AgentGemini:
 		return t.Gemini
+	case tmux.AgentAntigravity:
+		return t.Lavender
 	case tmux.AgentCursor:
 		return t.Claude
 	case tmux.AgentWindsurf:

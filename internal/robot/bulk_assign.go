@@ -719,6 +719,8 @@ func bulkAssignTMUXAgentType(agentType string) tmux.AgentType {
 		return tmux.AgentCodex
 	case "gemini":
 		return tmux.AgentGemini
+	case "antigravity":
+		return tmux.AgentAntigravity
 	case "cursor":
 		return tmux.AgentCursor
 	case "windsurf":

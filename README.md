@@ -65,7 +65,7 @@ NTM gives you a single local system for:
 NTM is a pure Go project, but the runtime experience is intentionally integration-heavy.
 
 - Required: `tmux`
-- Required for agent spawning: whichever CLIs you want to run, typically Claude Code, Codex, and Gemini CLI
+- Required for agent spawning: whichever CLIs you want to run, typically Claude Code, Codex, and Antigravity CLI (Gemini CLI is supported as legacy)
 - Optional but powerful: `br`, `bv`, Agent Mail, `cass`, `dcg`, `pt`
 - Sanity check everything with `ntm deps -v`
 
@@ -476,11 +476,11 @@ not bolt-on scripts.
               +-------------+-------------+      +---------------------------+
                             |
                             v
-              +---------------------------+
-              | tmux sessions and panes   |
-              | Claude / Codex / Gemini   |
-              | labeled multi-agent work  |
-              +---------------------------+
+              +------------------------------+
+              | tmux sessions and panes      |
+              | Claude / Codex / Antigravity |
+              | labeled multi-agent work     |
+              +------------------------------+
 ```
 
 ## Installation
@@ -527,7 +527,7 @@ ntm deps -v
 NTM can only launch tools that are installed and discoverable in `PATH`.
 Use `ntm deps -v` to check what it sees.
 
-### `claude`, `codex`, or `gemini` not detected over SSH / tmux / non-login shells
+### `claude`, `codex`, `agy`, or `gemini` not detected over SSH / tmux / non-login shells
 
 NTM discovers agent CLIs via the `PATH` of the **runtime environment it is launched in** —
 not the `PATH` of your interactive login shell. Tools installed under npm-global or
@@ -542,6 +542,7 @@ context where you run NTM:
 ```bash
 command -v claude
 command -v codex
+command -v agy
 command -v gemini
 ntm deps -v
 ```

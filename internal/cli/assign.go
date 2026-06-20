@@ -1131,6 +1131,8 @@ func detectAgentTypeFromTitle(title string) string {
 			return "codex"
 		case agent.AgentTypeGemini:
 			return "gemini"
+		case agent.AgentTypeAntigravity:
+			return "antigravity"
 		case agent.AgentTypeCursor:
 			return "cursor"
 		case agent.AgentTypeWindsurf:
@@ -1151,6 +1153,8 @@ func detectAgentTypeFromTitle(title string) string {
 		return "claude"
 	case strings.Contains(title, "codex"):
 		return "codex"
+	case strings.Contains(title, "antigravity"):
+		return "antigravity"
 	case strings.Contains(title, "gemini"):
 		return "gemini"
 	case strings.Contains(title, "cursor"):
@@ -1449,6 +1453,8 @@ func getAgentStyle(agentType string, th theme.Theme) lipgloss.Style {
 		color = th.Codex
 	case "gemini":
 		color = th.Gemini
+	case "antigravity":
+		color = th.Lavender
 	default:
 		color = th.Text
 	}

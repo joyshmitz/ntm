@@ -942,6 +942,10 @@
             "description": "Alerts active",
             "type": "integer"
           },
+          "antigravity_count": {
+            "description": "Antigravity count",
+            "type": "integer"
+          },
           "attached_count": {
             "description": "Attached count",
             "type": "integer"
@@ -1014,6 +1018,7 @@
           "claude_count",
           "codex_count",
           "gemini_count",
+          "antigravity_count",
           "cursor_count",
           "windsurf_count",
           "aider_count",

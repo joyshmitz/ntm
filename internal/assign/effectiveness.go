@@ -254,7 +254,7 @@ func (ei *EffectivenessIntegrator) RankAgentsForTask(taskType string) (*Effectiv
 	}
 
 	agentTypes := []tmux.AgentType{
-		tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini,
+		tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentAntigravity,
 		tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama,
 	}
 

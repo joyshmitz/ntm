@@ -580,6 +580,8 @@ func incrementAgentCounts(counts *output.AgentCountsResponse, t tmux.AgentType) 
 		counts.Codex++
 	case tmux.AgentGemini:
 		counts.Gemini++
+	case tmux.AgentAntigravity:
+		counts.Antigravity++
 	case tmux.AgentOllama:
 		counts.Ollama++
 	case tmux.AgentCursor:

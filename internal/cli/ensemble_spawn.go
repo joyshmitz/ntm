@@ -95,7 +95,7 @@ func bindEnsembleSpawnFlags(cmd *cobra.Command, opts *ensembleSpawnOptions) {
 
 func bindEnsembleSharedFlags(cmd *cobra.Command, opts *ensembleSpawnOptions) {
 	cmd.Flags().BoolVar(&opts.AllowAdvanced, "allow-advanced", false, "Allow advanced/experimental modes")
-	cmd.Flags().StringVar(&opts.AgentMix, "agent-mix", "", "Agent distribution (e.g., 'cc=3,cod=2,gmi=1')")
+	cmd.Flags().StringVar(&opts.AgentMix, "agent-mix", "", "Agent distribution (e.g., 'cc=3,cod=2,agy=1')")
 	cmd.Flags().StringVar(&opts.Assignment, "assignment", "affinity", "Assignment strategy: round-robin, affinity, category, explicit")
 	cmd.Flags().StringVar(&opts.Synthesis, "synthesis", "", "Synthesis strategy override")
 	cmd.Flags().IntVar(&opts.BudgetTotal, "budget-total", 0, "Override total token budget")

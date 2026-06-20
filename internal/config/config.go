@@ -690,6 +690,9 @@ func ValidateAccountsConfig(cfg *AccountsConfig) error {
 	if err := validateEntries("gemini", cfg.Gemini); err != nil {
 		return err
 	}
+	if err := validateEntries("antigravity", cfg.Antigravity); err != nil {
+		return err
+	}
 	if err := validateEntries("cursor", cfg.Cursor); err != nil {
 		return err
 	}
@@ -724,9 +727,9 @@ func ValidateRotationConfig(cfg *RotationConfig) error {
 	}
 	for i, account := range cfg.Accounts {
 		switch account.Provider {
-		case "claude", "codex", "gemini":
+		case "claude", "codex", "gemini", "antigravity":
 		default:
-			return fmt.Errorf("accounts[%d].provider: must be claude, codex, or gemini, got %q", i, account.Provider)
+			return fmt.Errorf("accounts[%d].provider: must be claude, codex, gemini, or antigravity, got %q", i, account.Provider)
 		}
 		if strings.TrimSpace(account.Email) == "" {
 			return fmt.Errorf("accounts[%d].email: must not be empty", i)
@@ -2391,6 +2394,8 @@ type PromptsConfig struct {
 	CodDefaultFile string `toml:"cod_default_file"` // File path for Codex default prompt
 	GmiDefault     string `toml:"gmi_default"`      // Default prompt for Gemini agents
 	GmiDefaultFile string `toml:"gmi_default_file"` // File path for Gemini default prompt
+	AgyDefault     string `toml:"agy_default"`      // Default prompt for Antigravity (agy) agents
+	AgyDefaultFile string `toml:"agy_default_file"` // File path for Antigravity default prompt
 }
 
 // ResolveForType returns the default prompt for a given agent type string (cc, cod, gmi).
@@ -2404,6 +2409,8 @@ func (p PromptsConfig) ResolveForType(agentType string) (string, error) {
 		val, filePath = p.CodDefault, p.CodDefaultFile
 	case "gmi":
 		val, filePath = p.GmiDefault, p.GmiDefaultFile
+	case "agy":
+		val, filePath = p.AgyDefault, p.AgyDefaultFile
 	default:
 		return "", nil
 	}
@@ -3391,6 +3398,16 @@ func Print(cfg *Config, w io.Writer) error {
 	} else {
 		fmt.Fprintln(w, "# gmi_default_file = \"\"")
 	}
+	if cfg.Prompts.AgyDefault != "" {
+		fmt.Fprintf(w, "agy_default = %q\n", cfg.Prompts.AgyDefault)
+	} else {
+		fmt.Fprintln(w, "# agy_default = \"\"")
+	}
+	if cfg.Prompts.AgyDefaultFile != "" {
+		fmt.Fprintf(w, "agy_default_file = %q\n", cfg.Prompts.AgyDefaultFile)
+	} else {
+		fmt.Fprintln(w, "# agy_default_file = \"\"")
+	}
 	fmt.Fprintln(w)
 
 	// Write models configuration
@@ -3587,6 +3604,7 @@ func Print(cfg *Config, w io.Writer) error {
 	writeAccountEntries("claude", cfg.Accounts.Claude)
 	writeAccountEntries("codex", cfg.Accounts.Codex)
 	writeAccountEntries("gemini", cfg.Accounts.Gemini)
+	writeAccountEntries("antigravity", cfg.Accounts.Antigravity)
 
 	// Write rotation configuration
 	fmt.Fprintln(w, "[rotation]")
@@ -4171,6 +4189,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Agents.Codex, nil
 		case "gemini":
 			return cfg.Agents.Gemini, nil
+		case "antigravity":
+			return cfg.Agents.Antigravity, nil
 		case "cursor":
 			return cfg.Agents.Cursor, nil
 		case "windsurf":
@@ -4791,6 +4811,10 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Prompts.GmiDefault, nil
 		case "gmi_default_file":
 			return cfg.Prompts.GmiDefaultFile, nil
+		case "agy_default":
+			return cfg.Prompts.AgyDefault, nil
+		case "agy_default_file":
+			return cfg.Prompts.AgyDefaultFile, nil
 		}
 	case "spawn_pacing":
 		if len(parts) < 2 {
@@ -5163,6 +5187,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Accounts.Codex, nil
 		case "gemini":
 			return cfg.Accounts.Gemini, nil
+		case "antigravity":
+			return cfg.Accounts.Antigravity, nil
 		}
 	case "rotation":
 		if len(parts) < 2 {
@@ -5522,6 +5548,8 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("prompts.cod_default_file", defaults.Prompts.CodDefaultFile, cfg.Prompts.CodDefaultFile)
 	addDiff("prompts.gmi_default", defaults.Prompts.GmiDefault, cfg.Prompts.GmiDefault)
 	addDiff("prompts.gmi_default_file", defaults.Prompts.GmiDefaultFile, cfg.Prompts.GmiDefaultFile)
+	addDiff("prompts.agy_default", defaults.Prompts.AgyDefault, cfg.Prompts.AgyDefault)
+	addDiff("prompts.agy_default_file", defaults.Prompts.AgyDefaultFile, cfg.Prompts.AgyDefaultFile)
 
 	// Context Rotation
 	addDiff("context_rotation.enabled", defaults.ContextRotation.Enabled, cfg.ContextRotation.Enabled)
@@ -5611,6 +5639,7 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("accounts.claude", defaults.Accounts.Claude, cfg.Accounts.Claude)
 	addDiff("accounts.codex", defaults.Accounts.Codex, cfg.Accounts.Codex)
 	addDiff("accounts.gemini", defaults.Accounts.Gemini, cfg.Accounts.Gemini)
+	addDiff("accounts.antigravity", defaults.Accounts.Antigravity, cfg.Accounts.Antigravity)
 	addDiff("rotation.enabled", defaults.Rotation.Enabled, cfg.Rotation.Enabled)
 	addDiff("rotation.prefer_restart", defaults.Rotation.PreferRestart, cfg.Rotation.PreferRestart)
 	addDiff("rotation.auto_open_browser", defaults.Rotation.AutoOpenBrowser, cfg.Rotation.AutoOpenBrowser)

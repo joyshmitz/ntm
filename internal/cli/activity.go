@@ -23,12 +23,13 @@ import (
 
 func newActivityCmd() *cobra.Command {
 	var (
-		filterClaude bool
-		filterCodex  bool
-		filterGemini bool
-		filterPane   string
-		watchMode    bool
-		interval     int
+		filterClaude      bool
+		filterCodex       bool
+		filterGemini      bool
+		filterAntigravity bool
+		filterPane        string
+		watchMode         bool
+		interval          int
 	)
 
 	cmd := &cobra.Command{
@@ -64,12 +65,13 @@ Examples:
 			}
 
 			opts := activityOptions{
-				filterClaude: filterClaude,
-				filterCodex:  filterCodex,
-				filterGemini: filterGemini,
-				filterPane:   filterPane,
-				watchMode:    watchMode,
-				interval:     time.Duration(interval) * time.Millisecond,
+				filterClaude:      filterClaude,
+				filterCodex:       filterCodex,
+				filterGemini:      filterGemini,
+				filterAntigravity: filterAntigravity,
+				filterPane:        filterPane,
+				watchMode:         watchMode,
+				interval:          time.Duration(interval) * time.Millisecond,
 			}
 
 			return runActivity(session, opts)
@@ -79,6 +81,7 @@ Examples:
 	cmd.Flags().BoolVar(&filterClaude, "cc", false, "Only show Claude agents")
 	cmd.Flags().BoolVar(&filterCodex, "cod", false, "Only show Codex agents")
 	cmd.Flags().BoolVar(&filterGemini, "gmi", false, "Only show Gemini agents")
+	cmd.Flags().BoolVar(&filterAntigravity, "agy", false, "Only show Antigravity agents")
 	cmd.Flags().StringVar(&filterPane, "pane", "", "Show specific pane (by name or index)")
 	cmd.Flags().BoolVarP(&watchMode, "watch", "w", false, "Auto-refresh display")
 	cmd.Flags().IntVar(&interval, "interval", 2000, "Refresh interval in milliseconds (with --watch)")
@@ -89,12 +92,13 @@ Examples:
 }
 
 type activityOptions struct {
-	filterClaude bool
-	filterCodex  bool
-	filterGemini bool
-	filterPane   string
-	watchMode    bool
-	interval     time.Duration
+	filterClaude      bool
+	filterCodex       bool
+	filterGemini      bool
+	filterAntigravity bool
+	filterPane        string
+	watchMode         bool
+	interval          time.Duration
 }
 
 func runActivity(session string, opts activityOptions) error {
@@ -307,6 +311,8 @@ func detectAgentTypeFromPane(pane tmux.Pane) string {
 		return "codex"
 	case tmux.AgentGemini:
 		return "gemini"
+	case tmux.AgentAntigravity:
+		return "antigravity"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -341,7 +347,7 @@ func passesFilter(agentType string, pane tmux.Pane, opts activityOptions) bool {
 	}
 
 	// If no type filters, allow all
-	if !opts.filterClaude && !opts.filterCodex && !opts.filterGemini {
+	if !opts.filterClaude && !opts.filterCodex && !opts.filterGemini && !opts.filterAntigravity {
 		return true
 	}
 
@@ -353,6 +359,9 @@ func passesFilter(agentType string, pane tmux.Pane, opts activityOptions) bool {
 		return true
 	}
 	if opts.filterGemini && agentType == "gemini" {
+		return true
+	}
+	if opts.filterAntigravity && agentType == "antigravity" {
 		return true
 	}
 
@@ -588,6 +597,8 @@ func activityAgentTypeColor(agentType string, t theme.Theme) lipgloss.Color {
 		return t.Codex
 	case agent.AgentTypeGemini:
 		return t.Gemini
+	case agent.AgentTypeAntigravity:
+		return t.Lavender
 	case agent.AgentTypeCursor:
 		return t.Cursor
 	case agent.AgentTypeWindsurf:

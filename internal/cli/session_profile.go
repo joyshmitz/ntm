@@ -21,6 +21,7 @@ type SessionProfile struct {
 	CC        int    `toml:"cc,omitempty" json:"cc,omitempty"`
 	Cod       int    `toml:"cod,omitempty" json:"cod,omitempty"`
 	Gmi       int    `toml:"gmi,omitempty" json:"gmi,omitempty"`
+	Agy       int    `toml:"agy,omitempty" json:"agy,omitempty"`
 	Ollama    int    `toml:"ollama,omitempty" json:"ollama,omitempty"`
 	Cursor    int    `toml:"cursor,omitempty" json:"cursor,omitempty"`
 	Windsurf  int    `toml:"windsurf,omitempty" json:"windsurf,omitempty"`
@@ -47,6 +48,7 @@ func (p SessionProfile) Validate() error {
 		"cc":       p.CC,
 		"cod":      p.Cod,
 		"gmi":      p.Gmi,
+		"agy":      p.Agy,
 		"ollama":   p.Ollama,
 		"cursor":   p.Cursor,
 		"windsurf": p.Windsurf,
@@ -273,11 +275,11 @@ func newSessionProfileCmd() *cobra.Command {
 
 func newSessionProfileSaveCmd() *cobra.Command {
 	var (
-		cc, cod, gmi, ollamaCount int
-		cursorCount, wsCount      int
-		aiderCount                int
-		userPane, safety, wt      bool
-		prompt, initFile          string
+		cc, cod, gmi, agy, ollamaCount int
+		cursorCount, wsCount           int
+		aiderCount                     int
+		userPane, safety, wt           bool
+		prompt, initFile               string
 	)
 
 	cmd := &cobra.Command{
@@ -290,6 +292,7 @@ func newSessionProfileSaveCmd() *cobra.Command {
 				CC:     cc,
 				Cod:    cod,
 				Gmi:    gmi,
+				Agy:    agy,
 				Ollama: ollamaCount,
 			}
 			if cursorCount > 0 {
@@ -327,6 +330,7 @@ func newSessionProfileSaveCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cc, "cc", 0, "Number of Claude agents")
 	cmd.Flags().IntVar(&cod, "cod", 0, "Number of Codex agents")
 	cmd.Flags().IntVar(&gmi, "gmi", 0, "Number of Gemini agents")
+	cmd.Flags().IntVar(&agy, "agy", 0, "Number of Antigravity agents")
 	cmd.Flags().IntVar(&ollamaCount, "ollama", 0, "Number of Ollama agents")
 	cmd.Flags().IntVar(&cursorCount, "cursor", 0, "Number of Cursor agents")
 	cmd.Flags().IntVar(&wsCount, "windsurf", 0, "Number of Windsurf agents")
@@ -447,6 +451,9 @@ func ApplySessionProfileToSpawnOptions(opts *SpawnOptions, profile *SessionProfi
 	}
 	if opts.GmiCount == 0 && profile.Gmi > 0 {
 		opts.GmiCount = profile.Gmi
+	}
+	if opts.AgyCount == 0 && profile.Agy > 0 {
+		opts.AgyCount = profile.Agy
 	}
 	if opts.OllamaCount == 0 && profile.Ollama > 0 {
 		opts.OllamaCount = profile.Ollama

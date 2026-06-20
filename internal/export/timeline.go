@@ -452,6 +452,8 @@ func exportAgentTypeString(agentType string) string {
 		return "codex"
 	case agent.AgentTypeGemini:
 		return "gemini"
+	case agent.AgentTypeAntigravity:
+		return "antigravity"
 	case agent.AgentTypeCursor:
 		return "cursor"
 	case agent.AgentTypeWindsurf:
@@ -498,7 +500,7 @@ func (e *TimelineExporter) getAgentColor(agentType string) string {
 		return firstNonEmptyExportColor(t.ClaudeColor, t.TextColor)
 	case "codex":
 		return firstNonEmptyExportColor(t.CodexColor, t.TextColor)
-	case "gemini":
+	case "gemini", "antigravity":
 		return firstNonEmptyExportColor(t.GeminiColor, t.TextColor)
 	case "cursor":
 		return firstNonEmptyExportColor(t.CursorColor, t.TextColor)

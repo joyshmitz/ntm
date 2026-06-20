@@ -18,9 +18,10 @@ import (
 type AgentType string
 
 const (
-	AgentTypeClaude AgentType = "claude"
-	AgentTypeCodex  AgentType = "codex"
-	AgentTypeGemini AgentType = "gemini"
+	AgentTypeClaude      AgentType = "claude"
+	AgentTypeCodex       AgentType = "codex"
+	AgentTypeGemini      AgentType = "gemini"
+	AgentTypeAntigravity AgentType = "antigravity"
 )
 
 // Specialization represents task types an agent excels at.
@@ -124,6 +125,27 @@ func (pm *ProfileMatcher) loadDefaults() {
 		Type:          AgentTypeGemini,
 		Model:         "gemini-3-pro-preview",
 		ContextBudget: models.GetTokenBudget("gmi"),
+		Specializations: []Specialization{
+			SpecResearch,
+			SpecDocs,
+			SpecAnalysis,
+		},
+		Preferences: Preferences{
+			PreferredFiles:  []string{"*.md", "docs/**", "README*", "*.txt"},
+			AvoidFiles:      []string{"*_test.go"},
+			PreferredLabels: []string{"docs", "research", "spike", "chore"},
+		},
+		Performance: Performance{
+			SuccessRate: 0.85,
+		},
+	}
+
+	// Antigravity (agy) is Gemini CLI's successor and shares Google's Gemini
+	// models, so its profile mirrors the Gemini entry.
+	pm.profiles[AgentTypeAntigravity] = &AgentProfile{
+		Type:          AgentTypeAntigravity,
+		Model:         "gemini-3-pro-preview",
+		ContextBudget: models.GetTokenBudget("agy"),
 		Specializations: []Specialization{
 			SpecResearch,
 			SpecDocs,
@@ -538,6 +560,8 @@ func NormalizeAgentType(t string) string {
 		return "codex"
 	case agentpkg.AgentTypeGemini:
 		return "gemini"
+	case agentpkg.AgentTypeAntigravity:
+		return "antigravity"
 	case agentpkg.AgentTypeCursor:
 		return "cursor"
 	case agentpkg.AgentTypeWindsurf:
@@ -563,6 +587,8 @@ func ParseAgentType(s string) AgentType {
 		return AgentTypeCodex
 	case "gemini":
 		return AgentTypeGemini
+	case "antigravity":
+		return AgentTypeAntigravity
 	default:
 		return AgentType(normalized)
 	}

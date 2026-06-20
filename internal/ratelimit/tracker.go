@@ -461,7 +461,7 @@ func NormalizeProvider(provider string) string {
 		return "anthropic"
 	case agent.AgentTypeCodex:
 		return "openai"
-	case agent.AgentTypeGemini:
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
 		return "google"
 	case agent.AgentTypeOllama:
 		return "ollama"

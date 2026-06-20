@@ -1115,6 +1115,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	targetCC := targets.HasTargetsForType(AgentTypeClaude)
 	targetCod := targets.HasTargetsForType(AgentTypeCodex)
 	targetGmi := targets.HasTargetsForType(AgentTypeGemini)
+	targetAgy := targets.HasTargetsForType(AgentTypeAntigravity)
 
 	// Helper for JSON error output
 	var (
@@ -1239,7 +1240,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		"prompt_length":  len(prompt),
 		"prompt_source":  promptSource,
 		"template":       templateName,
-		"targets":        buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex, tags),
+		"targets":        buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, tags),
 		"dry_run":        dryRun,
 		"randomize":      opts.Randomize,
 		"seed":           opts.Seed,
@@ -1326,13 +1327,15 @@ func runSendInternal(opts SendOptions) (err error) {
 			Prompt:   prompt,
 		}
 
-		// Filter by agent type if specified
-		if targetCC && !targetCod && !targetGmi {
+		// Filter by agent type if specified (only when exactly one type is set)
+		if targetCC && !targetCod && !targetGmi && !targetAgy {
 			routeOpts.AgentType = "claude"
-		} else if targetCod && !targetCC && !targetGmi {
+		} else if targetCod && !targetCC && !targetGmi && !targetAgy {
 			routeOpts.AgentType = "codex"
-		} else if targetGmi && !targetCC && !targetCod {
+		} else if targetGmi && !targetCC && !targetCod && !targetAgy {
 			routeOpts.AgentType = "gemini"
+		} else if targetAgy && !targetCC && !targetCod && !targetGmi {
+			routeOpts.AgentType = "antigravity"
 		}
 
 		recommendation, err := robot.GetRouteRecommendation(routeOpts)
@@ -1389,7 +1392,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Build target description for hook environment
-	targetDesc := buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst, paneIndex, tags)
+	targetDesc := buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, tags)
 
 	// Build execution context for hooks
 	hookCtx := hooks.ExecutionContext{
@@ -1401,6 +1404,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			"NTM_TARGET_CC":    boolToStr(targetCC),
 			"NTM_TARGET_COD":   boolToStr(targetCod),
 			"NTM_TARGET_GMI":   boolToStr(targetGmi),
+			"NTM_TARGET_AGY":   boolToStr(targetAgy),
 			"NTM_TARGET_ALL":   boolToStr(targetAll),
 			"NTM_PANE_INDEX":   fmt.Sprintf("%d", paneIndex),
 		},
@@ -1427,7 +1431,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Auto-checkpoint before broadcast sends
-	isBroadcast := !opts.PanesSpecified && paneIndex < 0 && (targetAll || (!targetCC && !targetCod && !targetGmi && len(tags) == 0))
+	isBroadcast := !opts.PanesSpecified && paneIndex < 0 && (targetAll || (!targetCC && !targetCod && !targetGmi && !targetAgy && len(tags) == 0))
 	if !dryRun && isBroadcast && cfg != nil && cfg.Checkpoints.Enabled && cfg.Checkpoints.BeforeBroadcast {
 		if !jsonOutput {
 			fmt.Println("Creating auto-checkpoint before broadcast...")
@@ -1500,7 +1504,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			}
 		}
 	} else {
-		noFilter := !targetCC && !targetCod && !targetGmi && !targetAll && len(tags) == 0
+		noFilter := !targetCC && !targetCod && !targetGmi && !targetAgy && !targetAll && len(tags) == 0
 		hasVariantFilter := len(targets) > 0
 		if noFilter {
 			// Default: send to all agent panes (skip user panes)
@@ -1523,7 +1527,7 @@ func runSendInternal(opts SendOptions) (err error) {
 				}
 
 				// Check type filters (only if specified)
-				hasTypeFilter := hasVariantFilter || targetCC || targetCod || targetGmi
+				hasTypeFilter := hasVariantFilter || targetCC || targetCod || targetGmi || targetAgy
 
 				if hasTypeFilter {
 					if hasVariantFilter {
@@ -2730,7 +2734,7 @@ func buildObservedTargetTypes(panes []tmux.Pane) string {
 	return strings.Join(targets, ",")
 }
 
-func buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst bool, paneIndex int, tags []string) string {
+func buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst bool, paneIndex int, tags []string) string {
 	if paneIndex >= 0 {
 		return fmt.Sprintf("pane:%d", paneIndex)
 	}
@@ -2747,6 +2751,9 @@ func buildTargetDescription(targetCC, targetCod, targetGmi, targetAll, skipFirst
 	}
 	if targetGmi {
 		targets = append(targets, "gmi")
+	}
+	if targetAgy {
+		targets = append(targets, "agy")
 	}
 	if len(tags) > 0 {
 		targets = append(targets, fmt.Sprintf("tags:[%s]", strings.Join(tags, ",")))

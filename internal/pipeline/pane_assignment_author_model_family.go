@@ -85,7 +85,9 @@ func modelFamilyGroup(raw string) string {
 		return "claude"
 	case agent.AgentTypeCodex:
 		return "codex"
-	case agent.AgentTypeGemini:
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
+		// agy (Antigravity) is Gemini-class for the cross-family adversarial
+		// contract, so it groups under the gemini family.
 		return "gemini"
 	}
 

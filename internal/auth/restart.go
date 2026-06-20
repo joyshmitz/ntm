@@ -61,8 +61,14 @@ func (o *Orchestrator) RegisterAuthFlow(provider string, flow AuthFlow) {
 
 // RestartContext holds context for restarting an agent
 type RestartContext struct {
-	PaneID      string
-	Provider    string
+	PaneID   string
+	Provider string
+	// AgentType is the canonical agent-type short form of the pane being
+	// restarted (cc/cod/gmi/agy/...). It is preferred over Provider when
+	// choosing the relaunch command, because several agent types can share a
+	// single auth provider — notably Antigravity (agy) and the legacy Gemini
+	// CLI both authenticate through Google. Optional; falls back to Provider.
+	AgentType   string
 	TargetEmail string
 	ModelAlias  string
 	SessionName string
@@ -183,18 +189,31 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 	var agentCmdTemplate string
 	var agentType string
 
-	switch prov.Name() {
-	case "Claude":
-		agentCmdTemplate = o.cfg.Agents.Claude
-		agentType = "cc"
-	case "Codex":
-		agentCmdTemplate = o.cfg.Agents.Codex
-		agentType = "cod"
-	case "Gemini":
-		agentCmdTemplate = o.cfg.Agents.Gemini
-		agentType = "gmi"
+	// Prefer the explicit pane agent type for the relaunch command. Multiple
+	// agent types can share one auth provider (agy and gemini both map to the
+	// Google/Gemini provider), so selecting by prov.Name() alone would relaunch
+	// an Antigravity pane with the Gemini binary and model.
+	switch tmux.AgentType(ctx.AgentType).Canonical() {
+	case tmux.AgentClaude:
+		agentCmdTemplate, agentType = o.cfg.Agents.Claude, "cc"
+	case tmux.AgentCodex:
+		agentCmdTemplate, agentType = o.cfg.Agents.Codex, "cod"
+	case tmux.AgentGemini:
+		agentCmdTemplate, agentType = o.cfg.Agents.Gemini, "gmi"
+	case tmux.AgentAntigravity:
+		agentCmdTemplate, agentType = o.cfg.Agents.Antigravity, "agy"
 	default:
-		return fmt.Errorf("unsupported provider: %s", prov.Name())
+		// No usable agent type recorded — fall back to the auth provider name.
+		switch prov.Name() {
+		case "Claude":
+			agentCmdTemplate, agentType = o.cfg.Agents.Claude, "cc"
+		case "Codex":
+			agentCmdTemplate, agentType = o.cfg.Agents.Codex, "cod"
+		case "Gemini":
+			agentCmdTemplate, agentType = o.cfg.Agents.Gemini, "gmi"
+		default:
+			return fmt.Errorf("unsupported provider: %s", prov.Name())
+		}
 	}
 
 	// Resolve model

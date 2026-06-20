@@ -1673,6 +1673,7 @@ Shell Integration:
 				CCCount:        robotSpawnCC,
 				CodCount:       robotSpawnCod,
 				GmiCount:       robotSpawnGmi,
+				AgyCount:       robotSpawnAgy,
 				Preset:         robotSpawnPreset,
 				NoUserPane:     robotSpawnNoUser,
 				WorkingDir:     robotSpawnDir,
@@ -2861,6 +2862,7 @@ var (
 	robotSpawnCC         int    // number of Claude agents
 	robotSpawnCod        int    // number of Codex agents
 	robotSpawnGmi        int    // number of Gemini agents
+	robotSpawnAgy        int    // number of Antigravity agents
 	robotSpawnPreset     string // recipe/preset name
 	robotSpawnNoUser     bool   // don't create user pane
 	robotSpawnWait       bool   // wait for agents to be ready
@@ -2877,7 +2879,7 @@ var (
 
 	// Robot-controller-spawn flags for launching controller agents
 	robotControllerSpawn     string // session name for controller spawn
-	robotControllerAgentType string // agent type: cc, cod, gmi
+	robotControllerAgentType string // agent type: cc, cod, gmi, agy
 	robotControllerPrompt    string // custom prompt file
 	robotControllerNoPrompt  bool   // skip sending initial prompt
 
@@ -3318,7 +3320,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotEnsemblePreset, "preset", "", "Ensemble preset name. Required with --robot-ensemble-spawn unless --modes is set")
 	rootCmd.Flags().StringVar(&robotEnsembleModes, "modes", "", "Explicit mode IDs or codes (comma-separated). Used with --robot-ensemble-spawn")
 	rootCmd.Flags().StringVar(&robotEnsembleQuestion, "question", "", "Question for ensemble spawn. Required with --robot-ensemble-spawn")
-	rootCmd.Flags().StringVar(&robotEnsembleAgents, "agents", "", "Agent mix for ensemble spawn (e.g., cc=2,cod=1,gmi=1)")
+	rootCmd.Flags().StringVar(&robotEnsembleAgents, "agents", "", "Agent mix for ensemble spawn (e.g., cc=2,cod=1,agy=1)")
 	rootCmd.Flags().StringVar(&robotEnsembleAssignment, "assignment", "affinity", "Assignment strategy for ensemble spawn: round-robin, affinity, category, explicit")
 	rootCmd.Flags().BoolVar(&robotEnsembleAllowAdvanced, "allow-advanced", false, "Allow advanced/experimental modes with --robot-ensemble-spawn")
 	rootCmd.Flags().IntVar(&robotEnsembleBudgetTotal, "budget-total", 0, "Override total token budget for ensemble spawn")
@@ -3370,7 +3372,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotSendEnter, "enter", true, "Send Enter after pasting message (default: true). Use --enter=false to paste without submitting")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "submit", true, "Alias for --enter")
 	rootCmd.Flags().BoolVar(&robotSendAll, "all", false, "Include user pane (default: agents only). Optional with --robot-send, --robot-interrupt, --robot-restart-pane, and --robot-support-bundle")
-	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider. Works with --robot-history, --robot-wait, --robot-route, --robot-send, --robot-ack, --robot-interrupt, --robot-errors, and --robot-restart-pane")
+	rootCmd.Flags().StringVar(&robotSendType, "type", "", "Filter by agent type: claude|cc, codex|cod, antigravity|agy, gemini|gmi (legacy), cursor, windsurf, aider. Works with --robot-history, --robot-wait, --robot-route, --robot-send, --robot-ack, --robot-interrupt, --robot-errors, and --robot-restart-pane")
 	rootCmd.Flags().StringVar(&robotSendExclude, "exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-send and --robot-route. Example: --exclude=0,3")
 	rootCmd.Flags().IntVar(&robotSendDelay, "delay-ms", 0, "Delay between sends (ms). Optional with --robot-send. Example: --delay-ms=500 for 0.5s between panes")
 
@@ -3434,6 +3436,7 @@ func init() {
 	rootCmd.Flags().IntVar(&robotSpawnCC, "spawn-cc", 0, "Claude Code agents to spawn. Use with --robot-spawn. Example: --spawn-cc=2")
 	rootCmd.Flags().IntVar(&robotSpawnCod, "spawn-cod", 0, "Codex CLI agents to spawn. Use with --robot-spawn. Example: --spawn-cod=1")
 	rootCmd.Flags().IntVar(&robotSpawnGmi, "spawn-gmi", 0, "Gemini CLI agents to spawn. Use with --robot-spawn. Example: --spawn-gmi=1")
+	rootCmd.Flags().IntVar(&robotSpawnAgy, "spawn-agy", 0, "Antigravity CLI agents to spawn. Use with --robot-spawn. Example: --spawn-agy=1")
 	rootCmd.Flags().StringVar(&robotSpawnPreset, "spawn-preset", "", "Use recipe preset instead of counts. See --robot-recipes. Example: --spawn-preset=standard")
 	rootCmd.Flags().BoolVar(&robotSpawnNoUser, "spawn-no-user", false, "Skip user pane creation. Optional with --robot-spawn. For headless/automation")
 	rootCmd.Flags().BoolVar(&robotSpawnWait, "spawn-wait", false, "Wait for agents to show ready state before returning. Recommended for automation")
@@ -3451,7 +3454,7 @@ func init() {
 
 	// Robot-controller-spawn flags for launching controller agent
 	rootCmd.Flags().StringVar(&robotControllerSpawn, "robot-controller-spawn", "", "Launch controller agent in session. Required: SESSION. Example: ntm --robot-controller-spawn=proj")
-	rootCmd.Flags().StringVar(&robotControllerAgentType, "controller-agent-type", "cc", "Agent type for controller: cc, cod, gmi, cursor, windsurf|ws, aider, or ollama. Use with --robot-controller-spawn")
+	rootCmd.Flags().StringVar(&robotControllerAgentType, "controller-agent-type", "cc", "Agent type for controller: cc, cod, gmi, agy, cursor, windsurf|ws, aider, or ollama. Use with --robot-controller-spawn")
 	rootCmd.Flags().StringVar(&robotControllerPrompt, "controller-prompt", "", "Custom prompt file. Use with --robot-controller-spawn")
 	rootCmd.Flags().BoolVar(&robotControllerNoPrompt, "controller-no-prompt", false, "Skip initial prompt. Use with --robot-controller-spawn")
 
@@ -3505,7 +3508,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotCassContext, "robot-cass-context", "", "Get relevant past context for a task. Example: ntm --robot-cass-context='how to implement auth'")
 
 	// CASS filters - work with --robot-cass-search and --robot-cass-context
-	rootCmd.Flags().StringVar(&cassAgent, "cass-agent", "", "Filter CASS by agent: claude, codex, gemini, cursor, etc. Example: --cass-agent=claude")
+	rootCmd.Flags().StringVar(&cassAgent, "cass-agent", "", "Filter CASS by agent: claude, codex, antigravity, gemini, cursor, etc. Example: --cass-agent=claude")
 	rootCmd.Flags().StringVar(&cassWorkspace, "cass-workspace", "", "Filter CASS by workspace/project path. Example: --cass-workspace=/path/to/project")
 	rootCmd.Flags().StringVar(&cassSince, "cass-since", "", "Filter CASS by recency: 1d, 7d, 30d, etc. Example: --cass-since=7d")
 	rootCmd.Flags().IntVar(&cassLimit, "cass-limit", 10, "Max CASS results to return. Example: --cass-limit=20")
@@ -3578,7 +3581,7 @@ func init() {
 
 	// Robot-activity flags for agent activity detection
 	rootCmd.Flags().StringVar(&robotActivity, "robot-activity", "", "Get agent activity state (idle/busy/error). Required: SESSION. Example: ntm --robot-activity=myproject")
-	rootCmd.Flags().StringVar(&robotActivityType, "activity-type", "", "Filter by agent type: claude, codex, gemini. Optional with --robot-activity. Example: --activity-type=claude")
+	rootCmd.Flags().StringVar(&robotActivityType, "activity-type", "", "Filter by agent type: claude, codex, antigravity, gemini. Optional with --robot-activity. Example: --activity-type=claude")
 
 	// Robot-wait flags for waiting on agent states
 	rootCmd.Flags().StringVar(&robotWait, "robot-wait", "", "Wait for agents to reach state. Required: SESSION. Example: ntm --robot-wait=myproject --wait-until=idle")
@@ -3770,7 +3773,7 @@ func init() {
 	rootCmd.Flags().IntVar(&cassLimit, "limit", 10, "Max results to return (default varies by command)")
 	rootCmd.Flags().IntVar(&robotOffset, "offset", 0, "Pagination offset (default 0)")
 	// Note: --since already defined at line 1631 for robotSince (used by --robot-snapshot)
-	rootCmd.Flags().StringVar(&cassAgent, "agent", "", "Filter by agent type: claude, codex, gemini, cursor, etc.")
+	rootCmd.Flags().StringVar(&cassAgent, "agent", "", "Filter by agent type: claude, codex, antigravity, gemini, cursor, etc.")
 	rootCmd.Flags().StringVar(&cassWorkspace, "workspace", "", "Filter by workspace/project path")
 
 	// --category and --tag for JFP
@@ -3819,7 +3822,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotReplayID, "id", "", "Entry ID for replay")
 
 	// --provider for CAAM/quota
-	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude|anthropic, openai, gemini|google")
+	rootCmd.Flags().StringVar(&robotAccountStatusProvider, "provider", "", "Filter by provider: claude|anthropic, openai, antigravity|agy, gemini|google")
 
 	// --verbose global flag (works with multiple commands)
 	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "verbose", false, "Include detailed/verbose output for commands that support it, including --robot-is-working, --robot-agent-health, and --robot-smart-restart")
@@ -4631,13 +4634,14 @@ Examples:
 					"theme":         effectiveCfg.Theme,
 					"palette_file":  effectiveCfg.PaletteFile,
 					"agents": map[string]string{
-						"claude":   effectiveCfg.Agents.Claude,
-						"codex":    effectiveCfg.Agents.Codex,
-						"gemini":   effectiveCfg.Agents.Gemini,
-						"cursor":   effectiveCfg.Agents.Cursor,
-						"windsurf": effectiveCfg.Agents.Windsurf,
-						"aider":    effectiveCfg.Agents.Aider,
-						"oc":       effectiveCfg.Agents.Opencode,
+						"claude":      effectiveCfg.Agents.Claude,
+						"codex":       effectiveCfg.Agents.Codex,
+						"antigravity": effectiveCfg.Agents.Antigravity,
+						"gemini":      effectiveCfg.Agents.Gemini,
+						"cursor":      effectiveCfg.Agents.Cursor,
+						"windsurf":    effectiveCfg.Agents.Windsurf,
+						"aider":       effectiveCfg.Agents.Aider,
+						"oc":          effectiveCfg.Agents.Opencode,
 					},
 					"tmux": map[string]interface{}{
 						"default_panes":      effectiveCfg.Tmux.DefaultPanes,
@@ -4965,6 +4969,7 @@ func printDefaultPrompts() error {
 		CCDefault  string `json:"cc_default"`
 		CodDefault string `json:"cod_default"`
 		GmiDefault string `json:"gmi_default"`
+		AgyDefault string `json:"agy_default"`
 	}
 	r := result{Success: true}
 	if cfg != nil {
@@ -4977,6 +4982,9 @@ func printDefaultPrompts() error {
 		}
 		if v, err := p.ResolveForType("gmi"); err == nil {
 			r.GmiDefault = v
+		}
+		if v, err := p.ResolveForType("agy"); err == nil {
+			r.AgyDefault = v
 		}
 	}
 	data, err := json.MarshalIndent(r, "", "  ")

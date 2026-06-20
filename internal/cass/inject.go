@@ -759,7 +759,7 @@ func FormatForAgent(agentType string) InjectionFormat {
 	switch agentCanonicalLongName(agentType) {
 	case "codex":
 		return FormatMinimal
-	case "gemini":
+	case "gemini", "antigravity":
 		return FormatStructured
 	default:
 		return FormatMarkdown
@@ -774,6 +774,8 @@ func agentCanonicalLongName(agentType string) string {
 		return "codex"
 	case agentpkg.AgentTypeGemini:
 		return "gemini"
+	case agentpkg.AgentTypeAntigravity:
+		return "antigravity"
 	case agentpkg.AgentTypeCursor:
 		return "cursor"
 	case agentpkg.AgentTypeWindsurf:

@@ -132,14 +132,15 @@ type Model struct {
 	statusFetchErr      error
 
 	// Stats
-	claudeCount   int
-	codexCount    int
-	geminiCount   int
-	cursorCount   int
-	windsurfCount int
-	aiderCount    int
-	ollamaCount   int
-	userCount     int
+	claudeCount      int
+	codexCount       int
+	geminiCount      int
+	antigravityCount int
+	cursorCount      int
+	windsurfCount    int
+	aiderCount       int
+	ollamaCount      int
+	userCount        int
 
 	// Theme
 	theme theme.Theme

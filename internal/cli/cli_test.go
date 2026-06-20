@@ -2852,7 +2852,7 @@ func TestDepsCmdSmoke(t *testing.T) {
 			depsByName[dep.Name] = dep
 		}
 
-		for _, name := range []string{"tmux", "Claude Code", "OpenAI Codex", "Gemini CLI", "fzf", "git"} {
+		for _, name := range []string{"tmux", "Claude Code", "OpenAI Codex", "Gemini CLI (legacy)", "fzf", "git"} {
 			dep, ok := depsByName[name]
 			if !ok {
 				t.Fatalf("missing dependency %q in response: %+v", name, resp.Dependencies)

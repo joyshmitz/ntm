@@ -957,6 +957,8 @@ func resolveAgentName(p tmux.Pane) string {
 		prefix = "Codex"
 	case tmux.AgentGemini:
 		prefix = "Gemini"
+	case tmux.AgentAntigravity:
+		prefix = "Antigravity"
 	case tmux.AgentCursor:
 		prefix = "Cursor"
 	case tmux.AgentWindsurf:

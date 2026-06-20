@@ -106,6 +106,8 @@ func normalizedCompactionAgentType(agentType string) string {
 		return "cod"
 	case agent.AgentTypeGemini:
 		return "gmi"
+	case agent.AgentTypeAntigravity:
+		return "agy"
 	default:
 		return strings.ToLower(strings.TrimSpace(agentType))
 	}

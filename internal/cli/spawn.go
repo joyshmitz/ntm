@@ -152,7 +152,7 @@ func parseEnvDurationMs(key string) (time.Duration, error) {
 	return time.Duration(ms) * time.Millisecond, nil
 }
 
-func resolveSpawnAssignAgentType(agent string, ccOnly, codOnly, gmiOnly bool) string {
+func resolveSpawnAssignAgentType(agent string, ccOnly, codOnly, gmiOnly, agyOnly bool) string {
 	if strings.TrimSpace(agent) != "" {
 		return robot.ResolveAgentType(agent)
 	}
@@ -164,6 +164,9 @@ func resolveSpawnAssignAgentType(agent string, ccOnly, codOnly, gmiOnly bool) st
 	}
 	if gmiOnly {
 		return "gemini"
+	}
+	if agyOnly {
+		return "antigravity"
 	}
 	return ""
 }
@@ -180,8 +183,10 @@ func parseLocalFallbackProvider(raw string) (AgentType, error) {
 		return AgentTypeCodex, nil
 	case agentpkg.AgentTypeGemini:
 		return AgentTypeGemini, nil
+	case agentpkg.AgentTypeAntigravity:
+		return AgentTypeAntigravity, nil
 	default:
-		return "", fmt.Errorf("invalid --local-fallback-provider %q (expected one of: cc|cod|gmi)", raw)
+		return "", fmt.Errorf("invalid --local-fallback-provider %q (expected one of: cc|cod|gmi|agy)", raw)
 	}
 }
 
@@ -193,6 +198,8 @@ func canonicalSpawnAgentType(raw string) (AgentType, bool) {
 		return AgentTypeCodex, true
 	case agentpkg.AgentTypeGemini:
 		return AgentTypeGemini, true
+	case agentpkg.AgentTypeAntigravity:
+		return AgentTypeAntigravity, true
 	case agentpkg.AgentTypeCursor:
 		return AgentTypeCursor, true
 	case agentpkg.AgentTypeWindsurf:
@@ -213,6 +220,7 @@ func orderedSpawnAgentTypes() []AgentType {
 		AgentTypeClaude,
 		AgentTypeCodex,
 		AgentTypeGemini,
+		AgentTypeAntigravity,
 		AgentTypeCursor,
 		AgentTypeWindsurf,
 		AgentTypeAider,
@@ -348,6 +356,7 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 	opts.CCCount = 0
 	opts.CodCount = 0
 	opts.GmiCount = 0
+	opts.AgyCount = 0
 	opts.CursorCount = 0
 	opts.WindsurfCount = 0
 	opts.AiderCount = 0
@@ -362,6 +371,8 @@ func recomputeSpawnAgentCounts(opts *SpawnOptions) {
 			opts.CodCount++
 		case AgentTypeGemini:
 			opts.GmiCount++
+		case AgentTypeAntigravity:
+			opts.AgyCount++
 		case AgentTypeCursor:
 			opts.CursorCount++
 		case AgentTypeWindsurf:
@@ -389,6 +400,7 @@ func populateSpawnAgentsFromCounts(opts *SpawnOptions) {
 		{agentType: AgentTypeClaude, count: opts.CCCount},
 		{agentType: AgentTypeCodex, count: opts.CodCount},
 		{agentType: AgentTypeGemini, count: opts.GmiCount},
+		{agentType: AgentTypeAntigravity, count: opts.AgyCount},
 		{agentType: AgentTypeCursor, count: opts.CursorCount},
 		{agentType: AgentTypeWindsurf, count: opts.WindsurfCount},
 		{agentType: AgentTypeAider, count: opts.AiderCount},
@@ -510,7 +522,7 @@ func sortPanesForAssignment(panes []tmux.Pane) {
 }
 
 func legacySpawnTotalAgentCount(opts SpawnOptions) int {
-	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OpencodeCount + opts.OllamaCount
+	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.CursorCount + opts.WindsurfCount + opts.AiderCount + opts.OpencodeCount + opts.OllamaCount
 }
 
 func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
@@ -518,6 +530,7 @@ func spawnHookCountEnv(totalAgents int, opts SpawnOptions) map[string]string {
 		"NTM_AGENT_COUNT_CC":       fmt.Sprintf("%d", opts.CCCount),
 		"NTM_AGENT_COUNT_COD":      fmt.Sprintf("%d", opts.CodCount),
 		"NTM_AGENT_COUNT_GMI":      fmt.Sprintf("%d", opts.GmiCount),
+		"NTM_AGENT_COUNT_AGY":      fmt.Sprintf("%d", opts.AgyCount),
 		"NTM_AGENT_COUNT_CURSOR":   fmt.Sprintf("%d", opts.CursorCount),
 		"NTM_AGENT_COUNT_WINDSURF": fmt.Sprintf("%d", opts.WindsurfCount),
 		"NTM_AGENT_COUNT_AIDER":    fmt.Sprintf("%d", opts.AiderCount),
@@ -535,6 +548,7 @@ func spawnSessionCreatedEventFields(opts SpawnOptions, dir string) map[string]st
 		"agent_cc":       fmt.Sprintf("%d", opts.CCCount),
 		"agent_cod":      fmt.Sprintf("%d", opts.CodCount),
 		"agent_gmi":      fmt.Sprintf("%d", opts.GmiCount),
+		"agent_agy":      fmt.Sprintf("%d", opts.AgyCount),
 		"agent_cursor":   fmt.Sprintf("%d", opts.CursorCount),
 		"agent_windsurf": fmt.Sprintf("%d", opts.WindsurfCount),
 		"agent_aider":    fmt.Sprintf("%d", opts.AiderCount),
@@ -627,7 +641,7 @@ func resolveStaggerInterval(mode string, opts SpawnOptions, tracker *ratelimit.R
 
 			hasAnthropic := opts.CCCount > 0
 			hasOpenAI := opts.CodCount > 0
-			hasGoogle := opts.GmiCount > 0
+			hasGoogle := opts.GmiCount > 0 || opts.AgyCount > 0
 
 			// Check detailed agent list if available (source of truth)
 			if len(opts.Agents) > 0 {
@@ -641,6 +655,8 @@ func resolveStaggerInterval(mode string, opts SpawnOptions, tracker *ratelimit.R
 					case AgentTypeCodex:
 						hasOpenAI = true
 					case AgentTypeGemini:
+						hasGoogle = true
+					case AgentTypeAntigravity:
 						hasGoogle = true
 					}
 				}
@@ -688,6 +704,7 @@ type SpawnOptions struct {
 	CCCount            int
 	CodCount           int
 	GmiCount           int
+	AgyCount           int
 	CursorCount        int
 	WindsurfCount      int
 	AiderCount         int
@@ -755,6 +772,7 @@ type SpawnOptions struct {
 	AssignCCOnly       bool          // Only assign to Claude agents (alias for --assign-agent=claude)
 	AssignCodOnly      bool          // Only assign to Codex agents (alias for --assign-agent=codex)
 	AssignGmiOnly      bool          // Only assign to Gemini agents (alias for --assign-agent=gemini)
+	AssignAgyOnly      bool          // Only assign to Antigravity agents (alias for --assign-agent=antigravity)
 
 	// Git worktree isolation configuration
 	UseWorktrees bool // Enable git worktree isolation for agents
@@ -935,6 +953,7 @@ func newSpawnCmd() *cobra.Command {
 	var assignCCOnly bool
 	var assignCodOnly bool
 	var assignGmiOnly bool
+	var assignAgyOnly bool
 
 	// Git worktree isolation flag
 	var useWorktrees bool
@@ -1041,7 +1060,7 @@ Worktree isolation (--worktrees):
 Local fallback (--local-fallback):
   If Ollama is unavailable or model preflight fails, local agents can be
   converted to cloud agents instead of failing spawn.
-  --local-fallback-provider selects fallback target (cc, cod, gmi).
+  --local-fallback-provider selects fallback target (cc, cod, gmi, agy).
 
 For running multiple agent swarms on the same project with different goals,
 use --label:
@@ -1054,7 +1073,8 @@ share the same project directory. Use ntm list --project myproject to see all.
 
 Examples:
   ntm spawn myproject --cc=2 --cod=2           # 2 Claude, 2 Codex + user pane
-  ntm spawn myproject --cc=3 --cod=3 --gmi=1   # 3 Claude, 3 Codex, 1 Gemini
+  ntm spawn myproject --cc=3 --cod=3 --agy=1   # 3 Claude, 3 Codex, 1 Antigravity
+  ntm spawn myproject --cc=3 --cod=3 --gmi=1   # legacy: Gemini CLI instead of Antigravity
   ntm spawn myproject --cc=4 --no-user         # 4 Claude, no user pane
   ntm spawn myproject -r full-stack            # Use full-stack recipe
   ntm spawn myproject -t red-green             # Use red-green workflow template
@@ -1268,7 +1288,7 @@ Examples:
 				}
 			}
 
-			assignAgentFilter := resolveSpawnAssignAgentType(assignAgentType, assignCCOnly, assignCodOnly, assignGmiOnly)
+			assignAgentFilter := resolveSpawnAssignAgentType(assignAgentType, assignCCOnly, assignCodOnly, assignGmiOnly, assignAgyOnly)
 
 			// Build the concrete agent list. When a persona set/list is
 			// requested (--profile-set/--profiles), expand it into ordered
@@ -1355,7 +1375,7 @@ Examples:
 	cmd.Flags().StringVar(&localModel, "local-model", "codellama:latest", "Ollama model to run for --local/--ollama agents")
 	cmd.Flags().StringVar(&localHost, "local-host", "", "Ollama host URL for --local/--ollama agents (overrides OLLAMA_HOST/NTM_OLLAMA_HOST)")
 	cmd.Flags().BoolVar(&localFallback, "local-fallback", false, "Fallback local Ollama agents to cloud provider when preflight fails")
-	cmd.Flags().StringVar(&localFallbackProvider, "local-fallback-provider", "cod", "Provider for --local-fallback: cc|cod|gmi")
+	cmd.Flags().StringVar(&localFallbackProvider, "local-fallback-provider", "cod", "Provider for --local-fallback: cc|cod|gmi|agy")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAider, &agentSpecs), "aider", "Aider agents (N or N:model)")
@@ -1398,10 +1418,11 @@ Examples:
 	cmd.Flags().BoolVarP(&assignVerbose, "assign-verbose", "", false, "Show detailed scoring/decision logs during assignment")
 	cmd.Flags().BoolVarP(&assignQuiet, "assign-quiet", "", false, "Suppress non-essential assignment output")
 	cmd.Flags().DurationVar(&assignTimeout, "assign-timeout", 30*time.Second, "Timeout for external calls during assignment (bv, br, Agent Mail)")
-	cmd.Flags().StringVar(&assignAgentType, "assign-agent", "", "Filter assignment to specific agent type: claude, codex, gemini")
+	cmd.Flags().StringVar(&assignAgentType, "assign-agent", "", "Filter assignment to specific agent type: claude, codex, gemini, antigravity")
 	cmd.Flags().BoolVar(&assignCCOnly, "assign-cc-only", false, "Only assign to Claude agents (alias for --assign-agent=claude)")
 	cmd.Flags().BoolVar(&assignCodOnly, "assign-cod-only", false, "Only assign to Codex agents (alias for --assign-agent=codex)")
 	cmd.Flags().BoolVar(&assignGmiOnly, "assign-gmi-only", false, "Only assign to Gemini agents (alias for --assign-agent=gemini)")
+	cmd.Flags().BoolVar(&assignAgyOnly, "assign-agy-only", false, "Only assign to Antigravity agents (alias for --assign-agent=antigravity)")
 
 	// Git worktree isolation flag
 	cmd.Flags().BoolVar(&useWorktrees, "worktrees", false, "Enable git worktree isolation for agents (each agent gets isolated working directory)")
@@ -1490,7 +1511,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	if len(opts.Agents) == 0 {
 		totalAgents = legacySpawnTotalAgentCount(opts)
 		if totalAgents == 0 {
-			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
+			return outputError(fmt.Errorf("no agents specified (use --cc, --cod, --gmi, --agy, --cursor, --windsurf, --aider, --ollama or plugin flags)"))
 		}
 	} else {
 		totalAgents = len(opts.Agents)
@@ -2484,7 +2505,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	}
 
 	// Emit analytics events (JSONL) for session creation and agent spawns.
-	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
+	events.EmitSessionCreate(opts.Session, opts.CCCount, opts.CodCount, opts.GmiCount, opts.AgyCount, opts.CursorCount, opts.WindsurfCount, opts.AiderCount, opts.OpencodeCount, opts.OllamaCount, dir, opts.RecipeName)
 	for _, agent := range launchedAgents {
 		events.Emit(events.EventAgentSpawn, opts.Session, events.AgentSpawnData{
 			AgentType: agent.agentType,

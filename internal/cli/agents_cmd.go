@@ -21,7 +21,7 @@ func newAgentsCmd() *cobra.Command {
 		Long: `Manage agent capability profiles for intelligent task assignment.
 
 Agent profiles define the capabilities, specializations, and preferences
-of different AI agents (Claude, Codex, Gemini). Use these commands to:
+of different AI agents (Claude, Codex, Gemini, Antigravity). Use these commands to:
   - View available agent profiles
   - Check agent performance statistics
   - Get recommendations for task assignment
@@ -75,8 +75,8 @@ func newAgentsShowCmd() *cobra.Command {
 		Short:   "Show details of a specific agent profile",
 		Long: `Show detailed information about a specific agent profile.
 
-Agent types: claude, codex, gemini
-Aliases are supported (cc for claude, cod for codex, gmi for gemini).
+Agent types: claude, codex, gemini, antigravity
+Aliases are supported (cc for claude, cod for codex, gmi for gemini, agy for antigravity).
 
 Examples:
   ntm agents show claude
@@ -322,7 +322,7 @@ func runAgentsRecommend(task agents.TaskInfo) error {
 	}
 	var scores []agentScore
 
-	for _, t := range []agents.AgentType{agents.AgentTypeClaude, agents.AgentTypeCodex, agents.AgentTypeGemini} {
+	for _, t := range []agents.AgentType{agents.AgentTypeClaude, agents.AgentTypeCodex, agents.AgentTypeGemini, agents.AgentTypeAntigravity} {
 		result := pm.ScoreAssignment(t, task)
 		scores = append(scores, agentScore{Agent: t, Result: result})
 	}

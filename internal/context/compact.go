@@ -105,9 +105,9 @@ func GetAgentCapabilities(agentType string) AgentCapabilities {
 			BuiltinCompactCommand:  "",
 			HistoryClearCommand:    "",
 		}
-	case agent.AgentTypeGemini:
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
 		return AgentCapabilities{
-			SupportsBuiltinCompact: false, // Gemini CLI doesn't have /compact
+			SupportsBuiltinCompact: false, // Gemini/Antigravity CLI doesn't have /compact
 			SupportsHistoryClear:   true,
 			BuiltinCompactCommand:  "",
 			HistoryClearCommand:    "/clear",

@@ -59,6 +59,8 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 		return cfg.Agents.Codex, nil, nil
 	case AgentTypeGemini:
 		return cfg.Agents.Gemini, nil, nil
+	case AgentTypeAntigravity:
+		return cfg.Agents.Antigravity, nil, nil
 	case AgentTypeOllama:
 		if ollamaHost == "" {
 			return cfg.Agents.Ollama, nil, nil
@@ -410,7 +412,7 @@ func runAdd(opts AddOptions) error {
 
 	// Add agents
 	flatAgents := opts.Agents.Flatten()
-	ccCount, codCount, gmiCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0
+	ccCount, codCount, gmiCount, agyCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0, 0
 	var rateLimitTracker *ratelimit.RateLimitTracker
 	openAICooldownWaited := false
 	ollamaHost := ""
@@ -482,6 +484,8 @@ func runAdd(opts AddOptions) error {
 			codCount++
 		case AgentTypeGemini:
 			gmiCount++
+		case AgentTypeAntigravity:
+			agyCount++
 		case AgentTypeOllama:
 			ollamaCount++
 		case AgentTypeCursor:
@@ -740,6 +744,7 @@ func runAdd(opts AddOptions) error {
 			AddedClaude:         ccCount,
 			AddedCodex:          codCount,
 			AddedGemini:         gmiCount,
+			AddedAntigravity:    agyCount,
 			AddedOllama:         ollamaCount,
 			AddedCursor:         cursorCount,
 			AddedWindsurf:       windsurfCount,

@@ -135,7 +135,7 @@ type Session struct {
 type Agent struct {
     PaneIndex   int       `json:"pane_index"`
     PaneID      string    `json:"pane_id"`       // "0.1", "0.2", etc.
-    Type        string    `json:"type"`          // "claude", "codex", "gemini"
+    Type        string    `json:"type"`          // "claude", "codex", "antigravity", "gemini" (legacy)
     Model       string    `json:"model,omitempty"`
     State       string    `json:"state"`         // "idle", "busy", "error", "compacting"
     StateAge    string    `json:"state_age"`     // "2m30s"

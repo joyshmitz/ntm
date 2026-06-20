@@ -150,6 +150,8 @@ func (m *Monitor) ScanAndRegisterAgents() error {
 			agentCmdTemplate = m.cfg.Agents.Codex
 		case tmux.AgentGemini:
 			agentCmdTemplate = m.cfg.Agents.Gemini
+		case tmux.AgentAntigravity:
+			agentCmdTemplate = m.cfg.Agents.Antigravity
 		case tmux.AgentOllama:
 			agentCmdTemplate = m.cfg.Agents.Ollama
 		case tmux.AgentCursor:

@@ -48,6 +48,7 @@ const (
 	TargetClaude
 	TargetCodex
 	TargetGemini
+	TargetAntigravity
 )
 
 // ReloadMsg is emitted when palette commands are reloaded from config changes.
@@ -60,12 +61,14 @@ type paneCounts struct {
 	claude      int
 	codex       int
 	gemini      int
+	antigravity int
 
 	// Representative pane titles per target (best-effort, used for UI clarity).
-	allSamples    []string
-	claudeSamples []string
-	codexSamples  []string
-	geminiSamples []string
+	allSamples         []string
+	claudeSamples      []string
+	codexSamples       []string
+	geminiSamples      []string
+	antigravitySamples []string
 }
 
 type paneCountsMsg struct {
@@ -168,6 +171,7 @@ type KeyMap struct {
 	Target2        key.Binding
 	Target3        key.Binding
 	Target4        key.Binding
+	Target5        key.Binding
 	Edit           key.Binding
 	ConfirmEdit    key.Binding
 	Num1           key.Binding
@@ -246,6 +250,7 @@ var keys = KeyMap{
 	Target2: key.NewBinding(key.WithKeys("2")),
 	Target3: key.NewBinding(key.WithKeys("3")),
 	Target4: key.NewBinding(key.WithKeys("4")),
+	Target5: key.NewBinding(key.WithKeys("5")),
 	Edit: key.NewBinding(
 		key.WithKeys("e"),
 		key.WithHelp("e", "edit prompt"),
@@ -449,6 +454,9 @@ func (m Model) fetchPaneCounts() tea.Cmd {
 			case tmux.AgentGemini:
 				counts.gemini++
 				addSample(&counts.geminiSamples, title, maxTypeSamples)
+			case tmux.AgentAntigravity:
+				counts.antigravity++
+				addSample(&counts.antigravitySamples, title, maxTypeSamples)
 			}
 		}
 
@@ -934,6 +942,10 @@ func (m *Model) updateTargetPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Target4):
 		m.target = TargetGemini
 		return m.send()
+
+	case key.Matches(msg, keys.Target5):
+		m.target = TargetAntigravity
+		return m.send()
 	}
 
 	return *m, nil
@@ -1294,6 +1306,8 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 			shouldSend = p.Type == tmux.AgentCodex
 		case TargetGemini:
 			shouldSend = p.Type == tmux.AgentGemini
+		case TargetAntigravity:
+			shouldSend = p.Type == tmux.AgentAntigravity
 		}
 
 		if shouldSend {
@@ -1459,6 +1473,10 @@ func (m Model) viewQuitting() string {
 		case TargetGemini:
 			targetName = "Gemini"
 			targetColor = string(t.Gemini)
+			targetIcon = ic.Gemini
+		case TargetAntigravity:
+			targetName = "Antigravity"
+			targetColor = string(t.Lavender)
 			targetIcon = ic.Gemini
 		}
 
@@ -1889,16 +1907,18 @@ func (m Model) renderTargetSummaryBadges() string {
 	}
 
 	var (
-		all    *int
-		claude *int
-		codex  *int
-		gemini *int
+		all         *int
+		claude      *int
+		codex       *int
+		gemini      *int
+		antigravity *int
 	)
 	if m.paneCountsKnown {
 		all = &m.paneCounts.totalAgents
 		claude = &m.paneCounts.claude
 		codex = &m.paneCounts.codex
 		gemini = &m.paneCounts.gemini
+		antigravity = &m.paneCounts.antigravity
 	}
 
 	badges := []string{
@@ -1906,6 +1926,7 @@ func (m Model) renderTargetSummaryBadges() string {
 		styles.TextBadge(labelWithIcon(ic.Claude, "", "cc", claude), t.Claude, t.Base),
 		styles.TextBadge(labelWithIcon(ic.Codex, "", "cod", codex), t.Codex, t.Base),
 		styles.TextBadge(labelWithIcon(ic.Gemini, "", "gmi", gemini), t.Gemini, t.Base),
+		styles.TextBadge(labelWithIcon(ic.Gemini, "", "agy", antigravity), t.Lavender, t.Base),
 	}
 
 	return styles.BadgeGroup(badges...)
@@ -1926,6 +1947,8 @@ func (m Model) samplePaneTitlesForTargetKey(key string, max int) []string {
 		src = m.paneCounts.codexSamples
 	case "4":
 		src = m.paneCounts.geminiSamples
+	case "5":
+		src = m.paneCounts.antigravitySamples
 	}
 
 	if len(src) > max {
@@ -2141,7 +2164,8 @@ func (m Model) viewTargetPhase() string {
 		{"1", ic.All, "All Agents", "broadcast to all", t.Green, t.Surface0},
 		{"2", ic.Claude, "Claude (cc)", "Anthropic agents", t.Claude, t.Surface0},
 		{"3", ic.Codex, "Codex (cod)", "OpenAI agents", t.Codex, t.Surface0},
-		{"4", ic.Gemini, "Gemini (gmi)", "Google agents", t.Gemini, t.Surface0},
+		{"4", ic.Gemini, "Gemini (gmi)", "Google agents (legacy)", t.Gemini, t.Surface0},
+		{"5", ic.Gemini, "Antigravity (agy)", "Google agents", t.Lavender, t.Surface0},
 	}
 
 	for _, target := range targets {
@@ -2157,6 +2181,8 @@ func (m Model) viewTargetPhase() string {
 				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.codex)
 			case "4":
 				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.gemini)
+			case "5":
+				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.antigravity)
 			}
 		}
 
@@ -2256,7 +2282,7 @@ func (m Model) renderTargetHelpBar() string {
 		key  string
 		desc string
 	}{
-		{"1-4", "select target"},
+		{"1-5", "select target"},
 		{"e", "edit prompt"},
 		{"?", "help"},
 		{"Esc", "back"},

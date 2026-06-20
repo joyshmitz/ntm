@@ -1226,6 +1226,10 @@
             "description": "Alerts active",
             "type": "integer"
           },
+          "antigravity_count": {
+            "description": "Antigravity count",
+            "type": "integer"
+          },
           "attached_count": {
             "description": "Attached count",
             "type": "integer"
@@ -1298,6 +1302,7 @@
           "claude_count",
           "codex_count",
           "gemini_count",
+          "antigravity_count",
           "cursor_count",
           "windsurf_count",
           "aider_count",
@@ -1376,6 +1381,10 @@
       },
       "SwarmPlanAllocation": {
         "properties": {
+          "agy_agents": {
+            "description": "Agy agents",
+            "type": "integer"
+          },
           "cc_agents": {
             "description": "C c agents",
             "type": "integer"
@@ -1407,7 +1416,8 @@
           "open_beads",
           "cc_agents",
           "cod_agents",
-          "gmi_agents"
+          "gmi_agents",
+          "agy_agents"
         ],
         "type": "object"
       },

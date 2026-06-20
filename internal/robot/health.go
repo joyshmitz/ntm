@@ -2033,6 +2033,8 @@ func getAgentCommand(agentType string) string {
 		return "codex"
 	case "gemini":
 		return "gemini"
+	case "antigravity":
+		return "agy"
 	case "cursor":
 		return "cursor"
 	case "windsurf":

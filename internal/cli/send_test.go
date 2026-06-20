@@ -1067,25 +1067,27 @@ func TestBuildTargetDescription(t *testing.T) {
 		cc        bool
 		cod       bool
 		gmi       bool
+		agy       bool
 		all       bool
 		skipFirst bool
 		paneIdx   int
 		want      string
 	}{
-		{"specific pane", false, false, false, false, false, 2, "pane:2"},
-		{"all panes", false, false, false, true, false, -1, "all"},
-		{"claude only", true, false, false, false, false, -1, "cc"},
-		{"codex only", false, true, false, false, false, -1, "cod"},
-		{"gemini only", false, false, true, false, false, -1, "gmi"},
-		{"cc and cod", true, true, false, false, false, -1, "cc,cod"},
-		{"all types", true, true, true, false, false, -1, "cc,cod,gmi"},
-		{"no filter skip first", false, false, false, false, true, -1, "agents"},
-		{"no filter no skip", false, false, false, false, false, -1, "all-agents"},
+		{"specific pane", false, false, false, false, false, false, 2, "pane:2"},
+		{"all panes", false, false, false, false, true, false, -1, "all"},
+		{"claude only", true, false, false, false, false, false, -1, "cc"},
+		{"codex only", false, true, false, false, false, false, -1, "cod"},
+		{"gemini only", false, false, true, false, false, false, -1, "gmi"},
+		{"antigravity only", false, false, false, true, false, false, -1, "agy"},
+		{"cc and cod", true, true, false, false, false, false, -1, "cc,cod"},
+		{"all types", true, true, true, true, false, false, -1, "cc,cod,gmi,agy"},
+		{"no filter skip first", false, false, false, false, false, true, -1, "agents"},
+		{"no filter no skip", false, false, false, false, false, false, -1, "all-agents"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildTargetDescription(tt.cc, tt.cod, tt.gmi, tt.all, tt.skipFirst, tt.paneIdx, nil)
+			got := buildTargetDescription(tt.cc, tt.cod, tt.gmi, tt.agy, tt.all, tt.skipFirst, tt.paneIdx, nil)
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}

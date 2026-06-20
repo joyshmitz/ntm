@@ -112,6 +112,8 @@ func countAgents(panes []tmux.Pane) AgentConfig {
 			config.Codex++
 		case tmux.AgentGemini:
 			config.Gemini++
+		case tmux.AgentAntigravity:
+			config.Antigravity++
 		case tmux.AgentCursor:
 			config.Cursor++
 		case tmux.AgentWindsurf:

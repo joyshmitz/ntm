@@ -158,7 +158,7 @@ If `short` fails for any bead, the matrix stops and writes
 ## Required vs no-real-model paths
 
 - **No real model:** every `short` and `race` gate runs entirely with
-  the synthetic harness; no real Claude / Codex / Gemini CLI is
+  the synthetic harness; no real Claude / Codex / Antigravity / Gemini CLI is
   launched. This is mandatory for matrix reproducibility.
 - **Opt-in 100+ pane:** `load` gate spawns 200 synthetic panes via
   `bd-2mb03.2`. Triggered only when `NTM_SWARM_LOAD=1` is exported.

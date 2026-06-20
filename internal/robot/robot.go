@@ -1780,26 +1780,27 @@ const (
 
 // StatusSummary provides aggregate stats
 type StatusSummary struct {
-	TotalSessions int            `json:"total_sessions"`
-	TotalAgents   int            `json:"total_agents"`
-	AttachedCount int            `json:"attached_count"`
-	ClaudeCount   int            `json:"claude_count"`
-	CodexCount    int            `json:"codex_count"`
-	GeminiCount   int            `json:"gemini_count"`
-	CursorCount   int            `json:"cursor_count"`
-	WindsurfCount int            `json:"windsurf_count"`
-	AiderCount    int            `json:"aider_count"`
-	OpencodeCount int            `json:"opencode_count"`
-	OllamaCount   int            `json:"ollama_count"`
-	AgentsByState map[string]int `json:"agents_by_state"`
-	AgentsByType  map[string]int `json:"agents_by_type"`
-	ReadyWork     int            `json:"ready_work"`
-	InProgress    int            `json:"in_progress"`
-	HealthScore   float64        `json:"health_score"`
-	HealthStatus  string         `json:"health_status,omitempty"`
-	AlertsActive  int            `json:"alerts_active"`
-	MailUnread    int            `json:"mail_unread"`
-	MailUrgent    int            `json:"mail_urgent"`
+	TotalSessions    int            `json:"total_sessions"`
+	TotalAgents      int            `json:"total_agents"`
+	AttachedCount    int            `json:"attached_count"`
+	ClaudeCount      int            `json:"claude_count"`
+	CodexCount       int            `json:"codex_count"`
+	GeminiCount      int            `json:"gemini_count"`
+	AntigravityCount int            `json:"antigravity_count"`
+	CursorCount      int            `json:"cursor_count"`
+	WindsurfCount    int            `json:"windsurf_count"`
+	AiderCount       int            `json:"aider_count"`
+	OpencodeCount    int            `json:"opencode_count"`
+	OllamaCount      int            `json:"ollama_count"`
+	AgentsByState    map[string]int `json:"agents_by_state"`
+	AgentsByType     map[string]int `json:"agents_by_type"`
+	ReadyWork        int            `json:"ready_work"`
+	InProgress       int            `json:"in_progress"`
+	HealthScore      float64        `json:"health_score"`
+	HealthStatus     string         `json:"health_status,omitempty"`
+	AlertsActive     int            `json:"alerts_active"`
+	MailUnread       int            `json:"mail_unread"`
+	MailUrgent       int            `json:"mail_urgent"`
 }
 
 // ProgressSummary provides bead completion metrics for status and dashboard (bd-1qct).
@@ -2282,26 +2283,27 @@ func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
 	cloned.Alerts = append([]string(nil), base.Alerts...)
 	cloned.AlertsDetailed = append([]AlertInfo(nil), base.AlertsDetailed...)
 	cloned.Summary = StatusSummary{
-		TotalSessions: base.Summary.TotalSessions,
-		TotalAgents:   base.Summary.TotalAgents,
-		AttachedCount: base.Summary.AttachedCount,
-		ClaudeCount:   base.Summary.ClaudeCount,
-		CodexCount:    base.Summary.CodexCount,
-		GeminiCount:   base.Summary.GeminiCount,
-		CursorCount:   base.Summary.CursorCount,
-		WindsurfCount: base.Summary.WindsurfCount,
-		AiderCount:    base.Summary.AiderCount,
-		OpencodeCount: base.Summary.OpencodeCount,
-		OllamaCount:   base.Summary.OllamaCount,
-		AgentsByState: make(map[string]int, len(base.Summary.AgentsByState)),
-		AgentsByType:  make(map[string]int, len(base.Summary.AgentsByType)),
-		ReadyWork:     base.Summary.ReadyWork,
-		InProgress:    base.Summary.InProgress,
-		HealthScore:   base.Summary.HealthScore,
-		HealthStatus:  base.Summary.HealthStatus,
-		AlertsActive:  base.Summary.AlertsActive,
-		MailUnread:    base.Summary.MailUnread,
-		MailUrgent:    base.Summary.MailUrgent,
+		TotalSessions:    base.Summary.TotalSessions,
+		TotalAgents:      base.Summary.TotalAgents,
+		AttachedCount:    base.Summary.AttachedCount,
+		ClaudeCount:      base.Summary.ClaudeCount,
+		CodexCount:       base.Summary.CodexCount,
+		GeminiCount:      base.Summary.GeminiCount,
+		AntigravityCount: base.Summary.AntigravityCount,
+		CursorCount:      base.Summary.CursorCount,
+		WindsurfCount:    base.Summary.WindsurfCount,
+		AiderCount:       base.Summary.AiderCount,
+		OpencodeCount:    base.Summary.OpencodeCount,
+		OllamaCount:      base.Summary.OllamaCount,
+		AgentsByState:    make(map[string]int, len(base.Summary.AgentsByState)),
+		AgentsByType:     make(map[string]int, len(base.Summary.AgentsByType)),
+		ReadyWork:        base.Summary.ReadyWork,
+		InProgress:       base.Summary.InProgress,
+		HealthScore:      base.Summary.HealthScore,
+		HealthStatus:     base.Summary.HealthStatus,
+		AlertsActive:     base.Summary.AlertsActive,
+		MailUnread:       base.Summary.MailUnread,
+		MailUrgent:       base.Summary.MailUrgent,
 	}
 	for key, value := range base.Summary.AgentsByState {
 		cloned.Summary.AgentsByState[key] = value
@@ -2617,6 +2619,8 @@ func statusAccumulateAgentSummary(summary *StatusSummary, agentType, agentState 
 		summary.CodexCount++
 	case "gemini":
 		summary.GeminiCount++
+	case "antigravity":
+		summary.AntigravityCount++
 	case "cursor":
 		summary.CursorCount++
 	case "windsurf":
@@ -3831,8 +3835,8 @@ func detectModel(agentType, title string) string {
 		return "sonnet" // Default Claude model
 	case "codex":
 		return "gpt4" // Default Codex model
-	case "gemini":
-		return "gemini" // Default Gemini model
+	case "gemini", "antigravity":
+		return "gemini" // Default Gemini-class model (agy shares Gemini models)
 	default:
 		return "unknown"
 	}
@@ -4513,6 +4517,7 @@ type SwarmPlanAllocation struct {
 	CCAgents  int    `json:"cc_agents"`
 	CodAgents int    `json:"cod_agents"`
 	GmiAgents int    `json:"gmi_agents"`
+	AgyAgents int    `json:"agy_agents"`
 }
 
 type SwarmSessionInfo struct {
@@ -5691,6 +5696,7 @@ func buildSwarmSnapshotPlan(cfg *config.Config, fallbackTotalAgents int) SwarmSn
 			CCAgents:  alloc.CCAgents,
 			CodAgents: alloc.CodAgents,
 			GmiAgents: alloc.GmiAgents,
+			AgyAgents: alloc.AgyAgents,
 		})
 	}
 
@@ -5737,6 +5743,8 @@ func agentTypeString(t tmux.AgentType) string {
 		return "codex"
 	case tmux.AgentGemini:
 		return "gemini"
+	case tmux.AgentAntigravity:
+		return "antigravity"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -5786,7 +5794,8 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 			if cfg.Models.DefaultCodex != "" {
 				return cfg.Models.DefaultCodex
 			}
-		case tmux.AgentGemini:
+		case tmux.AgentGemini, tmux.AgentAntigravity:
+			// agy (Antigravity) shares Gemini-class models.
 			if cfg.Models.DefaultGemini != "" {
 				return cfg.Models.DefaultGemini
 			}
@@ -5804,7 +5813,7 @@ func modelNameForPane(pane tmux.Pane, cfg *config.Config) string {
 		return defaults.DefaultClaude
 	case tmux.AgentCodex:
 		return defaults.DefaultCodex
-	case tmux.AgentGemini:
+	case tmux.AgentGemini, tmux.AgentAntigravity:
 		return defaults.DefaultGemini
 	case tmux.AgentCursor:
 		return "cursor"

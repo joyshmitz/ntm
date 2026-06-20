@@ -35,6 +35,7 @@ type SpawnOptions struct {
 	CCCount        int      // Claude agents
 	CodCount       int      // Codex agents
 	GmiCount       int      // Gemini agents
+	AgyCount       int      // Antigravity agents
 	Preset         string   // Recipe/preset name
 	NoUserPane     bool     // Don't create user pane
 	WorkingDir     string   // Override working directory
@@ -213,7 +214,7 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	_ = audit.LogEvent(opts.Session, audit.EventTypeSpawn, audit.ActorSystem, "robot.spawn", map[string]interface{}{
 		"phase":           "start",
 		"session":         opts.Session,
-		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount,
+		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount,
 		"preset":          opts.Preset,
 		"no_user_pane":    opts.NoUserPane,
 		"dry_run":         opts.DryRun,
@@ -231,7 +232,7 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		payload := map[string]interface{}{
 			"phase":           "finish",
 			"session":         opts.Session,
-			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount,
+			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount,
 			"preset":          opts.Preset,
 			"no_user_pane":    opts.NoUserPane,
 			"dry_run":         opts.DryRun,
@@ -298,9 +299,9 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	// handoffCtx is available for use in work prompts below
 	_ = handoffCtx // silence unused warning when not in orchestrator mode
 
-	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount
+	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
 	if totalAgents == 0 {
-		output.Error = "no agents specified (use cc, cod, or gmi counts)"
+		output.Error = "no agents specified (use cc, cod, gmi, or agy counts)"
 		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Specify at least one agent count")
 		return output, nil
 	}
@@ -379,6 +380,17 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 				Name:  dryRunNameMap.AssignNew("gemini", gmiPane),
 				Type:  "gemini",
 				Title: fmt.Sprintf("%s__gmi_%d", opts.Session, i+1),
+			})
+			paneIdx++
+		}
+
+		for i := 0; i < opts.AgyCount; i++ {
+			agyPane := fmt.Sprintf("0.%d", paneIdx)
+			output.WouldCreate = append(output.WouldCreate, SpawnedAgent{
+				Pane:  agyPane,
+				Name:  dryRunNameMap.AssignNew("antigravity", agyPane),
+				Type:  "antigravity",
+				Title: fmt.Sprintf("%s__agy_%d", opts.Session, i+1),
 			})
 			paneIdx++
 		}
@@ -493,6 +505,14 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	for i := 0; i < opts.GmiCount && agentNum < len(panes); i++ {
 		agent := launchAgent(panes[agentNum], opts.Session, "gemini", i+1, dir, agentCommands["gemini"])
 		agent.Name = nameMap.AssignNew("gemini", agent.Pane)
+		output.Agents = append(output.Agents, agent)
+		agentNum++
+	}
+
+	// Launch Antigravity agents
+	for i := 0; i < opts.AgyCount && agentNum < len(panes); i++ {
+		agent := launchAgent(panes[agentNum], opts.Session, "antigravity", i+1, dir, agentCommands["antigravity"])
+		agent.Name = nameMap.AssignNew("antigravity", agent.Pane)
 		output.Agents = append(output.Agents, agent)
 		agentNum++
 	}
@@ -674,6 +694,8 @@ func agentTypeShort(agentType string) string {
 		return "cod"
 	case tmux.AgentGemini:
 		return "gmi"
+	case tmux.AgentAntigravity:
+		return "agy"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -693,9 +715,10 @@ func agentTypeShort(agentType string) string {
 // Templates are rendered with empty vars (optional fields only).
 func getAgentCommands(cfg *config.Config) map[string]string {
 	defaults := map[string]string{
-		"claude": "claude",
-		"codex":  "codex",
-		"gemini": "gemini",
+		"claude":      "claude",
+		"codex":       "codex",
+		"gemini":      "gemini",
+		"antigravity": "agy",
 	}
 
 	if cfg != nil && cfg.Agents.Claude != "" {
@@ -706,6 +729,9 @@ func getAgentCommands(cfg *config.Config) map[string]string {
 	}
 	if cfg != nil && cfg.Agents.Gemini != "" {
 		defaults["gemini"] = cfg.Agents.Gemini
+	}
+	if cfg != nil && cfg.Agents.Antigravity != "" {
+		defaults["antigravity"] = cfg.Agents.Antigravity
 	}
 
 	// Render templates with empty vars (all template fields are optional)

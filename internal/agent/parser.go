@@ -82,6 +82,12 @@ func (p *parserImpl) DetectAgentType(output string) AgentType {
 		return AgentTypeCodex
 	}
 
+	// Antigravity patterns (checked before Gemini so an agy pane is not
+	// misclassified as the legacy Gemini CLI; the two share other signatures).
+	if agyHeaderPattern.MatchString(output) {
+		return AgentTypeAntigravity
+	}
+
 	// Gemini patterns
 	if gmiHeaderPattern.MatchString(output) {
 		return AgentTypeGemini
@@ -182,8 +188,8 @@ func (p *parserImpl) extractMetrics(output string, state *AgentState) {
 			state.TokensUsed = tokens
 		}
 
-	case AgentTypeGemini:
-		// Gemini shows memory usage
+	case AgentTypeGemini, AgentTypeAntigravity:
+		// Gemini (and its successor Antigravity) show memory usage
 		// Example: "gemini-3-pro-preview /model | 396.8 MB"
 		if mb := extractFloat(gmiMemoryPattern, output); mb != nil {
 			state.MemoryMB = mb
@@ -282,7 +288,7 @@ func (p *parserImpl) detectRateLimit(output string, agentType AgentType) bool {
 		return matchAny(recentOutput, ccRateLimitPatterns)
 	case AgentTypeCodex:
 		return matchAny(recentOutput, codRateLimitPatterns)
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
 		return matchAny(recentOutput, gmiRateLimitPatterns)
 	case AgentTypeCursor:
 		return matchAny(recentOutput, cursorRateLimitPatterns)
@@ -315,7 +321,7 @@ func (p *parserImpl) detectWorking(output string, agentType AgentType) bool {
 		return matchAny(recentOutput, ccWorkingPatterns)
 	case AgentTypeCodex:
 		return matchAny(recentOutput, codWorkingPatterns)
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
 		return matchAny(recentOutput, gmiWorkingPatterns)
 	case AgentTypeCursor:
 		return matchAny(recentOutput, cursorWorkingPatterns)
@@ -379,8 +385,9 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 		return false
 	case AgentTypeCodex:
 		return matchAnyRegex(lastLines, codIdlePatterns)
-	case AgentTypeGemini:
-		// Gemini is trickier - check for prompt or lack of working indicators
+	case AgentTypeGemini, AgentTypeAntigravity:
+		// Gemini (and its successor Antigravity) are trickier - check for prompt
+		// or lack of working indicators
 		return matchAnyRegex(lastLines, gmiIdlePatterns)
 	case AgentTypeCursor:
 		return matchAnyRegex(lastLines, cursorIdlePatterns)
@@ -412,7 +419,7 @@ func (p *parserImpl) detectError(output string, agentType AgentType) bool {
 		return matchAny(recentOutput, ccErrorPatterns)
 	case AgentTypeCodex:
 		return matchAny(recentOutput, codErrorPatterns)
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
 		return matchAny(recentOutput, gmiErrorPatterns)
 	case AgentTypeCursor:
 		return matchAny(recentOutput, cursorErrorPatterns)
@@ -444,7 +451,7 @@ func (p *parserImpl) collectLimitIndicators(output string, agentType AgentType) 
 		return collectMatches(recentOutput, ccRateLimitPatterns)
 	case AgentTypeCodex:
 		return collectMatches(recentOutput, codRateLimitPatterns)
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
 		return collectMatches(recentOutput, gmiRateLimitPatterns)
 	case AgentTypeCursor:
 		return collectMatches(recentOutput, cursorRateLimitPatterns)
@@ -477,7 +484,7 @@ func (p *parserImpl) collectWorkIndicators(output string, agentType AgentType) [
 		return collectMatches(recentOutput, ccWorkingPatterns)
 	case AgentTypeCodex:
 		return collectMatches(recentOutput, codWorkingPatterns)
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
 		return collectMatches(recentOutput, gmiWorkingPatterns)
 	case AgentTypeCursor:
 		return collectMatches(recentOutput, cursorWorkingPatterns)

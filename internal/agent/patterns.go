@@ -283,6 +283,19 @@ var (
 	gmiHeaderPattern = regexp.MustCompile(`(?i)(gemini.*preview|gemini-\d|google\s+ai)`)
 )
 
+// Antigravity CLI (agy) patterns for state detection.
+//
+// Antigravity is the Gemini CLI's successor and shares its interactive TUI
+// behavior (memory display, YOLO-style auto-approve, prompt rendering), so its
+// working / idle / rate-limit / error / metric detection reuses the gmi*
+// pattern sets above (see the AgentTypeAntigravity arms in parser.go). The only
+// agy-specific signal we need is a header signature that distinguishes an
+// Antigravity pane from a legacy Gemini pane during unhinted type detection.
+var (
+	// agyHeaderPattern confirms output is from the Antigravity CLI.
+	agyHeaderPattern = regexp.MustCompile(`(?i)antigravity`)
+)
+
 // Cursor (cursor) patterns.
 var (
 	cursorRateLimitPatterns = []string{
@@ -788,7 +801,9 @@ func GetPatternSet(agentType AgentType) *PatternSet {
 			TokenPattern:      codTokenPattern,
 			HeaderPattern:     codHeaderPattern,
 		}
-	case AgentTypeGemini:
+	case AgentTypeGemini, AgentTypeAntigravity:
+		// Antigravity (agy) shares the Gemini CLI's TUI behavior, so it reuses
+		// the gmi* detection pattern set (see parser.go).
 		return &PatternSet{
 			RateLimitPatterns: gmiRateLimitPatterns,
 			WorkingPatterns:   gmiWorkingPatterns,

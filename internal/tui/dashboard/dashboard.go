@@ -1973,7 +1973,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.healthMessage = "Spawn cancelled"
 			return m, nil
 		}
-		total := msg.Result.CCCount + msg.Result.CodCount + msg.Result.GmiCount
+		total := msg.Result.CCCount + msg.Result.CodCount + msg.Result.GmiCount + msg.Result.AgyCount
 		m.healthMessage = fmt.Sprintf("Adding %d agent(s)...", total)
 		if m.toasts != nil {
 			m.toasts.PushPersistent(spawnWizardProgressToastID, m.healthMessage, components.ToastInfo)
@@ -3627,6 +3627,7 @@ func (m *Model) updateStats() {
 	m.claudeCount = 0
 	m.codexCount = 0
 	m.geminiCount = 0
+	m.antigravityCount = 0
 	m.cursorCount = 0
 	m.windsurfCount = 0
 	m.aiderCount = 0
@@ -3641,6 +3642,8 @@ func (m *Model) updateStats() {
 			m.codexCount++
 		case tmux.AgentGemini:
 			m.geminiCount++
+		case tmux.AgentAntigravity:
+			m.antigravityCount++
 		case tmux.AgentCursor:
 			m.cursorCount++
 		case tmux.AgentWindsurf:
@@ -3698,7 +3701,7 @@ func (m *Model) updateTickerData() {
 	if activeAgents == 0 && len(m.panes) > 0 {
 		// Status detection hasn't populated yet; show total agents as placeholder
 		// This prevents showing "0/17" when we simply haven't fetched status yet
-		activeAgents = m.claudeCount + m.codexCount + m.geminiCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount
+		activeAgents = m.claudeCount + m.codexCount + m.geminiCount + m.antigravityCount + m.cursorCount + m.windsurfCount + m.aiderCount + m.ollamaCount
 	}
 
 	// Count alerts by severity
@@ -3721,6 +3724,7 @@ func (m *Model) updateTickerData() {
 		ClaudeCount:      m.claudeCount,
 		CodexCount:       m.codexCount,
 		GeminiCount:      m.geminiCount,
+		AntigravityCount: m.antigravityCount,
 		CursorCount:      m.cursorCount,
 		WindsurfCount:    m.windsurfCount,
 		AiderCount:       m.aiderCount,
@@ -3936,6 +3940,10 @@ func (m Model) renderPaneGrid() string {
 		case tmux.AgentGemini:
 			borderColor = t.Gemini
 			iconColor = t.Gemini
+			agentIcon = ic.Gemini
+		case tmux.AgentAntigravity:
+			borderColor = t.Lavender
+			iconColor = t.Lavender
 			agentIcon = ic.Gemini
 		default:
 			borderColor = t.Green
@@ -4619,7 +4627,7 @@ func (m *Model) resolveCostModelForPane(pane tmux.Pane) string {
 			return m.cfg.Models.DefaultCodex
 		}
 		return "gpt-4"
-	case tmux.AgentGemini:
+	case tmux.AgentGemini, tmux.AgentAntigravity:
 		if m.cfg != nil && m.cfg.Models.DefaultGemini != "" {
 			return m.cfg.Models.DefaultGemini
 		}
@@ -5647,6 +5655,9 @@ func (m Model) renderPaneDetail(width int) string {
 		typeIcon = ic.Codex
 	case tmux.AgentGemini:
 		typeColor = t.Gemini
+		typeIcon = ic.Gemini
+	case tmux.AgentAntigravity:
+		typeColor = t.Lavender
 		typeIcon = ic.Gemini
 	default:
 		typeColor = t.Green

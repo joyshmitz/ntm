@@ -210,6 +210,13 @@ func ValidateModelAlias(agentType AgentType, alias string) error {
 		aliases = cfg.Models.Codex
 	case AgentTypeGemini:
 		aliases = cfg.Models.Gemini
+	case AgentTypeAntigravity:
+		// agy's model is hard-pinned to "Gemini 3.1 Pro (High)" (see
+		// config.AntigravityRequiredModel), so there is no per-user alias map to
+		// validate against. Any requested alias is ignored rather than rejected:
+		// spawn.go warns and proceeds with the pinned model, so validation must
+		// not hard-fail here. Return nil unconditionally.
+		return nil
 	case AgentTypeOllama:
 		aliases = cfg.Models.Ollama
 	case AgentTypeCursor:

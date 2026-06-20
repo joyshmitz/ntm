@@ -193,7 +193,8 @@ Three ways to specify which agent should execute a step:
 Agent types:
 - `claude` / `cc` / `claude-code`
 - `codex` / `cod` / `openai`
-- `gemini` / `gmi` / `google`
+- `antigravity` / `agy` / `google-antigravity`
+- `gemini` / `gmi` / `google` (legacy)
 
 ### By Pane Index
 
@@ -280,7 +281,7 @@ Run multiple steps concurrently using the `parallel` block:
       prompt: Write initial code
 
     - id: review
-      agent: gemini
+      agent: antigravity
       prompt: Review architecture
 
 - id: combine
@@ -528,7 +529,7 @@ steps:
         prompt: Check git history for changes related to: ${vars.issue}
 
       - id: log_search
-        agent: gemini
+        agent: antigravity
         prompt: Search logs for errors related to: ${vars.issue}
 
   - id: synthesize

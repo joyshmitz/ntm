@@ -32,7 +32,8 @@ Required:
 Optional agents:
   - claude (Claude Code CLI)
   - codex (OpenAI Codex CLI)
-  - gemini (Google Gemini CLI)
+  - agy (Antigravity CLI, Google agent)
+  - gemini (Google Gemini CLI, legacy)
 
 Also checks for recommended tools like fzf.
 
@@ -133,20 +134,20 @@ func defaultDepChecks() []depCheck {
 			InstallHint: "npm install -g @openai/codex",
 		},
 		{
-			Name:        "Gemini CLI",
-			Command:     "gemini",
-			VersionArgs: []string{"--version"},
-			Required:    false,
-			Category:    "AI Agents",
-			InstallHint: "npm install -g @google/gemini-cli",
-		},
-		{
 			Name:        "Antigravity CLI (agy)",
 			Command:     "agy",
 			VersionArgs: []string{"--version"},
 			Required:    false,
 			Category:    "AI Agents",
 			InstallHint: "curl -fsSL https://antigravity.google/cli/install.sh | bash (then `agy` once to authenticate via Google OAuth)",
+		},
+		{
+			Name:        "Gemini CLI (legacy)",
+			Command:     "gemini",
+			VersionArgs: []string{"--version"},
+			Required:    false,
+			Category:    "AI Agents",
+			InstallHint: "npm install -g @google/gemini-cli",
 		},
 
 		// Recommended

@@ -39,16 +39,17 @@ var sessionNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 type AgentType = agent.AgentType
 
 const (
-	AgentClaude   = agent.AgentTypeClaudeCode
-	AgentCodex    = agent.AgentTypeCodex
-	AgentGemini   = agent.AgentTypeGemini
-	AgentCursor   = agent.AgentTypeCursor
-	AgentWindsurf = agent.AgentTypeWindsurf
-	AgentAider    = agent.AgentTypeAider
-	AgentOpencode = agent.AgentTypeOpencode
-	AgentOllama   = agent.AgentTypeOllama
-	AgentUser     = agent.AgentTypeUser
-	AgentUnknown  = agent.AgentTypeUnknown
+	AgentClaude      = agent.AgentTypeClaudeCode
+	AgentCodex       = agent.AgentTypeCodex
+	AgentGemini      = agent.AgentTypeGemini
+	AgentAntigravity = agent.AgentTypeAntigravity
+	AgentCursor      = agent.AgentTypeCursor
+	AgentWindsurf    = agent.AgentTypeWindsurf
+	AgentAider       = agent.AgentTypeAider
+	AgentOpencode    = agent.AgentTypeOpencode
+	AgentOllama      = agent.AgentTypeOllama
+	AgentUser        = agent.AgentTypeUser
+	AgentUnknown     = agent.AgentTypeUnknown
 )
 
 // FieldSeparator is used to separate fields in tmux format strings.
@@ -1090,8 +1091,9 @@ func needsBufferSend(agentType AgentType, content string) bool {
 		// newlines (tmux 3.6+), while paste-buffer converts them to CR which
 		// Claude Code interprets as Enter, enabling multi-line prompt submission.
 		return strings.Contains(content, "\n")
-	case AgentGemini:
-		// Use buffer if content contains newlines
+	case AgentGemini, AgentAntigravity:
+		// agy (Antigravity) reuses Gemini's TUI send behavior: use buffer if
+		// content contains newlines.
 		return strings.Contains(content, "\n")
 	case AgentCodex:
 		// Use buffer for Codex when content contains newlines or is large (>512 chars)

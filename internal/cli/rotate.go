@@ -74,11 +74,13 @@ Examples:
 			}
 			var paneID string
 			var provider string
+			var agentTypeStr string
 			var modelAlias string
 			for _, p := range panes {
 				if p.Index == paneIndex {
 					paneID = p.ID
 					provider = normalizedProviderName(p.Type)
+					agentTypeStr = string(p.Type.Canonical())
 					modelAlias = p.Variant
 					break
 				}
@@ -113,7 +115,7 @@ Examples:
 			if preserveContext {
 				return executeReauthRotation(session, paneIndex, paneID, provider, time.Duration(timeout)*time.Second)
 			}
-			return executeRestartRotation(session, paneIndex, paneID, provider, targetAccount, modelAlias, res.Inferred)
+			return executeRestartRotation(session, paneIndex, paneID, provider, agentTypeStr, targetAccount, modelAlias, res.Inferred)
 		},
 	}
 
@@ -395,6 +397,7 @@ func rotateAllLimited(session, targetAccount string, dryRun bool, inferred bool)
 		ctx := auth.RestartContext{
 			PaneID:      p.ID,
 			Provider:    normalizedProviderName(p.Type),
+			AgentType:   string(p.Type.Canonical()),
 			TargetEmail: targetAccount,
 			ModelAlias:  p.Variant,
 			SessionName: session,
@@ -418,7 +421,7 @@ func resolveRotationProjectDir(session string, inferred bool) (string, error) {
 	return projectDir, nil
 }
 
-func executeRestartRotation(session string, paneIdx int, paneID, provider, targetAccount, modelAlias string, inferred bool) error {
+func executeRestartRotation(session string, paneIdx int, paneID, provider, agentType, targetAccount, modelAlias string, inferred bool) error {
 	// Initialize Orchestrator
 	orchestrator := auth.NewOrchestrator(cfg)
 	projectDir, err := resolveRotationProjectDir(session, inferred)
@@ -437,6 +440,7 @@ func executeRestartRotation(session string, paneIdx int, paneID, provider, targe
 	ctx := auth.RestartContext{
 		PaneID:      paneID,
 		Provider:    provider,
+		AgentType:   agentType,
 		TargetEmail: targetAccount,
 		ModelAlias:  modelAlias,
 		SessionName: session,

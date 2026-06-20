@@ -512,8 +512,8 @@ func computeAgentTypeBonus(agentType string, rec *bv.TriageRecommendation) float
 		} else if taskComplexity >= 0.7 {
 			return -0.1 // Penalty for complex tasks
 		}
-	case agent.AgentTypeGemini:
-		// Gemini is balanced
+	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
+		// Gemini (and its successor Antigravity) are balanced
 		if taskComplexity >= 0.4 && taskComplexity <= 0.6 {
 			return 0.05 // Small bonus for medium complexity
 		}
