@@ -93,7 +93,7 @@ func TestGenerateAgentCommand_TemplateModelOverrideGuard(t *testing.T) {
 
 func TestGenerateAgentCommand_DefaultModelDoesNotTriggerLegacyGuard(t *testing.T) {
 	got, err := GenerateAgentCommand("claude --dangerously-skip-permissions", AgentTemplateVars{
-		Model: "claude-opus-4-6",
+		Model: "claude-opus-4-8",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

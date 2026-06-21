@@ -1786,15 +1786,15 @@ type ModelsConfig struct {
 // Model IDs should match those in internal/agents/profiles.go (no date suffixes).
 func DefaultModels() ModelsConfig {
 	return ModelsConfig{
-		DefaultClaude: "claude-opus-4-6",
+		DefaultClaude: "claude-opus-4-8",
 		DefaultCodex:  "gpt-5.5",
 		DefaultGemini: "gemini-3-pro-preview",
 		DefaultOllama: "llama3",
 		Claude: map[string]string{
-			"opus":      "claude-opus-4-6",
+			"opus":      "claude-opus-4-8",
 			"sonnet":    "claude-sonnet-4-6",
 			"haiku":     "claude-haiku-4-5",
-			"architect": "claude-opus-4-6",
+			"architect": "claude-opus-4-8",
 			"fast":      "claude-sonnet-4-6",
 		},
 		Codex: map[string]string{

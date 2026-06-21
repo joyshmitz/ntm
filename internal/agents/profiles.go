@@ -84,7 +84,7 @@ func NewProfileMatcher() *ProfileMatcher {
 func (pm *ProfileMatcher) loadDefaults() {
 	pm.profiles[AgentTypeClaude] = &AgentProfile{
 		Type:          AgentTypeClaude,
-		Model:         "claude-opus-4-6",
+		Model:         "claude-opus-4-8",
 		ContextBudget: models.GetTokenBudget("cc"),
 		Specializations: []Specialization{
 			SpecComplex,
