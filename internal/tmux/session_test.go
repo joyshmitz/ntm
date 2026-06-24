@@ -1568,6 +1568,43 @@ func TestNeedsBufferSend(t *testing.T) {
 			content:   strings.Repeat("x", 1000),
 			want:      false,
 		},
+		// Claude single-line autocomplete-trigger tokens — must buffer (#198)
+		{
+			name:      "claude single line with filename",
+			agentType: AgentClaude,
+			content:   "open README.md and summarize",
+			want:      true,
+		},
+		{
+			name:      "claude single line with path",
+			agentType: AgentClaude,
+			content:   "read .orch-dispatch/x.txt then start",
+			want:      true,
+		},
+		{
+			name:      "claude single line with leading slash path",
+			agentType: AgentClaude,
+			content:   "look at src/main.go",
+			want:      true,
+		},
+		{
+			name:      "claude single line with at mention",
+			agentType: AgentClaude,
+			content:   "review @internal/tmux/session.go",
+			want:      true,
+		},
+		{
+			name:      "claude single line plain prose no submit risk",
+			agentType: AgentClaude,
+			content:   "Reply with one word: ALIVE",
+			want:      false,
+		},
+		{
+			name:      "claude single line prose with sentence period",
+			agentType: AgentClaude,
+			content:   "Say hello. Then stop",
+			want:      false,
+		},
 		{
 			name:      "claude alias with newline",
 			agentType: AgentType("claude"),

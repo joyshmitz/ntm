@@ -416,8 +416,13 @@ func (t *CompactionTrigger) injectRecoveryContext(paneID string, agentType tmux.
 	// Wait a moment for compaction to settle
 	time.Sleep(2 * time.Second)
 
-	// Send recovery context
-	err := tmux.SendKeys(paneID, recoveryPrompt, true)
+	// Send recovery context via the agent-aware path so Claude (and other
+	// agents) get the atomic buffer (bracketed-paste) treatment. The recovery
+	// prompt routinely contains file paths / @-tokens, which jam Claude Code's
+	// TUI autocomplete picker when delivered char-by-char via send-keys — the
+	// trailing Enter selects a menu entry and the prompt silently never submits
+	// (operators worked around this with --no-recovery). (#198)
+	err := tmux.SendKeysForAgent(paneID, recoveryPrompt, true, agentType)
 	if err != nil {
 		slog.Error("Failed to inject recovery context",
 			"pane_id", paneID,

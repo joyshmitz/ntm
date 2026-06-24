@@ -1078,6 +1078,29 @@ func canonicalAgentType(agentType AgentType) AgentType {
 	return AgentType(agent.AgentType(agentType).Canonical())
 }
 
+// claudeFilenamePattern matches a bare "name.ext" filename token (e.g. README.md,
+// config.yaml) anywhere in the content. The token must be bounded by non-word
+// characters so that prose like "the end. Then..." or version strings embedded in
+// words do not match. Both sides of the dot must be alphanumeric/underscore/hyphen
+// runs to look like an actual filename rather than ordinary punctuation.
+var claudeFilenamePattern = regexp.MustCompile(`(^|[^\w.])[\w-]+\.[\w-]+`)
+
+// claudeAutocompleteRisk reports whether a single-line Claude prompt contains a
+// token that can trigger Claude Code's TUI file/@-mention autocomplete picker:
+//   - "/"  — a path separator (e.g. ".orch-dispatch/x.txt", src/main.go)
+//   - "@"  — an @-mention / @file reference
+//   - "name.ext" — a bare filename (e.g. README.md)
+//
+// When any of these are typed char-by-char via send-keys, the picker can pop up
+// mid-token and steal the trailing Enter, so the prompt never submits. Such
+// prompts are routed through the atomic buffer (bracketed-paste) path instead.
+func claudeAutocompleteRisk(content string) bool {
+	if strings.ContainsAny(content, "/@") {
+		return true
+	}
+	return claudeFilenamePattern.MatchString(content)
+}
+
 // needsBufferSend returns true if the content should be sent via buffer mechanism
 // rather than send-keys, based on agent type and content.
 func needsBufferSend(agentType AgentType, content string) bool {
@@ -1090,7 +1113,15 @@ func needsBufferSend(agentType AgentType, content string) bool {
 		// Use buffer if content contains newlines — send-keys -l silently strips
 		// newlines (tmux 3.6+), while paste-buffer converts them to CR which
 		// Claude Code interprets as Enter, enabling multi-line prompt submission.
-		return strings.Contains(content, "\n")
+		//
+		// Also use buffer for single-line prompts that contain autocomplete-
+		// triggering tokens (a path separator, an @-mention, or a name.ext
+		// filename pattern). Sending these char-by-char via send-keys lets
+		// Claude Code's TUI file/@-mention picker pop up mid-token, so the
+		// trailing Enter selects a menu entry instead of submitting the prompt
+		// and the dispatched work silently never starts. Bracketed paste
+		// delivers the whole prompt atomically, avoiding the picker race. (#198)
+		return strings.Contains(content, "\n") || claudeAutocompleteRisk(content)
 	case AgentGemini, AgentAntigravity:
 		// agy (Antigravity) reuses Gemini's TUI send behavior: use buffer if
 		// content contains newlines.
