@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 )
 
 var (
@@ -194,6 +195,31 @@ func ResolveModel(agentType AgentType, modelSpec string) string {
 		return modelSpec
 	}
 	return cfg.Models.GetModelName(string(agentType), modelSpec)
+}
+
+// resolveAgentModel resolves the concrete model name for an agent, layering a
+// plugin's declared default underneath the standard config resolution.
+//
+// Precedence, highest to lowest:
+//  1. explicit model on the agent spec (e.g. `--agent=1:model`)
+//  2. global config default for the agent type (built-in types only)
+//  3. the plugin's `[agent.defaults] model` from its TOML
+//
+// ResolveModel already covers (1) and (2): a non-empty modelSpec always
+// resolves to a non-empty name, and built-in types with a configured default
+// return it for an empty spec. It returns "" only when there is neither an
+// explicit model nor a global default — the exact gap where a plugin agent type
+// (e.g. `--hermes=1`) would otherwise spawn with an empty model and fail Agent
+// Mail registration. In that case we fall back to the plugin default, if any.
+func resolveAgentModel(agentType AgentType, modelSpec string, pluginMap map[string]plugins.AgentPlugin) string {
+	resolved := ResolveModel(agentType, modelSpec)
+	if resolved != "" {
+		return resolved
+	}
+	if p, ok := pluginMap[string(agentType)]; ok {
+		return strings.TrimSpace(p.Defaults.Model)
+	}
+	return resolved
 }
 
 // ValidateModelAlias checks if a model alias exists in config

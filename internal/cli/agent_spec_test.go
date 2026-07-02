@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 )
 
 func TestParseAgentSpec_ModelValidation(t *testing.T) {
@@ -191,6 +192,56 @@ func TestResolveModel_EmptySpecReturnsDefault(t *testing.T) {
 	got := ResolveModel(AgentTypeClaude, "")
 	// Just verify it doesn't panic; the result depends on whether cfg is set
 	_ = got
+}
+
+// TestResolveAgentModel_Precedence verifies the three-tier precedence for
+// plugin-aware model resolution (ntm#203): explicit spec model, then the global
+// config default for the agent type, then the plugin's declared default.
+func TestResolveAgentModel_Precedence(t *testing.T) {
+	oldCfg := cfg
+	defer func() { cfg = oldCfg }()
+	cfg = config.Default()
+
+	hermes := plugins.AgentPlugin{Name: "hermes"}
+	hermes.Defaults.Model = "google/gemini-2.5-flash"
+	// A plugin entry keyed to a built-in type proves the global default wins
+	// over a plugin default (this branch is never reached for built-ins).
+	ccPlugin := plugins.AgentPlugin{Name: "cc"}
+	ccPlugin.Defaults.Model = "plugin/should-not-win"
+	pluginMap := map[string]plugins.AgentPlugin{
+		"hermes": hermes,
+		"cc":     ccPlugin,
+	}
+
+	// 1. Explicit model on the spec wins over the plugin default.
+	if got := resolveAgentModel(AgentType("hermes"), "anthropic/claude-opus-4", pluginMap); got != "anthropic/claude-opus-4" {
+		t.Errorf("explicit model: got %q, want %q", got, "anthropic/claude-opus-4")
+	}
+
+	// 2. Global config default for a built-in type wins over any plugin default.
+	wantDefault := cfg.Models.DefaultClaude
+	if wantDefault == "" {
+		t.Fatal("expected a non-empty default claude model in config.Default()")
+	}
+	if got := resolveAgentModel(AgentTypeClaude, "", pluginMap); got != wantDefault {
+		t.Errorf("global default: got %q, want %q", got, wantDefault)
+	}
+
+	// 3. Plugin default is used when there is no explicit model and no global
+	//    default (the bare `--hermes=1` case that previously spawned empty).
+	if got := resolveAgentModel(AgentType("hermes"), "", pluginMap); got != "google/gemini-2.5-flash" {
+		t.Errorf("plugin default: got %q, want %q", got, "google/gemini-2.5-flash")
+	}
+
+	// 4. An agent type absent from the plugin map yields empty.
+	if got := resolveAgentModel(AgentType("nonexistent"), "", pluginMap); got != "" {
+		t.Errorf("missing plugin: got %q, want empty", got)
+	}
+
+	// A nil plugin map also yields empty for an otherwise-unknown plugin type.
+	if got := resolveAgentModel(AgentType("hermes"), "", nil); got != "" {
+		t.Errorf("nil plugin map: got %q, want empty", got)
+	}
 }
 
 func TestValidateModelAlias_EmptyAlias(t *testing.T) {

@@ -2043,8 +2043,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			}
 		}
 
-		// Resolve model alias to full model name
-		resolvedModel := ResolveModel(agent.Type, agent.Model)
+		// Resolve model alias to full model name (falling back to the plugin's
+		// declared default for bare plugin specs — see resolveAgentModel).
+		resolvedModel := resolveAgentModel(agent.Type, agent.Model, opts.PluginMap)
 		modelRequested := strings.TrimSpace(agent.Model) != ""
 		// agy is hard-pinned: ResolveModel always returns the required model. If
 		// the user explicitly requested a different one, surface that it was
@@ -2089,7 +2090,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 					systemPromptFile = promptFile
 				}
 				// For persona agents, resolve the model from the persona config
-				resolvedModel = ResolveModel(agent.Type, p.Model)
+				resolvedModel = resolveAgentModel(agent.Type, p.Model, opts.PluginMap)
 			}
 		}
 
@@ -2103,7 +2104,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			personaName = profile.Name
 			if strings.TrimSpace(profile.Model) != "" {
 				modelRequested = true
-				resolvedModel = ResolveModel(agent.Type, profile.Model)
+				resolvedModel = resolveAgentModel(agent.Type, profile.Model, opts.PluginMap)
 			}
 			if strings.TrimSpace(profile.ReasoningEffort) != "" {
 				resolvedReasoningEffort = profile.ReasoningEffort
