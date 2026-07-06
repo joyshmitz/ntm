@@ -1953,8 +1953,9 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 				// Default when [agents] antigravity isn't configured (e.g. a
 				// config.toml that predates this provider). The model is pinned by
 				// ResolveModel; --dangerously-skip-permissions is agy's autonomous
-				// flag, which the dcg agy guard (F5) backstops.
-				agentCmdTemplate = `agy --model {{shellQuote .Model}} --dangerously-skip-permissions`
+				// flag, which the dcg agy guard (F5) backstops. {{agyBinary}} resolves
+				// agy-locked (when on PATH) over the frequently-aliased `agy`.
+				agentCmdTemplate = config.DefaultAgentTemplates().Antigravity
 			}
 		case AgentTypeOllama:
 			agentCmdTemplate = cfg.Agents.Ollama

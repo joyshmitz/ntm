@@ -624,3 +624,50 @@ func TestAgentSpecsValue_StringDelegatesToSpecs(t *testing.T) {
 		t.Errorf("String() = %q, want '5:turbo'", got)
 	}
 }
+
+// TestAgentSpecsValue_AgyRelaxedModelCharset covers sharp edge #2 (ntm#210):
+// Antigravity display model names contain spaces and parentheses (e.g.
+// "Gemini 3.1 Pro (High)"), which the default model charset rejects. The agy
+// flag path must accept them via the relaxed charset, while the strict charset
+// still applies to every other agent type.
+func TestAgentSpecsValue_AgyRelaxedModelCharset(t *testing.T) {
+	// agy accepts the spaced/parenthesized display name.
+	var agySpecs AgentSpecs
+	agy := NewAgentSpecsValue(AgentTypeAntigravity, &agySpecs)
+	if err := agy.Set("1:Gemini 3.1 Pro (High)"); err != nil {
+		t.Fatalf("agy Set(%q) unexpected error: %v", "1:Gemini 3.1 Pro (High)", err)
+	}
+	if len(agySpecs) != 1 {
+		t.Fatalf("agy specs len = %d, want 1", len(agySpecs))
+	}
+	if agySpecs[0].Type != AgentTypeAntigravity {
+		t.Errorf("Type = %s, want agy", agySpecs[0].Type)
+	}
+	if agySpecs[0].Count != 1 {
+		t.Errorf("Count = %d, want 1", agySpecs[0].Count)
+	}
+	if agySpecs[0].Model != "Gemini 3.1 Pro (High)" {
+		t.Errorf("Model = %q, want %q", agySpecs[0].Model, "Gemini 3.1 Pro (High)")
+	}
+
+	// A charset-safe alias also parses for agy.
+	var aliasSpecs AgentSpecs
+	if err := NewAgentSpecsValue(AgentTypeAntigravity, &aliasSpecs).Set("2:gemini-3-pro-high"); err != nil {
+		t.Errorf("agy Set(alias) unexpected error: %v", err)
+	}
+
+	// The SAME spaced model name is REJECTED for a non-agy type (strict charset).
+	var geminiSpecs AgentSpecs
+	if err := NewAgentSpecsValue(AgentTypeGemini, &geminiSpecs).Set("1:Gemini 3.1 Pro (High)"); err == nil {
+		t.Error("gemini Set with spaced model should fail the strict charset, but succeeded")
+	}
+
+	// Even under the relaxed agy charset, shell metacharacters remain rejected
+	// (defense-in-depth against injection).
+	for _, bad := range []string{"1:a;b", "1:a|b", "1:a$b", "1:a`b`", "1:a&&b"} {
+		var s AgentSpecs
+		if err := NewAgentSpecsValue(AgentTypeAntigravity, &s).Set(bad); err == nil {
+			t.Errorf("agy Set(%q) should be rejected (shell metachar), but succeeded", bad)
+		}
+	}
+}

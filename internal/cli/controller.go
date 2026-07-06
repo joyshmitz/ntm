@@ -171,7 +171,7 @@ Custom prompt files support template variables:
 		},
 	}
 
-	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc, cod, gmi, cursor, windsurf|ws, aider, or ollama")
+	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc, cod, gmi, agy, cursor, windsurf|ws, aider, oc, or ollama")
 	cmd.Flags().StringVar(&promptFile, "prompt", "", "Custom prompt file (supports template variables)")
 	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Skip sending initial prompt")
 	cmd.ValidArgsFunction = completeSessionArgs

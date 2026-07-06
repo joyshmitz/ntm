@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -120,8 +121,27 @@ func memLimitPrefix() string {
 	return ""
 }
 
+// agyBinary resolves the Antigravity CLI launch binary, evaluated at render
+// (spawn) time so the choice reflects the launching shell's real PATH.
+//
+// Sharp edge: on many boxes `agy` is a shell ALIAS pointing at a wrapper such
+// as ~/.local/bin/agy-locked (a Python launcher). Shell aliases do NOT resolve
+// in NTM's non-interactive launch shell, so an `agy` command would fail to
+// start the pane. When the real `agy-locked` binary is present on PATH we use
+// it directly; otherwise we fall back to the plain `agy` binary (which is a
+// real executable on installs that ship it un-aliased).
+func agyBinary() string {
+	if _, err := exec.LookPath("agy-locked"); err == nil {
+		return "agy-locked"
+	}
+	return "agy"
+}
+
 // templateFuncs contains custom functions available in templates
 var templateFuncs = template.FuncMap{
+	// agyBinary resolves the Antigravity CLI binary (agy-locked if on PATH,
+	// else agy) at render time — see agyBinary() for the alias sharp edge.
+	"agyBinary": agyBinary,
 	// default returns the fallback if value is empty
 	"default": func(fallback, value string) string {
 		if value == "" {
@@ -235,8 +255,10 @@ func DefaultAgentTemplates() AgentConfig {
 		// Antigravity (agy): the model is hard-pinned to "Gemini 3.1 Pro (High)"
 		// by ResolveModel, so --model is always injected. --dangerously-skip-permissions
 		// is agy's autonomous (auto-approve) flag — the equivalent of gemini's --yolo —
-		// which the dcg agy guard (F5) backstops.
-		Antigravity: `agy --model {{shellQuote .Model}} --dangerously-skip-permissions`,
+		// which the dcg agy guard (F5) backstops. {{agyBinary}} resolves the real
+		// launch binary (agy-locked when present, else agy) because `agy` is often a
+		// shell alias that will not resolve in NTM's non-interactive launch shell.
+		Antigravity: `{{agyBinary}} --model {{shellQuote .Model}} --dangerously-skip-permissions`,
 		Ollama:      `ollama run {{shellQuote (.Model | default "codellama:latest")}}`,
 		Cursor:      `cursor{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
 		Windsurf:    `windsurf{{if .Model}} --model {{shellQuote .Model}}{{end}}`,

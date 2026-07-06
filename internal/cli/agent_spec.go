@@ -15,6 +15,17 @@ var (
 	// modelPattern restricts model/alias values to a safe charset to prevent shell injection.
 	// Allows common tokens: letters, numbers, dot, dash, underscore, slash, colon, plus, at.
 	modelPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+-]+$`)
+
+	// agyModelPattern is the RELAXED model charset for the Antigravity (agy)
+	// provider. Antigravity's model *display* names contain spaces and
+	// parentheses — e.g. "Gemini 3.1 Pro (High)" — which the standard
+	// modelPattern rejects. agy always renders its model through
+	// {{shellQuote .Model}} in the launch template (and, in practice, the value
+	// is hard-pinned by config.AntigravityRequiredModel before it ever reaches a
+	// shell), so widening the charset to include spaces and parentheses is safe:
+	// shell metacharacters (;, |, &, $, backtick, quotes, backslash, redirects,
+	// newlines) remain rejected, preventing injection.
+	agyModelPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+ ()-]+$`)
 )
 
 // AgentType represents the type of AI agent
@@ -94,7 +105,22 @@ func (s *AgentSpecs) Type() string {
 // the agent template (currently consumed by Codex's
 // `model_reasoning_effort` knob — see ntm#140).
 func ParseAgentSpec(value string) (AgentSpec, error) {
+	return parseAgentSpec(value, false)
+}
+
+// parseAgentSpec parses a spec string, optionally relaxing the model charset for
+// the Antigravity (agy) provider whose display model names contain spaces and
+// parentheses (e.g. "Gemini 3.1 Pro (High)"). See agyModelPattern for why the
+// widened charset is injection-safe.
+func parseAgentSpec(value string, relaxedModel bool) (AgentSpec, error) {
 	var spec AgentSpec
+
+	modelRe := modelPattern
+	allowedDesc := "letters, numbers, . _ / @ : + -"
+	if relaxedModel {
+		modelRe = agyModelPattern
+		allowedDesc = "letters, numbers, spaces, parentheses, . _ / @ : + -"
+	}
 
 	parts := strings.SplitN(value, ":", 3)
 	if len(parts) == 0 || parts[0] == "" {
@@ -115,8 +141,8 @@ func ParseAgentSpec(value string) (AgentSpec, error) {
 		if model == "" {
 			return spec, fmt.Errorf("empty model in agent spec: %q", value)
 		}
-		if !modelPattern.MatchString(model) {
-			return spec, fmt.Errorf("invalid characters in model %q; allowed: letters, numbers, . _ / @ : + -", model)
+		if !modelRe.MatchString(model) {
+			return spec, fmt.Errorf("invalid characters in model %q; allowed: %s", model, allowedDesc)
 		}
 		spec.Model = model
 	}
@@ -295,7 +321,9 @@ func (v *agentSpecsValue) String() string {
 }
 
 func (v *agentSpecsValue) Set(value string) error {
-	spec, err := ParseAgentSpec(value)
+	// agy carries a display model name with spaces/parentheses (e.g.
+	// "Gemini 3.1 Pro (High)"), so it uses the relaxed model charset.
+	spec, err := parseAgentSpec(value, v.agentType == AgentTypeAntigravity)
 	if err != nil {
 		return err
 	}
