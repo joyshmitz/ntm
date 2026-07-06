@@ -165,7 +165,7 @@ func TestInspector_DetectsGlobalVsIsolated(t *testing.T) {
 		},
 		homes: map[string]string{
 			"%1": "/home/u/.ntm/codex-homes/swarm/1", // isolated
-			"%2": "",                                  // unset => global
+			"%2": "",                                 // unset => global
 		},
 		setMap: map[string]bool{"%1": true, "%2": false},
 	}
