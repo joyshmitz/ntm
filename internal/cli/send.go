@@ -2361,7 +2361,7 @@ func reapOrphanProcesses(pids []int) {
 		if pid <= 1 || !process.IsAlive(pid) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		termProcess(pid)
 		termed = append(termed, pid)
 	}
 
@@ -2373,7 +2373,7 @@ func reapOrphanProcesses(pids []int) {
 
 	for _, pid := range termed {
 		if process.IsAlive(pid) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			killProcess(pid)
 		}
 	}
 }
