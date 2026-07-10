@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 )
 
@@ -2117,6 +2118,63 @@ func TestWaitForIdle_DetectorErrors(t *testing.T) {
 	}
 }
 
+// TestWaitForIdle_RequiresStableIdleStreak is the ntm#213 regression guard:
+// a single idle reading (a transient TUI misclassification — paste
+// placeholders, spinner gaps) must NOT complete the wait. Idle has to hold
+// for idleStablePolls consecutive polls.
+func TestWaitForIdle_RequiresStableIdleStreak(t *testing.T) {
+	cfg := DefaultExecutorConfig("test")
+	cfg.ProgressInterval = 50 * time.Millisecond
+	e := NewExecutor(cfg)
+
+	// Flap: every idle reading is immediately followed by working readings,
+	// so an idle streak never forms and the wait must time out.
+	var callCount int32
+	e.detector = &mockDetector{
+		detectFunc: func(paneID string) (status.AgentStatus, error) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n%3 == 1 {
+				return status.AgentStatus{State: status.StateIdle, PaneID: paneID}, nil
+			}
+			return status.AgentStatus{State: status.StateWorking, PaneID: paneID}, nil
+		},
+	}
+
+	err := e.waitForIdle(context.Background(), "mock-pane", 3*time.Second)
+	if err == nil {
+		t.Fatal("waitForIdle() completed on flapping idle readings; a single idle poll must not count as completion")
+	}
+}
+
+// TestWaitForIdle_StableIdleCompletes verifies the happy path with the
+// stability requirement: working, then persistently idle → completes after
+// exactly idleStablePolls consecutive idle readings.
+func TestWaitForIdle_StableIdleCompletes(t *testing.T) {
+	cfg := DefaultExecutorConfig("test")
+	cfg.ProgressInterval = 50 * time.Millisecond
+	e := NewExecutor(cfg)
+
+	var callCount int32
+	var idleCount int32
+	e.detector = &mockDetector{
+		detectFunc: func(paneID string) (status.AgentStatus, error) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n <= 2 {
+				return status.AgentStatus{State: status.StateWorking, PaneID: paneID}, nil
+			}
+			atomic.AddInt32(&idleCount, 1)
+			return status.AgentStatus{State: status.StateIdle, PaneID: paneID}, nil
+		},
+	}
+
+	if err := e.waitForIdle(context.Background(), "mock-pane", 10*time.Second); err != nil {
+		t.Fatalf("waitForIdle() should succeed on stable idle: %v", err)
+	}
+	if got := atomic.LoadInt32(&idleCount); got != idleStablePolls {
+		t.Errorf("waitForIdle() returned after %d idle polls, want exactly %d", got, idleStablePolls)
+	}
+}
+
 // TestDetectAgentState_WithMockDetector tests detectAgentState returns state from detector
 func TestDetectAgentState_WithMockDetector(t *testing.T) {
 
@@ -3181,6 +3239,60 @@ func TestNormalizeAgentType_Aliases(t *testing.T) {
 				t.Errorf("normalizeAgentType(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestFilterAgentsByType_NormalizesBothSides is the ntm#212 regression guard:
+// robot scoring reports long-form agent types ("claude", "codex", "gemini")
+// while pipeline steps may request either long-form names or short aliases
+// ("cc", "cod", "gmi"). The filter must normalize BOTH sides through the
+// shared alias resolver — raw string comparison filtered out every agent and
+// typed routing failed with "no suitable agents found".
+func TestFilterAgentsByType_NormalizesBothSides(t *testing.T) {
+	// Long-form types, as produced by robot.ScoreAgents / routePaneAgentType.
+	scored := []robot.ScoredAgent{
+		{PaneID: "%0", AgentType: "claude"},
+		{PaneID: "%1", AgentType: "codex"},
+		{PaneID: "%2", AgentType: "gemini"},
+	}
+
+	tests := []struct {
+		requested string
+		wantPane  string
+	}{
+		// Long-form step targets against long-form scored agents.
+		{"claude", "%0"},
+		{"codex", "%1"},
+		{"gemini", "%2"},
+		// Short-alias step targets against long-form scored agents.
+		{"cc", "%0"},
+		{"cod", "%1"},
+		{"gmi", "%2"},
+		// Case/whitespace drift.
+		{" Claude ", "%0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.requested, func(t *testing.T) {
+			got := filterAgentsByType(scored, tt.requested)
+			if len(got) != 1 {
+				t.Fatalf("filterAgentsByType(%q) matched %d agents, want 1", tt.requested, len(got))
+			}
+			if got[0].PaneID != tt.wantPane {
+				t.Errorf("filterAgentsByType(%q) selected pane %s, want %s", tt.requested, got[0].PaneID, tt.wantPane)
+			}
+		})
+	}
+
+	// Short-form scored agents (e.g. tmux metadata) against long-form targets.
+	scoredShort := []robot.ScoredAgent{{PaneID: "%9", AgentType: "cc"}}
+	if got := filterAgentsByType(scoredShort, "claude"); len(got) != 1 || got[0].PaneID != "%9" {
+		t.Errorf("filterAgentsByType short-form scored vs long-form target failed: %+v", got)
+	}
+
+	// Non-matching type still filters everything out.
+	if got := filterAgentsByType(scored, "aider"); len(got) != 0 {
+		t.Errorf("filterAgentsByType(%q) = %+v, want empty", "aider", got)
 	}
 }
 

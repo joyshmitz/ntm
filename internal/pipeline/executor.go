@@ -1094,6 +1094,15 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 					AgentState: e.detectAgentState(paneID),
 					Timestamp:  time.Now(),
 				}
+				// ntm#213: idle detection is heuristic and can miss a
+				// finished TUI turn entirely, timing out even though the
+				// agent's answer is sitting in the pane. Salvage the
+				// before/after diff so the response isn't dropped — the
+				// step still fails, but downstream consumers (retries,
+				// ignore_errors flows, humans debugging) get the output.
+				if after, capErr := e.tmuxClient().CapturePaneOutput(paneID, 2000); capErr == nil {
+					result.Output = util.ExtractNewOutput(beforeOutput, after)
+				}
 			}
 			result.FinishedAt = time.Now()
 			return result
@@ -1694,6 +1703,11 @@ func (e *Executor) executeTemplate(ctx context.Context, step *Step, workflow *Wo
 					err.Error())
 				result.Error.PaneOutput = e.captureErrorContext(paneID, 50)
 				result.Error.AgentState = e.detectAgentState(paneID)
+				// ntm#213: salvage the visible response on timeout (see the
+				// prompt-step WaitCompletion branch for rationale).
+				if after, capErr := e.tmuxClient().CapturePaneOutput(paneID, 2000); capErr == nil {
+					result.Output = util.ExtractNewOutput(beforeOutput, after)
+				}
 			}
 			result.FinishedAt = time.Now()
 			return result
@@ -2593,14 +2607,7 @@ func (e *Executor) selectAndMarkPane(ctx context.Context, step *Step, usedPanes 
 
 	// Filter by agent type if specified
 	if step.Agent != "" {
-		targetType := normalizeAgentType(step.Agent)
-		filtered := make([]robot.ScoredAgent, 0, len(agents))
-		for _, a := range agents {
-			if a.AgentType == targetType {
-				filtered = append(filtered, a)
-			}
-		}
-		agents = filtered
+		agents = filterAgentsByType(agents, step.Agent)
 	}
 
 	// Begin atomic selection and marking
@@ -2658,6 +2665,26 @@ func (e *Executor) selectAndMarkPane(ctx context.Context, step *Step, usedPanes 
 	return paneID, routeResult.Selected.AgentType, nil
 }
 
+// filterAgentsByType returns the scored agents whose detected type matches the
+// step's requested agent type. Both sides are normalized through the shared
+// alias resolver (agent.AgentType.Canonical via normalizeAgentType) before
+// comparing: robot scoring reports long-form types ("claude", "codex",
+// "gemini"), while pipeline steps may request either long-form names or the
+// short tmux aliases ("cc", "cod", "gmi"). Comparing the raw strings meant a
+// pane detected as "claude" never satisfied `agent: claude` (normalized to
+// "cc"), so typed routing failed with "no suitable agents found" even though
+// matching panes existed (ntm#212).
+func filterAgentsByType(agents []robot.ScoredAgent, requestedType string) []robot.ScoredAgent {
+	target := normalizeAgentType(requestedType)
+	filtered := make([]robot.ScoredAgent, 0, len(agents))
+	for _, a := range agents {
+		if normalizeAgentType(a.AgentType) == target {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}
+
 // selectPane finds the appropriate pane for a step
 func (e *Executor) selectPane(ctx context.Context, step *Step) (paneID string, agentType string, err error) {
 	// In dry run mode, return dummy pane info
@@ -2695,14 +2722,7 @@ func (e *Executor) selectPane(ctx context.Context, step *Step) (paneID string, a
 
 	// Filter by agent type if specified
 	if step.Agent != "" {
-		targetType := normalizeAgentType(step.Agent)
-		filtered := make([]robot.ScoredAgent, 0, len(agents))
-		for _, a := range agents {
-			if a.AgentType == targetType {
-				filtered = append(filtered, a)
-			}
-		}
-		agents = filtered
+		agents = filterAgentsByType(agents, step.Agent)
 	}
 
 	// Filter out excluded agents
@@ -2960,7 +2980,18 @@ func (e *Executor) parseOutput(output string, parse OutputParse) (interface{}, e
 	return parser.Parse(output, parse)
 }
 
-// waitForIdle waits for an agent to return to idle state
+// idleStablePolls is how many consecutive idle detections waitForIdle
+// requires before declaring a step complete. Status detection is a
+// screen-scrape heuristic, and a single idle reading can be a transient
+// misclassification of a TUI redraw state (paste placeholders, spinner gaps,
+// prompt boxes that stay rendered during work). Treating one idle poll as
+// completion made `wait: completion` steps return within seconds of dispatch
+// and capture pre-response screen debris as the step output (ntm#213).
+const idleStablePolls = 3
+
+// waitForIdle waits for an agent to return to a *stable* idle state: the
+// detector must report idle for idleStablePolls consecutive polls. Any
+// non-idle reading (or detector error) resets the streak.
 func (e *Executor) waitForIdle(ctx context.Context, paneID string, timeout time.Duration) error {
 	ticker := time.NewTicker(e.config.ProgressInterval)
 	defer ticker.Stop()
@@ -2974,6 +3005,7 @@ func (e *Executor) waitForIdle(ctx context.Context, paneID string, timeout time.
 	case <-time.After(2 * time.Second):
 	}
 
+	idleStreak := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -2983,10 +3015,16 @@ func (e *Executor) waitForIdle(ctx context.Context, paneID string, timeout time.
 		case <-ticker.C:
 			state, err := e.detector.Detect(paneID)
 			if err != nil {
+				idleStreak = 0
 				continue
 			}
 			if state.State == status.StateIdle {
-				return nil
+				idleStreak++
+				if idleStreak >= idleStablePolls {
+					return nil
+				}
+			} else {
+				idleStreak = 0
 			}
 		}
 	}

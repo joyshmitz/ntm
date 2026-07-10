@@ -101,9 +101,12 @@ func findPaneForStage(session, agentType, model string) (string, error) {
 		return "", err
 	}
 
-	// First pass: look for exact match (type + model)
+	// First pass: look for exact match (type + model). Normalize the pane's
+	// detected type through the same alias resolver as the target so
+	// long-form detections ("claude") match short-form targets ("cc") and
+	// vice versa (ntm#212).
 	for _, p := range panes {
-		if string(p.Type) == targetType {
+		if normalizeAgentType(string(p.Type)) == targetType {
 			// Check model if specified
 			if model != "" && p.Variant != model {
 				continue
@@ -116,7 +119,7 @@ func findPaneForStage(session, agentType, model string) (string, error) {
 	// Only if model was specified but not found
 	if model != "" {
 		for _, p := range panes {
-			if string(p.Type) == targetType {
+			if normalizeAgentType(string(p.Type)) == targetType {
 				return p.ID, nil
 			}
 		}
@@ -154,6 +157,10 @@ func waitForIdle(ctx context.Context, detector status.Detector, paneID string) e
 
 	timeout := time.After(30 * time.Minute) // Max 30 min per stage default
 
+	// Require a stable idle streak before declaring completion — a single
+	// idle reading can be a transient TUI misclassification (ntm#213). Keep
+	// in sync with Executor.waitForIdle.
+	idleStreak := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -163,10 +170,16 @@ func waitForIdle(ctx context.Context, detector status.Detector, paneID string) e
 		case <-ticker.C:
 			s, err := detector.Detect(paneID)
 			if err != nil {
+				idleStreak = 0
 				continue
 			}
 			if s.State == status.StateIdle {
-				return nil
+				idleStreak++
+				if idleStreak >= idleStablePolls {
+					return nil
+				}
+			} else {
+				idleStreak = 0
 			}
 			// Optional: print progress indicator
 		}
