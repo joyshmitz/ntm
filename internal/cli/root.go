@@ -859,7 +859,7 @@ Shell Integration:
 			return
 		}
 		if robotTokens {
-			session, err := resolveOptionalRobotSessionFilter(robotTokensSession)
+			session, err := resolveOptionalRobotSessionFilter(resolveRobotTokensSession(cmd))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -1044,7 +1044,7 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(2)
 			}
-			session, projectDir, err := resolveRobotSessionProjectScope(robotPipelineSession)
+			session, projectDir, err := resolveRobotSessionProjectScope(resolveRobotPipelineSession(cmd))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(2)
@@ -1698,11 +1698,10 @@ Shell Integration:
 		}
 		if robotAgentNames != "" {
 			customNames := robot.ParseCustomNames(robotSpawnNames)
-			if err := robot.PrintAgentNames(robotAgentNames, customNames); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			return
+			// PrintAgentNames emits the JSON envelope and returns the process
+			// exit code; success:false (e.g. SESSION_NOT_FOUND) must exit
+			// nonzero per the robot contract (ntm#215).
+			os.Exit(robot.PrintAgentNames(robotAgentNames, customNames))
 		}
 		if robotControllerSpawn != "" {
 			opts := ControllerInput{
@@ -2090,7 +2089,7 @@ Shell Integration:
 			return
 		}
 		if robotPaletteInfo {
-			paletteSession, err := resolveOptionalRobotSessionFilter(robotPaletteSession)
+			paletteSession, err := resolveOptionalRobotSessionFilter(resolveRobotPaletteSession(cmd))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -2153,7 +2152,7 @@ Shell Integration:
 
 		// Robot-alerts handler for alert listing (TUI parity)
 		if robotAlerts {
-			session, err := resolveOptionalRobotSessionFilter(robotAlertsSession)
+			session, err := resolveOptionalRobotSessionFilter(resolveRobotAlertsSession(cmd))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -3022,6 +3021,7 @@ var (
 	robotPipelineBG        bool   // run in background
 	robotPipelineStartFrom string // bd-9296v: top-level step ID to start from (mirrors `ntm pipeline run --start-from`)
 	robotPipelineFromState string // bd-9296v: prior run ID whose persisted outputs feed steps skipped by --start-from
+	robotSharedSession     string // shared --session flag: canonical form for the deprecated *-session prefixed flags (ntm#214)
 
 	// TUI Parity robot flags - expose TUI dashboard functionality to AI agents
 	robotFiles           string // session name for file changes query
@@ -3616,11 +3616,11 @@ func init() {
 	rootCmd.Flags().StringVar(&robotRouteExclude, "route-exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-route. Example: --route-exclude=0,3")
 
 	// Robot-pipeline flags for workflow execution
-	rootCmd.Flags().StringVar(&robotPipelineRun, "robot-pipeline-run", "", "Run a workflow. Required: WORKFLOW_FILE, --pipeline-session. Example: ntm --robot-pipeline-run=workflow.yaml --pipeline-session=proj")
+	rootCmd.Flags().StringVar(&robotPipelineRun, "robot-pipeline-run", "", "Run a workflow. Required: WORKFLOW_FILE, --session. Example: ntm --robot-pipeline-run=workflow.yaml --session=proj")
 	rootCmd.Flags().StringVar(&robotPipelineStatus, "robot-pipeline", "", "Get pipeline status. Required: RUN_ID. Example: ntm --robot-pipeline=run-20241230-123456-abcd")
 	rootCmd.Flags().BoolVar(&robotPipelineList, "robot-pipeline-list", false, "List all tracked pipelines. Example: ntm --robot-pipeline-list")
 	rootCmd.Flags().StringVar(&robotPipelineCancel, "robot-pipeline-cancel", "", "Cancel a running pipeline. Required: RUN_ID. Example: ntm --robot-pipeline-cancel=run-20241230-123456-abcd")
-	rootCmd.Flags().StringVar(&robotPipelineSession, "pipeline-session", "", "Tmux session for pipeline execution. Required with --robot-pipeline-run. Example: --pipeline-session=myproject")
+	rootCmd.Flags().StringVar(&robotPipelineSession, "pipeline-session", "", "Deprecated alias for --session. Tmux session for pipeline execution with --robot-pipeline-run. Example: --session=myproject")
 	rootCmd.Flags().StringVar(&robotPipelineVars, "pipeline-vars", "", "JSON variables for pipeline. Optional with --robot-pipeline-run. Example: --pipeline-vars='{\"env\":\"prod\"}'")
 	rootCmd.Flags().BoolVar(&robotPipelineDryRun, "pipeline-dry-run", false, "Validate workflow without executing. Optional with --robot-pipeline-run")
 	rootCmd.Flags().BoolVar(&robotPipelineBG, "pipeline-background", false, "Run pipeline in background. Optional with --robot-pipeline-run")
@@ -3859,6 +3859,12 @@ func init() {
 	// --vars, --background for pipeline
 	rootCmd.Flags().StringVar(&robotPipelineVars, "vars", "", "JSON variables for pipeline")
 	rootCmd.Flags().BoolVar(&robotPipelineBG, "background", false, "Run in background")
+
+	// --session shared flag: canonical replacement for the deprecated
+	// prefixed session flags. The deprecation hints below point at
+	// --session, so it must actually be registered on this command surface
+	// (ntm#214: the hint previously suggested a flag that didn't exist).
+	rootCmd.Flags().StringVar(&robotSharedSession, "session", "", "Session name. Canonical form for --robot-pipeline-run, --robot-tokens, --robot-alerts, and --robot-palette (replaces --pipeline-session, --tokens-session, --alerts-session, --palette-session)")
 
 	// --no-wait for interrupt
 	rootCmd.Flags().BoolVar(&robotInterruptNoWait, "no-wait", false, "Return immediately without waiting")
@@ -4335,6 +4341,22 @@ func resolveRobotSmartRestartDryRun(cmd *cobra.Command) bool {
 
 func resolveRobotPipelineDryRun(cmd *cobra.Command) bool {
 	return resolveRobotSharedBool(cmd, "pipeline-dry-run", robotPipelineDryRun, "dry-run", robotDryRun)
+}
+
+func resolveRobotPipelineSession(cmd *cobra.Command) string {
+	return resolveRobotSharedFlag(cmd, "pipeline-session", robotPipelineSession, "session", robotSharedSession)
+}
+
+func resolveRobotTokensSession(cmd *cobra.Command) string {
+	return resolveRobotSharedFlag(cmd, "tokens-session", robotTokensSession, "session", robotSharedSession)
+}
+
+func resolveRobotAlertsSession(cmd *cobra.Command) string {
+	return resolveRobotSharedFlag(cmd, "alerts-session", robotAlertsSession, "session", robotSharedSession)
+}
+
+func resolveRobotPaletteSession(cmd *cobra.Command) string {
+	return resolveRobotSharedFlag(cmd, "palette-session", robotPaletteSession, "session", robotSharedSession)
 }
 
 func resolveRobotReplayDryRun(cmd *cobra.Command) bool {

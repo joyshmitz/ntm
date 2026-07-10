@@ -223,13 +223,33 @@ func GetAgentNames(sessionName string, customNames []string) (*AgentNamesOutput,
 	return output, nil
 }
 
-// PrintAgentNames outputs agent names as JSON.
-func PrintAgentNames(sessionName string, customNames []string) error {
+// PrintAgentNames outputs agent names as JSON and returns the process exit
+// code (0 on success, nonzero when the envelope reports success:false — see
+// ExitCodeForResponse and ntm#207/ntm#215). GetAgentNames reports failures
+// like SESSION_NOT_FOUND as a structured envelope with a nil Go error, so the
+// exit code must be derived from the envelope, not the error: returning nil
+// here made `--robot-agent-names` exit 0 on missing sessions (ntm#215).
+func PrintAgentNames(sessionName string, customNames []string) int {
 	output, err := GetAgentNames(sessionName, customNames)
 	if err != nil {
-		return err
+		if output == nil {
+			outputJSON(NewErrorResponse(err, ErrCodeInternalError, ""))
+			return 1
+		}
+		output.Success = false
+		if output.Error == "" {
+			output.Error = err.Error()
+		}
+		if output.ErrorCode == "" {
+			output.ErrorCode = ErrCodeInternalError
+		}
+		_ = encodeJSON(output)
+		return 1
 	}
-	return encodeJSON(output)
+	if err := encodeJSON(output); err != nil {
+		return 1
+	}
+	return ExitCodeForResponse(output.RobotResponse)
 }
 
 // BuildNameMapFromSession inspects a tmux session and generates names for each agent pane.

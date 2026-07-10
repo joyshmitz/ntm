@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"os"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -260,6 +261,68 @@ func TestGetAgentNamesSessionNotFound(t *testing.T) {
 	}
 	if output.ErrorCode != ErrCodeSessionNotFound {
 		t.Errorf("expected error code %q, got %q", ErrCodeSessionNotFound, output.ErrorCode)
+	}
+}
+
+// TestPrintAgentNamesSessionNotFoundExitCode is the ntm#215 regression guard:
+// GetAgentNames reports SESSION_NOT_FOUND as a success:false envelope with a
+// nil Go error, so PrintAgentNames must derive the process exit code from the
+// envelope (ExitCodeForResponse) — not from the error — or the CLI exits 0 on
+// failure and agents branching on the shell status silently proceed.
+func TestPrintAgentNamesSessionNotFoundExitCode(t *testing.T) {
+	origInstalled := tmuxInstalledFn
+	origExists := tmuxSessionExistsFn
+	defer func() {
+		tmuxInstalledFn = origInstalled
+		tmuxSessionExistsFn = origExists
+	}()
+	tmuxInstalledFn = func() bool { return true }
+	tmuxSessionExistsFn = func(_ string) bool { return false }
+
+	// Silence the JSON envelope while capturing the exit code.
+	origStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	os.Stdout = devNull
+	exitCode := PrintAgentNames("definitely-no-such-session", nil)
+	os.Stdout = origStdout
+	devNull.Close()
+
+	if exitCode != 1 {
+		t.Errorf("PrintAgentNames() exit code = %d, want 1 for SESSION_NOT_FOUND", exitCode)
+	}
+}
+
+// TestPrintAgentNamesSuccessExitCode verifies the happy path still exits 0.
+func TestPrintAgentNamesSuccessExitCode(t *testing.T) {
+	origInstalled := tmuxInstalledFn
+	origExists := tmuxSessionExistsFn
+	origGetPanes := tmuxGetPanesFn
+	defer func() {
+		tmuxInstalledFn = origInstalled
+		tmuxSessionExistsFn = origExists
+		tmuxGetPanesFn = origGetPanes
+	}()
+	tmuxInstalledFn = func() bool { return true }
+	tmuxSessionExistsFn = func(_ string) bool { return true }
+	tmuxGetPanesFn = func(_ string) []tmuxPaneInfo {
+		return []tmuxPaneInfo{{Index: 1, Title: "proj__cc_1"}}
+	}
+
+	origStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	os.Stdout = devNull
+	exitCode := PrintAgentNames("proj", nil)
+	os.Stdout = origStdout
+	devNull.Close()
+
+	if exitCode != 0 {
+		t.Errorf("PrintAgentNames() exit code = %d, want 0 on success", exitCode)
 	}
 }
 
