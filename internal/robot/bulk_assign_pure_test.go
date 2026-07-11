@@ -129,11 +129,11 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result[1] != "bd-abc" {
-			t.Errorf("result[1] = %q, want %q", result[1], "bd-abc")
+		if result["1"] != "bd-abc" {
+			t.Errorf("result[1] = %q, want %q", result["1"], "bd-abc")
 		}
-		if result[2] != "bd-def" {
-			t.Errorf("result[2] = %q, want %q", result[2], "bd-def")
+		if result["2"] != "bd-def" {
+			t.Errorf("result[2] = %q, want %q", result["2"], "bd-def")
 		}
 	})
 
@@ -170,8 +170,8 @@ func TestParseBulkAssignAllocation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result[3] != "bd-trimmed" {
-			t.Errorf("result[3] = %q, want %q", result[3], "bd-trimmed")
+		if result["3"] != "bd-trimmed" {
+			t.Errorf("result[3] = %q, want %q", result["3"], "bd-trimmed")
 		}
 	})
 }

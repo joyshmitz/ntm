@@ -139,10 +139,11 @@ func TestGetIdleAgents(t *testing.T) {
 
 	c.mu.Lock()
 	c.agents["%0"] = &AgentState{
-		PaneID:       "%0",
-		Status:       robot.StateWaiting,
-		Healthy:      true,
-		LastActivity: time.Now().Add(-1 * time.Minute),
+		PaneID:         "%0",
+		Status:         robot.StateWaiting,
+		Healthy:        true,
+		SafeToDispatch: true,
+		LastActivity:   time.Now().Add(-1 * time.Minute),
 	}
 	c.agents["%1"] = &AgentState{
 		PaneID:       "%1",
@@ -168,7 +169,7 @@ func TestGetIdleAgents(t *testing.T) {
 	}
 }
 
-func TestUpdateAgentStates_RetainsExistingAgentWhenCaptureFails(t *testing.T) {
+func TestUpdateAgentStates_CaptureFailureMarksCurrentUnavailableAndRetainsLastKnown(t *testing.T) {
 	origGetPanesWithActivity := getPanesWithActivity
 	origCaptureForHealthCheckWithCtx := captureForHealthCheckWithCtx
 	t.Cleanup(func() {
@@ -198,12 +199,16 @@ func TestUpdateAgentStates_RetainsExistingAgentWhenCaptureFails(t *testing.T) {
 	c.monitor = NewAgentMonitor(c.session, nil, c.projectKey)
 	c.mu.Lock()
 	c.agents["%0"] = &AgentState{
-		PaneID:       "%0",
-		PaneIndex:    0,
-		AgentType:    string(tmux.AgentClaude),
-		Status:       robot.StateWaiting,
-		Healthy:      true,
-		LastActivity: lastActivity,
+		PaneID:                "%0",
+		PaneIndex:             0,
+		AgentType:             string(tmux.AgentClaude),
+		Status:                robot.StateWaiting,
+		Healthy:               true,
+		SafeToDispatch:        true,
+		LastActivity:          lastActivity,
+		ObservedAt:            lastActivity,
+		ObservationFreshness:  status.FreshnessFresh,
+		ObservationConfidence: 0.95,
 	}
 	c.mu.Unlock()
 
@@ -213,11 +218,120 @@ func TestUpdateAgentStates_RetainsExistingAgentWhenCaptureFails(t *testing.T) {
 	if agent == nil {
 		t.Fatal("expected existing agent to remain tracked when capture fails")
 	}
-	if agent.Status != robot.StateWaiting {
-		t.Fatalf("status = %v, want %v", agent.Status, robot.StateWaiting)
+	if agent.Status != robot.StateUnknown {
+		t.Fatalf("current status = %v, want %v", agent.Status, robot.StateUnknown)
+	}
+	if agent.LastKnownStatus != robot.StateWaiting || !agent.LastKnownObservedAt.Equal(lastActivity) {
+		t.Fatalf("last known = %v at %v, want waiting at %v", agent.LastKnownStatus, agent.LastKnownObservedAt, lastActivity)
+	}
+	if agent.ObservationFreshness != status.FreshnessUnavailable || agent.ObservationConfidence != 0 {
+		t.Fatalf("observation quality = %q/%v, want unavailable/0", agent.ObservationFreshness, agent.ObservationConfidence)
+	}
+	if agent.Healthy || agent.SafeToDispatch {
+		t.Fatalf("failed current observation remained healthy/dispatchable: %+v", agent)
+	}
+	if agent.ObservationError != "capture failed" {
+		t.Fatalf("observation error = %q, want capture failed", agent.ObservationError)
 	}
 	if !agent.LastActivity.Equal(lastActivity) {
 		t.Fatalf("last activity changed unexpectedly: got %v want %v", agent.LastActivity, lastActivity)
+	}
+}
+
+func TestUpdateAgentStates_TopologyFailureInvalidatesCurrentWithoutRefreshingLastUpdate(t *testing.T) {
+	origGetPanesWithActivity := getPanesWithActivity
+	origCaptureForHealthCheckWithCtx := captureForHealthCheckWithCtx
+	t.Cleanup(func() {
+		getPanesWithActivity = origGetPanesWithActivity
+		captureForHealthCheckWithCtx = origCaptureForHealthCheckWithCtx
+	})
+
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) {
+		return nil, errors.New("topology failed")
+	}
+	captureForHealthCheckWithCtx = func(context.Context, string) (string, error) {
+		t.Fatal("capture must not run after topology failure")
+		return "", nil
+	}
+
+	priorObservedAt := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	priorUpdate := priorObservedAt.Add(-time.Second)
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	c.monitor = NewAgentMonitor(c.session, nil, c.projectKey)
+	c.mu.Lock()
+	c.lastUpdate = priorUpdate
+	c.agents["%0"] = &AgentState{
+		PaneID:                "%0",
+		Status:                robot.StateWaiting,
+		Healthy:               true,
+		SafeToDispatch:        true,
+		ObservedAt:            priorObservedAt,
+		ObservationFreshness:  status.FreshnessFresh,
+		ObservationConfidence: 0.95,
+	}
+	c.mu.Unlock()
+
+	c.updateAgentStates()
+
+	agent := c.GetAgentByPaneID("%0")
+	if agent == nil {
+		t.Fatal("topology failure must not erase tracked agent")
+	}
+	if agent.Status != robot.StateUnknown || agent.Healthy || agent.SafeToDispatch {
+		t.Fatalf("topology failure left current state usable: %+v", agent)
+	}
+	if agent.LastKnownStatus != robot.StateWaiting || agent.LastKnownObservedAt != priorObservedAt {
+		t.Fatalf("last-known = %q at %v, want waiting at %v", agent.LastKnownStatus, agent.LastKnownObservedAt, priorObservedAt)
+	}
+	if agent.ObservationFreshness != status.FreshnessUnavailable || agent.ObservationConfidence != 0 || agent.ObservationError != "topology failed" {
+		t.Fatalf("topology failure quality not recorded: %+v", agent)
+	}
+	c.mu.RLock()
+	lastUpdate := c.lastUpdate
+	c.mu.RUnlock()
+	if lastUpdate != priorUpdate {
+		t.Fatalf("lastUpdate refreshed on failed topology: got %v want %v", lastUpdate, priorUpdate)
+	}
+}
+
+func TestUpdateAgentStates_UsesFreshObservationForDispatchSafety(t *testing.T) {
+	origGetPanesWithActivity := getPanesWithActivity
+	origCaptureForHealthCheckWithCtx := captureForHealthCheckWithCtx
+	t.Cleanup(func() {
+		getPanesWithActivity = origGetPanesWithActivity
+		captureForHealthCheckWithCtx = origCaptureForHealthCheckWithCtx
+	})
+
+	lastActivity := time.Now().Add(-time.Minute).UTC()
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) {
+		return []tmux.PaneActivity{
+			{Pane: tmux.Pane{ID: "%2", Index: 2, Title: "test-session__cc_2", Type: tmux.AgentClaude}, LastActivity: lastActivity},
+			{Pane: tmux.Pane{ID: "%1", Index: 1, Title: "test-session__cc_1", Type: tmux.AgentClaude}, LastActivity: lastActivity},
+		}, nil
+	}
+	captureForHealthCheckWithCtx = func(_ context.Context, paneID string) (string, error) {
+		if paneID == "%1" {
+			return "completed\n────────────\n❯ \n────────────", nil
+		}
+		return "processing a long task\n✻ Churning… (ctrl+c to interrupt · 4s)\n────────────\n❯ \n────────────", nil
+	}
+
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	c.config.IdleThreshold = 0
+	c.monitor = NewAgentMonitor(c.session, nil, c.projectKey)
+	c.updateAgentStates()
+
+	idle := c.GetAgentByPaneID("%1")
+	if idle == nil || idle.Status != robot.StateWaiting || !idle.Healthy || !idle.SafeToDispatch || idle.ObservationFreshness != status.FreshnessFresh {
+		t.Fatalf("idle observation not dispatch-safe: %+v", idle)
+	}
+	working := c.GetAgentByPaneID("%2")
+	if working == nil || working.Status != robot.StateGenerating || !working.Healthy || working.SafeToDispatch || working.ObservationFreshness != status.FreshnessFresh {
+		t.Fatalf("working observation safety = %+v", working)
+	}
+	idleAgents := c.GetIdleAgents()
+	if len(idleAgents) != 1 || idleAgents[0].PaneID != "%1" {
+		t.Fatalf("idle agents = %+v, want only %%1", idleAgents)
 	}
 }
 

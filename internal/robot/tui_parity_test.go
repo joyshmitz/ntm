@@ -1,7 +1,9 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
@@ -1965,8 +1968,9 @@ func TestPrintReplayMissingID(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintReplay(opts)
 	})
-	if err != nil {
-		t.Fatalf("PrintReplay returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintReplay error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result ReplayOutput
@@ -2166,6 +2170,48 @@ func TestBeadClaimOutputStructure(t *testing.T) {
 		if _, ok := parsed[field]; !ok {
 			t.Errorf("missing required field: %s", field)
 		}
+	}
+}
+
+func TestGetBeadClaimUsesAtomicActorAndIsIdempotent(t *testing.T) {
+	calls := 0
+	deps := &BeadClaimDependencies{
+		ClaimBead: func(_ context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+			calls++
+			if dir != "" || beadID != "ntm-atomic" || actor != "BlueLake" {
+				t.Fatalf("claim args dir=%q bead=%q actor=%q", dir, beadID, actor)
+			}
+			return bv.BeadClaimResult{ID: beadID, Title: "Atomic claim", Actor: actor, Status: "in_progress"}, nil
+		},
+	}
+	opts := BeadClaimOptions{BeadID: "ntm-atomic", Assignee: "BlueLake", Deps: deps}
+	for i := 0; i < 2; i++ {
+		output, err := GetBeadClaim(opts)
+		if err != nil {
+			t.Fatalf("GetBeadClaim: %v", err)
+		}
+		if !output.Success || !output.Claimed || output.Actor != "BlueLake" || output.NewStatus != "in_progress" {
+			t.Fatalf("output=%+v", output)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("claim calls=%d, want 2 idempotent atomic attempts", calls)
+	}
+}
+
+func TestGetBeadClaimClassifiesOtherActorConflict(t *testing.T) {
+	output, err := GetBeadClaim(BeadClaimOptions{
+		BeadID:   "ntm-owned",
+		Assignee: "BlueLake",
+		Deps: &BeadClaimDependencies{ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			return bv.BeadClaimResult{}, bv.ErrBeadAlreadyClaimed
+		}},
+	})
+	if err != nil {
+		t.Fatalf("GetBeadClaim: %v", err)
+	}
+	if output.Success || output.Claimed || output.ErrorCode != ErrCodeResourceBusy || output.Actor != "BlueLake" {
+		t.Fatalf("conflict output=%+v", output)
 	}
 }
 

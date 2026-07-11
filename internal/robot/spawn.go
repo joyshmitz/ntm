@@ -2,18 +2,22 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -30,22 +34,40 @@ var promptPatterns = []*regexp.Regexp{
 
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
-	Session        string
-	Label          string   // Session label — constructs "{Session}--{Label}" if set
-	CCCount        int      // Claude agents
-	CodCount       int      // Codex agents
-	GmiCount       int      // Gemini agents
-	AgyCount       int      // Antigravity agents
-	Preset         string   // Recipe/preset name
-	NoUserPane     bool     // Don't create user pane
-	WorkingDir     string   // Override working directory
-	WaitReady      bool     // Wait for agents to be ready
-	ReadyTimeout   int      // Timeout in seconds for ready detection
-	DryRun         bool     // Preview mode: show what would happen without executing
-	Safety         bool     // Fail if session already exists
-	AssignWork     bool     // Enable orchestrator work assignment mode
-	AssignStrategy string   // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
-	CustomNames    []string // Custom agent names (used in order, then NATO alphabet)
+	Session            string
+	Label              string   // Session label — constructs "{Session}--{Label}" if set
+	CCCount            int      // Claude agents
+	CodCount           int      // Codex agents
+	GmiCount           int      // Gemini agents
+	AgyCount           int      // Antigravity agents
+	Preset             string   // Recipe/preset name
+	NoUserPane         bool     // Don't create user pane
+	WorkingDir         string   // Override working directory
+	WaitReady          bool     // Wait for agents to be ready
+	ReadyTimeout       int      // Timeout in seconds for ready detection
+	DryRun             bool     // Preview mode: show what would happen without executing
+	Safety             bool     // Fail if session already exists
+	AssignWork         bool     // Enable orchestrator work assignment mode
+	AssignStrategy     string   // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
+	CustomNames        []string // Custom agent names (used in order, then NATO alphabet)
+	RequireReservation bool
+	ReservationPaths   []string
+	AssignmentDeps     *SpawnAssignmentDependencies
+}
+
+// SpawnAssignmentDependencies exposes assignment side-effect ports for focused
+// tests while production uses the durable Beads, ledger, and dispatch services.
+type SpawnAssignmentDependencies struct {
+	FetchTriage       func(dir string) (*bv.TriageResponse, error)
+	ListPanes         func(session string) ([]tmux.Pane, error)
+	LoadStore         func(session string) (*assignment.AssignmentStore, error)
+	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	NewIdempotencyKey func() (string, error)
+	ReservationPort   assignment.ReservationPort
+	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
+	ObserveSession    func(context.Context, string) (statuspkg.SessionObservation, error)
+	DispatchDeliverer dispatchsvc.Deliverer
+	DispatchPacer     dispatchsvc.Pacer
 }
 
 // SpawnOutput is the structured output for --robot-spawn.
@@ -81,15 +103,19 @@ type SpawnRecovery struct {
 
 // SpawnAssignment represents a work assignment to a spawned agent.
 type SpawnAssignment struct {
-	Pane        string `json:"pane"`                   // Pane reference (e.g., "0.1")
-	AgentType   string `json:"agent_type"`             // claude, codex, gemini
-	BeadID      string `json:"bead_id"`                // Assigned bead ID
-	BeadTitle   string `json:"bead_title"`             // Bead title for context
-	Priority    string `json:"priority"`               // Bead priority (P0-P4)
-	Claimed     bool   `json:"claimed"`                // Whether bead was successfully claimed (marked in_progress)
-	PromptSent  bool   `json:"prompt_sent"`            // Whether the work prompt was sent to the agent
-	ClaimError  string `json:"claim_error,omitempty"`  // Error during claim, if any
-	PromptError string `json:"prompt_error,omitempty"` // Error sending prompt, if any
+	Pane              string `json:"pane"`        // Pane reference (e.g., "0.1")
+	AgentType         string `json:"agent_type"`  // claude, codex, gemini
+	BeadID            string `json:"bead_id"`     // Assigned bead ID
+	BeadTitle         string `json:"bead_title"`  // Bead title for context
+	Priority          string `json:"priority"`    // Bead priority (P0-P4)
+	Claimed           bool   `json:"claimed"`     // Whether bead was successfully claimed (marked in_progress)
+	PromptSent        bool   `json:"prompt_sent"` // Whether the work prompt was sent to the agent
+	ClaimActor        string `json:"claim_actor,omitempty"`
+	IdempotencyKey    string `json:"idempotency_key,omitempty"`
+	DispatchReceiptID string `json:"dispatch_receipt_id,omitempty"`
+	ReservationIDs    []int  `json:"reservation_ids,omitempty"`
+	ClaimError        string `json:"claim_error,omitempty"`  // Error during claim, if any
+	PromptError       string `json:"prompt_error,omitempty"` // Error sending prompt, if any
 }
 
 // SpawnedAgent represents an agent created during spawn.
@@ -530,8 +556,9 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	if opts.AssignWork {
 		output.Mode = "orchestrator"
 		output.AssignStrategy = normalizeAssignStrategy(opts.AssignStrategy)
-		assignments := assignWorkToAgents(output, dir, opts.Session, output.AssignStrategy)
+		assignments := assignWorkToAgents(output, dir, opts.Session, output.AssignStrategy, cfg, opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps)
 		output.Assignments = assignments
+		finalizeSpawnAssignmentOutput(output)
 	}
 
 	output.TotalStartupMs = time.Since(startTime).Milliseconds()
@@ -551,7 +578,7 @@ func PrintSpawn(opts SpawnOptions, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot spawn failed")
 }
 
 // launchAgent launches a single agent and returns its info.
@@ -796,8 +823,9 @@ func normalizeAssignStrategy(strategy string) string {
 }
 
 // assignWorkToAgents gets triage recommendations, claims beads, and sends work prompts.
-func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string) []SpawnAssignment {
+func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies) []SpawnAssignment {
 	var assignments []SpawnAssignment
+	deps := spawnAssignmentDeps(customDeps)
 
 	// Get non-user agents that are ready
 	var readyAgents []SpawnedAgent
@@ -814,9 +842,12 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string) 
 	}
 
 	// Get triage recommendations from bv
-	triage, err := bv.GetTriage(workDir)
-	if err != nil || triage == nil {
-		return assignments
+	triage, err := deps.FetchTriage(workDir)
+	if err != nil {
+		return spawnAgentPlanErrors(readyAgents, fmt.Errorf("load bv triage: %w", err))
+	}
+	if triage == nil {
+		return spawnAgentPlanErrors(readyAgents, errors.New("load bv triage: empty response"))
 	}
 
 	// Get work items based on strategy
@@ -825,6 +856,24 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string) 
 		return assignments
 	}
 
+	store, err := deps.LoadStore(session)
+	if err != nil {
+		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("load assignment ledger: %w", err))
+	}
+	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
+	if cfg != nil {
+		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
+	}
+	dispatchPort := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
+	claimPort := newRobotAtomicClaimPort(workDir, deps.ClaimBead)
+	panes, err := deps.ListPanes(session)
+	if err != nil {
+		return spawnAssignmentPlanErrors(readyAgents, workItems, fmt.Errorf("load pane topology: %w", err))
+	}
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	reservationPort := deps.ReservationPort
+	resolveAgentName := deps.ResolveAgentName
+
 	// Assign work to agents
 	for i, agent := range readyAgents {
 		if i >= len(workItems) {
@@ -832,35 +881,215 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string) 
 		}
 
 		item := workItems[i]
-		assignment := SpawnAssignment{
+		spawnAssignment := SpawnAssignment{
 			Pane:      agent.Pane,
 			AgentType: agent.Type,
 			BeadID:    item.ID,
 			BeadTitle: item.Title,
 			Priority:  fmt.Sprintf("P%d", item.Priority),
 		}
-
-		// Claim the bead (mark as in_progress)
-		if err := claimBead(workDir, item.ID); err != nil {
-			assignment.ClaimError = err.Error()
-		} else {
-			assignment.Claimed = true
+		resolved, resolveErr := tmux.ResolvePaneSelectors(panes, []string{agent.Pane}, true)
+		if resolveErr != nil {
+			spawnAssignment.ClaimError = fmt.Sprintf("resolve pane %s: %v", agent.Pane, resolveErr)
+			assignments = append(assignments, spawnAssignment)
+			continue
 		}
+		pane := resolved[0]
+		spawnAssignment.Pane = pane.Ref().Canonical(multiWindow)
+		target := pane.ID
+		if target == "" {
+			target = pane.Ref().Physical()
+		}
+		prompt := generateWorkPrompt(item)
+		agentName := ""
+		idempotencyKey := ""
+		if replay := robotAtomicReplayIntent(store, item.ID, target, pane.Index, agent.Type, prompt, requireReservation, reservationPaths); replay != nil {
+			agentName = replay.AgentName
+			idempotencyKey = replay.IdempotencyKey
+		} else {
+			observation, observeErr := deps.ObserveSession(context.Background(), session)
+			if observeErr != nil {
+				spawnAssignment.ClaimError = fmt.Sprintf("observe pane %s before assignment: %v", spawnAssignment.Pane, observeErr)
+				assignments = append(assignments, spawnAssignment)
+				continue
+			}
+			if !observation.SafeToDispatch(target) {
+				spawnAssignment.ClaimError = fmt.Sprintf("pane %s (%s) is not safe to dispatch", spawnAssignment.Pane, target)
+				assignments = append(assignments, spawnAssignment)
+				continue
+			}
 
-		// Send work prompt to the agent (only if claimed or best effort)
-		if assignment.Claimed {
-			prompt := generateWorkPrompt(item)
-			if err := sendWorkPrompt(session, agent.Pane, agent.Type, prompt); err != nil {
-				assignment.PromptError = err.Error()
-			} else {
-				assignment.PromptSent = true
+			agentName = strings.TrimSpace(agent.Name)
+			if requireReservation {
+				if reservationPort == nil {
+					mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(context.Background(), workDir, session, nil)
+					if runtimeErr != nil {
+						spawnAssignment.ClaimError = runtimeErr.Error()
+						assignments = append(assignments, spawnAssignment)
+						continue
+					}
+					reservationPort = mailRuntime
+					if resolveAgentName == nil {
+						resolveAgentName = mailRuntime.ResolveRecipient
+					}
+				}
+				if resolveAgentName == nil {
+					spawnAssignment.ClaimError = "required reservation has no exact Agent Mail pane-identity resolver"
+					assignments = append(assignments, spawnAssignment)
+					continue
+				}
+				agentName, resolveErr = resolveAgentName(context.Background(), workDir, session, target, pane.Title)
+				if resolveErr != nil {
+					spawnAssignment.ClaimError = resolveErr.Error()
+					assignments = append(assignments, spawnAssignment)
+					continue
+				}
+				agentName = strings.TrimSpace(agentName)
+			}
+			if agentName == "" {
+				spawnAssignment.ClaimError = fmt.Sprintf("pane %s (%s) has no canonical assignment identity", spawnAssignment.Pane, target)
+				assignments = append(assignments, spawnAssignment)
+				continue
+			}
+			var keyErr error
+			idempotencyKey, keyErr = robotAtomicIdempotencyKey(
+				store, item.ID, target, pane.Index, agent.Type, agentName, prompt,
+				requireReservation, reservationPaths, deps.NewIdempotencyKey,
+			)
+			if keyErr != nil {
+				spawnAssignment.ClaimError = keyErr.Error()
+				assignments = append(assignments, spawnAssignment)
+				continue
 			}
 		}
+		spawnAssignment.IdempotencyKey = idempotencyKey
+		coordinator := assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort)
+		result, executeErr := coordinator.Execute(context.Background(), spawnAtomicRequest(
+			item, target, pane.Index, agent.Type, agentName, prompt, idempotencyKey, requireReservation, reservationPaths,
+		))
+		if result.Assignment != nil && result.Assignment.IdempotencyKey == idempotencyKey {
+			spawnAssignment.Claimed = result.Assignment.ClaimState == assignment.ClaimClaimed
+			spawnAssignment.ClaimActor = result.Assignment.ClaimActor
+			spawnAssignment.DispatchReceiptID = result.Assignment.DispatchReceiptID
+			spawnAssignment.ReservationIDs = append([]int(nil), result.Assignment.ReservationIDs...)
+		}
+		if executeErr != nil {
+			if spawnAssignment.Claimed {
+				spawnAssignment.PromptError = executeErr.Error()
+			} else {
+				spawnAssignment.ClaimError = executeErr.Error()
+			}
+		} else {
+			spawnAssignment.PromptSent = result.Sent
+		}
 
-		assignments = append(assignments, assignment)
+		assignments = append(assignments, spawnAssignment)
 	}
 
 	return assignments
+}
+
+func spawnAgentPlanErrors(agents []SpawnedAgent, err error) []SpawnAssignment {
+	result := make([]SpawnAssignment, 0, len(agents))
+	for _, agent := range agents {
+		result = append(result, SpawnAssignment{
+			Pane: agent.Pane, AgentType: agent.Type, ClaimError: err.Error(),
+		})
+	}
+	return result
+}
+
+func finalizeSpawnAssignmentOutput(output *SpawnOutput) {
+	if output == nil {
+		return
+	}
+	failed := 0
+	for _, spawnAssignment := range output.Assignments {
+		if spawnAssignment.ClaimError != "" || spawnAssignment.PromptError != "" || !spawnAssignment.Claimed || !spawnAssignment.PromptSent {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return
+	}
+	output.Error = fmt.Sprintf("%d of %d spawn work assignments failed", failed, len(output.Assignments))
+	output.RobotResponse = NewErrorResponse(
+		fmt.Errorf("%s", output.Error),
+		ErrCodeInternalError,
+		"Inspect assignments[].claim_error and assignments[].prompt_error; failed targets were not dispatched",
+	)
+}
+
+func spawnAtomicRequest(item workItem, target string, pane int, agentType, agentName, prompt, key string, requireReservation bool, reservationPaths []string) assignment.AtomicRequest {
+	return assignment.AtomicRequest{
+		BeadID: item.ID, BeadTitle: item.Title, Target: target, OccupancyKey: target, Pane: pane,
+		AgentType: agentType, AgentName: agentName, Actor: agentName, Prompt: prompt,
+		IdempotencyKey: key, RequireReservation: requireReservation, ReservationTTL: time.Hour,
+		RequestedPaths: append([]string(nil), reservationPaths...),
+	}
+}
+
+func spawnAssignmentPlanErrors(agents []SpawnedAgent, items []workItem, err error) []SpawnAssignment {
+	limit := len(agents)
+	if len(items) < limit {
+		limit = len(items)
+	}
+	result := make([]SpawnAssignment, 0, limit)
+	for i := 0; i < limit; i++ {
+		result = append(result, SpawnAssignment{
+			Pane: agents[i].Pane, AgentType: agents[i].Type, BeadID: items[i].ID,
+			BeadTitle: items[i].Title, Priority: fmt.Sprintf("P%d", items[i].Priority),
+			ClaimError: err.Error(),
+		})
+	}
+	return result
+}
+
+func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDependencies {
+	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
+	deps := SpawnAssignmentDependencies{
+		FetchTriage:       bv.GetTriage,
+		ListPanes:         tmux.GetPanes,
+		LoadStore:         assignment.LoadStoreStrict,
+		ClaimBead:         bv.ClaimBead,
+		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
+		ObserveSession:    observer.Observe,
+		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
+	}
+	if custom == nil {
+		return deps
+	}
+	if custom.FetchTriage != nil {
+		deps.FetchTriage = custom.FetchTriage
+	}
+	if custom.ListPanes != nil {
+		deps.ListPanes = custom.ListPanes
+	}
+	if custom.LoadStore != nil {
+		deps.LoadStore = custom.LoadStore
+	}
+	if custom.ClaimBead != nil {
+		deps.ClaimBead = custom.ClaimBead
+	}
+	if custom.NewIdempotencyKey != nil {
+		deps.NewIdempotencyKey = custom.NewIdempotencyKey
+	}
+	if custom.ReservationPort != nil {
+		deps.ReservationPort = custom.ReservationPort
+	}
+	if custom.ResolveAgentName != nil {
+		deps.ResolveAgentName = custom.ResolveAgentName
+	}
+	if custom.ObserveSession != nil {
+		deps.ObserveSession = custom.ObserveSession
+	}
+	if custom.DispatchDeliverer != nil {
+		deps.DispatchDeliverer = custom.DispatchDeliverer
+	}
+	if custom.DispatchPacer != nil {
+		deps.DispatchPacer = custom.DispatchPacer
+	}
+	return deps
 }
 
 // workItem represents a work item from triage for assignment.
@@ -1023,12 +1252,6 @@ func getDependencyAwareItems(triage *bv.TriageResponse, count int) []workItem {
 	return items
 }
 
-// claimBead marks a bead as in_progress using bd CLI.
-func claimBead(workDir, beadID string) error {
-	_, err := bv.RunBd(workDir, "update", beadID, "--status", "in_progress")
-	return err
-}
-
 // generateWorkPrompt creates a prompt for an agent to work on a bead.
 func generateWorkPrompt(item workItem) string {
 	var sb strings.Builder
@@ -1047,16 +1270,4 @@ func generateWorkPrompt(item workItem) string {
 	sb.WriteString("\nWhen done, close it with: `br close " + item.ID + " --reason \"Completed\"`")
 
 	return sb.String()
-}
-
-// sendWorkPrompt sends a work prompt to an agent via tmux.
-func sendWorkPrompt(session, paneRef, agentTypeStr, prompt string) error {
-	// Build the full pane target
-	target := fmt.Sprintf("%s:%s", session, paneRef)
-
-	// Use SendKeysForAgent to handle multi-line prompts via buffer mechanism
-	// for agents like Gemini and Claude Code that need it.
-	agentType := tmux.AgentType(agentTypeShort(agentTypeStr))
-
-	return tmux.SendKeysForAgent(target, prompt, true, agentType)
 }

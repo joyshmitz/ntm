@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -56,17 +57,24 @@ type SessionCoordinator struct {
 
 // AgentState tracks the current state of an agent pane.
 type AgentState struct {
-	PaneID        string           `json:"pane_id"`
-	PaneIndex     int              `json:"pane_index"`
-	AgentType     string           `json:"agent_type"` // cc, cod, gmi
-	AgentMailName string           `json:"agent_mail_name,omitempty"`
-	Status        robot.AgentState `json:"status"`
-	ContextUsage  float64          `json:"context_usage"`
-	LastActivity  time.Time        `json:"last_activity"`
-	CurrentTask   string           `json:"current_task,omitempty"`
-	Reservations  []string         `json:"reservations,omitempty"`
-	Healthy       bool             `json:"healthy"`
-	Profile       *persona.Persona `json:"profile,omitempty"` // Agent's assigned profile for routing
+	PaneID                string                      `json:"pane_id"`
+	PaneIndex             int                         `json:"pane_index"`
+	AgentType             string                      `json:"agent_type"` // cc, cod, gmi
+	AgentMailName         string                      `json:"agent_mail_name,omitempty"`
+	Status                robot.AgentState            `json:"status"`
+	LastKnownStatus       robot.AgentState            `json:"last_known_status,omitempty"`
+	ContextUsage          float64                     `json:"context_usage"`
+	LastActivity          time.Time                   `json:"last_activity"`
+	ObservedAt            time.Time                   `json:"observed_at"`
+	LastKnownObservedAt   time.Time                   `json:"last_known_observed_at,omitempty"`
+	ObservationFreshness  status.ObservationFreshness `json:"observation_freshness"`
+	ObservationConfidence float64                     `json:"observation_confidence"`
+	ObservationError      string                      `json:"observation_error,omitempty"`
+	SafeToDispatch        bool                        `json:"safe_to_dispatch"`
+	CurrentTask           string                      `json:"current_task,omitempty"`
+	Reservations          []string                    `json:"reservations,omitempty"`
+	Healthy               bool                        `json:"healthy"`
+	Profile               *persona.Persona            `json:"profile,omitempty"` // Agent's assigned profile for routing
 
 	// Assignment tracking (from bd-1g5t8)
 	// Assignments is the count of active assignments for this agent.
@@ -280,7 +288,7 @@ func (c *SessionCoordinator) GetIdleAgents() []*AgentState {
 
 	var idle []*AgentState
 	for _, agent := range c.agents {
-		if agent.Status == robot.StateWaiting && agent.Healthy {
+		if agent.Status == robot.StateWaiting && agent.Healthy && agent.SafeToDispatch {
 			if time.Since(agent.LastActivity).Seconds() >= c.config.IdleThreshold {
 				agentCopy := *agent
 				idle = append(idle, &agentCopy)
@@ -311,98 +319,40 @@ func (c *SessionCoordinator) monitorLoop(ctx context.Context, stopCh <-chan stru
 
 // updateAgentStates refreshes the state of all agents.
 func (c *SessionCoordinator) updateAgentStates() {
-	// 1. Get panes with activity from tmux (single call)
-	// This returns both pane metadata and last activity timestamp
-	panes, err := getPanesWithActivity(c.session)
+	if c.monitor == nil {
+		return
+	}
+	observation, err := c.monitor.ObserveSession(context.Background())
 	if err != nil {
+		c.markAgentObservationsUnavailable(observation.ObservedAt, err)
 		return
 	}
 
-	// Filter for agent panes to capture
-	var agentPanes []tmux.PaneActivity
-	for _, p := range panes {
-		if p.Pane.Type != tmux.AgentUser && p.Pane.Type != tmux.AgentUnknown {
-			agentPanes = append(agentPanes, p)
-		}
-	}
-
-	// 2. Parallel capture of pane outputs
-	// We use HealthCheck (50 lines) to provide enough context for both
-	// the UnifiedDetector (patterns) and ActivityMonitor (velocity).
-	type captureResult struct {
-		paneID string
-		output string
-		err    error
-	}
-
-	resultsCh := make(chan captureResult, len(agentPanes))
-	var wg sync.WaitGroup
-
-	for _, p := range agentPanes {
-		wg.Add(1)
-		go func(paneID string) {
-			defer wg.Done()
-			// Short timeout for capture to prevent holding up the cycle
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			output, err := captureForHealthCheckWithCtx(ctx, paneID)
-			resultsCh <- captureResult{paneID: paneID, output: output, err: err}
-		}(p.Pane.ID)
-	}
-
-	wg.Wait()
-	close(resultsCh)
-
-	outputs := make(map[string]string)
-	for res := range resultsCh {
-		if res.err == nil {
-			outputs[res.paneID] = res.output
-		}
-	}
-
-	// 3. Calculate status updates (CPU bound, fast)
 	type agentUpdate struct {
 		paneID    string
 		paneIndex int
 		agentType string
 		status    AgentStatusResult
 	}
-
-	var updates []agentUpdate
-	if c.monitor != nil {
-		updates = make([]agentUpdate, 0, len(agentPanes))
-		for _, p := range agentPanes {
-			output, ok := outputs[p.Pane.ID]
-			if !ok {
-				continue // Skip if capture failed
-			}
-
-			// Use the optimized method that accepts pre-captured output and activity
-			state := c.monitor.GetAgentStatusWithOutput(
-				p.Pane.ID,
-				p.Pane.Title,
-				string(p.Pane.Type),
-				output,
-				p.LastActivity,
-			)
-
-			updates = append(updates, agentUpdate{
-				paneID:    p.Pane.ID,
-				paneIndex: p.Pane.Index,
-				agentType: string(p.Pane.Type),
-				status:    state,
-			})
+	updates := make([]agentUpdate, 0, len(observation.Panes))
+	for _, pane := range observation.Panes {
+		if pane.AgentType == string(tmux.AgentUser) || pane.AgentType == string(tmux.AgentUnknown) {
+			continue
 		}
+		updates = append(updates, agentUpdate{
+			paneID:    pane.Pane.ID,
+			paneIndex: pane.Pane.PaneIndex,
+			agentType: pane.AgentType,
+			status:    c.monitor.resultFromPaneObservation(pane),
+		})
 	}
 
 	c.mu.Lock()
-	// defer c.mu.Unlock() // Removed defer to allow manual unlock before emitting events
 
 	// Track which panes we've seen
-	seenPanes := make(map[string]bool, len(agentPanes))
-	for _, pane := range agentPanes {
-		seenPanes[pane.Pane.ID] = true
+	seenPanes := make(map[string]bool, len(updates))
+	for _, update := range updates {
+		seenPanes[update.paneID] = true
 	}
 
 	type transitionEvent struct {
@@ -419,7 +369,6 @@ func (c *SessionCoordinator) updateAgentStates() {
 				PaneID:    update.paneID,
 				PaneIndex: update.paneIndex,
 				AgentType: update.agentType,
-				Healthy:   true,
 			}
 			c.agents[update.paneID] = agent
 		}
@@ -427,9 +376,26 @@ func (c *SessionCoordinator) updateAgentStates() {
 		// Update state using pre-calculated status
 		state := update.status
 		prevStatus := agent.Status
+		if state.LastKnownStatus == "" {
+			switch {
+			case agent.LastKnownStatus != "":
+				state.LastKnownStatus = agent.LastKnownStatus
+				state.LastKnownObservedAt = agent.LastKnownObservedAt
+			case state.Freshness != status.FreshnessFresh && agent.ObservationFreshness == status.FreshnessFresh && agent.Status != robot.StateUnknown:
+				state.LastKnownStatus = agent.Status
+				state.LastKnownObservedAt = agent.ObservedAt
+			}
+		}
 		agent.Status = state.Status
 		agent.ContextUsage = state.ContextUsage
 		agent.LastActivity = state.LastActivity
+		agent.ObservedAt = state.ObservedAt
+		agent.LastKnownStatus = state.LastKnownStatus
+		agent.LastKnownObservedAt = state.LastKnownObservedAt
+		agent.ObservationFreshness = state.Freshness
+		agent.ObservationConfidence = state.Confidence
+		agent.ObservationError = state.ErrorMessage
+		agent.SafeToDispatch = state.SafeToDispatch
 		agent.Healthy = state.Healthy
 
 		// Track events for state transitions
@@ -450,13 +416,37 @@ func (c *SessionCoordinator) updateAgentStates() {
 		}
 	}
 
-	c.lastUpdate = time.Now()
+	c.lastUpdate = observation.ObservedAt
 	c.mu.Unlock()
 
 	// Emit events outside the lock to prevent deadlocks if the event bus
 	// applies backpressure and blocks on the handler semaphore.
 	for _, transition := range transitions {
 		c.emitEvent(transition.agent, transition.prevStatus)
+	}
+}
+
+// markAgentObservationsUnavailable makes a whole-session observation failure
+// visible without stamping the prior state as current. lastUpdate intentionally
+// remains the time of the last completed topology observation.
+func (c *SessionCoordinator) markAgentObservationsUnavailable(observedAt time.Time, observationErr error) {
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, agent := range c.agents {
+		if agent.ObservationFreshness == status.FreshnessFresh && agent.Status != robot.StateUnknown {
+			agent.LastKnownStatus = agent.Status
+			agent.LastKnownObservedAt = agent.ObservedAt
+		}
+		agent.Status = robot.StateUnknown
+		agent.ObservedAt = observedAt
+		agent.ObservationFreshness = status.FreshnessUnavailable
+		agent.ObservationConfidence = 0
+		agent.ObservationError = observationErr.Error()
+		agent.SafeToDispatch = false
+		agent.Healthy = false
 	}
 }
 

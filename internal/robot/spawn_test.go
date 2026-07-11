@@ -1,12 +1,21 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -895,6 +904,24 @@ func findSubstringSpawn(s, sub string) bool {
 // Tests for orchestrator work assignment functionality
 // =============================================================================
 
+func spawnObservation(session string, state statuspkg.AgentState, panes ...tmux.Pane) statuspkg.SessionObservation {
+	now := time.Now().UTC()
+	observation := statuspkg.SessionObservation{
+		Session: session, ObservedAt: now, Complete: true,
+		Panes: make([]statuspkg.PaneObservation, 0, len(panes)),
+	}
+	for _, pane := range panes {
+		observation.Panes = append(observation.Panes, statuspkg.PaneObservation{
+			Pane: pane.Ref(), Metadata: pane,
+			Current: statuspkg.StateObservation{
+				Status: statuspkg.AgentStatus{State: state}, ObservedAt: now,
+				Freshness: statuspkg.FreshnessFresh, Confidence: 1,
+			},
+		})
+	}
+	return observation
+}
+
 // TestNormalizeAssignStrategy validates strategy normalization
 func TestNormalizeAssignStrategy(t *testing.T) {
 
@@ -973,6 +1000,16 @@ func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
 		DryRun:         true,
 		AssignWork:     true,
 		AssignStrategy: "top-n",
+		AssignmentDeps: &SpawnAssignmentDependencies{
+			FetchTriage: func(string) (*bv.TriageResponse, error) {
+				t.Fatal("dry run called assignment triage")
+				return nil, nil
+			},
+			LoadStore: func(string) (*assignment.AssignmentStore, error) {
+				t.Fatal("dry run loaded assignment store")
+				return nil, nil
+			},
+		},
 	}
 
 	cfg := config.Default()
@@ -996,6 +1033,473 @@ func TestSpawnOptions_AssignWorkDryRun(t *testing.T) {
 	// since dry-run returns early before assignment logic
 
 	t.Logf("DryRun with AssignWork: Session=%s, WouldCreate=%d", resp.Session, len(resp.WouldCreate))
+}
+
+func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("spawn-atomic")
+	var mu sync.Mutex
+	var order []string
+	claimCalls := 0
+	reserveCalls := 0
+	deliverCalls := 0
+	keyCalls := 0
+	observeCalls := 0
+
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%9", WindowIndex: 1, Index: 0, Title: "spawn-atomic__cod_1", Type: tmux.AgentCodex},
+	}
+	workDir := t.TempDir()
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-spawn", Title: "Atomic spawn", Status: "ready", Priority: 1}}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			claimCalls++
+			order = append(order, "claim")
+			if !strings.HasPrefix(actor, "BlueLake/ntm-") {
+				t.Fatalf("claim actor=%q, want resolved Agent Mail identity", actor)
+			}
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: func() (string, error) {
+			keyCalls++
+			return "spawn-key", nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(_ context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			reserveCalls++
+			order = append(order, "reserve")
+			expires := time.Now().UTC().Add(time.Hour)
+			return assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target, Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...), ReservationIDs: []int{77}, ExpiresAt: &expires}, nil
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			mu.Lock()
+			defer mu.Unlock()
+			deliverCalls++
+			order = append(order, "dispatch")
+			if delivery.Target.Ref.ID != "%9" {
+				t.Errorf("dispatch target=%q, want %%9", delivery.Target.Ref.ID)
+			}
+			return nil
+		}),
+		ObserveSession: func(_ context.Context, gotSession string) (statuspkg.SessionObservation, error) {
+			observeCalls++
+			if observeCalls > 1 {
+				t.Fatal("durable replay re-ran the fresh-idle observation gate")
+			}
+			if gotSession != "spawn-atomic" {
+				t.Fatalf("observed session=%q, want spawn-atomic", gotSession)
+			}
+			return spawnObservation(gotSession, statuspkg.StateIdle, panes...), nil
+		},
+		ResolveAgentName: func(_ context.Context, projectKey, gotSession, paneID, paneTitle string) (string, error) {
+			if projectKey != workDir || gotSession != "spawn-atomic" || paneID != "%9" || paneTitle != "spawn-atomic__cod_1" {
+				t.Fatalf("resolver args project=%q session=%q pane=%q title=%q", projectKey, gotSession, paneID, paneTitle)
+			}
+			return "BlueLake", nil
+		},
+	}
+	output := &SpawnOutput{Session: "spawn-atomic", Agents: []SpawnedAgent{{Pane: "1.0", Name: "GeneratedName", Type: "codex"}}}
+
+	reservationPaths := []string{"internal/robot/**"}
+	first := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
+	second := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, reservationPaths, deps)
+	if len(first) != 1 || !first[0].Claimed || !first[0].PromptSent || first[0].DispatchReceiptID == "" {
+		t.Fatalf("first assignment=%+v", first)
+	}
+	if len(second) != 1 || !second[0].PromptSent || second[0].IdempotencyKey != first[0].IdempotencyKey {
+		t.Fatalf("replayed assignment=%+v", second)
+	}
+	if !reflect.DeepEqual(order, []string{"claim", "reserve", "dispatch"}) {
+		t.Fatalf("side-effect order=%v", order)
+	}
+	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 1 {
+		t.Fatalf("calls claim=%d reserve=%d dispatch=%d key=%d observe=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, observeCalls)
+	}
+}
+
+func TestAssignWorkRequiredReservationWithoutIdentityFailsBeforeClaimAndDispatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	claimCalls := 0
+	reserveCalls := 0
+	deliverCalls := 0
+	panes := []tmux.Pane{{ID: "%5", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude}}
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-required", Title: "Required", Status: "ready"}}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) {
+			return append([]tmux.Pane(nil), panes...), nil
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-required"), nil },
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			claimCalls++
+			return bv.BeadClaimResult{}, errors.New("should not claim")
+		},
+		NewIdempotencyKey: func() (string, error) { return "required-key", nil },
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			reserveCalls++
+			return assignment.LeaseReceipt{}, errors.New("should not reserve")
+		}),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliverCalls++
+			return nil
+		}),
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			return spawnObservation(session, statuspkg.StateIdle, panes...), nil
+		},
+	}
+	output := &SpawnOutput{Session: "spawn-required", Agents: []SpawnedAgent{{Pane: "0.1", Name: "BlueLake", Type: "claude"}}}
+	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "no exact Agent Mail pane-identity resolver") {
+		t.Fatalf("assignment=%+v", got)
+	}
+	if claimCalls != 0 || reserveCalls != 0 || deliverCalls != 0 {
+		t.Fatalf("claim=%d reserve=%d dispatch=%d, want zero", claimCalls, reserveCalls, deliverCalls)
+	}
+}
+
+func TestAssignWorkUnsafeObservationHasNoAssignmentSideEffects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	panes := []tmux.Pane{{ID: "%17", WindowIndex: 0, Index: 1, Title: "unsafe__cc_1", Type: tmux.AgentClaude}}
+	claimCalls := 0
+	reserveCalls := 0
+	deliverCalls := 0
+	keyCalls := 0
+	resolverCalls := 0
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-unsafe", Title: "Unsafe pane", Status: "ready"}}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-unsafe"), nil },
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			claimCalls++
+			return bv.BeadClaimResult{}, errors.New("should not claim")
+		},
+		NewIdempotencyKey: func() (string, error) {
+			keyCalls++
+			return "unsafe-key", nil
+		},
+		ReservationPort: assignment.ReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+			reserveCalls++
+			return assignment.LeaseReceipt{}, errors.New("should not reserve")
+		}),
+		ResolveAgentName: func(context.Context, string, string, string, string) (string, error) {
+			resolverCalls++
+			return "UnsafeAgent", nil
+		},
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			return spawnObservation(session, statuspkg.StateWorking, panes...), nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliverCalls++
+			return errors.New("should not dispatch")
+		}),
+	}
+	output := &SpawnOutput{Session: "spawn-unsafe", Agents: []SpawnedAgent{{Pane: "0.1", Name: "UnsafeAgent", Type: "claude"}}}
+
+	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "not safe to dispatch") {
+		t.Fatalf("assignment=%+v", got)
+	}
+	if claimCalls != 0 || reserveCalls != 0 || deliverCalls != 0 || keyCalls != 0 || resolverCalls != 0 {
+		t.Fatalf("unsafe side effects claim=%d reserve=%d dispatch=%d key=%d resolver=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, resolverCalls)
+	}
+}
+
+func TestAssignWorkRequiredReservationRejectsIdentityAndTargetReceiptMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		mutate    func(*assignment.LeaseReceipt)
+		wantError string
+	}{
+		{
+			name: "identity",
+			mutate: func(receipt *assignment.LeaseReceipt) {
+				receipt.AgentName = "WrongAgent"
+			},
+			wantError: "reservation receipt agent mismatch",
+		},
+		{
+			name: "target",
+			mutate: func(receipt *assignment.LeaseReceipt) {
+				receipt.Target = "%999"
+			},
+			wantError: "reservation receipt target mismatch",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			workDir := t.TempDir()
+			panes := []tmux.Pane{{ID: "%42", WindowIndex: 2, Index: 0, Title: "receipts__cod_1", Type: tmux.AgentCodex}}
+			claimCalls := 0
+			reserveCalls := 0
+			deliverCalls := 0
+			deps := &SpawnAssignmentDependencies{
+				FetchTriage: func(string) (*bv.TriageResponse, error) {
+					return mockTriage([]bv.TriageRecommendation{{ID: "bd-mismatch-" + test.name, Title: "Receipt mismatch", Status: "ready"}}, nil), nil
+				},
+				ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+				LoadStore: func(string) (*assignment.AssignmentStore, error) {
+					return assignment.NewStore("spawn-mismatch-" + test.name), nil
+				},
+				ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+					claimCalls++
+					if !strings.HasPrefix(actor, "MailAgent/ntm-") {
+						t.Fatalf("claim actor=%q, want exact resolved MailAgent identity", actor)
+					}
+					return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+				},
+				NewIdempotencyKey: func() (string, error) { return "mismatch-key-" + test.name, nil },
+				ReservationPort: assignment.ReservationFunc(func(_ context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+					reserveCalls++
+					if req.AgentName != "MailAgent" || req.Target != "%42" {
+						t.Fatalf("reservation request agent=%q target=%q", req.AgentName, req.Target)
+					}
+					expires := time.Now().UTC().Add(time.Hour)
+					receipt := assignment.LeaseReceipt{
+						AgentName: req.AgentName, Target: req.Target,
+						Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...),
+						ReservationIDs: []int{91}, ExpiresAt: &expires,
+					}
+					test.mutate(&receipt)
+					return receipt, nil
+				}),
+				ResolveAgentName: func(_ context.Context, projectKey, session, paneID, paneTitle string) (string, error) {
+					if projectKey != workDir || session != "spawn-receipts" || paneID != "%42" || paneTitle != "receipts__cod_1" {
+						t.Fatalf("resolver args project=%q session=%q pane=%q title=%q", projectKey, session, paneID, paneTitle)
+					}
+					return "MailAgent", nil
+				},
+				ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+					return spawnObservation(session, statuspkg.StateIdle, panes...), nil
+				},
+				DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					deliverCalls++
+					return nil
+				}),
+			}
+			output := &SpawnOutput{Session: "spawn-receipts", Agents: []SpawnedAgent{{Pane: "2.0", Name: "GeneratedButNotCanonical", Type: "codex"}}}
+
+			got := assignWorkToAgents(output, workDir, output.Session, "top-n", config.Default(), true, []string{"internal/robot/**"}, deps)
+			if len(got) != 1 || !got[0].Claimed || got[0].PromptSent || !strings.Contains(got[0].PromptError, test.wantError) {
+				t.Fatalf("assignment=%+v", got)
+			}
+			if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 0 {
+				t.Fatalf("calls claim=%d reserve=%d dispatch=%d", claimCalls, reserveCalls, deliverCalls)
+			}
+		})
+	}
+}
+
+func TestAssignWorkDoesNotFabricateMissingIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	panes := []tmux.Pane{{ID: "%51", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude}}
+	claimCalls := 0
+	deliverCalls := 0
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-no-name", Title: "No name", Status: "ready"}}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return assignment.NewStore("spawn-no-name"), nil },
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			claimCalls++
+			return bv.BeadClaimResult{}, errors.New("should not claim")
+		},
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			return spawnObservation(session, statuspkg.StateIdle, panes...), nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliverCalls++
+			return nil
+		}),
+	}
+	output := &SpawnOutput{Session: "spawn-no-name", Agents: []SpawnedAgent{{Pane: "0.1", Name: "  ", Type: "claude"}}}
+
+	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	if len(got) != 1 || !strings.Contains(got[0].ClaimError, "no canonical assignment identity") {
+		t.Fatalf("assignment=%+v", got)
+	}
+	if claimCalls != 0 || deliverCalls != 0 {
+		t.Fatalf("claim=%d dispatch=%d, want zero", claimCalls, deliverCalls)
+	}
+}
+
+func TestAssignWorkCanonicalMultiWindowDuplicateLocalIndices(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("spawn-multi-window")
+	panes := []tmux.Pane{
+		{ID: "%22", WindowIndex: 1, Index: 0, Title: "multi__cod_1", Type: tmux.AgentCodex},
+		{ID: "%11", WindowIndex: 0, Index: 0, Title: "multi__cc_1", Type: tmux.AgentClaude},
+	}
+	keys := []string{"multi-key-0", "multi-key-1"}
+	keyIndex := 0
+	var delivered []string
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{
+				{ID: "bd-window-0", Title: "Window zero", Status: "ready", Priority: 1},
+				{ID: "bd-window-1", Title: "Window one", Status: "ready", Priority: 2},
+			}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: func() (string, error) {
+			key := keys[keyIndex]
+			keyIndex++
+			return key, nil
+		},
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			return spawnObservation(session, statuspkg.StateIdle, panes...), nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			delivered = append(delivered, delivery.Target.Ref.ID)
+			return nil
+		}),
+	}
+	output := &SpawnOutput{Session: "spawn-multi-window", Agents: []SpawnedAgent{
+		{Pane: "0.0", Name: "WindowZero", Type: "claude"},
+		{Pane: "1.0", Name: "WindowOne", Type: "codex"},
+	}}
+
+	got := assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	if len(got) != 2 || !got[0].Claimed || !got[0].PromptSent || !got[1].Claimed || !got[1].PromptSent {
+		t.Fatalf("assignments=%+v", got)
+	}
+	if got[0].Pane != "0.0" || got[1].Pane != "1.0" {
+		t.Fatalf("canonical panes=%q,%q, want 0.0,1.0", got[0].Pane, got[1].Pane)
+	}
+	if !reflect.DeepEqual(delivered, []string{"%11", "%22"}) {
+		t.Fatalf("delivery targets=%v, want [%%11 %%22]", delivered)
+	}
+	first := store.Get("bd-window-0")
+	second := store.Get("bd-window-1")
+	if first == nil || second == nil {
+		t.Fatalf("stored assignments first=%+v second=%+v", first, second)
+	}
+	if first.Pane != 0 || second.Pane != 0 || first.OccupancyKey != "%11" || second.OccupancyKey != "%22" {
+		t.Fatalf("stored pane occupancy first=%+v second=%+v", first, second)
+	}
+}
+
+func TestFinalizeSpawnAssignmentOutputReturnsStructuredTerminalFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("spawn-partial")
+	panes := []tmux.Pane{
+		{ID: "%61", WindowIndex: 0, Index: 0, Type: tmux.AgentClaude},
+		{ID: "%62", WindowIndex: 1, Index: 0, Type: tmux.AgentCodex},
+	}
+	keys := []string{"partial-key-0", "partial-key-1"}
+	keyIndex := 0
+	claimCalls := 0
+	var delivered []string
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return mockTriage([]bv.TriageRecommendation{
+				{ID: "bd-ok", Title: "Safe target", Status: "ready"},
+				{ID: "bd-failed", Title: "Unsafe target", Status: "ready"},
+			}, nil), nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+			claimCalls++
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: func() (string, error) {
+			key := keys[keyIndex]
+			keyIndex++
+			return key, nil
+		},
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			observation := spawnObservation(session, statuspkg.StateIdle, panes[0])
+			unsafe := spawnObservation(session, statuspkg.StateWorking, panes[1])
+			observation.Panes = append(observation.Panes, unsafe.Panes[0])
+			return observation, nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			delivered = append(delivered, delivery.Target.Ref.ID)
+			return nil
+		}),
+	}
+	output := &SpawnOutput{
+		RobotResponse: NewRobotResponse(true),
+		Session:       "spawn-partial",
+		Agents: []SpawnedAgent{
+			{Pane: "0.0", Name: "SafeAgent", Type: "claude"},
+			{Pane: "1.0", Name: "UnsafeAgent", Type: "codex"},
+		},
+	}
+	output.Assignments = assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	if len(output.Assignments) != 2 || !output.Assignments[0].PromptSent || !strings.Contains(output.Assignments[1].ClaimError, "not safe to dispatch") {
+		t.Fatalf("assignments=%+v", output.Assignments)
+	}
+	if claimCalls != 1 || !reflect.DeepEqual(delivered, []string{"%61"}) {
+		t.Fatalf("claim calls=%d delivered=%v, want one safe transaction", claimCalls, delivered)
+	}
+	finalizeSpawnAssignmentOutput(output)
+	if output.Success || output.ErrorCode != ErrCodeInternalError || !strings.Contains(output.Error, "1 of 2") {
+		t.Fatalf("response=%+v error=%q", output.RobotResponse, output.Error)
+	}
+
+	encoded, err := captureStdout(t, func() error {
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "robot spawn failed")
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("terminal error=%T %v, want written exit-1 ProcessExitError", err, err)
+	}
+	var decoded SpawnOutput
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("decode terminal JSON: %v\n%s", err, encoded)
+	}
+	if decoded.Success || len(decoded.Assignments) != 2 || !strings.Contains(decoded.Assignments[1].ClaimError, "not safe to dispatch") {
+		t.Fatalf("decoded=%+v", decoded)
+	}
+}
+
+func TestAssignWorkTriageFailureIsStructured(t *testing.T) {
+	deps := &SpawnAssignmentDependencies{
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			return nil, errors.New("bv unavailable")
+		},
+		LoadStore: func(string) (*assignment.AssignmentStore, error) {
+			t.Fatal("triage failure loaded assignment store")
+			return nil, nil
+		},
+	}
+	output := &SpawnOutput{
+		RobotResponse: NewRobotResponse(true), Session: "spawn-triage-failure",
+		Agents: []SpawnedAgent{
+			{Pane: "0.0", Name: "One", Type: "claude"},
+			{Pane: "1.0", Name: "Two", Type: "codex"},
+		},
+	}
+	output.Assignments = assignWorkToAgents(output, t.TempDir(), output.Session, "top-n", config.Default(), false, nil, deps)
+	if len(output.Assignments) != 2 {
+		t.Fatalf("assignments=%+v", output.Assignments)
+	}
+	for _, spawnAssignment := range output.Assignments {
+		if !strings.Contains(spawnAssignment.ClaimError, "load bv triage: bv unavailable") {
+			t.Fatalf("assignment=%+v", spawnAssignment)
+		}
+	}
+	finalizeSpawnAssignmentOutput(output)
+	if output.Success || !strings.Contains(output.Error, "2 of 2") {
+		t.Fatalf("output=%+v", output)
+	}
 }
 
 // TestSpawnAssignmentOutput_SchemaStability validates assignment output schema

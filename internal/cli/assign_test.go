@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +17,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 // ============================================================================
@@ -1282,13 +1289,13 @@ func TestLoadActiveAssignmentPanes_ExcludesBetweenTurnsPane(t *testing.T) {
 
 	active := loadActiveAssignmentPanes(session)
 
-	if _, ok := active[1]; !ok {
+	if _, ok := active["legacy-index:1"]; !ok {
 		t.Errorf("pane 1 (StatusWorking) must be in the active set — it is mid-flight and not dispatchable")
 	}
-	if _, ok := active[2]; !ok {
+	if _, ok := active["legacy-index:2"]; !ok {
 		t.Errorf("pane 2 (StatusAssigned) must be in the active set — it holds an active assignment")
 	}
-	if _, ok := active[3]; ok {
+	if _, ok := active["legacy-index:3"]; ok {
 		t.Errorf("pane 3 (StatusCompleted) must NOT be in the active set — completed work frees the pane")
 	}
 	if len(active) != 2 {
@@ -1305,4 +1312,338 @@ func TestLoadActiveAssignmentPanes_EmptyStore(t *testing.T) {
 	if len(active) != 0 {
 		t.Errorf("expected empty active set for missing store, got %d entries", len(active))
 	}
+}
+
+func TestResolveAssignmentItemPaneCanonicalMultiWindow(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%40", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex},
+		{ID: "%41", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+	}
+
+	for _, item := range []AssignmentItem{
+		{Pane: 1, PaneTarget: "0.1", PaneID: "%40"},
+		{Pane: 1, PaneTarget: "1.1", PaneID: "%41"},
+	} {
+		pane, err := resolveAssignmentItemPane(panes, item)
+		if err != nil {
+			t.Fatalf("resolve %+v: %v", item, err)
+		}
+		if pane.ID != item.PaneID {
+			t.Fatalf("resolve %+v selected %s", item, pane.ID)
+		}
+	}
+
+	if _, err := resolveAssignmentItemPane(panes, AssignmentItem{Pane: 1}); err == nil || !strings.Contains(err.Error(), "resolves to 2 panes") {
+		t.Fatalf("ambiguous legacy pane resolved without a useful error: %v", err)
+	}
+	if _, err := resolveAssignmentItemPane(panes, AssignmentItem{PaneTarget: "0.1", PaneID: "%41"}); err == nil {
+		t.Fatal("inconsistent pane target and ID must fail closed")
+	}
+}
+
+func TestGenerateAssignmentsLegacyPreservesMultiWindowPaneIdentity(t *testing.T) {
+	agents := []assignAgentInfo{
+		{pane: tmux.Pane{ID: "%50", WindowIndex: 0, Index: 1}, agentType: "codex", state: "idle"},
+		{pane: tmux.Pane{ID: "%51", WindowIndex: 1, Index: 1}, agentType: "claude", state: "idle"},
+	}
+	beads := []bv.BeadPreview{{ID: "ntm-a", Title: "First"}, {ID: "ntm-b", Title: "Second"}}
+	items := generateAssignmentsLegacy(agents, beads, &AssignCommandOptions{Session: "multi", Strategy: "speed"})
+	if len(items) != 2 {
+		t.Fatalf("assignments=%d, want 2", len(items))
+	}
+	if items[0].PaneTarget != "0.1" || items[0].PaneID != "%50" || items[1].PaneTarget != "1.1" || items[1].PaneID != "%51" {
+		t.Fatalf("multi-window assignments lost physical identity: %+v", items)
+	}
+	if items[0].AgentName == items[1].AgentName {
+		t.Fatalf("multi-window agents share identity %q", items[0].AgentName)
+	}
+}
+
+func TestResolveDirectAssignmentPaneCanonicalContract(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%10", WindowIndex: 0, Index: 0},
+		{ID: "%11", WindowIndex: 0, Index: 1},
+		{ID: "%12", WindowIndex: 1, Index: 0},
+		{ID: "%13", WindowIndex: 1, Index: 1},
+	}
+
+	for _, test := range []struct {
+		selector string
+		paneID   string
+		target   string
+	}{
+		{selector: "0.1", paneID: "%11", target: "0.1"},
+		{selector: "%13", paneID: "%13", target: "1.1"},
+		{selector: "1.0", paneID: "%12", target: "1.0"},
+	} {
+		pane, target, err := resolveDirectAssignmentPane(panes, test.selector)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", test.selector, err)
+		}
+		if pane.ID != test.paneID || target != test.target {
+			t.Fatalf("resolve %q = pane %s target %s, want %s/%s", test.selector, pane.ID, target, test.paneID, test.target)
+		}
+	}
+
+	if _, _, err := resolveDirectAssignmentPane(panes, "1"); err == nil || !strings.Contains(err.Error(), "matched 2 panes") {
+		t.Fatalf("bare multi-window selector must fail when its window has multiple panes: %v", err)
+	}
+
+	singleWindow := []tmux.Pane{{ID: "%20", WindowIndex: 0, Index: 0}, {ID: "%21", WindowIndex: 0, Index: 1}}
+	pane, target, err := resolveDirectAssignmentPane(singleWindow, "1")
+	if err != nil {
+		t.Fatalf("resolve single-window bare pane: %v", err)
+	}
+	if pane.ID != "%21" || target != "1" {
+		t.Fatalf("single-window bare selector = %s/%s, want %%21/1", pane.ID, target)
+	}
+}
+
+func TestDirectAssignmentIdempotencyKeyUsesRawIntentAndPhysicalPane(t *testing.T) {
+	base := &AssignCommandOptions{
+		Session:      "project",
+		PaneSelector: "1.0",
+		Prompt:       "review the parser",
+		Template:     "impl",
+		IgnoreDeps:   true,
+	}
+	first := directAssignmentIdempotencyKey(base, "ntm-123", "%42")
+	alias := *base
+	alias.PaneSelector = "%42"
+	if got := directAssignmentIdempotencyKey(&alias, "ntm-123", "%42"); got != first {
+		t.Fatalf("selector aliases for one physical pane changed the key: %s != %s", got, first)
+	}
+	changedPrompt := *base
+	changedPrompt.Prompt = "review the lexer"
+	if got := directAssignmentIdempotencyKey(&changedPrompt, "ntm-123", "%42"); got == first {
+		t.Fatal("changed prompt reused the raw-intent key")
+	}
+	if got := directAssignmentIdempotencyKey(base, "ntm-123", "%43"); got == first {
+		t.Fatal("changed physical pane reused the raw-intent key")
+	}
+
+	templatePath := filepath.Join(t.TempDir(), "assign-template.txt")
+	custom := &AssignCommandOptions{
+		Session:      "project",
+		PaneSelector: "%42",
+		Template:     "custom",
+		TemplateFile: templatePath,
+	}
+	if err := os.WriteFile(templatePath, []byte("first {BEAD_ID}"), 0o600); err != nil {
+		t.Fatalf("write first template: %v", err)
+	}
+	firstTemplateKey := directAssignmentIdempotencyKey(custom, "ntm-123", "%42")
+	if err := os.WriteFile(templatePath, []byte("second {BEAD_ID}"), 0o600); err != nil {
+		t.Fatalf("write changed template: %v", err)
+	}
+	if got := directAssignmentIdempotencyKey(custom, "ntm-123", "%42"); got == firstTemplateKey {
+		t.Fatal("changed template-file content reused the raw-intent key")
+	}
+}
+
+func TestDirectAssignCLIProcessHelper(t *testing.T) {
+	rawArgs := os.Getenv("NTM_DIRECT_ASSIGN_HELPER_ARGS")
+	if rawArgs == "" {
+		return
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		t.Fatalf("decode direct assign helper args: %v", err)
+	}
+	os.Args = append([]string{"ntm"}, args...)
+	if err := Execute(); err != nil {
+		os.Exit(ExitCode(err))
+	}
+	os.Exit(0)
+}
+
+func TestDirectAssignCLIReplayIsDurableAndBypassesChangedPreflight(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	projectDir := filepath.Join(root, "project")
+	fakeBin := filepath.Join(root, "bin")
+	for _, dir := range []string{home, projectDir, fakeBin, filepath.Join(projectDir, ".git")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("NTM_DISABLE_INTERNAL_MONITOR", "1")
+
+	claimLog := filepath.Join(root, "claims.log")
+	brScript := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+if [ "${1:-}" = "--lock-timeout" ]; then
+  shift 2
+fi
+if [ "${1:-}" = update ]; then
+  printf '[{"id":"%%s","title":"Direct assignment","status":"in_progress"}]\n' "$2"
+  exit 0
+fi
+printf '[]\n'
+`, claimLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(brScript), 0o755); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dispatchLog := filepath.Join(root, "dispatch.log")
+	agentScriptPath := filepath.Join(root, "agent.sh")
+	agentScript := fmt.Sprintf(`#!/bin/sh
+printf '❯ '
+IFS= read -r line
+printf '%%s\n' "$line" >> %q
+printf '\n• Working (press esc to interrupt)\n'
+sleep 300
+`, dispatchLog)
+	if err := os.WriteFile(agentScriptPath, []byte(agentScript), 0o755); err != nil {
+		t.Fatalf("write agent fixture: %v", err)
+	}
+
+	session := fmt.Sprintf("directassign%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(session, projectDir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	paneID, err := tmux.DefaultClient.Run("new-window", "-d", "-t", session, "-c", projectDir, "-P", "-F", "#{pane_id}", agentScriptPath)
+	if err != nil {
+		t.Fatalf("create agent window: %v", err)
+	}
+	paneID = strings.TrimSpace(paneID)
+	if err := tmux.SetPaneTitle(paneID, session+"__cc_1"); err != nil {
+		t.Fatalf("set pane title: %v", err)
+	}
+	waitForDirectAssignFixture(t, paneID, "❯")
+
+	baseArgs := []string{
+		"--json", "assign", session,
+		"--pane=" + paneID,
+		"--beads=ntm-direct-replay",
+		"--prompt=inspect durable replay",
+		"--ignore-deps",
+		"--reserve-files=false",
+		"--repo=" + projectDir,
+	}
+	first, firstCode, firstStderr := runDirectAssignCLIProcess(t, baseArgs)
+	if firstCode != 0 || !first.Success || first.Data == nil || first.Data.Receipt == nil {
+		claimTrace, _ := os.ReadFile(claimLog)
+		t.Fatalf("first assign failed: code=%d stderr=%q error=%+v data=%+v claims=%q", firstCode, firstStderr, first.Error, first.Data, claimTrace)
+	}
+	waitForDirectAssignFileLines(t, dispatchLog, 1)
+	waitForDirectAssignFixture(t, paneID, "Working")
+	if output, captureErr := tmux.CapturePaneOutput(paneID, 20); captureErr != nil || determineAgentState(output, "claude") != "working" {
+		t.Fatalf("fixture did not become a changed busy preflight: state=%q err=%v output=%q", determineAgentState(output, "claude"), captureErr, output)
+	}
+
+	second, secondCode, secondStderr := runDirectAssignCLIProcess(t, baseArgs)
+	if secondCode != 0 || !second.Success || second.Data == nil || second.Data.Receipt == nil {
+		t.Fatalf("same-intent replay failed: code=%d stderr=%q error=%+v data=%+v", secondCode, secondStderr, second.Error, second.Data)
+	}
+	if !reflect.DeepEqual(first.Data.Receipt, second.Data.Receipt) {
+		t.Fatalf("same-intent replay receipt changed:\nfirst=%+v\nsecond=%+v", first.Data.Receipt, second.Data.Receipt)
+	}
+	if got := countDirectAssignLogLines(t, claimLog); got != 1 {
+		t.Fatalf("same-intent replay claimed %d times, want 1", got)
+	}
+	if got := countDirectAssignLogLines(t, dispatchLog); got != 1 {
+		t.Fatalf("same-intent replay dispatched %d times, want 1", got)
+	}
+
+	changedArgs := append([]string(nil), baseArgs...)
+	changedArgs[5] = "--prompt=changed intent must conflict"
+	changed, changedCode, changedStderr := runDirectAssignCLIProcess(t, changedArgs)
+	if changedCode == 0 || changed.Success || changed.Error == nil || changed.Error.Code != "CLAIM_CONFLICT" {
+		t.Fatalf("changed intent did not conflict: code=%d stderr=%q error=%+v data=%+v", changedCode, changedStderr, changed.Error, changed.Data)
+	}
+	if got := countDirectAssignLogLines(t, claimLog); got != 1 {
+		t.Fatalf("changed-intent conflict actuated a claim; count=%d", got)
+	}
+	if got := countDirectAssignLogLines(t, dispatchLog); got != 1 {
+		t.Fatalf("changed-intent conflict actuated dispatch; count=%d", got)
+	}
+
+	store, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load durable ledger: %v", err)
+	}
+	durable := store.Get("ntm-direct-replay")
+	if durable == nil {
+		t.Fatal("direct assignment missing from durable ledger")
+	}
+	if durable.OccupancyKey != paneID || durable.DispatchTarget != first.Data.Receipt.Pane.Target || first.Data.Receipt.Pane.ID != paneID {
+		t.Fatalf("pane identity drift: ledger=%+v receipt=%+v", durable, first.Data.Receipt.Pane)
+	}
+}
+
+func runDirectAssignCLIProcess(t *testing.T, args []string) (AssignEnvelope[DirectAssignData], int, string) {
+	t.Helper()
+	rawArgs, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("encode helper args: %v", err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDirectAssignCLIProcessHelper$")
+	cmd.Env = append(os.Environ(), "NTM_DIRECT_ASSIGN_HELPER_ARGS="+string(rawArgs), "NTM_NO_COLOR=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("start direct assign helper: %v", err)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	var envelope AssignEnvelope[DirectAssignData]
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &envelope); decodeErr != nil {
+		t.Fatalf("decode direct assign output: %v\nstdout=%q\nstderr=%q", decodeErr, stdout.String(), stderr.String())
+	}
+	return envelope, exitCode, stderr.String()
+}
+
+func waitForDirectAssignFixture(t *testing.T, paneID, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		output, err := tmux.CapturePaneOutput(paneID, 30)
+		if err == nil && strings.Contains(output, marker) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("pane %s did not contain %q", paneID, marker)
+}
+
+func waitForDirectAssignFileLines(t *testing.T, path string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if countDirectAssignLogLines(t, path) >= want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s did not reach %d lines", path, want)
+}
+
+func countDirectAssignLogLines(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", path, err)
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }

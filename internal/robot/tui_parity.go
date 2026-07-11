@@ -4,8 +4,11 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -3712,6 +3715,7 @@ type BeadClaimOutput struct {
 	PrevStatus string      `json:"prev_status,omitempty"`
 	NewStatus  string      `json:"new_status"`
 	Claimed    bool        `json:"claimed"`
+	Actor      string      `json:"actor,omitempty"`
 	AgentHints *AgentHints `json:"_agent_hints,omitempty"`
 }
 
@@ -3719,6 +3723,12 @@ type BeadClaimOutput struct {
 type BeadClaimOptions struct {
 	BeadID   string // Bead ID to claim (e.g., "ntm-abc123")
 	Assignee string // Optional assignee name
+	Deps     *BeadClaimDependencies
+}
+
+// BeadClaimDependencies exposes the atomic claim boundary for focused tests.
+type BeadClaimDependencies struct {
+	ClaimBead func(context.Context, string, string, string) (bv.BeadClaimResult, error)
 }
 
 // GetBeadClaim claims a bead by setting its status to in_progress.
@@ -3738,71 +3748,40 @@ func GetBeadClaim(opts BeadClaimOptions) (*BeadClaimOutput, error) {
 		RobotResponse: NewRobotResponse(true),
 		BeadID:        opts.BeadID,
 	}
-
-	// Get current bead info first
-	showOutput, err := bv.RunBd("", "show", opts.BeadID, "--json")
+	actor := strings.TrimSpace(opts.Assignee)
+	if actor == "" {
+		actor = strings.TrimSpace(os.Getenv("AGENT_NAME"))
+	}
+	if actor == "" {
+		actor = "ntm-robot"
+	}
+	output.Actor = actor
+	claimBead := bv.ClaimBead
+	if opts.Deps != nil && opts.Deps.ClaimBead != nil {
+		claimBead = opts.Deps.ClaimBead
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bv.DefaultTimeout)
+	defer cancel()
+	claim, err := claimBead(ctx, "", opts.BeadID, actor)
 	if err != nil {
-		return &BeadClaimOutput{
-			RobotResponse: NewErrorResponse(
-				fmt.Errorf("bead '%s' not found: %w", opts.BeadID, err),
-				ErrCodeInvalidFlag,
-				"Use 'br list --status=open' to see available beads",
-			),
-			BeadID: opts.BeadID,
-		}, nil
-	}
-
-	// Parse bead info - br show returns an array
-	var beadInfo []struct {
-		ID     string `json:"id"`
-		Title  string `json:"title"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(showOutput), &beadInfo); err != nil || len(beadInfo) == 0 {
-		return &BeadClaimOutput{
-			RobotResponse: NewErrorResponse(
-				fmt.Errorf("failed to parse bead info"),
-				ErrCodeInternalError,
-				"Bead data may be corrupted",
-			),
-			BeadID: opts.BeadID,
-		}, nil
-	}
-
-	output.Title = beadInfo[0].Title
-	output.PrevStatus = beadInfo[0].Status
-
-	// Check if already in_progress
-	if beadInfo[0].Status == "in_progress" {
-		output.NewStatus = "in_progress"
-		output.Claimed = false
-		output.AgentHints = &AgentHints{
-			Summary:  fmt.Sprintf("Bead %s is already in progress", opts.BeadID),
-			Warnings: []string{"Bead was already claimed"},
+		errorCode := ErrCodeInternalError
+		hint := "Inspect the Beads claim error and retry with the same actor"
+		if errors.Is(err, bv.ErrBeadAlreadyClaimed) {
+			errorCode = ErrCodeResourceBusy
+			hint = "Choose another ready bead or coordinate with the current owner"
 		}
-		return output, nil
-	}
-
-	// Claim the bead
-	args := []string{"update", opts.BeadID, "--status=in_progress", "--json"}
-	if opts.Assignee != "" {
-		args = append(args, "--assignee="+opts.Assignee)
-	}
-
-	_, err = bv.RunBd("", args...)
-	if err != nil {
 		return &BeadClaimOutput{
 			RobotResponse: NewErrorResponse(
 				fmt.Errorf("failed to claim bead: %w", err),
-				ErrCodeInternalError,
-				"Check if bead is blocked by dependencies",
+				errorCode,
+				hint,
 			),
-			BeadID:     opts.BeadID,
-			Title:      output.Title,
-			PrevStatus: output.PrevStatus,
+			BeadID: opts.BeadID,
+			Actor:  actor,
 		}, nil
 	}
 
+	output.Title = claim.Title
 	output.NewStatus = "in_progress"
 	output.Claimed = true
 	output.AgentHints = &AgentHints{

@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -10,8 +11,11 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
@@ -89,6 +93,7 @@ type WorkAssignment struct {
 	BeadID         string    `json:"bead_id"`
 	BeadTitle      string    `json:"bead_title"`
 	AgentPaneID    string    `json:"agent_pane_id"`
+	AgentPaneIndex int       `json:"agent_pane_index"`
 	AgentMailName  string    `json:"agent_mail_name,omitempty"`
 	AgentType      string    `json:"agent_type"`
 	AssignedAt     time.Time `json:"assigned_at"`
@@ -99,11 +104,13 @@ type WorkAssignment struct {
 
 // AssignmentResult contains the result of an assignment attempt.
 type AssignmentResult struct {
-	Success      bool            `json:"success"`
-	Assignment   *WorkAssignment `json:"assignment,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	Reservations []string        `json:"reservations,omitempty"`
-	MessageSent  bool            `json:"message_sent"`
+	Success        bool            `json:"success"`
+	Assignment     *WorkAssignment `json:"assignment,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	Reservations   []string        `json:"reservations,omitempty"`
+	MessageSent    bool            `json:"message_sent"`
+	ClaimActor     string          `json:"claim_actor,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 }
 
 // AssignWork assigns work to idle agents based on bv triage.
@@ -181,13 +188,15 @@ func (c *SessionCoordinator) findBestMatch(agent *AgentState, recommendations []
 
 		// Create assignment
 		assignment := &WorkAssignment{
-			BeadID:      rec.ID,
-			BeadTitle:   rec.Title,
-			AgentPaneID: agent.PaneID,
-			AgentType:   agent.AgentType,
-			AssignedAt:  time.Now(),
-			Priority:    rec.Priority,
-			Score:       rec.Score,
+			BeadID:         rec.ID,
+			BeadTitle:      rec.Title,
+			AgentPaneID:    agent.PaneID,
+			AgentPaneIndex: agent.PaneIndex,
+			AgentType:      agent.AgentType,
+			AssignedAt:     time.Now(),
+			Priority:       rec.Priority,
+			Score:          rec.Score,
+			FilesToReserve: ExtractMentionedFiles(rec.Title, strings.Join(rec.Reasons, " ")),
 		}
 
 		// Check agent mail name mapping
@@ -207,10 +216,6 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 		Assignment: assignment,
 	}
 
-	// Reserve files if we know what files will be touched
-	// For now, we don't pre-reserve since we don't know the files yet
-	// The agent should reserve files when it starts working
-
 	if c.mailClient == nil {
 		result.Error = "assignment delivery unavailable: agent mail client is not configured"
 		return result
@@ -220,28 +225,162 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 		return result
 	}
 
-	body := c.formatAssignmentMessage(assignment, rec)
-	_, err := c.mailClient.SendMessage(ctx, agentmail.SendMessageOptions{
-		ProjectKey:  c.projectKey,
-		SenderName:  c.agentName,
-		To:          []string{assignment.AgentMailName},
-		Subject:     fmt.Sprintf("Work Assignment: %s", assignment.BeadTitle),
-		BodyMD:      body,
-		Importance:  "normal",
-		AckRequired: true,
-	})
-
+	idempotencyKey, err := assignmentstore.NewAssignmentIdempotencyKey()
 	if err != nil {
-		result.Error = fmt.Sprintf("sending message: %v", err)
+		result.Error = err.Error()
 		return result
 	}
-	result.MessageSent = true
-	result.Success = true
+	claimActor := assignmentstore.StableClaimActor(assignment.AgentMailName, idempotencyKey)
+	result.ClaimActor = claimActor
+	result.IdempotencyKey = idempotencyKey
+	body := c.formatAssignmentMessage(assignment, rec, claimActor)
+
+	store, err := assignmentstore.LoadStoreStrict(c.session)
+	if err != nil {
+		result.Error = fmt.Sprintf("loading assignment ledger: %v", err)
+		return result
+	}
+	atomicCoordinator := c.newAtomicAssignmentCoordinator(store)
+	atomicResult, err := atomicCoordinator.Execute(ctx, assignmentstore.AtomicRequest{
+		BeadID:             assignment.BeadID,
+		BeadTitle:          assignment.BeadTitle,
+		Target:             assignment.AgentPaneID,
+		OccupancyKey:       assignment.AgentPaneID,
+		Pane:               assignment.AgentPaneIndex,
+		AgentType:          assignment.AgentType,
+		AgentName:          assignment.AgentMailName,
+		Actor:              assignment.AgentMailName,
+		Prompt:             body,
+		IdempotencyKey:     idempotencyKey,
+		RequireReservation: len(assignment.FilesToReserve) > 0,
+		RequestedPaths:     append([]string(nil), assignment.FilesToReserve...),
+		ReservationTTL:     time.Hour,
+	})
+	result.Assignment = assignment
+	result.Reservations = append([]string(nil), atomicResult.Lease.Granted...)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.MessageSent = atomicResult.Sent
+	result.Success = atomicResult.Sent
 	return result
 }
 
+func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+	claimPort := assignmentstore.ClaimFunc(func(ctx context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
+		claim, err := bv.ClaimBead(ctx, c.projectKey, beadID, actor)
+		if err != nil {
+			if errors.Is(err, bv.ErrBeadAlreadyClaimed) {
+				return assignmentstore.ClaimReceipt{}, fmt.Errorf("%w: %v", assignmentstore.ErrClaimConflict, err)
+			}
+			return assignmentstore.ClaimReceipt{}, err
+		}
+		return assignmentstore.ClaimReceipt{
+			BeadID: claim.ID, Actor: claim.Actor, Status: claim.Status, ClaimedAt: claim.ClaimedAt,
+		}, nil
+	})
+	reservationPort := assignmentstore.ReservationFunc(func(ctx context.Context, req assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+		lease := assignmentstore.LeaseReceipt{
+			AgentName: req.AgentName,
+			Target:    req.Target,
+			Requested: append([]string(nil), req.RequestedPaths...),
+		}
+		if len(req.RequestedPaths) == 0 {
+			return lease, nil
+		}
+		ttlSeconds := int(req.TTL.Seconds())
+		if ttlSeconds < 60 {
+			ttlSeconds = 3600
+		}
+		reserved, err := c.mailClient.ReservePaths(ctx, agentmail.FileReservationOptions{
+			ProjectKey: c.projectKey,
+			AgentName:  req.AgentName,
+			Paths:      req.RequestedPaths,
+			TTLSeconds: ttlSeconds,
+			Exclusive:  true,
+			Reason:     fmt.Sprintf("bead assignment: %s", req.BeadID),
+		})
+		if reserved != nil {
+			for _, granted := range reserved.Granted {
+				lease.Granted = append(lease.Granted, granted.PathPattern)
+				lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
+				expiresAt := granted.ExpiresTS.Time
+				if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
+					lease.ExpiresAt = &expiresAt
+				}
+			}
+			if len(reserved.Conflicts) > 0 && err == nil {
+				err = fmt.Errorf("file reservation conflicts for %s", req.BeadID)
+			}
+		}
+		return lease, err
+	})
+	dispatchPort := assignmentstore.DispatchFunc(func(ctx context.Context, req assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+		started := time.Now()
+		sent, err := c.mailClient.SendMessage(ctx, agentmail.SendMessageOptions{
+			ProjectKey:  c.projectKey,
+			SenderName:  c.agentName,
+			To:          []string{req.AgentName},
+			Subject:     fmt.Sprintf("Work Assignment: %s", req.BeadTitle),
+			BodyMD:      req.Prompt,
+			Importance:  "normal",
+			AckRequired: true,
+		})
+		receipt := assignmentstore.DispatchReceipt{Duration: time.Since(started)}
+		if err != nil {
+			return receipt, err
+		}
+		deliveryID, receiptErr := validatedAgentMailDeliveryID(sent, c.projectKey, req.AgentName)
+		if receiptErr != nil {
+			return receipt, receiptErr
+		}
+		receipt.DeliveryID = deliveryID
+		return receipt, nil
+	})
+	preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, req assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+		loaded, err := config.LoadMerged(c.projectKey, config.DefaultPath())
+		if err != nil {
+			return assignmentstore.PromptPreflightResult{}, fmt.Errorf("load redaction policy: %w", err)
+		}
+		redactionConfig := loaded.Redaction.ToRedactionLibConfig()
+		dispatchResult := redaction.ScanAndRedact(req.Prompt, redactionConfig)
+		if dispatchResult.Blocked {
+			return assignmentstore.PromptPreflightResult{}, fmt.Errorf("redaction policy blocked assignment prompt (%d findings)", len(dispatchResult.Findings))
+		}
+		durableConfig := redactionConfig.DeepCopy()
+		durableConfig.Mode = redaction.ModeRedact
+		durablePrompt := redaction.ScanAndRedact(req.Prompt, durableConfig).Output
+		return assignmentstore.PromptPreflightResult{
+			DispatchPrompt: dispatchResult.Output,
+			DurablePrompt:  durablePrompt,
+		}, nil
+	})
+	return assignmentstore.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, preflight)
+}
+
+func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey, agentName string) (string, error) {
+	if sent == nil {
+		return "", errors.New("agent mail returned no delivery result")
+	}
+	if sent.Count != 1 || len(sent.Deliveries) != 1 {
+		return "", fmt.Errorf("agent mail returned count=%d deliveries=%d, want exactly one", sent.Count, len(sent.Deliveries))
+	}
+	payload := sent.Deliveries[0].Payload
+	if payload == nil || payload.ID <= 0 {
+		return "", errors.New("agent mail returned no concrete delivery receipt")
+	}
+	if sent.Deliveries[0].Project != projectKey {
+		return "", fmt.Errorf("agent mail delivery project %q does not match %q", sent.Deliveries[0].Project, projectKey)
+	}
+	if len(payload.To) != 1 || payload.To[0] != agentName {
+		return "", fmt.Errorf("agent mail delivery recipients %v do not match [%s]", payload.To, agentName)
+	}
+	return fmt.Sprintf("%d", payload.ID), nil
+}
+
 // formatAssignmentMessage formats a work assignment message.
-func (c *SessionCoordinator) formatAssignmentMessage(assignment *WorkAssignment, rec *bv.TriageRecommendation) string {
+func (c *SessionCoordinator) formatAssignmentMessage(assignment *WorkAssignment, rec *bv.TriageRecommendation, claimActor ...string) string {
 	var sb strings.Builder
 
 	sb.WriteString("# Work Assignment\n\n")
@@ -273,8 +412,12 @@ func (c *SessionCoordinator) formatAssignmentMessage(assignment *WorkAssignment,
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. Review the bead with `br show " + assignment.BeadID + "`\n")
-	sb.WriteString("2. Claim the work with `br update " + assignment.BeadID + " --status in_progress`\n")
-	sb.WriteString("3. Reserve any files you'll modify\n")
+	if len(claimActor) > 0 && strings.TrimSpace(claimActor[0]) != "" {
+		sb.WriteString("2. NTM already claimed this bead atomically as `" + claimActor[0] + "`; do not claim it again\n")
+	} else {
+		sb.WriteString("2. Verify the bead is assigned to you before editing\n")
+	}
+	sb.WriteString("3. Verify the listed file reservations before editing\n")
 	sb.WriteString("4. Implement and test\n")
 	sb.WriteString("5. Close with `br close " + assignment.BeadID + "`\n")
 	sb.WriteString("6. Commit with `.beads/` changes\n\n")
@@ -476,14 +619,16 @@ func scoreAssignment(
 
 	return ScoredAssignment{
 		Assignment: &WorkAssignment{
-			BeadID:        rec.ID,
-			BeadTitle:     rec.Title,
-			AgentPaneID:   agent.PaneID,
-			AgentMailName: agent.AgentMailName,
-			AgentType:     agent.AgentType,
-			AssignedAt:    time.Now(),
-			Priority:      rec.Priority,
-			Score:         totalScore,
+			BeadID:         rec.ID,
+			BeadTitle:      rec.Title,
+			AgentPaneID:    agent.PaneID,
+			AgentPaneIndex: agent.PaneIndex,
+			AgentMailName:  agent.AgentMailName,
+			AgentType:      agent.AgentType,
+			AssignedAt:     time.Now(),
+			Priority:       rec.Priority,
+			Score:          totalScore,
+			FilesToReserve: ExtractMentionedFiles(rec.Title, strings.Join(rec.Reasons, " ")),
 		},
 		Recommendation: rec,
 		Agent:          agent,

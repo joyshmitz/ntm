@@ -212,6 +212,66 @@ func TestAttemptAssignmentRequiresAgentMailIdentity(t *testing.T) {
 	}
 }
 
+func TestValidatedAgentMailDeliveryIDRequiresOneConcreteReceipt(t *testing.T) {
+	tests := []struct {
+		name string
+		sent *agentmail.SendResult
+		want string
+	}{
+		{name: "nil result"},
+		{name: "zero deliveries", sent: &agentmail.SendResult{}},
+		{name: "multiple deliveries", sent: &agentmail.SendResult{Count: 2, Deliveries: []agentmail.MessageDelivery{{Payload: &agentmail.Message{ID: 1}}, {Payload: &agentmail.Message{ID: 2}}}}},
+		{name: "nil payload", sent: &agentmail.SendResult{Count: 1, Deliveries: []agentmail.MessageDelivery{{}}}},
+		{name: "zero message id", sent: &agentmail.SendResult{Count: 1, Deliveries: []agentmail.MessageDelivery{{Payload: &agentmail.Message{}}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := validatedAgentMailDeliveryID(tt.sent, "/project", "BlueFox"); err == nil || got != "" {
+				t.Fatalf("validatedAgentMailDeliveryID() = %q, %v; want empty error result", got, err)
+			}
+		})
+	}
+
+	got, err := validatedAgentMailDeliveryID(&agentmail.SendResult{
+		Count: 1, Deliveries: []agentmail.MessageDelivery{{Project: "/project", Payload: &agentmail.Message{ID: 73, To: []string{"BlueFox"}}}},
+	}, "/project", "BlueFox")
+	if err != nil || got != "73" {
+		t.Fatalf("valid receipt = %q, %v; want 73", got, err)
+	}
+}
+
+func TestValidatedAgentMailDeliveryIDRejectsProjectAndRecipientMismatch(t *testing.T) {
+	base := &agentmail.SendResult{
+		Count: 1, Deliveries: []agentmail.MessageDelivery{{Project: "/project", Payload: &agentmail.Message{ID: 73, To: []string{"BlueFox"}}}},
+	}
+	if _, err := validatedAgentMailDeliveryID(base, "/other", "BlueFox"); err == nil || !strings.Contains(err.Error(), "project") {
+		t.Fatalf("project mismatch error = %v", err)
+	}
+	if _, err := validatedAgentMailDeliveryID(base, "/project", "RedSeal"); err == nil || !strings.Contains(err.Error(), "recipients") {
+		t.Fatalf("recipient mismatch error = %v", err)
+	}
+}
+
+func TestFindBestMatchPropagatesPaneAndReservationPaths(t *testing.T) {
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	agent := &AgentState{PaneID: "%9", PaneIndex: 4, AgentType: "cod", AgentMailName: "BlueFox"}
+	recommendations := []bv.TriageRecommendation{{
+		ID: "ntm-files", Title: "Update internal/coordinator/assign.go", Status: "open",
+		Reasons: []string{"also cover internal/coordinator/assign_test.go"},
+	}}
+	assignment, _ := c.findBestMatch(agent, recommendations)
+	if assignment == nil || assignment.AgentPaneID != "%9" || assignment.AgentPaneIndex != 4 {
+		t.Fatalf("assignment pane identity = %+v", assignment)
+	}
+	want := map[string]bool{"internal/coordinator/assign.go": true, "internal/coordinator/assign_test.go": true}
+	for _, path := range assignment.FilesToReserve {
+		delete(want, path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("reservation paths = %v, missing %v", assignment.FilesToReserve, want)
+	}
+}
+
 func TestFormatAssignmentMessage(t *testing.T) {
 	c := New("test-session", "/tmp/test", nil, "TestAgent")
 
@@ -245,6 +305,21 @@ func TestFormatAssignmentMessage(t *testing.T) {
 	}
 	if !strings.Contains(body, "br show") {
 		t.Error("expected br show instruction in message")
+	}
+}
+
+func TestFormatAssignmentMessageSaysClaimAlreadyOwned(t *testing.T) {
+	t.Parallel()
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	work := &WorkAssignment{BeadID: "ntm-1234", BeadTitle: "Implement feature X"}
+	rec := &bv.TriageRecommendation{ID: work.BeadID, Title: work.BeadTitle}
+
+	body := c.formatAssignmentMessage(work, rec, "BlueLake/ntm-deadbeef")
+	if !strings.Contains(body, "already claimed this bead atomically") {
+		t.Fatalf("missing atomic claim handoff: %s", body)
+	}
+	if strings.Contains(body, "br update") {
+		t.Fatalf("message tells recipient to re-claim owned work: %s", body)
 	}
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
@@ -187,6 +189,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	assignTemplateFile = ""
 	assignQuiet = true
 	assignVerbose = false
+	assignReserveFiles = false
 
 	output, err := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
 	if err != nil && !errors.Is(err, errJSONFailure) {
@@ -243,6 +246,11 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 
 	snapshot := captureAssignGlobals()
 	defer snapshot.restore()
+	previousClaim := claimBeadForAssignment
+	claimBeadForAssignment = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	t.Cleanup(func() { claimBeadForAssignment = previousClaim })
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
@@ -269,6 +277,7 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 
 	assignRetry = "bd-131"
 	assignRetryFailed = false
+	assignReserveFiles = false
 	assignToPane = codexPane.Index
 	assignToType = ""
 	assignTemplate = "impl"
