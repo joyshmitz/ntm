@@ -390,7 +390,8 @@ jobs:
           mkdir -p "$TMUX_TMPDIR"
           go test -v -tags=integration -count=1 -timeout=10m \
             ./internal/tmux/... \
-            ./internal/pipeline/...
+            ./internal/pipeline/... \
+            ./internal/tui/dashboard
 
       - name: Clean up private tmux server
         if: always()

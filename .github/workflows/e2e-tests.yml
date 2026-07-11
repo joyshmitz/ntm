@@ -5,11 +5,11 @@
 # In CI, tests run in mock mode. For local testing with real agents, omit E2E_MOCK_MODE.
 #
 # Local usage with real agents:
-#   go test -v -tags=e2e ./e2e/... -timeout 10m
+#   go test -v -tags=e2e ./e2e/... -timeout 20m
 #
 # CI mock mode:
 #   E2E_MOCK_MODE=1 go test -v -tags=e2e ./e2e/... \
-#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicAssignmentPromptSafety)$'
+#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicBulkAssignmentCanonicalMultiWindow|TestE2EAtomicAssignmentPromptSafety|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2E_RobotBulkAssign_.*)$'
 
 name: E2E Tests
 
@@ -36,20 +36,29 @@ on:
       - 'cmd/ntm/**'
       - 'internal/agent/**'
       - 'internal/agentmail/**'
+      - 'internal/agentsession/**'
+      - 'internal/assign/**'
       - 'internal/assignment/**'
+      - 'internal/bv/**'
       - 'internal/cli/**'
+      - 'internal/completion/**'
       - 'internal/coordinator/**'
       - 'internal/dispatch/**'
+      - 'internal/health/**'
+      - 'internal/pipeline/**'
       - 'internal/robot/**'
+      - 'internal/serve/**'
       - 'internal/session/**'
       - 'internal/status/**'
       - 'internal/tmux/**'
-      - 'internal/pipeline/**'
+      - 'internal/tui/**'
       - 'internal/caut/**'
       - 'internal/integrations/dcg/**'
+      - 'tests/**'
       - 'Makefile'
       - 'go.mod'
       - 'go.sum'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/e2e-tests.yml'
 
   # Nightly scheduled run
@@ -73,7 +82,7 @@ jobs:
   e2e-mock:
     name: Hermetic E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -113,9 +122,10 @@ jobs:
           E2E_MOCK_MODE: ${{ (github.event_name != 'workflow_dispatch' || inputs.mock_mode) && '1' || '0' }}
           CAUT_MOCK_FILE: "e2e/fixtures/caut_mock.json"
           E2E_LOG_DIR: "/tmp/e2e-logs"
-          # TestE2ECanonicalPaneContract includes the real smart-restart
-          # ready-gate, delivered, redaction-blocked, and ready-failure paths.
-          E2E_TEST_FILTER: ${{ inputs.test_filter || '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicAssignmentPromptSafety)$' }}
+          # The default set covers canonical targeting, direct/bulk/spawn atomic
+          # assignment, replay and prompt safety, capability budgets, and the
+          # repaired legacy bulk contract against isolated real tmux sessions.
+          E2E_TEST_FILTER: ${{ inputs.test_filter || '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicBulkAssignmentCanonicalMultiWindow|TestE2EAtomicAssignmentPromptSafety|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2E_RobotBulkAssign_.*)$' }}
         run: |
           # Create log directory
           mkdir -p "$E2E_LOG_DIR"
@@ -123,7 +133,7 @@ jobs:
           # The wider tagged suite contains live-agent scenarios. CI runs a
           # hermetic smoke set by default; workflow_dispatch can supply a
           # broader filter on a suitably provisioned runner.
-          go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 10m \
+          go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 20m \
             2>&1 | tee e2e-output.txt
 
       - name: Upload E2E Logs
