@@ -983,6 +983,32 @@ func TestBulkAssignBVFailure(t *testing.T) {
 	}
 }
 
+func TestBulkAssignPaneListMapsMissingSessionAndTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "tmux missing window wording", err: errors.New("can't find window: absent"), code: ErrCodeSessionNotFound},
+		{name: "context timeout", err: context.DeadlineExceeded, code: ErrCodeTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deps := BulkAssignDependencies{
+				ListPanes: func(string) ([]tmux.Pane, error) { return nil, test.err },
+				Now:       func() time.Time { return time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC) },
+			}
+			output, err := GetBulkAssign(BulkAssignOptions{Session: "absent", AllocationJSON: `{}`, Deps: &deps})
+			if err != nil {
+				t.Fatalf("GetBulkAssign returned transport error: %v", err)
+			}
+			if output.Success || output.ErrorCode != test.code || output.Assignments == nil {
+				t.Fatalf("response=%+v, want success=false code=%s and non-nil assignments", output, test.code)
+			}
+		})
+	}
+}
+
 func TestBulkAssignLargeTriage(t *testing.T) {
 	var recs []bv.TriageRecommendation
 	for i := 0; i < 120; i++ {

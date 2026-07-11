@@ -2642,10 +2642,11 @@ type ReplayOptions struct {
 	DryRun    bool   // Just show what would be replayed
 }
 
-// GetReplay returns replay operation result.
-// This function returns the data struct directly, enabling CLI/REST parity.
-// Note: When DryRun is false, this executes the replay and returns nil (send handles output).
-func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
+var getReplaySend = GetSend
+
+// GetReplay returns either replay metadata or the send result produced by an
+// executed replay. Exactly one output is non-nil on success.
+func GetReplay(opts ReplayOptions) (*ReplayOutput, *SendOutput, error) {
 	targetSession := strings.TrimSpace(opts.Session)
 	output := &ReplayOutput{
 		RobotResponse: NewRobotResponse(true),
@@ -2665,7 +2666,7 @@ func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
 			),
 			HistoryID:   opts.HistoryID,
 			TargetPanes: []int{},
-		}, nil
+		}, nil, nil
 	}
 
 	// Find the history entry
@@ -2686,7 +2687,7 @@ func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
 			),
 			HistoryID:   opts.HistoryID,
 			TargetPanes: []int{},
-		}, nil
+		}, nil, nil
 	}
 
 	if targetSession == "" {
@@ -2710,7 +2711,7 @@ func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
 			Summary: fmt.Sprintf("Would replay: %s", truncateString(target.Prompt, 50)),
 			Notes:   []string{"Use without --replay-dry-run to execute"},
 		}
-		return output, nil
+		return output, nil, nil
 	}
 
 	// Execute the replay by calling send logic
@@ -2724,44 +2725,27 @@ func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
 	}
 
 	// Execute the send - GetSend handles the actual operation
-	sendOutput, err := GetSend(sendOpts)
+	sendOutput, err := getReplaySend(sendOpts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	// Return nil to signal that PrintReplay should use send output directly
-	// This is a special case where we delegate to another command
-	_ = sendOutput // Used by PrintReplay
-	return nil, nil
+	return nil, sendOutput, nil
 }
 
 // PrintReplay outputs replay operation result.
 // This is a thin wrapper around GetReplay() for CLI output.
 func PrintReplay(opts ReplayOptions) error {
-	output, err := GetReplay(opts)
+	replayOutput, sendOutput, err := GetReplay(opts)
 	if err != nil {
 		return err
 	}
-	// nil output means GetReplay delegated to send
-	if output == nil {
-		// Execute send directly for non-dry-run case
-		entries, _ := history.ReadRecent(100)
-		for i := range entries {
-			if entries[i].ID == opts.HistoryID {
-				targetSession := strings.TrimSpace(opts.Session)
-				if targetSession == "" {
-					targetSession = entries[i].Session
-				}
-				sendOpts := SendOptions{
-					Session: targetSession,
-					Message: entries[i].Prompt,
-					Panes:   append([]string{}, entries[i].Targets...),
-				}
-				return PrintSend(sendOpts)
-			}
-		}
+	if sendOutput != nil {
+		return encodeTerminalRobotOutput(sendOutput, sendOutput.RobotResponse, "robot replay send failed")
 	}
-	return encodeJSON(output)
+	if replayOutput == nil {
+		return EncodeErrorJSON(errors.New("replay produced no output"), ErrCodeInternalError, "Retry the replay and inspect history if the problem persists", "robot-replay")
+	}
+	return encodeTerminalRobotOutput(replayOutput, replayOutput.RobotResponse, "robot replay failed")
 }
 
 // =============================================================================

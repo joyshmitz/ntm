@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func ptrInt64(v int64) *int64 { return &v }
@@ -1960,6 +1963,10 @@ func TestGetInspectIncidentUsesStore(t *testing.T) {
 // =============================================================================
 
 func TestPrintReplayMissingID(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
 	opts := ReplayOptions{
 		Session:   "test-session",
 		HistoryID: "",
@@ -1982,6 +1989,9 @@ func TestPrintReplayMissingID(t *testing.T) {
 	}
 	if result.ErrorCode != ErrCodeInvalidFlag {
 		t.Errorf("expected error_code %s, got %s", ErrCodeInvalidFlag, result.ErrorCode)
+	}
+	if result.OutputFormat != string(FormatJSON) {
+		t.Errorf("output_format = %q, want canonical failure format %q", result.OutputFormat, FormatJSON)
 	}
 }
 
@@ -2024,8 +2034,9 @@ func TestPrintReplayUsesRequestedSession(t *testing.T) {
 			HistoryID: entry.ID,
 		})
 	})
-	if err != nil {
-		t.Fatalf("PrintReplay returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintReplay error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result SendOutput
@@ -2035,8 +2046,128 @@ func TestPrintReplayUsesRequestedSession(t *testing.T) {
 	if result.Session != "target-session" {
 		t.Fatalf("Session = %q, want %q", result.Session, "target-session")
 	}
+	if result.Success {
+		t.Fatal("Success = true, want false for missing requested session")
+	}
 	if result.ErrorCode != ErrCodeSessionNotFound {
 		t.Fatalf("ErrorCode = %q, want %q", result.ErrorCode, ErrCodeSessionNotFound)
+	}
+}
+
+func TestPrintReplayEmitsExecutedSendResultOnce(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := history.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+
+	entry := history.NewEntry("origin-session", []string{"%42"}, "echo once", history.SourceCLI)
+	entry.SetSuccess()
+	if err := history.Append(entry); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	originalSend := getReplaySend
+	sendCalls := 0
+	getReplaySend = func(opts SendOptions) (*SendOutput, error) {
+		sendCalls++
+		if opts.Session != "target-session" || opts.Message != entry.Prompt || len(opts.Panes) != 1 || opts.Panes[0] != "%42" {
+			t.Fatalf("replay send options = %+v, want requested session and stored intent", opts)
+		}
+		return &SendOutput{
+			RobotResponse: NewRobotResponse(true),
+			Session:       opts.Session,
+			SentAt:        time.Now().UTC(),
+			Warnings:      []string{},
+			Targets:       []string{"%42"},
+			Successful:    []string{"%42"},
+			Failed:        []SendError{},
+		}, nil
+	}
+	t.Cleanup(func() { getReplaySend = originalSend })
+
+	stdout, err := captureStdout(t, func() error {
+		return PrintReplay(ReplayOptions{Session: "target-session", HistoryID: entry.ID})
+	})
+	if err != nil {
+		t.Fatalf("PrintReplay: %v", err)
+	}
+	if sendCalls != 1 {
+		t.Fatalf("replay send calls = %d, want exactly 1", sendCalls)
+	}
+
+	var result SendOutput
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode replay send output: %v\noutput=%s", err, stdout)
+	}
+	if !result.Success || result.Session != "target-session" || len(result.Successful) != 1 || result.Successful[0] != "%42" {
+		t.Fatalf("replay output = %+v, want the executed send result", result)
+	}
+}
+
+func TestPrintReplayRealTmuxDeliversOnce(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := history.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+
+	sessionName := fmt.Sprintf("ntm_replay_once_%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(sessionName, ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(sessionName) })
+
+	panes, err := tmux.GetPanes(sessionName)
+	if err != nil || len(panes) == 0 {
+		t.Fatalf("GetPanes: panes=%v err=%v", panes, err)
+	}
+	marker := fmt.Sprintf("replay-once-%d", time.Now().UnixNano())
+	markerPath := filepath.Join(t.TempDir(), "replay-markers.txt")
+	prompt := fmt.Sprintf("printf '%%s\\n' %q >> %q", marker, markerPath)
+	entry := history.NewEntry(sessionName, []string{panes[0].ID}, prompt, history.SourceCLI)
+	entry.SetSuccess()
+	if err := history.Append(entry); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	stdout, err := captureStdout(t, func() error {
+		return PrintReplay(ReplayOptions{Session: sessionName, HistoryID: entry.ID})
+	})
+	if err != nil {
+		t.Fatalf("PrintReplay: %v\noutput=%s", err, stdout)
+	}
+	var result SendOutput
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode replay send output: %v\noutput=%s", err, stdout)
+	}
+	if !result.Success || len(result.Successful) != 1 {
+		t.Fatalf("replay send output = %+v, want one successful target", result)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, readErr := os.ReadFile(markerPath)
+		if readErr == nil && strings.Contains(string(data), marker) {
+			break
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatalf("read marker file: %v", readErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for replay marker at %s", markerPath)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Give a wrongly queued second shell command time to execute before the
+	// final count. PrintReplay has already returned after submitting all sends.
+	time.Sleep(250 * time.Millisecond)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker file: %v", err)
+	}
+	if count := strings.Count(string(data), marker); count != 1 {
+		t.Fatalf("replay marker count = %d, want exactly 1; contents=%q", count, data)
 	}
 }
 

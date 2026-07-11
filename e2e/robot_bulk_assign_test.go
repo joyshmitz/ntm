@@ -265,7 +265,7 @@ func TestE2E_RobotBulkAssign_Strategy(t *testing.T) {
 			// Test strategy flag (note: --from-bv required with strategy)
 			result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
 				"--from-bv",
-				"--bulk-strategy="+strategy,
+				"--strategy="+strategy,
 				"--dry-run")
 
 			// Even if bv is not available, the strategy should be recorded
@@ -724,11 +724,14 @@ func TestE2E_RobotBulkAssign_AllStrategiesValidInput(t *testing.T) {
 			allocation := `{"0":"bd-` + strategy + `-test"}`
 			result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
 				"--allocation="+allocation,
-				"--bulk-strategy="+strategy,
+				"--strategy="+strategy,
 				"--dry-run")
 
 			if result == nil {
 				t.Fatal("[E2E-BULK-ASSIGN] Expected JSON response")
+			}
+			if result.Strategy != strategy {
+				t.Fatalf("[E2E-BULK-ASSIGN] strategy=%q, want canonical --strategy value %q", result.Strategy, strategy)
 			}
 
 			// Strategy should be recorded even with explicit allocation
@@ -757,7 +760,7 @@ func TestE2E_RobotBulkAssign_CombinedFlags(t *testing.T) {
 	result, _, _ := runBulkAssignCmd(t, suite, suite.Session(),
 		"--allocation="+allocation,
 		"--skip=1",
-		"--bulk-strategy=impact",
+		"--strategy=impact",
 		"--dry-run")
 
 	if result == nil {

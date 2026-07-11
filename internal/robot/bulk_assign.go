@@ -179,10 +179,11 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 
 	panes, err := deps.ListPanes(opts.Session)
 	if err != nil {
+		errorCode, hint := bulkAssignPaneListError(err)
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("failed to get panes: %w", err),
-			ErrCodeInternalError,
-			"Check tmux is running and session is accessible",
+			errorCode,
+			hint,
 		)
 		return output, nil
 	}
@@ -252,6 +253,19 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 	output.AllocationSource = "bv"
 	applyBulkAssignPlan(opts, deps, output, plan)
 	return output, nil
+}
+
+func bulkAssignPaneListError(err error) (string, string) {
+	switch tmux.ClassifyCommandError(err).Kind {
+	case tmux.CommandErrorSessionNotFound, tmux.CommandErrorPaneNotFound:
+		// list-panes is session-scoped. tmux commonly reports a missing session as
+		// "can't find window", but there is no pane selector at this boundary.
+		return ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions"
+	case tmux.CommandErrorTimeout, tmux.CommandErrorCanceled:
+		return ErrCodeTimeout, "Retry after confirming the tmux server is responsive"
+	default:
+		return ErrCodeInternalError, "Check tmux is running and session is accessible"
+	}
 }
 
 // PrintBulkAssign handles the --robot-bulk-assign command.
