@@ -345,8 +345,8 @@ func TestBuildSendDryRunEntries_Basic(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
-	if entries[0].Pane != 1 {
-		t.Errorf("entry[0].Pane = %d, want 1", entries[0].Pane)
+	if entries[0].Pane != "1" {
+		t.Errorf("entry[0].Pane = %q, want 1", entries[0].Pane)
 	}
 	if entries[0].Agent != "cc_1" {
 		t.Errorf("entry[0].Agent = %q, want %q", entries[0].Agent, "cc_1")
@@ -357,8 +357,8 @@ func TestBuildSendDryRunEntries_Basic(t *testing.T) {
 	if entries[0].Source != "manual" {
 		t.Errorf("entry[0].Source = %q, want %q", entries[0].Source, "manual")
 	}
-	if entries[1].Pane != 2 {
-		t.Errorf("entry[1].Pane = %d, want 2", entries[1].Pane)
+	if entries[1].Pane != "2" {
+		t.Errorf("entry[1].Pane = %q, want 2", entries[1].Pane)
 	}
 }
 

@@ -119,7 +119,6 @@ func TestAgentLifecycleSpawnWorkKill(t *testing.T) {
 		Prompt:    testPrompt,
 		TargetAll: true,
 		SkipFirst: false,
-		PaneIndex: -1,
 	}
 
 	err = runSendWithTargets(sendOpts)
@@ -272,7 +271,6 @@ func TestAgentLifecycleMultipleAgents(t *testing.T) {
 		Prompt:    testPrompt,
 		TargetAll: true,
 		SkipFirst: false,
-		PaneIndex: -1,
 	})
 	if err != nil {
 		t.Fatalf("send failed: %v", err)

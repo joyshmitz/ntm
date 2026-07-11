@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -91,7 +92,6 @@ func TestSendRealSession(t *testing.T) {
 		Targets:   targets,
 		TargetAll: true,
 		SkipFirst: false,
-		PaneIndex: -1,
 	})
 	if err != nil {
 		t.Fatalf("runSendWithTargets failed: %v", err)
@@ -138,7 +138,6 @@ func TestSendRealSession(t *testing.T) {
 		Targets:   SendTargets{},
 		TargetAll: true,
 		SkipFirst: false,
-		PaneIndex: -1,
 	}); err != nil {
 		t.Fatalf("runSendWithTargets (redact) failed: %v", err)
 	}
@@ -164,7 +163,6 @@ func TestSendRealSession(t *testing.T) {
 		Targets:   SendTargets{},
 		TargetAll: true,
 		SkipFirst: false,
-		PaneIndex: -1,
 	})
 	if err == nil {
 		t.Fatalf("expected error in block mode")
@@ -859,7 +857,6 @@ func TestSendDryRunDoesNotSendToPane(t *testing.T) {
 		Prompt:       prompt,
 		PromptSource: "args",
 		Targets:      SendTargets{}, // default targeting = agent panes
-		PaneIndex:    -1,
 		DryRun:       true,
 	})
 	if err != nil {
@@ -959,7 +956,6 @@ func TestSendDefaultTargetsAllAgentsWithoutUserPane(t *testing.T) {
 			PromptSource: "args",
 			Targets:      SendTargets{},
 			SkipFirst:    skipFirst,
-			PaneIndex:    -1,
 			DryRun:       true,
 		})
 		_ = w.Close()
@@ -988,6 +984,123 @@ func TestSendDefaultTargetsAllAgentsWithoutUserPane(t *testing.T) {
 	explicitSkipResult := dryRunTargets(true)
 	if explicitSkipResult.Total != 1 || len(explicitSkipResult.WouldSend) != 1 {
 		t.Fatalf("explicit skip-first targeted %d panes (%d entries), want one agent", explicitSkipResult.Total, len(explicitSkipResult.WouldSend))
+	}
+}
+
+func TestResolveShellSendSelectorsTopologyAware(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%3", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%0", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%2", WindowIndex: 1, Index: 0, Type: tmux.AgentCodex},
+		{ID: "%1", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+	}
+
+	ids := func(selected []tmux.Pane) []string {
+		out := make([]string, 0, len(selected))
+		for _, pane := range selected {
+			out = append(out, pane.ID)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name      string
+		selectors []string
+		singular  bool
+		want      []string
+		wantErr   string
+	}{
+		{name: "exact window pane", selectors: []string{"1.1"}, singular: true, want: []string{"%3"}},
+		{name: "exact pane id", selectors: []string{"%3"}, singular: true, want: []string{"%3"}},
+		{name: "bare multi-window selects window", selectors: []string{"1"}, want: []string{"%2", "%3"}},
+		{name: "singular bare multi-pane window is ambiguous", selectors: []string{"1"}, singular: true, wantErr: "matched 2 panes"},
+		{name: "mixed aliases deduplicate", selectors: []string{"0.1", "%1", "1.0"}, want: []string{"%1", "%2"}},
+		{name: "missing selector fails whole request", selectors: []string{"0.1", "9.9"}, wantErr: "not found"},
+		{name: "malformed selector", selectors: []string{"1.x"}, wantErr: "invalid pane selector"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selected, err := resolveShellSendSelectors(panes, test.selectors, test.singular)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("resolveShellSendSelectors error = %v, want substring %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveShellSendSelectors returned error: %v", err)
+			}
+			if got := ids(selected); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("resolved pane IDs = %v, want %v", got, test.want)
+			}
+		})
+	}
+
+	singleWindow := []tmux.Pane{
+		{ID: "%11", WindowIndex: 4, Index: 0},
+		{ID: "%12", WindowIndex: 4, Index: 1},
+	}
+	selected, err := resolveShellSendSelectors(singleWindow, []string{"1"}, true)
+	if err != nil {
+		t.Fatalf("single-window bare selector returned error: %v", err)
+	}
+	if got := ids(selected); !reflect.DeepEqual(got, []string{"%12"}) {
+		t.Fatalf("single-window bare selector IDs = %v, want [%%12]", got)
+	}
+
+	entries := buildSendDryRunEntries(panes, "review", "args", true)
+	wantRefs := []string{"1.1", "0.0", "1.0", "0.1"}
+	for i, entry := range entries {
+		if entry.Pane != wantRefs[i] || entry.PaneID != panes[i].ID {
+			t.Fatalf("dry-run entry %d = pane %q id %q, want pane %q id %q", i, entry.Pane, entry.PaneID, wantRefs[i], panes[i].ID)
+		}
+	}
+}
+
+func TestParseShellPaneSelectorsStrict(t *testing.T) {
+	selectors, err := parseShellPaneSelectors("0, 1.2, %7")
+	if err != nil {
+		t.Fatalf("parseShellPaneSelectors returned error: %v", err)
+	}
+	if want := []string{"0", "1.2", "%7"}; !reflect.DeepEqual(selectors, want) {
+		t.Fatalf("selectors = %v, want %v", selectors, want)
+	}
+
+	for _, raw := range []string{"all", "0,,1", "-1", "1.x", "%%7", "1.2.3"} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := parseShellPaneSelectors(raw); err == nil {
+				t.Fatalf("parseShellPaneSelectors(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+func TestSendCommandRejectsIncompatiblePaneSelectors(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "pane and panes", args: []string{"session", "prompt", "--pane=1", "--panes=2"}, wantErr: "cannot use --pane and --panes together"},
+		{name: "skip first and pane", args: []string{"session", "prompt", "--skip-first", "--pane=1"}, wantErr: "cannot combine --skip-first"},
+		{name: "all token", args: []string{"session", "prompt", "--panes=all"}, wantErr: "invalid pane selector"},
+		{name: "batch explicit pane", args: []string{"session", "--batch=batch.txt", "--pane=1"}, wantErr: "cannot combine --batch"},
+		{name: "distribute explicit pane", args: []string{"session", "--distribute", "--pane=1"}, wantErr: "cannot combine --distribute"},
+		{name: "codex goal plural", args: []string{"session", "goal", "--codex-goal", "--panes=1"}, wantErr: "requires exactly one --pane"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newSendCmd()
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(test.args)
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("send error = %v, want substring %q", err, test.wantErr)
+			}
+		})
 	}
 }
 
@@ -1079,9 +1192,8 @@ func TestSendSmartRouteIsDisabledWhenPanesSpecified(t *testing.T) {
 		PromptSource:   "args",
 		Targets:        SendTargets{},
 		PanesSpecified: true,
-		Panes:          []int{userPaneIndex},
+		PaneSelectors:  []string{fmt.Sprint(userPaneIndex)},
 		SmartRoute:     true,
-		PaneIndex:      -1,
 	})
 
 	_ = w.Close()
@@ -1101,7 +1213,7 @@ func TestSendSmartRouteIsDisabledWhenPanesSpecified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse send JSON: %v (stdout=%q)", err, strings.TrimSpace(string(stdoutBytes)))
 	}
-	if len(res.Targets) != 1 || res.Targets[0] != userPaneIndex {
+	if len(res.Targets) != 1 || res.Targets[0] != fmt.Sprint(userPaneIndex) {
 		t.Fatalf("expected targets [%d], got %v", userPaneIndex, res.Targets)
 	}
 	if res.RoutedTo != nil {
@@ -1237,6 +1349,12 @@ func TestFilterPanesForBatch(t *testing.T) {
 			opts:     SendOptions{TargetAll: true},
 			wantLen:  5,
 			wantIdxs: []int{0, 1, 2, 3, 4},
+		},
+		{
+			name:     "TargetAll skip first uses input topology order",
+			opts:     SendOptions{TargetAll: true, SkipFirst: true},
+			wantLen:  4,
+			wantIdxs: []int{1, 2, 3, 4},
 		},
 		{
 			name: "filter by tag frontend",
@@ -1690,7 +1808,7 @@ func TestSendResultJSONOmitsForceFieldByDefault(t *testing.T) {
 		name    string
 		payload any
 	}{
-		{"SendResult", SendResult{Success: true, Session: "s", Targets: []int{}}},
+		{"SendResult", SendResult{Success: true, Session: "s", Targets: []string{}}},
 		{"SendDryRunResult", SendDryRunResult{Success: true, DryRun: true, Session: "s"}},
 		{"BatchResult", BatchResult{Success: true, Session: "s"}},
 	}
@@ -1715,7 +1833,7 @@ func TestSendResultJSONEmitsForceFieldWhenSet(t *testing.T) {
 		name    string
 		payload any
 	}{
-		{"SendResult", SendResult{Success: true, Session: "s", Targets: []int{}, NonInteractiveForced: true}},
+		{"SendResult", SendResult{Success: true, Session: "s", Targets: []string{}, NonInteractiveForced: true}},
 		{"SendDryRunResult", SendDryRunResult{Success: true, DryRun: true, Session: "s", NonInteractiveForced: true}},
 		{"BatchResult", BatchResult{Success: true, Session: "s", NonInteractiveForced: true}},
 	}

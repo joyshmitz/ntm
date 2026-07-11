@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -62,7 +63,7 @@ type SendResult struct {
 	ErrorCode            string                              `json:"error_code,omitempty"`
 	Randomized           bool                                `json:"randomized,omitempty"`
 	SeedUsed             int64                               `json:"seed_used,omitempty"`
-	Targets              []int                               `json:"targets"`
+	Targets              []string                            `json:"targets"`
 	Delivered            int                                 `json:"delivered"`
 	Failed               int                                 `json:"failed"`
 	RoutedTo             *SendRoutingResult                  `json:"routed_to,omitempty"`
@@ -71,7 +72,8 @@ type SendResult struct {
 }
 
 type SendDryRunEntry struct {
-	Pane          int    `json:"pane"`
+	Pane          string `json:"pane"`
+	PaneID        string `json:"pane_id"`
 	Agent         string `json:"agent,omitempty"`
 	Prompt        string `json:"prompt"`
 	PromptPreview string `json:"prompt_preview,omitempty"`
@@ -99,6 +101,8 @@ type SendDryRunResult struct {
 // SendRoutingResult contains routing decision info for smart routing.
 type SendRoutingResult struct {
 	PaneIndex int     `json:"pane_index"`
+	Pane      string  `json:"pane,omitempty"`
+	PaneID    string  `json:"pane_id,omitempty"`
 	AgentType string  `json:"agent_type"`
 	Strategy  string  `json:"strategy"`
 	Reason    string  `json:"reason"`
@@ -227,9 +231,9 @@ type SendOptions struct {
 	Targets        SendTargets
 	TargetAll      bool
 	SkipFirst      bool
-	PaneIndex      int
-	Panes          []int // Specific pane indices to target
-	PanesSpecified bool  // True if --panes was explicitly set
+	PaneSelector   string   // Explicit N, W.P, or %N selector from --pane
+	PaneSelectors  []string // Explicit N, W.P, or %N selectors from --panes
+	PanesSpecified bool     // True if --panes was explicitly set
 	TemplateName   string
 	Tags           []string
 	DryRun         bool
@@ -509,7 +513,7 @@ func permuteBatchPrompts(prompts []BatchPrompt, perm []int) []BatchPrompt {
 func newSendCmd() *cobra.Command {
 	var targets SendTargets
 	var targetAll, skipFirst bool
-	var paneIndex int
+	var paneSelector string
 	var panesArg string
 	var promptFile, prefix, suffix string
 	var contextFiles []string
@@ -599,8 +603,10 @@ func newSendCmd() *cobra.Command {
 		  ntm send myproject --tag=frontend "update ui"         # Agents with 'frontend' tag
 		  ntm send myproject --cod --gmi "run the tests"        # Codex and Gemini
 		  ntm send myproject --all "git status"                 # All panes
-		  ntm send myproject --pane=2 "specific pane"           # Specific pane
-		  ntm send myproject --skip-first "restart"             # Skip user pane
+		  ntm send myproject --pane=2 "specific pane"           # Single-window pane index
+		  ntm send myproject --pane=1.0 "specific pane"         # Exact window.pane
+		  ntm send myproject --panes=%7,2.0 "two panes"         # Exact tmux ID + window.pane
+		  ntm send myproject --skip-first "restart"             # Skip first topology-ordered pane
 		  ntm send myproject --json "run tests"                 # JSON output
 		  ntm send myproject --file prompts/review.md           # From file
 		  cat error.log | ntm send myproject --cc               # From stdin
@@ -614,6 +620,27 @@ func newSendCmd() *cobra.Command {
 		  ntm send myproject --smart --route=affinity "auth"    # Use affinity strategy`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			paneSelector = strings.TrimSpace(paneSelector)
+			panesSpecified := strings.TrimSpace(panesArg) != ""
+			paneSelectors, err := parseShellPaneSelectors(panesArg)
+			if err != nil {
+				return err
+			}
+			if paneSelector != "" {
+				if err := validateShellPaneSelector(paneSelector); err != nil {
+					return err
+				}
+			}
+			if paneSelector != "" && panesSpecified {
+				return fmt.Errorf("cannot use --pane and --panes together")
+			}
+			if skipFirst && (paneSelector != "" || panesSpecified) {
+				return fmt.Errorf("cannot combine --skip-first with explicit --pane/--panes selectors")
+			}
+			if skipFirst && smartRoute {
+				return fmt.Errorf("cannot combine --skip-first with --smart")
+			}
+
 			// Handle --project mode: broadcast to all matching sessions (bd-3cu02.14)
 			if projectFilter != "" {
 				if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -623,7 +650,7 @@ func newSendCmd() *cobra.Command {
 						return fmt.Errorf("cannot use --project with a specific session name; use just --project or just a session name")
 					}
 				}
-				return runSendProject(cmd, projectFilter, args, targets, targetAll, skipFirst, paneIndex, tags, noHooks, dryRun, forceNonInteractive)
+				return runSendProject(cmd, projectFilter, args, targets, targetAll, skipFirst, paneSelector, paneSelectors, panesSpecified, tags, noHooks, dryRun, forceNonInteractive)
 			}
 
 			if len(args) == 0 {
@@ -634,11 +661,14 @@ func newSendCmd() *cobra.Command {
 			// Codex goal-send mode (#165): drive the Codex /goal slash command
 			// flow instead of the generic prompt-paste path.
 			if codexGoal {
+				if panesSpecified {
+					return fmt.Errorf("--codex-goal requires exactly one --pane selector; --panes is not supported")
+				}
 				body, _, err := getPromptContent(args[1:], promptFile, prefix, suffix)
 				if err != nil {
 					return err
 				}
-				return runCodexGoalSend(session, paneIndex, body)
+				return runCodexGoalSend(session, paneSelector, body)
 			}
 
 			// Resolve base prompt: flag > file > config (bd-3ejl)
@@ -654,6 +684,12 @@ func newSendCmd() *cobra.Command {
 
 			// Handle --distribute mode: auto-distribute work from bv triage
 			if distribute {
+				if paneSelector != "" || panesSpecified {
+					return fmt.Errorf("cannot combine --distribute with --pane or --panes")
+				}
+				if skipFirst {
+					return fmt.Errorf("cannot combine --distribute with --skip-first")
+				}
 				if dryRun && distributeAuto {
 					return fmt.Errorf("cannot use --dry-run with --dist-auto")
 				}
@@ -662,6 +698,9 @@ func newSendCmd() *cobra.Command {
 
 			// Handle --batch mode: send multiple prompts from file
 			if batchFile != "" {
+				if paneSelector != "" || panesSpecified {
+					return fmt.Errorf("cannot combine --batch with --pane or --panes; use --agent for a specific batch target")
+				}
 				var delay time.Duration
 				if batchDelay != "" {
 					var err error
@@ -676,7 +715,6 @@ func newSendCmd() *cobra.Command {
 					Targets:             targets,
 					TargetAll:           targetAll,
 					SkipFirst:           skipFirst,
-					PaneIndex:           paneIndex,
 					Tags:                tags,
 					SmartRoute:          smartRoute,
 					RouteStrategy:       routeStrategy,
@@ -700,27 +738,14 @@ func newSendCmd() *cobra.Command {
 				return runSendBatch(batchOpts)
 			}
 
-			var panes []int
-			panesSpecified := panesArg != ""
-			if panesSpecified {
-				var err error
-				panes, err = robot.ParsePanesArg(panesArg)
-				if err != nil {
-					return err
-				}
-			}
-			if panesSpecified && paneIndex >= 0 {
-				return fmt.Errorf("cannot use --pane and --panes together")
-			}
-
 			opts := SendOptions{
 				Session:             session,
 				BasePrompt:          resolvedBasePrompt,
 				Targets:             targets,
 				TargetAll:           targetAll,
 				SkipFirst:           skipFirst,
-				PaneIndex:           paneIndex,
-				Panes:               panes,
+				PaneSelector:        paneSelector,
+				PaneSelectors:       paneSelectors,
 				PanesSpecified:      panesSpecified,
 				Tags:                tags,
 				SmartRoute:          smartRoute,
@@ -782,9 +807,9 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().Var(newSendTargetValue(AgentTypeAntigravity, &targets), "agy", "send to Antigravity (agy) agents (optional :variant filter)")
 	cmd.Flags().Lookup("agy").NoOptDefVal = "true"
 	cmd.Flags().BoolVar(&targetAll, "all", false, "send to all panes (including user pane)")
-	cmd.Flags().BoolVarP(&skipFirst, "skip-first", "s", false, "skip the first (user) pane")
-	cmd.Flags().IntVarP(&paneIndex, "pane", "p", -1, "send to specific pane index")
-	cmd.Flags().StringVarP(&panesArg, "panes", "", "", "send to specific pane indices (comma-separated). Example: --panes=1,2")
+	cmd.Flags().BoolVarP(&skipFirst, "skip-first", "s", false, "skip the first pane in deterministic topology order")
+	cmd.Flags().StringVarP(&paneSelector, "pane", "p", "", "send to one pane (N, W.P, or %N)")
+	cmd.Flags().StringVarP(&panesArg, "panes", "", "", "send to panes (comma-separated N, W.P, or %N selectors)")
 	cmd.Flags().StringVarP(&promptFile, "file", "f", "", "read prompt from file (also used as {{file}} in templates)")
 	cmd.Flags().StringVar(&prefix, "prefix", "", "text to prepend to file/stdin content")
 	cmd.Flags().StringVar(&suffix, "suffix", "", "text to append to file/stdin content")
@@ -845,14 +870,14 @@ func newSendCmd() *cobra.Command {
 			"receipt. Requires --pane and a codex-live pane. Use with --file for the packet.")
 
 	cmd.ValidArgsFunction = completeSessionArgs
-	_ = cmd.RegisterFlagCompletionFunc("pane", completePaneIndexes)
-	_ = cmd.RegisterFlagCompletionFunc("panes", completePaneIndexes)
+	_ = cmd.RegisterFlagCompletionFunc("pane", completeSendPaneSelectors)
+	_ = cmd.RegisterFlagCompletionFunc("panes", completeSendPaneSelectors)
 
 	return cmd
 }
 
 // runSendProject broadcasts a prompt to all sessions matching a base project (bd-3cu02.14).
-func runSendProject(cmd *cobra.Command, project string, args []string, targets SendTargets, targetAll, skipFirst bool, paneIndex int, tags []string, noHooks, dryRun, forceNonInteractive bool) error {
+func runSendProject(cmd *cobra.Command, project string, args []string, targets SendTargets, targetAll, skipFirst bool, paneSelector string, paneSelectors []string, panesSpecified bool, tags []string, noHooks, dryRun, forceNonInteractive bool) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
@@ -894,7 +919,9 @@ func runSendProject(cmd *cobra.Command, project string, args []string, targets S
 			Targets:             targets,
 			TargetAll:           targetAll,
 			SkipFirst:           skipFirst,
-			PaneIndex:           paneIndex,
+			PaneSelector:        paneSelector,
+			PaneSelectors:       paneSelectors,
+			PanesSpecified:      panesSpecified,
 			Tags:                tags,
 			NoHooks:             noHooks,
 			DryRun:              dryRun,
@@ -1098,6 +1125,131 @@ func runSendWithTargets(opts SendOptions) error {
 	return runSendInternal(opts)
 }
 
+func parseShellPaneSelectors(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	selectors := make([]string, 0, len(parts))
+	for _, part := range parts {
+		selector := strings.TrimSpace(part)
+		if selector == "" {
+			return nil, fmt.Errorf("invalid empty pane selector in %q", raw)
+		}
+		if err := validateShellPaneSelector(selector); err != nil {
+			return nil, err
+		}
+		selectors = append(selectors, selector)
+	}
+	return selectors, nil
+}
+
+func validateShellPaneSelector(selector string) error {
+	selector = strings.TrimSpace(selector)
+	validNumber := func(value string) bool {
+		if value == "" {
+			return false
+		}
+		for _, char := range value {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+		_, err := strconv.Atoi(value)
+		return err == nil
+	}
+
+	valid := false
+	switch {
+	case strings.HasPrefix(selector, "%"):
+		valid = validNumber(strings.TrimPrefix(selector, "%"))
+	case strings.Contains(selector, "."):
+		window, pane, ok := strings.Cut(selector, ".")
+		valid = ok && validNumber(window) && validNumber(pane)
+	default:
+		valid = validNumber(selector)
+	}
+	if !valid {
+		return fmt.Errorf("invalid pane selector %q: expected N, W.P, or %%N", selector)
+	}
+	return nil
+}
+
+func sortPanesByTopology(panes []tmux.Pane) []tmux.Pane {
+	sorted := append([]tmux.Pane(nil), panes...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].WindowIndex != sorted[j].WindowIndex {
+			return sorted[i].WindowIndex < sorted[j].WindowIndex
+		}
+		if sorted[i].Index != sorted[j].Index {
+			return sorted[i].Index < sorted[j].Index
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	return sorted
+}
+
+func shellPaneRefs(panes []tmux.Pane, multiWindow bool) []string {
+	refs := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		ref := tmux.PaneTargetKey(pane, multiWindow)
+		if pane.ID != "" {
+			ref += " (" + pane.ID + ")"
+		}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func resolveShellSendSelectors(panes []tmux.Pane, selectors []string, singular bool) ([]tmux.Pane, error) {
+	if len(selectors) == 0 {
+		return nil, fmt.Errorf("at least one pane selector is required")
+	}
+	ordered := sortPanesByTopology(panes)
+	multiWindow := tmux.PanesSpanMultipleWindows(ordered)
+	selectedIDs := make(map[string]struct{})
+
+	for _, selector := range selectors {
+		if err := validateShellPaneSelector(selector); err != nil {
+			return nil, err
+		}
+		var matches []tmux.Pane
+		for _, pane := range ordered {
+			if tmux.PaneMatchesSelector(pane, selector, multiWindow) {
+				matches = append(matches, pane)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("pane selector %q not found; available: %s", selector, strings.Join(shellPaneRefs(ordered, multiWindow), ", "))
+		}
+		if singular && len(matches) != 1 {
+			return nil, fmt.Errorf("pane selector %q matched %d panes (%s); use explicit W.P or %%N", selector, len(matches), strings.Join(shellPaneRefs(matches, true), ", "))
+		}
+		for _, pane := range matches {
+			key := pane.ID
+			if key == "" {
+				key = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+			}
+			selectedIDs[key] = struct{}{}
+		}
+	}
+
+	selected := make([]tmux.Pane, 0, len(selectedIDs))
+	for _, pane := range ordered {
+		key := pane.ID
+		if key == "" {
+			key = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+		}
+		if _, ok := selectedIDs[key]; ok {
+			selected = append(selected, pane)
+		}
+	}
+	if singular && len(selected) != 1 {
+		return nil, fmt.Errorf("pane selector resolved to %d panes; use exactly one W.P or %%N selector", len(selected))
+	}
+	return selected, nil
+}
+
 func runSendInternal(opts SendOptions) (err error) {
 	session := opts.Session
 	prompt := applyBasePrompt(opts.BasePrompt, opts.Prompt)
@@ -1107,7 +1259,8 @@ func runSendInternal(opts SendOptions) (err error) {
 	targets := opts.Targets
 	targetAll := opts.TargetAll
 	skipFirst := opts.SkipFirst
-	paneIndex := opts.PaneIndex
+	paneIndex := -1
+	paneSelector := strings.TrimSpace(opts.PaneSelector)
 	tags := opts.Tags
 	dryRun := opts.DryRun
 
@@ -1119,7 +1272,7 @@ func runSendInternal(opts SendOptions) (err error) {
 
 	// Helper for JSON error output
 	var (
-		histTargets    []int
+		histTargets    []string
 		histAgentTypes []string
 		histErr        error
 		histSuccess    bool
@@ -1221,6 +1374,17 @@ func runSendInternal(opts SendOptions) (err error) {
 		}
 		return err
 	}
+	if paneSelector != "" {
+		if selectorErr := validateShellPaneSelector(paneSelector); selectorErr != nil {
+			return outputError(selectorErr)
+		}
+	}
+	if opts.PanesSpecified && len(opts.PaneSelectors) == 0 {
+		return outputError(fmt.Errorf("--panes requires at least one pane selector"))
+	}
+	if skipFirst && (paneSelector != "" || opts.PanesSpecified) {
+		return outputError(fmt.Errorf("cannot combine --skip-first with explicit --pane/--panes selectors"))
+	}
 
 	if redactionBlocked {
 		return outputError(redactionBlockedError{summary: *redactionSummary})
@@ -1240,7 +1404,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		"prompt_length":  len(prompt),
 		"prompt_source":  promptSource,
 		"template":       templateName,
-		"targets":        buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, tags),
+		"targets":        buildSendTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, paneSelector, opts.PaneSelectors, opts.PanesSpecified, tags),
 		"dry_run":        dryRun,
 		"randomize":      opts.Randomize,
 		"seed":           opts.Seed,
@@ -1272,7 +1436,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		if dryRun {
 			return
 		}
-		entry := history.NewEntry(session, intsToStrings(histTargets), prompt, history.SourceCLI)
+		entry := history.NewEntry(session, histTargets, prompt, history.SourceCLI)
 		entry.SetAgentTypes(histAgentTypes)
 		entry.Template = templateName
 		entry.DurationMs = int(time.Since(start) / time.Millisecond)
@@ -1287,7 +1451,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		promptEntry := sessionPkg.PromptEntry{
 			Session:  session,
 			Content:  prompt,
-			Targets:  intsToStrings(histTargets),
+			Targets:  histTargets,
 			Source:   "cli",
 			Template: templateName,
 		}
@@ -1296,7 +1460,7 @@ func runSendInternal(opts SendOptions) (err error) {
 
 	// Smart routing: select best agent automatically.
 	// Explicit pane selection (--pane/--panes) wins over automatic routing.
-	if opts.SmartRoute && (opts.PanesSpecified || paneIndex >= 0) {
+	if opts.SmartRoute && (opts.PanesSpecified || paneSelector != "") {
 		if !jsonOutput {
 			if opts.PanesSpecified {
 				fmt.Println("Note: --panes specified, skipping smart routing")
@@ -1348,8 +1512,10 @@ func runSendInternal(opts SendOptions) (err error) {
 
 		// Set target to the recommended pane
 		paneIndex = recommendation.PaneIndex
+		paneSelector = recommendation.PaneID
 		opts.routingResult = &SendRoutingResult{
 			PaneIndex: recommendation.PaneIndex,
+			PaneID:    recommendation.PaneID,
 			AgentType: recommendation.AgentType,
 			Strategy:  string(strategy),
 			Reason:    recommendation.Reason,
@@ -1359,6 +1525,33 @@ func runSendInternal(opts SendOptions) (err error) {
 		if !jsonOutput {
 			fmt.Printf("Smart routing: selected %s (pane %d) - %s\n",
 				recommendation.AgentType, recommendation.PaneIndex, recommendation.Reason)
+		}
+	}
+
+	// Resolve explicit selectors before duplicate checks, hooks, checkpoints, or
+	// any pane actuation. Ambiguous or missing selectors must fail closed without
+	// triggering side effects.
+	var panes []tmux.Pane
+	var selectedPanes []tmux.Pane
+	multiWindow := false
+	explicitSingle := paneSelector != ""
+	if explicitSingle || opts.PanesSpecified {
+		panes, err = tmux.GetPanes(session)
+		if err != nil {
+			return outputError(err)
+		}
+		if len(panes) == 0 {
+			return outputError(fmt.Errorf("no panes found in session '%s'", session))
+		}
+		panes = sortPanesByTopology(panes)
+		multiWindow = tmux.PanesSpanMultipleWindows(panes)
+		if explicitSingle {
+			selectedPanes, err = resolveShellSendSelectors(panes, []string{paneSelector}, true)
+		} else {
+			selectedPanes, err = resolveShellSendSelectors(panes, opts.PaneSelectors, false)
+		}
+		if err != nil {
+			return outputError(err)
 		}
 	}
 
@@ -1392,7 +1585,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Build target description for hook environment
-	targetDesc := buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, tags)
+	targetDesc := buildSendTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, paneSelector, opts.PaneSelectors, opts.PanesSpecified, tags)
 
 	// Build execution context for hooks
 	hookCtx := hooks.ExecutionContext{
@@ -1400,13 +1593,15 @@ func runSendInternal(opts SendOptions) (err error) {
 		ProjectDir:  getSessionWorkingDir(session, sessionInferred),
 		Message:     prompt,
 		AdditionalEnv: map[string]string{
-			"NTM_SEND_TARGETS": targetDesc,
-			"NTM_TARGET_CC":    boolToStr(targetCC),
-			"NTM_TARGET_COD":   boolToStr(targetCod),
-			"NTM_TARGET_GMI":   boolToStr(targetGmi),
-			"NTM_TARGET_AGY":   boolToStr(targetAgy),
-			"NTM_TARGET_ALL":   boolToStr(targetAll),
-			"NTM_PANE_INDEX":   fmt.Sprintf("%d", paneIndex),
+			"NTM_SEND_TARGETS":   targetDesc,
+			"NTM_TARGET_CC":      boolToStr(targetCC),
+			"NTM_TARGET_COD":     boolToStr(targetCod),
+			"NTM_TARGET_GMI":     boolToStr(targetGmi),
+			"NTM_TARGET_AGY":     boolToStr(targetAgy),
+			"NTM_TARGET_ALL":     boolToStr(targetAll),
+			"NTM_PANE_INDEX":     fmt.Sprintf("%d", paneIndex),
+			"NTM_PANE_SELECTOR":  paneSelector,
+			"NTM_PANE_SELECTORS": strings.Join(opts.PaneSelectors, ","),
 		},
 	}
 
@@ -1431,7 +1626,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Auto-checkpoint before broadcast sends
-	isBroadcast := !opts.PanesSpecified && paneIndex < 0 && (targetAll || (!targetCC && !targetCod && !targetGmi && !targetAgy && len(tags) == 0))
+	isBroadcast := !opts.PanesSpecified && paneSelector == "" && (targetAll || (!targetCC && !targetCod && !targetGmi && !targetAgy && len(tags) == 0))
 	if !dryRun && isBroadcast && cfg != nil && cfg.Checkpoints.Enabled && cfg.Checkpoints.BeforeBroadcast {
 		if !jsonOutput {
 			fmt.Println("Creating auto-checkpoint before broadcast...")
@@ -1455,55 +1650,20 @@ func runSendInternal(opts SendOptions) (err error) {
 		}
 	}
 
-	panes, err := tmux.GetPanes(session)
-	if err != nil {
-		return outputError(err)
+	if panes == nil {
+		panes, err = tmux.GetPanes(session)
+		if err != nil {
+			return outputError(err)
+		}
+		if len(panes) == 0 {
+			return outputError(fmt.Errorf("no panes found in session '%s'", session))
+		}
+		panes = sortPanesByTopology(panes)
+		multiWindow = tmux.PanesSpanMultipleWindows(panes)
 	}
 
-	if len(panes) == 0 {
-		return outputError(fmt.Errorf("no panes found in session '%s'", session))
-	}
-
-	// Determine which panes to target
-	var selectedPanes []tmux.Pane
-	if paneIndex >= 0 {
-		for _, p := range panes {
-			if sendValueEqual(p.Index, paneIndex) {
-				selectedPanes = append(selectedPanes, p)
-				break
-			}
-		}
-		if len(selectedPanes) == 0 {
-			return outputError(fmt.Errorf("pane %d not found", paneIndex))
-		}
-	} else if opts.PanesSpecified {
-		// --panes was specified: select only the specified pane indices
-		paneSet := make(map[int]bool)
-		for _, idx := range opts.Panes {
-			paneSet[idx] = true
-		}
-		for _, p := range panes {
-			if paneSet[p.Index] {
-				selectedPanes = append(selectedPanes, p)
-			}
-		}
-		// Check for missing panes
-		if len(selectedPanes) != len(opts.Panes) {
-			foundSet := make(map[int]bool)
-			for _, p := range selectedPanes {
-				foundSet[p.Index] = true
-			}
-			var missing []int
-			for _, idx := range opts.Panes {
-				if !foundSet[idx] {
-					missing = append(missing, idx)
-				}
-			}
-			if len(missing) > 0 {
-				return outputError(fmt.Errorf("pane(s) not found: %v", missing))
-			}
-		}
-	} else {
+	// Broad sends apply type/tag filters after deterministic topology ordering.
+	if selectedPanes == nil {
 		noFilter := !targetCC && !targetCod && !targetGmi && !targetAgy && !targetAll && len(tags) == 0
 		hasVariantFilter := len(targets) > 0
 
@@ -1549,21 +1709,25 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Track results for JSON output
-	if opts.Randomize && len(selectedPanes) > 1 && paneIndex < 0 {
+	if opts.Randomize && len(selectedPanes) > 1 && !explicitSingle {
 		var perm []int
 		seedUsed, perm = shuffledPermutation(len(selectedPanes), opts.Seed)
 		selectedPanes = permutePanes(selectedPanes, perm)
 	}
 
-	targetPanes := make([]int, 0, len(selectedPanes))
+	targetPanes := make([]string, 0, len(selectedPanes))
 	targetAgentTypes := make([]string, 0, len(selectedPanes))
 	for _, p := range selectedPanes {
-		targetPanes = append(targetPanes, p.Index)
+		targetPanes = append(targetPanes, tmux.PaneTargetKey(p, multiWindow))
 		targetAgentTypes = append(targetAgentTypes, p.Type.String())
+	}
+	if opts.routingResult != nil && len(selectedPanes) == 1 {
+		opts.routingResult.Pane = targetPanes[0]
+		opts.routingResult.PaneID = selectedPanes[0].ID
 	}
 	histTargets = targetPanes
 	histAgentTypes = targetAgentTypes
-	dispatchPacing := buildDispatchPacingDecision(opts, session, selectedPanes)
+	dispatchPacing := buildDispatchPacingDecision(opts, session, selectedPanes, multiWindow)
 
 	if opts.Randomize && len(targetPanes) > 1 && !jsonOutput {
 		fmt.Fprintf(os.Stderr, "Randomized send order (seed=%d): %v\n", seedUsed, targetPanes)
@@ -1575,7 +1739,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	if dryRun {
-		entries := buildSendDryRunEntries(selectedPanes, prompt, promptSource)
+		entries := buildSendDryRunEntries(selectedPanes, prompt, promptSource, multiWindow)
 		return printSendDryRunResult(SendDryRunResult{
 			Success:              true,
 			DryRun:               true,
@@ -1593,7 +1757,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// If specific pane requested
-	if paneIndex >= 0 {
+	if explicitSingle {
 		p := selectedPanes[0]
 		// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op when
 		// the semantic feature is off, so the dispatched prompt is unchanged.
@@ -1644,7 +1808,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
-		fmt.Printf("Sent to pane %d\n", paneIndex)
+		fmt.Printf("Sent to pane %s\n", targetPanes[0])
 		return nil
 	}
 
@@ -1662,7 +1826,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			failed++
 			histErr = err
 			if !jsonOutput {
-				return fmt.Errorf("sending to pane %d: %w", p.Index, err)
+				return fmt.Errorf("sending to pane %s: %w", tmux.PaneTargetKey(p, multiWindow), err)
 			}
 		} else {
 			delivered++
@@ -1766,11 +1930,16 @@ func paneAgentLabel(p tmux.Pane) string {
 	return fmt.Sprintf("pane_%d", p.Index)
 }
 
-func buildSendDryRunEntries(panes []tmux.Pane, prompt string, source string) []SendDryRunEntry {
+func buildSendDryRunEntries(panes []tmux.Pane, prompt string, source string, topology ...bool) []SendDryRunEntry {
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	if len(topology) > 0 {
+		multiWindow = topology[0]
+	}
 	entries := make([]SendDryRunEntry, 0, len(panes))
 	for _, p := range panes {
 		entries = append(entries, SendDryRunEntry{
-			Pane:          p.Index,
+			Pane:          tmux.PaneTargetKey(p, multiWindow),
+			PaneID:        p.ID,
 			Agent:         paneAgentLabel(p),
 			Prompt:        prompt,
 			PromptPreview: truncateForPreview(prompt, 80),
@@ -1780,15 +1949,19 @@ func buildSendDryRunEntries(panes []tmux.Pane, prompt string, source string) []S
 	return entries
 }
 
-func buildDispatchPacingDecision(opts SendOptions, session string, panes []tmux.Pane) *coordinator.DispatchPacingDecision {
+func buildDispatchPacingDecision(opts SendOptions, session string, panes []tmux.Pane, topology ...bool) *coordinator.DispatchPacingDecision {
 	if !opts.PaceDispatch && opts.DispatchPacingInput == nil {
 		return nil
 	}
 
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	if len(topology) > 0 {
+		multiWindow = topology[0]
+	}
 	input := coordinator.DispatchPacingInput{
 		Session:          session,
 		RequestedTargets: len(panes),
-		PaneHealth:       dispatchPacingPaneHealth(panes),
+		PaneHealth:       dispatchPacingPaneHealth(panes, multiWindow),
 	}
 	if opts.DispatchPacingInput != nil {
 		input = *opts.DispatchPacingInput
@@ -1799,7 +1972,7 @@ func buildDispatchPacingDecision(opts SendOptions, session string, panes []tmux.
 			input.RequestedTargets = len(panes)
 		}
 		if len(input.PaneHealth) == 0 {
-			input.PaneHealth = dispatchPacingPaneHealth(panes)
+			input.PaneHealth = dispatchPacingPaneHealth(panes, multiWindow)
 		}
 	}
 
@@ -1807,11 +1980,17 @@ func buildDispatchPacingDecision(opts SendOptions, session string, panes []tmux.
 	return &decision
 }
 
-func dispatchPacingPaneHealth(panes []tmux.Pane) []coordinator.DispatchPaneHealth {
+func dispatchPacingPaneHealth(panes []tmux.Pane, topology ...bool) []coordinator.DispatchPaneHealth {
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	if len(topology) > 0 {
+		multiWindow = topology[0]
+	}
 	health := make([]coordinator.DispatchPaneHealth, 0, len(panes))
 	for _, pane := range panes {
 		health = append(health, coordinator.DispatchPaneHealth{
 			PaneIndex: pane.Index,
+			Pane:      tmux.PaneTargetKey(pane, multiWindow),
+			PaneID:    pane.ID,
 			AgentType: pane.Type.Canonical().String(),
 			Healthy:   true,
 		})
@@ -1836,7 +2015,7 @@ func printSendDryRunResult(result SendDryRunResult) error {
 		if source == "" {
 			source = "unknown"
 		}
-		fmt.Printf("  %d. %s (pane %d): %q (%s)\n", i+1, w.Agent, w.Pane, w.PromptPreview, source)
+		fmt.Printf("  %d. %s (pane %s): %q (%s)\n", i+1, w.Agent, w.Pane, w.PromptPreview, source)
 	}
 	fmt.Println()
 	if result.Message != "" {
@@ -2770,6 +2949,16 @@ func buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll
 	return strings.Join(targets, ",")
 }
 
+func buildSendTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst bool, paneIndex int, paneSelector string, paneSelectors []string, panesSpecified bool, tags []string) string {
+	if paneSelector != "" {
+		return "pane:" + paneSelector
+	}
+	if panesSpecified {
+		return "panes:" + strings.Join(paneSelectors, ",")
+	}
+	return buildTargetDescription(targetCC, targetCod, targetGmi, targetAgy, targetAll, skipFirst, paneIndex, tags)
+}
+
 // getSessionWorkingDir returns the working directory for a resolved session,
 // preserving workspace fallback only for inferred-session commands.
 func getSessionWorkingDir(session string, inferred bool) string {
@@ -2925,7 +3114,8 @@ type CodexGoalSendResult struct {
 	robot.RobotResponse
 
 	Session string `json:"session"`
-	Pane    int    `json:"pane"`
+	Pane    string `json:"pane"`
+	PaneID  string `json:"pane_id"`
 
 	// TypedGoal is true once the "/goal" slash command was typed and the goal
 	// palette engaged (Codex showed the /goal command, not literal chat text).
@@ -2962,7 +3152,7 @@ var (
 // codex-live, types "/goal " as a real slash command, waits (via the palette/
 // preflight classifier) for the goal palette to engage, injects the packet body,
 // submits, and reports engaged / submitted / failed with provenance.
-func runCodexGoalSend(session string, paneIndex int, body string) error {
+func runCodexGoalSend(session, paneSelector, body string) error {
 	emitJSON := jsonOutput || IsJSONOutput()
 
 	// emit prints the single canonical receipt (JSON or human). On failure it
@@ -2986,7 +3176,7 @@ func runCodexGoalSend(session string, paneIndex int, body string) error {
 			return nil
 		}
 		fmt.Printf("Codex Goal Send\n===============\n\n")
-		fmt.Printf("Session: %s  Pane: %d\n", res.Session, res.Pane)
+		fmt.Printf("Session: %s  Pane: %s\n", res.Session, res.Pane)
 		fmt.Printf("State:   %s\n", res.State)
 		fmt.Printf("Typed /goal: %v  Body injected: %v  Submitted: %v (attempts %d)\n",
 			res.TypedGoal, res.BodyInjected, res.Submitted, res.SubmitAttempts)
@@ -2997,11 +3187,11 @@ func runCodexGoalSend(session string, paneIndex int, body string) error {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return err
 	}
-	if paneIndex < 0 {
+	if strings.TrimSpace(paneSelector) == "" {
 		return robot.RobotError(
 			fmt.Errorf("--codex-goal requires an explicit --pane"),
 			robot.ErrCodeInvalidFlag,
-			"Pass --pane <n> identifying the Codex pane to drive",
+			"Pass --pane <N|W.P|%N> identifying the Codex pane to drive",
 		)
 	}
 	if strings.TrimSpace(body) == "" {
@@ -3012,7 +3202,7 @@ func runCodexGoalSend(session string, paneIndex int, body string) error {
 		)
 	}
 
-	target, content, err := resolveCodexPane(session, paneIndex, tmux.LinesFullContext)
+	target, content, err := resolveCodexPaneSelector(session, paneSelector, tmux.LinesFullContext)
 	if err != nil {
 		return err
 	}
@@ -3021,7 +3211,8 @@ func runCodexGoalSend(session string, paneIndex int, body string) error {
 	res := CodexGoalSendResult{
 		RobotResponse:   robot.NewRobotResponse(false),
 		Session:         session,
-		Pane:            paneIndex,
+		Pane:            fmt.Sprintf("%d.%d", target.WindowIndex, target.Index),
+		PaneID:          target.ID,
 		ProvenanceHash:  hex.EncodeToString(sum[:]),
 		BodyPreview:     truncatePrompt(strings.TrimSpace(body), 80),
 		State:           "failed",
@@ -3570,14 +3761,14 @@ type BatchResult struct {
 
 // BatchPromptResult represents the result of sending a single prompt in a batch
 type BatchPromptResult struct {
-	Index         int    `json:"index"`
-	PromptPreview string `json:"prompt_preview"`
-	Priority      int    `json:"priority,omitempty"` // -1 omitted; 0..4 = P0..P4
-	Success       bool   `json:"success"`
-	Targets       []int  `json:"targets,omitempty"`
-	Delivered     int    `json:"delivered"`
-	Error         string `json:"error,omitempty"`
-	Skipped       bool   `json:"skipped,omitempty"`
+	Index         int      `json:"index"`
+	PromptPreview string   `json:"prompt_preview"`
+	Priority      int      `json:"priority,omitempty"` // -1 omitted; 0..4 = P0..P4
+	Success       bool     `json:"success"`
+	Targets       []string `json:"targets,omitempty"`
+	Delivered     int      `json:"delivered"`
+	Error         string   `json:"error,omitempty"`
+	Skipped       bool     `json:"skipped,omitempty"`
 }
 
 type BatchPrompt struct {
@@ -3770,7 +3961,10 @@ func filterPanesForBatch(panes []tmux.Pane, opts SendOptions) []tmux.Pane {
 	hasTags := len(opts.Tags) > 0
 	noFilter := !hasTargets && !hasTags && !opts.TargetAll
 
-	for _, p := range panes {
+	for i, p := range panes {
+		if opts.SkipFirst && i == 0 {
+			continue
+		}
 		// If --all, include everything
 		if opts.TargetAll {
 			filtered = append(filtered, p)
@@ -3853,6 +4047,8 @@ func runSendBatch(opts SendOptions) error {
 	if err != nil {
 		return fmt.Errorf("getting session panes: %w", err)
 	}
+	panes = sortPanesByTopology(panes)
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
 
 	// Apply agent type and tag filters
 	agentPanes := filterPanesForBatch(panes, opts)
@@ -3861,9 +4057,13 @@ func runSendBatch(opts SendOptions) error {
 		return errors.New("no matching agent panes found in session (check --cc/--cod/--gmi/--tag filters)")
 	}
 
-	paneByIndex := make(map[int]tmux.Pane, len(panes))
-	for _, p := range panes {
-		paneByIndex[p.Index] = p
+	var batchAgentPane *tmux.Pane
+	if opts.BatchAgentIndex >= 0 {
+		selected, err := resolveShellSendSelectors(panes, []string{strconv.Itoa(opts.BatchAgentIndex)}, true)
+		if err != nil {
+			return fmt.Errorf("resolving --agent: %w", err)
+		}
+		batchAgentPane = &selected[0]
 	}
 
 	if opts.DryRun {
@@ -3871,26 +4071,21 @@ func runSendBatch(opts SendOptions) error {
 		currentAgent := 0
 
 		for _, bp := range prompts {
-			var targetPanes []int
+			var targetPanes []tmux.Pane
 			if opts.BatchBroadcast {
-				for _, p := range agentPanes {
-					targetPanes = append(targetPanes, p.Index)
-				}
+				targetPanes = append(targetPanes, agentPanes...)
 			} else if opts.BatchAgentIndex >= 0 {
-				targetPanes = []int{opts.BatchAgentIndex}
+				targetPanes = []tmux.Pane{*batchAgentPane}
 			} else {
-				targetPanes = []int{agentPanes[currentAgent%len(agentPanes)].Index}
+				targetPanes = []tmux.Pane{agentPanes[currentAgent%len(agentPanes)]}
 				currentAgent++
 			}
 
-			for _, paneIdx := range targetPanes {
-				p, ok := paneByIndex[paneIdx]
-				if !ok {
-					continue
-				}
+			for _, pane := range targetPanes {
 				entries = append(entries, SendDryRunEntry{
-					Pane:          paneIdx,
-					Agent:         paneAgentLabel(p),
+					Pane:          tmux.PaneTargetKey(pane, multiWindow),
+					PaneID:        pane.ID,
+					Agent:         paneAgentLabel(pane),
 					Prompt:        bp.Text,
 					PromptPreview: truncateForPreview(bp.Text, 80),
 					Source:        bp.Source,
@@ -3940,7 +4135,7 @@ func runSendBatch(opts SendOptions) error {
 		if opts.BatchBroadcast {
 			fmt.Println("Mode: broadcast (same prompt to all agents)")
 		} else if opts.BatchAgentIndex >= 0 {
-			fmt.Printf("Mode: single agent (pane %d)\n", opts.BatchAgentIndex)
+			fmt.Printf("Mode: single agent (pane %s)\n", tmux.PaneTargetKey(*batchAgentPane, multiWindow))
 		} else {
 			fmt.Println("Mode: round-robin across agents")
 		}
@@ -3999,35 +4194,27 @@ func runSendBatch(opts SendOptions) error {
 		}
 
 		// Determine target panes
-		var targetPanes []int
+		var targetPanes []tmux.Pane
 		if opts.BatchBroadcast {
 			// Send to all agent panes
-			for _, p := range agentPanes {
-				targetPanes = append(targetPanes, p.Index)
-			}
+			targetPanes = append(targetPanes, agentPanes...)
 		} else if opts.BatchAgentIndex >= 0 {
 			// Send to specific pane
-			targetPanes = []int{opts.BatchAgentIndex}
+			targetPanes = []tmux.Pane{*batchAgentPane}
 		} else {
 			// Round-robin: cycle through agents
-			targetPanes = []int{agentPanes[currentAgent%len(agentPanes)].Index}
+			targetPanes = []tmux.Pane{agentPanes[currentAgent%len(agentPanes)]}
 			currentAgent++
 		}
 
 		// Send to each target pane
 		var paneDelivered, paneFailed int
 		var sendErr error
-		for _, paneIdx := range targetPanes {
-			p, ok := paneByIndex[paneIdx]
-			if !ok {
-				paneFailed++
-				sendErr = fmt.Errorf("pane %d not found", paneIdx)
-				continue
-			}
+		for _, pane := range targetPanes {
 			// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op
 			// when the semantic feature is off (prompt unchanged).
-			promptForPane := stampMarchingOrders(promptText, opts.Session, p.WindowIndex, p.Index)
-			if err := sendPromptToPane(opts.Session, p, promptForPane); err != nil {
+			promptForPane := stampMarchingOrders(promptText, opts.Session, pane.WindowIndex, pane.Index)
+			if err := sendPromptToPane(opts.Session, pane, promptForPane); err != nil {
 				paneFailed++
 				sendErr = err
 			} else {
@@ -4035,7 +4222,10 @@ func runSendBatch(opts SendOptions) error {
 			}
 		}
 
-		result.Targets = targetPanes
+		result.Targets = make([]string, 0, len(targetPanes))
+		for _, pane := range targetPanes {
+			result.Targets = append(result.Targets, tmux.PaneTargetKey(pane, multiWindow))
+		}
 		result.Delivered = paneDelivered
 
 		if paneFailed > 0 {

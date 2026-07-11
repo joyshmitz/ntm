@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -6778,16 +6777,7 @@ func robotSendUsesDoubleEnter(paneType tmux.AgentType, resolvedType string, send
 // no longer a unique address, so targeting and the response-map key switch to
 // the canonical "window.pane" form (#172).
 func paneSessionIsMultiWindow(panes []tmux.Pane) bool {
-	if len(panes) == 0 {
-		return false
-	}
-	first := panes[0].WindowIndex
-	for _, p := range panes[1:] {
-		if p.WindowIndex != first {
-			return true
-		}
-	}
-	return false
+	return tmux.PanesSpanMultipleWindows(panes)
 }
 
 // paneTargetKey returns the canonical response-map / target key for a pane.
@@ -6797,10 +6787,7 @@ func paneSessionIsMultiWindow(panes []tmux.Pane) bool {
 // every pane sharing window-local index, e.g. 1) does not collapse onto one
 // key (#172).
 func paneTargetKey(pane tmux.Pane, multiWindow bool) string {
-	if multiWindow {
-		return fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
-	}
-	return fmt.Sprintf("%d", pane.Index)
+	return tmux.PaneTargetKey(pane, multiWindow)
 }
 
 // paneMatchesToken reports whether a --panes token addresses the given pane.
@@ -6818,32 +6805,7 @@ func paneTargetKey(pane tmux.Pane, multiWindow bool) string {
 // Returning here is purely a membership test; callers build the response keys
 // via paneTargetKey so single-window output stays unchanged.
 func paneMatchesToken(pane tmux.Pane, token string, multiWindow bool) bool {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return false
-	}
-	// %N tmux pane ID.
-	if strings.HasPrefix(token, "%") {
-		return token == pane.ID
-	}
-	// W.P explicit window.pane address.
-	if win, p, ok := strings.Cut(token, "."); ok {
-		wi, errW := strconv.Atoi(strings.TrimSpace(win))
-		pi, errP := strconv.Atoi(strings.TrimSpace(p))
-		if errW != nil || errP != nil {
-			return false
-		}
-		return pane.WindowIndex == wi && pane.Index == pi
-	}
-	// Bare integer.
-	n, err := strconv.Atoi(token)
-	if err != nil {
-		return false
-	}
-	if multiWindow {
-		return pane.WindowIndex == n
-	}
-	return pane.Index == n
+	return tmux.PaneMatchesSelector(pane, token, multiWindow)
 }
 
 // paneMatchesAnyToken reports whether any token in the filter set addresses the

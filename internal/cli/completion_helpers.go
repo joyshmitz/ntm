@@ -113,6 +113,14 @@ func completePaneIndexes(cmd *cobra.Command, args []string, toComplete string) (
 	return completeCommaSeparated(listPaneIndexes(session), toComplete), cobra.ShellCompDirectiveNoFileComp
 }
 
+func completeSendPaneSelectors(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	session := sessionFromArgsOrFlag(cmd, args)
+	if session == "" {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return completeCommaSeparated(listSendPaneSelectors(session), toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
 func completeReadyBeadIDs(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return completeCommaSeparated(listReadyBeadIDs(), toComplete), cobra.ShellCompDirectiveNoFileComp
 }
@@ -204,6 +212,26 @@ func listPaneIndexes(session string) []string {
 	out := make([]string, 0, len(panes))
 	for _, p := range panes {
 		out = append(out, strconv.Itoa(p.Index))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func listSendPaneSelectors(session string) []string {
+	if session == "" {
+		return nil
+	}
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return nil
+	}
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	out := make([]string, 0, len(panes)*2)
+	for _, pane := range panes {
+		out = append(out, tmux.PaneTargetKey(pane, multiWindow))
+		if pane.ID != "" {
+			out = append(out, pane.ID)
+		}
 	}
 	sort.Strings(out)
 	return out

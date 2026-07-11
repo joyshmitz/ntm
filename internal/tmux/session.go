@@ -72,6 +72,63 @@ type Pane struct {
 	PID         int // Shell PID
 }
 
+// PanesSpanMultipleWindows reports whether panes belong to more than one tmux
+// window. Pane.Index is only unique within a window, so callers must switch to
+// topology-aware addresses when this returns true.
+func PanesSpanMultipleWindows(panes []Pane) bool {
+	if len(panes) == 0 {
+		return false
+	}
+	first := panes[0].WindowIndex
+	for _, pane := range panes[1:] {
+		if pane.WindowIndex != first {
+			return true
+		}
+	}
+	return false
+}
+
+// PaneTargetKey returns the shortest unambiguous pane address for the supplied
+// session topology. Single-window sessions use the familiar bare pane index;
+// multi-window sessions use window.pane.
+func PaneTargetKey(pane Pane, multiWindow bool) string {
+	if multiWindow {
+		return fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+	}
+	return strconv.Itoa(pane.Index)
+}
+
+// PaneMatchesSelector applies the pane-selector grammar shared by robot mode
+// and shell send: %N is an exact tmux pane ID, W.P is an exact window/pane
+// address, and a bare N selects pane N in a single-window session or window N
+// in a multi-window session. Syntax validation belongs at the command boundary;
+// malformed selectors simply do not match here.
+func PaneMatchesSelector(pane Pane, selector string, multiWindow bool) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return false
+	}
+	if strings.HasPrefix(selector, "%") {
+		return selector == pane.ID
+	}
+	if window, index, ok := strings.Cut(selector, "."); ok {
+		windowIndex, windowErr := strconv.Atoi(strings.TrimSpace(window))
+		paneIndex, paneErr := strconv.Atoi(strings.TrimSpace(index))
+		if windowErr != nil || paneErr != nil {
+			return false
+		}
+		return pane.WindowIndex == windowIndex && pane.Index == paneIndex
+	}
+	index, err := strconv.Atoi(selector)
+	if err != nil {
+		return false
+	}
+	if multiWindow {
+		return pane.WindowIndex == index
+	}
+	return pane.Index == index
+}
+
 // Session represents a tmux session
 type Session struct {
 	Name      string

@@ -1699,3 +1699,43 @@ func truncateForLog(s string) string {
 	}
 	return s
 }
+
+func TestPaneSelectorTopologyHelpers(t *testing.T) {
+	panes := []Pane{
+		{ID: "%0", WindowIndex: 0, Index: 0},
+		{ID: "%1", WindowIndex: 0, Index: 1},
+		{ID: "%2", WindowIndex: 1, Index: 0},
+		{ID: "%3", WindowIndex: 1, Index: 1},
+	}
+	if !PanesSpanMultipleWindows(panes) {
+		t.Fatal("PanesSpanMultipleWindows returned false for two-window fixture")
+	}
+	if got := PaneTargetKey(panes[3], true); got != "1.1" {
+		t.Fatalf("PaneTargetKey multi-window = %q, want 1.1", got)
+	}
+	if got := PaneTargetKey(panes[3], false); got != "1" {
+		t.Fatalf("PaneTargetKey single-window = %q, want 1", got)
+	}
+
+	tests := []struct {
+		name        string
+		pane        Pane
+		selector    string
+		multiWindow bool
+		want        bool
+	}{
+		{name: "pane id", pane: panes[3], selector: "%3", multiWindow: true, want: true},
+		{name: "window pane", pane: panes[3], selector: "1.1", multiWindow: true, want: true},
+		{name: "multi-window bare selects window", pane: panes[2], selector: "1", multiWindow: true, want: true},
+		{name: "multi-window bare rejects another window", pane: panes[1], selector: "1", multiWindow: true, want: false},
+		{name: "single-window bare selects pane", pane: panes[1], selector: "1", multiWindow: false, want: true},
+		{name: "malformed", pane: panes[1], selector: "1.x", multiWindow: true, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := PaneMatchesSelector(test.pane, test.selector, test.multiWindow); got != test.want {
+				t.Fatalf("PaneMatchesSelector(%+v, %q, %v) = %v, want %v", test.pane, test.selector, test.multiWindow, got, test.want)
+			}
+		})
+	}
+}

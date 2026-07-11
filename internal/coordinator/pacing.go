@@ -68,6 +68,8 @@ func DefaultDispatchPacingThresholds() DispatchPacingThresholds {
 // DispatchPaneHealth is the caller's health view for one target pane.
 type DispatchPaneHealth struct {
 	PaneIndex int    `json:"pane_index"`
+	Pane      string `json:"pane,omitempty"`
+	PaneID    string `json:"pane_id,omitempty"`
 	AgentType string `json:"agent_type,omitempty"`
 	Healthy   bool   `json:"healthy"`
 }

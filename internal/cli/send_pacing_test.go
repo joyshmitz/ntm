@@ -58,7 +58,7 @@ func TestSendPacingJSONOmittedByDefault(t *testing.T) {
 	t.Parallel()
 
 	payloads := []any{
-		SendResult{Success: true, Session: "proj", Targets: []int{1}, Delivered: 1},
+		SendResult{Success: true, Session: "proj", Targets: []string{"1"}, Delivered: 1},
 		SendDryRunResult{Success: true, DryRun: true, Session: "proj", WouldSend: []SendDryRunEntry{}},
 	}
 	for _, payload := range payloads {
@@ -80,7 +80,7 @@ func TestSendPacingJSONEmitsDecisionWhenSet(t *testing.T) {
 		RequestedTargets: 2,
 	})
 	payloads := []any{
-		SendResult{Success: true, Session: "proj", Targets: []int{1, 2}, Delivered: 2, DispatchPacing: &decision},
+		SendResult{Success: true, Session: "proj", Targets: []string{"1", "2"}, Delivered: 2, DispatchPacing: &decision},
 		SendDryRunResult{Success: true, DryRun: true, Session: "proj", WouldSend: []SendDryRunEntry{}, DispatchPacing: &decision},
 	}
 	for _, payload := range payloads {
