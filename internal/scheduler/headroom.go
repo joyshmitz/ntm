@@ -349,6 +349,10 @@ func (h *HeadroomGuard) recheck() {
 
 // Status returns the current headroom status.
 func (h *HeadroomGuard) Status() HeadroomStatus {
+	if !h.config.Enabled {
+		return HeadroomStatus{}
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

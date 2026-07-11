@@ -104,6 +104,11 @@ type Executor struct {
 	progress chan<- ProgressEvent
 	cancelFn context.CancelFunc
 
+	// backgroundCommandWG tracks WaitNone command cleanup workers. A workflow
+	// return cancels those commands and joins their workers so callers never
+	// observe state while cancellation persistence is still writing to disk.
+	backgroundCommandWG sync.WaitGroup
+
 	// adjudicatorHistory records the order in which rotate_adjudicator picked
 	// adjudicator panes during this run. Each entry is the chosen pane ID;
 	// rotateAdjudicator uses the gap-since-last-seen to balance assignments
@@ -173,7 +178,6 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancelFn = cancel
-	defer cancel()
 
 	// Apply global timeout
 	timeout := e.config.GlobalTimeout
@@ -181,7 +185,11 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 		timeout = workflow.Settings.Timeout.Duration
 	}
 	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
+	defer func() {
+		timeoutCancel()
+		cancel()
+		e.backgroundCommandWG.Wait()
+	}()
 
 	// Initialize execution state
 	runID := e.config.RunID
@@ -336,7 +344,6 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancelFn = cancel
-	defer cancel()
 
 	// Apply global timeout
 	timeout := e.config.GlobalTimeout
@@ -344,7 +351,11 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 		timeout = workflow.Settings.Timeout.Duration
 	}
 	ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
-	defer timeoutCancel()
+	defer func() {
+		timeoutCancel()
+		cancel()
+		e.backgroundCommandWG.Wait()
+	}()
 
 	e.stateMu.Lock()
 	e.state = prior
@@ -1342,7 +1353,9 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		startedAt := result.StartedAt
 		stepID := step.ID
 		workflowName := workflow.Name
+		e.backgroundCommandWG.Add(1)
 		go func() {
+			defer e.backgroundCommandWG.Done()
 			cleanup := waitCommandWithProcessGroupCleanup(ctx, cmd)
 			if !cleanup.Cancelled {
 				return

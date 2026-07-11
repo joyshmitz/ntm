@@ -42,6 +42,11 @@ func TestHeadroomGuard_DisabledAllowsAll(t *testing.T) {
 	if reason != "" {
 		t.Errorf("expected empty reason when allowed, got: %s", reason)
 	}
+
+	status := guard.Status()
+	if status.Limits != nil || status.Usage != nil || !status.LastCheck.IsZero() {
+		t.Fatalf("disabled status performed resource detection: %#v", status)
+	}
 }
 
 func TestHeadroomGuard_Status(t *testing.T) {

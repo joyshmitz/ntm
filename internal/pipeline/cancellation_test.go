@@ -133,18 +133,10 @@ func TestExecuteCommand_WaitNoneCancellation_MarksRerunOnResume(t *testing.T) {
 
 	cancel()
 
-	// The cleanup goroutine acquires stateMu, sets RerunOnResume, and persists.
-	// Allow up to 5s for waitCommandWithProcessGroupCleanup + grace period.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		e.stateMu.RLock()
-		flagged := e.state.Steps[step.ID].RerunOnResume
-		e.stateMu.RUnlock()
-		if flagged {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// Cancellation cleanup owns the state mutation and its atomic disk write.
+	// Join the worker before inspecting either surface so TempDir cleanup cannot
+	// race a late .ntm/pipelines writer after this test returns.
+	e.backgroundCommandWG.Wait()
 
 	e.stateMu.RLock()
 	got := e.state.Steps[step.ID]
@@ -154,6 +146,97 @@ func TestExecuteCommand_WaitNoneCancellation_MarksRerunOnResume(t *testing.T) {
 	}
 	if !shouldRerunStep(got) {
 		t.Fatalf("shouldRerunStep(%+v) = false; want true so applyResumeState reruns the sidecar", got)
+	}
+
+	persisted, err := LoadState(e.config.ProjectDir, e.state.RunID)
+	if err != nil {
+		t.Fatalf("LoadState() after WaitNone cleanup: %v", err)
+	}
+	if persistedStep := persisted.Steps[step.ID]; !persistedStep.RerunOnResume {
+		t.Fatalf("persisted RerunOnResume = false; want true after cleanup worker exits")
+	}
+}
+
+func TestExecutor_Run_WaitNoneCleanupSettlesBeforeReturn(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := DefaultExecutorConfig("wait-none-lifecycle")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "wait-none-lifecycle",
+		Steps: []Step{
+			{
+				ID:      "sidecar",
+				Command: "sleep 30",
+				Wait:    WaitNone,
+			},
+		},
+	}
+
+	state, err := e.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := state.Steps["sidecar"]; !got.RerunOnResume {
+		t.Fatalf("returned sidecar result = %+v; want cancellation cleanup settled before Run returns", got)
+	}
+
+	persisted, err := LoadState(tmpDir, state.RunID)
+	if err != nil {
+		t.Fatalf("LoadState() after Run: %v", err)
+	}
+	if got := persisted.Steps["sidecar"]; !got.RerunOnResume {
+		t.Fatalf("persisted sidecar result = %+v; want cancellation cleanup settled before Run returns", got)
+	}
+}
+
+func TestExecutor_Resume_WaitNoneCleanupSettlesBeforeReturn(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := DefaultExecutorConfig("wait-none-resume-lifecycle")
+	cfg.ProjectDir = tmpDir
+	e := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "wait-none-resume-lifecycle",
+		Steps: []Step{
+			{
+				ID:      "sidecar",
+				Command: "sleep 30",
+				Wait:    WaitNone,
+			},
+		},
+	}
+	prior := &ExecutionState{
+		RunID:         "wait-none-resume-run",
+		WorkflowID:    workflow.Name,
+		Session:       cfg.Session,
+		Status:        StatusFailed,
+		StartedAt:     time.Now().Add(-time.Minute),
+		UpdatedAt:     time.Now().Add(-time.Minute),
+		Steps:         make(map[string]StepResult),
+		Variables:     make(map[string]interface{}),
+		ForeachState:  make(map[string]ForeachIterationState),
+		ParallelState: make(map[string]ParallelGroupState),
+		InFlightSteps: make(map[string]InFlightStepState),
+	}
+
+	state, err := e.Resume(context.Background(), workflow, prior, nil)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if got := state.Steps["sidecar"]; !got.RerunOnResume {
+		t.Fatalf("returned sidecar result = %+v; want cancellation cleanup settled before Resume returns", got)
+	}
+
+	persisted, err := LoadState(tmpDir, state.RunID)
+	if err != nil {
+		t.Fatalf("LoadState() after Resume: %v", err)
+	}
+	if got := persisted.Steps["sidecar"]; !got.RerunOnResume {
+		t.Fatalf("persisted sidecar result = %+v; want cancellation cleanup settled before Resume returns", got)
 	}
 }
 

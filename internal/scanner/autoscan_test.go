@@ -2,8 +2,6 @@ package scanner
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -222,79 +220,55 @@ func TestAutoScanner_StartStop(t *testing.T) {
 }
 
 func TestAutoScanner_TriggerScan(t *testing.T) {
-	// Skip if UBS is not available
-	if !IsAvailable() {
-		t.Skip("UBS not installed, skipping integration test")
-	}
-
 	tmpDir := t.TempDir()
-
-	// Create a simple test file
-	testFile := filepath.Join(tmpDir, "test.go")
-	if err := os.WriteFile(testFile, []byte("package main\n"), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	wantResult := &ScanResult{Project: tmpDir}
+	started := make(chan struct{}, 1)
+	type completion struct {
+		result *ScanResult
+		err    error
 	}
-
-	var (
-		mu          sync.Mutex
-		scanStarted bool
-		scanDone    bool
-		scanResult  *ScanResult
-		scanErr     error
-	)
+	completed := make(chan completion, 1)
 
 	cfg := DefaultAutoScannerConfig(tmpDir)
-	cfg.ScanTimeout = 30 * time.Second
 	cfg.OnScanStart = func() {
-		mu.Lock()
-		scanStarted = true
-		mu.Unlock()
+		started <- struct{}{}
 	}
 	cfg.OnScanComplete = func(result *ScanResult, err error) {
-		mu.Lock()
-		scanDone = true
-		scanResult = result
-		scanErr = err
-		mu.Unlock()
+		completed <- completion{result: result, err: err}
 	}
 
-	auto, err := NewAutoScanner(cfg)
-	if err != nil {
-		t.Fatalf("NewAutoScanner: %v", err)
+	auto := NewAutoScannerWithScanner(cfg, &Scanner{binaryPath: "ubs"})
+	auto.scan = func(ctx context.Context, path string, opts ScanOptions) (*ScanResult, error) {
+		if path != tmpDir {
+			t.Errorf("scan path = %q, want %q", path, tmpDir)
+		}
+		return wantResult, nil
 	}
 
 	// Trigger scan without starting watcher
 	auto.TriggerScan()
 
-	// Wait for scan to complete
-	deadline := time.Now().Add(35 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := scanDone
-		mu.Unlock()
-		if done {
-			break
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+
+	var scanResult *ScanResult
+	select {
+	case got := <-completed:
+		if got.err != nil {
+			t.Fatalf("scan error: %v", got.err)
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !scanStarted {
-		t.Error("expected scan to start")
-	}
-	if !scanDone {
-		t.Error("expected scan to complete")
-	}
-	if scanErr != nil {
-		t.Errorf("scan error: %v", scanErr)
-	}
-	if scanResult == nil {
-		t.Error("expected scan result")
+		scanResult = got.result
+	case <-time.After(time.Second):
+		t.Fatal("scan did not complete")
 	}
 
 	// Verify LastResult
+	if scanResult != wantResult {
+		t.Fatalf("scan result = %#v, want %#v", scanResult, wantResult)
+	}
 	if auto.LastResult() != scanResult {
 		t.Error("LastResult mismatch")
 	}

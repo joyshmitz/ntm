@@ -63,6 +63,7 @@ type Scheduler struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	jobNotify  chan struct{}
+	retryAfter func(time.Duration, func())
 
 	// stats tracks scheduler statistics.
 	stats Stats
@@ -258,6 +259,9 @@ func New(cfg Config) *Scheduler {
 		maxCompleted:  cfg.MaxCompleted,
 		workers:       cfg.MaxConcurrent,
 		jobNotify:     make(chan struct{}, 1),
+		retryAfter: func(delay time.Duration, retry func()) {
+			time.AfterFunc(delay, retry)
+		},
 	}
 
 	s.resetRuntimeState()
@@ -882,7 +886,7 @@ func (s *Scheduler) executeJob(workerID int, job *SpawnJob) {
 
 func (s *Scheduler) scheduleRetry(job *SpawnJob, delay time.Duration) {
 	generation := s.generation.Load()
-	time.AfterFunc(delay, func() {
+	s.retryAfter(delay, func() {
 		if !s.started.Load() {
 			return
 		}

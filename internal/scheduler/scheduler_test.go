@@ -606,10 +606,13 @@ func TestScheduler_DoesNotReplayStaleRetryAfterRestart(t *testing.T) {
 	cfg.GlobalRateLimit.Rate = 100
 	cfg.GlobalRateLimit.MinInterval = 0
 	cfg.DefaultRetries = 1
-	cfg.DefaultRetryDelay = 250 * time.Millisecond
 	cfg.Headroom.Enabled = false
 
 	scheduler := New(cfg)
+	retryScheduled := make(chan func(), 1)
+	scheduler.retryAfter = func(_ time.Duration, retry func()) {
+		retryScheduled <- retry
+	}
 
 	var staleRuns int64
 	var freshRuns int64
@@ -627,16 +630,16 @@ func TestScheduler_DoesNotReplayStaleRetryAfterRestart(t *testing.T) {
 		t.Fatalf("first Start() failed: %v", err)
 	}
 
-	if err := scheduler.Submit(NewSpawnJob("stale-retry", JobTypeSession, "test")); err != nil {
+	staleJob := NewSpawnJob("stale-retry", JobTypeSession, "test")
+	if err := scheduler.Submit(staleJob); err != nil {
 		t.Fatalf("Submit(stale) failed: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt64(&staleRuns) == 1 && scheduler.Stats().TotalRetried == 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	var staleRetry func()
+	select {
+	case staleRetry = <-retryScheduled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale retry was not scheduled")
 	}
 	if got := atomic.LoadInt64(&staleRuns); got != 1 {
 		t.Fatalf("stale runs before restart = %d, want 1", got)
@@ -647,11 +650,13 @@ func TestScheduler_DoesNotReplayStaleRetryAfterRestart(t *testing.T) {
 
 	scheduler.Stop()
 
+	freshExecuted := make(chan struct{}, 1)
 	scheduler.SetExecutor(func(ctx context.Context, job *SpawnJob) error {
 		if job.ID == "stale-retry" {
 			atomic.AddInt64(&staleRuns, 1)
 		} else {
 			atomic.AddInt64(&freshRuns, 1)
+			freshExecuted <- struct{}{}
 		}
 		return nil
 	})
@@ -661,25 +666,27 @@ func TestScheduler_DoesNotReplayStaleRetryAfterRestart(t *testing.T) {
 	}
 	defer scheduler.Stop()
 
+	// Invoke the old runtime's timer after restart. The generation captured by
+	// scheduleRetry must reject it synchronously.
+	staleRetry()
+	if queued := scheduler.GetJob(staleJob.ID); queued != nil {
+		t.Fatalf("stale retry was re-enqueued after restart: %#v", queued)
+	}
+	if got := atomic.LoadInt64(&staleRuns); got != 1 {
+		t.Fatalf("stale retry executed after restart: got %d runs, want 1", got)
+	}
+
 	if err := scheduler.Submit(NewSpawnJob("fresh-after-restart", JobTypeSession, "test")); err != nil {
 		t.Fatalf("Submit(fresh) failed: %v", err)
 	}
 
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt64(&freshRuns) == 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-freshExecuted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh job did not execute after restart")
 	}
 	if got := atomic.LoadInt64(&freshRuns); got != 1 {
 		t.Fatalf("fresh runs after restart = %d, want 1", got)
-	}
-
-	time.Sleep(cfg.DefaultRetryDelay + 150*time.Millisecond)
-
-	if got := atomic.LoadInt64(&staleRuns); got != 1 {
-		t.Fatalf("stale retry executed after restart: got %d runs, want 1", got)
 	}
 }
 
