@@ -167,7 +167,7 @@ var (
 		cmd.Dir = projectDir
 		return cmd
 	}
-	memoryDaemonStartupDelay = 2 * time.Second
+	memoryDaemonStartupTimeout = 2 * time.Second
 )
 
 // Request/Response types
@@ -710,6 +710,10 @@ func (s *Server) currentMemoryDaemonInfo() *MemoryDaemonInfo {
 
 // checkMemoryDaemon checks if the memory daemon is running
 func (s *Server) checkMemoryDaemon() *MemoryDaemonInfo {
+	return s.checkMemoryDaemonMatching(0, "")
+}
+
+func (s *Server) checkMemoryDaemonMatching(port int, sessionID string) *MemoryDaemonInfo {
 	info := &MemoryDaemonInfo{State: DaemonStateStopped}
 
 	// Look for PID files in .ntm/pids
@@ -741,19 +745,44 @@ func (s *Server) checkMemoryDaemon() *MemoryDaemonInfo {
 			}
 
 			// Extract session ID from filename
-			sessionID := strings.TrimPrefix(name, "cm-")
-			sessionID = strings.TrimSuffix(sessionID, ".pid")
+			candidateSessionID := strings.TrimPrefix(name, "cm-")
+			candidateSessionID = strings.TrimSuffix(candidateSessionID, ".pid")
+			if port > 0 && pidInfo.Port != port {
+				continue
+			}
+			if sessionID != "" && candidateSessionID != sessionID {
+				continue
+			}
 
 			info.State = DaemonStateRunning
 			info.PID = pidInfo.PID
 			info.Port = pidInfo.Port
-			info.SessionID = sessionID
+			info.SessionID = candidateSessionID
 			info.StartedAt = &pidInfo.StartedAt
 			return info
 		}
 	}
 
 	return info
+}
+
+func (s *Server) waitForMemoryDaemon(port int, sessionID string, timeout time.Duration) *MemoryDaemonInfo {
+	deadline := time.Now().Add(timeout)
+	for {
+		info := s.checkMemoryDaemonMatching(port, sessionID)
+		if info.State == DaemonStateRunning {
+			return info
+		}
+
+		remaining := time.Until(deadline)
+		if timeout <= 0 || remaining <= 0 {
+			return info
+		}
+		if remaining > 25*time.Millisecond {
+			remaining = 25 * time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
 }
 
 // handleMemoryDaemonStart starts the memory daemon
@@ -860,13 +889,10 @@ func (s *Server) startMemoryDaemonAsync(port int, sessionID string) {
 
 	go s.watchMemoryDaemonExit(cmd, sessionID)
 
-	// Wait a moment for the daemon to start
-	time.Sleep(memoryDaemonStartupDelay)
-
-	// Check if the daemon that came up is the one we requested. A broad PID-file
-	// scan can otherwise misattribute another cm daemon and falsely report success.
-	daemonInfo := s.checkMemoryDaemon()
-	if daemonInfo.State == DaemonStateRunning && daemonInfo.Port == port {
+	// Wait for the exact daemon requested. A one-shot check is racy while the
+	// child initializes and a broad PID-file scan can misattribute another daemon.
+	daemonInfo := s.waitForMemoryDaemon(port, sessionID, memoryDaemonStartupTimeout)
+	if daemonInfo.State == DaemonStateRunning {
 		memoryStore.SetDaemonInfo(daemonInfo)
 		s.publishMemoryEvent("memory.daemon.started", map[string]interface{}{
 			"pid":        daemonInfo.PID,

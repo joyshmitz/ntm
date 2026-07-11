@@ -53,6 +53,13 @@ func TestServeMemoryDaemonHelperProcess(t *testing.T) {
 		if pidPath == "" {
 			os.Exit(2)
 		}
+		if delayText := os.Getenv("NTM_SERVE_HELPER_PID_DELAY"); delayText != "" {
+			delay, err := time.ParseDuration(delayText)
+			if err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(delay)
+		}
 		port, err := strconv.Atoi(os.Getenv("NTM_SERVE_HELPER_PORT"))
 		if err != nil {
 			os.Exit(2)
@@ -5454,16 +5461,17 @@ func TestStartMemoryDaemonAsync_KeepsDaemonAliveAfterStartup(t *testing.T) {
 	srv.projectDir = tmpDir
 
 	oldCommand := memoryDaemonCommand
-	oldDelay := memoryDaemonStartupDelay
+	oldTimeout := memoryDaemonStartupTimeout
 	oldStore := memoryStore
 	memoryStore = NewMemoryStore()
-	memoryDaemonStartupDelay = 50 * time.Millisecond
+	memoryDaemonStartupTimeout = 2 * time.Second
 	pidPath := filepath.Join(pidsDir, "cm-test-session.pid")
 	memoryDaemonCommand = func(projectDir string, port int) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestServeMemoryDaemonHelperProcess")
 		cmd.Env = append(os.Environ(),
 			"NTM_SERVE_HELPER_PROCESS=memory-daemon-write-pid",
 			"NTM_SERVE_HELPER_PID_PATH="+pidPath,
+			"NTM_SERVE_HELPER_PID_DELAY=150ms",
 			fmt.Sprintf("NTM_SERVE_HELPER_PORT=%d", port),
 		)
 		return cmd
@@ -5482,7 +5490,7 @@ func TestStartMemoryDaemonAsync_KeepsDaemonAliveAfterStartup(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		memoryDaemonCommand = oldCommand
-		memoryDaemonStartupDelay = oldDelay
+		memoryDaemonStartupTimeout = oldTimeout
 		memoryStore = oldStore
 	}()
 
@@ -5540,10 +5548,10 @@ func TestStartMemoryDaemonAsync_DoesNotAdoptDifferentDaemonPort(t *testing.T) {
 	srv.projectDir = tmpDir
 
 	oldCommand := memoryDaemonCommand
-	oldDelay := memoryDaemonStartupDelay
+	oldTimeout := memoryDaemonStartupTimeout
 	oldStore := memoryStore
 	memoryStore = NewMemoryStore()
-	memoryDaemonStartupDelay = 50 * time.Millisecond
+	memoryDaemonStartupTimeout = 50 * time.Millisecond
 	memoryDaemonCommand = func(projectDir string, port int) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestServeMemoryDaemonHelperProcess")
 		cmd.Env = append(os.Environ(), "NTM_SERVE_HELPER_PROCESS=memory-daemon")
@@ -5555,7 +5563,7 @@ func TestStartMemoryDaemonAsync_DoesNotAdoptDifferentDaemonPort(t *testing.T) {
 			_ = stopMemoryDaemonProcess(info.PID, 2*time.Second)
 		}
 		memoryDaemonCommand = oldCommand
-		memoryDaemonStartupDelay = oldDelay
+		memoryDaemonStartupTimeout = oldTimeout
 		memoryStore = oldStore
 	}()
 
