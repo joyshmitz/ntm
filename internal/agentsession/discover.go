@@ -11,6 +11,7 @@
 package agentsession
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -39,13 +40,34 @@ var claudeNonAlnumPattern = regexp.MustCompile(`[^a-zA-Z0-9]`)
 var codexUUIDAtEndPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 const (
-	casrDiscoveryTimeout = 30 * time.Second
-	casrDiscoveryLimit   = 20
-	processTreeMaxDepth  = 8
-	processTreeFanout    = 64
-	processTreeMaxNodes  = 256
-	processFilesTimeout  = 2 * time.Second
-	processSessionWindow = 5 * time.Minute
+	casrDiscoveryTimeout    = 30 * time.Second
+	casrDiscoveryLimit      = 20
+	processTreeMaxDepth     = 8
+	processTreeFanout       = 64
+	processTreeMaxNodes     = 256
+	processFilesTimeout     = 2 * time.Second
+	processSessionWindow    = 5 * time.Minute
+	bindingFreshnessHorizon = processSessionWindow
+)
+
+// DiscoverySource identifies how a provider session was bound to a pane.
+type DiscoverySource string
+
+const (
+	DiscoverySourceProcessTree DiscoverySource = "process_tree"
+	DiscoverySourceCASR        DiscoverySource = "casr"
+	DiscoverySourceNativeStore DiscoverySource = "native_store"
+)
+
+// BindingFreshness describes whether a provider binding is current enough to
+// trust as a fresh sample. Stale bindings remain useful for explicit restore
+// diagnostics but are never silently presented as fresh evidence.
+type BindingFreshness string
+
+const (
+	BindingFresh       BindingFreshness = "fresh"
+	BindingStale       BindingFreshness = "stale"
+	BindingUnavailable BindingFreshness = "unavailable"
 )
 
 // Info describes a discovered agent CLI session for a pane.
@@ -57,9 +79,27 @@ type Info struct {
 	// Provider is the casr/native provider name ("claude", "codex", "gemini", "antigravity").
 	Provider string `json:"provider"`
 	// SourcePath is the on-disk session file the id was discovered from.
-	SourcePath string `json:"source_path,omitempty"`
+	SourcePath string `json:"-"`
 	// UpdatedAt is the modification time of the session file.
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// Source identifies the discovery mechanism that produced this binding.
+	Source DiscoverySource `json:"source,omitempty"`
+}
+
+// BindingObservation is a bounded, point-in-time provider-session sample.
+// SourcePath remains process-private so status surfaces do not expose local
+// transcript locations; session persistence may copy it explicitly when needed.
+type BindingObservation struct {
+	AgentType       string           `json:"agent_type"`
+	SessionID       string           `json:"session_id,omitempty"`
+	Provider        string           `json:"provider,omitempty"`
+	Source          DiscoverySource  `json:"source,omitempty"`
+	ObservedAt      time.Time        `json:"observed_at"`
+	SourceUpdatedAt time.Time        `json:"source_updated_at,omitempty"`
+	Freshness       BindingFreshness `json:"freshness"`
+	Confidence      float64          `json:"confidence"`
+	FailureCode     string           `json:"failure_code,omitempty"`
+	SourcePath      string           `json:"-"`
 }
 
 // ResumeProvider maps an ntm agent type to the casr/provider name used by
@@ -139,6 +179,19 @@ func runDiscoveryCommand(ctx context.Context, name string, args ...string) ([]by
 // It returns nil when no session can be located because topology capture must
 // remain best-effort.
 func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
+	return d.DiscoverContext(context.Background(), agentType, workDir, panePID)
+}
+
+// DiscoverContext is the cancellation-aware form of Discover. External
+// commands inherit ctx, and native fallbacks check cancellation between each
+// bounded discovery stage.
+func (d *Discoverer) DiscoverContext(ctx context.Context, agentType, workDir string, panePID int) *Info {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	provider := ResumeProvider(agentType)
 	if provider == "" {
 		return nil
@@ -149,6 +202,9 @@ func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
 		homeFn = os.UserHomeDir
 	}
 	home, _ := homeFn()
+	if ctx.Err() != nil {
+		return nil
+	}
 	var processStartedAt int64
 	if panePID > 0 {
 		finder := d.findProcessSession
@@ -156,6 +212,12 @@ func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
 			finder = discoverProcessSession
 		}
 		if info := finder(agentType, provider, home, panePID); info != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if info.Source == "" {
+				info.Source = DiscoverySourceProcessTree
+			}
 			d.claim(info)
 			return info
 		}
@@ -166,6 +228,9 @@ func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
 			startFinder = agentProcessStartMillis
 		}
 		processStartedAt = startFinder(panePID, provider)
+		if ctx.Err() != nil {
+			return nil
+		}
 	}
 	if workDir == "" {
 		return nil
@@ -183,12 +248,18 @@ func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
 		d.fallbackCache = make(map[string]*Info)
 	}
 	if cached, ok := d.fallbackCache[cacheKey]; ok {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return cloneInfo(cached)
 	}
 
 	var info *Info
 	if provider == "codex" || provider == "gemini" {
-		info = d.discoverCASR(agentType, provider, cleanWorkDir, processStartedAt)
+		info = d.discoverCASR(ctx, agentType, provider, cleanWorkDir, processStartedAt)
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	if info != nil {
 		d.claim(info)
@@ -199,20 +270,80 @@ func (d *Discoverer) Discover(agentType, workDir string, panePID int) *Info {
 		d.fallbackCache[cacheKey] = nil
 		return nil
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
 
 	switch provider {
 	case "claude":
-		info = discoverClaude(home, cleanWorkDir)
+		info = discoverClaudeContext(ctx, home, cleanWorkDir)
 	case "codex":
-		info = discoverCodex(home, cleanWorkDir, d.claimedSessions)
+		info = discoverCodexContext(ctx, home, cleanWorkDir, d.claimedSessions)
 	case "gemini":
-		info = discoverGemini(home, cleanWorkDir, processStartedAt, d.claimedSessions)
+		info = discoverGeminiContext(ctx, home, cleanWorkDir, processStartedAt, d.claimedSessions)
 	case "antigravity":
-		info = discoverAntigravity(home, cleanWorkDir)
+		info = discoverAntigravityContext(ctx, home, cleanWorkDir)
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if info != nil && info.Source == "" {
+		info.Source = DiscoverySourceNativeStore
 	}
 	d.claim(info)
 	d.fallbackCache[cacheKey] = cloneInfo(info)
 	return info
+}
+
+// ObserveBinding samples one provider binding with explicit evidence quality.
+// A missing or cancelled lookup is represented as unavailable rather than an
+// ambiguous empty successful result.
+func (d *Discoverer) ObserveBinding(ctx context.Context, agentType, workDir string, panePID int, observedAt time.Time) BindingObservation {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	observedAt = observedAt.UTC()
+	observation := BindingObservation{
+		AgentType:  canonicalAgentType(agentType, ResumeProvider(agentType)),
+		ObservedAt: observedAt,
+		Freshness:  BindingUnavailable,
+	}
+	info := d.DiscoverContext(ctx, agentType, workDir, panePID)
+	if info == nil {
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			observation.FailureCode = "deadline_exceeded"
+		case context.Canceled:
+			observation.FailureCode = "cancelled"
+		default:
+			observation.FailureCode = "not_found"
+		}
+		return observation
+	}
+
+	observation.AgentType = info.AgentType
+	observation.SessionID = info.SessionID
+	observation.Provider = info.Provider
+	observation.Source = info.Source
+	observation.SourceUpdatedAt = info.UpdatedAt
+	observation.SourcePath = info.SourcePath
+	observation.Freshness = BindingFresh
+	switch info.Source {
+	case DiscoverySourceProcessTree:
+		observation.Confidence = 0.99
+	case DiscoverySourceCASR:
+		observation.Confidence = 0.9
+	case DiscoverySourceNativeStore:
+		observation.Confidence = 0.75
+	default:
+		observation.Confidence = 0.5
+	}
+	if info.Source != DiscoverySourceProcessTree &&
+		(info.UpdatedAt.IsZero() || info.UpdatedAt.After(observedAt) || observedAt.Sub(info.UpdatedAt) >= bindingFreshnessHorizon) {
+		observation.Freshness = BindingStale
+		observation.Confidence *= 0.5
+	}
+	return observation
 }
 
 func sessionClaimKey(provider, sessionID string) string {
@@ -233,7 +364,7 @@ func (d *Discoverer) isClaimed(provider, sessionID string) bool {
 	return d.claimedSessions[sessionClaimKey(provider, sessionID)]
 }
 
-func (d *Discoverer) discoverCASR(agentType, provider, workDir string, processStartedAt int64) *Info {
+func (d *Discoverer) discoverCASR(ctx context.Context, agentType, provider, workDir string, processStartedAt int64) *Info {
 	cleanWorkDir := filepath.Clean(workDir)
 	queryKey := provider + "\x00" + cleanWorkDir
 	if d.casrItemsCache == nil {
@@ -254,8 +385,8 @@ func (d *Discoverer) discoverCASR(agentType, provider, workDir string, processSt
 			if runner == nil {
 				runner = runDiscoveryCommand
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), casrDiscoveryTimeout)
-			output, runErr := runner(ctx, binary,
+			commandCtx, cancel := context.WithTimeout(ctx, casrDiscoveryTimeout)
+			output, runErr := runner(commandCtx, binary,
 				"list",
 				"--workspace", cleanWorkDir,
 				"--provider", provider,
@@ -264,6 +395,10 @@ func (d *Discoverer) discoverCASR(agentType, provider, workDir string, processSt
 				"--json",
 			)
 			cancel()
+			if runErr != nil && ctx.Err() != nil {
+				delete(d.casrChecked, queryKey)
+				return nil
+			}
 			if runErr == nil {
 				var envelope casrListEnvelope
 				if json.Unmarshal(output, &envelope) == nil {
@@ -272,11 +407,19 @@ func (d *Discoverer) discoverCASR(agentType, provider, workDir string, processSt
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		delete(d.casrChecked, queryKey)
+		return nil
+	}
 
 	var best *casrListItem
 	var bestActivity int64
 	var bestDelta int64
 	for _, item := range d.casrItemsCache[queryKey] {
+		if ctx.Err() != nil {
+			delete(d.casrChecked, queryKey)
+			return nil
+		}
 		if strings.TrimSpace(item.Provider) != provider || strings.TrimSpace(item.SessionID) == "" {
 			continue
 		}
@@ -318,6 +461,7 @@ func (d *Discoverer) discoverCASR(agentType, provider, workDir string, processSt
 		SessionID:  strings.TrimSpace(best.SessionID),
 		Provider:   provider,
 		SourcePath: best.Path,
+		Source:     DiscoverySourceCASR,
 	}
 	activity := best.LastActiveAt
 	if activity == 0 {
@@ -706,8 +850,15 @@ func encodeClaudeProjectDir(workDir string) string {
 // discoverClaude locates the newest *.jsonl under
 // ~/.claude/projects/<encoded-cwd>/ and treats the filename stem as the id.
 func discoverClaude(home, workDir string) *Info {
+	return discoverClaudeContext(context.Background(), home, workDir)
+}
+
+func discoverClaudeContext(ctx context.Context, home, workDir string) *Info {
+	if ctx.Err() != nil {
+		return nil
+	}
 	projDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectDir(workDir))
-	path, mod := newestFileWithExt(projDir, ".jsonl")
+	path, mod := newestFileWithExtContext(ctx, projDir, ".jsonl")
 	if path == "" {
 		return nil
 	}
@@ -728,8 +879,15 @@ func discoverClaude(home, workDir string) *Info {
 // structured session_meta record instead of matching an arbitrary cwd
 // substring in the rollout body.
 func discoverCodex(home, workDir string, claimed map[string]bool) *Info {
+	return discoverCodexContext(context.Background(), home, workDir, claimed)
+}
+
+func discoverCodexContext(ctx context.Context, home, workDir string, claimed map[string]bool) *Info {
+	if ctx.Err() != nil {
+		return nil
+	}
 	root := filepath.Join(home, ".codex", "sessions")
-	path, mod := newestCodexRolloutForCwd(root, filepath.Clean(workDir), claimed)
+	path, mod := newestCodexRolloutForCwdContext(ctx, root, filepath.Clean(workDir), claimed)
 	if path == "" {
 		return nil
 	}
@@ -750,8 +908,15 @@ func discoverCodex(home, workDir string, claimed map[string]bool) *Info {
 // both the current projects.json workspace slug and the legacy SHA256 directory
 // instead of scanning chat bodies for a cwd substring.
 func discoverGemini(home, workDir string, processStartedAt int64, claimed map[string]bool) *Info {
+	return discoverGeminiContext(context.Background(), home, workDir, processStartedAt, claimed)
+}
+
+func discoverGeminiContext(ctx context.Context, home, workDir string, processStartedAt int64, claimed map[string]bool) *Info {
+	if ctx.Err() != nil {
+		return nil
+	}
 	root := filepath.Join(home, ".gemini", "tmp")
-	path, mod := newestGeminiSessionForCwd(root, filepath.Clean(workDir), processStartedAt, claimed)
+	path, mod := newestGeminiSessionForCwdContext(ctx, root, filepath.Clean(workDir), processStartedAt, claimed)
 	if path == "" {
 		return nil
 	}
@@ -780,8 +945,15 @@ func discoverGemini(home, workDir string, processStartedAt int64, claimed map[st
 // each other's directory, so a gmi session is never reported as agy and vice
 // versa even though both hang off the shared ~/.gemini parent.
 func discoverAntigravity(home, workDir string) *Info {
+	return discoverAntigravityContext(context.Background(), home, workDir)
+}
+
+func discoverAntigravityContext(ctx context.Context, home, workDir string) *Info {
+	if ctx.Err() != nil {
+		return nil
+	}
 	root := filepath.Join(home, ".gemini", "antigravity-cli", "conversations")
-	path, mod := newestAntigravityConversationForCwd(root, filepath.Clean(workDir))
+	path, mod := newestAntigravityConversationForCwdContext(ctx, root, filepath.Clean(workDir))
 	if path == "" {
 		return nil
 	}
@@ -801,6 +973,13 @@ func discoverAntigravity(home, workDir string) *Info {
 // newestFileWithExt returns the path and modtime of the most-recently-modified
 // file with the given extension directly inside dir.
 func newestFileWithExt(dir, ext string) (string, time.Time) {
+	return newestFileWithExtContext(context.Background(), dir, ext)
+}
+
+func newestFileWithExtContext(ctx context.Context, dir, ext string) (string, time.Time) {
+	if ctx.Err() != nil {
+		return "", time.Time{}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", time.Time{}
@@ -808,6 +987,9 @@ func newestFileWithExt(dir, ext string) (string, time.Time) {
 	var bestPath string
 	var bestMod time.Time
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return "", time.Time{}
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ext) {
 			continue
 		}
@@ -826,9 +1008,16 @@ func newestFileWithExt(dir, ext string) (string, time.Time) {
 // newestCodexRolloutForCwd walks the date-sharded codex session tree and
 // returns the newest rollout whose session_meta workspace belongs to workDir.
 func newestCodexRolloutForCwd(root, workDir string, claimed map[string]bool) (string, time.Time) {
+	return newestCodexRolloutForCwdContext(context.Background(), root, workDir, claimed)
+}
+
+func newestCodexRolloutForCwdContext(ctx context.Context, root, workDir string, claimed map[string]bool) (string, time.Time) {
 	var bestPath string
 	var bestMod time.Time
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || d.IsDir() {
 			return nil //nolint:nilerr // best-effort scan
 		}
@@ -857,6 +1046,9 @@ func newestCodexRolloutForCwd(root, workDir string, claimed map[string]bool) (st
 		bestMod = info.ModTime()
 		return nil
 	})
+	if ctx.Err() != nil {
+		return "", time.Time{}
+	}
 	return bestPath, bestMod
 }
 
@@ -978,6 +1170,13 @@ func geminiSessionStartedAtMillis(path string) int64 {
 }
 
 func geminiWorkspaceChatDirs(root, workDir string) []string {
+	return geminiWorkspaceChatDirsContext(context.Background(), root, workDir)
+}
+
+func geminiWorkspaceChatDirsContext(ctx context.Context, root, workDir string) []string {
+	if ctx.Err() != nil {
+		return nil
+	}
 	var registry struct {
 		Projects map[string]string `json:"projects"`
 	}
@@ -985,6 +1184,9 @@ func geminiWorkspaceChatDirs(root, workDir string) []string {
 		if json.Unmarshal(data, &registry) != nil {
 			registry.Projects = nil
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 
 	dirs := make([]string, 0, 2)
@@ -1006,15 +1208,25 @@ func geminiWorkspaceChatDirs(root, workDir string) []string {
 // it correlates the pane to the closest newly-started chat instead of assigning
 // every same-workspace pane the globally newest session.
 func newestGeminiSessionForCwd(root, workDir string, processStartedAt int64, claimed map[string]bool) (string, time.Time) {
+	return newestGeminiSessionForCwdContext(context.Background(), root, workDir, processStartedAt, claimed)
+}
+
+func newestGeminiSessionForCwdContext(ctx context.Context, root, workDir string, processStartedAt int64, claimed map[string]bool) (string, time.Time) {
 	var bestPath string
 	var bestMod time.Time
 	var bestDelta int64
-	for _, chatsDir := range geminiWorkspaceChatDirs(root, workDir) {
+	for _, chatsDir := range geminiWorkspaceChatDirsContext(ctx, root, workDir) {
+		if ctx.Err() != nil {
+			return "", time.Time{}
+		}
 		entries, err := os.ReadDir(chatsDir)
 		if err != nil {
 			continue
 		}
 		for _, entry := range entries {
+			if ctx.Err() != nil {
+				return "", time.Time{}
+			}
 			if entry.IsDir() {
 				continue
 			}
@@ -1059,6 +1271,13 @@ func newestGeminiSessionForCwd(root, workDir string, processStartedAt int64, cla
 // embedded cwd can appear well past the first few KB, so the whole (small) file
 // is scanned instead of a capped prefix.
 func newestAntigravityConversationForCwd(root, workDir string) (string, time.Time) {
+	return newestAntigravityConversationForCwdContext(context.Background(), root, workDir)
+}
+
+func newestAntigravityConversationForCwdContext(ctx context.Context, root, workDir string) (string, time.Time) {
+	if ctx.Err() != nil {
+		return "", time.Time{}
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return "", time.Time{}
@@ -1066,6 +1285,9 @@ func newestAntigravityConversationForCwd(root, workDir string) (string, time.Tim
 	var bestPath string
 	var bestMod time.Time
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return "", time.Time{}
+		}
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".db") {
 			continue
 		}
@@ -1077,7 +1299,7 @@ func newestAntigravityConversationForCwd(root, workDir string) (string, time.Tim
 			continue
 		}
 		path := filepath.Join(root, e.Name())
-		if !fileContainsCwd(path, workDir) {
+		if !fileContainsCwdContext(ctx, path, workDir) {
 			continue
 		}
 		bestPath = path
@@ -1091,9 +1313,42 @@ func newestAntigravityConversationForCwd(root, workDir string) (string, time.Tim
 // reasonable fixed prefix limit. agy conversation DBs are small (sub-MB), so
 // reading the whole file is cheap and avoids missing a deep match.
 func fileContainsCwd(path, workDir string) bool {
-	data, err := os.ReadFile(path)
+	return fileContainsCwdContext(context.Background(), path, workDir)
+}
+
+func fileContainsCwdContext(ctx context.Context, path, workDir string) bool {
+	if ctx.Err() != nil || workDir == "" {
+		return false
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), workDir)
+	defer file.Close()
+
+	needle := []byte(workDir)
+	buffer := make([]byte, 64*1024)
+	carry := make([]byte, 0, len(needle)-1)
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		read, readErr := file.Read(buffer)
+		if read > 0 {
+			window := make([]byte, 0, len(carry)+read)
+			window = append(window, carry...)
+			window = append(window, buffer[:read]...)
+			if bytes.Contains(window, needle) {
+				return true
+			}
+			keep := len(needle) - 1
+			if keep > len(window) {
+				keep = len(window)
+			}
+			carry = append(carry[:0], window[len(window)-keep:]...)
+		}
+		if readErr != nil {
+			return false
+		}
+	}
 }

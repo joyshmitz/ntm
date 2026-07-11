@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -493,9 +494,16 @@ func resolveResumeScope(sessionName string, allowPrefix bool) (string, string, e
 		return resolvedStoredSession, configuredProjectDir, nil
 	}
 
-	projectDir, err := resolveExplicitProjectDirForSession(resolvedSession)
-	if err != nil {
-		return "", "", err
+	projectDir, explicitErr := resolveExplicitProjectDirForSession(resolvedSession)
+	if explicitErr != nil {
+		localProjectDir, localSession, matched, err := resolveLocalStoredHandoffProjectDir(resolvedSession, allowPrefix)
+		if err != nil {
+			return "", "", err
+		}
+		if matched {
+			return localSession, localProjectDir, nil
+		}
+		return "", "", explicitErr
 	}
 
 	reader := handoff.NewReader(projectDir)
@@ -504,6 +512,38 @@ func resolveResumeScope(sessionName string, allowPrefix bool) (string, string, e
 		return "", "", err
 	}
 	return resolvedSession, projectDir, nil
+}
+
+// resolveLocalStoredHandoffProjectDir permits current-workspace fallback only
+// when the workspace already contains a handoff for the requested session.
+// This preserves explicit-session isolation while allowing create -> resume to
+// work in projects that are not registered in projects_base or live tmux state.
+func resolveLocalStoredHandoffProjectDir(sessionName string, allowPrefix bool) (string, string, bool, error) {
+	candidates := make([]string, 0, 2)
+	if projectRoot := strings.TrimSpace(GetProjectRoot()); projectRoot != "" {
+		candidates = append(candidates, projectRoot)
+	}
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		candidates = append(candidates, cwd)
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		resolved, matched, err := resolveStoredHandoffSessionName(sessionName, handoff.NewReader(candidate), allowPrefix)
+		if err != nil {
+			return "", "", false, err
+		}
+		if matched {
+			return candidate, resolved, true, nil
+		}
+	}
+	return "", sessionName, false, nil
 }
 
 func resolveResumeSourceProjectDir(sessionName, handoffSession, handoffPath string, allowPrefix bool) (string, error) {

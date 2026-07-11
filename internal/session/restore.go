@@ -391,7 +391,7 @@ func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*Resum
 		}
 
 		var launchCmd string
-		if ps.SessionID != "" {
+		if ps.HasFreshSessionBinding() {
 			provider := ps.SessionProvider
 			if provider == "" {
 				provider = agentsession.ResumeProvider(ps.AgentType)

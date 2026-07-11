@@ -13,6 +13,12 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
+const paneSessionBindingTimeout = 1500 * time.Millisecond
+
+type paneBindingDiscoverer interface {
+	ObserveBinding(context.Context, string, string, int, time.Time) agentsession.BindingObservation
+}
+
 // Capture captures the current state of a tmux session.
 func Capture(sessionName string) (state *SessionState, err error) {
 	correlationID := audit.NewCorrelationID()
@@ -58,8 +64,27 @@ func Capture(sessionName string) (state *SessionState, err error) {
 	// Detect working directory from active pane, first pane, or process
 	cwd := detectWorkDir(sessionName, panes)
 
-	// Map pane states (enriches each agent pane with its resumable session id)
+	// Map topology immediately, then sample resumable provider bindings in the
+	// background while the remaining session metadata is collected.
 	paneStates := mapPaneStates(panes, cwd)
+	bindingObservedAt := time.Now().UTC()
+	bindingCtx, cancelBindings := context.WithTimeout(context.Background(), paneSessionBindingTimeout)
+	defer cancelBindings()
+	bindingResults := make(chan []agentsession.BindingObservation, 1)
+	if hasResumablePane(panes) {
+		go func() {
+			bindingResults <- samplePaneSessionBindings(
+				bindingCtx,
+				panes,
+				cwd,
+				bindingObservedAt,
+				agentsession.NewDiscoverer(),
+				paneCurrentPathContext,
+			)
+		}()
+	} else {
+		bindingResults <- make([]agentsession.BindingObservation, len(panes))
+	}
 
 	// Get git info if in a repo
 	gitBranch, gitRemote, gitCommit := getGitInfo(cwd)
@@ -67,6 +92,8 @@ func Capture(sessionName string) (state *SessionState, err error) {
 	// Get layout (whole-session fallback) and per-window fidelity metadata.
 	layout := getLayout(sessionName)
 	windows := captureWindows(sessionName)
+	bindings := awaitPaneSessionBindings(bindingCtx, bindingResults, panes, bindingObservedAt)
+	applyPaneSessionBindings(paneStates, bindings)
 
 	// Parse session creation time (tmux format varies, try common formats)
 	var createdAt time.Time
@@ -181,12 +208,10 @@ func countAgents(panes []tmux.Pane) AgentConfig {
 	return config
 }
 
-// mapPaneStates converts tmux panes to PaneState. sessionCwd is the session's
-// detected working directory, used as a fallback when a pane's own current path
-// cannot be read, for discovering each agent pane's resumable session id.
-func mapPaneStates(panes []tmux.Pane, sessionCwd string) []PaneState {
+// mapPaneStates converts tmux panes to PaneState without performing provider
+// discovery. Binding enrichment runs concurrently under a separate deadline.
+func mapPaneStates(panes []tmux.Pane, _ string) []PaneState {
 	states := make([]PaneState, len(panes))
-	discoverer := agentsession.NewDiscoverer()
 	for i, p := range panes {
 		states[i] = PaneState{
 			Title:       p.Title,
@@ -199,29 +224,117 @@ func mapPaneStates(panes []tmux.Pane, sessionCwd string) []PaneState {
 			Height:      p.Height,
 			PaneID:      p.ID,
 		}
+	}
+	return states
+}
 
-		// Best-effort: link each agent pane to its provider session id so it
-		// can be resumed later. User/editor panes return no provider.
-		if agentsession.ResumeProvider(string(p.Type)) == "" {
+func hasResumablePane(panes []tmux.Pane) bool {
+	for _, pane := range panes {
+		if agentsession.ResumeProvider(string(pane.Type)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func samplePaneSessionBindings(
+	ctx context.Context,
+	panes []tmux.Pane,
+	sessionCwd string,
+	observedAt time.Time,
+	discoverer paneBindingDiscoverer,
+	pathLookup func(context.Context, string) string,
+) []agentsession.BindingObservation {
+	bindings := make([]agentsession.BindingObservation, len(panes))
+	for index, pane := range panes {
+		agentType := string(pane.Type)
+		if agentsession.ResumeProvider(agentType) == "" {
 			continue
 		}
-		paneCwd := paneCurrentPath(p.ID)
+		if err := ctx.Err(); err != nil {
+			bindings[index] = unavailablePaneSessionBinding(agentType, observedAt, err)
+			continue
+		}
+		paneCwd := pathLookup(ctx, pane.ID)
 		if paneCwd == "" {
 			paneCwd = sessionCwd
 		}
-		if info := discoverer.Discover(string(p.Type), paneCwd, p.PID); info != nil {
-			states[i].SessionID = info.SessionID
-			states[i].SessionProvider = info.Provider
-			states[i].SessionFile = info.SourcePath
-		}
+		bindings[index] = discoverer.ObserveBinding(ctx, agentType, paneCwd, pane.PID, observedAt)
 	}
-	return states
+	return bindings
+}
+
+func awaitPaneSessionBindings(
+	ctx context.Context,
+	results <-chan []agentsession.BindingObservation,
+	panes []tmux.Pane,
+	observedAt time.Time,
+) []agentsession.BindingObservation {
+	select {
+	case bindings := <-results:
+		return bindings
+	default:
+	}
+	select {
+	case bindings := <-results:
+		return bindings
+	case <-ctx.Done():
+		bindings := make([]agentsession.BindingObservation, len(panes))
+		for index, pane := range panes {
+			if agentsession.ResumeProvider(string(pane.Type)) != "" {
+				bindings[index] = unavailablePaneSessionBinding(string(pane.Type), observedAt, ctx.Err())
+			}
+		}
+		return bindings
+	}
+}
+
+func unavailablePaneSessionBinding(agentType string, observedAt time.Time, err error) agentsession.BindingObservation {
+	failureCode := "unavailable"
+	switch err {
+	case context.DeadlineExceeded:
+		failureCode = "deadline_exceeded"
+	case context.Canceled:
+		failureCode = "cancelled"
+	}
+	return agentsession.BindingObservation{
+		AgentType:   agentType,
+		ObservedAt:  observedAt,
+		Freshness:   agentsession.BindingUnavailable,
+		FailureCode: failureCode,
+	}
+}
+
+func applyPaneSessionBindings(states []PaneState, bindings []agentsession.BindingObservation) {
+	limit := len(states)
+	if len(bindings) < limit {
+		limit = len(bindings)
+	}
+	for index := 0; index < limit; index++ {
+		binding := bindings[index]
+		if binding.Freshness == "" {
+			continue
+		}
+		states[index].SessionID = binding.SessionID
+		states[index].SessionProvider = binding.Provider
+		states[index].SessionFile = binding.SourcePath
+		states[index].SessionSource = binding.Source
+		states[index].SessionObservedAt = binding.ObservedAt
+		states[index].SessionSourceUpdated = binding.SourceUpdatedAt
+		states[index].SessionFreshness = binding.Freshness
+		states[index].SessionConfidence = binding.Confidence
+		states[index].SessionFailureCode = binding.FailureCode
+	}
 }
 
 // paneCurrentPath reads a single pane's current working directory via tmux.
 // Returns "" on any failure.
 func paneCurrentPath(paneID string) string {
-	output, err := tmux.DefaultClient.Run("display-message", "-t", paneID, "-p", "#{pane_current_path}")
+	return paneCurrentPathContext(context.Background(), paneID)
+}
+
+func paneCurrentPathContext(ctx context.Context, paneID string) string {
+	output, err := tmux.DefaultClient.RunContext(ctx, "display-message", "-t", paneID, "-p", "#{pane_current_path}")
 	if err != nil {
 		return ""
 	}

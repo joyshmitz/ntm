@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,6 +20,28 @@ func nativeDiscoverer(home string) *Discoverer {
 	discoverer.findProcessStart = func(int, string) int64 { return 0 }
 	return discoverer
 }
+
+type manualDeadlineContext struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newManualDeadlineContext() *manualDeadlineContext {
+	return &manualDeadlineContext{done: make(chan struct{})}
+}
+
+func (c *manualDeadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *manualDeadlineContext) Done() <-chan struct{}       { return c.done }
+func (c *manualDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+func (c *manualDeadlineContext) Value(any) any { return nil }
+func (c *manualDeadlineContext) expire()       { c.once.Do(func() { close(c.done) }) }
 
 func TestResumeProvider(t *testing.T) {
 	cases := map[string]string{
@@ -157,6 +180,229 @@ func TestResumeLatestCommand(t *testing.T) {
 		if got := ResumeLatestCommand(in); got != want {
 			t.Errorf("ResumeLatestCommand(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestObserveBindingRecordsProvenanceFreshnessAndKeepsSourcePathPrivate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name           string
+		info           *Info
+		wantSource     DiscoverySource
+		wantFreshness  BindingFreshness
+		wantConfidence float64
+	}{
+		{
+			name: "current process tree binding",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-current",
+				Provider:   "codex",
+				SourcePath: "/private/transcript/location",
+			},
+			wantSource:     DiscoverySourceProcessTree,
+			wantFreshness:  BindingFresh,
+			wantConfidence: 0.99,
+		},
+		{
+			name: "native fallback just inside bounded horizon is fresh",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-recent",
+				Provider:   "codex",
+				Source:     DiscoverySourceNativeStore,
+				SourcePath: "/private/transcript/recent",
+				UpdatedAt:  now.Add(-bindingFreshnessHorizon + time.Nanosecond),
+			},
+			wantSource:     DiscoverySourceNativeStore,
+			wantFreshness:  BindingFresh,
+			wantConfidence: 0.75,
+		},
+		{
+			name: "native fallback at horizon is stale",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-boundary",
+				Provider:   "codex",
+				Source:     DiscoverySourceNativeStore,
+				SourcePath: "/private/transcript/boundary",
+				UpdatedAt:  now.Add(-bindingFreshnessHorizon),
+			},
+			wantSource:     DiscoverySourceNativeStore,
+			wantFreshness:  BindingStale,
+			wantConfidence: 0.375,
+		},
+		{
+			name: "future native fallback is stale",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-future",
+				Provider:   "codex",
+				Source:     DiscoverySourceNativeStore,
+				SourcePath: "/private/transcript/future",
+				UpdatedAt:  now.Add(time.Second),
+			},
+			wantSource:     DiscoverySourceNativeStore,
+			wantFreshness:  BindingStale,
+			wantConfidence: 0.375,
+		},
+		{
+			name: "zero-time native fallback is stale",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-zero",
+				Provider:   "codex",
+				Source:     DiscoverySourceNativeStore,
+				SourcePath: "/private/transcript/zero",
+			},
+			wantSource:     DiscoverySourceNativeStore,
+			wantFreshness:  BindingStale,
+			wantConfidence: 0.375,
+		},
+		{
+			name: "old native fallback is explicitly stale",
+			info: &Info{
+				AgentType:  "cod",
+				SessionID:  "session-old",
+				Provider:   "codex",
+				Source:     DiscoverySourceNativeStore,
+				SourcePath: "/private/transcript/location",
+				UpdatedAt:  now.Add(-bindingFreshnessHorizon - time.Minute),
+			},
+			wantSource:     DiscoverySourceNativeStore,
+			wantFreshness:  BindingStale,
+			wantConfidence: 0.375,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			discoverer := NewDiscoverer()
+			discoverer.findProcessSession = func(string, string, string, int) *Info {
+				copy := *test.info
+				return &copy
+			}
+			observation := discoverer.ObserveBinding(context.Background(), "cod", "/repo", 42, now)
+			if observation.Source != test.wantSource || observation.Freshness != test.wantFreshness || observation.Confidence != test.wantConfidence {
+				t.Fatalf("binding quality = source %q freshness %q confidence %v, want %q/%q/%v", observation.Source, observation.Freshness, observation.Confidence, test.wantSource, test.wantFreshness, test.wantConfidence)
+			}
+			if observation.SessionID != test.info.SessionID || observation.SourcePath != test.info.SourcePath {
+				t.Fatalf("binding identity = %+v", observation)
+			}
+			encoded, err := json.Marshal(observation)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if strings.Contains(string(encoded), test.info.SourcePath) || strings.Contains(string(encoded), "source_path") {
+				t.Fatalf("serialized binding leaked private source path: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestObserveBindingDeadlineIsUnavailableAndRetryable(t *testing.T) {
+	t.Parallel()
+
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return t.TempDir(), nil }
+	discoverer.lookPath = func(string) (string, error) { return "/fake/casr", nil }
+	discoverer.findProcessSession = func(string, string, string, int) *Info { return nil }
+	discoverer.findProcessStart = func(int, string) int64 { return 0 }
+	runs := 0
+	deadlineCtx := newManualDeadlineContext()
+	discoverer.runCommand = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		runs++
+		if runs == 1 {
+			deadlineCtx.expire()
+			<-ctx.Done()
+			return nil, context.DeadlineExceeded
+		}
+		return []byte(`{"items":[{"session_id":"retry-session","provider":"codex","workspace":"/repo","path":"/private/retry.jsonl","last_active_at":1783771200000}]}`), nil
+	}
+
+	first := discoverer.ObserveBinding(deadlineCtx, "cod", "/repo", 0, time.Now())
+	if first.Freshness != BindingUnavailable || first.Confidence != 0 || first.FailureCode != "deadline_exceeded" {
+		t.Fatalf("deadline observation = %+v", first)
+	}
+	second := discoverer.ObserveBinding(context.Background(), "cod", "/repo", 0, time.UnixMilli(1783771200000))
+	if second.SessionID != "retry-session" || second.Source != DiscoverySourceCASR || second.Freshness != BindingFresh {
+		t.Fatalf("retry observation = %+v", second)
+	}
+	if runs != 2 {
+		t.Fatalf("CASR runs = %d, want 2 after cancelled lookup", runs)
+	}
+}
+
+func TestDiscoverContextCancelledBeforeNativeScanIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	workDir := "/data/projects/native-cancel"
+	projectDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectDir(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "retry-session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	discoverer := NewDiscoverer()
+	discoverer.findProcessSession = func(string, string, string, int) *Info { return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	homeCalls := 0
+	discoverer.homeDir = func() (string, error) {
+		homeCalls++
+		if homeCalls == 1 {
+			cancel()
+		}
+		return home, nil
+	}
+	if info := discoverer.DiscoverContext(ctx, "cc", workDir, 0); info != nil {
+		t.Fatalf("cancelled native discovery = %+v, want nil", info)
+	}
+	info := discoverer.DiscoverContext(context.Background(), "cc", workDir, 0)
+	if info == nil || info.SessionID != "retry-session" {
+		t.Fatalf("native retry = %+v, want retry-session", info)
+	}
+}
+
+func TestNativeDiscoveryScansHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	home := t.TempDir()
+	if info := discoverClaudeContext(ctx, home, "/repo"); info != nil {
+		t.Fatalf("cancelled Claude scan = %+v", info)
+	}
+	if info := discoverCodexContext(ctx, home, "/repo", nil); info != nil {
+		t.Fatalf("cancelled Codex scan = %+v", info)
+	}
+	if info := discoverGeminiContext(ctx, home, "/repo", 0, nil); info != nil {
+		t.Fatalf("cancelled Gemini scan = %+v", info)
+	}
+	if info := discoverAntigravityContext(ctx, home, "/repo"); info != nil {
+		t.Fatalf("cancelled Antigravity scan = %+v", info)
+	}
+}
+
+func TestFileContainsCwdContextMatchesAcrossReadBoundary(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "conversation.db")
+	workDir := "/data/projects/boundary"
+	payload := append(make([]byte, 64*1024-3), []byte(workDir)...)
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !fileContainsCwdContext(context.Background(), path, workDir) {
+		t.Fatal("cwd spanning read chunks was not detected")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if fileContainsCwdContext(ctx, path, workDir) {
+		t.Fatal("cancelled scan reported a match")
 	}
 }
 

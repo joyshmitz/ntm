@@ -1,14 +1,25 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentsession"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+type fakePaneBindingDiscoverer struct {
+	observe func(context.Context, string, string, int, time.Time) agentsession.BindingObservation
+}
+
+func (f fakePaneBindingDiscoverer) ObserveBinding(ctx context.Context, agentType, workDir string, panePID int, observedAt time.Time) agentsession.BindingObservation {
+	return f.observe(ctx, agentType, workDir, panePID, observedAt)
+}
 
 // --- AgentConfig Tests ---
 
@@ -49,6 +60,32 @@ func TestAgentConfig_Total(t *testing.T) {
 			got := tt.config.Total()
 			if got != tt.want {
 				t.Errorf("Total() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPaneStateHasFreshSessionBindingFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		pane       PaneState
+		wantUsable bool
+	}{
+		{name: "fresh process binding", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingFresh, SessionConfidence: 0.99}, wantUsable: true},
+		{name: "fresh native threshold", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingFresh, SessionConfidence: minimumSessionBindingConfidence}, wantUsable: true},
+		{name: "missing id", pane: PaneState{SessionFreshness: agentsession.BindingFresh, SessionConfidence: 0.99}},
+		{name: "legacy unqualified id", pane: PaneState{SessionID: "id"}},
+		{name: "stale", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingStale, SessionConfidence: 0.99}},
+		{name: "unavailable", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingUnavailable, SessionConfidence: 0.99}},
+		{name: "low confidence", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingFresh, SessionConfidence: minimumSessionBindingConfidence - 0.01}},
+		{name: "invalid high confidence", pane: PaneState{SessionID: "id", SessionFreshness: agentsession.BindingFresh, SessionConfidence: 1.01}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.pane.HasFreshSessionBinding(); got != test.wantUsable {
+				t.Fatalf("HasFreshSessionBinding = %v, want %v for %+v", got, test.wantUsable, test.pane)
 			}
 		})
 	}
@@ -923,6 +960,126 @@ func TestMapPaneStates(t *testing.T) {
 			t.Errorf("states[2].AgentType = %q, want cod", states[2].AgentType)
 		}
 	})
+}
+
+func TestSamplePaneSessionBindingsRecordsQualityAndPreservesPaneOrder(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	panes := []tmux.Pane{
+		{ID: "%0", Index: 0, Type: tmux.AgentUser},
+		{ID: "%1", Index: 1, Type: tmux.AgentClaude, PID: 101},
+		{ID: "%2", Index: 2, Type: tmux.AgentCodex, PID: 202},
+	}
+	type call struct {
+		agentType string
+		workDir   string
+		pid       int
+	}
+	var calls []call
+	discoverer := fakePaneBindingDiscoverer{observe: func(_ context.Context, agentType, workDir string, pid int, gotObservedAt time.Time) agentsession.BindingObservation {
+		if gotObservedAt != observedAt {
+			t.Fatalf("observedAt = %v, want %v", gotObservedAt, observedAt)
+		}
+		calls = append(calls, call{agentType: agentType, workDir: workDir, pid: pid})
+		if agentType == string(tmux.AgentClaude) {
+			return agentsession.BindingObservation{
+				AgentType:  agentType,
+				SessionID:  "claude-session",
+				Provider:   "claude",
+				Source:     agentsession.DiscoverySourceProcessTree,
+				ObservedAt: observedAt,
+				Freshness:  agentsession.BindingFresh,
+				Confidence: 0.99,
+				SourcePath: "/private/claude-session.jsonl",
+			}
+		}
+		return agentsession.BindingObservation{
+			AgentType:       agentType,
+			SessionID:       "codex-session",
+			Provider:        "codex",
+			Source:          agentsession.DiscoverySourceNativeStore,
+			ObservedAt:      observedAt,
+			SourceUpdatedAt: observedAt.Add(-48 * time.Hour),
+			Freshness:       agentsession.BindingStale,
+			Confidence:      0.375,
+		}
+	}}
+	bindings := samplePaneSessionBindings(
+		context.Background(),
+		panes,
+		"/session",
+		observedAt,
+		discoverer,
+		func(_ context.Context, paneID string) string {
+			if paneID == "%1" {
+				return "/pane-one"
+			}
+			return ""
+		},
+	)
+	if len(bindings) != len(panes) || bindings[0].Freshness != "" {
+		t.Fatalf("bindings = %+v", bindings)
+	}
+	if len(calls) != 2 || calls[0] != (call{agentType: "cc", workDir: "/pane-one", pid: 101}) || calls[1] != (call{agentType: "cod", workDir: "/session", pid: 202}) {
+		t.Fatalf("discovery calls = %+v", calls)
+	}
+
+	states := mapPaneStates(panes, "/session")
+	applyPaneSessionBindings(states, bindings)
+	if states[0].SessionFreshness != "" {
+		t.Fatalf("user pane gained provider binding: %+v", states[0])
+	}
+	if states[1].SessionID != "claude-session" || states[1].SessionSource != agentsession.DiscoverySourceProcessTree || states[1].SessionFreshness != agentsession.BindingFresh || states[1].SessionConfidence != 0.99 {
+		t.Fatalf("fresh binding not applied: %+v", states[1])
+	}
+	encoded, err := json.Marshal(states[1])
+	if err != nil {
+		t.Fatalf("Marshal pane state: %v", err)
+	}
+	if strings.Contains(string(encoded), "/private/claude-session.jsonl") || strings.Contains(string(encoded), "session_file") {
+		t.Fatalf("serialized pane state leaked provider transcript path: %s", encoded)
+	}
+	if states[2].SessionID != "codex-session" || states[2].SessionSource != agentsession.DiscoverySourceNativeStore || states[2].SessionFreshness != agentsession.BindingStale || states[2].SessionConfidence != 0.375 {
+		t.Fatalf("stale binding not explicit: %+v", states[2])
+	}
+}
+
+func TestSamplePaneSessionBindingsCancellationIsExplicitAndSkipsDiscovery(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	discoverer := fakePaneBindingDiscoverer{observe: func(context.Context, string, string, int, time.Time) agentsession.BindingObservation {
+		t.Fatal("discovery must not run after cancellation")
+		return agentsession.BindingObservation{}
+	}}
+	panes := []tmux.Pane{
+		{ID: "%0", Type: tmux.AgentUser},
+		{ID: "%1", Type: tmux.AgentClaude},
+	}
+	bindings := samplePaneSessionBindings(ctx, panes, "/repo", time.Now(), discoverer, func(context.Context, string) string {
+		t.Fatal("path lookup must not run after cancellation")
+		return ""
+	})
+	if bindings[0].Freshness != "" || bindings[1].Freshness != agentsession.BindingUnavailable || bindings[1].FailureCode != "cancelled" {
+		t.Fatalf("cancelled bindings = %+v", bindings)
+	}
+}
+
+func TestAwaitPaneSessionBindingsDeadlineReturnsUnavailableWithoutWaitingForWorker(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	panes := []tmux.Pane{
+		{ID: "%0", Type: tmux.AgentUser},
+		{ID: "%1", Type: tmux.AgentCodex},
+	}
+	bindings := awaitPaneSessionBindings(ctx, make(chan []agentsession.BindingObservation), panes, time.Now())
+	if bindings[0].Freshness != "" || bindings[1].Freshness != agentsession.BindingUnavailable || bindings[1].FailureCode != "deadline_exceeded" {
+		t.Fatalf("deadline bindings = %+v", bindings)
+	}
 }
 
 // TestWindowCreationOrder verifies the distinct window indices are returned in

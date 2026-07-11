@@ -3,6 +3,8 @@ package session
 
 import (
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentsession"
 )
 
 // StateVersion is the schema version for migrations
@@ -81,9 +83,26 @@ type PaneState struct {
 	// discovering the most-recent provider session for the pane's cwd+agent.
 	// Resume is delegated to casr / native `--resume <id>` (see internal/agentsession),
 	// not reimplemented here.
-	SessionID       string `json:"session_id,omitempty"`       // Provider session id (e.g. Claude UUID)
-	SessionProvider string `json:"session_provider,omitempty"` // casr provider name ("claude", "codex", "gemini")
-	SessionFile     string `json:"session_file,omitempty"`     // On-disk session file id was discovered from
+	SessionID            string                        `json:"session_id,omitempty"`       // Provider session id (e.g. Claude UUID)
+	SessionProvider      string                        `json:"session_provider,omitempty"` // casr provider name ("claude", "codex", "gemini")
+	SessionFile          string                        `json:"-"`                          // Process-private discovery path; never serialized
+	SessionSource        agentsession.DiscoverySource  `json:"session_source,omitempty"`
+	SessionObservedAt    time.Time                     `json:"session_observed_at,omitempty"`
+	SessionSourceUpdated time.Time                     `json:"session_source_updated_at,omitempty"`
+	SessionFreshness     agentsession.BindingFreshness `json:"session_freshness,omitempty"`
+	SessionConfidence    float64                       `json:"session_confidence,omitempty"`
+	SessionFailureCode   string                        `json:"session_failure_code,omitempty"`
+}
+
+const minimumSessionBindingConfidence = 0.75
+
+// HasFreshSessionBinding fails closed for stale, unavailable, low-confidence,
+// and legacy unqualified session IDs.
+func (p PaneState) HasFreshSessionBinding() bool {
+	return p.SessionID != "" &&
+		p.SessionFreshness == agentsession.BindingFresh &&
+		p.SessionConfidence >= minimumSessionBindingConfidence &&
+		p.SessionConfidence <= 1
 }
 
 // WindowState captures per-window metadata so a restored session reproduces
