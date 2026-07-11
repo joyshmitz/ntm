@@ -382,6 +382,23 @@ jobs:
           ./ntm shell bash | head -20
           ./ntm shell zsh | head -20
 
+      - name: Run real tmux integration tests
+        env:
+          TMUX_TMPDIR: ${{ runner.temp }}/ntm-tmux
+          TMUX: ""
+        run: |
+          mkdir -p "$TMUX_TMPDIR"
+          go test -v -tags=integration -count=1 -timeout=10m \
+            ./internal/tmux/... \
+            ./internal/pipeline/...
+
+      - name: Clean up private tmux server
+        if: always()
+        env:
+          TMUX_TMPDIR: ${{ runner.temp }}/ntm-tmux
+          TMUX: ""
+        run: tmux kill-server 2>/dev/null || true
+
   # ============================================================================
   # UPGRADE-CHECK - Verify upgrade command works against current releases
   # This catches asset naming drift between upgrade.go and GoReleaser BEFORE release

@@ -63,11 +63,11 @@ test:
 
 ## Run all tests including E2E (requires agents)
 test-all:
-	$(GO) test -v ./...
+	$(GO) test -v -count=1 -tags=e2e ./...
 
 ## Run E2E tests only (requires agents)
 test-e2e:
-	$(GO) test -v ./e2e/...
+	$(GO) test -v -count=1 -tags=e2e ./e2e/... -timeout 10m
 
 ## Validate upgrade asset naming contract
 upgrade-contract:

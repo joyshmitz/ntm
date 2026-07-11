@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -25,9 +26,13 @@ func TestSLBAdapterImplementsInterface(t *testing.T) {
 
 // TestSLBHealthWhenInstalled is an end-to-end regression for issue #202: slb
 // exposes version via the `version` SUBCOMMAND, not a `--version` flag, so the
-// old probe made a healthy slb report "health check failed". Runs only where a
-// real slb is installed (skips in CI without it).
+// old probe made a healthy slb report "health check failed". This live-host
+// probe is opt-in so a developer's PATH cannot affect the default unit suite.
 func TestSLBHealthWhenInstalled(t *testing.T) {
+	if os.Getenv("NTM_LIVE_TOOL_TESTS") != "1" {
+		t.Skip("set NTM_LIVE_TOOL_TESTS=1 to test the host-installed slb binary")
+	}
+
 	adapter := NewSLBAdapter()
 	if _, installed := adapter.Detect(); !installed {
 		t.Skip("slb not installed")

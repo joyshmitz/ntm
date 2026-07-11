@@ -16,7 +16,7 @@ esac
 
 # Normal mode - check arguments
 case "$1" in
-    --version)
+    version|--version)
         echo "slb 0.1.0"
         echo "  commit:  abc123fake"
         echo "  built:   2025-01-01T00:00:00Z"
