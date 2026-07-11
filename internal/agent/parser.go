@@ -416,6 +416,12 @@ func (p *parserImpl) detectError(output string, agentType AgentType) bool {
 
 	switch agentType {
 	case AgentTypeClaudeCode:
+		switch DetectClaudeTurnState(output) {
+		case ClaudeTurnWorking, ClaudeTurnEnded:
+			return false
+		case ClaudeTurnError:
+			return true
+		}
 		return matchAny(recentOutput, ccErrorPatterns)
 	case AgentTypeCodex:
 		return matchAny(recentOutput, codErrorPatterns)

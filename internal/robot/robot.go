@@ -4101,13 +4101,33 @@ func determineState(output, agentType string) string {
 	shortType := translateAgentTypeForStatus(normalizedType)
 	lastLine := status.GetLastNonEmptyLine(output)
 
-	// Claude's live classifier orders spinners against completion and terminal
-	// error markers, so its current-work verdict can safely supersede older
-	// errors and the persistent compose box.
-	if normalizedType == "claude" && isAIAgentLiveBusy(output, normalizedType) {
+	detectedError := status.DetectErrorInOutput(output)
+	if detectedError == status.ErrorRateLimit {
+		return "error"
+	}
+	// A shell prompt in a Claude pane means the agent process exited. Preserve
+	// that guard before considering an older completion marker as idle TUI state.
+	if normalizedType == "claude" &&
+		lastLine != "" &&
+		status.IsPromptLine(lastLine, "user") &&
+		!status.IsPromptLine(lastLine, shortType) &&
+		!HasIdlePattern(lastLine, normalizedType) {
 		return "active"
 	}
-	if status.DetectErrorInOutput(output) != status.ErrorNone {
+	if normalizedType == "claude" {
+		// Claude's newest dynamic marker orders live spinners, completion, and
+		// glyph-led terminal errors. A completed turn may supersede an older
+		// generic tool failure, while rate limits remain sticky above.
+		switch agent.DetectClaudeTurnState(output) {
+		case agent.ClaudeTurnWorking:
+			return "active"
+		case agent.ClaudeTurnError:
+			return "error"
+		case agent.ClaudeTurnEnded:
+			return "idle"
+		}
+	}
+	if detectedError != status.ErrorNone {
 		return "error"
 	}
 	// Other agents use position-blind live patterns. They may supersede idle

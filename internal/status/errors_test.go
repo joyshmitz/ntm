@@ -243,6 +243,15 @@ func TestDetectErrorInOutput_ClaudeToolResult(t *testing.T) {
 	}
 }
 
+func TestDetectErrorInOutput_ClaudeUsageLimit(t *testing.T) {
+	output := "  ⎿ \u00a0You've hit your limit · resets 6am (America/New_York)\n" +
+		"     /upgrade to increase your usage limit.\n"
+
+	if got := DetectErrorInOutput(output); got != ErrorRateLimit {
+		t.Fatalf("DetectErrorInOutput() = %q, want %q", got, ErrorRateLimit)
+	}
+}
+
 func TestDetectErrorInOutput_NoError(t *testing.T) {
 	tests := []struct {
 		name   string

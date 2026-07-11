@@ -275,11 +275,39 @@ func TestDetermineStateLiveBusyPrecedence(t *testing.T) {
 			want: "active",
 		},
 		{
+			name: "queued new-task text below spinner remains active",
+			output: "· Germinating… (5m 56s)\n" +
+				"────────────\n❯ Pick a new task? after this\n────────────\n",
+			want: "active",
+		},
+		{
 			name: "completion after spinner remains idle",
 			output: "✻ Germinating… (ctrl+c to interrupt · 5s)\n" +
 				"✻ Churned for 5s\n" +
 				"❯\n",
 			want: "idle",
+		},
+		{
+			name: "completion after recovered error remains idle",
+			output: "  ⎿ \u00a0Error: Exit code 1\n" +
+				"· Germinating… (5m 56s)\n" +
+				"✻ Churned for 5s\n" +
+				"❯\n",
+			want: "idle",
+		},
+		{
+			name: "completion after recovered connection error remains idle",
+			output: "  ⎿ \u00a0Error: connection refused\n" +
+				"· Germinating… (5m 56s)\n" +
+				"✻ Churned for 5s\n" +
+				"❯\n",
+			want: "idle",
+		},
+		{
+			name: "completion followed by shell prompt means agent exited",
+			output: "✻ Churned for 5s\n" +
+				"$ ",
+			want: "active",
 		},
 		{
 			name: "current error after older spinner remains error",
@@ -294,6 +322,13 @@ func TestDetermineStateLiveBusyPrecedence(t *testing.T) {
 			output: "Error: current command failed\n" +
 				"• Working (4s · esc to interrupt)\n" +
 				"codex>\n",
+			want: "error",
+		},
+		{
+			name: "claude usage limit remains error after completion marker",
+			output: "  ⎿ \u00a0You've hit your limit · resets 6am (America/New_York)\n" +
+				"     /upgrade to increase your usage limit.\n" +
+				"✻ Churned for 5s\n❯\n",
 			want: "error",
 		},
 	}

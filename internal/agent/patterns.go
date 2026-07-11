@@ -147,13 +147,13 @@ var (
 	// claudeNewTaskFooterRe matches the post-turn "new task?" hint Claude parks at
 	// after a turn ends (often paired with a "/clear to save … tokens" line). It
 	// is a turn-ended marker, not active work.
-	claudeNewTaskFooterRe = regexp.MustCompile(`(?i)new\s+task\?`)
+	claudeNewTaskFooterRe = regexp.MustCompile(`(?im)^\s*new\s+task\?\s*/clear\b`)
 
 	// claudeTerminalErrorLineRe matches Claude's rendered tool-result failure
 	// line. Keep this glyph-anchored so queued compose-box text or spinner labels
 	// containing "Error:" cannot terminate an otherwise live turn. Claude uses
 	// NBSP padding in real captures, so the post-glyph class is Unicode-aware.
-	claudeTerminalErrorLineRe = regexp.MustCompile(`(?i)^\s*⎿[\s\x{00a0}]*(?:error|failed|fatal|panic):`)
+	claudeTerminalErrorLineRe = regexp.MustCompile(`(?i)^\s*⎿[\s\x{00a0}]*error:`)
 
 	// ccErrorPatterns indicates an error condition.
 	ccErrorPatterns = []string{
@@ -442,8 +442,7 @@ const claudeLiveTailLines = 16
 // and matches the CC window detectIdle and status.maxIdleScanLines already use.
 const claudeIdleScanLines = 12
 
-// ClaudeActivelyWorking reports whether a Claude Code pane is mid-turn (actively
-// working) based on its captured terminal output.
+// ClaudeTurnState describes the newest dynamic marker in a Claude Code pane.
 //
 // Claude Code keeps a persistent "❯ " input box pinned to the BOTTOM of the
 // screen at all times, even while busy. The live activity spinner (e.g.
@@ -462,38 +461,48 @@ const claudeIdleScanLines = 12
 // present but ordering is ambiguous it returns true (false-WORKING). A
 // dispatcher must NEVER inject a second task into a working agent, so the only
 // acceptable error is to treat a maybe-idle pane as busy.
-func ClaudeActivelyWorking(output string) bool {
+type ClaudeTurnState uint8
+
+const (
+	ClaudeTurnUnknown ClaudeTurnState = iota
+	ClaudeTurnWorking
+	ClaudeTurnEnded
+	ClaudeTurnError
+)
+
+// DetectClaudeTurnState returns the state represented by Claude's newest
+// dynamic marker in the live tail. Completion/error markers are evaluated
+// after spinner markers on each line so an unexpected overlap fails closed.
+func DetectClaudeTurnState(output string) ClaudeTurnState {
 	if output == "" {
-		return false
+		return ClaudeTurnUnknown
 	}
 	clean := stripANSICodes(output)
 	tail := util.GetLastNLines(clean, claudeLiveTailLines)
 	if strings.TrimSpace(tail) == "" {
-		return false
+		return ClaudeTurnUnknown
 	}
 
 	lines := strings.Split(tail, "\n")
-
-	lastSpinner := -1
-	lastStopMarker := -1
-	for i, line := range lines {
+	latestState := ClaudeTurnUnknown
+	for _, line := range lines {
 		if claudeIsActiveSpinnerLine(line) {
-			lastSpinner = i
+			latestState = ClaudeTurnWorking
 		}
-		if claudeIsTurnEndedLine(line) || claudeIsTerminalErrorLine(line) {
-			lastStopMarker = i
+		if claudeIsTurnEndedLine(line) {
+			latestState = ClaudeTurnEnded
+		}
+		if claudeIsTerminalErrorLine(line) {
+			latestState = ClaudeTurnError
 		}
 	}
+	return latestState
+}
 
-	// No spinner anywhere in the live tail → not actively working.
-	if lastSpinner < 0 {
-		return false
-	}
-
-	// A spinner exists. It only counts as "current" work if no completion,
-	// new-task hint, or terminal tool-result error appears after it. The marker
-	// recognizers are deliberately disjoint, so they cannot tie on one line.
-	return lastStopMarker < lastSpinner
+// ClaudeActivelyWorking reports whether the newest Claude turn marker is a
+// live spinner rather than completion or a terminal tool-result error.
+func ClaudeActivelyWorking(output string) bool {
+	return DetectClaudeTurnState(output) == ClaudeTurnWorking
 }
 
 // claudeIsActiveSpinnerLine reports whether a single line is a live Claude

@@ -32,6 +32,7 @@ var errorPatterns = []ErrorPattern{
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)\b429\b.{0,10}(too many|rate|limit)`), Description: "429 with message"},
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)too many requests`), Description: "Too many requests"},
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)quota exceeded`), Description: "Quota exceeded"},
+	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)you(?:['’]|\.)ve\s+(?:hit|reached)\s+your\s+(?:usage\s+)?limit`), Description: "Provider usage limit reached"},
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)try again (later|in)`), Description: "Retry message"},
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)requests per (minute|second|hour)`), Description: "Rate description"},
 	{Type: ErrorRateLimit, Regex: regexp.MustCompile(`(?i)throttl(ed|ing)`), Description: "Throttling"},

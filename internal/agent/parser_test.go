@@ -1498,9 +1498,22 @@ func TestClaudeActivelyWorking(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "completion AFTER recovered error ends turn",
+			output: "  ⎿ \u00a0Error: Exit code 1\n" +
+				"· Germinating… (5m 56s)\n" +
+				"✻ Churned for 5s\n────────────\n❯ \n",
+			want: false,
+		},
+		{
 			name: "queued compose text containing Error does not stop spinner",
 			output: "· Germinating… (5m 56s)\n" +
 				"────────────\n❯ Fix Error: handling in robot tail\n────────────\n",
+			want: true,
+		},
+		{
+			name: "queued compose text containing new task does not stop spinner",
+			output: "· Germinating… (5m 56s)\n" +
+				"────────────\n❯ Pick a new task? after this\n────────────\n",
 			want: true,
 		},
 		{
@@ -1560,6 +1573,29 @@ func TestClaudeTimeoutBudgetAnnotationIsNotError(t *testing.T) {
 	}
 	if got := state.GetRecommendation(); got != RecommendDoNotInterrupt {
 		t.Fatalf("recommendation = %q, want %q", got, RecommendDoNotInterrupt)
+	}
+}
+
+func TestClaudeRecoveredErrorAfterCompletionIsIdle(t *testing.T) {
+	for _, errorLine := range []string{
+		"  ⎿ \u00a0Error: Exit code 1",
+		"  ⎿ \u00a0Error: connection refused",
+	} {
+		output := errorLine + "\n" +
+			"· Germinating… (5m 56s)\n" +
+			"✻ Churned for 5s\n" +
+			"────────────\n❯ \n────────────\n"
+
+		state, err := NewParser().ParseWithHint(output, AgentTypeClaudeCode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.IsInError || state.IsWorking || !state.IsIdle {
+			t.Fatalf("recovered Claude turn state = %+v, want idle without error", state)
+		}
+		if got := state.GetRecommendation(); got != RecommendSafeToRestart {
+			t.Fatalf("recommendation = %q, want %q", got, RecommendSafeToRestart)
+		}
 	}
 }
 
