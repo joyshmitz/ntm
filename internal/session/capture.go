@@ -186,6 +186,7 @@ func countAgents(panes []tmux.Pane) AgentConfig {
 // cannot be read, for discovering each agent pane's resumable session id.
 func mapPaneStates(panes []tmux.Pane, sessionCwd string) []PaneState {
 	states := make([]PaneState, len(panes))
+	discoverer := agentsession.NewDiscoverer()
 	for i, p := range panes {
 		states[i] = PaneState{
 			Title:       p.Title,
@@ -208,7 +209,7 @@ func mapPaneStates(panes []tmux.Pane, sessionCwd string) []PaneState {
 		if paneCwd == "" {
 			paneCwd = sessionCwd
 		}
-		if info := agentsession.Discover(string(p.Type), paneCwd); info != nil {
+		if info := discoverer.Discover(string(p.Type), paneCwd, p.PID); info != nil {
 			states[i].SessionID = info.SessionID
 			states[i].SessionProvider = info.Provider
 			states[i].SessionFile = info.SourcePath

@@ -1,12 +1,24 @@
 package agentsession
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func nativeDiscoverer(home string) *Discoverer {
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return home, nil }
+	discoverer.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	discoverer.findProcessSession = func(string, string, string, int) *Info { return nil }
+	discoverer.findProcessStart = func(int, string) int64 { return 0 }
+	return discoverer
+}
 
 func TestResumeProvider(t *testing.T) {
 	cases := map[string]string{
@@ -185,11 +197,7 @@ func TestDiscoverClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
-
-	info := Discover("cc", workDir)
+	info := nativeDiscoverer(home).Discover("cc", workDir, 0)
 	if info == nil {
 		t.Fatal("expected to discover a claude session, got nil")
 	}
@@ -206,20 +214,17 @@ func TestDiscoverClaude(t *testing.T) {
 
 func TestDiscoverClaudeNoSession(t *testing.T) {
 	home := t.TempDir()
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
-
-	if info := Discover("cc", "/no/such/project"); info != nil {
+	if info := nativeDiscoverer(home).Discover("cc", "/no/such/project", 0); info != nil {
 		t.Errorf("expected nil for missing project, got %+v", info)
 	}
 }
 
 func TestDiscoverNonResumableAgent(t *testing.T) {
-	if info := Discover("user", "/data/projects/demo"); info != nil {
+	discoverer := NewDiscoverer()
+	if info := discoverer.Discover("user", "/data/projects/demo", 0); info != nil {
 		t.Errorf("expected nil for user pane, got %+v", info)
 	}
-	if info := Discover("cursor", "/data/projects/demo"); info != nil {
+	if info := discoverer.Discover("cursor", "/data/projects/demo", 0); info != nil {
 		t.Errorf("expected nil for cursor pane, got %+v", info)
 	}
 }
@@ -231,29 +236,44 @@ func TestDiscoverCodex(t *testing.T) {
 	if err := os.MkdirAll(dayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	roll := filepath.Join(dayDir, "rollout-7c3a.jsonl")
-	content := `{"type":"session_meta","cwd":"` + workDir + `"}` + "\n"
+	sessionID := "019f4e56-c2ba-7652-91d4-e4173bc0f302"
+	roll := filepath.Join(dayDir, "rollout-2026-07-10T19-22-16-"+sessionID+".jsonl")
+	content := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + workDir + `"}}` + "\n"
 	if err := os.WriteFile(roll, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A newer rollout in a sibling prefix must not match this workspace.
+	sibling := filepath.Join(dayDir, "rollout-2026-07-10T20-00-00-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl")
+	if err := os.WriteFile(sibling, []byte(`{"type":"session_meta","payload":{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","cwd":"`+workDir+`-other"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(sibling, future, future); err != nil {
+		t.Fatal(err)
+	}
+	subagent := filepath.Join(dayDir, "rollout-2026-07-10T21-00-00-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl")
+	if err := os.WriteFile(subagent, []byte(`{"type":"session_meta","payload":{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","cwd":"`+workDir+`","thread_source":"subagent"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	furtherFuture := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(subagent, furtherFuture, furtherFuture); err != nil {
+		t.Fatal(err)
+	}
 
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
-
-	info := Discover("cod", workDir)
+	discoverer := nativeDiscoverer(home)
+	info := discoverer.Discover("cod", workDir, 0)
 	if info == nil {
 		t.Fatal("expected to discover a codex session, got nil")
 	}
-	if info.SessionID != "7c3a" {
-		t.Errorf("SessionID = %q, want 7c3a", info.SessionID)
+	if info.SessionID != sessionID {
+		t.Errorf("SessionID = %q, want %q", info.SessionID, sessionID)
 	}
 	if info.Provider != "codex" {
 		t.Errorf("Provider = %q, want codex", info.Provider)
 	}
 
 	// A rollout for a different cwd must not match.
-	if info := Discover("cod", "/some/other/dir"); info != nil {
+	if info := discoverer.Discover("cod", "/some/other/dir", 0); info != nil {
 		t.Errorf("expected nil for non-matching cwd, got %+v", info)
 	}
 }
@@ -261,26 +281,453 @@ func TestDiscoverCodex(t *testing.T) {
 func TestDiscoverGemini(t *testing.T) {
 	home := t.TempDir()
 	workDir := "/data/projects/gemdemo"
-	chatsDir := filepath.Join(home, ".gemini", "tmp", "abcdef", "chats")
+	geminiHome := filepath.Join(home, ".gemini")
+	chatsDir := filepath.Join(geminiHome, "tmp", "gemdemo", "chats")
 	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sess := filepath.Join(chatsDir, "session-42.json")
-	content := `{"workspace":"` + workDir + `"}`
+	registry := `{"projects":{"` + workDir + `":"gemdemo"}}`
+	if err := os.WriteFile(filepath.Join(geminiHome, "projects.json"), []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := filepath.Join(chatsDir, "session-2026-07-10T12-00-gemini42.jsonl")
+	content := `{"sessionId":"gemini-native-42","workspace":"` + workDir + `"}`
 	if err := os.WriteFile(sess, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
-
-	info := Discover("gmi", workDir)
+	info := nativeDiscoverer(home).Discover("gmi", workDir, 0)
 	if info == nil {
 		t.Fatal("expected to discover a gemini session, got nil")
 	}
-	if info.SessionID != "42" {
-		t.Errorf("SessionID = %q, want 42", info.SessionID)
+	if info.SessionID != "gemini-native-42" {
+		t.Errorf("SessionID = %q, want gemini-native-42", info.SessionID)
+	}
+}
+
+func TestDiscoverPrefersPaneProcessSession(t *testing.T) {
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return t.TempDir(), nil }
+	discoverer.findProcessSession = func(agentType, provider, _ string, panePID int) *Info {
+		if agentType != "cod" || provider != "codex" || (panePID != 4242 && panePID != 5252) {
+			t.Fatalf("unexpected process lookup: agent=%q provider=%q pid=%d", agentType, provider, panePID)
+		}
+		return &Info{AgentType: "cod", Provider: "codex", SessionID: "pane-owned"}
+	}
+	discoverer.lookPath = func(string) (string, error) {
+		t.Fatal("CASR must not run when pane process discovery succeeds")
+		return "", os.ErrNotExist
+	}
+
+	info := discoverer.Discover("cod", "/data/projects/demo", 4242)
+	if info == nil || info.SessionID != "pane-owned" {
+		t.Fatalf("process-owned discovery = %+v, want pane-owned session", info)
+	}
+	repeated := discoverer.Discover("cod", "/data/projects/demo", 5252)
+	if repeated == nil || repeated.SessionID != "pane-owned" {
+		t.Fatalf("second pane process discovery = %+v, want shared pane-owned session", repeated)
+	}
+}
+
+func TestDiscoverProcessSessionDoesNotRequireHomeOrWorkDir(t *testing.T) {
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return "", os.ErrNotExist }
+	discoverer.findProcessSession = func(agentType, provider, home string, panePID int) *Info {
+		if agentType != "cod" || provider != "codex" || home != "" || panePID != 4242 {
+			t.Fatalf("unexpected process lookup: agent=%q provider=%q home=%q pid=%d", agentType, provider, home, panePID)
+		}
+		return &Info{AgentType: "cod", Provider: "codex", SessionID: "pane-owned"}
+	}
+	discoverer.lookPath = func(string) (string, error) {
+		t.Fatal("fallback discovery must not run after exact process ownership")
+		return "", os.ErrNotExist
+	}
+
+	info := discoverer.Discover("cod", "", 4242)
+	if info == nil || info.SessionID != "pane-owned" {
+		t.Fatalf("process-owned discovery = %+v, want pane-owned session", info)
+	}
+}
+
+func TestProcessNodeSessionPrefersExplicitResumeOverOpenFile(t *testing.T) {
+	const resumedID = "019f4e56-c2ba-7652-91d4-e4173bc0f302"
+	path := filepath.Join(t.TempDir(), "rollout-root.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"open-file-id","cwd":"/data/projects/demo"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := processNodeSession("cod", "codex", []string{"codex", "resume", resumedID}, func() []string {
+		t.Fatal("open files must not be inspected after a validated resume selector")
+		return []string{path}
+	})
+	if info == nil || info.SessionID != resumedID || info.SourcePath != "" {
+		t.Fatalf("process node session = %+v, want explicit resume %q", info, resumedID)
+	}
+}
+
+func TestProcessNodeSessionIgnoresFilesForUnrelatedProcess(t *testing.T) {
+	info := processNodeSession("cod", "codex", []string{"zsh", "-l"}, func() []string {
+		t.Fatal("open files must not be inspected for an unrelated process")
+		return nil
+	})
+	if info != nil {
+		t.Fatalf("unrelated process session = %+v, want nil", info)
+	}
+}
+
+func TestProcessNodeSessionSkipsEarlierSubagentFile(t *testing.T) {
+	dayDir := filepath.Join(t.TempDir(), "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subagentPath := filepath.Join(dayDir, "rollout-subagent.jsonl")
+	if err := os.WriteFile(subagentPath, []byte(`{"type":"session_meta","payload":{"id":"subagent","cwd":"/data/projects/demo","thread_source":"subagent"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(dayDir, "rollout-root.jsonl")
+	if err := os.WriteFile(rootPath, []byte(`{"type":"session_meta","payload":{"id":"root-session","cwd":"/data/projects/demo","thread_source":"user"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := processNodeSession("cod", "codex", []string{"codex"}, func() []string {
+		return []string{subagentPath, rootPath}
+	})
+	if info == nil || info.SessionID != "root-session" || info.SourcePath != rootPath {
+		t.Fatalf("process discovery = %+v, want root-session from %s", info, rootPath)
+	}
+}
+
+func TestDiscoverCASRStructuredResultAndCache(t *testing.T) {
+	const activity = int64(1_783_726_430_137)
+	casrDir := t.TempDir()
+	subagentPath := filepath.Join(casrDir, "rollout-subagent.jsonl")
+	if err := os.WriteFile(subagentPath, []byte(`{"type":"session_meta","payload":{"id":"subagent","cwd":"/data/projects/demo","thread_source":"subagent"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(casrDir, "rollout-root.jsonl")
+	if err := os.WriteFile(rootPath, []byte(`{"type":"session_meta","payload":{"id":"casr-session","cwd":"/data/projects/demo","thread_source":"user"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(casrListEnvelope{Items: []casrListItem{
+		{
+			SessionID:    "subagent",
+			Provider:     "codex",
+			Workspace:    "/data/projects/demo/subdir",
+			Path:         subagentPath,
+			LastActiveAt: activity + 1,
+		},
+		{
+			SessionID:    "casr-session",
+			Provider:     "codex",
+			Workspace:    "/data/projects/demo/subdir",
+			Path:         rootPath,
+			LastActiveAt: activity,
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return t.TempDir(), nil }
+	discoverer.findProcessSession = func(string, string, string, int) *Info { return nil }
+	discoverer.lookPath = func(name string) (string, error) {
+		if name != "casr" {
+			t.Fatalf("lookPath(%q), want casr", name)
+		}
+		return "/usr/bin/casr", nil
+	}
+	calls := 0
+	discoverer.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls++
+		if name != "/usr/bin/casr" {
+			t.Fatalf("command = %q, want /usr/bin/casr", name)
+		}
+		wantArgs := []string{
+			"list", "--workspace", "/data/projects/demo",
+			"--provider", "codex", "--sort", "date",
+			"--limit", "20", "--json",
+		}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("args = %#v, want %#v", args, wantArgs)
+		}
+		return payload, nil
+	}
+
+	first := discoverer.Discover("cod", "/data/projects/demo", 100)
+	second := discoverer.Discover("cod", "/data/projects/demo", 100)
+	if calls != 1 {
+		t.Fatalf("CASR calls = %d, want 1 cached workspace query", calls)
+	}
+	for _, info := range []*Info{first, second} {
+		if info == nil || info.SessionID != "casr-session" || info.Provider != "codex" {
+			t.Fatalf("CASR discovery = %+v", info)
+		}
+		if info.SourcePath != rootPath {
+			t.Errorf("SourcePath = %q", info.SourcePath)
+		}
+		if got := info.UpdatedAt.UnixMilli(); got != activity {
+			t.Errorf("UpdatedAt = %d, want %d", got, activity)
+		}
+	}
+	if first == second {
+		t.Fatal("cached discovery must return copies, not a shared mutable pointer")
+	}
+}
+
+func TestDiscoverCASRRejectsSiblingPrefixAndFallsBack(t *testing.T) {
+	home := t.TempDir()
+	workDir := "/data/projects/demo"
+	dayDir := filepath.Join(home, ".codex", "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nativeID := "11111111-1111-1111-1111-111111111111"
+	nativePath := filepath.Join(dayDir, "rollout-2026-07-10T20-00-00-"+nativeID+".jsonl")
+	if err := os.WriteFile(nativePath, []byte(`{"type":"session_meta","payload":{"id":"`+nativeID+`","cwd":"`+workDir+`"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(casrListEnvelope{Items: []casrListItem{{
+		SessionID: "wrong-prefix-session",
+		Provider:  "codex",
+		Workspace: workDir + "-other",
+		Path:      "/tmp/wrong.jsonl",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoverer := nativeDiscoverer(home)
+	discoverer.lookPath = func(string) (string, error) { return "/usr/bin/casr", nil }
+	discoverer.runCommand = func(context.Context, string, ...string) ([]byte, error) {
+		return payload, nil
+	}
+
+	info := discoverer.Discover("cod", workDir, 0)
+	if info == nil || info.SessionID != nativeID || info.SourcePath != nativePath {
+		t.Fatalf("fallback discovery = %+v, want native %q", info, nativeID)
+	}
+}
+
+func TestDiscoverCASRCorrelatesSameWorkspacePanesByProcessStart(t *testing.T) {
+	const (
+		firstProcess  = int64(1_700_000_000_000)
+		secondProcess = int64(1_700_000_100_000)
+	)
+	payload, err := json.Marshal(casrListEnvelope{Items: []casrListItem{
+		{
+			SessionID: "older-selector",
+			Provider:  "gemini",
+			Workspace: "/data/projects/demo",
+			Path:      "/tmp/session-older.jsonl",
+			StartedAt: firstProcess - 10,
+		},
+		{
+			SessionID: "first-pane",
+			Provider:  "gemini",
+			Workspace: "/data/projects/demo",
+			Path:      "/tmp/session-first.jsonl",
+			StartedAt: firstProcess + 500,
+		},
+		{
+			SessionID: "second-pane",
+			Provider:  "gemini",
+			Workspace: "/data/projects/demo",
+			Path:      "/tmp/session-second.jsonl",
+			StartedAt: secondProcess + 500,
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	discoverer := NewDiscoverer()
+	discoverer.homeDir = func() (string, error) { return t.TempDir(), nil }
+	discoverer.findProcessSession = func(string, string, string, int) *Info { return nil }
+	discoverer.findProcessStart = func(pid int, _ string) int64 {
+		switch pid {
+		case 101:
+			return firstProcess
+		case 202:
+			return secondProcess
+		default:
+			return 0
+		}
+	}
+	discoverer.lookPath = func(string) (string, error) { return "/usr/bin/casr", nil }
+	calls := 0
+	discoverer.runCommand = func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		return payload, nil
+	}
+
+	first := discoverer.Discover("gmi", "/data/projects/demo", 101)
+	second := discoverer.Discover("gmi", "/data/projects/demo", 202)
+	if first == nil || first.SessionID != "first-pane" {
+		t.Fatalf("first pane discovery = %+v, want first-pane", first)
+	}
+	if second == nil || second.SessionID != "second-pane" {
+		t.Fatalf("second pane discovery = %+v, want second-pane", second)
+	}
+	if calls != 1 {
+		t.Fatalf("CASR calls = %d, want one cached workspace enumeration", calls)
+	}
+}
+
+func TestDiscoverCASRRejectsSessionPredatingProcess(t *testing.T) {
+	const processStartedAt = int64(1_700_000_000_000)
+	home := t.TempDir()
+	workDir := "/data/projects/gemdemo"
+	geminiHome := filepath.Join(home, ".gemini")
+	chatsDir := filepath.Join(geminiHome, "tmp", "gemdemo", "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(geminiHome, "projects.json"), []byte(`{"projects":{"`+workDir+`":"gemdemo"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nativePath := filepath.Join(chatsDir, "session-current.jsonl")
+	nativeStart := time.UnixMilli(processStartedAt + 1_000).UTC().Format(time.RFC3339Nano)
+	if err := os.WriteFile(nativePath, []byte(`{"sessionId":"native-current","startTime":"`+nativeStart+`"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(casrListEnvelope{Items: []casrListItem{{
+		SessionID: "stale-prior-session",
+		Provider:  "gemini",
+		Workspace: workDir,
+		Path:      "/tmp/session-stale.jsonl",
+		StartedAt: processStartedAt - 10_000,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoverer := nativeDiscoverer(home)
+	discoverer.findProcessStart = func(int, string) int64 { return processStartedAt }
+	discoverer.lookPath = func(string) (string, error) { return "/usr/bin/casr", nil }
+	discoverer.runCommand = func(context.Context, string, ...string) ([]byte, error) {
+		return payload, nil
+	}
+
+	info := discoverer.Discover("gmi", workDir, 101)
+	if info == nil || info.SessionID != "native-current" || info.SourcePath != nativePath {
+		t.Fatalf("stale-CASR fallback = %+v, want native-current", info)
+	}
+}
+
+func TestDiscoverCASRMalformedOutputFallsBack(t *testing.T) {
+	home := t.TempDir()
+	workDir := "/data/projects/demo"
+	dayDir := filepath.Join(home, ".codex", "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nativeID := "22222222-2222-2222-2222-222222222222"
+	path := filepath.Join(dayDir, "rollout-modern-"+nativeID+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"`+nativeID+`","cwd":"`+workDir+`"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	discoverer := nativeDiscoverer(home)
+	discoverer.lookPath = func(string) (string, error) { return "/usr/bin/casr", nil }
+	discoverer.runCommand = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("not json"), nil
+	}
+	info := discoverer.Discover("cod", workDir, 0)
+	if info == nil || info.SessionID != nativeID {
+		t.Fatalf("malformed-CASR fallback = %+v, want %q", info, nativeID)
+	}
+}
+
+func TestDiscoverGeminiNativeCorrelatesSameWorkspacePanesByProcessStart(t *testing.T) {
+	home := t.TempDir()
+	workDir := "/data/projects/gemdemo"
+	geminiHome := filepath.Join(home, ".gemini")
+	chatsDir := filepath.Join(geminiHome, "tmp", "gemdemo", "chats")
+	if err := os.MkdirAll(chatsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(geminiHome, "projects.json"), []byte(`{"projects":{"`+workDir+`":"gemdemo"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firstStart := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	secondStart := firstStart.Add(2 * time.Minute)
+	firstPath := filepath.Join(chatsDir, "session-first.jsonl")
+	if err := os.WriteFile(firstPath, []byte(`{"sessionId":"first-pane","startTime":"`+firstStart.Format(time.RFC3339Nano)+`"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secondPath := filepath.Join(chatsDir, "session-second.jsonl")
+	if err := os.WriteFile(secondPath, []byte(`{"sessionId":"second-pane","startTime":"`+secondStart.Format(time.RFC3339Nano)+`"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	discoverer := nativeDiscoverer(home)
+	discoverer.findProcessStart = func(pid int, _ string) int64 {
+		if pid == 101 {
+			return firstStart.Add(-time.Second).UnixMilli()
+		}
+		return secondStart.Add(-time.Second).UnixMilli()
+	}
+	first := discoverer.Discover("gmi", workDir, 101)
+	second := discoverer.Discover("gmi", workDir, 202)
+	if first == nil || first.SessionID != "first-pane" || first.SourcePath != firstPath {
+		t.Fatalf("first native Gemini pane = %+v", first)
+	}
+	if second == nil || second.SessionID != "second-pane" || second.SourcePath != secondPath {
+		t.Fatalf("second native Gemini pane = %+v", second)
+	}
+}
+
+func TestResumedSessionID(t *testing.T) {
+	const codexID = "019f4e56-c2ba-7652-91d4-e4173bc0f302"
+	tests := []struct {
+		provider string
+		argv     []string
+		want     string
+	}{
+		{"claude", []string{"claude", "--resume", "cc-id"}, "cc-id"},
+		{"codex", []string{"codex", "resume", codexID}, codexID},
+		{"codex", []string{"codex", "resume", "-m", "gpt-5", codexID}, codexID},
+		{"codex", []string{"codex", "resume", "--last"}, ""},
+		{"gemini", []string{"gemini", "--resume", "gmi-id"}, "gmi-id"},
+		{"gemini", []string{"gemini", "--resume", "latest"}, ""},
+		{"gemini", []string{"gemini", "--resume", "5"}, ""},
+		{"antigravity", []string{"agy", "--conversation", "agy-id", "--model", "x"}, "agy-id"},
+		{"codex", []string{"codex", "exec", "task"}, ""},
+		{"codex", []string{"rg", "resume", "not-a-session"}, ""},
+	}
+	for _, test := range tests {
+		if got := resumedSessionID(test.provider, test.argv); got != test.want {
+			t.Errorf("resumedSessionID(%q, %#v) = %q, want %q", test.provider, test.argv, got, test.want)
+		}
+	}
+}
+
+func TestPathWithin(t *testing.T) {
+	tests := []struct {
+		candidate string
+		want      bool
+	}{
+		{"/data/projects/demo", true},
+		{"/data/projects/demo/internal", true},
+		{"/data/projects/demo-other", false},
+		{"/data/projects", false},
+	}
+	for _, test := range tests {
+		if got := pathWithin("/data/projects/demo", test.candidate); got != test.want {
+			t.Errorf("pathWithin(candidate=%q) = %v, want %v", test.candidate, got, test.want)
+		}
+	}
+}
+
+func TestParseLsofOpenFiles(t *testing.T) {
+	output := "p42\nfcwd\nn/data/projects/demo\nf12u\nn/tmp/sessions/rollout-root.jsonl\nf3r\nn/tmp/sessions/rollout-older.jsonl\n"
+	want := []processOpenFile{
+		{fd: 12, path: "/tmp/sessions/rollout-root.jsonl"},
+		{fd: 3, path: "/tmp/sessions/rollout-older.jsonl"},
+	}
+	if got := parseLsofOpenFiles(output); !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseLsofOpenFiles() = %#v, want %#v", got, want)
 	}
 }
 
@@ -321,11 +768,8 @@ func TestDiscoverAntigravity(t *testing.T) {
 	// A conversation for a DIFFERENT cwd must be ignored even though it's newest.
 	writeAgyConversation(t, convDir, "33333333-3333-3333-3333-333333333333", "/some/other/dir", -time.Hour)
 
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
-
-	info := Discover("agy", workDir)
+	discoverer := nativeDiscoverer(home)
+	info := discoverer.Discover("agy", workDir, 0)
 	if info == nil {
 		t.Fatal("expected to discover an agy session, got nil")
 	}
@@ -343,7 +787,7 @@ func TestDiscoverAntigravity(t *testing.T) {
 	}
 
 	// A cwd with no matching conversation yields no session.
-	if info := Discover("agy", "/no/such/agy/project"); info != nil {
+	if info := discoverer.Discover("agy", "/no/such/agy/project", 0); info != nil {
 		t.Errorf("expected nil for non-matching cwd, got %+v", info)
 	}
 }
@@ -357,7 +801,7 @@ func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
 	workDir := "/data/projects/sharedcwd"
 
 	// Lay down a gmi (legacy Gemini CLI) session.
-	gmiChats := filepath.Join(home, ".gemini", "tmp", "deadbeef", "chats")
+	gmiChats := filepath.Join(home, ".gemini", "tmp", geminiProjectHash(workDir), "chats")
 	if err := os.MkdirAll(gmiChats, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -373,12 +817,10 @@ func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
 	}
 	writeAgyConversation(t, convDir, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", workDir, 0)
 
-	orig := homeDir
-	homeDir = func() (string, error) { return home, nil }
-	defer func() { homeDir = orig }()
+	discoverer := nativeDiscoverer(home)
 
 	// gmi discovery must find ONLY the legacy session, never the agy uuid.
-	gmiInfo := Discover("gmi", workDir)
+	gmiInfo := discoverer.Discover("gmi", workDir, 0)
 	if gmiInfo == nil {
 		t.Fatal("expected gmi to discover its legacy session, got nil")
 	}
@@ -387,7 +829,7 @@ func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
 	}
 
 	// agy discovery must find ONLY the conversation db, never the gmi session.
-	agyInfo := Discover("agy", workDir)
+	agyInfo := discoverer.Discover("agy", workDir, 0)
 	if agyInfo == nil {
 		t.Fatal("expected agy to discover its conversation, got nil")
 	}
@@ -398,7 +840,7 @@ func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
 	// Cross-check: removing the agy store entirely must NOT make gmi vanish,
 	// and an agy lookup must never pick up the gmi tmp session.
 	gmiOnlyHome := t.TempDir()
-	gmiOnlyChats := filepath.Join(gmiOnlyHome, ".gemini", "tmp", "cafef00d", "chats")
+	gmiOnlyChats := filepath.Join(gmiOnlyHome, ".gemini", "tmp", geminiProjectHash(workDir), "chats")
 	if err := os.MkdirAll(gmiOnlyChats, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -406,8 +848,8 @@ func TestDiscoverAgyGmiDisambiguation(t *testing.T) {
 		[]byte(`{"workspace":"`+workDir+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	homeDir = func() (string, error) { return gmiOnlyHome, nil }
-	if info := Discover("agy", workDir); info != nil {
+	gmiOnlyDiscoverer := nativeDiscoverer(gmiOnlyHome)
+	if info := gmiOnlyDiscoverer.Discover("agy", workDir, 0); info != nil {
 		t.Errorf("agy must not discover a gmi tmp session, got %+v", info)
 	}
 }
