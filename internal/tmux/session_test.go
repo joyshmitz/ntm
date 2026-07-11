@@ -1739,3 +1739,210 @@ func TestPaneSelectorTopologyHelpers(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePaneSelectorStrict(t *testing.T) {
+	tests := []struct {
+		input string
+		kind  PaneSelectorKind
+		valid bool
+	}{
+		{input: "0", kind: PaneSelectorPaneIndex, valid: true},
+		{input: " 12 ", kind: PaneSelectorPaneIndex, valid: true},
+		{input: "2.7", kind: PaneSelectorWindowPane, valid: true},
+		{input: "%19", kind: PaneSelectorID, valid: true},
+		{input: ""},
+		{input: "-1"},
+		{input: "+1"},
+		{input: "%"},
+		{input: "%x"},
+		{input: "1."},
+		{input: ".1"},
+		{input: "1.2.3"},
+		{input: "1 .2"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			selector, err := ParsePaneSelector(test.input)
+			if !test.valid {
+				if err == nil {
+					t.Fatalf("ParsePaneSelector(%q) succeeded: %+v", test.input, selector)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePaneSelector(%q) error: %v", test.input, err)
+			}
+			if selector.Kind != test.kind {
+				t.Fatalf("ParsePaneSelector(%q) kind = %v, want %v", test.input, selector.Kind, test.kind)
+			}
+		})
+	}
+}
+
+func TestResolvePaneSelectorsCanonicalContract(t *testing.T) {
+	panes := []Pane{
+		{ID: "%3", WindowIndex: 1, Index: 1},
+		{ID: "%0", WindowIndex: 0, Index: 0},
+		{ID: "%2", WindowIndex: 1, Index: 0},
+		{ID: "%1", WindowIndex: 0, Index: 1},
+	}
+
+	selected, err := ResolvePaneSelectors(panes, []string{"0.1", "%1", "1.0"}, false)
+	if err != nil {
+		t.Fatalf("ResolvePaneSelectors aliases: %v", err)
+	}
+	if len(selected) != 2 || selected[0].ID != "%1" || selected[1].ID != "%2" {
+		t.Fatalf("ResolvePaneSelectors aliases = %+v, want %%1 then %%2", selected)
+	}
+
+	window, err := ResolvePaneSelectors(panes, []string{"1"}, false)
+	if err != nil {
+		t.Fatalf("ResolvePaneSelectors window: %v", err)
+	}
+	if len(window) != 2 || window[0].ID != "%2" || window[1].ID != "%3" {
+		t.Fatalf("ResolvePaneSelectors window = %+v, want %%2 then %%3", window)
+	}
+
+	if _, err := ResolvePaneSelectors(panes, []string{"1"}, true); err == nil || !strings.Contains(err.Error(), "matched 2 panes") {
+		t.Fatalf("ambiguous singular error = %v", err)
+	}
+	if _, err := ResolvePaneSelectors(panes, []string{"9.9"}, false); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := ResolvePaneSelectors(panes, []string{"1.x"}, false); err == nil || !strings.Contains(err.Error(), "invalid pane selector") {
+		t.Fatalf("invalid selector error = %v", err)
+	}
+}
+
+func TestResolvePaneSelectorsRealTmuxTopologyMatrix(t *testing.T) {
+	session := createTestSession(t)
+	directory := t.TempDir()
+
+	initial, err := GetPanes(session)
+	if err != nil || len(initial) != 1 {
+		t.Fatalf("initial panes = %d, err = %v; want one pane", len(initial), err)
+	}
+	baseWindow := initial[0].WindowIndex
+	if _, err := DefaultClient.Run("split-window", "-d", "-t", fmt.Sprintf("%s:%d", session, baseWindow), "-c", directory); err != nil {
+		t.Fatalf("split initial window: %v", err)
+	}
+
+	singleWindow, err := GetPanes(session)
+	if err != nil {
+		t.Fatalf("get single-window panes: %v", err)
+	}
+	if len(singleWindow) != 2 || PanesSpanMultipleWindows(singleWindow) {
+		t.Fatalf("single-window topology = %+v, want two panes in one window", singleWindow)
+	}
+	for i, pane := range SortPanesByTopology(singleWindow) {
+		if _, err := DefaultClient.Run("select-pane", "-t", pane.ID, "-T", fmt.Sprintf("%s__cc_%d", session, i+1)); err != nil {
+			t.Fatalf("title single-window pane %s: %v", pane.ID, err)
+		}
+	}
+	singleWindow, err = GetPanes(session)
+	if err != nil {
+		t.Fatalf("refresh single-window panes: %v", err)
+	}
+	orderedSingle := SortPanesByTopology(singleWindow)
+	bare := fmt.Sprintf("%d", orderedSingle[1].Index)
+	selected, err := ResolvePaneSelectors(singleWindow, []string{bare, orderedSingle[1].ID}, false)
+	if err != nil {
+		t.Fatalf("single-window alias resolution: %v", err)
+	}
+	if len(selected) != 1 || selected[0].ID != orderedSingle[1].ID {
+		t.Fatalf("single-window alias resolution = %+v, want %s once", selected, orderedSingle[1].ID)
+	}
+
+	if _, err := DefaultClient.Run("new-window", "-d", "-t", session, "-c", directory); err != nil {
+		t.Fatalf("create second window: %v", err)
+	}
+	multiWindow, err := GetPanes(session)
+	if err != nil {
+		t.Fatalf("get multi-window panes: %v", err)
+	}
+	secondWindow := -1
+	for _, pane := range multiWindow {
+		if pane.WindowIndex != baseWindow {
+			secondWindow = pane.WindowIndex
+			break
+		}
+	}
+	if secondWindow < 0 {
+		t.Fatalf("second window not found in %+v", multiWindow)
+	}
+	if _, err := DefaultClient.Run("split-window", "-d", "-t", fmt.Sprintf("%s:%d", session, secondWindow), "-c", directory); err != nil {
+		t.Fatalf("split second window: %v", err)
+	}
+
+	multiWindow, err = GetPanes(session)
+	if err != nil {
+		t.Fatalf("refresh multi-window panes: %v", err)
+	}
+	orderedMulti := SortPanesByTopology(multiWindow)
+	if len(orderedMulti) != 4 || !PanesSpanMultipleWindows(orderedMulti) {
+		t.Fatalf("multi-window topology = %+v, want four panes across two windows", orderedMulti)
+	}
+	for i, pane := range orderedMulti {
+		if _, err := DefaultClient.Run("select-pane", "-t", pane.ID, "-T", fmt.Sprintf("%s__cod_%d", session, i+1)); err != nil {
+			t.Fatalf("title multi-window pane %s: %v", pane.ID, err)
+		}
+	}
+	multiWindow, err = GetPanes(session)
+	if err != nil {
+		t.Fatalf("refresh titled multi-window panes: %v", err)
+	}
+	orderedMulti = SortPanesByTopology(multiWindow)
+
+	exact := orderedMulti[2]
+	aliases := []string{exact.Ref().Physical(), exact.ID, exact.Ref().Physical()}
+	selected, err = ResolvePaneSelectors(multiWindow, aliases, true)
+	if err != nil {
+		t.Fatalf("multi-window exact alias resolution: %v", err)
+	}
+	if len(selected) != 1 || selected[0].ID != exact.ID {
+		t.Fatalf("multi-window aliases = %+v, want %s once", selected, exact.ID)
+	}
+
+	windowSelector := fmt.Sprintf("%d", secondWindow)
+	windowPanes, err := ResolvePaneSelectors(multiWindow, []string{windowSelector}, false)
+	if err != nil {
+		t.Fatalf("bare multi-window selector: %v", err)
+	}
+	if len(windowPanes) != 2 {
+		t.Fatalf("bare window selector resolved %d panes, want 2: %+v", len(windowPanes), windowPanes)
+	}
+	if _, err := ResolvePaneSelectors(multiWindow, []string{windowSelector}, true); err == nil {
+		t.Fatal("singular bare window selector succeeded, want ambiguity error")
+	} else if selectorErr, ok := err.(*PaneSelectorError); !ok || selectorErr.Kind != PaneSelectorAmbiguous {
+		t.Fatalf("singular bare window error = %T %v, want ambiguous PaneSelectorError", err, err)
+	}
+	if _, err := ResolvePaneSelectors(multiWindow, []string{"999.999"}, false); err == nil {
+		t.Fatal("missing physical selector succeeded")
+	} else if selectorErr, ok := err.(*PaneSelectorError); !ok || selectorErr.Kind != PaneSelectorNotFound {
+		t.Fatalf("missing selector error = %T %v, want not-found PaneSelectorError", err, err)
+	}
+	if _, err := ResolvePaneSelectors(multiWindow, []string{"1.x"}, false); err == nil {
+		t.Fatal("malformed selector succeeded")
+	} else if selectorErr, ok := err.(*PaneSelectorError); !ok || selectorErr.Kind != PaneSelectorInvalid {
+		t.Fatalf("malformed selector error = %T %v, want invalid PaneSelectorError", err, err)
+	}
+
+	// Put the operator pane after an agent in topology order. Selector identity
+	// must remain stable regardless of where the user pane appears.
+	userPane := orderedMulti[1]
+	if _, err := DefaultClient.Run("select-pane", "-t", userPane.ID, "-T", "operator"); err != nil {
+		t.Fatalf("mark reordered user pane: %v", err)
+	}
+	withUser, err := GetPanes(session)
+	if err != nil {
+		t.Fatalf("get reordered-user topology: %v", err)
+	}
+	orderedUser := SortPanesByTopology(withUser)
+	if len(orderedUser) != 4 || orderedUser[0].Type == AgentUser || orderedUser[1].Type != AgentUser {
+		t.Fatalf("user pane order = %+v, want user pane second", orderedUser)
+	}
+	selected, err = ResolvePaneSelectors(withUser, []string{exact.ID}, true)
+	if err != nil || len(selected) != 1 || selected[0].ID != exact.ID {
+		t.Fatalf("exact selection with reordered user = %+v, err=%v", selected, err)
+	}
+}

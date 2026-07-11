@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -72,6 +73,179 @@ type Pane struct {
 	PID         int // Shell PID
 }
 
+// PaneRef is the stable physical identity and topology address of a pane.
+// ID is the tmux-native identity; WindowIndex and PaneIndex identify its
+// current physical location. NTMIndex is a logical label only and is never
+// used to address a pane.
+type PaneRef struct {
+	ID          string `json:"pane_id,omitempty"`
+	WindowIndex int    `json:"window_index"`
+	PaneIndex   int    `json:"pane_index"`
+	NTMIndex    int    `json:"ntm_index,omitempty"`
+}
+
+// Ref returns the pane's stable identity and current topology address.
+func (p Pane) Ref() PaneRef {
+	return PaneRef{
+		ID:          p.ID,
+		WindowIndex: p.WindowIndex,
+		PaneIndex:   p.Index,
+		NTMIndex:    p.NTMIndex,
+	}
+}
+
+// Physical returns the explicit window.pane address.
+func (r PaneRef) Physical() string {
+	return fmt.Sprintf("%d.%d", r.WindowIndex, r.PaneIndex)
+}
+
+// Canonical returns the shortest unambiguous address for the session
+// topology. A multi-window session requires window.pane; a single-window
+// session retains the familiar bare pane index.
+func (r PaneRef) Canonical(multiWindow bool) string {
+	if multiWindow {
+		return r.Physical()
+	}
+	return strconv.Itoa(r.PaneIndex)
+}
+
+// StableKey returns a process-stable identity suitable for deduplication.
+// Synthetic panes without a tmux ID fall back to their physical address.
+func (r PaneRef) StableKey() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Physical()
+}
+
+// PaneSelectorKind identifies one syntax in the shared pane selector grammar.
+type PaneSelectorKind uint8
+
+const (
+	PaneSelectorPaneIndex PaneSelectorKind = iota + 1
+	PaneSelectorWindowPane
+	PaneSelectorID
+)
+
+// PaneSelector is a validated selector. Bare N means pane index in a
+// single-window session and window index in a multi-window session. W.P and
+// %N always name one physical pane.
+type PaneSelector struct {
+	Raw         string
+	Kind        PaneSelectorKind
+	Index       int
+	WindowIndex int
+	PaneIndex   int
+	PaneID      string
+}
+
+// PaneSelectorErrorKind identifies why a pane selector could not be resolved.
+// Command surfaces use this classification to produce stable machine-readable
+// error codes without parsing human-readable error strings.
+type PaneSelectorErrorKind string
+
+const (
+	PaneSelectorInvalid   PaneSelectorErrorKind = "invalid"
+	PaneSelectorMissing   PaneSelectorErrorKind = "missing"
+	PaneSelectorNotFound  PaneSelectorErrorKind = "not_found"
+	PaneSelectorAmbiguous PaneSelectorErrorKind = "ambiguous"
+)
+
+// PaneSelectorError describes a pane-selector validation or resolution error.
+type PaneSelectorError struct {
+	Kind      PaneSelectorErrorKind
+	Selector  string
+	Matches   int
+	Available []string
+}
+
+func (e *PaneSelectorError) Error() string {
+	if e == nil {
+		return "pane selector error"
+	}
+	switch e.Kind {
+	case PaneSelectorMissing:
+		return "at least one pane selector is required"
+	case PaneSelectorNotFound:
+		return fmt.Sprintf("pane selector %q not found; available: %s", e.Selector, strings.Join(e.Available, ", "))
+	case PaneSelectorAmbiguous:
+		if e.Selector != "" {
+			return fmt.Sprintf("pane selector %q matched %d panes (%s); use explicit W.P or %%N", e.Selector, e.Matches, strings.Join(e.Available, ", "))
+		}
+		return fmt.Sprintf("pane selector resolved to %d panes; use exactly one W.P or %%N selector", e.Matches)
+	default:
+		return fmt.Sprintf("invalid pane selector %q: expected N, W.P, or %%N", e.Selector)
+	}
+}
+
+func parsePaneSelectorNumber(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil
+}
+
+// ParsePaneSelector validates and parses N, W.P, or %N syntax.
+func ParsePaneSelector(input string) (PaneSelector, error) {
+	raw := strings.TrimSpace(input)
+	invalid := func() (PaneSelector, error) {
+		return PaneSelector{}, &PaneSelectorError{Kind: PaneSelectorInvalid, Selector: input}
+	}
+	if raw == "" {
+		return invalid()
+	}
+	if strings.HasPrefix(raw, "%") {
+		index, ok := parsePaneSelectorNumber(strings.TrimPrefix(raw, "%"))
+		if !ok {
+			return invalid()
+		}
+		return PaneSelector{Raw: raw, Kind: PaneSelectorID, Index: index, PaneID: raw}, nil
+	}
+	if strings.Contains(raw, ".") {
+		window, pane, ok := strings.Cut(raw, ".")
+		windowIndex, windowOK := parsePaneSelectorNumber(window)
+		paneIndex, paneOK := parsePaneSelectorNumber(pane)
+		if !ok || !windowOK || !paneOK {
+			return invalid()
+		}
+		return PaneSelector{
+			Raw:         raw,
+			Kind:        PaneSelectorWindowPane,
+			WindowIndex: windowIndex,
+			PaneIndex:   paneIndex,
+		}, nil
+	}
+	index, ok := parsePaneSelectorNumber(raw)
+	if !ok {
+		return invalid()
+	}
+	return PaneSelector{Raw: raw, Kind: PaneSelectorPaneIndex, Index: index}, nil
+}
+
+// Matches reports whether the validated selector addresses pane in the given
+// topology.
+func (s PaneSelector) Matches(pane Pane, multiWindow bool) bool {
+	switch s.Kind {
+	case PaneSelectorID:
+		return pane.ID == s.PaneID
+	case PaneSelectorWindowPane:
+		return pane.WindowIndex == s.WindowIndex && pane.Index == s.PaneIndex
+	case PaneSelectorPaneIndex:
+		if multiWindow {
+			return pane.WindowIndex == s.Index
+		}
+		return pane.Index == s.Index
+	default:
+		return false
+	}
+}
+
 // PanesSpanMultipleWindows reports whether panes belong to more than one tmux
 // window. Pane.Index is only unique within a window, so callers must switch to
 // topology-aware addresses when this returns true.
@@ -92,10 +266,7 @@ func PanesSpanMultipleWindows(panes []Pane) bool {
 // session topology. Single-window sessions use the familiar bare pane index;
 // multi-window sessions use window.pane.
 func PaneTargetKey(pane Pane, multiWindow bool) string {
-	if multiWindow {
-		return fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
-	}
-	return strconv.Itoa(pane.Index)
+	return pane.Ref().Canonical(multiWindow)
 }
 
 // PaneMatchesSelector applies the pane-selector grammar shared by robot mode
@@ -104,29 +275,92 @@ func PaneTargetKey(pane Pane, multiWindow bool) string {
 // in a multi-window session. Syntax validation belongs at the command boundary;
 // malformed selectors simply do not match here.
 func PaneMatchesSelector(pane Pane, selector string, multiWindow bool) bool {
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return false
-	}
-	if strings.HasPrefix(selector, "%") {
-		return selector == pane.ID
-	}
-	if window, index, ok := strings.Cut(selector, "."); ok {
-		windowIndex, windowErr := strconv.Atoi(strings.TrimSpace(window))
-		paneIndex, paneErr := strconv.Atoi(strings.TrimSpace(index))
-		if windowErr != nil || paneErr != nil {
-			return false
-		}
-		return pane.WindowIndex == windowIndex && pane.Index == paneIndex
-	}
-	index, err := strconv.Atoi(selector)
+	parsed, err := ParsePaneSelector(selector)
 	if err != nil {
 		return false
 	}
-	if multiWindow {
-		return pane.WindowIndex == index
+	return parsed.Matches(pane, multiWindow)
+}
+
+// SortPanesByTopology returns a deterministic window, pane, then ID ordering.
+func SortPanesByTopology(panes []Pane) []Pane {
+	ordered := append([]Pane(nil), panes...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].WindowIndex != ordered[j].WindowIndex {
+			return ordered[i].WindowIndex < ordered[j].WindowIndex
+		}
+		if ordered[i].Index != ordered[j].Index {
+			return ordered[i].Index < ordered[j].Index
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+	return ordered
+}
+
+func paneSelectorRefs(panes []Pane, multiWindow bool) []string {
+	refs := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		ref := pane.Ref().Canonical(multiWindow)
+		if pane.ID != "" {
+			ref += " (" + pane.ID + ")"
+		}
+		refs = append(refs, ref)
 	}
-	return pane.Index == index
+	return refs
+}
+
+// ResolvePaneSelectors resolves every selector, rejects missing or ambiguous
+// singular matches, deduplicates aliases by physical pane identity, and
+// returns panes in deterministic topology order.
+func ResolvePaneSelectors(panes []Pane, selectors []string, requireSingle bool) ([]Pane, error) {
+	if len(selectors) == 0 {
+		return nil, &PaneSelectorError{Kind: PaneSelectorMissing}
+	}
+	ordered := SortPanesByTopology(panes)
+	multiWindow := PanesSpanMultipleWindows(ordered)
+	selected := make(map[string]struct{})
+
+	for _, raw := range selectors {
+		selector, err := ParsePaneSelector(raw)
+		if err != nil {
+			return nil, err
+		}
+		matches := make([]Pane, 0, 1)
+		for _, pane := range ordered {
+			if selector.Matches(pane, multiWindow) {
+				matches = append(matches, pane)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, &PaneSelectorError{
+				Kind:      PaneSelectorNotFound,
+				Selector:  raw,
+				Available: paneSelectorRefs(ordered, multiWindow),
+			}
+		}
+		if requireSingle && len(matches) != 1 {
+			return nil, &PaneSelectorError{
+				Kind:      PaneSelectorAmbiguous,
+				Selector:  raw,
+				Matches:   len(matches),
+				Available: paneSelectorRefs(matches, true),
+			}
+		}
+		for _, pane := range matches {
+			selected[pane.Ref().StableKey()] = struct{}{}
+		}
+	}
+
+	resolved := make([]Pane, 0, len(selected))
+	for _, pane := range ordered {
+		if _, ok := selected[pane.Ref().StableKey()]; ok {
+			resolved = append(resolved, pane)
+		}
+	}
+	if requireSingle && len(resolved) != 1 {
+		return nil, &PaneSelectorError{Kind: PaneSelectorAmbiguous, Matches: len(resolved)}
+	}
+	return resolved, nil
 }
 
 // Session represents a tmux session
