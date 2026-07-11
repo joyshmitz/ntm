@@ -232,6 +232,17 @@ func TestDetectErrorInOutput_Crash(t *testing.T) {
 	}
 }
 
+func TestDetectErrorInOutput_ClaudeToolResult(t *testing.T) {
+	output := "● Bash(go test ./...)\n" +
+		"  ⎿ \u00a0Error: Exit code 1\n" +
+		"     package tests failed\n" +
+		"❯\n"
+
+	if got := DetectErrorInOutput(output); got != ErrorGeneric {
+		t.Fatalf("DetectErrorInOutput() = %q, want %q", got, ErrorGeneric)
+	}
+}
+
 func TestDetectErrorInOutput_NoError(t *testing.T) {
 	tests := []struct {
 		name   string

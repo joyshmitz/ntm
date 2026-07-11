@@ -4101,8 +4101,19 @@ func determineState(output, agentType string) string {
 	shortType := translateAgentTypeForStatus(normalizedType)
 	lastLine := status.GetLastNonEmptyLine(output)
 
+	// Claude's live classifier orders spinners against completion and terminal
+	// error markers, so its current-work verdict can safely supersede older
+	// errors and the persistent compose box.
+	if normalizedType == "claude" && isAIAgentLiveBusy(output, normalizedType) {
+		return "active"
+	}
 	if status.DetectErrorInOutput(output) != status.ErrorNone {
 		return "error"
+	}
+	// Other agents use position-blind live patterns. They may supersede idle
+	// chrome, but never a current error.
+	if normalizedType != "claude" && isAIAgentLiveBusy(output, normalizedType) {
+		return "active"
 	}
 	// A bare shell prompt in a known agent pane usually means the agent exited
 	// and dropped back to the shell, not that the agent is idle at its own prompt.

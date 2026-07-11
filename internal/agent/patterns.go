@@ -149,6 +149,12 @@ var (
 	// is a turn-ended marker, not active work.
 	claudeNewTaskFooterRe = regexp.MustCompile(`(?i)new\s+task\?`)
 
+	// claudeTerminalErrorLineRe matches Claude's rendered tool-result failure
+	// line. Keep this glyph-anchored so queued compose-box text or spinner labels
+	// containing "Error:" cannot terminate an otherwise live turn. Claude uses
+	// NBSP padding in real captures, so the post-glyph class is Unicode-aware.
+	claudeTerminalErrorLineRe = regexp.MustCompile(`(?i)^\s*⎿[\s\x{00a0}]*(?:error|failed|fatal|panic):`)
+
 	// ccErrorPatterns indicates an error condition.
 	ccErrorPatterns = []string{
 		"error:",
@@ -160,7 +166,8 @@ var (
 		"permission denied",
 		"access denied",
 		"connection refused",
-		"timeout",
+		"timed out",
+		"timeout error",
 	}
 
 	// ccHeaderPattern confirms output is from Claude Code.
@@ -448,8 +455,8 @@ const claudeIdleScanLines = 12
 // does.
 //
 // Semantics: a pane is WORKING iff an active spinner is the MOST-RECENT dynamic
-// marker — i.e. no turn-ended marker (completion line or "new task?" hint)
-// appears AFTER the last spinner line within the live tail.
+// marker — i.e. no turn-ended marker (completion line or "new task?" hint) or
+// terminal error appears AFTER the last spinner line within the live tail.
 //
 // The classifier is deliberately biased to the SAFE failure: when a spinner is
 // present but ordering is ambiguous it returns true (false-WORKING). A
@@ -468,13 +475,13 @@ func ClaudeActivelyWorking(output string) bool {
 	lines := strings.Split(tail, "\n")
 
 	lastSpinner := -1
-	lastTurnEnded := -1
+	lastStopMarker := -1
 	for i, line := range lines {
 		if claudeIsActiveSpinnerLine(line) {
 			lastSpinner = i
 		}
-		if claudeIsTurnEndedLine(line) {
-			lastTurnEnded = i
+		if claudeIsTurnEndedLine(line) || claudeIsTerminalErrorLine(line) {
+			lastStopMarker = i
 		}
 	}
 
@@ -483,11 +490,10 @@ func ClaudeActivelyWorking(output string) bool {
 		return false
 	}
 
-	// A spinner exists. It only counts as "current" work if no turn-ended
-	// marker appears AFTER it. When a completion/new-task marker is strictly
-	// more recent than the spinner, the turn has ended (idle). Otherwise —
-	// including the ambiguous tie where they share a line — bias to WORKING.
-	return lastTurnEnded < lastSpinner
+	// A spinner exists. It only counts as "current" work if no completion,
+	// new-task hint, or terminal tool-result error appears after it. The marker
+	// recognizers are deliberately disjoint, so they cannot tie on one line.
+	return lastStopMarker < lastSpinner
 }
 
 // claudeIsActiveSpinnerLine reports whether a single line is a live Claude
@@ -513,6 +519,10 @@ func claudeIsActiveSpinnerLine(line string) bool {
 // (completion summary or the post-turn "new task?" hint).
 func claudeIsTurnEndedLine(line string) bool {
 	return claudeIsCompletionLine(line) || claudeNewTaskFooterRe.MatchString(line)
+}
+
+func claudeIsTerminalErrorLine(line string) bool {
+	return claudeTerminalErrorLineRe.MatchString(line)
 }
 
 // claudeChevronBoxRe matches Claude Code's bottom-pinned input box prompt on

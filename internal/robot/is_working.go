@@ -135,6 +135,27 @@ func getRecommendationReason(state *agent.AgentState) string {
 	}
 }
 
+// applyLiveBusyOverride reconciles the parser's scrollback-wide flags with the
+// current live window. When work is visibly in flight, prompt chrome is not an
+// idle signal and an error match elsewhere in the capture is historical rather
+// than the pane's current state. Rate-limit and context-low flags remain intact
+// and therefore retain their normal recommendation precedence.
+func applyLiveBusyOverride(content string, state *agent.AgentState) bool {
+	if state == nil || !isAIAgentLiveBusy(content, string(state.Type)) {
+		return false
+	}
+	canonicalType := state.Type.Canonical()
+	if state.IsInError && canonicalType != agent.AgentTypeClaudeCode {
+		return false
+	}
+	state.IsWorking = true
+	state.IsIdle = false
+	if canonicalType == agent.AgentTypeClaudeCode {
+		state.IsInError = false
+	}
+	return true
+}
+
 // ParsePanesArg parses the --panes argument.
 // Accepts "all", empty string, or comma-separated integers.
 func ParsePanesArg(panesArg string) ([]int, error) {
@@ -307,20 +328,11 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		// (parser's view, hint-confirmed) rather than the raw tmux hint so
 		// content-detected agents on hint-less panes still get the override.
 		//
-		// Re-derive the recommendation from the corrected state so we keep
-		// higher-priority signals (RateLimitedWait, ErrorState,
-		// ContextLowContinue) when they apply, and only fall through to
-		// DoNotInterrupt when the only thing the legacy parser was wrong
-		// about was IsWorking/IsIdle. Mutating `state.IsWorking` and
-		// `state.IsIdle` is safe: ParseWithHint returns a freshly-allocated
-		// *AgentState per call, and only state.RawSample is read after this
-		// point — that field is not touched by the override.
-		isAIAgentPane := state.Type != "" &&
-			state.Type != agent.AgentTypeUser &&
-			state.Type != agent.AgentTypeUnknown
-		if isAIAgentPane && IsLiveBusy(content, string(state.Type)) {
-			state.IsWorking = true
-			state.IsIdle = false
+		// Re-derive the recommendation from the corrected current state. A live
+		// window supersedes stale prompt/error matches, while rate-limit and
+		// context-low signals retain their normal precedence. ParseWithHint
+		// returns a fresh *AgentState, so this mutation is local to this pane.
+		if applyLiveBusyOverride(content, state) {
 			status.IsWorking = true
 			status.IsIdle = false
 			status.Recommendation = string(state.GetRecommendation())

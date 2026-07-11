@@ -869,6 +869,17 @@ func IsLiveBusy(scrollback string, agentType string) bool {
 	return len(matches) > 0
 }
 
+// isAIAgentLiveBusy applies the live-window classifier only to known AI panes.
+// IsLiveBusy intentionally exposes wildcard thinking patterns, so callers must
+// not apply it to user or unknown panes where ordinary shell output can match.
+func isAIAgentLiveBusy(scrollback, agentType string) bool {
+	canonicalType := agent.AgentType(agentType).Canonical()
+	if !canonicalType.IsValid() || canonicalType == agent.AgentTypeUser || canonicalType == agent.AgentTypeUnknown {
+		return false
+	}
+	return IsLiveBusy(scrollback, string(canonicalType))
+}
+
 // lastNLines returns the last n non-empty-slice lines of s, preserving
 // their original order and the trailing newline structure. If s has
 // fewer than n lines it is returned unchanged. The scan is intentionally

@@ -362,6 +362,70 @@ func TestIsLiveBusy_Claude_DefersToOrderingAwareClassifier(t *testing.T) {
 	}
 }
 
+func TestApplyLiveBusyOverrideRecommendationPrecedence(t *testing.T) {
+	activeSpinner := "Error: prior command failed\n" +
+		"✻ Germinating… (ctrl+c to interrupt · 5m 56s)\n" +
+		"❯\n"
+	tests := []struct {
+		name  string
+		state *agent.AgentState
+		want  agent.Recommendation
+	}{
+		{
+			name: "stale error does not override current work",
+			state: &agent.AgentState{
+				Type:      agent.AgentTypeClaudeCode,
+				IsIdle:    true,
+				IsInError: true,
+			},
+			want: agent.RecommendDoNotInterrupt,
+		},
+		{
+			name: "rate limit retains precedence",
+			state: &agent.AgentState{
+				Type:          agent.AgentTypeClaudeCode,
+				IsRateLimited: true,
+				IsInError:     true,
+			},
+			want: agent.RecommendRateLimitedWait,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !applyLiveBusyOverride(activeSpinner, tt.state) {
+				t.Fatal("expected live-busy override")
+			}
+			if !tt.state.IsWorking || tt.state.IsIdle || tt.state.IsInError {
+				t.Fatalf("overridden state = %+v", tt.state)
+			}
+			if got := tt.state.GetRecommendation(); got != tt.want {
+				t.Fatalf("recommendation = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	currentError := &agent.AgentState{Type: agent.AgentTypeClaudeCode, IsInError: true}
+	currentErrorOutput := "· Germinating… (5m 56s)\n" +
+		"  ⎿ \u00a0Error: Exit code 1\n" +
+		"     current command failed\n❯\n"
+	if applyLiveBusyOverride(currentErrorOutput, currentError) {
+		t.Fatal("current error after an older spinner must not be overridden")
+	}
+	if got := currentError.GetRecommendation(); got != agent.RecommendErrorState {
+		t.Fatalf("current-error recommendation = %q, want %q", got, agent.RecommendErrorState)
+	}
+
+	codexError := &agent.AgentState{Type: agent.AgentTypeCodex, IsInError: true, IsIdle: true}
+	codexOutput := "Error: current command failed\n• Working (4s · esc to interrupt)\ncodex>\n"
+	if applyLiveBusyOverride(codexOutput, codexError) {
+		t.Fatal("position-blind Codex working text must not override a current error")
+	}
+	if got := codexError.GetRecommendation(); got != agent.RecommendErrorState {
+		t.Fatalf("codex current-error recommendation = %q, want %q", got, agent.RecommendErrorState)
+	}
+}
+
 // TestIsLiveBusy_WildcardPatternsDocumentTheUserPaneSkipReason locks in the
 // reason GetIsWorking gates the live-window override on `state.Type` being a
 // known AI agent: the pattern library carries agent-agnostic CategoryThinking
@@ -369,7 +433,7 @@ func TestIsLiveBusy_Claude_DefersToOrderingAwareClassifier(t *testing.T) {
 // anywhere) that will fire on incidental shell output. If the override fired
 // on user/unknown panes, a `tar`-style spinner or a starship-flavored prompt
 // would falsely flip the pane into the working bucket. The GetIsWorking call
-// site filters for AI agents specifically so this never reaches
+// site's shared isAIAgentLiveBusy guard filters for AI agents specifically so this never reaches
 // PaneWorkStatus, but the predicate itself remains permissive — keep this
 // test as the load-bearing canary if the wildcard set is ever rewritten.
 func TestIsLiveBusy_WildcardPatternsDocumentTheUserPaneSkipReason(t *testing.T) {
@@ -383,6 +447,9 @@ extracting archive ⠋
 `
 	if !IsLiveBusy(shellScrollback, agent.AgentTypeUser.String()) {
 		t.Fatalf("expected wildcard CategoryThinking match (braille_spinner) on shell scrollback with user hint; if this assertion changes, the GetIsWorking user-pane skip may no longer be needed")
+	}
+	if isAIAgentLiveBusy(shellScrollback, agent.AgentTypeUser.String()) {
+		t.Fatal("shared live-busy guard must reject user panes even when wildcard thinking patterns match")
 	}
 }
 

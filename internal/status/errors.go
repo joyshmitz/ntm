@@ -83,6 +83,7 @@ var errorPatterns = []ErrorPattern{
 
 	// Generic errors (lowest priority - catch-all)
 	{Type: ErrorGeneric, Regex: regexp.MustCompile(`(?i)^error:`), Description: "Error prefix"},
+	{Type: ErrorGeneric, Regex: regexp.MustCompile(`(?im)^\s*⎿[\s\x{00a0}]*error:`), Description: "Claude tool-result error prefix"},
 	{Type: ErrorGeneric, Regex: regexp.MustCompile(`(?i)\berror\b.*\bfailed\b`), Description: "Error failed"},
 }
 

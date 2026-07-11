@@ -1485,6 +1485,31 @@ func TestClaudeActivelyWorking(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "terminal error AFTER a spinner wins ⇒ not working",
+			output: "· Germinating… (5m 56s)\n" +
+				"  ⎿ \u00a0Error: Exit code 1\n" +
+				"     command failed\n────────────\n❯ \n",
+			want: false,
+		},
+		{
+			name: "spinner AFTER older error starts new work",
+			output: "  ⎿ \u00a0Error: Exit code 1\n" +
+				"· Germinating… (5m 56s)\n────────────\n❯ \n",
+			want: true,
+		},
+		{
+			name: "queued compose text containing Error does not stop spinner",
+			output: "· Germinating… (5m 56s)\n" +
+				"────────────\n❯ Fix Error: handling in robot tail\n────────────\n",
+			want: true,
+		},
+		{
+			name: "spinner label containing Error does not stop itself",
+			output: "· Repairing Error: handling… (5m 56s)\n" +
+				"────────────\n❯ \n────────────\n",
+			want: true,
+		},
+		{
 			name:   "new task footer is a turn-ended marker ⇒ not working",
 			output: "✻ Brewing… (ctrl+c to interrupt · 9s)\nnew task? /clear to save 12.3k tokens\n❯ \n",
 			want:   false,
@@ -1513,6 +1538,28 @@ func TestClaudeActivelyWorking(t *testing.T) {
 				t.Errorf("ClaudeActivelyWorking() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClaudeTimeoutBudgetAnnotationIsNotError(t *testing.T) {
+	output := "  ⎿  === all_simple_paths_mark_ab\n" +
+		"     (2m 9s · timeout 9m 30s)\n" +
+		"· Germinating… (5m 56s)\n" +
+		"────────────\n❯ \n────────────\n" +
+		"  ⏵⏵ bypass permissions on\n"
+
+	state, err := NewParser().ParseWithHint(output, AgentTypeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.IsInError {
+		t.Fatalf("timeout budget annotation marked as error: %+v", state)
+	}
+	if !state.IsWorking || state.IsIdle {
+		t.Fatalf("live timeout-budget frame state = %+v, want working", state)
+	}
+	if got := state.GetRecommendation(); got != RecommendDoNotInterrupt {
+		t.Fatalf("recommendation = %q, want %q", got, RecommendDoNotInterrupt)
 	}
 }
 

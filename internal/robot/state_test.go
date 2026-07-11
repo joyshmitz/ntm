@@ -252,6 +252,65 @@ func TestDetermineStateErrorConditions(t *testing.T) {
 	}
 }
 
+func TestDetermineStateLiveBusyPrecedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		output    string
+		want      string
+	}{
+		{
+			name: "live claude spinner wins over timeout budget and prompt chrome",
+			output: "  ⎿  === all_simple_paths_mark_ab\n" +
+				"     (2m 9s · timeout 9m 30s)\n" +
+				"· Germinating… (5m 56s)\n" +
+				"❯\n",
+			want: "active",
+		},
+		{
+			name: "new live spinner wins over older real error",
+			output: "  ⎿ \u00a0Error: Exit code 1\n" +
+				"· Germinating… (5m 56s)\n" +
+				"❯\n",
+			want: "active",
+		},
+		{
+			name: "completion after spinner remains idle",
+			output: "✻ Germinating… (ctrl+c to interrupt · 5s)\n" +
+				"✻ Churned for 5s\n" +
+				"❯\n",
+			want: "idle",
+		},
+		{
+			name: "current error after older spinner remains error",
+			output: "· Germinating… (5m 56s)\n" +
+				"  ⎿ \u00a0Error: Exit code 1\n" +
+				"     current command failed\n❯\n",
+			want: "error",
+		},
+		{
+			name:      "codex current error wins over position-blind working text",
+			agentType: "codex",
+			output: "Error: current command failed\n" +
+				"• Working (4s · esc to interrupt)\n" +
+				"codex>\n",
+			want: "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentType := tt.agentType
+			if agentType == "" {
+				agentType = "claude"
+			}
+			if got := determineState(tt.output, agentType); got != tt.want {
+				t.Fatalf("determineState() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestDetermineStateIdleConditions tests idle detection logic specifically
 func TestDetermineStateIdleConditions(t *testing.T) {
 	idleTests := []struct {
