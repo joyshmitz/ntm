@@ -361,13 +361,13 @@ type PaneWorkStatus struct {
 
 // IsWorkingSummary provides aggregate statistics.
 type IsWorkingSummary struct {
-	TotalPanes       int              `json:"total_panes"`
-	WorkingCount     int              `json:"working_count"`
-	IdleCount        int              `json:"idle_count"`
-	RateLimitedCount int              `json:"rate_limited_count"`
-	ContextLowCount  int              `json:"context_low_count"`
-	ErrorCount       int              `json:"error_count"`
-	ByRecommendation map[string][]int `json:"by_recommendation"`
+	TotalPanes       int                 `json:"total_panes"`
+	WorkingCount     int                 `json:"working_count"`
+	IdleCount        int                 `json:"idle_count"`
+	RateLimitedCount int                 `json:"rate_limited_count"`
+	ContextLowCount  int                 `json:"context_low_count"`
+	ErrorCount       int                 `json:"error_count"`
+	ByRecommendation map[string][]string `json:"by_recommendation"`
 }
 
 // CallIsWorking invokes --robot-is-working and parses the result.

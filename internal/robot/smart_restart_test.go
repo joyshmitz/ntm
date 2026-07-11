@@ -1,11 +1,58 @@
 package robot
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+type smartRestartPromptDispatcherFunc func(context.Context, dispatchsvc.Request) (dispatchsvc.Result, error)
+
+func (f smartRestartPromptDispatcherFunc) Execute(ctx context.Context, req dispatchsvc.Request) (dispatchsvc.Result, error) {
+	return f(ctx, req)
+}
+
+type deterministicSmartRestartExecutor struct {
+	launches []string
+}
+
+func (e *deterministicSmartRestartExecutor) exitAgent(_ string, _, _ int, _ string, seq *RestartSequence) error {
+	seq.ExitMethod = "test_exit"
+	return nil
+}
+
+func (*deterministicSmartRestartExecutor) waitForShellReturn(string, int, int, time.Duration) (bool, string) {
+	return true, ""
+}
+
+func (*deterministicSmartRestartExecutor) hardKillAgent(string, int, int, *RestartSequence) (*HardKillResult, error) {
+	return &HardKillResult{Success: true}, nil
+}
+
+func (e *deterministicSmartRestartExecutor) sendKeys(_ string, win, pane int, keys string) error {
+	e.launches = append(e.launches, fmt.Sprintf("%d.%d:%s", win, pane, keys))
+	return nil
+}
+
+func (*deterministicSmartRestartExecutor) getShellPID(string, int, int) (int, error) {
+	return 0, nil
+}
+
+func (*deterministicSmartRestartExecutor) waitForPaneAgentReady(string, int, string, time.Duration) bool {
+	return true
+}
+
+func (*deterministicSmartRestartExecutor) capturePaneOutput(string, int) (string, error) {
+	return "", nil
+}
 
 // =============================================================================
 // Unit Tests for --robot-smart-restart (bd-2c7f4, bd-2eo1l)
@@ -225,11 +272,11 @@ func TestBuildWaitInfo(t *testing.T) {
 
 // TestAppendPaneToAction tests pane tracking in summary.
 func TestAppendPaneToAction(t *testing.T) {
-	panesByAction := make(map[string][]int)
+	panesByAction := make(map[string][]string)
 
-	appendPaneToAction(panesByAction, "RESTARTED", 2)
-	appendPaneToAction(panesByAction, "RESTARTED", 3)
-	appendPaneToAction(panesByAction, "SKIPPED", 4)
+	appendPaneToAction(panesByAction, "RESTARTED", "0.2")
+	appendPaneToAction(panesByAction, "RESTARTED", "1.3")
+	appendPaneToAction(panesByAction, "SKIPPED", "1.4")
 
 	if len(panesByAction["RESTARTED"]) != 2 {
 		t.Errorf("RESTARTED panes = %d, want 2", len(panesByAction["RESTARTED"]))
@@ -240,8 +287,8 @@ func TestAppendPaneToAction(t *testing.T) {
 	}
 
 	// Check pane values
-	if panesByAction["RESTARTED"][0] != 2 || panesByAction["RESTARTED"][1] != 3 {
-		t.Errorf("RESTARTED panes = %v, want [2, 3]", panesByAction["RESTARTED"])
+	if panesByAction["RESTARTED"][0] != "0.2" || panesByAction["RESTARTED"][1] != "1.3" {
+		t.Errorf("RESTARTED panes = %v, want [0.2, 1.3]", panesByAction["RESTARTED"])
 	}
 }
 
@@ -555,12 +602,12 @@ func TestRestartSummary(t *testing.T) {
 		Waiting:       1,
 		Failed:        0,
 		WouldRestart:  0,
-		PanesByAction: make(map[string][]int),
+		PanesByAction: make(map[string][]string),
 	}
 
-	summary.PanesByAction["RESTARTED"] = []int{2, 3}
-	summary.PanesByAction["SKIPPED"] = []int{4}
-	summary.PanesByAction["WAITING"] = []int{5}
+	summary.PanesByAction["RESTARTED"] = []string{"0.2", "1.3"}
+	summary.PanesByAction["SKIPPED"] = []string{"1.4"}
+	summary.PanesByAction["WAITING"] = []string{"2.5"}
 
 	if summary.Restarted != 2 {
 		t.Error("RestartSummary.Restarted mismatch")
@@ -1145,5 +1192,448 @@ func TestSmartRestartFailLoudClassification(t *testing.T) {
 				t.Errorf("classify(%+v, dryRun=%v) = %v, want %v", tt.summary, tt.dryRun, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDispatchSmartRestartPromptUsesCanonicalService(t *testing.T) {
+	var delivered dispatchsvc.Delivery
+	service, _, err := newRobotDispatchService(
+		redaction.Config{Mode: redaction.ModeRedact},
+		dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			delivered = delivery
+			return nil
+		}),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newRobotDispatchService: %v", err)
+	}
+
+	var request dispatchsvc.Request
+	dispatcher := smartRestartPromptDispatcherFunc(func(ctx context.Context, req dispatchsvc.Request) (dispatchsvc.Result, error) {
+		request = req
+		return service.Execute(ctx, req)
+	})
+	prompt := "continue the work with password=hunter2hunter2"
+	outcome, err := dispatchSmartRestartPrompt(context.Background(), "proj", 7, 3, "codex", true, SmartRestartOptions{
+		Prompt:         prompt,
+		promptDispatch: dispatcher,
+	})
+	if err != nil {
+		t.Fatalf("dispatchSmartRestartPrompt: %v", err)
+	}
+	if outcome.Status != PromptDeliveryDelivered || outcome.Delivered != 1 || outcome.ReceiptStatus != string(dispatchsvc.ReceiptDelivered) {
+		t.Fatalf("prompt outcome = %+v, want one delivered receipt", outcome)
+	}
+	if len(request.Panes) != 1 || len(request.Selectors) != 1 || request.Selectors[0] != "7.3" || !request.RequireSingleSelector {
+		t.Fatalf("dispatch request did not enforce exact 7.3 target: %+v", request)
+	}
+	if request.Session != "proj" || !request.IncludeUser || !request.Submit || !request.StopOnFailure {
+		t.Fatalf("dispatch request safety fields = %+v", request)
+	}
+	if got := delivered.Target.Ref.Physical(); got != "7.3" {
+		t.Fatalf("delivery physical target = %q, want 7.3", got)
+	}
+	if delivered.Session != "proj" || delivered.Target.AgentType != tmux.AgentCodex {
+		t.Fatalf("delivery target = %+v, session = %q", delivered.Target, delivered.Session)
+	}
+	if delivered.Protocol != dispatchsvc.ProtocolDoubleEnter || delivered.EnterDelay != tmux.DoubleEnterFirstDelay || delivered.SecondEnterDelay != tmux.DoubleEnterSecondDelay {
+		t.Fatalf("delivery protocol = %+v", delivered)
+	}
+	if delivered.Message == prompt || strings.Contains(delivered.Message, "hunter2hunter2") {
+		t.Fatalf("final message was not redacted: %q", delivered.Message)
+	}
+}
+
+func TestDispatchSmartRestartPromptRejectsRedactionPreflightFailure(t *testing.T) {
+	deliveries := 0
+	service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor: dispatchsvc.FinalMessageRedactorFunc(func(context.Context, dispatchsvc.Target, string) (dispatchsvc.RedactionResult, error) {
+			return dispatchsvc.RedactionResult{}, errors.New("policy unavailable")
+		}),
+		Deliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliveries++
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("dispatchsvc.NewService: %v", err)
+	}
+
+	outcome, err := dispatchSmartRestartPrompt(context.Background(), "proj", 2, 4, "cc", true, SmartRestartOptions{
+		Prompt:         "continue",
+		promptDispatch: service,
+	})
+	if err == nil || !strings.Contains(err.Error(), "redaction_failed") || !strings.Contains(err.Error(), "policy unavailable") {
+		t.Fatalf("redaction preflight error = %v", err)
+	}
+	if outcome.Status != PromptDeliveryFailed || outcome.DispatchCode != string(dispatchsvc.ErrRedaction) {
+		t.Fatalf("redaction preflight outcome = %+v, want failed/%s", outcome, dispatchsvc.ErrRedaction)
+	}
+	if deliveries != 0 {
+		t.Fatalf("redaction preflight failure performed %d deliveries, want 0", deliveries)
+	}
+}
+
+func TestDispatchSmartRestartPromptClassifiesBlockedPreflight(t *testing.T) {
+	deliveries := 0
+	service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor: dispatchsvc.FinalMessageRedactorFunc(func(context.Context, dispatchsvc.Target, string) (dispatchsvc.RedactionResult, error) {
+			return dispatchsvc.RedactionResult{Mode: "block", Blocked: true}, nil
+		}),
+		Deliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliveries++
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("dispatchsvc.NewService: %v", err)
+	}
+
+	outcome, err := dispatchSmartRestartPrompt(context.Background(), "proj", 2, 4, "cc", true, SmartRestartOptions{
+		Prompt:         "continue",
+		promptDispatch: service,
+	})
+	if err == nil || !strings.Contains(err.Error(), "redaction_blocked") {
+		t.Fatalf("blocked preflight error = %v", err)
+	}
+	if outcome.Status != PromptDeliveryBlocked || outcome.Blocked != 1 || outcome.DispatchCode != string(dispatchsvc.ErrRedactionBlocked) {
+		t.Fatalf("blocked preflight outcome = %+v", outcome)
+	}
+	if deliveries != 0 {
+		t.Fatalf("blocked preflight performed %d deliveries, want 0", deliveries)
+	}
+}
+
+func TestDispatchSmartRestartPromptRejectsAmbiguousOutcome(t *testing.T) {
+	expectedTarget := dispatchsvc.Target{Ref: tmux.PaneRef{WindowIndex: 2, PaneIndex: 4}}
+	deliveredReceipt := dispatchsvc.Receipt{Target: expectedTarget, Status: dispatchsvc.ReceiptDelivered}
+
+	tests := []struct {
+		name        string
+		result      dispatchsvc.Result
+		dispatchErr error
+		want        string
+		wantStatus  PromptDeliveryStatus
+	}{
+		{
+			name: "transport error after delivered receipt",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Receipts:  []dispatchsvc.Receipt{deliveredReceipt},
+			},
+			dispatchErr: errors.New("transport acknowledgement lost"),
+			want:        "outcome is ambiguous",
+			wantStatus:  PromptDeliveryAmbiguous,
+		},
+		{
+			name: "successful aggregate without receipt",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Targets:   []dispatchsvc.Target{expectedTarget},
+				Receipts:  []dispatchsvc.Receipt{},
+			},
+			want:       "got 0 receipts",
+			wantStatus: PromptDeliveryAmbiguous,
+		},
+		{
+			name: "receipt for a different pane",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Targets:   []dispatchsvc.Target{expectedTarget},
+				Receipts: []dispatchsvc.Receipt{{
+					Target: dispatchsvc.Target{Ref: tmux.PaneRef{WindowIndex: 9, PaneIndex: 9}},
+					Status: dispatchsvc.ReceiptDelivered,
+				}},
+			},
+			want:       "targeted pane 9.9, want 2.4",
+			wantStatus: PromptDeliveryAmbiguous,
+		},
+		{
+			name: "failed terminal receipt",
+			result: dispatchsvc.Result{
+				Failed:  1,
+				Targets: []dispatchsvc.Target{expectedTarget},
+				Receipts: []dispatchsvc.Receipt{{
+					Target: expectedTarget,
+					Status: dispatchsvc.ReceiptFailed,
+				}},
+			},
+			want:       "was not confirmed",
+			wantStatus: PromptDeliveryFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatcher := smartRestartPromptDispatcherFunc(func(context.Context, dispatchsvc.Request) (dispatchsvc.Result, error) {
+				return tt.result, tt.dispatchErr
+			})
+			outcome, err := dispatchSmartRestartPrompt(context.Background(), "proj", 2, 4, "cc", true, SmartRestartOptions{
+				Prompt:         "continue",
+				promptDispatch: dispatcher,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("dispatch error = %v, want substring %q", err, tt.want)
+			}
+			if outcome.Status != tt.wantStatus {
+				t.Fatalf("dispatch outcome = %+v, want status %s", outcome, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestDispatchSmartRestartPromptDoesNotActuateBeforeReadyOrDuringDryRun(t *testing.T) {
+	dispatches := 0
+	dispatcher := smartRestartPromptDispatcherFunc(func(context.Context, dispatchsvc.Request) (dispatchsvc.Result, error) {
+		dispatches++
+		return dispatchsvc.Result{}, errors.New("unexpected dispatch")
+	})
+
+	tests := []struct {
+		name   string
+		ready  bool
+		dryRun bool
+	}{
+		{name: "failed ready gate", ready: false},
+		{name: "dry run", ready: true, dryRun: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcome, err := dispatchSmartRestartPrompt(context.Background(), "proj", 1, 6, "cc", tt.ready, SmartRestartOptions{
+				DryRun:         tt.dryRun,
+				Prompt:         "continue",
+				promptDispatch: dispatcher,
+			})
+			if err != nil {
+				t.Fatalf("dispatchSmartRestartPrompt: %v", err)
+			}
+			if outcome.Status != PromptDeliveryNotAttempted {
+				t.Fatalf("safety gate outcome = %+v, want not_attempted", outcome)
+			}
+		})
+	}
+	if dispatches != 0 {
+		t.Fatalf("safety gates performed %d dispatches, want 0", dispatches)
+	}
+}
+
+func TestExecuteRestartReportsRequestedPromptOutcome(t *testing.T) {
+	expectedTarget := dispatchsvc.Target{Ref: tmux.PaneRef{WindowIndex: 2, PaneIndex: 4}}
+	expectedReceipt := dispatchsvc.Receipt{Target: expectedTarget, Status: dispatchsvc.ReceiptDelivered}
+
+	tests := []struct {
+		name        string
+		result      dispatchsvc.Result
+		dispatchErr error
+		wantStatus  PromptDeliveryStatus
+		wantSent    bool
+		wantErr     bool
+	}{
+		{
+			name: "blocked preflight",
+			result: dispatchsvc.Result{
+				Targets:  []dispatchsvc.Target{expectedTarget},
+				Receipts: []dispatchsvc.Receipt{{Target: expectedTarget, Status: dispatchsvc.ReceiptBlocked}},
+				Blocked:  1,
+			},
+			dispatchErr: &dispatchsvc.Error{Code: dispatchsvc.ErrRedactionBlocked, Err: errors.New("blocked by policy")},
+			wantStatus:  PromptDeliveryBlocked,
+			wantErr:     true,
+		},
+		{
+			name:        "transport failure before delivery",
+			result:      dispatchsvc.Result{Targets: []dispatchsvc.Target{expectedTarget}, Receipts: []dispatchsvc.Receipt{}},
+			dispatchErr: errors.New("transport unavailable"),
+			wantStatus:  PromptDeliveryFailed,
+			wantErr:     true,
+		},
+		{
+			name: "wrong receipt",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Targets:   []dispatchsvc.Target{expectedTarget},
+				Receipts: []dispatchsvc.Receipt{{
+					Target: dispatchsvc.Target{Ref: tmux.PaneRef{WindowIndex: 9, PaneIndex: 9}},
+					Status: dispatchsvc.ReceiptDelivered,
+				}},
+			},
+			wantStatus: PromptDeliveryAmbiguous,
+			wantErr:    true,
+		},
+		{
+			name: "delivered receipt plus transport error",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Targets:   []dispatchsvc.Target{expectedTarget},
+				Receipts:  []dispatchsvc.Receipt{expectedReceipt},
+			},
+			dispatchErr: errors.New("acknowledgement lost"),
+			wantStatus:  PromptDeliveryAmbiguous,
+			wantErr:     true,
+		},
+		{
+			name: "confirmed delivery",
+			result: dispatchsvc.Result{
+				Success:   true,
+				Delivered: 1,
+				Targets:   []dispatchsvc.Target{expectedTarget},
+				Receipts:  []dispatchsvc.Receipt{expectedReceipt},
+			},
+			wantStatus: PromptDeliveryDelivered,
+			wantSent:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &deterministicSmartRestartExecutor{}
+			dispatcher := smartRestartPromptDispatcherFunc(func(context.Context, dispatchsvc.Request) (dispatchsvc.Result, error) {
+				return tt.result, tt.dispatchErr
+			})
+			seq, err := executeRestart("proj", 2, 4, "cc", SmartRestartOptions{
+				Prompt:         "continue",
+				PostWaitTime:   time.Millisecond,
+				promptDispatch: dispatcher,
+				executor:       executor,
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("executeRestart error = %v, wantErr=%t", err, tt.wantErr)
+			}
+			if seq == nil || !seq.AgentLaunched {
+				t.Fatalf("restart sequence = %+v, want launched agent", seq)
+			}
+			if seq.PromptOutcome == nil || seq.PromptOutcome.Status != tt.wantStatus {
+				t.Fatalf("prompt outcome = %+v, want status %s", seq.PromptOutcome, tt.wantStatus)
+			}
+			if seq.PromptSent != tt.wantSent {
+				t.Fatalf("prompt_sent = %t, want %t", seq.PromptSent, tt.wantSent)
+			}
+			if len(executor.launches) != 1 || executor.launches[0] != "2.4:cc\n" {
+				t.Fatalf("launches = %q, want exact pane 2.4 launch", executor.launches)
+			}
+			if tt.wantErr {
+				var structured *StructuredError
+				if !errors.As(err, &structured) || structured.Code != ErrCodePromptSendFailed || structured.Phase != "prompt" {
+					t.Fatalf("executeRestart error = %T %+v, want prompt structured error", err, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSmartRestartPromptFailureIsTopLevelFailureAndExitOne(t *testing.T) {
+	structured := NewStructuredError(ErrCodePromptSendFailed, "requested prompt was not confirmed").WithPhase("prompt").WithPane(4)
+	out := &SmartRestartOutput{
+		RobotResponse: NewRobotResponse(true),
+		Session:       "proj",
+		Actions: map[string]RestartAction{
+			"2.4": {
+				Action:      ActionRestarted,
+				PromptError: structured,
+				RestartSequence: &RestartSequence{
+					AgentLaunched: true,
+					PromptOutcome: &PromptDeliveryOutcome{Requested: true, Target: "2.4", Status: PromptDeliveryAmbiguous},
+				},
+			},
+		},
+		Summary: RestartSummary{
+			Restarted:              1,
+			PromptFailed:           1,
+			PanesWithPromptFailure: []string{"2.4"},
+			PanesByAction:          map[string][]string{"RESTARTED": {"2.4"}},
+		},
+	}
+	finalizeSmartRestartOutput(out, SmartRestartOptions{Session: "proj", Prompt: "continue"})
+	if out.Success || out.ErrorCode != ErrCodePromptSendFailed {
+		t.Fatalf("top-level response = %+v, want PROMPT_SEND_FAILED", out.RobotResponse)
+	}
+	if out.Actions["2.4"].Action != ActionRestarted || !out.Actions["2.4"].RestartSequence.AgentLaunched {
+		t.Fatalf("restart status was hidden by prompt failure: %+v", out.Actions["2.4"])
+	}
+
+	stdout, err := captureStdout(t, func() error {
+		return encodeTerminalRobotOutput(out, out.RobotResponse, "robot smart-restart failed")
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("terminal result = %T %v, want written exit-1 ProcessExitError", err, err)
+	}
+	var decoded SmartRestartOutput
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("terminal output is not JSON: %v\n%s", err, stdout)
+	}
+	if decoded.Success || decoded.ErrorCode != ErrCodePromptSendFailed || decoded.Summary.PromptFailed != 1 {
+		t.Fatalf("terminal output = %+v", decoded)
+	}
+	decodedAction := decoded.Actions["2.4"]
+	if decodedAction.Action != ActionRestarted || decodedAction.PromptError == nil || decodedAction.PromptError.Code != ErrCodePromptSendFailed {
+		t.Fatalf("terminal action lost restart/prompt distinction: %+v", decodedAction)
+	}
+	if decodedAction.RestartSequence == nil || decodedAction.RestartSequence.PromptOutcome == nil || decodedAction.RestartSequence.PromptOutcome.Status != PromptDeliveryAmbiguous {
+		t.Fatalf("terminal action lost structured prompt outcome: %+v", decodedAction)
+	}
+}
+
+func TestApplyRestartExecutionOutcomePreservesRestartStatusOnPromptFailure(t *testing.T) {
+	out := &SmartRestartOutput{
+		RobotResponse: NewRobotResponse(true),
+		Actions:       map[string]RestartAction{},
+		Summary: RestartSummary{
+			PanesByAction: map[string][]string{},
+		},
+	}
+	action := RestartAction{}
+	seq := &RestartSequence{
+		AgentLaunched: true,
+		PromptOutcome: &PromptDeliveryOutcome{
+			Requested: true,
+			Target:    "2.4",
+			Status:    PromptDeliveryBlocked,
+			Blocked:   1,
+		},
+	}
+	promptErr := NewStructuredError(ErrCodePromptSendFailed, "blocked by redaction policy").WithPhase("prompt").WithPane(4)
+	verified := &PostStateInfo{AgentRunning: true, AgentType: "cc", Confidence: 1}
+
+	applyRestartExecutionOutcome(out, &action, "2.4", "idle", seq, promptErr, func() *PostStateInfo {
+		return verified
+	})
+
+	if action.Action != ActionRestarted || action.RestartSequence != seq || action.PostState != verified {
+		t.Fatalf("action = %+v, want honest restarted state", action)
+	}
+	if action.PromptError != promptErr || action.StructuredError != nil || action.Error != "" {
+		t.Fatalf("prompt failure was not isolated from restart error fields: %+v", action)
+	}
+	if out.Summary.Restarted != 1 || out.Summary.Failed != 0 || out.Summary.PromptFailed != 1 {
+		t.Fatalf("summary = %+v, want restarted=1 failed=0 prompt_failed=1", out.Summary)
+	}
+	if got := out.Summary.PanesWithPromptFailure; len(got) != 1 || got[0] != "2.4" {
+		t.Fatalf("panes_with_prompt_failure = %v, want [2.4]", got)
+	}
+}
+
+func TestApplyRestartExecutionOutcomeCountsConfirmedPrompt(t *testing.T) {
+	out := &SmartRestartOutput{Summary: RestartSummary{PanesByAction: map[string][]string{}}}
+	action := RestartAction{}
+	seq := &RestartSequence{
+		AgentLaunched: true,
+		PromptSent:    true,
+		PromptOutcome: &PromptDeliveryOutcome{Requested: true, Target: "2.4", Status: PromptDeliveryDelivered, Delivered: 1},
+	}
+
+	applyRestartExecutionOutcome(out, &action, "2.4", "idle", seq, nil, nil)
+
+	if action.Action != ActionRestarted || action.RestartSequence != seq {
+		t.Fatalf("action = %+v, want restarted delivery", action)
+	}
+	if out.Summary.Restarted != 1 || out.Summary.PromptDelivered != 1 || out.Summary.PromptFailed != 0 {
+		t.Fatalf("summary = %+v, want one confirmed prompt", out.Summary)
 	}
 }

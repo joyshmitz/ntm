@@ -3,12 +3,15 @@
 package robot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -26,10 +29,11 @@ import (
 
 // IsWorkingOptions configures the is-working command.
 type IsWorkingOptions struct {
-	Session       string // Session name (required)
-	Panes         []int  // Pane indices to check (empty = all non-control panes)
-	LinesCaptured int    // Number of lines to capture (default: 100)
-	Verbose       bool   // Include raw sample in output
+	Session       string   // Session name (required)
+	Panes         []int    // Legacy bare pane indices (empty = all non-control panes)
+	PaneSelectors []string // N, W.P, or %N selectors; takes precedence over Panes
+	LinesCaptured int      // Number of lines to capture (default: 100)
+	Verbose       bool     // Include raw sample in output
 
 	// Semantic, when true, enables the OPTIONAL ground-truth semantic-progress
 	// signal (#199): per pane, attach SemanticProgress derived from
@@ -53,8 +57,9 @@ func DefaultIsWorkingOptions() IsWorkingOptions {
 
 // IsWorkingQuery contains the query parameters for reproducibility.
 type IsWorkingQuery struct {
-	PanesRequested []int `json:"panes_requested"`
-	LinesCaptured  int   `json:"lines_captured"`
+	PanesRequested     []string `json:"panes_requested"`
+	SelectorsRequested []string `json:"selectors_requested,omitempty"`
+	LinesCaptured      int      `json:"lines_captured"`
 }
 
 // WorkIndicators contains the patterns that matched for each category.
@@ -65,17 +70,24 @@ type WorkIndicators struct {
 
 // PaneWorkStatus contains the work state for a single pane.
 type PaneWorkStatus struct {
-	AgentType            string         `json:"agent_type"`
-	IsWorking            bool           `json:"is_working"`
-	IsIdle               bool           `json:"is_idle"`
-	IsRateLimited        bool           `json:"is_rate_limited"`
-	IsContextLow         bool           `json:"is_context_low"`
-	ContextRemaining     *float64       `json:"context_remaining,omitempty"`
-	Confidence           float64        `json:"confidence"`
-	Indicators           WorkIndicators `json:"indicators"`
-	Recommendation       string         `json:"recommendation"`
-	RecommendationReason string         `json:"recommendation_reason"`
-	RawSample            string         `json:"raw_sample,omitempty"` // Only with --verbose
+	AgentType             string         `json:"agent_type"`
+	IsWorking             bool           `json:"is_working"`
+	IsIdle                bool           `json:"is_idle"`
+	IsRateLimited         bool           `json:"is_rate_limited"`
+	IsContextLow          bool           `json:"is_context_low"`
+	ContextRemaining      *float64       `json:"context_remaining,omitempty"`
+	Confidence            float64        `json:"confidence"`
+	Indicators            WorkIndicators `json:"indicators"`
+	Recommendation        string         `json:"recommendation"`
+	RecommendationReason  string         `json:"recommendation_reason"`
+	RawSample             string         `json:"raw_sample,omitempty"` // Only with --verbose
+	ObservationState      string         `json:"observation_state"`
+	ObservationFreshness  string         `json:"observation_freshness"`
+	ObservationObservedAt string         `json:"observation_observed_at"`
+	ObservationError      string         `json:"observation_error,omitempty"`
+	LastKnownState        string         `json:"last_known_state,omitempty"`
+	LastKnownObservedAt   string         `json:"last_known_observed_at,omitempty"`
+	SafeToDispatch        bool           `json:"safe_to_dispatch"`
 
 	// SemanticProgress is the OPTIONAL, additive ground-truth signal (#199),
 	// present only under --semantic and omitted entirely otherwise. It is
@@ -85,13 +97,13 @@ type PaneWorkStatus struct {
 
 // IsWorkingSummary provides aggregate statistics across all panes.
 type IsWorkingSummary struct {
-	TotalPanes       int              `json:"total_panes"`
-	WorkingCount     int              `json:"working_count"`
-	IdleCount        int              `json:"idle_count"`
-	RateLimitedCount int              `json:"rate_limited_count"`
-	ContextLowCount  int              `json:"context_low_count"`
-	ErrorCount       int              `json:"error_count"`
-	ByRecommendation map[string][]int `json:"by_recommendation"`
+	TotalPanes       int                 `json:"total_panes"`
+	WorkingCount     int                 `json:"working_count"`
+	IdleCount        int                 `json:"idle_count"`
+	RateLimitedCount int                 `json:"rate_limited_count"`
+	ContextLowCount  int                 `json:"context_low_count"`
+	ErrorCount       int                 `json:"error_count"`
+	ByRecommendation map[string][]string `json:"by_recommendation"`
 }
 
 // IsWorkingOutput is the response for --robot-is-working.
@@ -110,7 +122,7 @@ func PrintIsWorking(opts IsWorkingOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot is-working failed")
 }
 
 // getRecommendationReason provides human-readable explanation for each recommendation.
@@ -184,19 +196,51 @@ func ParsePanesArg(panesArg string) ([]int, error) {
 	return panes, nil
 }
 
+// ParsePaneSelectorsArg validates the shared N, W.P, and %N selector grammar.
+// Resolution against a concrete session topology happens inside the command so
+// missing selectors produce a typed PANE_NOT_FOUND response.
+func ParsePaneSelectorsArg(panesArg string) ([]string, error) {
+	if panesArg == "" || strings.EqualFold(strings.TrimSpace(panesArg), "all") {
+		return []string{}, nil
+	}
+
+	parts := strings.Split(panesArg, ",")
+	selectors := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for index, part := range parts {
+		selector := strings.TrimSpace(part)
+		if selector == "" {
+			return nil, fmt.Errorf("invalid pane selector list %q: empty selector at position %d", panesArg, index+1)
+		}
+		parsed, err := tmux.ParsePaneSelector(selector)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[parsed.Raw]; exists {
+			continue
+		}
+		seen[parsed.Raw] = struct{}{}
+		selectors = append(selectors, parsed.Raw)
+	}
+	return selectors, nil
+}
+
 // GetIsWorking returns the work state for specified panes in a session.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
+	if opts.LinesCaptured <= 0 {
+		opts.LinesCaptured = DefaultIsWorkingOptions().LinesCaptured
+	}
 	output := &IsWorkingOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
 		Query: IsWorkingQuery{
-			PanesRequested: opts.Panes,
-			LinesCaptured:  opts.LinesCaptured,
+			SelectorsRequested: append([]string(nil), opts.PaneSelectors...),
+			LinesCaptured:      opts.LinesCaptured,
 		},
 		Panes: make(map[string]PaneWorkStatus),
 		Summary: IsWorkingSummary{
-			ByRecommendation: make(map[string][]int),
+			ByRecommendation: make(map[string][]string),
 		},
 	}
 
@@ -210,23 +254,33 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		return output, nil
 	}
 
-	// Get all panes in session
-	allPanes, err := tmux.GetPanes(opts.Session)
+	observer := newRobotSessionObserver(opts.LinesCaptured)
+	observation, err := observer.Observe(context.Background(), opts.Session)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("failed to get panes: %w", err),
+			fmt.Errorf("failed to observe panes: %w", err),
 			ErrCodeInternalError,
 			"Check tmux session state",
 		)
 		return output, nil
 	}
+	allPanes := observationPanes(observation)
+	observationsByID := observationPaneMap(observation)
 
 	// Determine which panes to check. This is window-aware (#170): a
 	// window-per-agent layout (N windows each with a single pane sharing
 	// window-local index 0) must NOT collapse to one entry, and the legacy
 	// "skip the global minimum index" control-pane heuristic excluded every
 	// pane in that layout (they all share the min), reporting total_panes:0.
-	selected := selectIsWorkingPanes(opts.Session, allPanes, opts.Panes)
+	selected, err := resolveIsWorkingPanes(opts.Session, allPanes, opts.PaneSelectors, opts.Panes)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(
+			err,
+			paneSelectorRobotErrorCode(err),
+			"Use --robot-status or --robot-is-working without --panes to inspect canonical pane addresses",
+		)
+		return output, nil
+	}
 
 	// Whether the session spans multiple windows. When it does, a bare pane
 	// index is no longer a unique key, so the response map is keyed by the
@@ -237,15 +291,14 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 	// Create parser
 	parser := agent.NewParser()
 
-	// Track requested pane indices for the query echo (backward-compatible
-	// shape: []int of pane indices). Targets and metadata come from the
-	// selected pane objects directly.
-	requestedIndices := make([]int, 0, len(selected))
+	// Echo canonical resolved targets. Window-local pane indices are not
+	// unique identities in multi-window sessions.
+	requestedTargets := make([]string, 0, len(selected))
 
 	// Process each selected pane.
 	for _, sel := range selected {
-		requestedIndices = append(requestedIndices, sel.Index)
 		paneKey := isWorkingPaneKey(sel, multiWindow)
+		requestedTargets = append(requestedTargets, paneKey)
 
 		if !sel.found {
 			output.Panes[paneKey] = PaneWorkStatus{
@@ -259,55 +312,66 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 			continue
 		}
 
-		// Capture pane output. The target uses the window.pane address so it
-		// resolves correctly regardless of pane-base-index / multi-window.
-		paneIdx := sel.Index
-		target := sel.target
 		paneHint := sel.hint
-		content, err := tmux.CapturePaneOutput(target, opts.LinesCaptured)
-		if err != nil {
-			output.Panes[paneKey] = PaneWorkStatus{
-				AgentType:            string(agent.AgentTypeUnknown),
-				Recommendation:       string(agent.RecommendErrorState),
-				RecommendationReason: fmt.Sprintf("Failed to capture output: %v", err),
-				Confidence:           0.0,
-				Indicators:           WorkIndicators{Work: []string{}, Limit: []string{}},
+		paneObservation, found := observationsByID[sel.id]
+		if !found || paneObservation.Current.Freshness != statuspkg.FreshnessFresh || paneObservation.Current.Error != "" {
+			workStatus := paneWorkStatusFromObservation(paneObservation)
+			if !found {
+				workStatus.ObservationState = string(statuspkg.StateUnknown)
+				workStatus.ObservationFreshness = string(statuspkg.FreshnessUnavailable)
+				workStatus.ObservationError = "pane missing from canonical observation"
 			}
+			workStatus.Recommendation = string(agent.RecommendErrorState)
+			workStatus.RecommendationReason = "Current pane output is unavailable; last-known state is diagnostic only"
+			workStatus.Confidence = 0
+			workStatus.Indicators = WorkIndicators{Work: []string{}, Limit: []string{}}
+			if workStatus.AgentType == "" {
+				workStatus.AgentType = string(agent.AgentTypeUnknown)
+			}
+			output.Panes[paneKey] = workStatus
+			output.Summary.ErrorCount++
+			continue
+		}
+		content := paneObservation.RawOutput
+
+		if paneObservation.Current.Status.State == statuspkg.StateUnknown {
+			// The richer parser below may still recognize provider-specific UI
+			// chrome, but preserve the canonical state alongside that verdict.
+			paneObservation.Current.Confidence = 0.25
+		}
+
+		// Parse the already-captured output. Hint with the tmux-tracked agent
+		// type so we do not misclassify mixed historical scrollback.
+		state, err := parser.ParseWithHint(content, paneHint)
+		if err != nil {
+			workStatus := paneWorkStatusFromObservation(paneObservation)
+			workStatus.AgentType = string(agent.AgentTypeUnknown)
+			workStatus.Recommendation = string(agent.RecommendUnknown)
+			workStatus.RecommendationReason = fmt.Sprintf("Parse failed: %v", err)
+			workStatus.ObservationError = err.Error()
+			workStatus.Confidence = 0
+			workStatus.Indicators = WorkIndicators{Work: []string{}, Limit: []string{}}
+			output.Panes[paneKey] = workStatus
 			output.Summary.ErrorCount++
 			continue
 		}
 
-		// Parse the output. Hint with the tmux-tracked agent type so we don't
-		// misclassify Codex panes as Claude (or vice versa) when both agents'
-		// chrome appears in the scrollback.
-		state, err := parser.ParseWithHint(content, paneHint)
-		if err != nil {
-			output.Panes[paneKey] = PaneWorkStatus{
-				AgentType:            string(agent.AgentTypeUnknown),
-				Recommendation:       string(agent.RecommendUnknown),
-				RecommendationReason: fmt.Sprintf("Parse failed: %v", err),
-				Confidence:           0.0,
-				Indicators:           WorkIndicators{Work: []string{}, Limit: []string{}},
-			}
-			continue
+		// Build the pane status.
+		workStatus := paneWorkStatusFromObservation(paneObservation)
+		workStatus.AgentType = string(state.Type)
+		workStatus.IsWorking = state.IsWorking
+		workStatus.IsIdle = state.IsIdle
+		workStatus.IsRateLimited = state.IsRateLimited
+		workStatus.IsContextLow = state.IsContextLow
+		workStatus.ContextRemaining = state.ContextRemaining
+		workStatus.Confidence = state.Confidence
+		workStatus.Indicators = WorkIndicators{
+			Work:  state.WorkIndicators,
+			Limit: state.LimitIndicators,
 		}
-
-		// Build the pane status
-		status := PaneWorkStatus{
-			AgentType:        string(state.Type),
-			IsWorking:        state.IsWorking,
-			IsIdle:           state.IsIdle,
-			IsRateLimited:    state.IsRateLimited,
-			IsContextLow:     state.IsContextLow,
-			ContextRemaining: state.ContextRemaining,
-			Confidence:       state.Confidence,
-			Indicators: WorkIndicators{
-				Work:  state.WorkIndicators,
-				Limit: state.LimitIndicators,
-			},
-			Recommendation:       string(state.GetRecommendation()),
-			RecommendationReason: getRecommendationReason(state),
-		}
+		workStatus.Recommendation = string(state.GetRecommendation())
+		workStatus.RecommendationReason = getRecommendationReason(state)
+		status := workStatus
 
 		// Live-window THINKING override (#133). The legacy parser can mark a
 		// pane idle when its prompt-pattern view does not see in-flight work
@@ -345,6 +409,7 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 			copy(work, status.Indicators.Work)
 			status.Indicators.Work = append(work, "live_window_thinking")
 		}
+		applyCanonicalWorkSafety(&status, paneObservation)
 
 		// Ensure indicators are never nil
 		if status.Indicators.Work == nil {
@@ -391,26 +456,145 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 
 		rec := status.Recommendation
 		if output.Summary.ByRecommendation[rec] == nil {
-			output.Summary.ByRecommendation[rec] = []int{}
+			output.Summary.ByRecommendation[rec] = []string{}
 		}
-		output.Summary.ByRecommendation[rec] = append(output.Summary.ByRecommendation[rec], paneIdx)
+		output.Summary.ByRecommendation[rec] = append(output.Summary.ByRecommendation[rec], paneKey)
 	}
 
 	output.Summary.TotalPanes = len(selected)
-	output.Query.PanesRequested = requestedIndices
+	output.Query.PanesRequested = requestedTargets
 
 	return output, nil
+}
+
+func newRobotSessionObserver(lines int) *statuspkg.SessionObserver {
+	detectorConfig := statuspkg.DefaultConfig()
+	if lines > 0 {
+		detectorConfig.ScanLines = lines
+	}
+	detector := statuspkg.NewDetectorWithConfig(detectorConfig)
+	observerConfig := statuspkg.DefaultSessionObserverConfig(detectorConfig)
+	observerConfig.CaptureLines = lines
+	return statuspkg.NewSessionObserverWithDependencies(detector, observerConfig, statuspkg.SessionObserverDependencies{})
+}
+
+func observationPanes(observation statuspkg.SessionObservation) []tmux.Pane {
+	panes := make([]tmux.Pane, 0, len(observation.Panes))
+	for _, pane := range observation.Panes {
+		panes = append(panes, pane.Metadata)
+	}
+	return panes
+}
+
+func observationPaneMap(observation statuspkg.SessionObservation) map[string]statuspkg.PaneObservation {
+	panes := make(map[string]statuspkg.PaneObservation, len(observation.Panes))
+	for _, pane := range observation.Panes {
+		panes[pane.Pane.StableKey()] = pane
+	}
+	return panes
+}
+
+func paneWorkStatusFromObservation(observation statuspkg.PaneObservation) PaneWorkStatus {
+	result := PaneWorkStatus{
+		AgentType:             observation.AgentType,
+		ObservationState:      string(observation.Current.Status.State),
+		ObservationFreshness:  string(observation.Current.Freshness),
+		ObservationObservedAt: FormatTimestamp(observation.Current.ObservedAt),
+		ObservationError:      observation.Current.Error,
+		SafeToDispatch:        observation.SafeToDispatch(),
+	}
+	if observation.LastKnown != nil &&
+		(observation.Current.Freshness != statuspkg.FreshnessFresh || observation.Current.Status.State == statuspkg.StateUnknown) {
+		result.LastKnownState = string(observation.LastKnown.Status.State)
+		result.LastKnownObservedAt = FormatTimestamp(observation.LastKnown.ObservedAt)
+	}
+	return result
+}
+
+func applyCanonicalWorkSafety(workStatus *PaneWorkStatus, observation statuspkg.PaneObservation) {
+	if workStatus == nil {
+		return
+	}
+	switch observation.Current.Status.State {
+	case statuspkg.StateWorking:
+		workStatus.IsWorking = true
+		workStatus.IsIdle = false
+		workStatus.Recommendation = string(agent.RecommendDoNotInterrupt)
+		workStatus.RecommendationReason = "Canonical live observation reports active work"
+	case statuspkg.StateUnknown:
+		workStatus.IsWorking = false
+		workStatus.IsIdle = false
+		workStatus.Recommendation = string(agent.RecommendUnknown)
+		workStatus.RecommendationReason = "Canonical live observation could not determine current state"
+	}
+}
+
+func lastKnownObservationState(observation statuspkg.PaneObservation) string {
+	if observation.LastKnown == nil ||
+		(observation.Current.Freshness == statuspkg.FreshnessFresh && observation.Current.Status.State != statuspkg.StateUnknown) {
+		return ""
+	}
+	return string(observation.LastKnown.Status.State)
+}
+
+func lastKnownObservationTime(observation statuspkg.PaneObservation) string {
+	if observation.LastKnown == nil ||
+		(observation.Current.Freshness == statuspkg.FreshnessFresh && observation.Current.Status.State != statuspkg.StateUnknown) {
+		return ""
+	}
+	return FormatTimestamp(observation.LastKnown.ObservedAt)
+}
+
+func paneSelectorRobotErrorCode(err error) string {
+	var selectorErr *tmux.PaneSelectorError
+	if errors.As(err, &selectorErr) && selectorErr.Kind == tmux.PaneSelectorNotFound {
+		return ErrCodePaneNotFound
+	}
+	return ErrCodeInvalidFlag
+}
+
+func resolveIsWorkingPanes(session string, allPanes []tmux.Pane, selectors []string, legacy []int) ([]selectedPane, error) {
+	if len(selectors) == 0 && len(legacy) > 0 {
+		selectors = make([]string, 0, len(legacy))
+		for _, pane := range legacy {
+			selectors = append(selectors, strconv.Itoa(pane))
+		}
+	}
+	if len(selectors) == 0 {
+		return selectIsWorkingPanes(session, allPanes, nil), nil
+	}
+	resolved, err := tmux.ResolvePaneSelectors(allPanes, selectors, false)
+	if err != nil {
+		return nil, err
+	}
+	selected := make([]selectedPane, 0, len(resolved))
+	for _, pane := range resolved {
+		selected = append(selected, buildSelectedPane(session, pane))
+	}
+	return selected, nil
 }
 
 // selectedPane bundles a chosen pane with the metadata GetIsWorking needs:
 // its tmux target (window.pane address), the agent-type hint from tmux, and a
 // found flag (false when the caller requested a pane index that doesn't exist).
 type selectedPane struct {
+	id          string
 	WindowIndex int
 	Index       int
 	target      string
 	hint        agent.AgentType
 	found       bool
+}
+
+func buildSelectedPane(session string, pane tmux.Pane) selectedPane {
+	return selectedPane{
+		id:          pane.Ref().StableKey(),
+		WindowIndex: pane.WindowIndex,
+		Index:       pane.Index,
+		target:      fmt.Sprintf("%s:%d.%d", session, pane.WindowIndex, pane.Index),
+		hint:        agent.AgentType(paneAgentType(pane)).Canonical(),
+		found:       true,
+	}
 }
 
 // selectIsWorkingPanes resolves the set of panes to inspect for
@@ -430,13 +614,7 @@ type selectedPane struct {
 // instead of excluding them all under the old global-minimum heuristic.
 func selectIsWorkingPanes(session string, allPanes []tmux.Pane, requested []int) []selectedPane {
 	build := func(p tmux.Pane) selectedPane {
-		return selectedPane{
-			WindowIndex: p.WindowIndex,
-			Index:       p.Index,
-			target:      fmt.Sprintf("%s:%d.%d", session, p.WindowIndex, p.Index),
-			hint:        agent.AgentType(paneAgentType(p)).Canonical(),
-			found:       true,
-		}
+		return buildSelectedPane(session, p)
 	}
 
 	if len(requested) > 0 {

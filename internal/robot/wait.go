@@ -4,6 +4,7 @@ package robot
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,14 +17,15 @@ type WaitOptions struct {
 	Condition         string // idle, complete, generating, healthy, attention, action_required, etc.
 	Timeout           time.Duration
 	PollInterval      time.Duration
-	PaneIndices       []int  // Empty = all panes
-	AgentType         string // Empty = all types
-	WaitForAny        bool   // If true, wait for ANY; otherwise wait for ALL
-	ExitOnError       bool   // If true, exit immediately on ERROR state
-	CountN            int    // With WaitForAny, wait for at least N agents (default 1)
-	RequireTransition bool   // If true, agents must leave and return to target state
-	SinceCursor       int64  // Attention-based conditions only fire for events after this cursor
-	Profile           string // Filter profile for attention-based conditions (operator, debug, minimal, alerts)
+	PaneSelectors     []string // N, W.P, or %N selectors; empty = all agent panes
+	PaneIndices       []int    // Legacy bare pane indices for internal callers
+	AgentType         string   // Empty = all types
+	WaitForAny        bool     // If true, wait for ANY; otherwise wait for ALL
+	ExitOnError       bool     // If true, exit immediately on ERROR state
+	CountN            int      // With WaitForAny, wait for at least N agents (default 1)
+	RequireTransition bool     // If true, agents must leave and return to target state
+	SinceCursor       int64    // Attention-based conditions only fire for events after this cursor
+	Profile           string   // Filter profile for attention-based conditions (operator, debug, minimal, alerts)
 }
 
 // WaitResponse is the JSON output for --robot-wait.
@@ -104,7 +106,7 @@ const (
 const CompleteIdleThreshold = 5 * time.Second
 
 // GetWait executes the wait operation and returns the response data.
-// Returns the response and exit code (0=success, 1=timeout, 2=error, 3=agent error).
+// Returns the response and normalized robot exit code (0=success, 1=error).
 func GetWait(opts WaitOptions) (*WaitResponse, int) {
 	// Validate session exists
 	if !tmux.SessionExists(opts.Session) {
@@ -116,7 +118,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 			),
 			Session:   opts.Session,
 			Condition: opts.Condition,
-		}, 2
+		}, 1
 	}
 
 	// Validate condition — check for unsupported conditions with specific guidance
@@ -141,7 +143,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 			),
 			Session:   opts.Session,
 			Condition: opts.Condition,
-		}, 2
+		}, 1
 	}
 
 	// Parse conditions once and split pane-vs-attention semantics. Mixed waits
@@ -195,7 +197,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 		}
 
 		var activities []*AgentActivity
-		needPaneState := len(paneConditions) > 0 || opts.ExitOnError || opts.RequireTransition
+		needPaneState := len(paneConditions) > 0 || opts.ExitOnError || opts.RequireTransition || len(waitPaneSelectors(opts)) > 0
 		if needPaneState {
 			panes, err := tmux.GetPanes(opts.Session)
 			if err != nil {
@@ -207,10 +209,21 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 					),
 					Session:   opts.Session,
 					Condition: opts.Condition,
-				}, 2
+				}, 1
 			}
 
-			filteredPanes := filterWaitPanes(panes, opts)
+			filteredPanes, filterErr := resolveWaitPanes(panes, opts)
+			if filterErr != nil {
+				return &WaitResponse{
+					RobotResponse: NewErrorResponse(
+						filterErr,
+						paneSelectorRobotErrorCode(filterErr),
+						"Use --robot-status or --robot-is-working to inspect canonical pane addresses",
+					),
+					Session:   opts.Session,
+					Condition: opts.Condition,
+				}, 1
+			}
 			if len(filteredPanes) == 0 {
 				return &WaitResponse{
 					RobotResponse: NewErrorResponse(
@@ -220,7 +233,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 					),
 					Session:   opts.Session,
 					Condition: opts.Condition,
-				}, 2
+				}, 1
 			}
 
 			for _, pane := range filteredPanes {
@@ -265,7 +278,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 								State:     string(a.State),
 								AgentType: a.AgentType,
 							}},
-						}, 3
+						}, 1
 					}
 				}
 			}
@@ -301,7 +314,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 						NextCursor:     details.EarliestCursor,
 						OldestCursor:   details.EarliestCursor,
 					},
-				}, 2
+				}, 1
 			}
 			attentionMet = lastAttentionResult != nil && lastAttentionResult.Met
 		}
@@ -325,10 +338,14 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 }
 
 // PrintWait executes the wait operation and outputs JSON.
-// Returns exit code: 0 = success, 1 = timeout, 2 = error, 3 = agent error
+// Returns exit code 0 on success and 1 for every wait failure.
 func PrintWait(opts WaitOptions) int {
 	resp, exitCode := GetWait(opts)
-	outputJSON(resp)
+	if resp.Success {
+		_ = outputJSON(resp)
+	} else {
+		_ = encodeRobotFailureJSON(resp)
+	}
 	return exitCode
 }
 
@@ -418,24 +435,32 @@ func splitWaitConditions(conditions []string) ([]string, []string) {
 	return paneConditions, attentionConditions
 }
 
-// filterWaitPanes filters panes based on wait options.
-func filterWaitPanes(panes []tmux.Pane, opts WaitOptions) []tmux.Pane {
-	var result []tmux.Pane
+func waitPaneSelectors(opts WaitOptions) []string {
+	if len(opts.PaneSelectors) > 0 {
+		return append([]string(nil), opts.PaneSelectors...)
+	}
+	selectors := make([]string, 0, len(opts.PaneIndices))
+	for _, index := range opts.PaneIndices {
+		selectors = append(selectors, strconv.Itoa(index))
+	}
+	return selectors
+}
 
-	// Build pane index set for quick lookup
-	paneIndexSet := make(map[int]bool)
-	for _, idx := range opts.PaneIndices {
-		paneIndexSet[idx] = true
+// resolveWaitPanes resolves canonical selectors, then applies agent filters.
+func resolveWaitPanes(panes []tmux.Pane, opts WaitOptions) ([]tmux.Pane, error) {
+	candidates := tmux.SortPanesByTopology(panes)
+	if selectors := waitPaneSelectors(opts); len(selectors) > 0 {
+		resolved, err := tmux.ResolvePaneSelectors(candidates, selectors, false)
+		if err != nil {
+			return nil, err
+		}
+		candidates = resolved
 	}
 
-	for _, pane := range panes {
+	var result []tmux.Pane
+	for _, pane := range candidates {
 		agentType := waitPaneAgentType(pane)
 		if agentType == "" || agentType == "unknown" || agentType == "user" {
-			continue
-		}
-
-		// Filter by specific pane indices
-		if len(opts.PaneIndices) > 0 && !paneIndexSet[pane.Index] {
 			continue
 		}
 
@@ -447,6 +472,13 @@ func filterWaitPanes(panes []tmux.Pane, opts WaitOptions) []tmux.Pane {
 		result = append(result, pane)
 	}
 
+	return result, nil
+}
+
+// filterWaitPanes preserves the legacy pure-filter helper for internal callers.
+// Production paths use resolveWaitPanes so selector errors fail loud.
+func filterWaitPanes(panes []tmux.Pane, opts WaitOptions) []tmux.Pane {
+	result, _ := resolveWaitPanes(panes, opts)
 	return result
 }
 

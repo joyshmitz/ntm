@@ -1,12 +1,55 @@
 package robot
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestGetWaitFailureUsesGeneralErrorExit(t *testing.T) {
+	response, exitCode := GetWait(WaitOptions{
+		Session:   "ntm-robot-contract-wait-missing",
+		Condition: WaitConditionIdle,
+	})
+	if exitCode != 1 {
+		t.Fatalf("GetWait() exit code = %d, want 1", exitCode)
+	}
+	if response.Success || response.ErrorCode != ErrCodeSessionNotFound {
+		t.Fatalf("GetWait() response = %+v, want SESSION_NOT_FOUND failure", response.RobotResponse)
+	}
+}
+
+func TestPrintWaitFailureForcesJSONUnderTOON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	var exitCode int
+	stdout, err := captureStdout(t, func() error {
+		exitCode = PrintWait(WaitOptions{
+			Session:   "ntm-robot-contract-wait-missing-toon",
+			Condition: WaitConditionIdle,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("capture PrintWait: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("PrintWait() exit code = %d, want 1", exitCode)
+	}
+
+	var response WaitResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("PrintWait failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeSessionNotFound || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("PrintWait response = %+v, want SESSION_NOT_FOUND JSON failure", response.RobotResponse)
+	}
+}
 
 func TestIsValidWaitCondition(t *testing.T) {
 	tests := []struct {
@@ -853,5 +896,37 @@ func TestWaitPaneAgentTypePrefersParsedPaneType(t *testing.T) {
 
 	if got := waitPaneAgentType(pane); got != "gemini" {
 		t.Fatalf("waitPaneAgentType() = %q, want gemini", got)
+	}
+}
+
+func TestResolveWaitPanesCanonicalSelectors(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%10", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%11", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%20", WindowIndex: 1, Index: 0, Type: tmux.AgentCodex},
+		{ID: "%21", WindowIndex: 1, Index: 1, Type: tmux.AgentGemini},
+	}
+
+	selected, err := resolveWaitPanes(panes, WaitOptions{PaneSelectors: []string{"1"}})
+	if err != nil {
+		t.Fatalf("resolveWaitPanes(window selector) error = %v", err)
+	}
+	if len(selected) != 2 || selected[0].ID != "%20" || selected[1].ID != "%21" {
+		t.Fatalf("window selector resolved %+v, want %%20 then %%21", selected)
+	}
+
+	selected, err = resolveWaitPanes(panes, WaitOptions{PaneSelectors: []string{"0.1", "%11", "0.1"}})
+	if err != nil {
+		t.Fatalf("resolveWaitPanes(alias dedup) error = %v", err)
+	}
+	if len(selected) != 1 || selected[0].ID != "%11" {
+		t.Fatalf("alias dedup resolved %+v, want only %%11", selected)
+	}
+
+	if _, err := resolveWaitPanes(panes, WaitOptions{PaneSelectors: []string{"9.0"}}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+	if _, err := resolveWaitPanes(panes, WaitOptions{PaneSelectors: []string{"1.x"}}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("malformed selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
 	}
 }

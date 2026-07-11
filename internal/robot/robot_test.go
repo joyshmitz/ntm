@@ -1151,8 +1151,9 @@ func TestPrintTailNonexistentSession(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintTail("nonexistent_session_12345", 20, nil)
 	})
-	if err != nil {
-		t.Fatalf("PrintTail should not return error, got: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintTail error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result TailOutput
@@ -1184,8 +1185,9 @@ func TestPrintSendNonexistentSession(t *testing.T) {
 		})
 	})
 
-	if err != nil {
-		t.Fatalf("PrintSend should not return error, got: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintSend error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result SendOutput
@@ -1271,8 +1273,9 @@ func TestPrintSend_AllIncludesUserPane(t *testing.T) {
 			DryRun:  true,
 		})
 	})
-	if err != nil {
-		t.Fatalf("PrintSend failed: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintSend no-target error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result SendOutput
@@ -1281,6 +1284,9 @@ func TestPrintSend_AllIncludesUserPane(t *testing.T) {
 	}
 	if len(result.Targets) != 0 {
 		t.Fatalf("expected no targets without --all, got %v", result.Targets)
+	}
+	if result.Success || result.ErrorCode == "" {
+		t.Fatalf("expected typed no-target failure, got %+v", result.RobotResponse)
 	}
 
 	// With --all, user pane should be included.
@@ -1295,6 +1301,7 @@ func TestPrintSend_AllIncludesUserPane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrintSend failed: %v", err)
 	}
+	result = SendOutput{}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("Failed to parse JSON: %v", err)
 	}
@@ -1338,8 +1345,9 @@ func TestSendOptionsExclude(t *testing.T) {
 		})
 	})
 
-	if err != nil {
-		t.Fatalf("PrintSend failed: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintSend exclude-all error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result SendOutput
@@ -1352,6 +1360,9 @@ func TestSendOptionsExclude(t *testing.T) {
 		if target == paneToExclude {
 			t.Errorf("Pane %s should be excluded", paneToExclude)
 		}
+	}
+	if result.Success || result.ErrorCode == "" || len(result.Targets) != 0 || len(result.Successful) != 0 {
+		t.Fatalf("exclude-all response = %+v, want typed no-target failure", result)
 	}
 }
 
@@ -2318,8 +2329,9 @@ func TestPrintSendEmptySession(t *testing.T) {
 		})
 	})
 
-	if err != nil {
-		t.Fatalf("PrintSend should not return error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintSend error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result SendOutput

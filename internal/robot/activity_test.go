@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestNewVelocityTracker(t *testing.T) {
@@ -1409,6 +1410,45 @@ func TestActivityOptions(t *testing.T) {
 	}
 }
 
+func TestPrintActivityFailureReturnsTypedErrorAndRawJSON(t *testing.T) {
+	stdout, err := captureStdout(t, func() error {
+		return PrintActivity(ActivityOptions{Session: "ntm-activity-missing-session-for-test"})
+	})
+	if err == nil {
+		t.Fatal("PrintActivity() error = nil, want typed terminal failure")
+	}
+	var response RobotResponse
+	if json.Unmarshal([]byte(stdout), &response) != nil {
+		t.Fatalf("stdout is not raw JSON: %q", stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeSessionNotFound {
+		t.Fatalf("response = %+v, want SESSION_NOT_FOUND", response)
+	}
+}
+
+func TestResolveActivityPaneIDsSelectors(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0},
+		{ID: "%2", WindowIndex: 1, Index: 0},
+	}
+	selected, err := resolveActivityPaneIDs(panes, []string{"1", "1.0", "%2"})
+	if err != nil {
+		t.Fatalf("resolveActivityPaneIDs() error = %v", err)
+	}
+	if len(selected) != 1 {
+		t.Fatalf("selected IDs = %v, want one deduplicated pane", selected)
+	}
+	if _, ok := selected["%2"]; !ok {
+		t.Fatalf("selected IDs = %v, want %%2", selected)
+	}
+	if _, err := resolveActivityPaneIDs(panes, []string{"9.0"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := resolveActivityPaneIDs(panes, []string{"1.x"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("invalid selector error = %v", err)
+	}
+}
+
 func TestActivityOutput(t *testing.T) {
 	output := ActivityOutput{
 		RobotResponse: NewRobotResponse(true),
@@ -1458,14 +1498,18 @@ func TestAgentActivityInfo(t *testing.T) {
 func TestAgentActivityInfo_CaptureProvenance(t *testing.T) {
 	t.Run("live capture omits error and serializes provenance", func(t *testing.T) {
 		info := AgentActivityInfo{
-			Pane:               "0",
-			PaneIdx:            0,
-			AgentType:          "claude",
-			State:              "WAITING",
-			Confidence:         0.95,
-			PanePID:            12345,
-			CaptureCollectedAt: "2026-05-03T20:30:00Z",
-			CaptureProvenance:  "live",
+			Pane:                  "0",
+			PaneIdx:               0,
+			AgentType:             "claude",
+			State:                 "WAITING",
+			Confidence:            0.95,
+			PanePID:               12345,
+			CaptureCollectedAt:    "2026-05-03T20:30:00Z",
+			CaptureProvenance:     "live",
+			ObservationState:      "idle",
+			ObservationFreshness:  "fresh",
+			ObservationConfidence: 0.95,
+			SafeToDispatch:        true,
 		}
 		blob, err := json.Marshal(info)
 		if err != nil {
@@ -1481,18 +1525,25 @@ func TestAgentActivityInfo_CaptureProvenance(t *testing.T) {
 		if strings.Contains(s, "capture_error") {
 			t.Errorf("happy-path live capture must omit capture_error, got %s", s)
 		}
+		if !strings.Contains(s, `"observation_freshness":"fresh"`) || !strings.Contains(s, `"safe_to_dispatch":true`) {
+			t.Errorf("expected canonical observation metadata, got %s", s)
+		}
 	})
 
 	t.Run("failed capture preserves error string", func(t *testing.T) {
 		info := AgentActivityInfo{
-			Pane:               "1",
-			PaneIdx:            1,
-			AgentType:          "codex",
-			State:              "UNKNOWN",
-			PanePID:            6789,
-			CaptureCollectedAt: "2026-05-03T20:30:01Z",
-			CaptureProvenance:  "unavailable",
-			CaptureError:       "tmux capture-pane: pane not found",
+			Pane:                 "1",
+			PaneIdx:              1,
+			AgentType:            "codex",
+			State:                "UNKNOWN",
+			PanePID:              6789,
+			CaptureCollectedAt:   "2026-05-03T20:30:01Z",
+			CaptureProvenance:    "unavailable",
+			CaptureError:         "tmux capture-pane: pane not found",
+			ObservationState:     "unknown",
+			ObservationFreshness: "unavailable",
+			LastKnownState:       "working",
+			LastKnownObservedAt:  "2026-05-03T20:29:59Z",
 		}
 		blob, err := json.Marshal(info)
 		if err != nil {
@@ -1510,6 +1561,9 @@ func TestAgentActivityInfo_CaptureProvenance(t *testing.T) {
 		}
 		if !strings.Contains(s, "tmux capture-pane: pane not found") {
 			t.Errorf("expected capture_error preserved, got %s", s)
+		}
+		if !strings.Contains(s, `"last_known_state":"working"`) || strings.Contains(s, `"safe_to_dispatch":true`) {
+			t.Errorf("expected diagnostic last-known state and fail-closed dispatch, got %s", s)
 		}
 	})
 

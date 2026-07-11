@@ -26,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/models"
@@ -3875,6 +3876,13 @@ type PaneOutput struct {
 	Lines     []string `json:"lines"`
 	Truncated bool     `json:"truncated"`
 
+	ObservationState      string  `json:"observation_state"`
+	ObservationFreshness  string  `json:"observation_freshness"`
+	ObservationConfidence float64 `json:"observation_confidence"`
+	LastKnownState        string  `json:"last_known_state,omitempty"`
+	LastKnownObservedAt   string  `json:"last_known_observed_at,omitempty"`
+	SafeToDispatch        bool    `json:"safe_to_dispatch"`
+
 	// PanePID is the tmux shell PID of this pane (`#{pane_pid}`). Populated
 	// additively so downstream watchdogs can detect respawns by comparing
 	// against the PID they last observed. See ntm#117.
@@ -3925,29 +3933,37 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 			Panes:      make(map[string]PaneOutput),
 		}, nil
 	}
+	if opts.Lines <= 0 {
+		opts.Lines = 20
+	}
 
-	tmuxCollectedAt := time.Now().UTC()
-	tmuxCollectedAtStr := tmuxCollectedAt.Format(time.RFC3339)
-	panes, err := tmux.GetPanes(opts.Session)
+	observer := newRobotSessionObserver(opts.Lines)
+	observation, err := observer.Observe(context.Background(), opts.Session)
 	if err != nil {
+		errorCode := ErrCodeInternalError
+		hint := "Check tmux is running and session is accessible"
+		if tmux.ClassifyCommandError(err).Kind == tmux.CommandErrorSessionNotFound {
+			errorCode = ErrCodeSessionNotFound
+			hint = "Use 'ntm list' to see available sessions"
+		}
 		return &TailOutput{
 			RobotResponse: NewErrorResponse(
-				fmt.Errorf("failed to get panes: %w", err),
-				ErrCodeInternalError,
-				"Check tmux is running and session is accessible",
+				fmt.Errorf("failed to observe panes: %w", err),
+				errorCode,
+				hint,
 			),
 			Session:    opts.Session,
-			CapturedAt: time.Now().UTC(),
+			CapturedAt: observation.ObservedAt,
 			Panes:      make(map[string]PaneOutput),
 			SourceHealth: map[string]SourceHealthEntry{
 				"tmux": {
 					Source:           "tmux",
 					Status:           "unavailable",
-					CollectedAt:      tmuxCollectedAtStr,
+					CollectedAt:      FormatTimestamp(observation.ObservedAt),
 					FreshnessSec:     0,
 					StaleAfterSec:    5,
 					Provenance:       "live",
-					DegradedFeatures: []string{"pane_output", "pane_pid"},
+					DegradedFeatures: []string{"pane_output", "pane_pid", "agent_state"},
 					LastError:        err.Error(),
 					LastErrorAt:      time.Now().UTC().Format(time.RFC3339),
 				},
@@ -3955,78 +3971,110 @@ func GetTail(opts TailOptions) (*TailOutput, error) {
 		}, nil
 	}
 
+	panes := observationPanes(observation)
+	selectedIDs := make(map[string]struct{}, len(panes))
+	if len(opts.PaneFilter) > 0 {
+		selected, resolveErr := tmux.ResolvePaneSelectors(panes, opts.PaneFilter, false)
+		if resolveErr != nil {
+			return &TailOutput{
+				RobotResponse: NewErrorResponse(
+					resolveErr,
+					paneSelectorRobotErrorCode(resolveErr),
+					"Use --robot-status or --robot-tail without --panes to inspect canonical pane addresses",
+				),
+				Session:    opts.Session,
+				CapturedAt: observation.ObservedAt,
+				Panes:      make(map[string]PaneOutput),
+			}, nil
+		}
+		for _, pane := range selected {
+			selectedIDs[pane.Ref().StableKey()] = struct{}{}
+		}
+	}
+
+	collectedAt := FormatTimestamp(observation.ObservedAt)
 	output := &TailOutput{
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
-		CapturedAt:    time.Now().UTC(),
+		CapturedAt:    observation.ObservedAt,
 		Panes:         make(map[string]PaneOutput),
 		SourceHealth: map[string]SourceHealthEntry{
 			"tmux": {
 				Source:        "tmux",
 				Status:        "fresh",
-				CollectedAt:   tmuxCollectedAtStr,
-				FreshnessSec:  int(time.Since(tmuxCollectedAt).Seconds()),
+				CollectedAt:   collectedAt,
+				FreshnessSec:  0,
 				StaleAfterSec: 5,
 				Provenance:    "live",
 			},
 		},
 	}
+	if !observation.Complete {
+		source := output.SourceHealth["tmux"]
+		source.Status = "stale"
+		source.DegradedFeatures = []string{"pane_output", "agent_state"}
+		if len(observation.Failures) > 0 {
+			source.LastError = observation.Failures[0].Error
+			source.LastErrorAt = collectedAt
+		}
+		output.SourceHealth["tmux"] = source
+	}
 
-	// Build pane filter (topology-aware, #172).
 	multiWindow := paneSessionIsMultiWindow(panes)
-	paneFilter := opts.PaneFilter
-	hasFilter := len(paneFilter) > 0
-
-	for _, pane := range panes {
+	for _, paneObservation := range observation.Panes {
+		pane := paneObservation.Metadata
 		// Use the topology-aware key so window-per-agent layouts don't collapse
 		// every window's pane onto a single output-map entry (#172).
 		paneKey := paneTargetKey(pane, multiWindow)
 
-		// Skip if filter is set and this pane is not in it
-		if hasFilter && !paneMatchesAnyToken(pane, paneFilter, multiWindow) {
-			continue
+		if len(opts.PaneFilter) > 0 {
+			if _, selected := selectedIDs[pane.Ref().StableKey()]; !selected {
+				continue
+			}
 		}
 
-		// Capture pane output. Stamp the attempt time *before* the call so
-		// CaptureCollectedAt reflects when we asked tmux, not when it answered.
-		paneCapturedAt := time.Now().UTC().Format(time.RFC3339)
-		captured, err := tmux.CapturePaneOutput(pane.ID, opts.Lines)
-		if err != nil {
-			// Include empty output on error, but populate per-pane
-			// provenance so a watchdog can pinpoint the failed pane
-			// instead of inferring "this pane went dark" from len(lines)==0.
+		paneCapturedAt := FormatTimestamp(paneObservation.Current.ObservedAt)
+		if paneObservation.Current.Freshness != status.FreshnessFresh || paneObservation.Current.Error != "" {
+			captureErr := paneObservation.Current.Error
+			if captureErr == "" {
+				captureErr = fmt.Sprintf("current pane observation is %s", paneObservation.Current.Freshness)
+			}
 			output.Panes[paneKey] = PaneOutput{
-				Type:               paneAgentType(pane),
-				State:              "unknown",
-				Lines:              []string{},
-				Truncated:          false,
-				PanePID:            pane.PID,
-				CaptureCollectedAt: paneCapturedAt,
-				CaptureProvenance:  "unavailable",
-				CaptureError:       err.Error(),
+				Type:                  paneAgentType(pane),
+				State:                 "unknown",
+				Lines:                 []string{},
+				PanePID:               pane.PID,
+				CaptureCollectedAt:    paneCapturedAt,
+				CaptureProvenance:     "unavailable",
+				CaptureError:          captureErr,
+				ObservationState:      string(paneObservation.Current.Status.State),
+				ObservationFreshness:  string(paneObservation.Current.Freshness),
+				ObservationConfidence: paneObservation.Current.Confidence,
+				LastKnownState:        lastKnownObservationState(paneObservation),
+				LastKnownObservedAt:   lastKnownObservationTime(paneObservation),
+				SafeToDispatch:        false,
 			}
 			continue
 		}
 
-		// Strip ANSI codes and split into lines
-		cleanOutput := status.StripANSI(captured)
+		cleanOutput := status.StripANSI(paneObservation.RawOutput)
 		outputLines := splitLines(cleanOutput)
-
-		// Detect state from output
-		agentType := paneAgentType(pane)
-		state := determineState(captured, agentType)
-
-		// Check if truncated (we captured exactly the requested lines)
 		truncated := len(outputLines) >= opts.Lines
 
 		output.Panes[paneKey] = PaneOutput{
-			Type:               agentType,
-			State:              state,
-			Lines:              outputLines,
-			Truncated:          truncated,
-			PanePID:            pane.PID,
-			CaptureCollectedAt: paneCapturedAt,
-			CaptureProvenance:  "live",
+			Type:                  paneAgentType(pane),
+			State:                 tailObservationState(paneObservation.Current.Status.State),
+			Lines:                 outputLines,
+			Truncated:             truncated,
+			PanePID:               pane.PID,
+			CaptureCollectedAt:    paneCapturedAt,
+			CaptureProvenance:     "live",
+			ObservationState:      string(paneObservation.Current.Status.State),
+			ObservationFreshness:  string(paneObservation.Current.Freshness),
+			ObservationConfidence: paneObservation.Current.Confidence,
+			LastKnownState:        lastKnownObservationState(paneObservation),
+			LastKnownObservedAt:   lastKnownObservationTime(paneObservation),
+			SafeToDispatch:        paneObservation.SafeToDispatch(),
 		}
 	}
 
@@ -4047,7 +4095,14 @@ func PrintTail(session string, lines int, paneFilter []string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot tail failed")
+}
+
+func tailObservationState(state status.AgentState) string {
+	if state == status.StateWorking {
+		return "active"
+	}
+	return string(state)
 }
 
 // generateTailHints analyzes pane states and provides actionable hints for AI agents
@@ -5963,6 +6018,7 @@ type SendOptions struct {
 	Message        string // Message to send
 	Redaction      redaction.Config
 	All            bool     // Send to all panes (including user)
+	Pane           string   // Singular N, W.P, or %N selector; mutually exclusive with Panes
 	Panes          []string // Specific pane indices (e.g., "0", "1", "2")
 	AgentTypes     []string // Filter by agent types (e.g., "claude", "codex")
 	Exclude        []string // Panes to exclude
@@ -6523,6 +6579,140 @@ func applySendMessageRedaction(message string, cfg redaction.Config) (messageToS
 	}
 }
 
+// robotFinalMessageRedactor adapts the robot redaction envelope to the neutral
+// dispatch service. Robot send has one final message for every target, so the
+// scan is memoized while the service still invokes the final-message policy for
+// every prepared pane.
+type robotFinalMessageRedactor struct {
+	config redaction.Config
+	once   sync.Once
+	result dispatchsvc.RedactionResult
+	view   struct {
+		preview  string
+		summary  RedactionSummary
+		warnings []string
+	}
+}
+
+func (r *robotFinalMessageRedactor) RedactFinalMessage(_ context.Context, _ dispatchsvc.Target, message string) (dispatchsvc.RedactionResult, error) {
+	r.once.Do(func() {
+		final, preview, summary, warnings, blocked := applySendMessageRedaction(message, r.config)
+		r.result = dispatchsvc.RedactionResult{
+			Message:    final,
+			Mode:       summary.Mode,
+			Findings:   summary.Findings,
+			Categories: cloneStringIntMap(summary.Categories),
+			Warnings:   cloneStringsPreserveNil(warnings),
+			Blocked:    blocked,
+		}
+		r.view.preview = preview
+		r.view.summary = summary
+		r.view.summary.Categories = cloneStringIntMap(summary.Categories)
+		r.view.warnings = cloneStringsPreserveNil(warnings)
+	})
+	result := r.result
+	result.Categories = cloneStringIntMap(r.result.Categories)
+	result.Warnings = cloneStringsPreserveNil(r.result.Warnings)
+	return result, nil
+}
+
+func (r *robotFinalMessageRedactor) outputView() (string, RedactionSummary, []string) {
+	preview := r.view.preview
+	summary := r.view.summary
+	summary.Categories = cloneStringIntMap(summary.Categories)
+	return preview, summary, cloneStringsPreserveNil(r.view.warnings)
+}
+
+func cloneStringsPreserveNil(input []string) []string {
+	if input == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(input)), input...)
+}
+
+func cloneStringIntMap(input map[string]int) map[string]int {
+	if len(input) == 0 {
+		return nil
+	}
+	result := make(map[string]int, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+type robotDispatchProtocolPlanner struct{}
+
+func (robotDispatchProtocolPlanner) PlanDelivery(_ context.Context, target dispatchsvc.Target, submit bool) (dispatchsvc.ProtocolPlan, error) {
+	if !submit {
+		return dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolStageOnly}, nil
+	}
+	resolvedType := paneAgentType(target.Pane)
+	if robotSendUsesDoubleEnter(target.Pane.Type, resolvedType, true) {
+		return dispatchsvc.ProtocolPlan{
+			Protocol:         dispatchsvc.ProtocolDoubleEnter,
+			EnterDelay:       tmux.DoubleEnterFirstDelay,
+			SecondEnterDelay: tmux.DoubleEnterSecondDelay,
+		}, nil
+	}
+	enterDelay := tmux.DefaultEnterDelay
+	if target.Pane.Type == tmux.AgentUser || resolvedType == "user" || resolvedType == "unknown" {
+		enterDelay = tmux.ShellEnterDelay
+	}
+	return dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolSingleEnter, EnterDelay: enterDelay}, nil
+}
+
+func newRobotDispatchService(redactCfg redaction.Config, deliverer dispatchsvc.Deliverer, pacer dispatchsvc.Pacer) (*dispatchsvc.Service, *robotFinalMessageRedactor, error) {
+	if deliverer == nil {
+		deliverer = dispatchsvc.TMUXDeliverer{}
+	}
+	redactor := &robotFinalMessageRedactor{config: redactCfg}
+	service, err := dispatchsvc.NewService(dispatchsvc.Ports{
+		Redactor:  redactor,
+		Protocols: robotDispatchProtocolPlanner{},
+		Deliverer: deliverer,
+		Pacer:     pacer,
+	})
+	return service, redactor, err
+}
+
+func robotPreparedDispatchRequest(allPanes, targetPanes []tmux.Pane, opts SendOptions, message string, submit bool) dispatchsvc.Request {
+	selectors := make([]string, 0, len(targetPanes))
+	for _, pane := range targetPanes {
+		if pane.ID != "" {
+			selectors = append(selectors, pane.ID)
+		} else {
+			selectors = append(selectors, pane.Ref().Physical())
+		}
+	}
+	return dispatchsvc.Request{
+		Session:           opts.Session,
+		Panes:             allPanes,
+		Selectors:         selectors,
+		IncludeUser:       true,
+		Message:           message,
+		AllowEmptyMessage: true,
+		Submit:            submit,
+		Delay:             time.Duration(opts.DelayMs) * time.Millisecond,
+		DryRun:            opts.DryRun,
+	}
+}
+
+func applyRobotDispatchResult(output *SendOutput, result dispatchsvc.Result) {
+	for _, receipt := range result.Receipts {
+		switch receipt.Status {
+		case dispatchsvc.ReceiptDelivered:
+			output.Successful = append(output.Successful, receipt.Target.Address)
+		case dispatchsvc.ReceiptFailed, dispatchsvc.ReceiptSkipped, dispatchsvc.ReceiptBlocked:
+			message := receipt.Error
+			if message == "" {
+				message = "dispatch did not deliver to pane"
+			}
+			output.Failed = append(output.Failed, SendError{Pane: receipt.Target.Address, Error: message})
+		}
+	}
+}
+
 // GetSend sends a message to multiple panes atomically and returns structured results.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetSend(opts SendOptions) (*SendOutput, error) {
@@ -6614,7 +6804,17 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		excludeMap[e] = true
 	}
 
-	targetPanes, targetKeys := selectSendTargets(panes, opts, excludeMap)
+	targetPanes, targetKeys, err := selectSendTargets(panes, opts, excludeMap)
+	if err != nil {
+		errorCode := ErrCodeInvalidFlag
+		var selectorErr *tmux.PaneSelectorError
+		if errors.As(err, &selectorErr) && selectorErr.Kind == tmux.PaneSelectorNotFound {
+			errorCode = ErrCodePaneNotFound
+		}
+		output.RobotResponse = NewErrorResponse(err, errorCode, "Use --robot-is-working to inspect canonical pane addresses")
+		output.Failed = append(output.Failed, SendError{Pane: "selector", Error: err.Error()})
+		return finalizeTerminalSendActuation(trace, opts, &output), nil
+	}
 	output.Targets = append(output.Targets, targetKeys...)
 
 	// Perform CASS injection if enabled
@@ -6659,89 +6859,90 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		}
 	}
 
-	// Redaction preflight on final outbound message (after CASS injection, if any).
-	redacted, preview, summary, warnings, blocked := applySendMessageRedaction(messageToSend, redactCfg)
-	output.Redaction = summary
-	output.Warnings = warnings
-	output.Blocked = blocked
-	output.MessagePreview = preview
-
-	if blocked {
-		errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
-		if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
-			errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
-		}
-		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact")
-		output.Success = false
-		return &output, nil
-	}
-	messageToSend = redacted
-
-	// Dry-run mode: show what would happen without sending
-	if opts.DryRun {
-		output.DryRun = true
-		if len(output.Targets) > 0 {
-			output.WouldSendTo = append(output.WouldSendTo, output.Targets...)
-			output.Success = true
-		} else {
-			output.Success = false
-			output.Error = "no target panes matched the filter criteria"
-			output.ErrorCode = ErrCodeInvalidFlag
-		}
-		return &output, nil
-	}
-
-	publishSendActuationRequest(trace, opts, output.Targets, output.MessagePreview)
-
 	sendEnter := true
 	if opts.Enter != nil {
 		sendEnter = *opts.Enter
 	}
 
-	// Send to all targets
-	for i, pane := range targetPanes {
-		// targetKeys is index-aligned with targetPanes and already encodes the
-		// topology-aware key (window.pane on multi-window sessions, #172).
-		paneKey := targetKeys[i]
-
-		// Apply delay between sends (except for first)
-		if i > 0 && opts.DelayMs > 0 {
-			time.Sleep(time.Duration(opts.DelayMs) * time.Millisecond)
-		}
-
-		agentType := paneAgentType(pane)
-
-		var err error
-		if robotSendUsesDoubleEnter(pane.Type, agentType, sendEnter) {
-			// Agent panes get the double-Enter submission protocol (same as
-			// ntm send and the palette, #94/#187): a single delayed Enter
-			// races a busy agent TUI's busy->idle re-render and can leave
-			// the message typed-but-unsubmitted. SendKeysForAgentDoubleEnter
-			// routes through SendKeysForAgent, preserving buffer-based paste
-			// for multi-line content (Gemini/Codex/Claude quirks).
-			err = tmux.SendKeysForAgentDoubleEnter(pane.ID, messageToSend, pane.Type)
-		} else {
-			// Determine appropriate Enter delay based on pane type.
-			// User/shell panes need a longer delay than AI agent TUIs because
-			// shells (bash, zsh) have different input buffering behavior.
-			enterDelay := tmux.DefaultEnterDelay
-			if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
-				enterDelay = tmux.ShellEnterDelay
+	// No-target behavior remains a robot-envelope concern. It still performs the
+	// final redaction preflight so blocked content cannot leak into previews.
+	if len(targetPanes) == 0 {
+		_, preview, summary, warnings, blocked := applySendMessageRedaction(messageToSend, redactCfg)
+		output.Redaction = summary
+		output.Warnings = warnings
+		output.Blocked = blocked
+		output.MessagePreview = preview
+		if blocked {
+			errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
+			if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+				errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
 			}
-
-			// Use agent-aware send method which handles Gemini's multi-line quirks
-			// by using buffer-based paste instead of send-keys when content has newlines
-			err = tmux.SendKeysForAgentWithDelay(pane.ID, messageToSend, sendEnter, enterDelay, pane.Type)
+			output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact")
+			return &output, nil
 		}
-		if err != nil {
-			output.Failed = append(output.Failed, SendError{
-				Pane:  paneKey,
-				Error: err.Error(),
-			})
-		} else {
-			output.Successful = append(output.Successful, paneKey)
-		}
+		output.DryRun = opts.DryRun
+		output.RobotResponse = NewErrorResponse(
+			errors.New("no target panes matched the filter criteria"),
+			ErrCodePaneNotFound,
+			"Check --all, --panes, --type, and --exclude filters",
+		)
+		output.AgentHints = generateSendHints(output)
+		return finalizeTerminalSendActuation(trace, opts, &output), nil
 	}
+
+	service, finalRedactor, err := newRobotDispatchService(redactCfg, nil, nil)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Dispatch service initialization failed")
+		return finalizeTerminalSendActuation(trace, opts, &output), nil
+	}
+	prepared, prepareErr := service.Prepare(
+		context.Background(),
+		robotPreparedDispatchRequest(panes, targetPanes, opts, messageToSend, sendEnter),
+	)
+	preview, summary, warnings := finalRedactor.outputView()
+	if summary.Mode != "" {
+		output.Redaction = summary
+		output.Warnings = warnings
+		output.Blocked = summary.Action == string(redaction.ModeBlock) && summary.Findings > 0
+		output.MessagePreview = preview
+	}
+	if prepareErr != nil {
+		var dispatchErr *dispatchsvc.Error
+		if errors.As(prepareErr, &dispatchErr) && dispatchErr.Code == dispatchsvc.ErrRedactionBlocked {
+			errMsg := "refusing to proceed: potential secrets detected (redaction mode: block)"
+			if parts := formatRedactionCategoryCounts(summary.Categories); parts != "" {
+				errMsg = fmt.Sprintf("refusing to proceed: potential secrets detected (%s) (redaction mode: block)", parts)
+			}
+			output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", errMsg), "SENSITIVE_DATA_BLOCKED", "Re-run with --allow-secret to bypass, or use --redact=warn/--redact=redact")
+			output.Blocked = true
+			return &output, nil
+		}
+		errorCode := ErrCodeInternalError
+		hint := "Inspect the dispatch target and message policy"
+		if errors.As(prepareErr, &dispatchErr) && (dispatchErr.Code == dispatchsvc.ErrInvalidRequest || dispatchErr.Code == dispatchsvc.ErrInvalidSelector || dispatchErr.Code == dispatchsvc.ErrNoTargets) {
+			errorCode = ErrCodeInvalidFlag
+			hint = "Check --panes, --agent-types, --exclude, --delay, and message options"
+		}
+		output.RobotResponse = NewErrorResponse(prepareErr, errorCode, hint)
+		output.Failed = append(output.Failed, SendError{Pane: "dispatch", Error: prepareErr.Error()})
+		return finalizeTerminalSendActuation(trace, opts, &output), nil
+	}
+
+	if opts.DryRun {
+		result, dispatchErr := service.Dispatch(context.Background(), prepared)
+		if dispatchErr != nil {
+			output.RobotResponse = NewErrorResponse(dispatchErr, ErrCodeInternalError, "Dispatch dry-run failed")
+			return finalizeTerminalSendActuation(trace, opts, &output), nil
+		}
+		output.DryRun = result.DryRun
+		output.WouldSendTo = append(output.WouldSendTo, output.Targets...)
+		output.Success = result.Success
+		return &output, nil
+	}
+
+	publishSendActuationRequest(trace, opts, output.Targets, output.MessagePreview)
+	result, _ := service.Dispatch(context.Background(), prepared)
+	applyRobotDispatchResult(&output, result)
 
 	// Update success based on results
 	output.Success = len(output.Failed) == 0 && len(output.Successful) > 0
@@ -6819,57 +7020,78 @@ func paneMatchesAnyToken(pane tmux.Pane, tokens []string, multiWindow bool) bool
 	return false
 }
 
-func selectSendTargets(panes []tmux.Pane, opts SendOptions, excludeMap map[string]bool) ([]tmux.Pane, []string) {
-	multiWindow := paneSessionIsMultiWindow(panes)
-
-	paneFilter := make([]string, 0, len(opts.Panes))
-	for _, p := range opts.Panes {
-		paneFilter = append(paneFilter, p)
+func selectSendTargets(panes []tmux.Pane, opts SendOptions, excludeMap map[string]bool) ([]tmux.Pane, []string, error) {
+	ordered := tmux.SortPanesByTopology(panes)
+	singularPane := strings.TrimSpace(opts.Pane)
+	if singularPane != "" && len(opts.Panes) > 0 {
+		return nil, nil, &dispatchsvc.Error{
+			Code: dispatchsvc.ErrInvalidRequest,
+			Err:  errors.New("--pane and --panes are mutually exclusive for robot send"),
+		}
 	}
-	hasPaneFilter := len(paneFilter) > 0
-
+	selectors := append([]string(nil), opts.Panes...)
+	requireSingle := false
+	if singularPane != "" {
+		selectors = []string{singularPane}
+		requireSingle = true
+	}
 	excludeTokens := make([]string, 0, len(excludeMap))
 	for k := range excludeMap {
 		excludeTokens = append(excludeTokens, k)
 	}
+	sort.Strings(excludeTokens)
 
-	typeFilterMap := make(map[string]bool)
+	planningPanes := make([]tmux.Pane, len(ordered))
+	originalByKey := make(map[string]tmux.Pane, len(ordered))
+	for i, pane := range ordered {
+		planningPanes[i] = pane
+		planningPanes[i].Tags = append([]string(nil), pane.Tags...)
+		planningPanes[i].Type = tmux.AgentType(paneAgentType(pane)).Canonical()
+		originalByKey[pane.Ref().StableKey()] = pane
+	}
+
+	filters := make([]dispatchsvc.AgentFilter, 0, len(opts.AgentTypes))
 	for _, t := range opts.AgentTypes {
-		typeFilterMap[normalizeAgentType(t)] = true
-	}
-	hasTypeFilter := len(typeFilterMap) > 0
-
-	var targetPanes []tmux.Pane
-	var targetKeys []string
-	for _, pane := range panes {
-		paneKey := paneTargetKey(pane, multiWindow)
-
-		if paneMatchesAnyToken(pane, excludeTokens, multiWindow) {
-			continue
-		}
-		if hasPaneFilter && !paneMatchesAnyToken(pane, paneFilter, multiWindow) {
-			continue
-		}
-
-		agentType := paneAgentType(pane)
-		if hasTypeFilter && !typeFilterMap[normalizeAgentType(agentType)] {
-			continue
-		}
-
-		if !opts.All && !hasPaneFilter && !hasTypeFilter {
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
-		}
-
-		targetPanes = append(targetPanes, pane)
-		targetKeys = append(targetKeys, paneKey)
+		filters = append(filters, dispatchsvc.AgentFilter{Type: tmux.AgentType(normalizeAgentType(t))})
 	}
 
-	return targetPanes, targetKeys
+	// Preserve the historical robot default that treats an unclassified pane 0
+	// as the operator pane. Explicit pane/type filters still opt it back in.
+	if !opts.All && len(selectors) == 0 && len(opts.AgentTypes) == 0 {
+		for _, pane := range ordered {
+			if pane.Index != 0 || paneAgentType(pane) != "unknown" {
+				continue
+			}
+			if pane.ID != "" {
+				excludeTokens = append(excludeTokens, pane.ID)
+			} else {
+				excludeTokens = append(excludeTokens, pane.Ref().Physical())
+			}
+		}
+	}
+
+	targets, err := dispatchsvc.PlanTargets(dispatchsvc.Request{
+		Panes:                 planningPanes,
+		Selectors:             selectors,
+		RequireSingleSelector: requireSingle,
+		ExcludeSelectors:      excludeTokens,
+		AgentFilters:          filters,
+		IncludeUser:           opts.All,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	targetPanes := make([]tmux.Pane, 0, len(targets))
+	targetKeys := make([]string, 0, len(targets))
+	for _, target := range targets {
+		original, ok := originalByKey[target.Ref.StableKey()]
+		if !ok {
+			return nil, nil, fmt.Errorf("dispatch target %q was not present in the source pane snapshot", target.Ref.StableKey())
+		}
+		targetPanes = append(targetPanes, original)
+		targetKeys = append(targetKeys, target.Address)
+	}
+	return targetPanes, targetKeys, nil
 }
 
 // PrintSend outputs the send operation result as JSON.
@@ -6879,7 +7101,22 @@ func PrintSend(opts SendOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot send failed")
+}
+
+func encodeTerminalRobotOutput(output any, response RobotResponse, fallback string) error {
+	if response.Success {
+		return encodeJSON(output)
+	}
+	response.OutputFormat = string(FormatJSON)
+	if err := encodeRobotFailureJSON(output); err != nil {
+		return ExitResultForCode(1, fmt.Errorf("encode robot failure: %w", err), false)
+	}
+	cause := errors.New(response.Error)
+	if response.Error == "" {
+		cause = errors.New(fallback)
+	}
+	return ExitResultForResponse(response, cause, true)
 }
 
 // generateSendHints creates actionable hints based on send results
@@ -9905,9 +10142,15 @@ type AgentActivityInfo struct {
 	//   capture_error         the underlying classifier error string when
 	//                         capture_provenance == "unavailable". Omitted
 	//                         on the happy path.
-	CaptureCollectedAt string `json:"capture_collected_at,omitempty"`
-	CaptureProvenance  string `json:"capture_provenance,omitempty"`
-	CaptureError       string `json:"capture_error,omitempty"`
+	CaptureCollectedAt    string  `json:"capture_collected_at,omitempty"`
+	CaptureProvenance     string  `json:"capture_provenance,omitempty"`
+	CaptureError          string  `json:"capture_error,omitempty"`
+	ObservationState      string  `json:"observation_state"`
+	ObservationFreshness  string  `json:"observation_freshness"`
+	ObservationConfidence float64 `json:"observation_confidence"`
+	LastKnownState        string  `json:"last_known_state,omitempty"`
+	LastKnownObservedAt   string  `json:"last_known_observed_at,omitempty"`
+	SafeToDispatch        bool    `json:"safe_to_dispatch"`
 }
 
 // SourceHealthEntry describes the freshness of a source feeding a robot
@@ -9985,15 +10228,12 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 		return output, nil
 	}
 
-	// Track tmux source health (ntm#117). Populated as a single observation
-	// — every agent in this output came from this tmux capture, so the
-	// freshness/provenance applies uniformly. On capture failure the entry
-	// flips to status=unavailable with degraded_features identifying the
-	// fields that are now stale or missing, rather than silently emitting
-	// an empty agent list.
+	// Track tmux source health from one bounded canonical observation. Pane-level
+	// capture failures remain in the result as UNKNOWN instead of disappearing.
 	tmuxCollectedAt := time.Now().UTC()
 	tmuxCollectedAtStr := tmuxCollectedAt.Format(time.RFC3339)
-	panes, err := tmux.GetPanes(opts.Session)
+	observer := newRobotSessionObserver(0)
+	observation, err := observer.Observe(context.Background(), opts.Session)
 	if err != nil {
 		output.SourceHealth = map[string]SourceHealthEntry{
 			"tmux": {
@@ -10015,6 +10255,8 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 		)
 		return output, nil
 	}
+	panes := observationPanes(observation)
+	observationsByID := observationPaneMap(observation)
 
 	// Mark tmux source as fresh — pane data was collected live from tmux
 	// just now. `stale_after_sec` is a hint that downstream watchdogs
@@ -10030,6 +10272,16 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 			Provenance:    "live",
 		},
 	}
+	if !observation.Complete {
+		source := output.SourceHealth["tmux"]
+		source.Status = "stale"
+		source.DegradedFeatures = []string{"agent_states"}
+		if len(observation.Failures) > 0 {
+			source.LastError = observation.Failures[0].Error
+			source.LastErrorAt = tmuxCollectedAtStr
+		}
+		output.SourceHealth["tmux"] = source
+	}
 
 	output.Agents = make([]AgentActivityInfo, 0, len(panes))
 
@@ -10037,6 +10289,15 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 	multiWindow := paneSessionIsMultiWindow(panes)
 	paneFilter := opts.Panes
 	hasPaneFilter := len(paneFilter) > 0
+	selectedPaneIDs, resolveErr := resolveActivityPaneIDs(panes, paneFilter)
+	if resolveErr != nil {
+		output.RobotResponse = NewErrorResponse(
+			resolveErr,
+			paneSelectorRobotErrorCode(resolveErr),
+			"Use --robot-status or --robot-activity without --panes to inspect canonical pane addresses",
+		)
+		return output, nil
+	}
 
 	typeFilterMap := make(map[string]bool)
 	for _, t := range opts.AgentTypes {
@@ -10051,8 +10312,10 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 		paneKey := paneTargetKey(pane, multiWindow)
 
 		// Apply pane filter
-		if hasPaneFilter && !paneMatchesAnyToken(pane, paneFilter, multiWindow) {
-			continue
+		if hasPaneFilter {
+			if _, selected := selectedPaneIDs[pane.Ref().StableKey()]; !selected {
+				continue
+			}
 		}
 
 		agentType := paneAgentType(pane)
@@ -10067,30 +10330,57 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 			continue
 		}
 
-		// Create classifier for this pane
+		paneObservation, observed := observationsByID[pane.Ref().StableKey()]
+		if !observed {
+			paneObservation = status.PaneObservation{
+				Pane:      pane.Ref(),
+				AgentType: agentType,
+				Current: status.StateObservation{
+					Status:     status.AgentStatus{State: status.StateUnknown},
+					ObservedAt: tmuxCollectedAt,
+					Freshness:  status.FreshnessUnavailable,
+					Error:      "pane missing from canonical observation",
+				},
+			}
+		}
+
+		// Preserve the richer velocity/pattern classifier, but feed it the exact
+		// output from the canonical observation instead of capturing tmux again.
 		classifier := NewStateClassifier(pane.ID, &ClassifierConfig{
 			AgentType: agentType,
 		})
 
-		// Classify current state. Stamp before the call so
-		// CaptureCollectedAt reflects when we asked, not when we got an answer.
-		paneCapturedAt := time.Now().UTC().Format(time.RFC3339)
-		activity, err := classifier.Classify()
+		paneCapturedAt := FormatTimestamp(paneObservation.Current.ObservedAt)
+		var activity *AgentActivity
+		if paneObservation.Current.Freshness == status.FreshnessFresh && paneObservation.Current.Error == "" {
+			activity, err = classifier.ClassifyWithOutput(paneObservation.RawOutput)
+		} else {
+			err = fmt.Errorf("%s", paneObservation.Current.Error)
+			if paneObservation.Current.Error == "" {
+				err = fmt.Errorf("current pane observation is %s", paneObservation.Current.Freshness)
+			}
+		}
 		if err != nil {
 			// Include with unknown state on error, plus per-pane
 			// capture provenance so a watchdog can distinguish
 			// "this pane was classified UNKNOWN" from "this pane's
 			// classifier silently errored". See ntm#117 deferred item #1.
 			output.Agents = append(output.Agents, AgentActivityInfo{
-				Pane:               paneKey,
-				PaneIdx:            pane.Index,
-				AgentType:          agentType,
-				State:              string(StateUnknown),
-				Confidence:         0.0,
-				PanePID:            pane.PID,
-				CaptureCollectedAt: paneCapturedAt,
-				CaptureProvenance:  "unavailable",
-				CaptureError:       err.Error(),
+				Pane:                  paneKey,
+				PaneIdx:               pane.Index,
+				AgentType:             agentType,
+				State:                 string(StateUnknown),
+				Confidence:            0.0,
+				PanePID:               pane.PID,
+				CaptureCollectedAt:    paneCapturedAt,
+				CaptureProvenance:     string(paneObservation.Current.Freshness),
+				CaptureError:          err.Error(),
+				ObservationState:      string(paneObservation.Current.Status.State),
+				ObservationFreshness:  string(paneObservation.Current.Freshness),
+				ObservationConfidence: paneObservation.Current.Confidence,
+				LastKnownState:        lastKnownObservationState(paneObservation),
+				LastKnownObservedAt:   lastKnownObservationTime(paneObservation),
+				SafeToDispatch:        false,
 			})
 			output.Summary.ByState[string(StateUnknown)]++
 			continue
@@ -10098,16 +10388,22 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 
 		// Build agent info
 		info := AgentActivityInfo{
-			Pane:               paneKey,
-			PaneIdx:            pane.Index,
-			AgentType:          activity.AgentType,
-			State:              string(activity.State),
-			Confidence:         activity.Confidence,
-			Velocity:           activity.Velocity,
-			DetectedPatterns:   activity.DetectedPatterns,
-			PanePID:            pane.PID,
-			CaptureCollectedAt: paneCapturedAt,
-			CaptureProvenance:  "live",
+			Pane:                  paneKey,
+			PaneIdx:               pane.Index,
+			AgentType:             activity.AgentType,
+			State:                 string(activity.State),
+			Confidence:            activity.Confidence,
+			Velocity:              activity.Velocity,
+			DetectedPatterns:      activity.DetectedPatterns,
+			PanePID:               pane.PID,
+			CaptureCollectedAt:    paneCapturedAt,
+			CaptureProvenance:     "live",
+			ObservationState:      string(paneObservation.Current.Status.State),
+			ObservationFreshness:  string(paneObservation.Current.Freshness),
+			ObservationConfidence: paneObservation.Current.Confidence,
+			LastKnownState:        lastKnownObservationState(paneObservation),
+			LastKnownObservedAt:   lastKnownObservationTime(paneObservation),
+			SafeToDispatch:        paneObservation.SafeToDispatch(),
 		}
 
 		if !activity.StateSince.IsZero() {
@@ -10142,6 +10438,21 @@ func GetActivity(opts ActivityOptions) (*ActivityOutput, error) {
 	return output, nil
 }
 
+func resolveActivityPaneIDs(panes []tmux.Pane, selectors []string) (map[string]struct{}, error) {
+	selectedIDs := make(map[string]struct{})
+	if len(selectors) == 0 {
+		return selectedIDs, nil
+	}
+	selected, err := tmux.ResolvePaneSelectors(panes, selectors, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, pane := range selected {
+		selectedIDs[pane.Ref().StableKey()] = struct{}{}
+	}
+	return selectedIDs, nil
+}
+
 // PrintActivity handles the --robot-activity command.
 // This is a thin wrapper around GetActivity() for CLI output.
 func PrintActivity(opts ActivityOptions) error {
@@ -10149,7 +10460,7 @@ func PrintActivity(opts ActivityOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot activity failed")
 }
 
 // generateActivityHints creates actionable hints based on agent states.

@@ -4,7 +4,9 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,14 +116,23 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 		return output, nil
 	}
 
-	// Build pane filter map
-	paneFilterMap := make(map[string]bool)
-	for _, p := range opts.Panes {
-		paneFilterMap[p] = true
+	targetPanes, targetErr := resolveAckTargets(panes, opts.Panes)
+	if targetErr != nil {
+		output.Failed = append(output.Failed, AckFailure{Pane: "selector", Reason: targetErr.Error()})
+		output.RobotResponse = NewErrorResponse(
+			targetErr,
+			paneSelectorRobotErrorCode(targetErr),
+			"Use --robot-status or --robot-is-working to inspect canonical pane addresses",
+		)
+		output.CompletedAt = time.Now().UTC()
+		return output, nil
 	}
-	targetPanes := selectAckTargets(panes, paneFilterMap)
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	targetByKey := make(map[string]tmux.Pane, len(targetPanes))
 	for _, pane := range targetPanes {
-		output.Pending = append(output.Pending, fmt.Sprintf("%d", pane.Index))
+		paneKey := tmux.PaneTargetKey(pane, multiWindow)
+		targetByKey[paneKey] = pane
+		output.Pending = append(output.Pending, paneKey)
 	}
 
 	if len(targetPanes) == 0 {
@@ -132,7 +143,7 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 	// Capture initial state of each pane
 	initialStates := make(map[string]string)
 	for _, pane := range targetPanes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
+		paneKey := tmux.PaneTargetKey(pane, multiWindow)
 		captured, err := func() (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -155,16 +166,8 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 		stillPending := []string{}
 
 		for _, paneKey := range output.Pending {
-			// Find the pane
-			var targetPane *tmux.Pane
-			for i := range targetPanes {
-				if fmt.Sprintf("%d", targetPanes[i].Index) == paneKey {
-					targetPane = &targetPanes[i]
-					break
-				}
-			}
-
-			if targetPane == nil {
+			targetPane, ok := targetByKey[paneKey]
+			if !ok {
 				stillPending = append(stillPending, paneKey)
 				continue
 			}
@@ -184,7 +187,7 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 			initialOutput := initialStates[paneKey]
 
 			// Check for acknowledgment
-			ackType, detected := detectAcknowledgmentForAgent(initialOutput, currentOutput, opts.Message, ackPaneAgentType(*targetPane))
+			ackType, detected := detectAcknowledgmentForAgent(initialOutput, currentOutput, opts.Message, ackPaneAgentType(targetPane))
 
 			if detected {
 				latency := time.Since(sentAt)
@@ -228,7 +231,7 @@ func PrintAck(opts AckOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ack failed")
 }
 
 func ackPaneAgentType(pane tmux.Pane) string {
@@ -272,22 +275,28 @@ func shouldSkipDefaultAgentPane(pane tmux.Pane, agentType string) bool {
 	return agentType == "user"
 }
 
-func selectAckTargets(panes []tmux.Pane, paneFilterMap map[string]bool) []tmux.Pane {
-	hasPaneFilter := len(paneFilterMap) > 0
-
-	var targetPanes []tmux.Pane
-	for _, pane := range panes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-		if hasPaneFilter && !paneFilterMap[paneKey] && !paneFilterMap[pane.ID] {
-			continue
-		}
-		if !hasPaneFilter && shouldSkipDefaultAgentPane(pane, ackPaneAgentType(pane)) {
-			continue
-		}
-		targetPanes = append(targetPanes, pane)
+func resolveAckTargets(panes []tmux.Pane, selectors []string) ([]tmux.Pane, error) {
+	ordered := tmux.SortPanesByTopology(panes)
+	if len(selectors) > 0 {
+		return tmux.ResolvePaneSelectors(ordered, selectors, false)
 	}
+	targets := make([]tmux.Pane, 0, len(ordered))
+	for _, pane := range ordered {
+		if !shouldSkipDefaultAgentPane(pane, ackPaneAgentType(pane)) {
+			targets = append(targets, pane)
+		}
+	}
+	return targets, nil
+}
 
-	return targetPanes
+func selectAckTargets(panes []tmux.Pane, paneFilterMap map[string]bool) []tmux.Pane {
+	selectors := make([]string, 0, len(paneFilterMap))
+	for selector := range paneFilterMap {
+		selectors = append(selectors, selector)
+	}
+	sort.Strings(selectors)
+	targets, _ := resolveAckTargets(panes, selectors)
+	return targets
 }
 
 // detectAcknowledgment checks if the agent has acknowledged the input
@@ -608,23 +617,45 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		excludeMap[e] = true
 	}
 
-	// Build pane filter map
-	paneFilterMap := make(map[string]bool)
-	for _, p := range opts.Panes {
-		paneFilterMap[p] = true
+	// Reuse the canonical robot-send resolver so --track has identical singular,
+	// plural, multi-window, exclusion, and type-filter semantics.
+	targetPanes, targetKeys, targetErr := selectSendTargets(panes, opts.SendOptions, excludeMap)
+	if targetErr != nil {
+		errorCode := ErrCodeInvalidFlag
+		var selectorErr *tmux.PaneSelectorError
+		if errors.As(targetErr, &selectorErr) && selectorErr.Kind == tmux.PaneSelectorNotFound {
+			errorCode = ErrCodePaneNotFound
+		}
+		errResp := NewErrorResponse(targetErr, errorCode, "Use --robot-is-working to inspect canonical pane addresses")
+		return finalizeTerminalSendAndAckActuation(trace, opts, &SendAndAckOutput{
+			RobotResponse: errResp,
+			Send: SendOutput{
+				RobotResponse:  errResp,
+				Session:        opts.Session,
+				SentAt:         sentAt,
+				Blocked:        false,
+				Redaction:      redactionSummary,
+				Warnings:       redactionWarnings,
+				Targets:        []string{},
+				Successful:     []string{},
+				Failed:         []SendError{{Pane: "selector", Error: targetErr.Error()}},
+				MessagePreview: preview,
+			},
+			Ack: AckOutput{
+				RobotResponse: errResp,
+				Session:       opts.Session,
+				SentAt:        sentAt,
+				CompletedAt:   time.Now().UTC(),
+				Confirmations: []AckConfirmation{},
+				Pending:       []string{},
+				Failed:        []AckFailure{{Pane: "selector", Reason: "send target resolution failed"}},
+			},
+		}), nil
 	}
-
-	// Build agent type filter map (resolves aliases to canonical form)
-	typeFilterMap := make(map[string]bool)
-	for _, t := range opts.AgentTypes {
-		typeFilterMap[ResolveAgentType(t)] = true
-	}
-	// Determine target panes and capture initial state
-	targetPanes, targetKeys := selectSendAndAckTargets(panes, excludeMap, paneFilterMap, typeFilterMap, opts.All)
 	initialStates := make(map[string]string)
 
-	for _, pane := range targetPanes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
+	for i, pane := range targetPanes {
+		paneKey := targetKeys[i]
 		// Capture initial state before sending
 		captured, err := func() (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -648,35 +679,79 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		Failed:         []SendError{},
 		MessagePreview: preview,
 	}
-
-	publishSendActuationRequest(trace, opts.SendOptions, targetKeys, preview)
-
-	// Send to all targets
-	for i, pane := range targetPanes {
-		paneKey := fmt.Sprintf("%d", pane.Index)
-
-		if i > 0 && opts.DelayMs > 0 {
-			time.Sleep(time.Duration(opts.DelayMs) * time.Millisecond)
+	if len(targetPanes) == 0 {
+		sendOutput.RobotResponse = NewErrorResponse(
+			errors.New("no target panes matched the filter criteria"),
+			ErrCodeInvalidFlag,
+			"Check --pane, --panes, --type, --exclude, and --all",
+		)
+	} else {
+		sendEnter := true
+		if opts.Enter != nil {
+			sendEnter = *opts.Enter
 		}
-
-		err := sendAndAckToPane(pane, opts.Message, opts.Enter, tmux.SendKeysForAgentWithDelay)
-		if err != nil {
-			sendOutput.Failed = append(sendOutput.Failed, SendError{
-				Pane:  paneKey,
-				Error: err.Error(),
-			})
+		service, finalRedactor, serviceErr := newRobotDispatchService(redactCfg, nil, nil)
+		if serviceErr != nil {
+			sendOutput.RobotResponse = NewErrorResponse(serviceErr, ErrCodeInternalError, "Dispatch service initialization failed")
+			sendOutput.Failed = append(sendOutput.Failed, SendError{Pane: "dispatch", Error: serviceErr.Error()})
 		} else {
-			sendOutput.Successful = append(sendOutput.Successful, paneKey)
+			prepared, prepareErr := service.Prepare(
+				context.Background(),
+				robotPreparedDispatchRequest(panes, targetPanes, opts.SendOptions, opts.Message, sendEnter),
+			)
+			finalPreview, finalSummary, finalWarnings := finalRedactor.outputView()
+			if finalSummary.Mode != "" && (finalSummary.Findings > 0 || sendOutput.Redaction.Findings == 0) {
+				sendOutput.MessagePreview = finalPreview
+				sendOutput.Redaction = finalSummary
+				sendOutput.Warnings = finalWarnings
+			}
+			if prepareErr != nil {
+				sendOutput.RobotResponse = NewErrorResponse(prepareErr, ErrCodeInvalidFlag, "Inspect robot send target and message options")
+				sendOutput.Failed = append(sendOutput.Failed, SendError{Pane: "dispatch", Error: prepareErr.Error()})
+			} else if opts.DryRun {
+				result, dispatchErr := service.Dispatch(context.Background(), prepared)
+				if dispatchErr != nil {
+					sendOutput.RobotResponse = NewErrorResponse(dispatchErr, ErrCodeInternalError, "Dispatch dry-run failed")
+					sendOutput.Failed = append(sendOutput.Failed, SendError{Pane: "dispatch", Error: dispatchErr.Error()})
+				} else {
+					sendOutput.DryRun = true
+					sendOutput.WouldSendTo = append(sendOutput.WouldSendTo, targetKeys...)
+					sendOutput.Success = result.Success
+				}
+			} else {
+				publishSendActuationRequest(trace, opts.SendOptions, targetKeys, sendOutput.MessagePreview)
+				result, _ := service.Dispatch(context.Background(), prepared)
+				applyRobotDispatchResult(&sendOutput, result)
+			}
 		}
 	}
 
 	// Update success based on send results
-	sendOutput.Success = len(sendOutput.Failed) == 0 && len(sendOutput.Successful) > 0
+	if !sendOutput.DryRun {
+		sendOutput.Success = len(sendOutput.Failed) == 0 && len(sendOutput.Successful) > 0
+	}
 	if len(sendOutput.Failed) > 0 {
 		sendOutput.Error = fmt.Sprintf("%d of %d sends failed", len(sendOutput.Failed), len(sendOutput.Targets))
 		sendOutput.ErrorCode = ErrCodeInternalError
 	}
 	publishSendActuationOutcome(trace, opts.SendOptions, sendOutput)
+	if opts.DryRun {
+		ackOutput := AckOutput{
+			RobotResponse: NewRobotResponse(sendOutput.Success),
+			Session:       opts.Session,
+			SentAt:        sentAt,
+			CompletedAt:   time.Now().UTC(),
+			Confirmations: []AckConfirmation{},
+			Pending:       []string{},
+			Failed:        []AckFailure{},
+			TimeoutMs:     opts.AckTimeoutMs,
+		}
+		combined := sendOutput.RobotResponse
+		if sendOutput.Success {
+			combined = NewRobotResponse(true)
+		}
+		return &SendAndAckOutput{RobotResponse: combined, Send: sendOutput, Ack: ackOutput}, nil
+	}
 
 	// Now wait for acknowledgments (only for successful sends)
 	ackOutput := AckOutput{
@@ -710,7 +785,7 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 		for _, paneKey := range ackOutput.Pending {
 			var targetPane *tmux.Pane
 			for i := range targetPanes {
-				if fmt.Sprintf("%d", targetPanes[i].Index) == paneKey {
+				if targetKeys[i] == paneKey {
 					targetPane = &targetPanes[i]
 					break
 				}
@@ -840,5 +915,5 @@ func PrintSendAndAck(opts SendAndAckOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot send-and-ack failed")
 }

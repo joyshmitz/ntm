@@ -174,36 +174,49 @@ func TestGetHistoryStatsHonorsFilters(t *testing.T) {
 	}
 }
 
-func TestHistoryPaneFilterAliasesMatchStoredPaneIndex(t *testing.T) {
-	pane := tmux.Pane{
-		ID:          "%42",
-		Index:       2,
-		WindowIndex: 0,
-		NTMIndex:    1,
-		Title:       "proj__cc_1",
+func TestHistoryPaneFilterAliasesResolveCanonicalTopology(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%11", WindowIndex: 0, Index: 1, Title: "proj__cc_1"},
+		{ID: "%20", WindowIndex: 1, Index: 0, Title: "proj__cod_1"},
+		{ID: "%21", WindowIndex: 1, Index: 1, Title: "proj__gmi_1"},
 	}
 
-	if !historyPaneMatchesFilter(pane, "%42") {
-		t.Fatal("expected tmux pane ID filter to match live pane")
+	aliases, err := resolveHistoryPaneFilterAliases(panes, "0.1")
+	if err != nil {
+		t.Fatalf("resolveHistoryPaneFilterAliases() error = %v", err)
 	}
-	if !historyPaneMatchesFilter(pane, "0.2") {
-		t.Fatal("expected window.pane filter to match live pane")
-	}
-	if !historyPaneMatchesFilter(pane, "proj__cc_1") {
-		t.Fatal("expected pane title filter to match live pane")
-	}
-
-	aliases := historyPaneAliases(pane)
-	entry := history.NewEntry("proj", []string{"2"}, "prompt", history.SourceCLI)
+	entry := history.NewEntry("proj", []string{"0.1"}, "prompt", history.SourceCLI)
 	if !historyEntryMatchesPaneFilter(*entry, aliases) {
-		t.Fatal("pane aliases must match history entries stored by pane index")
+		t.Fatal("pane aliases must match history entries stored by canonical address")
+	}
+	wrongEntry := history.NewEntry("proj", []string{"1"}, "wrong prompt", history.SourceCLI)
+	if historyEntryMatchesPaneFilter(*wrongEntry, aliases) {
+		t.Fatal("multi-window aliases must not over-match a bare pane index")
 	}
 
-	targetAliases := map[string]struct{}{}
-	addHistoryPaneTargetAliases(targetAliases, pane)
-	wrongEntry := history.NewEntry("proj", []string{"1"}, "wrong prompt", history.SourceCLI)
-	if historyEntryMatchesPaneFilter(*wrongEntry, targetAliases) {
-		t.Fatal("target aliases must not over-match entries stored under a different pane index")
+	idAliases, err := resolveHistoryPaneFilterAliases(panes, "%11")
+	if err != nil {
+		t.Fatalf("ID selector error = %v", err)
+	}
+	if _, ok := idAliases["0.1"]; !ok {
+		t.Fatalf("ID selector aliases = %v, want canonical physical address", idAliases)
+	}
+
+	windowAliases, err := resolveHistoryPaneFilterAliases(panes, "1")
+	if err != nil {
+		t.Fatalf("window selector error = %v", err)
+	}
+	for _, want := range []string{"1.0", "1.1", "%20", "%21"} {
+		if _, ok := windowAliases[want]; !ok {
+			t.Fatalf("window selector aliases = %v, missing %q", windowAliases, want)
+		}
+	}
+
+	if _, err := resolveHistoryPaneFilterAliases(panes, "9.0"); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+	if _, err := resolveHistoryPaneFilterAliases(panes, "proj__cc_1"); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("title selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
 	}
 }
 

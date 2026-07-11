@@ -3,11 +3,97 @@
 package robot
 
 import (
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestRobotSendSingularPaneRealTmux(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	session := fmt.Sprintf("ntm-dispatch-smoke-%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(session, ""); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	defer tmux.KillSession(session)
+
+	if _, err := tmux.DefaultClient.Run("new-window", "-d", "-t", session); err != nil {
+		t.Fatalf("create second window: %v", err)
+	}
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWindow := -1
+	for _, pane := range panes {
+		if pane.WindowIndex > secondWindow {
+			secondWindow = pane.WindowIndex
+		}
+	}
+	if _, err := tmux.DefaultClient.Run("split-window", "-d", "-t", fmt.Sprintf("%s:%d", session, secondWindow)); err != nil {
+		t.Fatalf("split second window: %v", err)
+	}
+	panes, err = tmux.GetPanes(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target tmux.Pane
+	for _, pane := range panes {
+		if pane.WindowIndex == secondWindow && pane.Index > target.Index {
+			target = pane
+		}
+	}
+	if target.ID == "" {
+		t.Fatalf("no target pane found in window %d: %+v", secondWindow, panes)
+	}
+
+	enter := false
+	output, err := GetSend(SendOptions{Session: session, Message: "dispatch-smoke", Pane: target.ID, Enter: &enter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !output.Success || len(output.Successful) != 1 || output.Successful[0] != target.Ref().Physical() {
+		t.Fatalf("singular send output = %+v", output)
+	}
+	time.Sleep(100 * time.Millisecond)
+	captured, err := tmux.CapturePaneVisible(target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(captured, "dispatch-smoke") {
+		t.Fatalf("target pane did not receive staged message: %q", captured)
+	}
+
+	ambiguous, err := GetSend(SendOptions{Session: session, Message: "work", Pane: fmt.Sprint(secondWindow), DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ambiguous.Success || ambiguous.ErrorCode != ErrCodeInvalidFlag || len(ambiguous.Failed) != 1 {
+		t.Fatalf("ambiguous singular output = %+v", ambiguous)
+	}
+	notFound, err := GetSend(SendOptions{Session: session, Message: "work", Pane: "99.99", DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notFound.Success || notFound.ErrorCode != ErrCodePaneNotFound {
+		t.Fatalf("not-found singular output = %+v", notFound)
+	}
+
+	tracked, err := GetSendAndAck(SendAndAckOptions{
+		SendOptions: SendOptions{Session: session, Message: "track-preview", Pane: target.Ref().Physical(), DryRun: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tracked.Success || !tracked.Send.DryRun || !tracked.Send.Success || !reflect.DeepEqual(tracked.Send.WouldSendTo, []string{target.Ref().Physical()}) {
+		t.Fatalf("tracked singular dry-run = %+v", tracked)
+	}
+}
 
 func TestDetectAcknowledgment(t *testing.T) {
 	tests := []struct {
@@ -255,6 +341,38 @@ func TestSelectAckTargetsSkipsUserPaneByDefault(t *testing.T) {
 	}
 	if targets[0].ID != "%1" {
 		t.Fatalf("selectAckTargets() picked %s, want %%1", targets[0].ID)
+	}
+}
+
+func TestResolveAckTargetsCanonicalSelectors(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%10", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%11", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%20", WindowIndex: 1, Index: 0, Type: tmux.AgentCodex},
+		{ID: "%21", WindowIndex: 1, Index: 1, Type: tmux.AgentGemini},
+	}
+
+	targets, err := resolveAckTargets(panes, []string{"1"})
+	if err != nil {
+		t.Fatalf("resolveAckTargets(window selector) error = %v", err)
+	}
+	if len(targets) != 2 || targets[0].ID != "%20" || targets[1].ID != "%21" {
+		t.Fatalf("window selector resolved %+v, want %%20 then %%21", targets)
+	}
+
+	targets, err = resolveAckTargets(panes, []string{"0.1", "%11", "0.1"})
+	if err != nil {
+		t.Fatalf("resolveAckTargets(alias dedup) error = %v", err)
+	}
+	if len(targets) != 1 || targets[0].ID != "%11" {
+		t.Fatalf("alias dedup resolved %+v, want only %%11", targets)
+	}
+
+	if _, err := resolveAckTargets(panes, []string{"9.0"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+	if _, err := resolveAckTargets(panes, []string{"1.x"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("malformed selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
 	}
 }
 
@@ -762,10 +880,11 @@ func TestPrintAck_NonexistentSession(t *testing.T) {
 		PollMs:    50,
 	}
 
-	// PrintAck should handle missing session gracefully
+	// PrintAck writes the envelope once and returns the typed exit-1 result.
 	err := PrintAck(opts)
-	if err != nil {
-		t.Errorf("PrintAck should not return error for missing session (writes JSON), got: %v", err)
+	var processExit *ProcessExitError
+	if !errors.As(err, &processExit) || processExit.ExitCode() != 1 || !processExit.JSONWritten() {
+		t.Fatalf("PrintAck error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 	// The function writes JSON to stdout including the failure info
 	t.Log("ACK_TEST: PrintAck handled missing session - failure captured in output")
@@ -807,8 +926,12 @@ func TestPrintSendAndAck_NonexistentSession(t *testing.T) {
 	}
 
 	err := PrintSendAndAck(opts)
-	if err != nil {
-		t.Errorf("PrintSendAndAck should not return error for missing session, got: %v", err)
+	if err == nil {
+		t.Fatal("PrintSendAndAck should return the typed process failure after writing JSON")
+	}
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintSendAndAck error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 	t.Log("ACK_TEST: PrintSendAndAck handled missing session - failure captured in output")
 }

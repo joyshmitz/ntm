@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -440,9 +442,12 @@ func TestSelectSendTargetsUsesParsedPaneTypeAndAliases(t *testing.T) {
 		{Index: 3, ID: "%3", Title: "claude_notes", Type: tmux.AgentUser},
 	}
 
-	targets, keys := selectSendTargets(panes, SendOptions{
+	targets, keys, err := selectSendTargets(panes, SendOptions{
 		AgentTypes: []string{"cc", "cod"},
 	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("selectSendTargets() error: %v", err)
+	}
 
 	if len(targets) != 2 {
 		t.Fatalf("selectSendTargets() returned %d panes, want 2", len(targets))
@@ -468,7 +473,10 @@ func TestSelectSendTargetsWindowAware(t *testing.T) {
 	}
 
 	// --panes=2 targets exactly the agent in window 2 (was: no-op).
-	targets, keys := selectSendTargets(panes, SendOptions{Panes: []string{"2"}}, map[string]bool{})
+	targets, keys, err := selectSendTargets(panes, SendOptions{Panes: []string{"2"}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("--panes=2 error: %v", err)
+	}
 	if len(targets) != 1 || targets[0].ID != "%3" {
 		t.Fatalf("--panes=2 targets = %v, want single %%3", targets)
 	}
@@ -477,19 +485,143 @@ func TestSelectSendTargetsWindowAware(t *testing.T) {
 	}
 
 	// --panes=1 targets exactly window 1 (was: broadcast to every window).
-	targets, _ = selectSendTargets(panes, SendOptions{Panes: []string{"1"}}, map[string]bool{})
+	targets, _, err = selectSendTargets(panes, SendOptions{Panes: []string{"1"}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("--panes=1 error: %v", err)
+	}
 	if len(targets) != 1 || targets[0].ID != "%2" {
 		t.Fatalf("--panes=1 targets = %v, want single %%2 (no broadcast)", targets)
 	}
 
 	// Explicit window.pane and %N addresses resolve precisely.
-	targets, _ = selectSendTargets(panes, SendOptions{Panes: []string{"2.0"}}, map[string]bool{})
+	targets, _, err = selectSendTargets(panes, SendOptions{Panes: []string{"2.0"}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("--panes=2.0 error: %v", err)
+	}
 	if len(targets) != 1 || targets[0].ID != "%3" {
 		t.Fatalf("--panes=2.0 targets = %v, want %%3", targets)
 	}
-	targets, _ = selectSendTargets(panes, SendOptions{Panes: []string{"%2"}}, map[string]bool{})
+	targets, _, err = selectSendTargets(panes, SendOptions{Panes: []string{"%2"}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("--panes=%%2 error: %v", err)
+	}
 	if len(targets) != 1 || targets[0].ID != "%2" {
 		t.Fatalf("--panes=%%2 targets = %v, want %%2", targets)
+	}
+}
+
+func TestSelectSendTargetsRejectsInvalidAndMissingSelectors(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentCodex},
+	}
+
+	for _, selectors := range [][]string{{"1.x"}, {"9.0"}, {"1", "9.0"}} {
+		if _, _, err := selectSendTargets(panes, SendOptions{Panes: selectors}, map[string]bool{}); err == nil {
+			t.Fatalf("selectSendTargets(%v) succeeded, want error", selectors)
+		}
+	}
+}
+
+func TestSelectSendTargetsRejectsNoMatchingTargets(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%2", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex},
+	}
+	tests := []struct {
+		name    string
+		opts    SendOptions
+		exclude map[string]bool
+	}{
+		{name: "unmatched agent type", opts: SendOptions{AgentTypes: []string{"aider"}}, exclude: map[string]bool{}},
+		{name: "selected pane excluded", opts: SendOptions{Panes: []string{"1"}}, exclude: map[string]bool{"1": true}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			targets, keys, err := selectSendTargets(panes, test.opts, test.exclude)
+			if err == nil {
+				t.Fatalf("selectSendTargets() = targets %v keys %v, want no-target error", targets, keys)
+			}
+			var dispatchErr *dispatchsvc.Error
+			if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrNoTargets {
+				t.Fatalf("selectSendTargets() error = %T %v, want dispatch no-target error", err, err)
+			}
+		})
+	}
+}
+
+func TestSelectSendTargetsDeduplicatesAliasesAndSortsTopology(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%3", Index: 0, WindowIndex: 2, Type: tmux.AgentCodex},
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentClaude},
+	}
+	targets, keys, err := selectSendTargets(panes, SendOptions{Panes: []string{"2.0", "%3", "0.0"}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("selectSendTargets() error: %v", err)
+	}
+	if got := []string{targets[0].ID, targets[1].ID}; !reflect.DeepEqual(got, []string{"%1", "%3"}) {
+		t.Fatalf("target order = %v, want [%%1 %%3]", got)
+	}
+	if !reflect.DeepEqual(keys, []string{"0.0", "2.0"}) {
+		t.Fatalf("keys = %v, want [0.0 2.0]", keys)
+	}
+}
+
+func TestSelectSendTargetsSingularPaneRequiresOnePhysicalPane(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentUser},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentClaude},
+		{ID: "%3", Index: 1, WindowIndex: 1, Type: tmux.AgentCodex},
+	}
+	for _, tc := range []struct {
+		name string
+		pane string
+		want string
+	}{
+		{name: "tmux id shell-significant selector", pane: "%3", want: "%3"},
+		{name: "canonical window pane", pane: "1.1", want: "%3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets, keys, err := selectSendTargets(panes, SendOptions{Pane: tc.pane}, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(targets) != 1 || targets[0].ID != tc.want || !reflect.DeepEqual(keys, []string{"1.1"}) {
+				t.Fatalf("targets=%+v keys=%v", targets, keys)
+			}
+		})
+	}
+
+	_, _, err := selectSendTargets(panes, SendOptions{Pane: "1"}, map[string]bool{})
+	var selectorErr *tmux.PaneSelectorError
+	if !errors.As(err, &selectorErr) || selectorErr.Kind != tmux.PaneSelectorAmbiguous {
+		t.Fatalf("bare-window ambiguity = %T %v", err, err)
+	}
+	_, _, err = selectSendTargets(panes, SendOptions{Pane: "9.9"}, map[string]bool{})
+	if !errors.As(err, &selectorErr) || selectorErr.Kind != tmux.PaneSelectorNotFound {
+		t.Fatalf("not-found error = %T %v", err, err)
+	}
+	_, _, err = selectSendTargets(panes, SendOptions{Pane: "%3", Panes: []string{"1.1"}}, map[string]bool{})
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrInvalidRequest {
+		t.Fatalf("mutual-exclusion error = %T %v", err, err)
+	}
+}
+
+func TestSelectSendTargetsOmittedSingularPanePreservesBroadcast(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentUser},
+		{ID: "%2", Index: 1, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%3", Index: 2, WindowIndex: 0, Type: tmux.AgentCodex},
+	}
+	targets, keys, err := selectSendTargets(panes, SendOptions{}, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{targets[0].ID, targets[1].ID}; !reflect.DeepEqual(got, []string{"%2", "%3"}) || !reflect.DeepEqual(keys, []string{"1", "2"}) {
+		t.Fatalf("targets=%+v keys=%v", targets, keys)
 	}
 }
 
@@ -982,5 +1114,169 @@ func TestRobotSendUsesDoubleEnter(t *testing.T) {
 					tt.paneType, tt.resolvedType, tt.sendEnter, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRobotFinalMessageRedactorParity(t *testing.T) {
+	t.Parallel()
+	input := "prefix password=hunter2hunter2 suffix"
+	for _, mode := range []redaction.Mode{redaction.ModeOff, redaction.ModeWarn, redaction.ModeRedact, redaction.ModeBlock} {
+		t.Run(string(mode), func(t *testing.T) {
+			wantMessage, wantPreview, wantSummary, wantWarnings, wantBlocked := applySendMessageRedaction(input, redaction.Config{Mode: mode})
+			adapter := &robotFinalMessageRedactor{config: redaction.Config{Mode: mode}}
+			target := dispatchsvc.Target{Pane: tmux.Pane{ID: "%1", Type: tmux.AgentClaude}}
+			first, err := adapter.RedactFinalMessage(context.Background(), target, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := adapter.RedactFinalMessage(context.Background(), target, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.Message != wantMessage || first.Blocked != wantBlocked || first.Mode != wantSummary.Mode || first.Findings != wantSummary.Findings ||
+				!reflect.DeepEqual(first.Categories, wantSummary.Categories) || !reflect.DeepEqual(first.Warnings, wantWarnings) {
+				t.Fatalf("adapter result = %+v, want message=%q blocked=%v summary=%+v warnings=%v", first, wantMessage, wantBlocked, wantSummary, wantWarnings)
+			}
+			if !reflect.DeepEqual(first, second) {
+				t.Fatalf("memoized result drifted: first=%+v second=%+v", first, second)
+			}
+			preview, summary, warnings := adapter.outputView()
+			if preview != wantPreview || !reflect.DeepEqual(summary, wantSummary) || !reflect.DeepEqual(warnings, wantWarnings) {
+				t.Fatalf("output view = %q %+v %v, want %q %+v %v", preview, summary, warnings, wantPreview, wantSummary, wantWarnings)
+			}
+		})
+	}
+}
+
+func TestRobotDispatchProtocolPlannerParity(t *testing.T) {
+	t.Parallel()
+	planner := robotDispatchProtocolPlanner{}
+	for _, tc := range []struct {
+		name       string
+		pane       tmux.Pane
+		submit     bool
+		protocol   dispatchsvc.DeliveryProtocol
+		firstDelay time.Duration
+		second     time.Duration
+	}{
+		{name: "claude double", pane: tmux.Pane{Type: tmux.AgentClaude}, submit: true, protocol: dispatchsvc.ProtocolDoubleEnter, firstDelay: tmux.DoubleEnterFirstDelay, second: tmux.DoubleEnterSecondDelay},
+		{name: "detected codex double", pane: tmux.Pane{Type: tmux.AgentUnknown, Title: "proj__cod_1"}, submit: true, protocol: dispatchsvc.ProtocolDoubleEnter, firstDelay: tmux.DoubleEnterFirstDelay, second: tmux.DoubleEnterSecondDelay},
+		{name: "user single", pane: tmux.Pane{Type: tmux.AgentUser}, submit: true, protocol: dispatchsvc.ProtocolSingleEnter, firstDelay: tmux.ShellEnterDelay},
+		{name: "unknown single", pane: tmux.Pane{Type: tmux.AgentUnknown}, submit: true, protocol: dispatchsvc.ProtocolSingleEnter, firstDelay: tmux.ShellEnterDelay},
+		{name: "stage only", pane: tmux.Pane{Type: tmux.AgentClaude}, submit: false, protocol: dispatchsvc.ProtocolStageOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := dispatchsvc.Target{Pane: tc.pane, AgentType: tc.pane.Type}
+			got, err := planner.PlanDelivery(context.Background(), target, tc.submit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Protocol != tc.protocol || got.EnterDelay != tc.firstDelay || got.SecondEnterDelay != tc.second {
+				t.Fatalf("plan = %+v, want protocol=%s first=%s second=%s", got, tc.protocol, tc.firstDelay, tc.second)
+			}
+		})
+	}
+}
+
+func TestRobotDispatchServiceAdapterParity(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		{ID: "%3", Index: 0, WindowIndex: 2, Type: tmux.AgentClaude, Title: "proj__cc_1"},
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentUser, Title: "operator"},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentUnknown, Title: "proj__cod_1"},
+	}
+	opts := SendOptions{Session: "proj", All: true, DelayMs: 17}
+	targetPanes, keys, err := selectSendTargets(panes, opts, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(keys, []string{"0.0", "1.0", "2.0"}) {
+		t.Fatalf("target keys = %v", keys)
+	}
+	var deliveries []dispatchsvc.Delivery
+	var paces []dispatchsvc.Pace
+	service, adapter, err := newRobotDispatchService(
+		redaction.Config{Mode: redaction.ModeRedact},
+		dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			deliveries = append(deliveries, delivery)
+			return nil
+		}),
+		dispatchsvc.PacerFunc(func(_ context.Context, pace dispatchsvc.Pace) error {
+			paces = append(paces, pace)
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Execute(
+		context.Background(),
+		robotPreparedDispatchRequest(panes, targetPanes, opts, "password=hunter2hunter2", true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || result.Delivered != 3 || len(deliveries) != 3 || len(paces) != 2 {
+		t.Fatalf("result=%+v deliveries=%d paces=%d", result, len(deliveries), len(paces))
+	}
+	for i, delivery := range deliveries {
+		if delivery.Target.Address != keys[i] || strings.Contains(delivery.Message, "hunter2hunter2") {
+			t.Fatalf("delivery %d = %+v", i, delivery)
+		}
+	}
+	if deliveries[0].Protocol != dispatchsvc.ProtocolSingleEnter || deliveries[0].EnterDelay != tmux.ShellEnterDelay {
+		t.Fatalf("user delivery = %+v", deliveries[0])
+	}
+	if deliveries[1].Protocol != dispatchsvc.ProtocolDoubleEnter || deliveries[1].Target.Pane.Type != tmux.AgentUnknown {
+		t.Fatalf("detected-codex delivery = %+v", deliveries[1])
+	}
+	if deliveries[2].Protocol != dispatchsvc.ProtocolDoubleEnter {
+		t.Fatalf("claude delivery = %+v", deliveries[2])
+	}
+	for i, pace := range paces {
+		if pace.Delay != 17*time.Millisecond || pace.Ordinal != i+1 {
+			t.Fatalf("pace %d = %+v", i, pace)
+		}
+	}
+	preview, summary, warnings := adapter.outputView()
+	if strings.Contains(preview, "hunter2hunter2") || summary.Action != "redact" || summary.Findings == 0 || len(warnings) == 0 {
+		t.Fatalf("redaction view = %q %+v %v", preview, summary, warnings)
+	}
+}
+
+func TestApplyRobotDispatchResultPreservesReceiptOrderAndErrors(t *testing.T) {
+	t.Parallel()
+	output := SendOutput{Successful: []string{}, Failed: []SendError{}}
+	applyRobotDispatchResult(&output, dispatchsvc.Result{Receipts: []dispatchsvc.Receipt{
+		{Target: dispatchsvc.Target{Address: "0.0"}, Status: dispatchsvc.ReceiptDelivered},
+		{Target: dispatchsvc.Target{Address: "1.0"}, Status: dispatchsvc.ReceiptFailed, Error: "pane busy"},
+		{Target: dispatchsvc.Target{Address: "2.0"}, Status: dispatchsvc.ReceiptSkipped, Error: "pacing canceled"},
+		{Target: dispatchsvc.Target{Address: "3.0"}, Status: dispatchsvc.ReceiptBlocked},
+	}})
+	if !reflect.DeepEqual(output.Successful, []string{"0.0"}) {
+		t.Fatalf("successful = %v", output.Successful)
+	}
+	wantFailed := []SendError{
+		{Pane: "1.0", Error: "pane busy"},
+		{Pane: "2.0", Error: "pacing canceled"},
+		{Pane: "3.0", Error: "dispatch did not deliver to pane"},
+	}
+	if !reflect.DeepEqual(output.Failed, wantFailed) {
+		t.Fatalf("failed = %+v, want %+v", output.Failed, wantFailed)
+	}
+}
+
+func TestSelectSendTargetsPreservesDetectedTypeFilteringAndOriginalPane(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, Type: tmux.AgentUser, Title: "operator"},
+		{ID: "%2", Index: 1, Type: tmux.AgentUnknown, Title: "proj__cod_1"},
+	}
+	targets, keys, err := selectSendTargets(panes, SendOptions{AgentTypes: []string{"codex"}}, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(keys, []string{"1"}) || len(targets) != 1 || targets[0].ID != "%2" || targets[0].Type != tmux.AgentUnknown {
+		t.Fatalf("targets=%+v keys=%v", targets, keys)
 	}
 }

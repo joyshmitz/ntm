@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -96,7 +97,20 @@ func GetHistory(opts HistoryOptions) (*HistoryOutput, error) {
 	var sinceTime time.Time
 	normalizedAgentType := normalizeAgentType(opts.AgentType)
 	livePaneTypes := make(map[string]string)
-	paneFilterAliases := historyPaneFilterAliases(opts)
+	paneFilterAliases, paneFilterErr := historyPaneFilterAliases(opts)
+	if paneFilterErr != nil {
+		errorCode := ErrCodeInternalError
+		var selectorErr *tmux.PaneSelectorError
+		if errors.As(paneFilterErr, &selectorErr) {
+			errorCode = paneSelectorRobotErrorCode(paneFilterErr)
+		}
+		output.RobotResponse = NewErrorResponse(
+			paneFilterErr,
+			errorCode,
+			"Use N, W.P, or %N from --robot-status or --robot-is-working",
+		)
+		return output, nil
+	}
 
 	if opts.Since != "" {
 		var parseErr error
@@ -190,39 +204,47 @@ func historyEntryMatchesAgentType(entry history.HistoryEntry, want string, liveP
 	return false
 }
 
-func historyPaneFilterAliases(opts HistoryOptions) map[string]struct{} {
+func historyPaneFilterAliases(opts HistoryOptions) (map[string]struct{}, error) {
 	filter := strings.TrimSpace(opts.Pane)
 	if filter == "" {
-		return nil
+		return nil, nil
 	}
-
-	aliases := map[string]struct{}{filter: {}}
+	parsed, err := tmux.ParsePaneSelector(filter)
+	if err != nil {
+		return nil, err
+	}
 	if opts.Session == "" || !tmux.SessionExists(opts.Session) {
-		return aliases
+		return map[string]struct{}{parsed.Raw: {}}, nil
 	}
 
 	panes, err := tmux.GetPanes(opts.Session)
 	if err != nil {
-		return aliases
+		return nil, fmt.Errorf("list panes for history filter: %w", err)
 	}
-	for _, pane := range panes {
-		if historyPaneMatchesFilter(pane, filter) {
-			addHistoryPaneTargetAliases(aliases, pane)
-		}
-	}
-	return aliases
+	return resolveHistoryPaneFilterAliases(panes, parsed.Raw)
 }
 
-func historyPaneMatchesFilter(pane tmux.Pane, filter string) bool {
-	if filter == "" {
-		return false
+func resolveHistoryPaneFilterAliases(panes []tmux.Pane, filter string) (map[string]struct{}, error) {
+	resolved, err := tmux.ResolvePaneSelectors(panes, []string{filter}, false)
+	if err != nil {
+		return nil, err
 	}
-	for alias := range historyPaneAliases(pane) {
-		if alias == filter {
-			return true
-		}
+	aliases := make(map[string]struct{}, len(resolved)*3)
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	for _, pane := range resolved {
+		addCanonicalHistoryTargetAliases(aliases, pane, multiWindow)
 	}
-	return false
+	return aliases, nil
+}
+
+func addCanonicalHistoryTargetAliases(aliases map[string]struct{}, pane tmux.Pane, multiWindow bool) {
+	if pane.ID != "" {
+		aliases[pane.ID] = struct{}{}
+	}
+	aliases[pane.Ref().Physical()] = struct{}{}
+	if !multiWindow {
+		aliases[fmt.Sprintf("%d", pane.Index)] = struct{}{}
+	}
 }
 
 func historyEntryMatchesPaneFilter(entry history.HistoryEntry, aliases map[string]struct{}) bool {
@@ -234,38 +256,6 @@ func historyEntryMatchesPaneFilter(entry history.HistoryEntry, aliases map[strin
 	return false
 }
 
-func historyPaneAliases(pane tmux.Pane) map[string]struct{} {
-	aliases := make(map[string]struct{}, 5)
-	addHistoryPaneFilterAliases(aliases, pane)
-	return aliases
-}
-
-func addHistoryPaneFilterAliases(aliases map[string]struct{}, pane tmux.Pane) {
-	if pane.ID != "" {
-		aliases[pane.ID] = struct{}{}
-	}
-	if pane.Title != "" {
-		aliases[pane.Title] = struct{}{}
-	}
-	aliases[fmt.Sprintf("%d", pane.Index)] = struct{}{}
-	aliases[fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)] = struct{}{}
-	if pane.NTMIndex > 0 {
-		aliases[fmt.Sprintf("%d", pane.NTMIndex)] = struct{}{}
-		aliases[fmt.Sprintf("%d.%d", pane.WindowIndex, pane.NTMIndex)] = struct{}{}
-	}
-}
-
-func addHistoryPaneTargetAliases(aliases map[string]struct{}, pane tmux.Pane) {
-	if pane.ID != "" {
-		aliases[pane.ID] = struct{}{}
-	}
-	if pane.Title != "" {
-		aliases[pane.Title] = struct{}{}
-	}
-	aliases[fmt.Sprintf("%d", pane.Index)] = struct{}{}
-	aliases[fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)] = struct{}{}
-}
-
 // PrintHistory outputs command history as JSON.
 // This is a thin wrapper around GetHistory() for CLI output.
 func PrintHistory(opts HistoryOptions) error {
@@ -273,7 +263,7 @@ func PrintHistory(opts HistoryOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot history failed")
 }
 
 // parseSinceTime parses various time formats

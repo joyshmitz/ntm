@@ -1,10 +1,13 @@
 package robot
 
 import (
+	"encoding/json"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -22,6 +25,26 @@ func TestDefaultIsWorkingOptions(t *testing.T) {
 	}
 	if len(opts.Panes) != 0 {
 		t.Errorf("expected empty Panes, got %v", opts.Panes)
+	}
+}
+
+func TestPrintIsWorkingFailureReturnsTypedErrorAndRawJSON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	stdout, err := captureStdout(t, func() error {
+		return PrintIsWorking(IsWorkingOptions{Session: "ntm-is-working-missing-session-for-test"})
+	})
+	if err == nil {
+		t.Fatal("PrintIsWorking() error = nil, want typed terminal failure")
+	}
+	var response RobotResponse
+	if json.Unmarshal([]byte(stdout), &response) != nil {
+		t.Fatalf("stdout is not raw JSON: %q", stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeSessionNotFound || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("response = %+v, want SESSION_NOT_FOUND JSON failure", response)
 	}
 }
 
@@ -121,6 +144,112 @@ func TestParsePanesArg(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParsePaneSelectorsArg(t *testing.T) {
+	selectors, err := ParsePaneSelectorsArg(" 1,1.0,%7,1 ")
+	if err != nil {
+		t.Fatalf("ParsePaneSelectorsArg() error = %v", err)
+	}
+	want := []string{"1", "1.0", "%7"}
+	if len(selectors) != len(want) {
+		t.Fatalf("selectors = %v, want %v", selectors, want)
+	}
+	for index := range want {
+		if selectors[index] != want[index] {
+			t.Fatalf("selectors[%d] = %q, want %q", index, selectors[index], want[index])
+		}
+	}
+	for _, input := range []string{"-1", "1.x", "%x", " ", ",", "1,", ",1", "1,,2"} {
+		if _, err := ParsePaneSelectorsArg(input); err == nil {
+			t.Errorf("ParsePaneSelectorsArg(%q) expected error", input)
+		}
+	}
+
+	for _, input := range []string{"", "all", " ALL "} {
+		selectors, err := ParsePaneSelectorsArg(input)
+		if err != nil {
+			t.Errorf("ParsePaneSelectorsArg(%q) error = %v", input, err)
+			continue
+		}
+		if len(selectors) != 0 {
+			t.Errorf("ParsePaneSelectorsArg(%q) = %v, want empty default selection", input, selectors)
+		}
+	}
+}
+
+func TestResolveIsWorkingPanesSelectorsDeduplicateAliases(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0, Type: tmux.AgentType("claude")},
+		{ID: "%2", WindowIndex: 1, Index: 0, Type: tmux.AgentType("codex")},
+	}
+	selected, err := resolveIsWorkingPanes("proj", panes, []string{"1", "1.0", "%2"}, nil)
+	if err != nil {
+		t.Fatalf("resolveIsWorkingPanes() error = %v", err)
+	}
+	if len(selected) != 1 || selected[0].id != "%2" {
+		t.Fatalf("selected = %+v, want one physical pane %%2", selected)
+	}
+
+	_, err = resolveIsWorkingPanes("proj", panes, []string{"9.0"}, nil)
+	if err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+	_, err = resolveIsWorkingPanes("proj", panes, []string{"1.x"}, nil)
+	if err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("invalid selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+}
+
+func TestPaneWorkStatusSeparatesUnavailableCurrentFromLastKnown(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	lastKnown := statuspkg.StateObservation{
+		Status:     statuspkg.AgentStatus{State: statuspkg.StateIdle},
+		ObservedAt: now.Add(-time.Minute),
+		Freshness:  statuspkg.FreshnessFresh,
+		Confidence: 0.95,
+	}
+	observation := statuspkg.PaneObservation{
+		AgentType: "cod",
+		Current: statuspkg.StateObservation{
+			Status:     statuspkg.AgentStatus{State: statuspkg.StateUnknown},
+			ObservedAt: now,
+			Freshness:  statuspkg.FreshnessUnavailable,
+			Error:      "capture failed",
+		},
+		LastKnown: &lastKnown,
+	}
+
+	got := paneWorkStatusFromObservation(observation)
+	if got.ObservationState != "unknown" || got.ObservationFreshness != "unavailable" {
+		t.Fatalf("current observation = %q/%q", got.ObservationState, got.ObservationFreshness)
+	}
+	if got.LastKnownState != "idle" || got.LastKnownObservedAt == "" {
+		t.Fatalf("last-known observation = %q at %q", got.LastKnownState, got.LastKnownObservedAt)
+	}
+	if got.SafeToDispatch {
+		t.Fatal("unavailable current observation must fail closed")
+	}
+}
+
+func TestApplyCanonicalWorkSafetyFailsClosed(t *testing.T) {
+	working := PaneWorkStatus{IsIdle: true, Recommendation: string(agent.RecommendSafeToRestart)}
+	applyCanonicalWorkSafety(&working, statuspkg.PaneObservation{Current: statuspkg.StateObservation{
+		Status:    statuspkg.AgentStatus{State: statuspkg.StateWorking},
+		Freshness: statuspkg.FreshnessFresh,
+	}})
+	if !working.IsWorking || working.IsIdle || working.Recommendation != string(agent.RecommendDoNotInterrupt) {
+		t.Fatalf("working safety override = %+v", working)
+	}
+
+	unknown := PaneWorkStatus{IsIdle: true, Recommendation: string(agent.RecommendSafeToRestart)}
+	applyCanonicalWorkSafety(&unknown, statuspkg.PaneObservation{Current: statuspkg.StateObservation{
+		Status:    statuspkg.AgentStatus{State: statuspkg.StateUnknown},
+		Freshness: statuspkg.FreshnessFresh,
+	}})
+	if unknown.IsWorking || unknown.IsIdle || unknown.Recommendation != string(agent.RecommendUnknown) {
+		t.Fatalf("unknown safety override = %+v", unknown)
 	}
 }
 
@@ -238,7 +367,7 @@ func TestPaneWorkStatusDefaults(t *testing.T) {
 
 func TestIsWorkingSummaryInitialization(t *testing.T) {
 	summary := IsWorkingSummary{
-		ByRecommendation: make(map[string][]int),
+		ByRecommendation: make(map[string][]string),
 	}
 
 	if summary.TotalPanes != 0 {
@@ -254,7 +383,7 @@ func TestIsWorkingSummaryInitialization(t *testing.T) {
 
 func TestIsWorkingQueryFields(t *testing.T) {
 	query := IsWorkingQuery{
-		PanesRequested: []int{1, 2, 3},
+		PanesRequested: []string{"0.1", "1.0", "%7"},
 		LinesCaptured:  100,
 	}
 
@@ -271,7 +400,7 @@ func TestIsWorkingOutputStructure(t *testing.T) {
 		RobotResponse: NewRobotResponse(true),
 		Session:       "test-session",
 		Query: IsWorkingQuery{
-			PanesRequested: []int{1, 2},
+			PanesRequested: []string{"0.1", "1.0"},
 			LinesCaptured:  50,
 		},
 		Panes: make(map[string]PaneWorkStatus),
@@ -279,7 +408,7 @@ func TestIsWorkingOutputStructure(t *testing.T) {
 			TotalPanes:       2,
 			WorkingCount:     1,
 			IdleCount:        1,
-			ByRecommendation: map[string][]int{"DO_NOT_INTERRUPT": {1}, "SAFE_TO_RESTART": {2}},
+			ByRecommendation: map[string][]string{"DO_NOT_INTERRUPT": {"0.1"}, "SAFE_TO_RESTART": {"1.0"}},
 		},
 	}
 

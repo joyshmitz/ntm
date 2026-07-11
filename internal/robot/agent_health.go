@@ -5,7 +5,6 @@ package robot
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +28,8 @@ import (
 // AgentHealthOptions configures the agent-health command.
 type AgentHealthOptions struct {
 	Session       string        // Session name (required)
-	Panes         []int         // Pane indices to check (empty = all non-control panes)
+	Panes         []int         // Legacy bare pane indices (empty = all non-control panes)
+	PaneSelectors []string      // N, W.P, or %N selectors; takes precedence over Panes
 	LinesCaptured int           // Number of lines to capture (default: 100)
 	IncludeCaut   bool          // Whether to query caut for provider usage (default: true)
 	IncludePT     bool          // Whether to query process_triage for health states (default: true)
@@ -52,13 +52,20 @@ func DefaultAgentHealthOptions() AgentHealthOptions {
 
 // LocalStateInfo contains the parsed local agent state.
 type LocalStateInfo struct {
-	IsWorking        bool           `json:"is_working"`
-	IsIdle           bool           `json:"is_idle"`
-	IsRateLimited    bool           `json:"is_rate_limited"`
-	IsContextLow     bool           `json:"is_context_low"`
-	ContextRemaining *float64       `json:"context_remaining,omitempty"`
-	Confidence       float64        `json:"confidence"`
-	Indicators       WorkIndicators `json:"indicators"`
+	IsWorking             bool           `json:"is_working"`
+	IsIdle                bool           `json:"is_idle"`
+	IsRateLimited         bool           `json:"is_rate_limited"`
+	IsContextLow          bool           `json:"is_context_low"`
+	ContextRemaining      *float64       `json:"context_remaining,omitempty"`
+	Confidence            float64        `json:"confidence"`
+	Indicators            WorkIndicators `json:"indicators"`
+	ObservationState      string         `json:"observation_state"`
+	ObservationFreshness  string         `json:"observation_freshness"`
+	ObservationObservedAt string         `json:"observation_observed_at"`
+	ObservationError      string         `json:"observation_error,omitempty"`
+	LastKnownState        string         `json:"last_known_state,omitempty"`
+	LastKnownObservedAt   string         `json:"last_known_observed_at,omitempty"`
+	SafeToDispatch        bool           `json:"safe_to_dispatch"`
 }
 
 // ProviderUsageInfo contains the caut provider usage data.
@@ -128,9 +135,9 @@ type PaneHealthStatus struct {
 
 // ProviderStats contains aggregated statistics for a provider.
 type ProviderStats struct {
-	Accounts       int     `json:"accounts"`
-	AvgUsedPercent float64 `json:"avg_used_percent"`
-	PanesUsing     []int   `json:"panes_using"`
+	Accounts       int      `json:"accounts"`
+	AvgUsedPercent float64  `json:"avg_used_percent"`
+	PanesUsing     []string `json:"panes_using"`
 }
 
 // FleetHealthSummary contains overall health statistics across all panes.
@@ -145,10 +152,11 @@ type FleetHealthSummary struct {
 
 // AgentHealthQuery contains query parameters for reproducibility.
 type AgentHealthQuery struct {
-	PanesRequested []int `json:"panes_requested"`
-	LinesCaptured  int   `json:"lines_captured"`
-	CautEnabled    bool  `json:"caut_enabled"`
-	PTEnabled      bool  `json:"pt_enabled"`
+	PanesRequested     []string `json:"panes_requested"`
+	SelectorsRequested []string `json:"selectors_requested,omitempty"`
+	LinesCaptured      int      `json:"lines_captured"`
+	CautEnabled        bool     `json:"caut_enabled"`
+	PTEnabled          bool     `json:"pt_enabled"`
 }
 
 // AgentHealthOutput is the response for --robot-agent-health.
@@ -175,7 +183,8 @@ func PrintAgentHealth(opts AgentHealthOptions) int {
 		// unexpected internal error; force the failure envelope so the emitted
 		// JSON and the exit code agree.
 		if output == nil {
-			outputJSON(NewErrorResponse(err, ErrCodeInternalError, ""))
+			response := NewErrorResponse(err, ErrCodeInternalError, "")
+			_ = encodeRobotFailureJSON(&response)
 			return 1
 		}
 		output.Success = false
@@ -185,10 +194,14 @@ func PrintAgentHealth(opts AgentHealthOptions) int {
 		if output.ErrorCode == "" {
 			output.ErrorCode = ErrCodeInternalError
 		}
-		_ = encodeJSON(output)
+		_ = encodeRobotFailureJSON(output)
 		return 1
 	}
-	_ = encodeJSON(output)
+	if output.Success {
+		_ = encodeJSON(output)
+	} else {
+		_ = encodeRobotFailureJSON(output)
+	}
 	return ExitCodeForResponse(output.RobotResponse)
 }
 
@@ -199,10 +212,10 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 		RobotResponse: NewRobotResponse(true),
 		Session:       opts.Session,
 		Query: AgentHealthQuery{
-			PanesRequested: opts.Panes,
-			LinesCaptured:  opts.LinesCaptured,
-			CautEnabled:    opts.IncludeCaut,
-			PTEnabled:      opts.IncludePT,
+			SelectorsRequested: append([]string(nil), opts.PaneSelectors...),
+			LinesCaptured:      opts.LinesCaptured,
+			CautEnabled:        opts.IncludeCaut,
+			PTEnabled:          opts.IncludePT,
 		},
 		Panes:           make(map[string]PaneHealthStatus),
 		ProviderSummary: make(map[string]ProviderStats),
@@ -213,6 +226,7 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	isWorkingOpts := IsWorkingOptions{
 		Session:       opts.Session,
 		Panes:         opts.Panes,
+		PaneSelectors: opts.PaneSelectors,
 		LinesCaptured: opts.LinesCaptured,
 		Verbose:       opts.Verbose,
 	}
@@ -275,13 +289,20 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	for paneStr, workStatus := range isWorkingResult.Panes {
 		// Convert IsWorking result to our local state structure
 		localState := LocalStateInfo{
-			IsWorking:        workStatus.IsWorking,
-			IsIdle:           workStatus.IsIdle,
-			IsRateLimited:    workStatus.IsRateLimited,
-			IsContextLow:     workStatus.IsContextLow,
-			ContextRemaining: workStatus.ContextRemaining,
-			Confidence:       workStatus.Confidence,
-			Indicators:       workStatus.Indicators,
+			IsWorking:             workStatus.IsWorking,
+			IsIdle:                workStatus.IsIdle,
+			IsRateLimited:         workStatus.IsRateLimited,
+			IsContextLow:          workStatus.IsContextLow,
+			ContextRemaining:      workStatus.ContextRemaining,
+			Confidence:            workStatus.Confidence,
+			Indicators:            workStatus.Indicators,
+			ObservationState:      workStatus.ObservationState,
+			ObservationFreshness:  workStatus.ObservationFreshness,
+			ObservationObservedAt: workStatus.ObservationObservedAt,
+			ObservationError:      workStatus.ObservationError,
+			LastKnownState:        workStatus.LastKnownState,
+			LastKnownObservedAt:   workStatus.LastKnownObservedAt,
+			SafeToDispatch:        workStatus.SafeToDispatch,
 		}
 
 		healthStatus := PaneHealthStatus{
@@ -300,8 +321,7 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 					healthStatus.ProviderUsage = convertProviderUsage(cached)
 
 					// Track in provider summary
-					paneNum, _ := strconv.Atoi(paneStr)
-					updateProviderSummary(output.ProviderSummary, provider, cached, paneNum)
+					updateProviderSummary(output.ProviderSummary, provider, cached, paneStr)
 				}
 			}
 		}
@@ -319,12 +339,20 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 		}
 
 		// Calculate health score and recommendation
-		healthStatus.HealthScore = CalculateHealthScore(&workStatus, providerUsage)
-		healthStatus.HealthGrade = HealthGrade(healthStatus.HealthScore)
-		healthStatus.Issues = CollectIssues(&workStatus, providerUsage)
-		rec, reason := DeriveHealthRecommendation(&workStatus, providerUsage, healthStatus.HealthScore)
-		healthStatus.Recommendation = string(rec)
-		healthStatus.RecommendationReason = reason
+		if !paneObservationUsableForHealth(workStatus) {
+			healthStatus.HealthScore = 0
+			healthStatus.HealthGrade = HealthGrade(healthStatus.HealthScore)
+			healthStatus.Issues = append(healthStatus.Issues, "Current pane observation unavailable")
+			healthStatus.Recommendation = string(RecommendMonitor)
+			healthStatus.RecommendationReason = "Live state is unavailable; inspect the pane before acting on last-known state"
+		} else {
+			healthStatus.HealthScore = CalculateHealthScore(&workStatus, providerUsage)
+			healthStatus.HealthGrade = HealthGrade(healthStatus.HealthScore)
+			healthStatus.Issues = CollectIssues(&workStatus, providerUsage)
+			rec, reason := DeriveHealthRecommendation(&workStatus, providerUsage, healthStatus.HealthScore)
+			healthStatus.Recommendation = string(rec)
+			healthStatus.RecommendationReason = reason
+		}
 
 		// Include raw sample if verbose
 		if opts.Verbose {
@@ -359,6 +387,12 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	}
 
 	return output, nil
+}
+
+func paneObservationUsableForHealth(workStatus PaneWorkStatus) bool {
+	return workStatus.ObservationFreshness == "fresh" &&
+		workStatus.ObservationState != "unknown" &&
+		workStatus.ObservationError == ""
 }
 
 // convertProviderUsage converts caut.ProviderPayload to our ProviderUsageInfo.
@@ -403,24 +437,24 @@ func convertProviderUsage(payload *caut.ProviderPayload) *ProviderUsageInfo {
 }
 
 // updateProviderSummary updates the provider summary with usage data.
-func updateProviderSummary(summary map[string]ProviderStats, provider string, payload *caut.ProviderPayload, paneNum int) {
+func updateProviderSummary(summary map[string]ProviderStats, provider string, payload *caut.ProviderPayload, paneTarget string) {
 	stats, exists := summary[provider]
 	if !exists {
 		stats = ProviderStats{
-			PanesUsing: []int{},
+			PanesUsing: []string{},
 		}
 	}
 
 	// Add this pane if not already tracked
 	found := false
 	for _, p := range stats.PanesUsing {
-		if p == paneNum {
+		if p == paneTarget {
 			found = true
 			break
 		}
 	}
 	if !found {
-		stats.PanesUsing = append(stats.PanesUsing, paneNum)
+		stats.PanesUsing = append(stats.PanesUsing, paneTarget)
 	}
 
 	// Update usage stats

@@ -3,10 +3,14 @@
 package robot
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -32,9 +36,15 @@ type InterruptOutput struct {
 
 // PaneState captures the state of a pane before interruption
 type PaneState struct {
-	State      string `json:"state"`       // active, idle, error, unknown
-	LastOutput string `json:"last_output"` // Truncated last output (for context)
-	AgentType  string `json:"agent_type"`  // claude, codex, gemini, user, unknown
+	State                 string  `json:"state"`       // active, idle, error, unknown
+	LastOutput            string  `json:"last_output"` // Truncated last output (for context)
+	AgentType             string  `json:"agent_type"`  // claude, codex, gemini, user, unknown
+	ObservationFreshness  string  `json:"observation_freshness"`
+	ObservationConfidence float64 `json:"observation_confidence"`
+	ObservedAt            string  `json:"observed_at"`
+	ObservationError      string  `json:"observation_error,omitempty"`
+	LastKnownState        string  `json:"last_known_state,omitempty"`
+	LastKnownObservedAt   string  `json:"last_known_observed_at,omitempty"`
 }
 
 // InterruptError represents a failed interrupt attempt
@@ -104,7 +114,8 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		return finalizeTerminalInterruptActuation(trace, opts, nil, output), nil
 	}
 
-	panes, err := tmux.GetPanes(opts.Session)
+	observer := newRobotSessionObserver(20)
+	observation, err := observer.Observe(context.Background(), opts.Session)
 	if err != nil {
 		output.Failed = append(output.Failed, InterruptError{
 			Pane:   "panes",
@@ -118,17 +129,22 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		output.CompletedAt = time.Now().UTC()
 		return finalizeTerminalInterruptActuation(trace, opts, nil, output), nil
 	}
-
-	// Build pane filter map
-	paneFilterMap := make(map[string]bool)
-	for _, p := range opts.Panes {
-		paneFilterMap[p] = true
-	}
+	panes := observationPanes(observation)
+	observationsByID := observationPaneMap(observation)
 
 	// Topology-aware keys (#172): on a multi-window session every key is the
 	// canonical "window.pane" address so panes never collapse onto one entry.
 	multiWindow := paneSessionIsMultiWindow(panes)
-	targetPanes := selectInterruptTargets(panes, paneFilterMap, opts.All)
+	targetPanes, err := resolveInterruptTargets(panes, opts.Panes, opts.All)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(
+			err,
+			paneSelectorRobotErrorCode(err),
+			"Use --robot-status or --robot-interrupt without --panes to inspect canonical pane addresses",
+		)
+		output.CompletedAt = time.Now().UTC()
+		return finalizeTerminalInterruptActuation(trace, opts, nil, output), nil
+	}
 	targetKeys := make([]string, 0, len(targetPanes))
 	for _, pane := range targetPanes {
 		targetKeys = append(targetKeys, paneTargetKey(pane, multiWindow))
@@ -153,30 +169,11 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 	for _, pane := range targetPanes {
 		paneKey := paneTargetKey(pane, multiWindow)
 
-		captured, err := tmux.CapturePaneOutput(pane.ID, 20)
-		if err != nil {
-			output.PreviousStates[paneKey] = PaneState{
-				State:      "unknown",
-				LastOutput: "",
-				AgentType:  interruptPaneAgentType(pane),
-			}
-			continue
+		paneObservation, found := observationsByID[pane.Ref().StableKey()]
+		if !found {
+			paneObservation = unavailableRobotPaneObservation(pane, "pane missing from canonical observation", interruptedAt)
 		}
-
-		cleanOutput := stripANSI(captured)
-		lines := splitLines(cleanOutput)
-		agentType := interruptPaneAgentType(pane)
-		state := determineState(captured, agentType)
-
-		// Get last meaningful output (truncated)
-		shortAgentType := translateAgentTypeForStatus(agentType)
-		lastOutput := getLastMeaningfulOutput(lines, 200, shortAgentType)
-
-		output.PreviousStates[paneKey] = PaneState{
-			State:      state,
-			LastOutput: lastOutput,
-			AgentType:  agentType,
-		}
+		output.PreviousStates[paneKey] = interruptPaneStateFromObservation(paneObservation, interruptPaneAgentType(pane))
 	}
 
 	// Dry-run mode: show what would happen without executing
@@ -253,16 +250,18 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 					continue
 				}
 
-				// Check if agent is ready
-				captured, err := tmux.CapturePaneOutput(targetPane.ID, 10)
-				if err != nil {
-					continue
-				}
+				// Check if the agent is ready. The individual capture is
+				// intentional here: readiness is a per-pane transition poll.
+				current := observeInterruptPoll(
+					observer,
+					opts.Session,
+					*targetPane,
+					tmux.CapturePaneOutput,
+					tmux.GetPaneActivity,
+				)
+				state := interruptPaneStateFromObservation(current, interruptPaneAgentType(*targetPane))
 
-				agentType := interruptPaneAgentType(*targetPane)
-				state := determineState(captured, agentType)
-
-				if state == "idle" {
+				if state.State == "idle" {
 					output.ReadyForInput = append(output.ReadyForInput, paneKey)
 					delete(pending, paneKey)
 				}
@@ -281,10 +280,8 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 				ErrCodeTimeout,
 				"Increase --interrupt-timeout or check agent health",
 			)
-			// Still add them to ready_for_input since Ctrl+C was sent
-			for paneKey := range pending {
-				output.ReadyForInput = append(output.ReadyForInput, paneKey)
-			}
+			// Pending panes are intentionally not marked ready. A timeout or
+			// unavailable observation must not authorize the follow-up message.
 		}
 	} else if opts.NoWait {
 		// If no wait, all interrupted panes are considered ready
@@ -296,7 +293,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		// Small delay to ensure interrupt settled
 		time.Sleep(100 * time.Millisecond)
 
-		promptTargets := make([]interruptMessageTarget, 0, len(output.ReadyForInput))
+		messageTargets := make([]tmux.Pane, 0, len(output.ReadyForInput))
 		for _, paneKey := range output.ReadyForInput {
 			// Find the pane
 			var targetPane *tmux.Pane
@@ -308,18 +305,44 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 			}
 
 			if targetPane != nil {
-				promptTargets = append(promptTargets, interruptMessageTarget{
-					Pane:      paneKey,
-					Target:    targetPane.ID,
-					AgentType: interruptPaneTMUXAgentType(*targetPane),
-				})
+				normalized := *targetPane
+				normalized.Tags = append([]string(nil), targetPane.Tags...)
+				normalized.Type = interruptPaneTMUXAgentType(*targetPane)
+				messageTargets = append(messageTargets, normalized)
 			}
 		}
 
-		messageErrors := sendInterruptMessages(promptTargets, opts.Message, tmux.SendKeysForAgentWithDelay)
-		output.Failed = append(output.Failed, messageErrors...)
-		if len(promptTargets) > len(messageErrors) {
-			output.MessageSent = true
+		if len(messageTargets) > 0 {
+			dispatchPanes := make([]tmux.Pane, len(panes))
+			for i, pane := range panes {
+				dispatchPanes[i] = pane
+				dispatchPanes[i].Tags = append([]string(nil), pane.Tags...)
+				dispatchPanes[i].Type = interruptPaneTMUXAgentType(pane)
+			}
+			service, _, serviceErr := newRobotDispatchService(redaction.Config{Mode: redaction.ModeOff}, nil, nil)
+			if serviceErr != nil {
+				output.Failed = append(output.Failed, InterruptError{Pane: "dispatch", Reason: fmt.Sprintf("failed to initialize message dispatch: %v", serviceErr)})
+			} else {
+				sendOpts := SendOptions{Session: opts.Session, Message: opts.Message}
+				prepared, prepareErr := service.Prepare(
+					context.Background(),
+					robotPreparedDispatchRequest(dispatchPanes, messageTargets, sendOpts, opts.Message, true),
+				)
+				if prepareErr != nil {
+					output.Failed = append(output.Failed, InterruptError{Pane: "dispatch", Reason: fmt.Sprintf("failed to prepare follow-up message: %v", prepareErr)})
+				} else {
+					result, _ := service.Dispatch(context.Background(), prepared)
+					for _, receipt := range result.Receipts {
+						if receipt.Status == dispatchsvc.ReceiptDelivered {
+							output.MessageSent = true
+							continue
+						}
+						if receipt.Status == dispatchsvc.ReceiptFailed || receipt.Status == dispatchsvc.ReceiptSkipped || receipt.Status == dispatchsvc.ReceiptBlocked {
+							output.Failed = append(output.Failed, InterruptError{Pane: receipt.Target.Address, Reason: fmt.Sprintf("failed to send message: %s", receipt.Error)})
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -328,6 +351,26 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 	publishInterruptActuationVerification(trace, opts, targetKeys, output)
 	output.CompletedAt = time.Now().UTC()
 	return output, nil
+}
+
+func observeInterruptPoll(
+	observer *status.SessionObserver,
+	session string,
+	pane tmux.Pane,
+	capture func(string, int) (string, error),
+	activity func(string) (time.Time, error),
+) status.PaneObservation {
+	captured, captureErr := capture(pane.ID, 10)
+	lastActive, activityErr := activity(pane.ID)
+	if activityErr != nil {
+		captureErr = errors.Join(captureErr, fmt.Errorf("refresh pane activity: %w", activityErr))
+	}
+	return observer.ObservePaneCapture(
+		session,
+		tmux.PaneActivity{Pane: pane, LastActivity: lastActive},
+		captured,
+		captureErr,
+	)
 }
 
 // markInterruptFailures flips the envelope to success:false when one or more
@@ -376,27 +419,16 @@ func PrintInterrupt(opts InterruptOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot interrupt failed")
 }
 
-func selectInterruptTargets(panes []tmux.Pane, paneFilterMap map[string]bool, all bool) []tmux.Pane {
-	hasPaneFilter := len(paneFilterMap) > 0
-	// Match the filter topology-aware (#172): on a multi-window / window-per-agent
-	// layout a bare --panes index selects a whole window rather than broadcasting
-	// to every window's same-indexed pane (or no-op'ing when the index is the
-	// window number).
-	multiWindow := paneSessionIsMultiWindow(panes)
-	filterTokens := make([]string, 0, len(paneFilterMap))
-	for k := range paneFilterMap {
-		filterTokens = append(filterTokens, k)
+func resolveInterruptTargets(panes []tmux.Pane, selectors []string, all bool) ([]tmux.Pane, error) {
+	if len(selectors) > 0 {
+		return tmux.ResolvePaneSelectors(panes, selectors, false)
 	}
 	var targetPanes []tmux.Pane
 	for _, pane := range panes {
-		if hasPaneFilter && !paneMatchesAnyToken(pane, filterTokens, multiWindow) {
-			continue
-		}
-
-		if !all && !hasPaneFilter {
+		if !all {
 			agentType := interruptPaneAgentType(pane)
 			if pane.Index == 0 && agentType == "unknown" {
 				continue
@@ -408,7 +440,74 @@ func selectInterruptTargets(panes []tmux.Pane, paneFilterMap map[string]bool, al
 
 		targetPanes = append(targetPanes, pane)
 	}
-	return targetPanes
+	return targetPanes, nil
+}
+
+// selectInterruptTargets preserves the legacy pure helper used by older tests
+// and internal callers. Command paths use resolveInterruptTargets so selector
+// errors remain typed instead of collapsing to an empty target set.
+func selectInterruptTargets(panes []tmux.Pane, paneFilterMap map[string]bool, all bool) []tmux.Pane {
+	selectors := make([]string, 0, len(paneFilterMap))
+	for selector := range paneFilterMap {
+		selectors = append(selectors, selector)
+	}
+	resolved, err := resolveInterruptTargets(panes, selectors, all)
+	if err != nil {
+		return nil
+	}
+	return resolved
+}
+
+func unavailableRobotPaneObservation(pane tmux.Pane, observationError string, observedAt time.Time) status.PaneObservation {
+	return status.PaneObservation{
+		Pane:      pane.Ref(),
+		PaneName:  pane.Title,
+		AgentType: interruptPaneAgentType(pane),
+		Metadata:  pane,
+		Current: status.StateObservation{
+			Status: status.AgentStatus{
+				PaneID:    pane.ID,
+				PaneName:  pane.Title,
+				AgentType: interruptPaneAgentType(pane),
+				State:     status.StateUnknown,
+				UpdatedAt: observedAt,
+			},
+			ObservedAt: observedAt,
+			Freshness:  status.FreshnessUnavailable,
+			Confidence: 0,
+			Error:      observationError,
+		},
+	}
+}
+
+func interruptPaneStateFromObservation(observation status.PaneObservation, agentType string) PaneState {
+	result := PaneState{
+		State:                 "unknown",
+		AgentType:             agentType,
+		ObservationFreshness:  string(observation.Current.Freshness),
+		ObservationConfidence: observation.Current.Confidence,
+		ObservedAt:            FormatTimestamp(observation.Current.ObservedAt),
+		ObservationError:      observation.Current.Error,
+		LastKnownState:        lastKnownObservationState(observation),
+		LastKnownObservedAt:   lastKnownObservationTime(observation),
+	}
+	if observation.Current.Freshness != status.FreshnessFresh || observation.Current.Error != "" {
+		return result
+	}
+
+	cleanOutput := stripANSI(observation.RawOutput)
+	shortAgentType := translateAgentTypeForStatus(agentType)
+	result.LastOutput = getLastMeaningfulOutput(splitLines(cleanOutput), 200, shortAgentType)
+	result.State = determineState(observation.RawOutput, agentType)
+	switch observation.Current.Status.State {
+	case status.StateWorking:
+		if result.State == "idle" || result.State == "unknown" {
+			result.State = "active"
+		}
+	case status.StateUnknown:
+		result.State = "unknown"
+	}
+	return result
 }
 
 func interruptPaneAgentType(pane tmux.Pane) string {

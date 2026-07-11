@@ -1,9 +1,12 @@
 package robot
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -41,6 +44,67 @@ func TestSelectInterruptTargetsWindowAware(t *testing.T) {
 	// A %N pane id resolves regardless of topology.
 	if got := selectInterruptTargets(panes, map[string]bool{"%1": true}, false); len(got) != 1 || got[0].ID != "%1" {
 		t.Fatalf("expected --panes=%%1 to resolve to %%1, got %v", got)
+	}
+}
+
+func TestResolveInterruptTargetsSelectorsDeduplicateAndFailTyped(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentType("claude")},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentType("codex")},
+		{ID: "%3", Index: 0, WindowIndex: 2, Type: tmux.AgentType("gemini")},
+	}
+	selected, err := resolveInterruptTargets(panes, []string{"2", "2.0", "%3"}, false)
+	if err != nil {
+		t.Fatalf("resolveInterruptTargets() error = %v", err)
+	}
+	if len(selected) != 1 || selected[0].ID != "%3" {
+		t.Fatalf("selected = %v, want one physical pane %%3", selected)
+	}
+	if _, err := resolveInterruptTargets(panes, []string{"9.0"}, false); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if _, err := resolveInterruptTargets(panes, []string{"1.x"}, false); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+		t.Fatalf("invalid selector error = %v", err)
+	}
+}
+
+func TestInterruptPaneStateUsesOnlyFreshCurrentObservation(t *testing.T) {
+	now := time.Date(2026, 7, 11, 13, 0, 0, 0, time.UTC)
+	lastKnown := status.StateObservation{
+		Status:     status.AgentStatus{State: status.StateIdle},
+		ObservedAt: now.Add(-time.Minute),
+		Freshness:  status.FreshnessFresh,
+		Confidence: 0.95,
+	}
+	unavailable := status.PaneObservation{
+		Current: status.StateObservation{
+			Status:     status.AgentStatus{State: status.StateUnknown},
+			ObservedAt: now,
+			Freshness:  status.FreshnessUnavailable,
+			Error:      "capture failed",
+		},
+		LastKnown: &lastKnown,
+	}
+	got := interruptPaneStateFromObservation(unavailable, "codex")
+	if got.State != "unknown" || got.LastKnownState != "idle" || got.ObservationFreshness != "unavailable" {
+		t.Fatalf("unavailable state = %+v", got)
+	}
+	if got.LastOutput != "" {
+		t.Fatalf("unavailable state exposed last output %q", got.LastOutput)
+	}
+
+	working := status.PaneObservation{
+		RawOutput: "codex>",
+		Current: status.StateObservation{
+			Status:     status.AgentStatus{State: status.StateWorking},
+			ObservedAt: now,
+			Freshness:  status.FreshnessFresh,
+			Confidence: 0.95,
+		},
+	}
+	got = interruptPaneStateFromObservation(working, "codex")
+	if got.State != "active" {
+		t.Fatalf("canonical working state = %+v, want active", got)
 	}
 }
 
@@ -120,5 +184,41 @@ func TestGetInterruptUnknownSessionFailsLoud(t *testing.T) {
 	}
 	if out.ErrorCode != ErrCodeSessionNotFound {
 		t.Errorf("expected error_code=%q, got %q", ErrCodeSessionNotFound, out.ErrorCode)
+	}
+}
+
+func TestObserveInterruptPollRefreshesActivityAndFailsClosed(t *testing.T) {
+	pane := tmux.Pane{ID: "%41", Index: 0, WindowIndex: 2, Type: tmux.AgentUser}
+	refreshed := time.Now().UTC().Add(-time.Second)
+	observation := observeInterruptPoll(
+		newRobotSessionObserver(10),
+		"session",
+		pane,
+		func(target string, lines int) (string, error) {
+			if target != pane.ID || lines != 10 {
+				t.Fatalf("capture called with %q/%d", target, lines)
+			}
+			return "", nil
+		},
+		func(target string) (time.Time, error) {
+			if target != pane.ID {
+				t.Fatalf("activity called with %q", target)
+			}
+			return refreshed, nil
+		},
+	)
+	if !observation.Current.Status.LastActive.Equal(refreshed) {
+		t.Fatalf("LastActive=%v, want refreshed %v", observation.Current.Status.LastActive, refreshed)
+	}
+
+	unavailable := observeInterruptPoll(
+		newRobotSessionObserver(10),
+		"session",
+		pane,
+		func(string, int) (string, error) { return "", nil },
+		func(string) (time.Time, error) { return time.Time{}, errors.New("activity unavailable") },
+	)
+	if unavailable.Current.Freshness != status.FreshnessUnavailable || unavailable.Current.Error == "" {
+		t.Fatalf("activity failure authorized current state: %+v", unavailable.Current)
 	}
 }

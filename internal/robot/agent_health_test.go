@@ -1,11 +1,40 @@
 package robot
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/caut"
 	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 )
+
+func TestPrintAgentHealthFailureForcesJSONUnderTOON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	var exitCode int
+	stdout, err := captureStdout(t, func() error {
+		exitCode = PrintAgentHealth(AgentHealthOptions{
+			Session: "ntm-agent-health-missing-session-toon",
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("capture PrintAgentHealth: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("PrintAgentHealth() exit code = %d, want 1", exitCode)
+	}
+
+	var response AgentHealthOutput
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("PrintAgentHealth failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeSessionNotFound || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("PrintAgentHealth response = %+v, want SESSION_NOT_FOUND JSON failure", response.RobotResponse)
+	}
+}
 
 func TestCalculateHealthScore(t *testing.T) {
 	tests := []struct {
@@ -445,6 +474,39 @@ func TestDefaultAgentHealthOptions(t *testing.T) {
 	}
 }
 
+func TestPaneObservationUsableForHealthFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		work PaneWorkStatus
+		want bool
+	}{
+		{
+			name: "fresh known state",
+			work: PaneWorkStatus{ObservationFreshness: "fresh", ObservationState: "idle"},
+			want: true,
+		},
+		{
+			name: "fresh unknown state",
+			work: PaneWorkStatus{ObservationFreshness: "fresh", ObservationState: "unknown"},
+		},
+		{
+			name: "unavailable with last known",
+			work: PaneWorkStatus{ObservationFreshness: "unavailable", ObservationState: "unknown", LastKnownState: "idle"},
+		},
+		{
+			name: "fresh source with classification error",
+			work: PaneWorkStatus{ObservationFreshness: "fresh", ObservationState: "idle", ObservationError: "parse failed"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := paneObservationUsableForHealth(test.work); got != test.want {
+				t.Fatalf("paneObservationUsableForHealth() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestConvertProviderUsage(t *testing.T) {
 	// Test nil input
 	if got := convertProviderUsage(nil); got != nil {
@@ -492,7 +554,7 @@ func TestUpdateProviderSummary(t *testing.T) {
 
 	// First update
 	payload1 := makeProviderUsage(60.0)
-	updateProviderSummary(summary, "claude", payload1, 2)
+	updateProviderSummary(summary, "claude", payload1, "0.2")
 
 	if stats, ok := summary["claude"]; !ok {
 		t.Error("claude should be in summary")
@@ -503,14 +565,14 @@ func TestUpdateProviderSummary(t *testing.T) {
 		if stats.AvgUsedPercent != 60.0 {
 			t.Errorf("AvgUsedPercent = %f, want 60.0", stats.AvgUsedPercent)
 		}
-		if len(stats.PanesUsing) != 1 || stats.PanesUsing[0] != 2 {
-			t.Errorf("PanesUsing = %v, want [2]", stats.PanesUsing)
+		if len(stats.PanesUsing) != 1 || stats.PanesUsing[0] != "0.2" {
+			t.Errorf("PanesUsing = %v, want [0.2]", stats.PanesUsing)
 		}
 	}
 
 	// Second update - same provider, different pane
 	payload2 := makeProviderUsage(80.0)
-	updateProviderSummary(summary, "claude", payload2, 3)
+	updateProviderSummary(summary, "claude", payload2, "1.2")
 
 	stats := summary["claude"]
 	if stats.Accounts != 2 {
@@ -524,7 +586,7 @@ func TestUpdateProviderSummary(t *testing.T) {
 	}
 
 	// Duplicate pane should not add
-	updateProviderSummary(summary, "claude", payload1, 2)
+	updateProviderSummary(summary, "claude", payload1, "0.2")
 	if len(summary["claude"].PanesUsing) != 2 {
 		t.Errorf("Duplicate pane should not be added, got %v", summary["claude"].PanesUsing)
 	}
