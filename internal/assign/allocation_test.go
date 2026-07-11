@@ -229,6 +229,25 @@ func TestPlanAllocationsLogsRequiredFields(t *testing.T) {
 	}
 }
 
+func TestPlanAllocationsPreservesCanonicalPaneIdentity(t *testing.T) {
+	plan := PlanAllocations(AllocationInput{
+		BVAvailable: true,
+		Pressure:    AllocationPressure{Available: true, Level: "normal", AgentHeadroom: 2},
+		ReadyBeads:  []AllocationReadyBead{{ID: "ntm-pane", Title: "Topology", Priority: 1}},
+		Agents: []AllocationAgent{{
+			ID: "cod-1", Session: "alpha", PaneIndex: 1, PaneTarget: "2.1", PaneID: "%91",
+			AgentType: tmux.AgentCodex, Idle: true, ResourceHeadroom: 0.90,
+		}},
+	})
+	if len(plan.Recommendations) != 1 {
+		t.Fatalf("recommendations=%d, want 1", len(plan.Recommendations))
+	}
+	recommendation := plan.Recommendations[0]
+	if recommendation.PaneTarget != "2.1" || recommendation.PaneID != "%91" {
+		t.Fatalf("recommendation lost canonical pane identity: %+v", recommendation)
+	}
+}
+
 func allocationTestEqual[T comparable](left, right T) bool {
 	return left == right
 }

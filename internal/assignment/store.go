@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -17,14 +18,17 @@ import (
 
 const (
 	// assignmentsDirName is the directory name for assignment storage
-	assignmentsDirName = "assignments"
-	fileExtension      = ".json"
+	assignmentsDirName     = "assignments"
+	fileExtension          = ".json"
+	assignmentStoreVersion = 4
 )
 
 // AssignmentStatus represents the current state of an assignment
 type AssignmentStatus string
 
 const (
+	StatusClaiming   AssignmentStatus = "claiming"   // Durable intent exists; external claim outcome may need reconciliation
+	StatusClaimed    AssignmentStatus = "claimed"    // Bead claimed; reservation/dispatch may still be pending
 	StatusAssigned   AssignmentStatus = "assigned"   // Prompt sent, waiting to start
 	StatusWorking    AssignmentStatus = "working"    // Agent actively working
 	StatusCompleted  AssignmentStatus = "completed"  // Bead closed successfully
@@ -48,6 +52,43 @@ type Assignment struct {
 	FailureReason string           `json:"failure_reason,omitempty"` // Detailed failure reason
 	RetryCount    int              `json:"retry_count,omitempty"`    // Number of retry attempts
 	PromptSent    string           `json:"prompt_sent,omitempty"`    // The actual prompt sent
+
+	// Atomic assignment metadata is persisted before each external boundary so
+	// retries can distinguish completed, recoverable, and outcome-unknown work.
+	IdempotencyKey        string           `json:"idempotency_key,omitempty"`
+	ClaimActor            string           `json:"claim_actor,omitempty"`
+	ClaimState            ClaimState       `json:"claim_state,omitempty"`
+	ClaimStatus           string           `json:"claim_status,omitempty"`
+	ClaimAttempts         int              `json:"claim_attempts,omitempty"`
+	ClaimStartedAt        *time.Time       `json:"claim_started_at,omitempty"`
+	ClaimError            string           `json:"claim_error,omitempty"`
+	ClaimedAt             *time.Time       `json:"claimed_at,omitempty"`
+	ReservationRequired   bool             `json:"reservation_required,omitempty"`
+	ReservationDiscovery  bool             `json:"reservation_discovery,omitempty"`
+	ReservationInputPaths []string         `json:"reservation_input_paths,omitempty"`
+	ReservationState      ReservationState `json:"reservation_state,omitempty"`
+	ReservationAttempts   int              `json:"reservation_attempts,omitempty"`
+	ReservationStartedAt  *time.Time       `json:"reservation_started_at,omitempty"`
+	ReservationCompleted  bool             `json:"reservation_completed,omitempty"`
+	ReservationAgent      string           `json:"reservation_agent,omitempty"`
+	ReservationTarget     string           `json:"reservation_target,omitempty"`
+	ReservationRequested  []string         `json:"reservation_requested,omitempty"`
+	ReservedPaths         []string         `json:"reserved_paths,omitempty"`
+	ReservationIDs        []int            `json:"reservation_ids,omitempty"`
+	ReservationExpiresAt  *time.Time       `json:"reservation_expires_at,omitempty"`
+	ReservationError      string           `json:"reservation_error,omitempty"`
+	DispatchState         DispatchState    `json:"dispatch_state,omitempty"`
+	DispatchTarget        string           `json:"dispatch_target,omitempty"`
+	OccupancyKey          string           `json:"occupancy_key,omitempty"`
+	PromptSHA256          string           `json:"prompt_sha256,omitempty"`
+	IntentSHA256          string           `json:"intent_sha256,omitempty"`
+	PendingPrompt         string           `json:"pending_prompt,omitempty"`
+	DispatchAttempts      int              `json:"dispatch_attempts,omitempty"`
+	DispatchStartedAt     *time.Time       `json:"dispatch_started_at,omitempty"`
+	DispatchedAt          *time.Time       `json:"dispatched_at,omitempty"`
+	DispatchReceiptID     string           `json:"dispatch_receipt_id,omitempty"`
+	DispatchDuration      time.Duration    `json:"dispatch_duration,omitempty"`
+	LastDispatchError     string           `json:"last_dispatch_error,omitempty"`
 }
 
 // AssignmentUpdate describes mutable assignment metadata that can be updated
@@ -85,6 +126,16 @@ func cloneAssignment(a *Assignment) *Assignment {
 	cloned.StartedAt = cloneTimePtr(a.StartedAt)
 	cloned.CompletedAt = cloneTimePtr(a.CompletedAt)
 	cloned.FailedAt = cloneTimePtr(a.FailedAt)
+	cloned.ClaimedAt = cloneTimePtr(a.ClaimedAt)
+	cloned.ClaimStartedAt = cloneTimePtr(a.ClaimStartedAt)
+	cloned.ReservationExpiresAt = cloneTimePtr(a.ReservationExpiresAt)
+	cloned.ReservationStartedAt = cloneTimePtr(a.ReservationStartedAt)
+	cloned.DispatchStartedAt = cloneTimePtr(a.DispatchStartedAt)
+	cloned.DispatchedAt = cloneTimePtr(a.DispatchedAt)
+	cloned.ReservationRequested = append([]string(nil), a.ReservationRequested...)
+	cloned.ReservationInputPaths = append([]string(nil), a.ReservationInputPaths...)
+	cloned.ReservedPaths = append([]string(nil), a.ReservedPaths...)
+	cloned.ReservationIDs = append([]int(nil), a.ReservationIDs...)
 	normalizeFailureReason(&cloned)
 	return &cloned
 }
@@ -96,8 +147,10 @@ type AssignmentStore struct {
 	UpdatedAt   time.Time              `json:"updated_at"`
 	Version     int                    `json:"version"` // Schema version for migrations
 
-	mutex sync.RWMutex
-	path  string // Path to persistence file
+	mutex    sync.RWMutex
+	path     string                 // Path to persistence file
+	baseline map[string]*Assignment // Last disk snapshot used to derive local deltas
+	replace  map[string]struct{}    // Beads intentionally replaced as whole records
 }
 
 // PersistenceError represents an error during persistence operations
@@ -143,14 +196,16 @@ func NewStore(sessionName string) *AssignmentStore {
 	sessionDir := filepath.Join(baseDir, sessionName)
 
 	// Ensure session directory exists (it might not if we are just creating assignments before session save)
-	_ = os.MkdirAll(sessionDir, 0755)
+	_ = os.MkdirAll(sessionDir, 0700)
 
 	return &AssignmentStore{
 		SessionName: sessionName,
 		Assignments: make(map[string]*Assignment),
 		UpdatedAt:   time.Now().UTC(),
-		Version:     1,
+		Version:     assignmentStoreVersion,
 		path:        filepath.Join(sessionDir, assignmentsDirName+fileExtension),
+		baseline:    make(map[string]*Assignment),
+		replace:     make(map[string]struct{}),
 	}
 }
 
@@ -164,10 +219,79 @@ func LoadStore(sessionName string) (*AssignmentStore, error) {
 	return store, nil
 }
 
+// LoadStoreStrict loads the durable assignment ledger without treating
+// corruption as an empty store. Mutating orchestration paths must use this so
+// a lost `sending` marker cannot turn an ambiguous delivery into a duplicate.
+func LoadStoreStrict(sessionName string) (*AssignmentStore, error) {
+	store := NewStore(sessionName)
+	if err := store.LoadStrict(); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// LoadStrict is the fail-closed counterpart to Load. A missing store is a
+// valid empty ledger only when no backup exists. Mutating callers never fall
+// back to a backup because it may predate a persisted sending barrier.
+func (s *AssignmentStore) LoadStrict() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	unlock, err := acquireStoreFileLock(s.path)
+	if err != nil {
+		return &PersistenceError{Operation: "lock for load", Path: s.path, Cause: err}
+	}
+	defer unlock()
+
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return &PersistenceError{Operation: "load", Path: s.path, Cause: err}
+		}
+		bakPath := s.path + ".bak"
+		if _, backupErr := os.Stat(bakPath); backupErr == nil {
+			return &PersistenceError{
+				Operation: "load",
+				Path:      s.path,
+				Cause:     fmt.Errorf("primary ledger is missing while backup %s exists", bakPath),
+			}
+		} else if !os.IsNotExist(backupErr) {
+			return &PersistenceError{Operation: "inspect backup", Path: bakPath, Cause: backupErr}
+		}
+		return nil
+	}
+
+	var loaded AssignmentStore
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return &PersistenceError{Operation: "parse primary ledger", Path: s.path, Cause: err}
+	}
+
+	s.SessionName = loaded.SessionName
+	s.Assignments = loaded.Assignments
+	s.UpdatedAt = loaded.UpdatedAt
+	s.Version = loaded.Version
+	if s.Version < assignmentStoreVersion {
+		s.Version = assignmentStoreVersion
+	}
+	if s.Assignments == nil {
+		s.Assignments = make(map[string]*Assignment)
+	}
+	for _, assignment := range s.Assignments {
+		normalizeFailureReason(assignment)
+	}
+	s.baseline = cloneAssignmentMap(s.Assignments)
+	s.replace = make(map[string]struct{})
+	return nil
+}
+
 // Load reads the assignment store from disk
 func (s *AssignmentStore) Load() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	unlock, lockErr := acquireStoreFileLock(s.path)
+	if lockErr != nil {
+		return &PersistenceError{Operation: "lock for load", Path: s.path, Cause: lockErr}
+	}
+	defer unlock()
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -207,6 +331,9 @@ func (s *AssignmentStore) Load() error {
 	s.Assignments = loaded.Assignments
 	s.UpdatedAt = loaded.UpdatedAt
 	s.Version = loaded.Version
+	if s.Version < assignmentStoreVersion {
+		s.Version = assignmentStoreVersion
+	}
 
 	if s.Assignments == nil {
 		s.Assignments = make(map[string]*Assignment)
@@ -214,6 +341,8 @@ func (s *AssignmentStore) Load() error {
 	for _, assignment := range s.Assignments {
 		normalizeFailureReason(assignment)
 	}
+	s.baseline = cloneAssignmentMap(s.Assignments)
+	s.replace = make(map[string]struct{})
 
 	return nil
 }
@@ -230,41 +359,266 @@ func (s *AssignmentStore) Save() error {
 func (s *AssignmentStore) saveLocked() error {
 	// Ensure directory exists
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return &PersistenceError{Operation: "save", Path: s.path, Cause: fmt.Errorf("create directory: %w", err)}
 	}
+	unlock, err := acquireStoreFileLock(s.path)
+	if err != nil {
+		return &PersistenceError{Operation: "lock for save", Path: s.path, Cause: err}
+	}
+	defer unlock()
 
-	s.UpdatedAt = time.Now().UTC()
+	latest, err := readAssignmentMapForMerge(s.path)
+	if err != nil {
+		return &PersistenceError{Operation: "reload before save", Path: s.path, Cause: err}
+	}
+	merged := mergeAssignmentDeltas(latest, s.baseline, s.Assignments, s.replace)
 
-	data, err := json.MarshalIndent(s, "", "  ")
+	updatedAt := time.Now().UTC()
+
+	snapshot := &AssignmentStore{
+		SessionName: s.SessionName,
+		Assignments: merged,
+		UpdatedAt:   updatedAt,
+		Version:     assignmentStoreVersion,
+	}
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return &PersistenceError{Operation: "save", Path: s.path, Cause: fmt.Errorf("marshal: %w", err)}
 	}
 
-	// Write to temporary file first
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	// A unique temp file avoids collisions between independent processes even
+	// before the advisory lock is acquired on unusual filesystems.
+	tmpFile, err := os.CreateTemp(dir, ".assignments-*.tmp")
+	if err != nil {
+		return &PersistenceError{Operation: "save", Path: dir, Cause: err}
+	}
+	tmpPath := tmpFile.Name()
+	if chmodErr := tmpFile.Chmod(0600); chmodErr != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return &PersistenceError{Operation: "save", Path: tmpPath, Cause: chmodErr}
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return &PersistenceError{Operation: "save", Path: tmpPath, Cause: err}
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return &PersistenceError{Operation: "sync", Path: tmpPath, Cause: err}
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return &PersistenceError{Operation: "save", Path: tmpPath, Cause: err}
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	// Create backup of current file (if exists)
+	// Publish the same new snapshot to the backup before the primary. If the
+	// process stops between these renames, the still-valid primary is older but
+	// cannot have crossed an external side-effect boundary that follows Save.
 	bakPath := s.path + ".bak"
-	if _, err := os.Stat(s.path); err == nil {
-		_ = os.Rename(s.path, bakPath)
+	backupTemp, err := os.CreateTemp(dir, ".assignments-backup-*.tmp")
+	if err != nil {
+		return &PersistenceError{Operation: "save backup", Path: dir, Cause: err}
+	}
+	backupTempPath := backupTemp.Name()
+	if chmodErr := backupTemp.Chmod(0600); chmodErr != nil {
+		_ = backupTemp.Close()
+		_ = os.Remove(backupTempPath)
+		return &PersistenceError{Operation: "save backup", Path: backupTempPath, Cause: chmodErr}
+	}
+	if _, writeErr := backupTemp.Write(data); writeErr != nil {
+		_ = backupTemp.Close()
+		_ = os.Remove(backupTempPath)
+		return &PersistenceError{Operation: "save backup", Path: backupTempPath, Cause: writeErr}
+	}
+	if syncErr := backupTemp.Sync(); syncErr != nil {
+		_ = backupTemp.Close()
+		_ = os.Remove(backupTempPath)
+		return &PersistenceError{Operation: "sync backup", Path: backupTempPath, Cause: syncErr}
+	}
+	if closeErr := backupTemp.Close(); closeErr != nil {
+		_ = os.Remove(backupTempPath)
+		return &PersistenceError{Operation: "save backup", Path: backupTempPath, Cause: closeErr}
+	}
+	defer func() { _ = os.Remove(backupTempPath) }()
+	if err := os.Rename(backupTempPath, bakPath); err != nil {
+		return &PersistenceError{Operation: "save backup", Path: bakPath, Cause: err}
+	}
+	if err := syncAssignmentDirectory(dir); err != nil {
+		return &PersistenceError{Operation: "sync backup directory", Path: dir, Cause: err}
 	}
 
 	// Rename temp to current
 	if err := os.Rename(tmpPath, s.path); err != nil {
 		return &PersistenceError{Operation: "save", Path: s.path, Cause: err}
 	}
+	if err := syncAssignmentDirectory(dir); err != nil {
+		return &PersistenceError{Operation: "sync directory", Path: dir, Cause: err}
+	}
+	s.Assignments = merged
+	s.baseline = cloneAssignmentMap(merged)
+	s.replace = make(map[string]struct{})
+	s.UpdatedAt = updatedAt
+	s.Version = assignmentStoreVersion
 
 	return nil
+}
+
+func cloneAssignmentMap(input map[string]*Assignment) map[string]*Assignment {
+	cloned := make(map[string]*Assignment, len(input))
+	for beadID, value := range input {
+		cloned[beadID] = cloneAssignment(value)
+	}
+	return cloned
+}
+
+func readAssignmentMapForMerge(path string) (map[string]*Assignment, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if _, backupErr := os.Stat(path + ".bak"); backupErr == nil {
+				return nil, fmt.Errorf("primary ledger is missing while backup %s exists", path+".bak")
+			} else if !os.IsNotExist(backupErr) {
+				return nil, backupErr
+			}
+			return make(map[string]*Assignment), nil
+		}
+		return nil, err
+	}
+	var loaded AssignmentStore
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return nil, err
+	}
+	if loaded.Assignments == nil {
+		loaded.Assignments = make(map[string]*Assignment)
+	}
+	return cloneAssignmentMap(loaded.Assignments), nil
+}
+
+func mergeAssignmentDeltas(latest, baseline, current map[string]*Assignment, replacements map[string]struct{}) map[string]*Assignment {
+	merged := cloneAssignmentMap(latest)
+	for beadID := range baseline {
+		if _, stillPresent := current[beadID]; !stillPresent {
+			delete(merged, beadID)
+		}
+	}
+	for beadID, value := range current {
+		if previous, existed := baseline[beadID]; !existed || !reflect.DeepEqual(previous, value) {
+			if _, replace := replacements[beadID]; replace {
+				merged[beadID] = cloneAssignment(value)
+				continue
+			}
+			merged[beadID] = mergeAssignmentDelta(latest[beadID], previous, value)
+		}
+	}
+	return merged
+}
+
+// mergeAssignmentDelta applies only fields changed from the caller's baseline
+// onto the latest durable record. This prevents a stale lifecycle writer from
+// erasing a newer dispatch barrier or receipt for the same bead.
+func mergeAssignmentDelta(latest, baseline, current *Assignment) *Assignment {
+	if current == nil {
+		return nil
+	}
+	if latest == nil {
+		return cloneAssignment(current)
+	}
+	if baseline == nil {
+		baseline = &Assignment{}
+	}
+
+	merged := cloneAssignment(latest)
+	baselineValue := reflect.ValueOf(baseline).Elem()
+	currentValue := reflect.ValueOf(current).Elem()
+	mergedValue := reflect.ValueOf(merged).Elem()
+	assignmentType := currentValue.Type()
+	localStatusChanged := current.Status != baseline.Status
+
+	for i := 0; i < currentValue.NumField(); i++ {
+		fieldName := assignmentType.Field(i).Name
+		if fieldName == "Status" {
+			continue
+		}
+		if localStatusChanged && isAssignmentLifecycleField(fieldName) {
+			continue
+		}
+		if !reflect.DeepEqual(baselineValue.Field(i).Interface(), currentValue.Field(i).Interface()) {
+			mergedValue.Field(i).Set(currentValue.Field(i))
+		}
+	}
+
+	if localStatusChanged && shouldApplyAssignmentStatusDelta(baseline.Status, latest.Status, current.Status) {
+		merged.Status = current.Status
+		merged.StartedAt = cloneTimePtr(current.StartedAt)
+		merged.CompletedAt = cloneTimePtr(current.CompletedAt)
+		merged.FailedAt = cloneTimePtr(current.FailedAt)
+		merged.FailReason = current.FailReason
+		merged.FailureReason = current.FailureReason
+	}
+	return cloneAssignment(merged)
+}
+
+func isAssignmentLifecycleField(name string) bool {
+	switch name {
+	case "Status", "StartedAt", "CompletedAt", "FailedAt", "FailReason", "FailureReason":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldApplyAssignmentStatusDelta(baseline, latest, current AssignmentStatus) bool {
+	if latest == baseline {
+		return true
+	}
+	if isTerminalAssignmentStatus(latest) {
+		return false
+	}
+	if isTerminalAssignmentStatus(current) {
+		return true
+	}
+	return assignmentStatusRank(current) > assignmentStatusRank(latest)
+}
+
+func isTerminalAssignmentStatus(status AssignmentStatus) bool {
+	switch status {
+	case StatusCompleted, StatusFailed, StatusReassigned:
+		return true
+	default:
+		return false
+	}
+}
+
+func assignmentStatusRank(status AssignmentStatus) int {
+	switch status {
+	case StatusClaiming:
+		return 1
+	case StatusClaimed:
+		return 2
+	case StatusAssigned:
+		return 3
+	case StatusWorking:
+		return 4
+	case StatusCompleted, StatusFailed, StatusReassigned:
+		return 5
+	default:
+		return 0
+	}
 }
 
 // Assign creates or updates an assignment for a bead
 func (s *AssignmentStore) Assign(beadID, beadTitle string, pane int, agentType, agentName, prompt string) (*Assignment, error) {
 	s.mutex.Lock()
+	if _, exists := s.Assignments[beadID]; exists {
+		if s.replace == nil {
+			s.replace = make(map[string]struct{})
+		}
+		s.replace[beadID] = struct{}{}
+	}
 
 	now := time.Now().UTC()
 	assignment := &Assignment{
@@ -375,7 +729,7 @@ func (s *AssignmentStore) ListActive() []*Assignment {
 
 	var result []*Assignment
 	for _, a := range s.Assignments {
-		if a.Status == StatusAssigned || a.Status == StatusWorking {
+		if a.Status == StatusClaiming || a.Status == StatusClaimed || a.Status == StatusAssigned || a.Status == StatusWorking {
 			result = append(result, cloneAssignment(a))
 		}
 	}
@@ -422,6 +776,7 @@ func (s *AssignmentStore) Update(beadID string, update AssignmentUpdate) error {
 // otherwise drop those completions on the floor with an "invalid transition"
 // warning, leaving the assignment forever stuck in "assigned" (#124).
 var ValidTransitions = map[AssignmentStatus][]AssignmentStatus{
+	StatusClaimed:    {StatusAssigned, StatusFailed},
 	StatusAssigned:   {StatusWorking, StatusCompleted, StatusFailed},
 	StatusWorking:    {StatusCompleted, StatusFailed, StatusReassigned},
 	StatusFailed:     {StatusAssigned}, // Retry
@@ -469,6 +824,12 @@ func (s *AssignmentStore) UpdateStatus(beadID string, newStatus AssignmentStatus
 	// Update status and timestamps
 	assignment.Status = newStatus
 	switch newStatus {
+	case StatusClaimed:
+		assignment.StartedAt = nil
+		assignment.CompletedAt = nil
+		assignment.FailedAt = nil
+		assignment.FailReason = ""
+		assignment.FailureReason = ""
 	case StatusAssigned:
 		assignment.StartedAt = nil
 		assignment.CompletedAt = nil
@@ -588,6 +949,10 @@ func (s *AssignmentStore) Reassign(beadID string, newPane int, newAgentType, new
 	}
 
 	s.Assignments[beadID] = newAssignment
+	if s.replace == nil {
+		s.replace = make(map[string]struct{})
+	}
+	s.replace[beadID] = struct{}{}
 
 	if err := s.saveLocked(); err != nil {
 		slog.Warn("failed to persist assignment store", "error", err)
@@ -629,6 +994,8 @@ func (s *AssignmentStore) Stats() AssignmentStats {
 	for _, a := range s.Assignments {
 		stats.Total++
 		switch a.Status {
+		case StatusClaimed:
+			stats.Claimed++
 		case StatusAssigned:
 			stats.Assigned++
 		case StatusWorking:
@@ -647,6 +1014,7 @@ func (s *AssignmentStore) Stats() AssignmentStats {
 // AssignmentStats contains summary statistics
 type AssignmentStats struct {
 	Total      int `json:"total"`
+	Claimed    int `json:"claimed"`
 	Assigned   int `json:"assigned"`
 	Working    int `json:"working"`
 	Completed  int `json:"completed"`

@@ -715,6 +715,16 @@ func HasLocalBeadsDB(dir string) bool {
 // If br reports a missing database and suggests `--no-db`, it retries once with `--no-db`
 // and caches that preference for the remainder of the process.
 func RunBd(dir string, args ...string) (string, error) {
+	return runBdContext(context.Background(), dir, true, args...)
+}
+
+// runBdContext executes br with the workspace serialization and retry policy
+// used by RunBd. allowNoDB must be false for compare-and-set mutations such as
+// claims because JSONL-only fallback cannot provide the SQLite transaction.
+func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...string) (string, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	// Normalize dir to ensure consistent cache keys.
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
@@ -730,7 +740,7 @@ func RunBd(dir string, args ...string) (string, error) {
 	defer mu.Unlock()
 
 	// Check cache for this specific directory
-	if getNoDBState(dir) && !containsString(args, "--no-db") {
+	if allowNoDB && getNoDBState(dir) && !containsString(args, "--no-db") {
 		args = append([]string{"--no-db"}, args...)
 	}
 	if !containsString(args, "--no-db") && !containsString(args, "--lock-timeout") {
@@ -739,7 +749,7 @@ func RunBd(dir string, args ...string) (string, error) {
 
 	const maxAttempts = 6 // Canonical default: config.RetryConfig.DB.MaxAttempts
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
+		ctx, cancel := context.WithTimeout(parent, DefaultTimeout)
 
 		cmd := exec.CommandContext(ctx, "br", args...)
 		cmd.WaitDelay = time.Second // Prevent hanging on open pipes
@@ -756,6 +766,9 @@ func RunBd(dir string, args ...string) (string, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
 		}
+		if parent.Err() != nil {
+			return "", parent.Err()
+		}
 
 		stdoutStr := stdout.String()
 		stderrStr := stderr.String()
@@ -764,7 +777,7 @@ func RunBd(dir string, args ...string) (string, error) {
 			diagnostics = stdoutStr
 		}
 		// If we haven't already forced no-db, check if we should
-		if !getNoDBState(dir) && !containsString(args, "--no-db") && isNoBeadsDBError(stderrStr, stdoutStr) {
+		if allowNoDB && !getNoDBState(dir) && !containsString(args, "--no-db") && isNoBeadsDBError(stderrStr, stdoutStr) {
 			setNoDBState(dir, true)
 			args = append([]string{"--no-db"}, stripFlagWithValue(args, "--lock-timeout")...)
 			attempt = 0
@@ -778,6 +791,73 @@ func RunBd(dir string, args ...string) (string, error) {
 	}
 
 	return "", fmt.Errorf("br %s: exceeded retry budget", strings.Join(args, " "))
+}
+
+var ErrBeadAlreadyClaimed = errors.New("bead is already claimed")
+
+// BeadClaimResult is the validated output of br's atomic claim operation.
+type BeadClaimResult struct {
+	ID        string
+	Title     string
+	Actor     string
+	Status    string
+	ClaimedAt time.Time
+}
+
+// ClaimBead performs the cross-process compare-and-set used by every NTM
+// assignment path. It deliberately disables RunBd's --no-db fallback.
+func ClaimBead(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	beadID = strings.TrimSpace(beadID)
+	actor = strings.TrimSpace(actor)
+	if beadID == "" {
+		return BeadClaimResult{}, errors.New("bead ID is required")
+	}
+	if actor == "" {
+		return BeadClaimResult{}, errors.New("claim actor is required")
+	}
+
+	output, err := runBdContext(ctx, dir, false, beadClaimArgs(beadID, actor)...)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already assigned to") {
+			return BeadClaimResult{}, fmt.Errorf("%w: %v", ErrBeadAlreadyClaimed, err)
+		}
+		return BeadClaimResult{}, err
+	}
+	result, err := parseBeadClaimOutput(output)
+	if err != nil {
+		return BeadClaimResult{}, err
+	}
+	if result.ID != beadID {
+		return BeadClaimResult{}, fmt.Errorf("atomic claim returned bead %q, want %q", result.ID, beadID)
+	}
+	result.Actor = actor
+	result.ClaimedAt = time.Now().UTC()
+	return result, nil
+}
+
+func beadClaimArgs(beadID, actor string) []string {
+	return []string{"update", beadID, "--claim", "--actor", actor, "--json"}
+}
+
+func parseBeadClaimOutput(output string) (BeadClaimResult, error) {
+	var rows []struct {
+		ID     string `json:"id"`
+		Title  string `json:"title"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &rows); err != nil {
+		return BeadClaimResult{}, fmt.Errorf("parse atomic claim output: %w", err)
+	}
+	if len(rows) != 1 {
+		return BeadClaimResult{}, fmt.Errorf("atomic claim returned %d rows, want 1", len(rows))
+	}
+	if strings.TrimSpace(rows[0].ID) == "" {
+		return BeadClaimResult{}, errors.New("atomic claim response is missing id")
+	}
+	if !strings.EqualFold(strings.TrimSpace(rows[0].Status), "in_progress") {
+		return BeadClaimResult{}, fmt.Errorf("atomic claim status is %q, want in_progress", rows[0].Status)
+	}
+	return BeadClaimResult{ID: rows[0].ID, Title: rows[0].Title, Status: "in_progress"}, nil
 }
 
 type brListEnvelope[T any] struct {

@@ -92,6 +92,8 @@ type AllocationAgent struct {
 	ID                string         `json:"id"`
 	Session           string         `json:"session"`
 	PaneIndex         int            `json:"pane_index,omitempty"`
+	PaneTarget        string         `json:"pane_target,omitempty"`
+	PaneID            string         `json:"pane_id,omitempty"`
 	AgentType         tmux.AgentType `json:"agent_type"`
 	Idle              bool           `json:"idle"`
 	ContextUsage      float64        `json:"context_usage,omitempty"`
@@ -157,6 +159,8 @@ type AllocationRecommendation struct {
 	Session         string                    `json:"session"`
 	AgentID         string                    `json:"agent_id"`
 	PaneIndex       int                       `json:"pane_index,omitempty"`
+	PaneTarget      string                    `json:"pane_target,omitempty"`
+	PaneID          string                    `json:"pane_id,omitempty"`
 	AgentType       tmux.AgentType            `json:"agent_type"`
 	Score           float64                   `json:"score"`
 	ScoreComponents AllocationScoreComponents `json:"score_components"`
@@ -174,6 +178,8 @@ type AllocationCandidate struct {
 	Session         string                    `json:"session"`
 	AgentID         string                    `json:"agent_id"`
 	PaneIndex       int                       `json:"pane_index,omitempty"`
+	PaneTarget      string                    `json:"pane_target,omitempty"`
+	PaneID          string                    `json:"pane_id,omitempty"`
 	AgentType       tmux.AgentType            `json:"agent_type"`
 	Score           float64                   `json:"score"`
 	ScoreComponents AllocationScoreComponents `json:"score_components"`
@@ -341,6 +347,8 @@ func (p *AllocationPlanner) Plan(in AllocationInput) AllocationPlan {
 			Session:         candidate.Session,
 			AgentID:         candidate.AgentID,
 			PaneIndex:       candidate.PaneIndex,
+			PaneTarget:      candidate.PaneTarget,
+			PaneID:          candidate.PaneID,
 			AgentType:       candidate.AgentType,
 			Score:           candidate.Score,
 			ScoreComponents: candidate.ScoreComponents,
@@ -379,14 +387,16 @@ func (p *AllocationPlanner) scoreCandidate(
 	session := sessions[worker.Session]
 
 	candidate := AllocationCandidate{
-		BeadID:    bead.ID,
-		BeadTitle: bead.Title,
-		Priority:  bead.Priority,
-		Session:   worker.Session,
-		AgentID:   worker.ID,
-		PaneIndex: worker.PaneIndex,
-		AgentType: worker.AgentType,
-		Decision:  AllocationDecisionAlternative,
+		BeadID:     bead.ID,
+		BeadTitle:  bead.Title,
+		Priority:   bead.Priority,
+		Session:    worker.Session,
+		AgentID:    worker.ID,
+		PaneIndex:  worker.PaneIndex,
+		PaneTarget: worker.PaneTarget,
+		PaneID:     worker.PaneID,
+		AgentType:  worker.AgentType,
+		Decision:   AllocationDecisionAlternative,
 	}
 
 	if !worker.Idle {

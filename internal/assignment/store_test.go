@@ -20,8 +20,8 @@ func TestNewStore(t *testing.T) {
 	if len(store.Assignments) != 0 {
 		t.Errorf("expected empty assignments, got %d", len(store.Assignments))
 	}
-	if store.Version != 1 {
-		t.Errorf("expected version 1, got %d", store.Version)
+	if store.Version != assignmentStoreVersion {
+		t.Errorf("expected version %d, got %d", assignmentStoreVersion, store.Version)
 	}
 }
 
@@ -610,6 +610,204 @@ func TestPersistenceBackupRecovery(t *testing.T) {
 	}
 	if a.BeadID != "bd-backup" {
 		t.Errorf("expected bead ID 'bd-backup', got '%s'", a.BeadID)
+	}
+	if store.Version != assignmentStoreVersion {
+		t.Fatalf("recovered store version=%d, want migrated version %d", store.Version, assignmentStoreVersion)
+	}
+}
+
+func TestLoadStoreStrictRejectsCorruptLedgerWithoutBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	store := NewStore("strict-corrupt")
+	if err := os.WriteFile(store.path, []byte("{not-json"), 0644); err != nil {
+		t.Fatalf("write corrupt ledger: %v", err)
+	}
+
+	if _, err := LoadStoreStrict("strict-corrupt"); err == nil {
+		t.Fatal("expected strict load to reject corrupt primary without backup")
+	}
+}
+
+func TestLoadStoreStrictNeverRollsBackToBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	store := NewStore("strict-stale-backup")
+
+	stale := &AssignmentStore{
+		SessionName: "strict-stale-backup",
+		Assignments: map[string]*Assignment{
+			"bd-ambiguous": {
+				BeadID:         "bd-ambiguous",
+				Status:         StatusClaimed,
+				DispatchState:  DispatchPending,
+				IdempotencyKey: "attempt-1",
+			},
+		},
+		Version: assignmentStoreVersion,
+	}
+	backup, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal stale backup: %v", err)
+	}
+	if err := os.WriteFile(store.path+".bak", backup, 0644); err != nil {
+		t.Fatalf("write stale backup: %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{not-json"), 0644); err != nil {
+		t.Fatalf("write corrupt primary: %v", err)
+	}
+
+	if _, err := LoadStoreStrict("strict-stale-backup"); err == nil {
+		t.Fatal("expected strict load to reject corrupt primary instead of restoring retryable backup")
+	}
+}
+
+func TestLoadStoreStrictRejectsOrphanedBackup(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	store := NewStore("strict-orphaned-backup")
+	if err := os.WriteFile(store.path+".bak", []byte(`{"session_name":"strict-orphaned-backup","assignments":{}}`), 0644); err != nil {
+		t.Fatalf("write orphaned backup: %v", err)
+	}
+
+	if _, err := LoadStoreStrict("strict-orphaned-backup"); err == nil {
+		t.Fatal("expected strict load to reject a backup with no primary ledger")
+	}
+}
+
+func TestStaleLifecycleWriterPreservesAtomicDispatchBarrierAndReceipt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "same-bead-field-merge"
+		beadID  = "ntm-same-bead"
+		key     = "same-bead-attempt"
+	)
+
+	seed := NewStore(session)
+	req := AtomicRequest{
+		BeadID:         beadID,
+		BeadTitle:      "Same bead merge",
+		Target:         "%17",
+		Pane:           2,
+		AgentType:      "codex",
+		AgentName:      "CodexOne",
+		Actor:          "CodexOne",
+		Prompt:         "continue",
+		IdempotencyKey: key,
+	}
+	claimedAt := time.Now().UTC().Add(-time.Minute)
+	if _, err := seed.RecordAtomicIntent(req, StableClaimActor(req.Actor, key), claimedAt); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := seed.RecordAtomicClaim(req, ClaimReceipt{
+		BeadID: beadID, Actor: StableClaimActor(req.Actor, key), Status: "in_progress", ClaimedAt: claimedAt,
+	}); err != nil {
+		t.Fatalf("RecordAtomicClaim: %v", err)
+	}
+	seed.Assignments[beadID].Status = StatusAssigned
+	if err := seed.Save(); err != nil {
+		t.Fatalf("persist assigned seed: %v", err)
+	}
+
+	staleLifecycle, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load stale lifecycle writer: %v", err)
+	}
+	dispatchWriter, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load dispatch writer: %v", err)
+	}
+	startedAt := time.Now().UTC()
+	if err := dispatchWriter.RecordAtomicDispatchStarted(beadID, key, startedAt); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+	if err := staleLifecycle.MarkCompleted(beadID); err != nil {
+		t.Fatalf("stale MarkCompleted: %v", err)
+	}
+
+	afterCompletion, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload after stale completion: %v", err)
+	}
+	barrier := afterCompletion.Get(beadID)
+	if barrier == nil || barrier.Status != StatusCompleted || barrier.DispatchState != DispatchSending ||
+		barrier.DispatchAttempts != 1 || barrier.DispatchStartedAt == nil || !barrier.DispatchStartedAt.Equal(startedAt) {
+		t.Fatalf("stale lifecycle merge erased sending barrier: %+v", barrier)
+	}
+
+	dispatchedAt := startedAt.Add(time.Second)
+	if err := dispatchWriter.RecordAtomicDispatchSent(beadID, key, req.Prompt, DispatchReceipt{
+		DeliveryID: "delivery-17", Duration: 25 * time.Millisecond,
+	}, dispatchedAt); err != nil {
+		t.Fatalf("RecordAtomicDispatchSent: %v", err)
+	}
+	finalStore, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload final store: %v", err)
+	}
+	final := finalStore.Get(beadID)
+	if final == nil || final.Status != StatusCompleted || final.DispatchState != DispatchSent ||
+		final.DispatchAttempts != 1 || final.DispatchReceiptID != "delivery-17" ||
+		final.DispatchedAt == nil || !final.DispatchedAt.Equal(dispatchedAt) {
+		t.Fatalf("dispatch receipt/lifecycle merge = %+v", final)
+	}
+}
+
+func TestSaveMergeRejectsCorruptPrimaryInsteadOfUsingBackup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("strict-save-merge")
+	if _, err := store.Assign("ntm-corrupt", "Corrupt", 1, "codex", "CodexOne", "prompt"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt primary: %v", err)
+	}
+	if err := store.Save(); err == nil {
+		t.Fatal("Save succeeded by rolling back to a stale backup")
+	}
+}
+
+func TestReassignExplicitlyReplacesAtomicRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("reassign-atomic-record")
+	req := AtomicRequest{
+		BeadID: "ntm-reassign", BeadTitle: "Reassign", Target: "%31", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne",
+		Prompt: "work", IdempotencyKey: "old-atomic-key",
+	}
+	now := time.Now().UTC()
+	if _, err := store.RecordAtomicIntent(req, StableClaimActor(req.Actor, req.IdempotencyKey), now); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := store.RecordAtomicClaim(req, ClaimReceipt{
+		BeadID: req.BeadID, Actor: StableClaimActor(req.Actor, req.IdempotencyKey), Status: "in_progress", ClaimedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordAtomicClaim: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(req.BeadID, req.IdempotencyKey, now); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+	if err := store.RecordAtomicDispatchSent(req.BeadID, req.IdempotencyKey, req.Prompt, DispatchReceipt{DeliveryID: "old-receipt"}, now); err != nil {
+		t.Fatalf("RecordAtomicDispatchSent: %v", err)
+	}
+	if err := store.MarkWorking(req.BeadID); err != nil {
+		t.Fatalf("MarkWorking: %v", err)
+	}
+	if _, err := store.Reassign(req.BeadID, 4, "claude", "ClaudeFour"); err != nil {
+		t.Fatalf("Reassign: %v", err)
+	}
+
+	reloaded, err := LoadStoreStrict("reassign-atomic-record")
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	got := reloaded.Get(req.BeadID)
+	if got == nil || got.Pane != 4 || got.AgentType != "claude" || got.AgentName != "ClaudeFour" || got.Status != StatusAssigned {
+		t.Fatalf("reassigned record = %+v", got)
+	}
+	if got.IdempotencyKey != "" || got.DispatchState != "" || got.DispatchTarget != "" ||
+		got.DispatchReceiptID != "" || got.DispatchAttempts != 0 || got.PromptSent != "" {
+		t.Fatalf("reassign retained stale atomic metadata: %+v", got)
 	}
 }
 

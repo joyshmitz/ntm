@@ -1,6 +1,9 @@
 package bv
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestParseBeadStatusOutput_Object(t *testing.T) {
 	t.Parallel()
@@ -41,5 +44,46 @@ func TestParseBeadStatusOutput_InvalidJSON(t *testing.T) {
 	_, err := parseBeadStatusOutput(`{`)
 	if err == nil {
 		t.Fatal("expected parse error")
+	}
+}
+
+func TestParseBeadClaimOutput(t *testing.T) {
+	t.Parallel()
+
+	claim, err := parseBeadClaimOutput(`[{
+		"id":"ntm-123",
+		"title":"Atomic assignment",
+		"status":"in_progress",
+		"priority":1,
+		"updated_at":"2026-07-11T12:00:00Z"
+	}]`)
+	if err != nil {
+		t.Fatalf("parseBeadClaimOutput: %v", err)
+	}
+	if claim.ID != "ntm-123" || claim.Status != "in_progress" {
+		t.Fatalf("claim=%+v", claim)
+	}
+	if claim.Title != "Atomic assignment" {
+		t.Fatalf("claim title=%q", claim.Title)
+	}
+}
+
+func TestParseBeadClaimOutputRejectsNonClaimedState(t *testing.T) {
+	t.Parallel()
+
+	if _, err := parseBeadClaimOutput(`[{"id":"ntm-123","status":"open"}]`); err == nil {
+		t.Fatal("expected non-in_progress claim output to fail")
+	}
+	if _, err := parseBeadClaimOutput(`[]`); err == nil {
+		t.Fatal("expected empty claim output to fail")
+	}
+}
+
+func TestBeadClaimArgsUseAtomicPrimitive(t *testing.T) {
+	t.Parallel()
+
+	want := []string{"update", "ntm-123", "--claim", "--actor", "BlueLake/ntm-key", "--json"}
+	if got := beadClaimArgs("ntm-123", "BlueLake/ntm-key"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("beadClaimArgs=%q, want %q", got, want)
 	}
 }

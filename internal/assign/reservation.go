@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
@@ -25,6 +26,7 @@ type FileReservationResult struct {
 	GrantedPaths   []string                        `json:"granted_paths"`
 	Conflicts      []agentmail.ReservationConflict `json:"conflicts,omitempty"`
 	ReservationIDs []int                           `json:"reservation_ids"`
+	ExpiresAt      *time.Time                      `json:"expires_at,omitempty"`
 	Success        bool                            `json:"success"`
 	Error          string                          `json:"error,omitempty"`
 }
@@ -211,8 +213,7 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 		if reservationResult != nil {
 			result.Conflicts = reservationResult.Conflicts
 			for _, granted := range reservationResult.Granted {
-				result.GrantedPaths = append(result.GrantedPaths, granted.PathPattern)
-				result.ReservationIDs = append(result.ReservationIDs, granted.ID)
+				recordGrantedReservation(result, granted)
 			}
 			result.Error = fmt.Sprintf("conflicts detected: %v", err)
 			return result, nil
@@ -223,12 +224,20 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 
 	// Process successful reservations
 	for _, granted := range reservationResult.Granted {
-		result.GrantedPaths = append(result.GrantedPaths, granted.PathPattern)
-		result.ReservationIDs = append(result.ReservationIDs, granted.ID)
+		recordGrantedReservation(result, granted)
 	}
 	result.Success = true
 
 	return result, nil
+}
+
+func recordGrantedReservation(result *FileReservationResult, granted agentmail.FileReservation) {
+	result.GrantedPaths = append(result.GrantedPaths, granted.PathPattern)
+	result.ReservationIDs = append(result.ReservationIDs, granted.ID)
+	expiresAt := granted.ExpiresTS.Time
+	if !expiresAt.IsZero() && (result.ExpiresAt == nil || expiresAt.Before(*result.ExpiresAt)) {
+		result.ExpiresAt = &expiresAt
+	}
 }
 
 // ReleaseForBead releases all reservations held by an agent for a bead.

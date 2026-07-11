@@ -5,9 +5,29 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
+
+func TestRecordGrantedReservationTracksEarliestLeaseExpiry(t *testing.T) {
+	t.Parallel()
+	result := &FileReservationResult{}
+	later := time.Date(2030, 1, 2, 0, 0, 0, 0, time.UTC)
+	earlier := later.Add(-time.Hour)
+	recordGrantedReservation(result, agentmail.FileReservation{
+		ID: 1, PathPattern: "internal/**", ExpiresTS: agentmail.FlexTime{Time: later},
+	})
+	recordGrantedReservation(result, agentmail.FileReservation{
+		ID: 2, PathPattern: "cmd/**", ExpiresTS: agentmail.FlexTime{Time: earlier},
+	})
+	if result.ExpiresAt == nil || !result.ExpiresAt.Equal(earlier) {
+		t.Fatalf("ExpiresAt=%v, want %v", result.ExpiresAt, earlier)
+	}
+	if len(result.ReservationIDs) != 2 || len(result.GrantedPaths) != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+}
 
 type assignToolHandler func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError)
 
