@@ -1,14 +1,248 @@
 package robot
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestGetCapabilitiesWithOptionsFiltersAndCompacts(t *testing.T) {
+	output, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Command: "--robot-send", Compact: true})
+	if err != nil {
+		t.Fatalf("GetCapabilitiesWithOptions() error: %v", err)
+	}
+	if !output.Success || len(output.Commands) != 1 {
+		t.Fatalf("filtered output = success:%v commands:%d", output.Success, len(output.Commands))
+	}
+	command := output.Commands[0]
+	if command.Name != "send" || command.Flag != "--robot-send" {
+		t.Fatalf("command = %+v, want send", command)
+	}
+	if len(command.Parameters) != 0 || len(command.Examples) != 0 || output.Surfaces != nil || output.Attention != nil {
+		t.Fatalf("compact output retained verbose metadata: %+v", output)
+	}
+	if output.Filter == nil || !output.Filter.Compact || output.Filter.Command != "send" {
+		t.Fatalf("filter metadata = %+v", output.Filter)
+	}
+}
+
+func TestGetCapabilitiesWithOptionsCategoryAndSearch(t *testing.T) {
+	output, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Category: "control", Query: "interrupt"})
+	if err != nil {
+		t.Fatalf("GetCapabilitiesWithOptions() error: %v", err)
+	}
+	if !output.Success || len(output.Commands) == 0 {
+		t.Fatalf("filtered output = success:%v commands:%d", output.Success, len(output.Commands))
+	}
+	if len(output.Categories) != 1 || output.Categories[0] != "control" {
+		t.Fatalf("categories = %v, want [control]", output.Categories)
+	}
+	for _, command := range output.Commands {
+		if command.Category != "control" {
+			t.Fatalf("command %q category = %q", command.Name, command.Category)
+		}
+		raw, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(strings.ToLower(string(raw)), "interrupt") {
+			t.Fatalf("command %q does not match query", command.Name)
+		}
+	}
+}
+
+func TestGetCapabilitiesWithOptionsUnknownExactFilter(t *testing.T) {
+	for _, opts := range []CapabilitiesOptions{{Command: "does-not-exist"}, {Category: "does-not-exist"}} {
+		output, err := GetCapabilitiesWithOptions(opts)
+		if err != nil {
+			t.Fatalf("GetCapabilitiesWithOptions(%+v) error: %v", opts, err)
+		}
+		if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Commands == nil || output.Categories == nil {
+			t.Fatalf("GetCapabilitiesWithOptions(%+v) = %+v", opts, output)
+		}
+	}
+}
+
+func TestCapabilitiesSerializedSizeBudgets(t *testing.T) {
+	full, err := GetCapabilities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Compact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, budget := range map[string]struct {
+		value any
+		max   int
+	}{
+		"full":    {value: full, max: 400_000},
+		"compact": {value: compact, max: 50_000},
+	} {
+		raw, err := json.Marshal(budget.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s capabilities payload: %d bytes (budget %d)", name, len(raw), budget.max)
+		if len(raw) > budget.max {
+			t.Errorf("%s capabilities = %d bytes, budget %d", name, len(raw), budget.max)
+		}
+	}
+
+	const oneCommandBudget = 4_000
+	maxName := ""
+	maxSize := 0
+	for _, command := range full.Commands {
+		one, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Command: command.Name, Compact: true})
+		if err != nil {
+			t.Fatalf("GetCapabilitiesWithOptions(%q): %v", command.Name, err)
+		}
+		if !one.Success || len(one.Commands) != 1 || one.Commands[0].Name != command.Name {
+			t.Fatalf("one-command projection for %q = success:%v commands:%+v", command.Name, one.Success, one.Commands)
+		}
+		raw, err := json.Marshal(one)
+		if err != nil {
+			t.Fatalf("marshal one-command projection %q: %v", command.Name, err)
+		}
+		if len(raw) > maxSize {
+			maxName, maxSize = command.Name, len(raw)
+		}
+		if len(raw) > oneCommandBudget {
+			t.Errorf("%s one-command capabilities = %d bytes, budget %d", command.Name, len(raw), oneCommandBudget)
+		}
+	}
+	t.Logf("largest one-command compact payload: %s at %d bytes (budget %d)", maxName, maxSize, oneCommandBudget)
+}
+
+func TestPrintCapabilitiesCompactStdoutBudget(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	originalVerbosity := GetOutputVerbosity()
+	SetOutputFormat(FormatJSON)
+	SetOutputVerbosity(VerbosityDefault)
+	t.Cleanup(func() {
+		SetOutputFormat(originalFormat)
+		SetOutputVerbosity(originalVerbosity)
+	})
+
+	stdout, err := captureStdout(t, func() error {
+		return PrintCapabilitiesWithOptions(CapabilitiesOptions{Compact: true})
+	})
+	if err != nil {
+		t.Fatalf("PrintCapabilitiesWithOptions: %v", err)
+	}
+	if !json.Valid([]byte(stdout)) {
+		t.Fatalf("compact capabilities stdout is not valid JSON: %q", stdout)
+	}
+	if size := len([]byte(stdout)); size >= 50_000 {
+		t.Fatalf("compact capabilities stdout = %d bytes, require < 50000", size)
+	}
+}
+
+func TestCapabilitiesProjectionsPreserveRegistryContracts(t *testing.T) {
+	registry := GetRobotRegistry()
+	full, err := GetCapabilities()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := GetCapabilitiesWithOptions(CapabilitiesOptions{Compact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(full.Commands) != len(registry.Surfaces) || len(compact.Commands) != len(registry.Surfaces) {
+		t.Fatalf("projection sizes = full:%d compact:%d registry:%d", len(full.Commands), len(compact.Commands), len(registry.Surfaces))
+	}
+	if !reflect.DeepEqual(full.Surfaces, registry.Surfaces) {
+		t.Fatal("full capabilities surfaces drifted from the robot registry")
+	}
+
+	for i, surface := range registry.Surfaces {
+		fullCommand := full.Commands[i]
+		compactCommand := compact.Commands[i]
+		if fullCommand.Name != surface.Name || fullCommand.Flag != surface.Flag || fullCommand.Category != surface.Category ||
+			fullCommand.Summary != surface.Summary || fullCommand.Description != surface.Description || fullCommand.Note != surface.Note ||
+			!reflect.DeepEqual(fullCommand.OutputFormats, surface.OutputFormats) || fullCommand.DefaultOutputFormat != surface.DefaultOutputFormat ||
+			fullCommand.SchemaID != surface.SchemaID || fullCommand.SchemaType != surface.SchemaType ||
+			fullCommand.SchemaSource != surface.SchemaSource || fullCommand.SchemaUnavailableReason != surface.SchemaUnavailableReason ||
+			!reflect.DeepEqual(fullCommand.Sections, surface.Sections) || !reflect.DeepEqual(fullCommand.Parameters, surface.Parameters) ||
+			!reflect.DeepEqual(fullCommand.Examples, surface.Examples) || !reflect.DeepEqual(fullCommand.Transports, surface.Transports) {
+			t.Errorf("full capability command %q drifted from registry surface\ncommand: %+v\nsurface: %+v", surface.Name, fullCommand, surface)
+		}
+
+		if compactCommand.Name != surface.Name || compactCommand.Flag != surface.Flag || compactCommand.Category != surface.Category ||
+			!reflect.DeepEqual(compactCommand.OutputFormats, surface.OutputFormats) || compactCommand.DefaultOutputFormat != surface.DefaultOutputFormat ||
+			compactCommand.SchemaID != surface.SchemaID || compactCommand.SchemaType != surface.SchemaType ||
+			compactCommand.SchemaSource != surface.SchemaSource || compactCommand.SchemaUnavailableReason != surface.SchemaUnavailableReason {
+			t.Errorf("compact capability command %q lost canonical contract fields\ncommand: %+v\nsurface: %+v", surface.Name, compactCommand, surface)
+		}
+		if compactCommand.Summary == "" {
+			t.Errorf("compact capability command %q has no summary", surface.Name)
+		}
+		if compactCommand.Description != "" || compactCommand.Note != "" || compactCommand.Sections != nil ||
+			compactCommand.Parameters != nil || compactCommand.Examples != nil || compactCommand.Transports != nil {
+			t.Errorf("compact capability command %q retained verbose metadata: %+v", surface.Name, compactCommand)
+		}
+	}
+}
+
+func TestBuildCommandRegistry_CanonicalPaneContracts(t *testing.T) {
+	commands := make(map[string]RobotCommandInfo)
+	for _, command := range buildCommandRegistry() {
+		commands[command.Name] = command
+	}
+
+	for _, name := range []string{"tail", "is-working", "agent-health", "activity", "send", "ack", "interrupt", "smart-restart", "wait"} {
+		command, ok := commands[name]
+		if !ok {
+			t.Fatalf("missing pane-selector command %q", name)
+		}
+		found := false
+		for _, parameter := range command.Parameters {
+			if parameter.Flag != "--panes" {
+				continue
+			}
+			found = true
+			for _, grammar := range []string{"N", "W.P", "%N"} {
+				if !strings.Contains(parameter.Description, grammar) {
+					t.Errorf("command %q --panes description missing %q: %q", name, grammar, parameter.Description)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("command %q has no --panes parameter", name)
+		}
+	}
+
+	bulk := commands["bulk-assign"]
+	flags := make(map[string]bool, len(bulk.Parameters))
+	for _, parameter := range bulk.Parameters {
+		flags[parameter.Flag] = true
+	}
+	for _, canonical := range []string{"--skip", "--template"} {
+		if !flags[canonical] {
+			t.Errorf("bulk-assign missing canonical parameter %q", canonical)
+		}
+	}
+	for _, deprecated := range []string{"--skip-panes", "--prompt-template"} {
+		if flags[deprecated] {
+			t.Errorf("bulk-assign advertises deprecated parameter %q", deprecated)
+		}
+	}
+
+	history := commands["history"]
+	for _, parameter := range history.Parameters {
+		if parameter.Flag == "--pane" && (!strings.Contains(parameter.Description, "W.P") || !strings.Contains(parameter.Description, "%N")) {
+			t.Errorf("history --pane description does not advertise canonical selector grammar: %q", parameter.Description)
+		}
+	}
+}
 
 // =============================================================================
 // categoryIndex tests

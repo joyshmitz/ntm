@@ -486,6 +486,13 @@ var (
 	overlayCurrentSession   = tmux.GetCurrentSession
 	overlayOSExecutable     = os.Executable
 	overlayLaunchProbeDelay = 150 * time.Millisecond
+	overlayWaitCommand      = func(cmd *exec.Cmd) <-chan error {
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- cmd.Wait()
+		}()
+		return waitCh
+	}
 )
 
 // OverlayOptions configures the --robot-overlay command.
@@ -618,10 +625,7 @@ func PrintOverlay(opts OverlayOptions) error {
 			))
 		}
 
-		waitCh := make(chan error, 1)
-		go func() {
-			waitCh <- cmd.Wait()
-		}()
+		waitCh := overlayWaitCommand(cmd)
 
 		select {
 		case err := <-waitCh:

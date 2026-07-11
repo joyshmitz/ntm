@@ -111,7 +111,9 @@ func TestApplyRedactionFlagOverrides_NilConfig(t *testing.T) {
 	defer cleanup()
 
 	// Should not panic with nil config.
-	applyRedactionFlagOverrides(nil)
+	if err := applyRedactionFlagOverrides(nil); err != nil {
+		t.Fatalf("applyRedactionFlagOverrides(nil) error = %v", err)
+	}
 }
 
 func TestApplyRedactionFlagOverrides_ConfigDefaultAppliedWithNoFlags(t *testing.T) {
@@ -124,7 +126,9 @@ func TestApplyRedactionFlagOverrides_ConfigDefaultAppliedWithNoFlags(t *testing.
 
 	cfg := config.Default()
 	original := cfg.Redaction.Mode
-	applyRedactionFlagOverrides(cfg)
+	if err := applyRedactionFlagOverrides(cfg); err != nil {
+		t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+	}
 
 	if cfg.Redaction.Mode != original {
 		t.Errorf("config mode should be unchanged when no flags; got %q, want %q", cfg.Redaction.Mode, original)
@@ -155,7 +159,9 @@ func TestApplyRedactionFlagOverrides_RedactFlagOverridesConfig(t *testing.T) {
 
 			cfg := config.Default()
 			cfg.Redaction.Mode = tt.configMode
-			applyRedactionFlagOverrides(cfg)
+			if err := applyRedactionFlagOverrides(cfg); err != nil {
+				t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+			}
 
 			if cfg.Redaction.Mode != tt.want {
 				t.Errorf("got %q, want %q", cfg.Redaction.Mode, tt.want)
@@ -174,7 +180,9 @@ func TestApplyRedactionFlagOverrides_AllowSecretOverridesBlock(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Redaction.Mode = "block"
-	applyRedactionFlagOverrides(cfg)
+	if err := applyRedactionFlagOverrides(cfg); err != nil {
+		t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+	}
 
 	// --allow-secret should downgrade block to warn.
 	if cfg.Redaction.Mode != "warn" {
@@ -194,7 +202,9 @@ func TestApplyRedactionFlagOverrides_AllowSecretDoesNotAffectOtherModes(t *testi
 
 			cfg := config.Default()
 			cfg.Redaction.Mode = mode
-			applyRedactionFlagOverrides(cfg)
+			if err := applyRedactionFlagOverrides(cfg); err != nil {
+				t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+			}
 
 			if cfg.Redaction.Mode != mode {
 				t.Errorf("--allow-secret should not affect %q mode; got %q", mode, cfg.Redaction.Mode)
@@ -214,7 +224,9 @@ func TestApplyRedactionFlagOverrides_RedactFlagThenAllowSecret(t *testing.T) {
 	allowSecret = true
 
 	cfg := config.Default()
-	applyRedactionFlagOverrides(cfg)
+	if err := applyRedactionFlagOverrides(cfg); err != nil {
+		t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+	}
 
 	if cfg.Redaction.Mode != "warn" {
 		t.Errorf("--allow-secret should override --redact=block; got %q", cfg.Redaction.Mode)
@@ -230,7 +242,9 @@ func TestApplyRedactionFlagOverrides_InvalidRedactModeIgnored(t *testing.T) {
 
 	cfg := config.Default()
 	original := cfg.Redaction.Mode
-	applyRedactionFlagOverrides(cfg)
+	if err := applyRedactionFlagOverrides(cfg); err == nil {
+		t.Fatal("applyRedactionFlagOverrides() error = nil, want invalid mode error")
+	}
 
 	// Invalid value should be ignored, config unchanged.
 	if cfg.Redaction.Mode != original {
@@ -266,7 +280,9 @@ func TestApplyRedactionFlagOverrides_FullPrecedenceChain(t *testing.T) {
 
 			cfg := config.Default()
 			cfg.Redaction.Mode = tt.configMode
-			applyRedactionFlagOverrides(cfg)
+			if err := applyRedactionFlagOverrides(cfg); err != nil {
+				t.Fatalf("applyRedactionFlagOverrides() error = %v", err)
+			}
 
 			if cfg.Redaction.Mode != tt.want {
 				t.Errorf("got %q, want %q", cfg.Redaction.Mode, tt.want)

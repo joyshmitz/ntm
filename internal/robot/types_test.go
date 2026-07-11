@@ -110,6 +110,35 @@ func TestNewErrorResponse(t *testing.T) {
 	}
 }
 
+func TestEncodeTerminalRobotOutputFailureForcesJSON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	output := &SendOutput{
+		RobotResponse: NewErrorResponse(errors.New("no target panes"), ErrCodePaneNotFound, "check filters"),
+		Targets:       []string{},
+		Successful:    []string{},
+		Failed:        []SendError{},
+		Warnings:      []string{},
+	}
+	stdout, err := captureStdout(t, func() error {
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "send failed")
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("terminal error = %T %v, want written exit-1 ProcessExitError", err, err)
+	}
+
+	var response SendOutput
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("terminal failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodePaneNotFound || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("terminal response = %+v, want PANE_NOT_FOUND JSON failure", response.RobotResponse)
+	}
+}
+
 func TestRobotResponseJSON(t *testing.T) {
 	t.Run("success response serialization", func(t *testing.T) {
 		resp := NewRobotResponse(true)
@@ -316,6 +345,51 @@ func TestRobotError(t *testing.T) {
 	if returnedErr != testErr {
 		t.Errorf("RobotError should return the original error, got %v", returnedErr)
 	}
+}
+
+func TestPrintRobotErrorsReturnTypedProcessResults(t *testing.T) {
+	t.Run("error", func(t *testing.T) {
+		stdout, err := captureStdout(t, func() error {
+			return PrintRobotError(errors.New("bad input"), ErrCodeInvalidFlag, "fix the input")
+		})
+		var exitErr *ProcessExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("PrintRobotError error = %T, want *ProcessExitError", err)
+		}
+		if exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+			t.Fatalf("PrintRobotError result = exit %d, json_written=%v", exitErr.ExitCode(), exitErr.JSONWritten())
+		}
+		var payload RobotResponse
+		if decodeErr := json.Unmarshal([]byte(stdout), &payload); decodeErr != nil {
+			t.Fatalf("decode error payload: %v\n%s", decodeErr, stdout)
+		}
+		if payload.Success || payload.ErrorCode != ErrCodeInvalidFlag {
+			t.Fatalf("unexpected error payload: %+v", payload)
+		}
+	})
+
+	t.Run("unavailable", func(t *testing.T) {
+		stdout, err := captureStdout(t, func() error {
+			return PrintRobotUnavailable("future", "not ready", "v2", "try later")
+		})
+		var exitErr *ProcessExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("PrintRobotUnavailable error = %T, want *ProcessExitError", err)
+		}
+		if exitErr.ExitCode() != 2 || !exitErr.JSONWritten() {
+			t.Fatalf("PrintRobotUnavailable result = exit %d, json_written=%v", exitErr.ExitCode(), exitErr.JSONWritten())
+		}
+		var payload NotImplementedResponse
+		if decodeErr := json.Unmarshal([]byte(stdout), &payload); decodeErr != nil {
+			t.Fatalf("decode unavailable payload: %v\n%s", decodeErr, stdout)
+		}
+		if payload.Success || payload.ErrorCode != ErrCodeNotImplemented || payload.Feature != "future" {
+			t.Fatalf("unexpected unavailable payload: %+v", payload)
+		}
+		if payload.Meta == nil || payload.Meta.ExitCode != 2 {
+			t.Fatalf("unavailable meta = %+v, want exit_code=2", payload.Meta)
+		}
+	})
 }
 
 func TestNotImplementedResponse(t *testing.T) {

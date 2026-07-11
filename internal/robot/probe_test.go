@@ -10,6 +10,16 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
+func TestGetProbeSessionFailureUsesGeneralErrorExit(t *testing.T) {
+	output, exitCode := GetProbeSession(ProbeSessionOptions{})
+	if exitCode != 1 {
+		t.Fatalf("GetProbeSession() exit code = %d, want 1", exitCode)
+	}
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag {
+		t.Fatalf("GetProbeSession() response = %+v, want INVALID_FLAG failure", output.RobotResponse)
+	}
+}
+
 func TestValidProbeMethods(t *testing.T) {
 	methods := ValidProbeMethods()
 	if len(methods) != 2 {

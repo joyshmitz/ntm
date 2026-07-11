@@ -112,6 +112,26 @@ func TestFormatTarget(t *testing.T) {
 	}
 }
 
+func TestFormatTargetWinPreservesExplicitWindowIndex(t *testing.T) {
+	tests := []struct {
+		name    string
+		session string
+		window  int
+		pane    int
+		want    string
+	}{
+		{name: "zero based window", session: "mysession", window: 0, pane: 3, want: "mysession:0.3"},
+		{name: "positive window", session: "mysession", window: 7, pane: 2, want: "mysession:7.2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTargetWin(tt.session, tt.window, tt.pane); got != tt.want {
+				t.Fatalf("formatTargetWin(%q, %d, %d) = %q, want %q", tt.session, tt.window, tt.pane, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSummarizeReservations(t *testing.T) {
 
 	now := time.Now()

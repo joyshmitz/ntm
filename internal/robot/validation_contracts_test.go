@@ -28,7 +28,6 @@ func TestContract_SchemaIDFormat(t *testing.T) {
 	registry := GetRobotRegistry()
 	for _, surface := range registry.Surfaces {
 		if surface.SchemaID == "" {
-			t.Errorf("surface %q has empty schema_id", surface.Name)
 			continue
 		}
 		if !schemaIDPattern.MatchString(surface.SchemaID) {
@@ -382,9 +381,7 @@ func TestContract_SurfaceDescriptor_RequiredFields(t *testing.T) {
 		if surface.Description == "" {
 			t.Errorf("surface %q missing description", surface.Name)
 		}
-		if surface.SchemaID == "" {
-			t.Errorf("surface %q missing schema_id", surface.Name)
-		}
+		assertSurfaceOutputContract(t, surface)
 
 		// Every surface must have at least CLI transport
 		if len(surface.Transports) == 0 {

@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -55,6 +58,7 @@ func resetFlags() {
 	robotProxyStatus = false
 	robotLines = 20
 	robotPanes = ""
+	robotHistoryPane = ""
 	robotSend = ""
 	robotSendMsg = ""
 	robotSendMsgFile = ""
@@ -100,6 +104,7 @@ func resetFlags() {
 	robotSmartRestartHardKill = false
 	robotSmartRestartHardKillOnly = false
 	robotFormat = ""
+	robotVerbosity = ""
 }
 
 func TestShouldInitializeRobotPersistenceSkipsStatelessOverlay(t *testing.T) {
@@ -188,8 +193,9 @@ func createCLIWorkspaceProjectRoot(t *testing.T) (string, string) {
 	t.Helper()
 
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir workspace git dir: %v", err)
+	cmd := exec.Command("git", "init", "-b", "main", root)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("initialize workspace git repository: %v\n%s", err, output)
 	}
 	nested := filepath.Join(root, "nested")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
@@ -205,7 +211,9 @@ func TestResolveRobotFormat_DefaultAuto(t *testing.T) {
 	t.Setenv("NTM_OUTPUT_FORMAT", "")
 	t.Setenv("TOON_DEFAULT_FORMAT", "")
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatAuto {
 		t.Errorf("OutputFormat default = %q, want %q", robot.GetOutputFormat(), robot.FormatAuto)
@@ -218,7 +226,9 @@ func TestResolveRobotFormat_EnvFallback(t *testing.T) {
 	t.Setenv("NTM_OUTPUT_FORMAT", "")
 	t.Setenv("TOON_DEFAULT_FORMAT", "")
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatTOON {
 		t.Errorf("OutputFormat from env = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
@@ -1930,6 +1940,68 @@ func TestResolveResumeScopeRejectsWorkspaceFallbackForExplicitSession(t *testing
 	}
 }
 
+func TestResolveResumeScopeUsesCurrentWorkspaceOnlyForStoredHandoff(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	workspace := t.TempDir()
+	handoffDir := filepath.Join(workspace, ".ntm", "handoffs", "mysession")
+	if err := os.MkdirAll(handoffDir, 0o755); err != nil {
+		t.Fatalf("mkdir handoff dir: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: filepath.Join(workspace, "unregistered-projects")}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	session, gotDir, err := resolveResumeScope("mysession", true)
+	if err != nil {
+		t.Fatalf("resolveResumeScope() error = %v", err)
+	}
+	if session != "mysession" {
+		t.Fatalf("session = %q, want mysession", session)
+	}
+	if gotDir != workspace {
+		t.Fatalf("project dir = %q, want %q", gotDir, workspace)
+	}
+}
+
+func TestResolveResumeScopeUsesProjectRootStoredHandoffFromNestedDirectory(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	root, nested := createCLIWorkspaceProjectRoot(t)
+	handoffDir := filepath.Join(root, ".ntm", "handoffs", "mysession--frontend")
+	if err := os.MkdirAll(handoffDir, 0o755); err != nil {
+		t.Fatalf("mkdir handoff dir: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: filepath.Join(root, "unregistered-projects")}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	session, gotDir, err := resolveResumeScope("mysession--front", true)
+	if err != nil {
+		t.Fatalf("resolveResumeScope() error = %v", err)
+	}
+	if session != "mysession--frontend" {
+		t.Fatalf("session = %q, want mysession--frontend", session)
+	}
+	if gotDir != root {
+		t.Fatalf("project dir = %q, want %q", gotDir, root)
+	}
+}
+
 func TestResolveResumeScopeRejectsInvalidSessionName(t *testing.T) {
 	_, _, err := resolveResumeScope("../escape", true)
 	if err == nil {
@@ -2540,7 +2612,9 @@ func TestResolveRobotFormat_NtmOutputFormatFallback(t *testing.T) {
 	t.Setenv("NTM_OUTPUT_FORMAT", "toon")
 	t.Setenv("TOON_DEFAULT_FORMAT", "")
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatTOON {
 		t.Errorf("OutputFormat from NTM_OUTPUT_FORMAT = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
@@ -2553,7 +2627,9 @@ func TestResolveRobotFormat_ToonDefaultFallback(t *testing.T) {
 	t.Setenv("NTM_OUTPUT_FORMAT", "")
 	t.Setenv("TOON_DEFAULT_FORMAT", "toon")
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatTOON {
 		t.Errorf("OutputFormat from TOON_DEFAULT_FORMAT = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
@@ -2565,7 +2641,9 @@ func TestResolveRobotFormat_FlagOverridesEnv(t *testing.T) {
 	t.Setenv("NTM_ROBOT_FORMAT", "toon")
 	robotFormat = "json"
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatJSON {
 		t.Errorf("OutputFormat from flag = %q, want %q", robot.GetOutputFormat(), robot.FormatJSON)
@@ -2576,7 +2654,9 @@ func TestResolveRobotFormat_InvalidValueFallsBack(t *testing.T) {
 	resetFlags()
 	robotFormat = "xml"
 
-	resolveRobotFormat(nil)
+	if err := resolveRobotFormat(nil); err == nil {
+		t.Fatal("resolveRobotFormat() error = nil, want invalid format error")
+	}
 
 	if robot.GetOutputFormat() != robot.FormatAuto {
 		t.Errorf("OutputFormat invalid = %q, want %q", robot.GetOutputFormat(), robot.FormatAuto)
@@ -2621,7 +2701,9 @@ func TestResolveRobotFormat_ConfigFallback(t *testing.T) {
 		},
 	}
 
-	resolveRobotFormat(cfg)
+	if err := resolveRobotFormat(cfg); err != nil {
+		t.Fatalf("resolveRobotFormat() error = %v", err)
+	}
 
 	if robot.GetOutputFormat() != robot.FormatTOON {
 		t.Errorf("OutputFormat from config = %q, want %q", robot.GetOutputFormat(), robot.FormatTOON)
@@ -2646,6 +2728,29 @@ func TestSmartRestartHardKillFlagsRegistered(t *testing.T) {
 	}
 	if rootCmd.Flags().Lookup("hard-kill-only") == nil {
 		t.Fatal("expected --hard-kill-only flag to be registered")
+	}
+}
+
+func TestAtomicRobotAssignmentReservationFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"require-reservation", "reservation-paths"} {
+		if rootCmd.Flags().Lookup(name) == nil {
+			t.Fatalf("expected --%s flag to be registered", name)
+		}
+	}
+}
+
+func TestParseRobotReservationPathsArgStrict(t *testing.T) {
+	paths, err := parseRobotReservationPathsArg("internal/robot/**, docs/**,internal/robot/**")
+	if err != nil {
+		t.Fatalf("parse paths: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "internal/robot/**" || paths[1] != "docs/**" {
+		t.Fatalf("paths=%v", paths)
+	}
+	for _, raw := range []string{"internal/**,", ",internal/**", "internal/**,,docs/**"} {
+		if _, err := parseRobotReservationPathsArg(raw); err == nil {
+			t.Fatalf("parseRobotReservationPathsArg(%q) succeeded", raw)
+		}
 	}
 }
 
@@ -3040,8 +3145,6 @@ func TestListCmdJSONExecutes(t *testing.T) {
 
 // TestSpawnValidation tests spawn command argument validation
 func TestSpawnValidation(t *testing.T) {
-	testutil.RequireTmuxThrottled(t)
-
 	// Initialize config for spawn command
 	cfg = config.Default()
 
@@ -5092,6 +5195,9 @@ func envWithOverrides(env []string, overrides ...string) []string {
 }
 
 func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping nested release build in short mode")
+	}
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
 	binaryPath := filepath.Join(tmpDir, "ntm")
@@ -5140,6 +5246,163 @@ func TestRobotStateCommandsWorkWithCGODisabledReleaseBuild(t *testing.T) {
 			}
 			if success, _ := payload["success"].(bool); !success {
 				t.Fatalf("%s success=false in CGO-disabled build: %v", flag, payload)
+			}
+		})
+	}
+}
+
+func TestRootDispatcherDoesNotExitProcess(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate cli test source")
+	}
+	rootFile := filepath.Join(filepath.Dir(testFile), "root.go")
+	file, err := parser.ParseFile(token.NewFileSet(), rootFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse root dispatcher: %v", err)
+	}
+
+	var exitCalls []token.Pos
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Exit" {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if ok && pkg.Name == "os" {
+			exitCalls = append(exitCalls, call.Pos())
+		}
+		return true
+	})
+	if len(exitCalls) != 0 {
+		t.Fatalf("root dispatcher must return typed errors instead of calling os.Exit; found %d call(s)", len(exitCalls))
+	}
+}
+
+func TestRobotProcessContractHelper(t *testing.T) {
+	rawArgs := os.Getenv("NTM_ROBOT_CONTRACT_ARGS")
+	if rawArgs == "" {
+		return
+	}
+
+	var args []string
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		t.Fatalf("decode helper args: %v", err)
+	}
+	if len(args) == 1 && args[0] == "__robot_contract_unavailable__" {
+		err := robot.EncodeErrorJSON(errors.New("feature unavailable"), robot.ErrCodeNotImplemented, "Use a supported robot surface", "robot-test")
+		os.Exit(ExitCode(err))
+	}
+	os.Args = append([]string{"ntm"}, args...)
+	if err := Execute(); err != nil {
+		os.Exit(ExitCode(err))
+	}
+	os.Exit(0)
+}
+
+func TestRobotProcessErrorContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping process-level robot contract integration in short mode")
+	}
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configHome := filepath.Join(tmpDir, "xdg")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(homeDir) failed: %v", err)
+	}
+	if err := os.MkdirAll(configHome, 0o755); err != nil {
+		t.Fatalf("MkdirAll(configHome) failed: %v", err)
+	}
+	invalidConfig := filepath.Join(tmpDir, "invalid.toml")
+	if err := os.WriteFile(invalidConfig, []byte("[robot\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(invalidConfig) failed: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		errorCode    string
+		expectedExit int
+	}{
+		{name: "unknown robot flag", args: []string{"--robot-status", "--not-a-real-flag"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid pagination", args: []string{"--robot-status", "--robot-limit=-1"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid duration", args: []string{"--robot-attention", "--attention-timeout=not-a-duration"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid panes", args: []string{"--robot-rano-stats", "--panes=not-a-pane"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "robot send empty singular pane", args: []string{"--robot-send=proj", "--msg=work", "--pane="}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "robot send singular and plural panes", args: []string{"--robot-send=proj", "--msg=work", "--pane=1", "--panes=2"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "missing session", args: []string{"--robot-agent-names=ntm-robot-contract-missing-session"}, errorCode: robot.ErrCodeSessionNotFound, expectedExit: 1},
+		{name: "unknown docs topic", args: []string{"--robot-docs=not-a-topic"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "unknown schema type", args: []string{"--robot-schema=not-a-schema"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "unknown capability command", args: []string{"--robot-capabilities", "--capability-command=not-a-command"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "unknown capability category", args: []string{"--robot-capabilities", "--capability-category=not-a-category"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid robot format", args: []string{"--robot-status", "--robot-format=xml"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid robot verbosity", args: []string{"--robot-status", "--robot-verbosity=noisy"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid robot redaction", args: []string{"--robot-status", "--redact=erase"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
+		{name: "invalid robot config", args: []string{"--config", invalidConfig, "--robot-status"}, errorCode: robot.ErrCodeInternalError, expectedExit: 1},
+		{name: "unavailable feature", args: []string{"__robot_contract_unavailable__"}, errorCode: robot.ErrCodeNotImplemented, expectedExit: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawArgs, err := json.Marshal(tt.args)
+			if err != nil {
+				t.Fatalf("encode helper args: %v", err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+			cmd.Dir = tmpDir
+			cmd.Env = envWithOverrides(os.Environ(),
+				"HOME="+homeDir,
+				"XDG_CONFIG_HOME="+configHome,
+				"NTM_NO_COLOR=1",
+				"NTM_CONFIG=",
+				"NTM_ROBOT_FORMAT=",
+				"NTM_OUTPUT_FORMAT=",
+				"TOON_DEFAULT_FORMAT=",
+				"NTM_ROBOT_VERBOSITY=",
+				"NTM_ROBOT_CONTRACT_ARGS="+string(rawArgs),
+			)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			err = cmd.Run()
+			exitCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("command failed without process exit status: %v", err)
+				}
+				exitCode = exitErr.ExitCode()
+			}
+			if exitCode != tt.expectedExit {
+				t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", exitCode, tt.expectedExit, stdout.String(), stderr.String())
+			}
+			if got := strings.TrimSpace(stderr.String()); got != "" {
+				t.Fatalf("stderr = %q, want empty", got)
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("stdout is not exactly one JSON document: %v\nstdout=%q", err, stdout.String())
+			}
+			if success, ok := payload["success"].(bool); !ok || success {
+				t.Fatalf("success = %v, want false; payload=%v", payload["success"], payload)
+			}
+			if got, _ := payload["output_format"].(string); got != "json" {
+				t.Fatalf("output_format = %q, want json; payload=%v", got, payload)
+			}
+			if got, _ := payload["error_code"].(string); got != tt.errorCode {
+				t.Fatalf("error_code = %q, want %q; payload=%v", got, tt.errorCode, payload)
+			}
+			if meta, ok := payload["_meta"].(map[string]any); ok {
+				if got, ok := meta["exit_code"].(float64); ok && int(got) != exitCode {
+					t.Fatalf("_meta.exit_code = %d, process exit = %d", int(got), exitCode)
+				}
 			}
 		})
 	}

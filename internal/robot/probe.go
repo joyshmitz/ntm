@@ -661,7 +661,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 			ErrCodeInvalidFlag,
 			"Provide a session name: ntm --robot-probe=myproject",
 		)
-		return output, 2
+		return output, 1
 	}
 
 	if !CurrentTmuxClient.SessionExists(opts.Session) {
@@ -670,7 +670,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 			ErrCodeSessionNotFound,
 			"Use 'ntm list' to see available sessions",
 		)
-		return output, 2
+		return output, 1
 	}
 
 	panes, err := CurrentTmuxClient.GetPanes(opts.Session)
@@ -680,7 +680,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 			ErrCodeInternalError,
 			"Check tmux session state",
 		)
-		return output, 2
+		return output, 1
 	}
 
 	var targetPanes []int
@@ -709,7 +709,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 			ErrCodePaneNotFound,
 			"Use --panes to target a specific pane or spawn agents first",
 		)
-		return output, 2
+		return output, 1
 	}
 
 	sort.Ints(targetPanes)
@@ -731,22 +731,22 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 	}
 
 	if !output.Success {
-		return output, 2
+		return output, 1
 	}
 	if output.Summary.TotalProbed == 0 {
-		return output, 2
+		return output, 1
 	}
 	if output.Summary.Responsive == output.Summary.TotalProbed {
 		return output, 0
 	}
 	if output.Summary.Responsive == 0 {
-		return output, 2
+		return output, 1
 	}
 	return output, 1
 }
 
 // PrintProbeSession outputs multi-pane probe results as JSON.
-// Returns 0 on success, 1 on partial failure, 2 on complete failure.
+// Returns 0 on success and 1 for partial or complete failure.
 func PrintProbeSession(opts ProbeSessionOptions) int {
 	output, exitCode := GetProbeSession(opts)
 	outputJSON(output)

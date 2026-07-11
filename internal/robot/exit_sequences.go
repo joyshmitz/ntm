@@ -122,12 +122,10 @@ func formatTarget(session string, pane int) string {
 	return formatTargetWin(session, 1, pane)
 }
 
-// formatTargetWin creates a tmux target string for a session, window, and pane
-// (#172). A win < 1 is treated as window 1 to preserve the legacy behavior.
+// formatTargetWin creates a tmux target string for an explicit session,
+// window, and pane address (#172). tmux window indexes may start at zero, so
+// this helper must preserve the caller's window index exactly.
 func formatTargetWin(session string, win, pane int) string {
-	if win < 1 {
-		win = 1
-	}
 	return session + ":" + strconv.Itoa(win) + "." + strconv.Itoa(pane)
 }
 
@@ -195,11 +193,8 @@ func hardKillAgent(session string, win, pane int, seq *RestartSequence) (*HardKi
 
 // getShellPID retrieves the PID of the shell process in a tmux pane.
 // Uses: tmux list-panes -t session:window -F '#{pane_index} #{pane_pid}'
-// win is the pane's tmux window index (#172); win < 1 falls back to window 1.
+// win is the pane's exact tmux window index (#172).
 func getShellPID(session string, win, pane int) (int, error) {
-	if win < 1 {
-		win = 1
-	}
 	target := session + ":" + strconv.Itoa(win)
 	cmd := exec.Command(tmux.BinaryPath(), "list-panes", "-t", target, "-F", "#{pane_index} #{pane_pid}")
 	output, err := cmd.Output()

@@ -13,7 +13,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
+
+func init() {
+	robot.MustRegisterSchemaCommand("pipeline_run", PipelineRunOutput{})
+	robot.MustRegisterSchemaCommand("pipeline_status", PipelineStatusOutput{})
+	robot.MustRegisterSchemaCommand("pipeline_list", PipelineListOutput{})
+	robot.MustRegisterSchemaCommand("pipeline_cancel", PipelineCancelOutput{})
+}
 
 // PipelineRegistry tracks running pipeline executions
 var (

@@ -12,7 +12,7 @@
     "utility"
   ],
   "category_count": 10,
-  "schema_type_count": 116,
+  "schema_type_count": 126,
   "schema_types": [
     "account_status",
     "accounts_list",
@@ -31,15 +31,18 @@
     "bead_show",
     "beads_list",
     "bulk_assign",
+    "capabilities",
     "cass_context",
     "cass_insights",
     "cass_search",
     "cass_status",
+    "causality",
     "context",
     "dashboard",
     "dcg_check",
     "dcg_status",
     "diagnose",
+    "diff",
     "digest",
     "dismiss_alert",
     "docs",
@@ -57,6 +60,7 @@
     "file_relations",
     "files",
     "forecast",
+    "giil_fetch",
     "graph",
     "health",
     "health_oauth",
@@ -94,6 +98,7 @@
     "ms_search",
     "ms_show",
     "overlay",
+    "palette",
     "plan",
     "probe",
     "proxy_status",
@@ -105,8 +110,12 @@
     "recipes",
     "replay",
     "restart_pane",
+    "restore",
     "route",
     "ru_sync",
+    "safety_simulate",
+    "save",
+    "schema",
     "search",
     "send",
     "setup_status",
@@ -123,6 +132,7 @@
     "switch_account",
     "tail",
     "terse",
+    "tokens",
     "tools",
     "triage",
     "version",
@@ -238,7 +248,7 @@
       "has_request_semantics": false,
       "name": "diff",
       "schema_id": "ntm:robot:diff:v1",
-      "schema_type": ""
+      "schema_type": "diff"
     },
     {
       "category": "state",
@@ -465,7 +475,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "markdown",
-      "schema_id": "ntm:robot:markdown:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -589,8 +599,8 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "terse",
-      "schema_id": "ntm:robot:terse:v1",
-      "schema_type": "terse"
+      "schema_id": "",
+      "schema_type": ""
     },
     {
       "category": "state",
@@ -621,7 +631,7 @@
       "has_request_semantics": false,
       "name": "attention",
       "schema_id": "ntm:robot:attention:v1",
-      "schema_type": "",
+      "schema_type": "attention",
       "supports_acknowledge": true,
       "supports_pagination": true
     },
@@ -805,7 +815,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "context-inject",
-      "schema_id": "ntm:robot:context-inject:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -925,7 +935,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "controller-spawn",
-      "schema_id": "ntm:robot:controller-spawn:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1301,7 +1311,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "pipeline-cancel",
-      "schema_id": "ntm:robot:pipeline-cancel:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1316,7 +1326,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "pipeline-list",
-      "schema_id": "ntm:robot:pipeline-list:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1331,7 +1341,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "pipeline-run",
-      "schema_id": "ntm:robot:pipeline-run:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1346,7 +1356,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "pipeline-status",
-      "schema_id": "ntm:robot:pipeline-status:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1422,7 +1432,7 @@
       "has_request_semantics": false,
       "name": "capabilities",
       "schema_id": "ntm:robot:capabilities:v1",
-      "schema_type": ""
+      "schema_type": "capabilities"
     },
     {
       "category": "utility",
@@ -1437,7 +1447,7 @@
       "has_request_semantics": false,
       "name": "causality",
       "schema_id": "ntm:robot:causality:v1",
-      "schema_type": ""
+      "schema_type": "causality"
     },
     {
       "category": "utility",
@@ -1481,7 +1491,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "default-prompts",
-      "schema_id": "ntm:robot:default-prompts:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1542,7 +1552,7 @@
       "has_request_semantics": false,
       "name": "giil-fetch",
       "schema_id": "ntm:robot:giil-fetch:v1",
-      "schema_type": ""
+      "schema_type": "giil_fetch"
     },
     {
       "category": "utility",
@@ -1556,7 +1566,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "help",
-      "schema_id": "ntm:robot:help:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1827,7 +1837,7 @@
       "has_request_semantics": false,
       "name": "palette",
       "schema_id": "ntm:robot:palette:v1",
-      "schema_type": ""
+      "schema_type": "palette"
     },
     {
       "category": "utility",
@@ -1841,7 +1851,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "profile-list",
-      "schema_id": "ntm:robot:profile-list:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1856,7 +1866,7 @@
       "has_lifecycle": false,
       "has_request_semantics": false,
       "name": "profile-show",
-      "schema_id": "ntm:robot:profile-show:v1",
+      "schema_id": "",
       "schema_type": ""
     },
     {
@@ -1977,7 +1987,7 @@
       "has_request_semantics": false,
       "name": "restore",
       "schema_id": "ntm:robot:restore:v1",
-      "schema_type": ""
+      "schema_type": "restore"
     },
     {
       "category": "utility",
@@ -2007,7 +2017,7 @@
       "has_request_semantics": true,
       "name": "safety-simulate",
       "schema_id": "ntm:robot:safety-simulate:v1",
-      "schema_type": "",
+      "schema_type": "safety_simulate",
       "supports_idempotency": true
     },
     {
@@ -2023,7 +2033,7 @@
       "has_request_semantics": false,
       "name": "save",
       "schema_id": "ntm:robot:save:v1",
-      "schema_type": ""
+      "schema_type": "save"
     },
     {
       "category": "utility",
@@ -2038,7 +2048,7 @@
       "has_request_semantics": false,
       "name": "schema",
       "schema_id": "ntm:robot:schema:v1",
-      "schema_type": ""
+      "schema_type": "schema"
     },
     {
       "category": "utility",
@@ -2143,7 +2153,7 @@
       "has_request_semantics": false,
       "name": "tokens",
       "schema_id": "ntm:robot:tokens:v1",
-      "schema_type": ""
+      "schema_type": "tokens"
     },
     {
       "category": "utility",

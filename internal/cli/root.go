@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,6 +65,63 @@ var (
 )
 
 var robotStateStore *state.Store
+var robotProcessExit error
+
+func recordRobotProcessExit(err error) {
+	if err != nil && robotProcessExit == nil {
+		robotProcessExit = err
+	}
+}
+
+func failRobotCommand(err error, code, hint, command string) {
+	recordRobotProcessExit(robot.EncodeErrorJSON(err, code, hint, command))
+}
+
+func recordLegacyRobotExit(code int) {
+	recordRobotProcessExit(robot.ExitResultForCode(code, nil, true))
+}
+
+func robotInvocationFromArgs(args []string) (bool, string) {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		flag := strings.SplitN(arg, "=", 2)[0]
+		if strings.HasPrefix(flag, "--robot-") {
+			return true, strings.TrimPrefix(flag, "--")
+		}
+	}
+	return false, ""
+}
+
+func classifyRobotExecuteError(err error) (string, string) {
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"unknown flag",
+		"invalid argument",
+		"required flag",
+		"requires at least",
+		"requires at most",
+		"accepts ",
+	} {
+		if strings.Contains(message, fragment) {
+			return robot.ErrCodeInvalidFlag, "Use 'ntm --robot-help' or 'ntm --robot-capabilities' to inspect valid flags"
+		}
+	}
+	return robot.ErrCodeInternalError, "Retry the command or inspect ntm diagnostics"
+}
+
+// ExitCode maps an Execute error onto the public robot process contract.
+func ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitCoder interface{ ExitCode() int }
+	if errors.As(err, &exitCoder) {
+		return robot.NormalizeProcessExitCode(exitCoder.ExitCode())
+	}
+	return 1
+}
 
 // VersionInput is the kernel input for core.version.
 type VersionInput struct {
@@ -128,6 +184,14 @@ Shell Integration:
 			cfg, err = startup.GetConfig()
 			endProfile()
 			if err != nil {
+				if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+					return robot.EncodeErrorJSON(
+						fmt.Errorf("config load failed: %w", err),
+						robot.ErrCodeInternalError,
+						"Fix the selected TOML configuration or pass --config with a valid file",
+						robotCommand,
+					)
+				}
 				// Config loading failed for a genuine reason (e.g. an invalid
 				// global config); an invalid project overlay no longer reaches
 				// here — it is skipped with its own warning inside LoadMerged.
@@ -142,8 +206,20 @@ Shell Integration:
 			}
 			theme.ApplyLipGlossDefaults(activeTheme)
 
-			// Apply redaction flag overrides
-			applyRedactionFlagOverrides(cfg)
+			// Apply redaction flag overrides. Robot invocations must fail with
+			// one machine-readable envelope; the human CLI retains its historical
+			// warn-and-ignore behavior for an invalid override.
+			if err := applyRedactionFlagOverrides(cfg); err != nil {
+				if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+					return robot.EncodeErrorJSON(
+						err,
+						robot.ErrCodeInvalidFlag,
+						"Use --redact=off, --redact=warn, --redact=redact, or --redact=block",
+						robotCommand,
+					)
+				}
+				fmt.Fprintf(os.Stderr, "Warning: %v, ignoring\n", err)
+			}
 
 			// Ensure persisted prompt history + event logs never store raw secrets/PII when redaction is enabled.
 			// (bd-3sl0s)
@@ -212,9 +288,28 @@ Shell Integration:
 		PrintProfilingIfEnabled()
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		// Resolve robot output format and verbosity: CLI flag > env var > config > default
-		resolveRobotFormat(cfg)
-		resolveRobotVerbosity(cfg)
+		// Resolve robot output format and verbosity: CLI flag > env var > config > default.
+		// Invalid values remain warnings for human use, but robot commands fail
+		// before dispatch so stdout contains exactly one JSON error document.
+		formatErr := resolveRobotFormat(cfg)
+		verbosityErr := resolveRobotVerbosity(cfg)
+		if robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:]); robotInvocation {
+			if formatErr != nil {
+				failRobotCommand(formatErr, robot.ErrCodeInvalidFlag, "Use json, toon, or auto", robotCommand)
+				return
+			}
+			if verbosityErr != nil {
+				failRobotCommand(verbosityErr, robot.ErrCodeInvalidFlag, "Use terse, default, or debug", robotCommand)
+				return
+			}
+		} else {
+			if formatErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v, using default (auto)\n", formatErr)
+			}
+			if verbosityErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v, using default verbosity\n", verbosityErr)
+			}
+		}
 		robotDryRunEffective := robotDryRun || robotRestoreDry
 
 		// Handle robot flags for AI agent integration
@@ -225,40 +320,42 @@ Shell Integration:
 		if robotStatus {
 			pagination, err := resolveRobotPagination(cmd)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Pagination values must be zero or greater", "robot-status")
+				return
 			}
 			if err := robot.PrintStatusWithOptions(pagination); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotVersion {
 			if err := robot.PrintVersion(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCapabilities {
-			if err := robot.PrintCapabilities(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+			opts := robot.CapabilitiesOptions{
+				Command:  robotCapabilitiesCommand,
+				Category: robotCapabilitiesCategory,
+				Query:    robotCapabilitiesSearch,
+				Compact:  robotCapabilitiesCompact,
+			}
+			if err := robot.PrintCapabilitiesWithOptions(opts); err != nil {
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if cmd.Flags().Changed("robot-docs") {
 			if err := robot.PrintDocs(robotDocs); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
+				return
 			}
 			return
 		}
 		if robotPlan {
 			if err := robot.PrintPlan(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -269,31 +366,31 @@ Shell Integration:
 			}
 			pagination, err := resolveRobotPagination(cmd)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Pagination values must be zero or greater", "robot-snapshot")
+				return
 			}
 			if robotSince != "" {
 				// Parse the since timestamp
 				sinceTime, parseErr := time.Parse(time.RFC3339, robotSince)
 				if parseErr != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --since timestamp (expected ISO8601/RFC3339 format): %v\n", parseErr)
-					os.Exit(1)
+					err = fmt.Errorf("invalid --since timestamp (expected ISO8601/RFC3339 format): %w", parseErr)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use an ISO8601/RFC3339 timestamp", "robot-snapshot")
+					return
 				}
 				err = robot.PrintSnapshotDelta(sinceTime)
 			} else {
 				err = robot.PrintSnapshotWithOptions(cfg, pagination)
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEvents {
 			session, err := resolveOptionalRobotSessionFilter(robotEventsSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-events")
+				return
 			}
 			opts := robot.EventsOptions{
 				SinceCursor: robotEventsSinceCursor,
@@ -305,24 +402,27 @@ Shell Integration:
 			if robotEventsAsOf != "" {
 				asOf, err := time.Parse(time.RFC3339, robotEventsAsOf)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --events-as-of timestamp (expected RFC3339): %v\n", err)
-					os.Exit(1)
+					err = fmt.Errorf("invalid --events-as-of timestamp (expected RFC3339): %w", err)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use an RFC3339 timestamp", "robot-events")
+					return
 				}
 				opts.AsOf = asOf
 			}
 			if robotEventsWindowBefore != "" {
 				windowBefore, err := time.ParseDuration(robotEventsWindowBefore)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --events-window-before duration: %v\n", err)
-					os.Exit(1)
+					err = fmt.Errorf("invalid --events-window-before duration: %w", err)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 5m or 30s", "robot-events")
+					return
 				}
 				opts.WindowBefore = windowBefore
 			}
 			if robotEventsWindowAfter != "" {
 				windowAfter, err := time.ParseDuration(robotEventsWindowAfter)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --events-window-after duration: %v\n", err)
-					os.Exit(1)
+					err = fmt.Errorf("invalid --events-window-after duration: %w", err)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 1m or 30s", "robot-events")
+					return
 				}
 				opts.WindowAfter = windowAfter
 			}
@@ -333,26 +433,27 @@ Shell Integration:
 				opts.ActionabilityFilter = []string{robotEventsActionability}
 			}
 			if err := robot.PrintEvents(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotAttention {
 			session, err := resolveOptionalRobotSessionFilter(robotAttentionSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-attention")
+				return
 			}
 			timeout, err := time.ParseDuration(robotAttentionTimeout)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid attention timeout '%s': %v\n", robotAttentionTimeout, err)
-				os.Exit(1)
+				err = fmt.Errorf("invalid attention timeout %q: %w", robotAttentionTimeout, err)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 5m or 30s", "robot-attention")
+				return
 			}
 			poll, err := time.ParseDuration(robotAttentionPoll)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid attention poll '%s': %v\n", robotAttentionPoll, err)
-				os.Exit(1)
+				err = fmt.Errorf("invalid attention poll %q: %w", robotAttentionPoll, err)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 1s or 500ms", "robot-attention")
+				return
 			}
 			sinceCursor := robotAttentionSinceCursor
 			if sinceCursor == 0 {
@@ -367,13 +468,14 @@ Shell Integration:
 				Profile:      robotProfile,
 			}
 			exitCode := robot.PrintAttention(opts)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotDigest {
 			session, err := resolveOptionalRobotSessionFilter(robotAttentionSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-digest")
+				return
 			}
 			sinceCursor := robotAttentionSinceCursor
 			if sinceCursor == 0 {
@@ -385,111 +487,97 @@ Shell Integration:
 				Profile:     robotProfile,
 			}
 			if err := robot.PrintDigest(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotGraph {
 			if err := robot.PrintGraph(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotTriage {
 			if err := robot.PrintTriage(robot.TriageOptions{Limit: robotTriageLimit}); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotForecast != "" {
 			if err := robot.PrintForecast(robotForecast); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSuggest {
 			if err := robot.PrintSuggest(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotImpact != "" {
 			if err := robot.PrintImpact(robotImpact); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSearch != "" {
 			if err := robot.PrintSearch(robotSearch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLabelAttention {
 			opts := robot.LabelAttentionOptions{Limit: robotAttentionLimit}
 			if err := robot.PrintLabelAttention(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLabelFlow {
 			if err := robot.PrintLabelFlow(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLabelHealth {
 			if err := robot.PrintLabelHealth(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotFileBeads != "" {
 			opts := robot.FileBeadsOptions{FilePath: robotFileBeads, Limit: robotFileBeadsLimit}
 			if err := robot.PrintFileBeads(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotFileHotspots {
 			opts := robot.FileHotspotsOptions{Limit: robotHotspotsLimit}
 			if err := robot.PrintFileHotspots(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotFileRelations != "" {
 			opts := robot.FileRelationsOptions{FilePath: robotFileRelations, Limit: robotRelationsLimit, Threshold: robotRelationsThreshold}
 			if err := robot.PrintFileRelations(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotDashboard {
 			if err := robot.PrintDashboard(jsonOutput); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotContext != "" {
 			session, _, err := resolveRobotSessionProjectScope(robotContext)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-context")
+				return
 			}
 			// Use --lines flag for scrollback (default 20, or as specified)
 			scrollbackLines := robotLines
@@ -499,16 +587,15 @@ Shell Integration:
 				scrollbackLines = 1000 // Safety fallback
 			}
 			if err := robot.PrintContext(session, scrollbackLines); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEnsembleModesList {
 			pagination, err := resolveRobotPagination(cmd)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Pagination values must be zero or greater", "robot-ensemble-modes")
+				return
 			}
 			opts := robot.EnsembleModesOptions{
 				Category: strings.TrimSpace(jfpCategory),
@@ -517,15 +604,13 @@ Shell Integration:
 				Offset:   pagination.Offset,
 			}
 			if err := robot.PrintEnsembleModes(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEnsemblePresetsList {
 			if err := robot.PrintEnsemblePresets(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -545,51 +630,47 @@ Shell Integration:
 				ProjectDir:    robotEnsembleProject,
 			}
 			if err := robot.PrintEnsembleSpawn(opts, cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEnsemble != "" {
 			session, err := resolveRobotOfflineCapableSession(robotEnsemble)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ensemble")
+				return
 			}
 			if err := robot.PrintEnsemble(session); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEnsembleSuggest != "" {
 			if err := robot.PrintEnsembleSuggest(robotEnsembleSuggest, robotEnsembleSuggestIDOnly); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotEnsembleStop != "" {
 			session, err := resolveRobotOfflineCapableSession(robotEnsembleStop)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ensemble-stop")
+				return
 			}
 			opts := robot.EnsembleStopOptions{
 				Force:     robotEnsembleStopForce,
 				NoCollect: robotEnsembleStopNoCollect,
 			}
 			if err := robot.PrintEnsembleStop(session, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotOverlay {
 			session, err := resolveOptionalRobotLiveSession(robotOverlaySession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-overlay")
+				return
 			}
 			opts := robot.OverlayOptions{
 				Session: session,
@@ -597,43 +678,37 @@ Shell Integration:
 				NoWait:  robotOverlayNoWait,
 			}
 			if err := robot.PrintOverlay(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotTools {
 			if err := robot.PrintTools(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotACFSStatus || robotSetup {
 			if err := robot.PrintACFSStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSLBPending {
 			if err := robot.PrintSLBPending(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSLBApprove != "" {
 			if err := robot.PrintSLBApprove(robotSLBApprove); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSLBDeny != "" {
 			if err := robot.PrintSLBDeny(robotSLBDeny, slbReason); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -642,15 +717,13 @@ Shell Integration:
 				DryRun: robotDryRun,
 			}
 			if err := robot.PrintRUSync(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotGiilFetch != "" {
 			if err := robot.PrintGIILFetch(robotGiilFetch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -671,80 +744,70 @@ Shell Integration:
 			if sessionName != "" {
 				resolvedSession, resolvedProjectKey, err := resolveAgentMailScopeWithPreference(sessionName, sessionExplicit)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					failRobotCommand(err, robot.ErrCodeSessionNotFound, "Verify the session and Agent Mail project scope", "robot-mail")
+					return
 				}
 				sessionName = resolvedSession
 				projectKey = resolvedProjectKey
 			}
 
 			if err := robot.PrintMail(sessionName, projectKey); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCassStatus {
 			if err := robot.PrintCASSStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCassSearch != "" {
 			if err := robot.PrintCASSSearch(robotCassSearch, cassAgent, cassWorkspace, cassSince, cassLimit); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCassInsights {
 			if err := robot.PrintCASSInsights(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCassContext != "" {
 			if err := robot.PrintCASSContext(robotCassContext); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		// JFP (JeffreysPrompts) robot handlers
 		if robotJFPStatus {
 			if err := robot.PrintJFPStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPList {
 			if err := robot.PrintJFPList(jfpCategory, jfpTag); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPSearch != "" {
 			if err := robot.PrintJFPSearch(robotJFPSearch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPShow != "" {
 			if err := robot.PrintJFPShow(robotJFPShow); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPSuggest != "" {
 			if err := robot.PrintJFPSuggest(robotJFPSuggest); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -754,65 +817,56 @@ Shell Integration:
 				project = robotEnsembleProject
 			}
 			if err := robot.PrintJFPInstall(robotJFPInstall, project); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPExport != "" {
 			if err := robot.PrintJFPExport(robotJFPExport, jfpFormat); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPUpdate {
 			if err := robot.PrintJFPUpdate(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPInstalled {
 			if err := robot.PrintJFPInstalled(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPCategories {
 			if err := robot.PrintJFPCategories(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPTags {
 			if err := robot.PrintJFPTags(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotJFPBundles {
 			if err := robot.PrintJFPBundles(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		// MS (Meta Skill) robot handlers
 		if robotMSSearch != "" {
 			if err := robot.PrintMSSearch(robotMSSearch); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotMSShow != "" {
 			if err := robot.PrintMSShow(robotMSShow); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -825,44 +879,39 @@ Shell Integration:
 				Sort:  xfSort,
 			}
 			if err := robot.PrintXFSearch(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotXFStatus {
 			if err := robot.PrintXFStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotDefaultPrompts {
 			if err := printDefaultPrompts(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotProfileList {
 			if err := printSessionProfileList(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotProfileShow != "" {
 			if err := printSessionProfileShow(robotProfileShow); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotTokens {
 			session, err := resolveOptionalRobotSessionFilter(resolveRobotTokensSession(cmd))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-tokens")
+				return
 			}
 			opts := robot.TokensOptions{
 				Days:      robotTokensDays,
@@ -872,21 +921,20 @@ Shell Integration:
 				AgentType: robotTokensAgent,
 			}
 			if err := robot.PrintTokens(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotHistory != "" {
 			session, err := resolveRobotSessionFilter(robotHistory)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-history")
+				return
 			}
 			pagination, err := resolveRobotPagination(cmd)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Pagination values must be zero or greater", "robot-history")
+				return
 			}
 			opts := robot.HistoryOptions{
 				Session:   session,
@@ -899,16 +947,15 @@ Shell Integration:
 				Offset:    pagination.Offset,
 			}
 			if err := robot.PrintHistory(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCausality != "" {
 			session, err := resolveRobotOfflineCapableSession(robotCausality)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-causality")
+				return
 			}
 			projectDir := strings.TrimSpace(robotCausalityProject)
 			if projectDir == "" {
@@ -934,21 +981,20 @@ Shell Integration:
 				Limit:     robotCausalityLimit,
 			}
 			if err := robot.PrintCausality(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotActivity != "" {
 			session, err := resolveRobotLiveSession(robotActivity)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-activity")
+				return
 			}
-			// Parse pane filter (reuse --panes flag)
-			var paneFilter []string
-			if robotPanes != "" {
-				paneFilter = strings.Split(robotPanes, ",")
+			paneFilter, err := robot.ParsePaneSelectorsArg(robotPanes)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-activity")
+				return
 			}
 			// Parse agent types
 			var agentTypes []string
@@ -961,40 +1007,35 @@ Shell Integration:
 				AgentTypes: agentTypes,
 			}
 			if err := robot.PrintActivity(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotWait != "" {
 			session, err := resolveRobotLiveSession(robotWait)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-wait")
+				return
 			}
 			// Parse timeout and poll interval
 			timeout, err := time.ParseDuration(robotWaitTimeout)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid timeout '%s': %v\n", robotWaitTimeout, err)
-				os.Exit(2)
+				err = fmt.Errorf("invalid timeout %q: %w", robotWaitTimeout, err)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 5m or 30s", "robot-wait")
+				return
 			}
 			poll, err := time.ParseDuration(robotWaitPoll)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid poll interval '%s': %v\n", robotWaitPoll, err)
-				os.Exit(2)
+				err = fmt.Errorf("invalid poll interval %q: %w", robotWaitPoll, err)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a Go duration such as 1s or 500ms", "robot-wait")
+				return
 			}
-			// Parse pane filter
-			var paneFilter []int
+			// Parse pane selectors; resolution happens against the live topology.
 			waitPanes := resolveRobotWaitPanes(cmd)
-			if waitPanes != "" {
-				for _, p := range strings.Split(waitPanes, ",") {
-					idx, err := strconv.Atoi(strings.TrimSpace(p))
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error: invalid --panes/--wait-panes index '%s': %v\n", p, err)
-						os.Exit(2)
-					}
-					paneFilter = append(paneFilter, idx)
-				}
+			paneSelectors, err := robot.ParsePaneSelectorsArg(waitPanes)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-wait")
+				return
 			}
 			sinceCursor := robotAttentionSinceCursor
 			if sinceCursor == 0 {
@@ -1005,7 +1046,7 @@ Shell Integration:
 				Condition:         robotWaitUntil,
 				Timeout:           timeout,
 				PollInterval:      poll,
-				PaneIndices:       paneFilter,
+				PaneSelectors:     paneSelectors,
 				AgentType:         resolveRobotWaitType(cmd),
 				WaitForAny:        robotWaitAny,
 				ExitOnError:       robotWaitOnError,
@@ -1014,19 +1055,20 @@ Shell Integration:
 				Profile:           robotProfile,
 			}
 			exitCode := robot.PrintWait(opts)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotRoute != "" {
 			session, err := resolveRobotLiveSession(robotRoute)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-route")
+				return
 			}
 			// Parse exclude panes
 			excludePanes, err := robot.ParseExcludePanes(resolveRobotRouteExclude(cmd))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-route")
+				return
 			}
 			opts := robot.RouteOptions{
 				Session:      session,
@@ -1035,19 +1077,20 @@ Shell Integration:
 				ExcludePanes: excludePanes,
 			}
 			exitCode := robot.PrintRoute(opts)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		// Robot-pipeline commands
 		if robotPipelineRun != "" {
 			vars, err := pipeline.ParsePipelineVars(robotPipelineVars)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use KEY=VALUE pipeline variables", "robot-pipeline-run")
+				return
 			}
 			session, projectDir, err := resolveRobotSessionProjectScope(resolveRobotPipelineSession(cmd))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Provide a valid pipeline session or project scope", "robot-pipeline-run")
+				return
 			}
 			// bd-9296v: --pipeline-from-state requires --pipeline-start-from
 			// (mirrors the `ntm pipeline run --from-state` validation in
@@ -1055,8 +1098,9 @@ Shell Integration:
 			// reuse prior step state without telling the run where to
 			// start.
 			if robotPipelineFromState != "" && robotPipelineStartFrom == "" {
-				fmt.Fprintln(os.Stderr, "Error: --pipeline-from-state requires --pipeline-start-from")
-				os.Exit(2)
+				err := errors.New("--pipeline-from-state requires --pipeline-start-from")
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Add --pipeline-start-from or remove --pipeline-from-state", "robot-pipeline-run")
+				return
 			}
 			opts := pipeline.PipelineRunOptions{
 				WorkflowFile:  robotPipelineRun,
@@ -1069,55 +1113,58 @@ Shell Integration:
 				FromState:     robotPipelineFromState,
 			}
 			exitCode := pipeline.PrintPipelineRun(opts)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotPipelineStatus != "" {
 			exitCode := pipeline.PrintPipelineStatus(robotPipelineStatus)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotPipelineList {
 			exitCode := pipeline.PrintPipelineList()
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotPipelineCancel != "" {
 			exitCode := pipeline.PrintPipelineCancel(robotPipelineCancel)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotTail != "" {
 			session, err := resolveRobotLiveSession(robotTail)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-tail")
+				return
 			}
-			// Parse pane filter
-			var paneFilter []string
-			if robotPanes != "" {
-				paneFilter = strings.Split(robotPanes, ",")
+			paneFilter, err := robot.ParsePaneSelectorsArg(robotPanes)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-tail")
+				return
 			}
 			if err := robot.PrintTail(session, robotLines, paneFilter); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotWatchBead != "" {
 			session, err := resolveRobotLiveSession(robotWatchBead)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-watch-bead")
+				return
 			}
 			panes, err := robot.ParsePanesArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(2)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-watch-bead")
+				return
 			}
 
 			interval := 30 * time.Second
 			if strings.TrimSpace(robotMonitorInterval) != "" {
 				interval, err = util.ParseDurationWithDefault(robotMonitorInterval, time.Millisecond, "interval")
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --interval: %v\n", err)
-					os.Exit(2)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-watch-bead")
+					return
 				}
 			}
 
@@ -1134,16 +1181,15 @@ Shell Integration:
 				Interval:    interval,
 			}
 			if err := robot.PrintWatchBead(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotErrors != "" {
 			session, err := resolveRobotLiveSession(robotErrors)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-errors")
+				return
 			}
 			// Parse pane filter
 			var paneFilter []string
@@ -1167,26 +1213,25 @@ Shell Integration:
 				AgentType: agentType,
 			}
 			if err := robot.PrintErrors(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotIsWorking != "" {
 			session, err := resolveRobotLiveSession(robotIsWorking)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-is-working")
+				return
 			}
 			// Parse pane filter
-			panes, err := robot.ParsePanesArg(robotPanes)
+			paneSelectors, err := robot.ParsePaneSelectorsArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-is-working")
+				return
 			}
 			opts := robot.IsWorkingOptions{
 				Session:       session,
-				Panes:         panes,
+				PaneSelectors: paneSelectors,
 				LinesCaptured: robotIsWorkingLines(cmd),
 				Verbose:       robotIsWorkingVerbose,
 				Semantic:      robotSemantic,
@@ -1194,55 +1239,55 @@ Shell Integration:
 			if robotSemantic {
 				win, werr := resolveSemanticWindow(robotSemanticWindow)
 				if werr != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --semantic-window: %v\n", werr)
-					os.Exit(3)
+					failRobotCommand(werr, robot.ErrCodeInvalidFlag, "Use a valid semantic sampling window", "robot-is-working")
+					return
 				}
 				opts.SemanticWindow = win
 			}
 			if err := robot.PrintIsWorking(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotAgentHealth != "" {
 			session, err := resolveRobotLiveSession(robotAgentHealth)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-agent-health")
+				return
 			}
 			// Parse pane filter
-			panes, err := robot.ParsePanesArg(robotPanes)
+			paneSelectors, err := robot.ParsePaneSelectorsArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-agent-health")
+				return
 			}
 			opts := robot.AgentHealthOptions{
 				Session:       session,
-				Panes:         panes,
+				PaneSelectors: paneSelectors,
 				LinesCaptured: robotAgentHealthLines(cmd),
 				IncludeCaut:   !robotAgentHealthNoCaut,
 				Verbose:       resolveRobotAgentHealthVerbose(cmd),
 			}
 			// PrintAgentHealth emits the JSON envelope and returns the process
 			// exit code; a success:false result must exit nonzero (ntm#207).
-			os.Exit(robot.PrintAgentHealth(opts))
+			recordLegacyRobotExit(robot.PrintAgentHealth(opts))
+			return
 		}
 		if robotSmartRestart != "" {
 			session, err := resolveRobotLiveSession(robotSmartRestart)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-smart-restart")
+				return
 			}
 			// Parse pane filter
-			panes, err := robot.ParsePanesArg(robotPanes)
+			paneSelectors, err := robot.ParsePaneSelectorsArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-smart-restart")
+				return
 			}
 			opts := robot.SmartRestartOptions{
 				Session:       session,
-				Panes:         panes,
+				PaneSelectors: paneSelectors,
 				Force:         robotSmartRestartForce,
 				DryRun:        resolveRobotSmartRestartDryRun(cmd),
 				Prompt:        robotSmartRestartPrompt,
@@ -1252,49 +1297,48 @@ Shell Integration:
 				HardKillOnly:  robotSmartRestartHardKillOnly,
 			}
 			if err := robot.PrintSmartRestart(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotMonitor != "" {
 			session, err := resolveRobotLiveSession(robotMonitor)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-monitor")
+				return
 			}
 			// Parse pane filter
 			panes, err := robot.ParsePanesArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-monitor")
+				return
 			}
 			// Parse interval
 			interval, err := robot.ParseIntervalArg(robotMonitorInterval)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-monitor")
+				return
 			}
 			// Parse thresholds
 			warnThresh, err := robot.ParseThresholdArg(robotMonitorWarn, 25.0)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a numeric percentage", "robot-monitor")
+				return
 			}
 			critThresh, err := robot.ParseThresholdArg(robotMonitorCrit, 15.0)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a numeric percentage", "robot-monitor")
+				return
 			}
 			infoThresh, err := robot.ParseThresholdArg(robotMonitorInfo, 40.0)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a numeric percentage", "robot-monitor")
+				return
 			}
 			alertThresh, err := robot.ParseThresholdArg(robotMonitorAlert, 80.0)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a numeric percentage", "robot-monitor")
+				return
 			}
 			config := robot.MonitorConfig{
 				Session:        session,
@@ -1309,16 +1353,15 @@ Shell Integration:
 				LinesCaptured:  robotMonitorLines(cmd),
 			}
 			if err := robot.PrintMonitor(config); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSupportBundle != "" || cmd.Flags().Changed("robot-support-bundle") {
 			session, err := resolveOptionalRobotLiveSession(robotSupportBundle)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-support-bundle")
+				return
 			}
 			opts := robot.SupportBundleOptions{
 				Session:      session,
@@ -1333,34 +1376,45 @@ Shell Integration:
 				NTMVersion:   Version,
 			}
 			if err := robot.PrintSupportBundle(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSend != "" {
+			singularPane := ""
+			if cmd.Flags().Changed("pane") {
+				singularPane = strings.TrimSpace(robotHistoryPane)
+				if singularPane == "" {
+					failRobotCommand(errors.New("--pane requires one N, W.P, or %N selector with --robot-send"), robot.ErrCodeInvalidFlag, "Use --pane=2, --pane=1.0, or --pane=%3", "robot-send")
+					return
+				}
+			}
+			if singularPane != "" && strings.TrimSpace(robotPanes) != "" {
+				failRobotCommand(errors.New("--pane and --panes are mutually exclusive with --robot-send"), robot.ErrCodeInvalidFlag, "Use --pane for exactly one physical pane or --panes for a set", "robot-send")
+				return
+			}
 			session, err := resolveRobotLiveSession(robotSend)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-send")
+				return
 			}
 			// Load message from --msg or --msg-file
 			msg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Provide a readable non-empty --msg or --msg-file", "robot-send")
+				return
 			}
 			robotSendMsg = msg
 
 			// Validate message is provided
 			if robotSendMsg == "" {
-				fmt.Fprintf(os.Stderr, "Error: --msg or --msg-file is required with --robot-send\n")
-				os.Exit(1)
+				failRobotCommand(errors.New("--msg or --msg-file is required with --robot-send"), robot.ErrCodeInvalidFlag, "Provide --msg or --msg-file", "robot-send")
+				return
 			}
-			// Parse pane filter
-			var paneFilter []string
-			if robotPanes != "" {
-				paneFilter = strings.Split(robotPanes, ",")
+			paneSelectors, err := robot.ParsePaneSelectorsArg(robotPanes)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-send")
+				return
 			}
 			// Parse exclude list
 			var excludeList []string
@@ -1388,16 +1442,16 @@ Shell Integration:
 				}
 				ackTimeout, err := util.ParseDurationWithDefault(ackTimeoutStr, time.Millisecond, "timeout")
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --timeout/--ack-timeout: %v\n", err)
-					os.Exit(1)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-send")
+					return
 				}
 
 				ackPollMs := robotAckPoll
 				if cmd.Flags().Changed("poll") {
 					pollDur, err := util.ParseDurationWithDefault(robotWaitPoll, time.Millisecond, "poll")
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error: invalid --poll/--ack-poll: %v\n", err)
-						os.Exit(1)
+						failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 1s or 500ms", "robot-send")
+						return
 					}
 					ackPollMs = int(pollDur.Milliseconds())
 				}
@@ -1406,7 +1460,8 @@ Shell Integration:
 						Session:    session,
 						Message:    robotSendMsg,
 						All:        robotSendAll,
-						Panes:      paneFilter,
+						Pane:       singularPane,
+						Panes:      paneSelectors,
 						AgentTypes: agentTypes,
 						Exclude:    excludeList,
 						DelayMs:    robotSendDelay,
@@ -1420,8 +1475,7 @@ Shell Integration:
 					opts.Redaction = cfg.Redaction.ToRedactionLibConfig()
 				}
 				if err := robot.PrintSendAndAck(opts); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					recordRobotProcessExit(err)
 				}
 				return
 			}
@@ -1430,7 +1484,8 @@ Shell Integration:
 				Session:    session,
 				Message:    robotSendMsg,
 				All:        robotSendAll,
-				Panes:      paneFilter,
+				Pane:       singularPane,
+				Panes:      paneSelectors,
 				AgentTypes: agentTypes,
 				Exclude:    excludeList,
 				DelayMs:    robotSendDelay,
@@ -1441,43 +1496,42 @@ Shell Integration:
 				opts.Redaction = cfg.Redaction.ToRedactionLibConfig()
 			}
 			if err := robot.PrintSend(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotHealth != "" {
 			session, err := resolveRobotLiveSession(robotHealth)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health")
+				return
 			}
 			if err := robot.PrintSessionHealth(session); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotHealthOAuth != "" {
 			session, err := resolveRobotLiveSession(robotHealthOAuth)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health-oauth")
+				return
 			}
 			// PrintHealthOAuth emits the JSON envelope and returns the process
 			// exit code; a success:false result must exit nonzero (ntm#207).
-			os.Exit(robot.PrintHealthOAuth(session))
+			recordLegacyRobotExit(robot.PrintHealthOAuth(session))
+			return
 		}
 		if robotHealthRestartStuck != "" {
 			session, err := resolveRobotLiveSession(robotHealthRestartStuck)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-health-restart-stuck")
+				return
 			}
 			threshold, err := robot.ParseStuckThreshold(robotStuckThreshold)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a valid stuck-duration threshold", "robot-health-restart-stuck")
+				return
 			}
 			opts := robot.AutoRestartStuckOptions{
 				Session:   session,
@@ -1485,24 +1539,23 @@ Shell Integration:
 				DryRun:    robotDryRunEffective,
 			}
 			if err := robot.PrintAutoRestartStuck(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLogs != "" {
 			session, err := resolveRobotLiveSession(robotLogs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-logs")
+				return
 			}
 			var panes []int
 			if robotLogsPanes != "" {
 				var err error
 				panes, err = robot.ParsePanesArg(robotLogsPanes)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-logs")
+					return
 				}
 			}
 			opts := robot.LogsOptions{
@@ -1511,21 +1564,19 @@ Shell Integration:
 				Limit:   robotLogsLimit,
 			}
 			if err := robot.PrintLogs(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotDiagnose != "" {
 			session, err := resolveRobotLiveSession(robotDiagnose)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-diagnose")
+				return
 			}
 			if robotDiagnoseBrief {
 				if err := robot.PrintDiagnoseBrief(cmd.Context(), session); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					recordRobotProcessExit(err)
 				}
 			} else {
 				opts := robot.DiagnoseOptions{
@@ -1535,44 +1586,42 @@ Shell Integration:
 					Brief:   robotDiagnoseBrief,
 				}
 				if err := robot.PrintDiagnose(cmd.Context(), opts); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					recordRobotProcessExit(err)
 				}
 			}
 			return
 		}
 		if robotRecipes {
 			if err := robot.PrintRecipes(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSchema != "" {
 			if err := robot.PrintSchema(robotSchema); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
+				return
 			}
 			return
 		}
 		if robotAck != "" {
 			session, err := resolveRobotLiveSession(robotAck)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-ack")
+				return
 			}
 			// Load message from --msg or --msg-file (reuse logic from robot-send)
 			msg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Provide a readable non-empty --msg or --msg-file", "robot-ack")
+				return
 			}
 			robotSendMsg = msg
 
-			// Parse pane filter
-			var paneFilter []string
-			if robotPanes != "" {
-				paneFilter = strings.Split(robotPanes, ",")
+			paneSelectors, err := robot.ParsePaneSelectorsArg(robotPanes)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-ack")
+				return
 			}
 			// Canonical modifiers for ack behavior are --timeout and --poll.
 			// --ack-timeout/--ack-poll remain as deprecated aliases for backward compatibility.
@@ -1582,37 +1631,36 @@ Shell Integration:
 			}
 			ackTimeout, err := util.ParseDurationWithDefault(ackTimeoutStr, time.Millisecond, "timeout")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --timeout/--ack-timeout: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-ack")
+				return
 			}
 
 			ackPollMs := robotAckPoll
 			if cmd.Flags().Changed("poll") {
 				pollDur, err := util.ParseDurationWithDefault(robotWaitPoll, time.Millisecond, "poll")
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --poll/--ack-poll: %v\n", err)
-					os.Exit(1)
+					failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 1s or 500ms", "robot-ack")
+					return
 				}
 				ackPollMs = int(pollDur.Milliseconds())
 			}
 			opts := robot.AckOptions{
 				Session:   session,
 				Message:   robotSendMsg, // Reuse --msg flag for echo detection
-				Panes:     paneFilter,
+				Panes:     paneSelectors,
 				TimeoutMs: int(ackTimeout.Milliseconds()),
 				PollMs:    ackPollMs,
 			}
 			if err := robot.PrintAck(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotAssign != "" {
 			session, err := resolveRobotLiveSession(robotAssign)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-assign")
+				return
 			}
 			var beads []string
 			if robotAssignBeads != "" {
@@ -1624,24 +1672,25 @@ Shell Integration:
 				Strategy: robotAssignStrategy,
 			}
 			if err := robot.PrintAssign(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotBulkAssign != "" {
 			session, err := resolveRobotLiveSession(robotBulkAssign)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-bulk-assign")
+				return
 			}
-			var skipPanes []int
-			if robotBulkAssignSkip != "" {
-				for _, p := range strings.Split(robotBulkAssignSkip, ",") {
-					if idx, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
-						skipPanes = append(skipPanes, idx)
-					}
-				}
+			skipSelectors, err := robot.ParsePaneSelectorsArg(robotBulkAssignSkip)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated N, W.P, or %N pane selectors", "robot-bulk-assign")
+				return
+			}
+			reservationPaths, err := parseRobotReservationPathsArg(robotReservationPaths)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated non-empty project-relative path globs", "robot-bulk-assign")
+				return
 			}
 			opts := robot.BulkAssignOptions{
 				Session:            session,
@@ -1649,8 +1698,10 @@ Shell Integration:
 				Strategy:           robotBulkAssignStrategy,
 				AllocationJSON:     robotBulkAssignAlloc,
 				DryRun:             robotDryRunEffective,
-				SkipPanes:          skipPanes,
+				SkipPaneSelectors:  skipSelectors,
 				PromptTemplatePath: robotBulkAssignTemplate,
+				RequireReservation: robotRequireReservation,
+				ReservationPaths:   reservationPaths,
 			}
 			// Project/user-level default dispatch template (#153). A per-invocation
 			// --bulk-assign-template still wins; these only fill the gap the built-in
@@ -1660,8 +1711,7 @@ Shell Integration:
 				opts.DefaultTemplatePath = cfg.Assign.PromptTemplateFile
 			}
 			if err := robot.PrintBulkAssign(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1669,30 +1719,36 @@ Shell Integration:
 			// Parse spawn timeout duration (expects seconds)
 			spawnTimeout, err := util.ParseDurationWithDefault(resolveRobotSpawnTimeout(cmd), time.Second, "timeout")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --timeout/--spawn-timeout/--ready-timeout: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-spawn")
+				return
+			}
+			reservationPaths, err := parseRobotReservationPathsArg(robotReservationPaths)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated non-empty project-relative path globs", "robot-spawn")
+				return
 			}
 			opts := robot.SpawnOptions{
-				Session:        robotSpawn,
-				Label:          robotSpawnLabel,
-				CCCount:        robotSpawnCC,
-				CodCount:       robotSpawnCod,
-				GmiCount:       robotSpawnGmi,
-				AgyCount:       robotSpawnAgy,
-				Preset:         robotSpawnPreset,
-				NoUserPane:     robotSpawnNoUser,
-				WorkingDir:     robotSpawnDir,
-				WaitReady:      robotSpawnWait,
-				ReadyTimeout:   int(spawnTimeout.Seconds()),
-				DryRun:         robotDryRunEffective,
-				Safety:         robotSpawnSafety,
-				AssignWork:     robotSpawnAssignWork,
-				AssignStrategy: resolveRobotSpawnStrategy(cmd),
-				CustomNames:    robot.ParseCustomNames(robotSpawnNames),
+				Session:            robotSpawn,
+				Label:              robotSpawnLabel,
+				CCCount:            robotSpawnCC,
+				CodCount:           robotSpawnCod,
+				GmiCount:           robotSpawnGmi,
+				AgyCount:           robotSpawnAgy,
+				Preset:             robotSpawnPreset,
+				NoUserPane:         robotSpawnNoUser,
+				WorkingDir:         robotSpawnDir,
+				WaitReady:          robotSpawnWait,
+				ReadyTimeout:       int(spawnTimeout.Seconds()),
+				DryRun:             robotDryRunEffective,
+				Safety:             robotSpawnSafety,
+				AssignWork:         robotSpawnAssignWork,
+				AssignStrategy:     resolveRobotSpawnStrategy(cmd),
+				CustomNames:        robot.ParseCustomNames(robotSpawnNames),
+				RequireReservation: robotRequireReservation,
+				ReservationPaths:   reservationPaths,
 			}
 			if err := robot.PrintSpawn(opts, cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1701,7 +1757,8 @@ Shell Integration:
 			// PrintAgentNames emits the JSON envelope and returns the process
 			// exit code; success:false (e.g. SESSION_NOT_FOUND) must exit
 			// nonzero per the robot contract (ntm#215).
-			os.Exit(robot.PrintAgentNames(robotAgentNames, customNames))
+			recordLegacyRobotExit(robot.PrintAgentNames(robotAgentNames, customNames))
+			return
 		}
 		if robotControllerSpawn != "" {
 			opts := ControllerInput{
@@ -1712,23 +1769,19 @@ Shell Integration:
 			}
 			resp, err := buildControllerResponse(opts)
 			if err != nil {
-				errResp := robot.NewErrorResponse(err, robot.ErrCodeSessionNotFound, err.Error())
-				if jsonErr := output.PrintJSON(errResp); jsonErr != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				}
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-controller-spawn")
+				return
 			}
 			if err := output.PrintJSON(resp); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotInterrupt != "" {
 			session, err := resolveRobotLiveSession(robotInterrupt)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-interrupt")
+				return
 			}
 			// Parse pane filter (reuse --panes flag)
 			var paneFilter []string
@@ -1738,8 +1791,8 @@ Shell Integration:
 			// Parse interrupt timeout duration
 			interruptTimeout, err := util.ParseDurationWithDefault(resolveRobotInterruptTimeout(cmd), time.Millisecond, "timeout")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --timeout/--interrupt-timeout: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration such as 30s or 500ms", "robot-interrupt")
+				return
 			}
 			opts := robot.InterruptOptions{
 				Session:   session,
@@ -1752,16 +1805,15 @@ Shell Integration:
 				DryRun:    robotDryRunEffective,
 			}
 			if err := robot.PrintInterrupt(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotRestartPane != "" {
 			session, err := resolveRobotLiveSession(robotRestartPane)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-restart-pane")
+				return
 			}
 			// Parse pane filter (reuse --panes flag)
 			var paneFilter []string
@@ -1778,28 +1830,25 @@ Shell Integration:
 				Prompt:  robotRestartPanePrompt,
 			}
 			if err := robot.PrintRestartPane(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotProbe != "" {
 			session, err := resolveRobotLiveSession(robotProbe)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-probe")
+				return
 			}
 			panes, err := robot.ParsePanesArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(3)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-probe")
+				return
 			}
 			flags, err := robot.ParseProbeFlags(robotProbeMethod, robotProbeTimeout, robotProbeAggressive)
 			if err != nil {
-				if err := robot.PrintProbeFlagError(err); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				}
-				os.Exit(1)
+				recordRobotProcessExit(robot.PrintProbeFlagError(err))
+				return
 			}
 			opts := robot.ProbeSessionOptions{
 				Session: session,
@@ -1807,20 +1856,20 @@ Shell Integration:
 				Flags:   *flags,
 			}
 			exitCode := robot.PrintProbeSession(opts)
-			os.Exit(exitCode)
+			recordLegacyRobotExit(exitCode)
+			return
 		}
 		if robotTerse {
 			if err := robot.PrintTerse(cfg); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotMarkdown {
 			session, err := resolveOptionalRobotSessionFilter(robotMarkdownSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-markdown")
+				return
 			}
 			opts := robot.DefaultMarkdownOptions()
 			opts.Compact = robotMarkdownCompact
@@ -1845,24 +1894,22 @@ Shell Integration:
 				opts.MaxAlerts = robotMarkdownMaxAlerts
 			}
 			if err := robot.PrintMarkdown(cfg, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotSave != "" {
 			session, err := resolveRobotLiveSession(robotSave)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-save")
+				return
 			}
 			opts := robot.SaveOptions{
 				Session:    session,
 				OutputFile: robotSaveOutput,
 			}
 			if err := robot.PrintSave(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1872,8 +1919,7 @@ Shell Integration:
 				DryRun:    robotDryRunEffective,
 			}
 			if err := robot.PrintRestore(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1882,8 +1928,8 @@ Shell Integration:
 		if robotFiles != "" {
 			session, err := resolveOptionalRobotSessionFilter(robotFiles)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-files")
+				return
 			}
 			opts := robot.FilesOptions{
 				Session:    session,
@@ -1891,16 +1937,15 @@ Shell Integration:
 				Limit:      robotFilesLimit,
 			}
 			if err := robot.PrintFiles(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotInspectPane != "" {
 			session, err := resolveRobotLiveSession(robotInspectPane)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-inspect-pane")
+				return
 			}
 			opts := robot.InspectPaneOptions{
 				Session:     session,
@@ -1909,23 +1954,21 @@ Shell Integration:
 				IncludeCode: robotInspectCode,
 			}
 			if err := robot.PrintInspectPane(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotInspectSession != "" {
 			session, err := resolveRobotLiveSession(robotInspectSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-inspect-session")
+				return
 			}
 			opts := robot.InspectSessionOptions{
 				Session: session,
 			}
 			if err := robot.PrintInspectSession(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1934,8 +1977,7 @@ Shell Integration:
 				AgentID: robotInspectAgent,
 			}
 			if err := robot.PrintInspectAgent(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1944,8 +1986,7 @@ Shell Integration:
 				BeadID: robotInspectWork,
 			}
 			if err := robot.PrintInspectWork(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1954,8 +1995,7 @@ Shell Integration:
 				AgentName: robotInspectCoord,
 			}
 			if err := robot.PrintInspectCoordination(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1964,8 +2004,7 @@ Shell Integration:
 				QuotaID: robotInspectQuota,
 			}
 			if err := robot.PrintInspectQuota(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -1974,22 +2013,15 @@ Shell Integration:
 				IncidentID: robotInspectIncident,
 			}
 			if err := robot.PrintInspectIncident(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotContextInject != "" {
 			session, projectDir, err := resolveRobotSessionProjectScope(robotContextInject)
 			if err != nil {
-				output.PrintJSON(ContextInjectResult{
-					Success:       false,
-					Session:       robotContextInject,
-					Error:         err.Error(),
-					InjectedFiles: []string{},
-					PanesInjected: []int{},
-				})
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-context-inject")
+				return
 			}
 			files := defaultContextFiles()
 			if robotContextInjectFiles != "" {
@@ -2000,28 +2032,19 @@ Shell Integration:
 			}
 			content, injected, truncated, err := formatContextInjectContent(projectDir, files, robotContextInjectMax)
 			if err != nil {
-				output.PrintJSON(ContextInjectResult{Success: false, Session: session, Error: err.Error(), InjectedFiles: []string{}, PanesInjected: []int{}})
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use readable project-relative context files", "robot-context-inject")
 				return
 			}
 			var injectedPanes []int
 			if len(injected) > 0 {
 				panes, pErr := tmux.GetPanes(session)
 				if pErr != nil {
-					output.PrintJSON(ContextInjectResult{Success: false, Session: session, Error: fmt.Sprintf("get panes: %s", pErr), InjectedFiles: []string{}, PanesInjected: []int{}})
-					os.Exit(1)
+					failRobotCommand(fmt.Errorf("get panes: %w", pErr), robot.ErrCodeInternalError, "Check tmux session health", "robot-context-inject")
 					return
 				}
 				targets, targetErr := selectContextInjectTargetPanes(panes, robotContextInjectPane, robotContextInjectAll, session)
 				if targetErr != nil {
-					output.PrintJSON(ContextInjectResult{
-						Success:       false,
-						Session:       session,
-						Error:         targetErr.Error(),
-						InjectedFiles: []string{},
-						PanesInjected: []int{},
-					})
-					os.Exit(1)
+					failRobotCommand(targetErr, robot.ErrCodePaneNotFound, "Inspect canonical pane addresses with --robot-is-working", "robot-context-inject")
 					return
 				}
 				if !robotContextInjectDry {
@@ -2052,30 +2075,31 @@ Shell Integration:
 			if result.PanesInjected == nil {
 				result.PanesInjected = []int{}
 			}
-			output.PrintJSON(result)
+			if err := output.PrintJSON(result); err != nil {
+				recordRobotProcessExit(err)
+			}
 			return
 		}
 		if robotMetrics != "" {
 			session, err := resolveRobotLiveSession(robotMetrics)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-metrics")
+				return
 			}
 			opts := robot.MetricsOptions{
 				Session: session,
 				Period:  robotMetricsPeriod,
 			}
 			if err := robot.PrintMetrics(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotReplay != "" {
 			session, err := resolveRobotLiveSession(robotReplay)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-replay")
+				return
 			}
 			opts := robot.ReplayOptions{
 				Session:   session,
@@ -2083,16 +2107,15 @@ Shell Integration:
 				DryRun:    resolveRobotReplayDryRun(cmd),
 			}
 			if err := robot.PrintReplay(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotPaletteInfo {
 			paletteSession, err := resolveOptionalRobotSessionFilter(resolveRobotPaletteSession(cmd))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-palette")
+				return
 			}
 			opts := robot.PaletteOptions{
 				Session:     paletteSession,
@@ -2100,16 +2123,15 @@ Shell Integration:
 				SearchQuery: robotPaletteSearch,
 			}
 			if err := robot.PrintPalette(cfg, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotDismissAlert != "" {
 			dismissSession, err := resolveOptionalRobotSessionFilter(robotDismissSession)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-dismiss-alert")
+				return
 			}
 			dismissAlertID := robotDismissAlert
 			if dismissAlertID == "__present__" {
@@ -2121,8 +2143,7 @@ Shell Integration:
 				DismissAll: robotDismissAll,
 			}
 			if err := robot.PrintDismissAlert(cfg, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2131,21 +2152,20 @@ Shell Integration:
 		if robotDiff != "" {
 			session, err := resolveRobotLiveSession(robotDiff)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-diff")
+				return
 			}
 			since, err := parseRobotSinceWindow(resolveRobotDiffSince(cmd), time.Minute, "since")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --since/--diff-since: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration or supported timestamp", "robot-diff")
+				return
 			}
 			opts := robot.DiffOptions{
 				Session: session,
 				Since:   since,
 			}
 			if err := robot.PrintDiff(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2154,8 +2174,8 @@ Shell Integration:
 		if robotAlerts {
 			session, err := resolveOptionalRobotSessionFilter(resolveRobotAlertsSession(cmd))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-alerts")
+				return
 			}
 			opts := robot.TUIAlertsOptions{
 				Session:  session,
@@ -2163,8 +2183,7 @@ Shell Integration:
 				Type:     robotAlertsType,
 			}
 			if err := robot.PrintAlertsTUI(cfg, opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2179,8 +2198,7 @@ Shell Integration:
 				Limit:    robotBeadsLimit,
 			}
 			if err := robot.PrintBeadsList(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2192,8 +2210,7 @@ Shell Integration:
 				Assignee: beadAssignee,
 			}
 			if err := robot.PrintBeadClaim(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2214,8 +2231,7 @@ Shell Integration:
 				DependsOn:   dependsOn,
 			}
 			if err := robot.PrintBeadCreate(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2224,8 +2240,7 @@ Shell Integration:
 				BeadID: robotBeadShow,
 			}
 			if err := robot.PrintBeadShow(opts); err != nil {
-				// RobotError already outputs JSON-formatted error to stdout
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2235,8 +2250,7 @@ Shell Integration:
 				Reason: beadCloseReason,
 			}
 			if err := robot.PrintBeadClose(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2245,21 +2259,20 @@ Shell Integration:
 		if robotSummary != "" {
 			session, err := resolveRobotLiveSession(robotSummary)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-summary")
+				return
 			}
 			since, err := parseRobotSinceWindow(resolveRobotSummarySince(cmd), time.Minute, "since")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --since/--summary-since: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a duration or supported timestamp", "robot-summary")
+				return
 			}
 			opts := robot.SummaryOptions{
 				Session: session,
 				Since:   since,
 			}
 			if err := robot.PrintSummary(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2270,8 +2283,7 @@ Shell Integration:
 				Provider: resolveRobotProvider(cmd, "account-status-provider", robotAccountStatusProvider),
 			}
 			if err := robot.PrintAccountStatus(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2282,8 +2294,7 @@ Shell Integration:
 				Provider: resolveRobotProvider(cmd, "accounts-list-provider", robotAccountsListProvider),
 			}
 			if err := robot.PrintAccountsList(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2295,8 +2306,7 @@ Shell Integration:
 				opts.Pane = robotHistoryPane
 			}
 			if err := robot.PrintSwitchAccount(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2304,8 +2314,7 @@ Shell Integration:
 		// Robot-dcg-status handler for DCG status
 		if robotDCGStatus {
 			if err := robot.PrintDCGStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2317,8 +2326,7 @@ Shell Integration:
 				CWD:     robotDCGCwd,
 			}
 			if err := robot.PrintDCGCheckWithOptions(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2328,8 +2336,7 @@ Shell Integration:
 				Steps:   robotSafetySteps,
 			}
 			if err := robot.PrintSafetySimulation(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2337,8 +2344,7 @@ Shell Integration:
 		// Robot-quota-status handler for caut quota status
 		if robotQuotaStatus {
 			if err := robot.PrintQuotaStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2346,8 +2352,7 @@ Shell Integration:
 		// Robot-quota-check handler for caut quota check (single provider)
 		if robotQuotaCheck {
 			if err := robot.PrintQuotaCheck(resolveRobotProvider(cmd, "quota-check-provider", robotQuotaCheckProvider)); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2355,8 +2360,7 @@ Shell Integration:
 		// Robot-env handler for environment info (bd-18gwh)
 		if robotEnv != "" {
 			if err := robot.PrintEnv(robotEnv); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2365,16 +2369,15 @@ Shell Integration:
 		if robotRanoStats {
 			panes, err := robot.ParsePanesArg(robotPanes)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --panes: %v\n", err)
-				os.Exit(1)
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-rano-stats")
+				return
 			}
 			opts := robot.RanoStatsOptions{
 				Panes:  panes,
 				Window: robotRanoWindow,
 			}
 			if err := robot.PrintRanoStats(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2382,16 +2385,14 @@ Shell Integration:
 		// Robot-rch-status handler for RCH status
 		if robotRCHStatus {
 			if err := robot.PrintRCHStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
 		// Robot-proxy-status handler for rust_proxy status
 		if robotProxyStatus {
 			if err := robot.PrintProxyStatus(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2402,8 +2403,7 @@ Shell Integration:
 				Worker: robotRCHWorker,
 			}
 			if err := robot.PrintRCHWorkers(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2424,8 +2424,7 @@ Shell Integration:
 				Until:         mailUntil, // Date filter
 			}
 			if err := robot.PrintMailCheck(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				recordRobotProcessExit(err)
 			}
 			return
 		}
@@ -2453,6 +2452,8 @@ Shell Integration:
 
 func Execute() error {
 	defer closeRobotPersistence()
+	robotProcessExit = nil
+	robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:])
 	// Install a signal-cancellable context at the root so handlers using
 	// `cmd.Context()` (diagnose, swarm, openapi, support_bundle, …) see
 	// cancellation when the user presses Ctrl-C. Without this, `cmd.Context()`
@@ -2465,9 +2466,24 @@ func Execute() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := rootCmd.ExecuteContext(ctx)
+	if err == nil && robotProcessExit != nil {
+		err = robotProcessExit
+	}
 	logCommandAuditEnd(err)
 	_ = audit.CloseAll()
 	if err != nil {
+		var processExit *robot.ProcessExitError
+		if errors.As(err, &processExit) {
+			if processExit.JSONWritten() {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			return err
+		}
+		if robotInvocation {
+			code, hint := classifyRobotExecuteError(err)
+			return robot.EncodeErrorJSON(err, code, hint, robotCommand)
+		}
 		// errJSONFailure means the command already wrote its failure envelope
 		// to stdout; the only remaining job is to exit non-zero. Don't decorate
 		// stderr — the JSON is the contract.
@@ -2737,6 +2753,10 @@ var (
 	robotStatus                bool
 	robotVersion               bool
 	robotCapabilities          bool
+	robotCapabilitiesCommand   string
+	robotCapabilitiesCategory  string
+	robotCapabilitiesSearch    string
+	robotCapabilitiesCompact   bool
 	robotDocs                  string // --robot-docs topic
 	robotPlan                  bool
 	robotSnapshot              bool   // unified state query
@@ -2821,6 +2841,8 @@ var (
 	robotBulkAssignStrategy string // assignment strategy: impact, ready, stale, balanced
 	robotBulkAssignSkip     string // comma-separated panes to skip
 	robotBulkAssignTemplate string // prompt template file path
+	robotRequireReservation bool   // fail closed unless assignment reservations succeed
+	robotReservationPaths   string // comma-separated reservation path globs
 
 	// Robot-health flag
 	robotHealth             string // session health or project health (empty = project)
@@ -3238,6 +3260,8 @@ var (
 )
 
 func init() {
+	robot.MustRegisterSchemaCommand("default_prompts", DefaultPromptsOutput{})
+
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/ntm/config.toml)")
 
 	// Global JSON output flag - applies to all commands
@@ -3259,6 +3283,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotStatus, "robot-status", false, "Get tmux sessions, panes, agent states. Start here. Example: ntm --robot-status")
 	rootCmd.Flags().BoolVar(&robotVersion, "robot-version", false, "Get ntm version, commit, build info (JSON). Example: ntm --robot-version")
 	rootCmd.Flags().BoolVar(&robotCapabilities, "robot-capabilities", false, "Get all available robot commands with parameters and descriptions (JSON). Machine-discoverable API")
+	rootCmd.Flags().StringVar(&robotCapabilitiesCommand, "capability-command", "", "Filter --robot-capabilities to one exact command name or flag")
+	rootCmd.Flags().StringVar(&robotCapabilitiesCategory, "capability-category", "", "Filter --robot-capabilities to one exact category")
+	rootCmd.Flags().StringVar(&robotCapabilitiesSearch, "capability-search", "", "Search --robot-capabilities metadata for a case-insensitive query")
+	rootCmd.Flags().BoolVar(&robotCapabilitiesCompact, "capability-compact", false, "Return a token-efficient --robot-capabilities command catalog")
 	rootCmd.Flags().StringVar(&robotDocs, "robot-docs", "", "Get documentation for a topic (JSON). Topics: quickstart, commands, examples, exit-codes. Example: ntm --robot-docs=quickstart")
 	rootCmd.Flags().BoolVar(&robotPlan, "robot-plan", false, "Get bv execution plan with parallelizable tracks (JSON). Example: ntm --robot-plan")
 	rootCmd.Flags().BoolVar(&robotSnapshot, "robot-snapshot", false, "Unified state: sessions + beads + alerts + mail. Use --since for delta. Example: ntm --robot-snapshot")
@@ -3287,7 +3315,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotErrors, "robot-errors", "", "Filter pane output to show only errors. Required: SESSION. Example: ntm --robot-errors=myproject --lines=100")
 	rootCmd.Flags().StringVar(&robotErrorsSince, "errors-since", "", "Filter to errors from last duration. Optional with --robot-errors. Example: --errors-since=5m")
 	rootCmd.Flags().IntVar(&robotLines, "lines", 20, "Lines to capture per pane. Optional with --robot-tail, --robot-errors, --robot-watch-bead, --robot-is-working, --robot-agent-health, --robot-smart-restart, and --robot-monitor. Example: --lines=100")
-	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter to specific pane indices. Optional with --robot-tail, --robot-watch-bead, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-wait, --robot-is-working, --robot-agent-health, --robot-smart-restart, --robot-restart-pane, and --robot-monitor. Example: --panes=1,2")
+	rootCmd.Flags().StringVar(&robotPanes, "panes", "", "Filter with comma-separated N, W.P, or %N pane selectors. Optional with --robot-tail, --robot-watch-bead, --robot-errors, --robot-send, --robot-ack, --robot-interrupt, --robot-wait, --robot-is-working, --robot-agent-health, --robot-smart-restart, --robot-restart-pane, and --robot-monitor. Example: --panes=1,2.0,%7")
 	rootCmd.Flags().StringVar(&robotIsWorking, "robot-is-working", "", "Check if agents are working. Returns work state with recommendations. Required: SESSION. Example: ntm --robot-is-working=myproject --panes=2,3")
 	rootCmd.Flags().BoolVar(&robotIsWorkingVerbose, "is-working-verbose", false, "Include raw sample output in --robot-is-working response. Example: --is-working-verbose")
 	rootCmd.Flags().BoolVar(&robotSemantic, "semantic", false, "Add an optional ground-truth semantic_progress field to --robot-is-working (token-attributed git commits / bead claims). Advisory only; never flips is_working. Off by default (no git/br calls). Example: ntm --robot-is-working=myproject --semantic")
@@ -3398,8 +3426,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotBulkAssignFromBV, "from-bv", false, "Use bv triage for bead selection. Use with --robot-bulk-assign")
 	rootCmd.Flags().StringVar(&robotBulkAssignAlloc, "allocation", "", "Explicit pane->bead allocation JSON. Alternative to --from-bv. Example: --allocation='{\"2\":\"bd-abc\"}'")
 	rootCmd.Flags().StringVar(&robotBulkAssignStrategy, "bulk-strategy", "impact", "Bulk assignment strategy: impact (default), ready, stale, balanced. Use with --from-bv")
-	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip-panes", "", "Comma-separated pane indices to skip. Use with --robot-bulk-assign. Example: --skip-panes=0,3")
+	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip-panes", "", "Comma-separated N, W.P, or %N pane selectors to skip. Use with --robot-bulk-assign")
 	rootCmd.Flags().StringVar(&robotBulkAssignTemplate, "prompt-template", "", "Custom prompt template file. Use with --robot-bulk-assign")
+	rootCmd.Flags().BoolVar(&robotRequireReservation, "require-reservation", false, "Require exact Agent Mail file reservations before bulk/spawn work assignment")
+	rootCmd.Flags().StringVar(&robotReservationPaths, "reservation-paths", "", "Comma-separated project-relative file globs to reserve before bulk/spawn work assignment")
 
 	// Robot-health flag for session/project health summary
 	rootCmd.Flags().StringVar(&robotHealth, "robot-health", "", "Get session or project health (JSON). SESSION for per-agent health, empty for project health. Example: ntm --robot-health=myproject")
@@ -3601,7 +3631,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotWaitUntil, "condition", "idle", "Alias for --wait-until. Same condition set, including attention-feed waits.")
 	rootCmd.Flags().StringVar(&robotWaitTimeout, "wait-timeout", "5m", "Maximum wait time. Optional with --robot-wait. Example: --wait-timeout=2m")
 	rootCmd.Flags().StringVar(&robotWaitPoll, "wait-poll", "2s", "Polling interval. Optional with --robot-wait. Example: --wait-poll=500ms")
-	rootCmd.Flags().StringVar(&robotWaitPanes, "wait-panes", "", "Comma-separated pane indices. Optional with --robot-wait. Example: --wait-panes=1,2")
+	rootCmd.Flags().StringVar(&robotWaitPanes, "wait-panes", "", "Comma-separated N, W.P, or %N pane selectors. Optional with --robot-wait. Example: --wait-panes=1,1.0,%7")
 	rootCmd.Flags().StringVar(&robotWaitType, "wait-type", "", "Deprecated alias for --type. Filter by agent type with --robot-wait. Example: --type=claude")
 	rootCmd.Flags().BoolVar(&robotWaitAny, "wait-any", false, "Wait for ANY agent instead of ALL. Optional with --robot-wait")
 	rootCmd.Flags().BoolVar(&robotWaitOnError, "wait-exit-on-error", false, "Exit immediately if ERROR state detected. Optional with --robot-wait")
@@ -3799,7 +3829,7 @@ func init() {
 
 	// --pane and --last, --stats for history
 	// Note: --type already defined at line 1689 for robotSendType (used by --robot-send)
-	rootCmd.Flags().StringVar(&robotHistoryPane, "pane", "", "Filter by pane ID. Optional with --robot-history")
+	rootCmd.Flags().StringVar(&robotHistoryPane, "pane", "", "Singular N, W.P, or %N pane selector. Optional with --robot-send (exactly one pane) and --robot-history")
 	rootCmd.Flags().IntVar(&robotHistoryLast, "last", 0, "Show last N entries")
 	rootCmd.Flags().BoolVar(&robotHistoryStats, "stats", false, "Show statistics instead of entries")
 
@@ -3853,7 +3883,7 @@ func init() {
 	rootCmd.Flags().IntVar(&robotMarkdownMaxAlerts, "max-alerts", 0, "Max alerts to show")
 
 	// --skip, --template for bulk-assign
-	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip", "", "Pane indices to skip (comma-separated)")
+	rootCmd.Flags().StringVar(&robotBulkAssignSkip, "skip", "", "N, W.P, or %N pane selectors to skip (comma-separated)")
 	rootCmd.Flags().StringVar(&robotBulkAssignTemplate, "template", "", "Custom prompt template file")
 
 	// --vars, --background for pipeline
@@ -4309,6 +4339,27 @@ func resolveRobotSpawnTimeout(cmd *cobra.Command) string {
 
 func resolveRobotSpawnStrategy(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "spawn-assign-strategy", robotSpawnStrategy, "strategy", robotAssignStrategy)
+}
+
+func parseRobotReservationPathsArg(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	paths := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for index, part := range parts {
+		path := strings.TrimSpace(part)
+		if path == "" {
+			return nil, fmt.Errorf("invalid reservation path list %q: empty path at position %d", raw, index+1)
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 func resolveRobotInterruptMessage(cmd *cobra.Command) string {
@@ -4994,18 +5045,18 @@ func GetFormatter() *output.Formatter {
 	return output.New(output.WithJSON(jsonOutput))
 }
 
-// resolveRobotFormat determines the robot output format from CLI flag, env var, config, or default.
-// Priority: --robot-format flag > NTM_ROBOT_FORMAT > NTM_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > config > auto
+// DefaultPromptsOutput is the robot response for --robot-default-prompts.
+type DefaultPromptsOutput struct {
+	Success    bool   `json:"success"`
+	CCDefault  string `json:"cc_default"`
+	CodDefault string `json:"cod_default"`
+	GmiDefault string `json:"gmi_default"`
+	AgyDefault string `json:"agy_default"`
+}
+
 // printDefaultPrompts outputs per-agent-type default prompts as JSON (bd-2ywo).
 func printDefaultPrompts() error {
-	type result struct {
-		Success    bool   `json:"success"`
-		CCDefault  string `json:"cc_default"`
-		CodDefault string `json:"cod_default"`
-		GmiDefault string `json:"gmi_default"`
-		AgyDefault string `json:"agy_default"`
-	}
-	r := result{Success: true}
+	r := DefaultPromptsOutput{Success: true}
 	if cfg != nil {
 		p := cfg.Prompts
 		if v, err := p.ResolveForType("cc"); err == nil {
@@ -5029,7 +5080,9 @@ func printDefaultPrompts() error {
 	return nil
 }
 
-func resolveRobotFormat(cfg *config.Config) {
+// resolveRobotFormat determines the robot output format from CLI flag, env var, config, or default.
+// Priority: --robot-format flag > NTM_ROBOT_FORMAT > NTM_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > config > auto
+func resolveRobotFormat(cfg *config.Config) error {
 	formatStr := robotFormat
 
 	// Fall back to environment variable if flag not set
@@ -5052,14 +5105,14 @@ func resolveRobotFormat(cfg *config.Config) {
 	if formatStr != "" {
 		format, err := robot.ParseRobotFormat(formatStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v, using default (auto)\n", err)
 			robot.SetOutputFormat(robot.FormatAuto)
-			return
+			return err
 		}
 		robot.SetOutputFormat(format)
 	} else {
 		robot.SetOutputFormat(robot.FormatAuto)
 	}
+	return nil
 }
 
 func robotLinesOrDefault(cmd *cobra.Command, fallback int) int {
@@ -5111,7 +5164,7 @@ func robotMonitorLines(cmd *cobra.Command) int {
 
 // resolveRobotVerbosity determines the robot verbosity profile from CLI flag, env var, or config.
 // Priority: --robot-verbosity flag > NTM_ROBOT_VERBOSITY env var > config.robot.verbosity > default
-func resolveRobotVerbosity(cfg *config.Config) {
+func resolveRobotVerbosity(cfg *config.Config) error {
 	verbosityStr := robotVerbosity
 
 	// Fall back to environment variable if flag not set
@@ -5126,32 +5179,33 @@ func resolveRobotVerbosity(cfg *config.Config) {
 
 	if verbosityStr == "" {
 		robot.SetOutputVerbosity(robot.VerbosityDefault)
-		return
+		return nil
 	}
 
 	verbosity, err := robot.ParseRobotVerbosity(verbosityStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v, using default verbosity\n", err)
 		robot.SetOutputVerbosity(robot.VerbosityDefault)
-		return
+		return err
 	}
 	robot.SetOutputVerbosity(verbosity)
+	return nil
 }
 
 // applyRedactionFlagOverrides applies CLI flag overrides to the redaction config.
 // Priority: --allow-secret > --redact > config > default
-func applyRedactionFlagOverrides(cfg *config.Config) {
+func applyRedactionFlagOverrides(cfg *config.Config) error {
 	if cfg == nil {
-		return
+		return nil
 	}
 
+	var overrideErr error
 	// --redact flag overrides config mode
 	if redactMode != "" {
 		switch redactMode {
 		case "off", "warn", "redact", "block":
 			cfg.Redaction.Mode = redactMode
 		default:
-			fmt.Fprintf(os.Stderr, "Warning: invalid --redact value %q, ignoring\n", redactMode)
+			overrideErr = fmt.Errorf("invalid --redact value %q", redactMode)
 		}
 	}
 
@@ -5160,6 +5214,7 @@ func applyRedactionFlagOverrides(cfg *config.Config) {
 	if allowSecret && cfg.Redaction.Mode == "block" {
 		cfg.Redaction.Mode = "warn"
 	}
+	return overrideErr
 }
 
 func applyRobotEnsembleConfigDefaults(cmd *cobra.Command, cfg *config.Config) {

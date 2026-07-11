@@ -99,7 +99,10 @@ func PrintDocs(topic string) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	if err := outputJSON(output); err != nil {
+		return err
+	}
+	return ExitResultForResponse(output.RobotResponse, nil, true)
 }
 
 // getDocsContent returns the content for a specific topic
@@ -147,7 +150,9 @@ This separation enables reliable parsing while providing useful context for debu
 			},
 			{
 				Heading: "Discovery",
-				Body: `Use --robot-capabilities for machine-readable API schema.
+				Body: `Use --robot-capabilities for the registry-backed command and output contract.
+Add --capability-compact for a bounded catalog, --capability-command=NAME for one command, or --capability-category=NAME to scope discovery.
+Use --robot-schema=TYPE when you need the JSON Schema for a concrete response type.
 Use --robot-docs=<topic> for topic-scoped JSON documentation.
 Start with --robot-status to understand current state.`,
 			},
@@ -234,7 +239,8 @@ func getCommandsContent() *DocsContent {
 			},
 			{
 				Heading: "Utilities",
-				Body: `--robot-capabilities: Machine-discoverable API schema
+				Body: `--robot-capabilities: Registry-backed command/output discovery; scope with --capability-command, --capability-category, --capability-search, or --capability-compact
+--robot-schema=TYPE: JSON Schema for one response type (or TYPE=all)
 --robot-docs: Documentation (this command)
 --robot-version: Version and build info
 --robot-help: Human-readable help text
@@ -288,8 +294,14 @@ func getExamplesContent() *DocsContent {
 			{
 				Name:        "send_to_panes",
 				Description: "Send prompt to specific panes",
-				Command:     "ntm --robot-send=proj --msg='Debug issue' --panes=1,2",
-				Notes:       "Use comma-separated pane indices",
+				Command:     "ntm --robot-send=proj --msg='Debug issue' --panes=0.1,%7",
+				Notes:       "Use canonical N, W.P, or %N selectors; W.P and %N name one physical pane",
+			},
+			{
+				Name:        "discover_one_command",
+				Description: "Discover the bounded contract for one robot command",
+				Command:     "ntm --robot-capabilities --capability-command=send --capability-compact",
+				Notes:       "Compact one-command discovery preserves output formats and schema identity while omitting verbose examples and transport metadata",
 			},
 			{
 				Name:        "send_and_track",
@@ -301,7 +313,7 @@ func getExamplesContent() *DocsContent {
 			{
 				Name:        "capture_output",
 				Description: "Capture recent pane output",
-				Command:     "ntm --robot-tail=proj --lines=100 --panes=1,2",
+				Command:     "ntm --robot-tail=proj --lines=100 --panes=0.1,%7",
 				Notes:       "Useful for checking progress",
 			},
 			{
@@ -313,7 +325,7 @@ func getExamplesContent() *DocsContent {
 			{
 				Name:        "activity_filtered",
 				Description: "Inspect activity state for specific panes and agent types",
-				Command:     "ntm --robot-activity=proj --panes=1,2 --activity-type=claude,codex",
+				Command:     "ntm --robot-activity=proj --panes=0.1,%7 --activity-type=claude,codex",
 				Notes:       "Useful when you want a lighter-weight pane classifier than a full diagnose pass",
 			},
 			{
@@ -376,8 +388,8 @@ func getExitCodesContent() *DocsContent {
 		Sections: []DocsSection{
 			{
 				Heading: "Overview",
-				Body: `Robot mode uses standard Unix exit codes with extensions for specific conditions.
-Exit code 0 always indicates success. Non-zero codes indicate various error conditions.
+				Body: `Robot mode uses exactly three process exit codes.
+Exit code 0 indicates success, 1 indicates an error, and 2 indicates unavailable functionality.
 All errors include a JSON response with error_code and error fields for programmatic handling.`,
 			},
 			{
@@ -392,22 +404,8 @@ All errors include a JSON response with error_code and error fields for programm
 		},
 		ExitCodes: []DocsExitCode{
 			{Code: 0, Name: "SUCCESS", Description: "Command completed successfully", Recoverable: true},
-			{Code: 1, Name: "GENERAL_ERROR", Description: "General error (check error field for details)", Recoverable: true},
-			{Code: 2, Name: "INVALID_ARGS", Description: "Invalid or missing command arguments", Recoverable: true},
-			{Code: 3, Name: "SESSION_NOT_FOUND", Description: "Specified tmux session does not exist", Recoverable: true},
-			{Code: 4, Name: "SESSION_EXISTS", Description: "Session already exists (for spawn commands)", Recoverable: true},
-			{Code: 5, Name: "PANE_NOT_FOUND", Description: "Specified pane does not exist", Recoverable: true},
-			{Code: 6, Name: "TIMEOUT", Description: "Operation timed out", Recoverable: true},
-			{Code: 7, Name: "NO_AGENTS", Description: "No agents found matching criteria", Recoverable: true},
-			{Code: 8, Name: "AGENT_BUSY", Description: "Agent is busy and cannot accept new work", Recoverable: true},
-			{Code: 10, Name: "BEAD_NOT_FOUND", Description: "Specified bead does not exist", Recoverable: true},
-			{Code: 11, Name: "BEAD_CONFLICT", Description: "Bead state conflict (e.g., already closed)", Recoverable: true},
-			{Code: 20, Name: "TOOL_NOT_FOUND", Description: "External tool (br, bv, cass) not installed", Recoverable: false},
-			{Code: 21, Name: "TOOL_ERROR", Description: "External tool returned an error", Recoverable: true},
-			{Code: 30, Name: "TMUX_NOT_FOUND", Description: "tmux is not installed", Recoverable: false},
-			{Code: 31, Name: "TMUX_ERROR", Description: "tmux command failed", Recoverable: true},
-			{Code: 40, Name: "CONFIG_ERROR", Description: "Configuration file error", Recoverable: true},
-			{Code: 50, Name: "INTERNAL_ERROR", Description: "Internal error (please report)", Recoverable: false},
+			{Code: 1, Name: "ERROR", Description: "Command failed; inspect error_code, error, and hint", Recoverable: true},
+			{Code: 2, Name: "UNAVAILABLE", Description: "Requested functionality is not implemented or unavailable", Recoverable: true},
 		},
 	}
 }

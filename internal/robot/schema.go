@@ -12,6 +12,7 @@ import (
 // SchemaCommand is the supported schema command types.
 var SchemaCommand = map[string]interface{}{
 	// Core state inspection
+	"capabilities":   CapabilitiesOutput{},
 	"status":         StatusOutput{},
 	"snapshot":       SnapshotOutput{},
 	"dashboard":      DashboardOutput{},
@@ -27,6 +28,8 @@ var SchemaCommand = map[string]interface{}{
 	"history":        HistoryOutput{},
 	"recipes":        RecipesOutput{},
 	"alerts":         AlertsOutput{},
+	"causality":      CausalityOutput{},
+	"diff":           DiffOutput{},
 	"cass_status":    CASSStatusOutput{},
 	"cass_search":    CASSSearchOutput{},
 	"acfs_status":    ACFSStatusOutput{},
@@ -54,6 +57,8 @@ var SchemaCommand = map[string]interface{}{
 	"rano_stats":     RanoStatsOutput{},
 	"rch_status":     RCHStatusOutput{},
 	"rch_workers":    RCHWorkersOutput{},
+	"schema":         SchemaOutput{},
+	"tokens":         TokensOutput{},
 
 	// Session operations
 	"spawn":            SpawnOutput{},
@@ -96,6 +101,11 @@ var SchemaCommand = map[string]interface{}{
 	"cass_insights":    CASSInsightsOutput{},
 	"ensemble_stop":    EnsembleStopOutput{},
 	"ensemble_suggest": EnsembleSuggestOutput{},
+	"giil_fetch":       GIILFetchOutput{},
+	"palette":          PaletteOutput{},
+	"restore":          RestoreResult{},
+	"safety_simulate":  SafetySimulationOutput{},
+	"save":             SaveResult{},
 
 	// Pane inspection
 	"inspect":              InspectPaneOutput{},
@@ -138,6 +148,34 @@ var SchemaCommand = map[string]interface{}{
 	"diagnose":           DiagnoseOutput{},
 	"probe":              ProbeSessionOutput{},
 	"auto_restart_stuck": AutoRestartStuckOutput{},
+}
+
+// MustRegisterSchemaCommand adds the real response type for a robot surface owned
+// by a package that already depends on robot (for example cli or pipeline).
+// Registration must happen during package initialization, before the registry
+// is first read; registering the concrete type keeps schema generation exact
+// without introducing an import cycle or a parallel schema-only DTO.
+func MustRegisterSchemaCommand(name string, binding interface{}) {
+	name = strings.ReplaceAll(strings.TrimSpace(name), "-", "_")
+	if name == "" {
+		panic("robot: schema command name is empty") // ubs:ignore -- invalid package initialization must fail fast
+	}
+	if binding == nil {
+		panic(fmt.Sprintf("robot: schema command %q has a nil binding", name)) // ubs:ignore -- invalid package initialization must fail fast
+	}
+
+	robotRegistryBuildMu.Lock()
+	defer robotRegistryBuildMu.Unlock()
+	if robotRegistry != nil {
+		panic(fmt.Sprintf("robot: schema command %q registered after registry initialization", name)) // ubs:ignore -- init ordering is a programming error
+	}
+	if existing, ok := SchemaCommand[name]; ok {
+		if reflect.TypeOf(existing) != reflect.TypeOf(binding) {
+			panic(fmt.Sprintf("robot: schema command %q already registered as %T, cannot replace with %T", name, existing, binding)) // ubs:ignore -- conflicting registrations are programming errors
+		}
+		return
+	}
+	SchemaCommand[name] = binding
 }
 
 // JSONSchema represents a JSON Schema document.
@@ -212,7 +250,10 @@ func PrintSchema(schemaType string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	if err := encodeJSON(output); err != nil {
+		return err
+	}
+	return ExitResultForResponse(output.RobotResponse, nil, true)
 }
 
 // getSchemaTypes returns available schema type names.
@@ -395,10 +436,12 @@ func typeToSchema(t reflect.Type, defs map[string]*JSONSchema) *JSONSchema {
 				Type:       "object",
 				Properties: make(map[string]*JSONSchema),
 			}
+			// Install the definition before descending so self-referential
+			// response types (notably JSONSchema) terminate at a $ref.
+			defs[typeName] = schema
 			var required []string
 			processStruct(t, schema.Properties, &required, defs)
 			schema.Required = required
-			defs[typeName] = schema
 		}
 
 		return &JSONSchema{

@@ -390,6 +390,7 @@ func restoreOverlayTestDeps() func() {
 	prevCurrentSession := overlayCurrentSession
 	prevOSExecutable := overlayOSExecutable
 	prevLaunchProbeDelay := overlayLaunchProbeDelay
+	prevWaitCommand := overlayWaitCommand
 
 	return func() {
 		overlayExecCommand = prevExecCommand
@@ -400,6 +401,7 @@ func restoreOverlayTestDeps() func() {
 		overlayCurrentSession = prevCurrentSession
 		overlayOSExecutable = prevOSExecutable
 		overlayLaunchProbeDelay = prevLaunchProbeDelay
+		overlayWaitCommand = prevWaitCommand
 	}
 }
 
@@ -561,12 +563,6 @@ func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
 	restore := restoreOverlayTestDeps()
 	defer restore()
 
-	prevProbeDelay := overlayLaunchProbeDelay
-	overlayLaunchProbeDelay = 20 * time.Millisecond
-	defer func() {
-		overlayLaunchProbeDelay = prevProbeDelay
-	}()
-
 	overlayIsInstalled = func() bool { return true }
 	overlayInTmux = func() bool { return true }
 	overlayCurrentSession = func() string { return "proj" }
@@ -575,6 +571,11 @@ func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
 	overlayOSExecutable = func() (string, error) { return "/usr/local/bin/ntm", nil }
 	overlayExecCommand = func(string, ...string) *exec.Cmd {
 		return exec.Command("false")
+	}
+	overlayWaitCommand = func(cmd *exec.Cmd) <-chan error {
+		waitCh := make(chan error, 1)
+		waitCh <- cmd.Wait()
+		return waitCh
 	}
 
 	out, err := captureStdout(t, func() error {

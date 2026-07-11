@@ -75,6 +75,8 @@ Start by calling ntm --robot-snapshot to survey the current state, then ntm --ro
 to wait for the first event that needs coordination.`
 
 func init() {
+	robot.MustRegisterSchemaCommand("controller_spawn", ControllerResponse{})
+
 	// Register sessions.controller command
 	kernel.MustRegister(kernel.Command{
 		Name:        "sessions.controller",

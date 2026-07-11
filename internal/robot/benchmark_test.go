@@ -19,6 +19,7 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -896,6 +897,9 @@ func TestDeduplicationEffectiveness(t *testing.T) {
 
 func skipLatencyRegressionIfInstrumented(t *testing.T) {
 	t.Helper()
+	if os.Getenv("NTM_ENFORCE_PERF") != "1" {
+		t.Skip("set NTM_ENFORCE_PERF=1 to enforce host-sensitive latency thresholds")
+	}
 	if testing.Short() {
 		t.Skip("skipping latency regression test in short mode")
 	}

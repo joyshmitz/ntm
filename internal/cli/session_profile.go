@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 // SessionProfile is the TOML-serializable spawn configuration stored in a profile.
@@ -32,6 +33,24 @@ type SessionProfile struct {
 	InitFile  string `toml:"init_file,omitempty" json:"init_file,omitempty"`
 	Safety    *bool  `toml:"safety,omitempty" json:"safety,omitempty"`
 	Worktrees *bool  `toml:"worktrees,omitempty" json:"worktrees,omitempty"`
+}
+
+// SessionProfileListOutput is the robot response for --robot-profile-list.
+type SessionProfileListOutput struct {
+	Success  bool     `json:"success"`
+	Profiles []string `json:"profiles"`
+}
+
+// SessionProfileShowOutput is the robot response for --robot-profile-show.
+type SessionProfileShowOutput struct {
+	Success bool           `json:"success"`
+	Name    string         `json:"name"`
+	Profile SessionProfile `json:"profile"`
+}
+
+func init() {
+	robot.MustRegisterSchemaCommand("profile_list", SessionProfileListOutput{})
+	robot.MustRegisterSchemaCommand("profile_show", SessionProfileShowOutput{})
 }
 
 var validProfileName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
@@ -402,10 +421,6 @@ func newSessionProfileShowCmd() *cobra.Command {
 
 // printSessionProfileList outputs profile list as JSON for robot mode.
 func printSessionProfileList() error {
-	type result struct {
-		Success  bool     `json:"success"`
-		Profiles []string `json:"profiles"`
-	}
 	names, err := ListSessionProfiles()
 	if err != nil {
 		return err
@@ -413,7 +428,7 @@ func printSessionProfileList() error {
 	if names == nil {
 		names = []string{}
 	}
-	data, err := json.MarshalIndent(result{Success: true, Profiles: names}, "", "  ")
+	data, err := json.MarshalIndent(SessionProfileListOutput{Success: true, Profiles: names}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -427,12 +442,7 @@ func printSessionProfileShow(name string) error {
 	if err != nil {
 		return err
 	}
-	type result struct {
-		Success bool           `json:"success"`
-		Name    string         `json:"name"`
-		Profile SessionProfile `json:"profile"`
-	}
-	data, err := json.MarshalIndent(result{Success: true, Name: name, Profile: *cfg}, "", "  ")
+	data, err := json.MarshalIndent(SessionProfileShowOutput{Success: true, Name: name, Profile: *cfg}, "", "  ")
 	if err != nil {
 		return err
 	}

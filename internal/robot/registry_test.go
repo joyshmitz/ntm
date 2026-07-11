@@ -35,9 +35,7 @@ func TestGetRobotRegistry_SurfaceCoverage(t *testing.T) {
 		if !reflect.DeepEqual(surface.Examples, command.Examples) {
 			t.Fatalf("surface %q examples drifted from command registry", command.Name)
 		}
-		if strings.TrimSpace(surface.SchemaID) == "" {
-			t.Fatalf("surface %q missing schema_id", command.Name)
-		}
+		assertSurfaceOutputContract(t, surface)
 		if len(surface.Transports) == 0 || surface.Transports[0].Type != "cli" {
 			t.Fatalf("surface %q missing CLI transport", command.Name)
 		}
@@ -114,7 +112,7 @@ func TestGetRobotRegistry_KeySurfaceMetadata(t *testing.T) {
 		},
 		{
 			name:       "attention",
-			schemaType: "",
+			schemaType: "attention",
 			sections:   []string{"attention", "incidents", "next_actions", "cursor"},
 		},
 		{
@@ -204,12 +202,16 @@ func TestGetRobotRegistry_SurfaceReturnsDetachedSlices(t *testing.T) {
 		t.Fatal("expected status surface parameters")
 	}
 	first.Parameters[0].Name = "mutated"
+	first.OutputFormats[0] = "mutated"
 	first.Sections[0] = "mutated"
 	first.Examples[0] = "mutated"
 	first.Transports[0].Endpoint = "mutated"
 
 	if second.Parameters[0].Name == "mutated" {
 		t.Fatal("surface parameters alias registry storage")
+	}
+	if second.OutputFormats[0] == "mutated" {
+		t.Fatal("surface output formats alias registry storage")
 	}
 	if second.Sections[0] == "mutated" {
 		t.Fatal("surface sections alias registry storage")
@@ -232,12 +234,16 @@ func TestGetRobotRegistry_ReturnsDetachedRegistrySnapshots(t *testing.T) {
 	}
 
 	first.Surfaces[0].Name = "mutated-surface"
+	first.Surfaces[0].OutputFormats[0] = "mutated-format"
 	first.Sections[0].Name = "mutated-section"
 	first.Categories[0] = "mutated-category"
 	first.SchemaTypes[0] = "mutated-schema"
 
 	if second.Surfaces[0].Name == "mutated-surface" {
 		t.Fatal("GetRobotRegistry returned shared surfaces slice")
+	}
+	if second.Surfaces[0].OutputFormats[0] == "mutated-format" {
+		t.Fatal("GetRobotRegistry returned shared surface output formats")
 	}
 	if second.Sections[0].Name == "mutated-section" {
 		t.Fatal("GetRobotRegistry returned shared sections slice")
@@ -438,7 +444,6 @@ func TestSchemaID_FormatConsistency(t *testing.T) {
 	for _, surface := range registry.Surfaces {
 		schemaID := surface.SchemaID
 		if schemaID == "" {
-			t.Errorf("surface %q has empty schema_id", surface.Name)
 			continue
 		}
 
@@ -482,6 +487,9 @@ func TestSchemaID_Uniqueness(t *testing.T) {
 	schemaIDs := make(map[string]string) // schema_id -> surface/section name
 
 	for _, surface := range registry.Surfaces {
+		if surface.SchemaID == "" {
+			continue
+		}
 		if existing, ok := schemaIDs[surface.SchemaID]; ok {
 			t.Errorf("duplicate schema_id %q used by both %q and %q", surface.SchemaID, existing, surface.Name)
 		}
@@ -496,6 +504,152 @@ func TestSchemaID_Uniqueness(t *testing.T) {
 			}
 		}
 		schemaIDs[section.SchemaID] = "section:" + section.Name
+	}
+}
+
+func assertSurfaceOutputContract(t *testing.T, surface RobotSurfaceDescriptor) {
+	t.Helper()
+	if len(surface.OutputFormats) == 0 {
+		t.Fatalf("surface %q has no output formats", surface.Name)
+	}
+	seen := make(map[string]bool, len(surface.OutputFormats))
+	for _, format := range surface.OutputFormats {
+		if strings.TrimSpace(format) == "" || seen[format] {
+			t.Fatalf("surface %q has invalid output formats %#v", surface.Name, surface.OutputFormats)
+		}
+		seen[format] = true
+	}
+	if !seen[surface.DefaultOutputFormat] {
+		t.Fatalf("surface %q default output format %q is not supported by %#v", surface.Name, surface.DefaultOutputFormat, surface.OutputFormats)
+	}
+
+	if seen["json"] {
+		if surface.SchemaSource != "built_in" && surface.SchemaSource != "external" {
+			t.Fatalf("surface %q JSON schema_source = %q", surface.Name, surface.SchemaSource)
+		}
+		if surface.SchemaSource == "built_in" {
+			if strings.TrimSpace(surface.SchemaType) == "" || strings.TrimSpace(surface.SchemaID) == "" {
+				t.Fatalf("surface %q built-in JSON output lacks a schema binding", surface.Name)
+			}
+		}
+		if surface.SchemaUnavailableReason != "" {
+			t.Fatalf("surface %q JSON output has schema_unavailable_reason %q", surface.Name, surface.SchemaUnavailableReason)
+		}
+	} else {
+		if surface.SchemaSource != "none" {
+			t.Fatalf("surface %q non-JSON schema_source = %q, want none", surface.Name, surface.SchemaSource)
+		}
+		if surface.SchemaID != "" || surface.SchemaType != "" {
+			t.Fatalf("surface %q non-JSON output advertises JSON schema %q/%q", surface.Name, surface.SchemaID, surface.SchemaType)
+		}
+		if strings.TrimSpace(surface.SchemaUnavailableReason) == "" {
+			t.Fatalf("surface %q non-JSON output lacks schema_unavailable_reason", surface.Name)
+		}
+	}
+}
+
+func TestGetRobotRegistry_OutputContractsAreExplicit(t *testing.T) {
+	registry := GetRobotRegistry()
+	external := map[string]bool{
+		"context-inject":   true,
+		"controller-spawn": true,
+		"default-prompts":  true,
+		"pipeline-cancel":  true,
+		"pipeline-list":    true,
+		"pipeline-run":     true,
+		"pipeline-status":  true,
+		"profile-list":     true,
+		"profile-show":     true,
+	}
+	nonJSON := map[string]string{"help": "text", "markdown": "markdown", "terse": "text"}
+
+	for _, surface := range registry.Surfaces {
+		assertSurfaceOutputContract(t, surface)
+		if got := surface.SchemaSource == "external"; got != external[surface.Name] {
+			t.Errorf("surface %q external schema source = %t, want %t", surface.Name, got, external[surface.Name])
+		}
+		wantNonJSONFormat, wantNonJSON := nonJSON[surface.Name]
+		gotNonJSON := !slicesContain(surface.OutputFormats, "json")
+		if gotNonJSON != wantNonJSON || (wantNonJSON && surface.DefaultOutputFormat != wantNonJSONFormat) {
+			t.Errorf("surface %q non-JSON contract = formats %#v default %q, want non_json=%t default=%q", surface.Name, surface.OutputFormats, surface.DefaultOutputFormat, wantNonJSON, wantNonJSONFormat)
+		}
+		delete(external, surface.Name)
+		delete(nonJSON, surface.Name)
+	}
+	if len(external) != 0 || len(nonJSON) != 0 {
+		t.Fatalf("registry is missing explicit output metadata: external=%v non_json=%v", external, nonJSON)
+	}
+	dashboard, ok := registry.Surface("dashboard")
+	if !ok {
+		t.Fatal("missing dashboard surface")
+	}
+	if !reflect.DeepEqual(dashboard.OutputFormats, []string{"markdown", "json"}) || dashboard.DefaultOutputFormat != "markdown" {
+		t.Fatalf("dashboard output contract = formats %#v default %q", dashboard.OutputFormats, dashboard.DefaultOutputFormat)
+	}
+}
+
+func TestGetRobotRegistry_DiscoverySurfaceFormatsMatchEmittedContracts(t *testing.T) {
+	registry := GetRobotRegistry()
+	for _, name := range []string{"capabilities", "docs", "schema"} {
+		surface, ok := registry.Surface(name)
+		if !ok {
+			t.Fatalf("missing discovery surface %q", name)
+		}
+		if !reflect.DeepEqual(surface.OutputFormats, []string{"json"}) || surface.DefaultOutputFormat != "json" || surface.SchemaSource != "built_in" {
+			t.Errorf("discovery surface %q output contract = formats:%v default:%q source:%q", name, surface.OutputFormats, surface.DefaultOutputFormat, surface.SchemaSource)
+		}
+	}
+
+	docs, _ := registry.Surface("docs")
+	if docs.SchemaType != "docs" || docs.SchemaID == "" || docs.ConsumerGuidance == nil {
+		t.Fatalf("docs schema/guidance contract = %+v", docs)
+	}
+	guidance := strings.ToLower(docs.ConsumerGuidance.IntendedUse + " " + docs.ConsumerGuidance.SummaryHint)
+	if !strings.Contains(guidance, "json") || strings.Contains(guidance, "markdown") || strings.Contains(guidance, "human-readable") {
+		t.Fatalf("docs registry guidance does not describe emitted JSON: %q", guidance)
+	}
+}
+
+func slicesContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGetRobotRegistry_NativeSchemaBindingsUseEmittedTypes(t *testing.T) {
+	registry := GetRobotRegistry()
+	want := map[string]interface{}{
+		"capabilities":    CapabilitiesOutput{},
+		"causality":       CausalityOutput{},
+		"diff":            DiffOutput{},
+		"giil_fetch":      GIILFetchOutput{},
+		"palette":         PaletteOutput{},
+		"restore":         RestoreResult{},
+		"safety_simulate": SafetySimulationOutput{},
+		"save":            SaveResult{},
+		"schema":          SchemaOutput{},
+		"tokens":          TokensOutput{},
+	}
+	for schemaType, expected := range want {
+		got, ok := registry.SchemaBinding(schemaType)
+		if !ok {
+			t.Errorf("missing native schema binding %q", schemaType)
+			continue
+		}
+		if reflect.TypeOf(got) != reflect.TypeOf(expected) {
+			t.Errorf("schema %q binding = %T, want %T", schemaType, got, expected)
+		}
+		output, err := GetSchema(schemaType)
+		if err != nil {
+			t.Errorf("GetSchema(%q): %v", schemaType, err)
+			continue
+		}
+		if !output.Success || output.Schema == nil || len(output.Schema.Properties) == 0 {
+			t.Errorf("schema %q did not generate a concrete object schema", schemaType)
+		}
 	}
 }
 

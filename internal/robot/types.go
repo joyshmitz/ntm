@@ -66,6 +66,7 @@ package robot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -151,6 +152,44 @@ type ResponseMeta struct {
 	// Command is the robot command that generated this response (e.g., "robot-status").
 	// Useful for debugging and log correlation.
 	Command string `json:"command,omitempty"`
+}
+
+// ProcessExitError carries the process exit status for a robot command after
+// its machine-readable response has been written. Robot mode has exactly three
+// process outcomes: success (0), error (1), and unavailable (2).
+type ProcessExitError struct {
+	code        int
+	cause       error
+	jsonWritten bool
+}
+
+// Error implements error.
+func (e *ProcessExitError) Error() string {
+	if e == nil || e.cause == nil {
+		return "robot command failed"
+	}
+	return e.cause.Error()
+}
+
+// Unwrap exposes the underlying command or encoding error.
+func (e *ProcessExitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// ExitCode returns the normalized robot process exit code.
+func (e *ProcessExitError) ExitCode() int {
+	if e == nil {
+		return 0
+	}
+	return NormalizeProcessExitCode(e.code)
+}
+
+// JSONWritten reports whether the failure envelope was successfully encoded.
+func (e *ProcessExitError) JSONWritten() bool {
+	return e != nil && e.jsonWritten
 }
 
 // RobotResponse is the base structure for all robot command outputs.
@@ -609,6 +648,85 @@ func NewErrorResponse(err error, code, hint string) RobotResponse {
 	return resp
 }
 
+type robotResponseCarrier interface {
+	robotResponse() *RobotResponse
+}
+
+func (r *RobotResponse) robotResponse() *RobotResponse {
+	return r
+}
+
+// encodeRobotFailureJSON writes the stable terminal error format regardless of
+// the requested success-output format. Pointers to response structs satisfy
+// robotResponseCarrier through their embedded RobotResponse.
+func encodeRobotFailureJSON(output any) error {
+	carrier, ok := output.(robotResponseCarrier)
+	if !ok || carrier.robotResponse() == nil {
+		return fmt.Errorf("robot failure payload %T does not expose RobotResponse", output)
+	}
+	carrier.robotResponse().OutputFormat = string(FormatJSON)
+	return json.NewEncoder(os.Stdout).Encode(output)
+}
+
+// NormalizeProcessExitCode enforces the public robot process contract. Exit 2
+// is reserved for unavailable functionality; every other nonzero condition is
+// a normal command error and exits 1.
+func NormalizeProcessExitCode(code int) int {
+	switch code {
+	case 0:
+		return 0
+	case 2:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// ExitResultForResponse converts an already-encoded robot envelope into the
+// typed process result consumed by the CLI entry point.
+func ExitResultForResponse(resp RobotResponse, cause error, jsonWritten bool) error {
+	code := ExitCodeForResponse(resp)
+	if code != 0 && cause == nil {
+		cause = fmt.Errorf("robot command failed with %s", resp.ErrorCode)
+	}
+	return ExitResultForCode(code, cause, jsonWritten)
+}
+
+// ExitResultForCode adapts a legacy robot printer that already wrote its
+// envelope but still returns an integer status. New robot surfaces should
+// return ExitResultForResponse directly.
+func ExitResultForCode(code int, cause error, jsonWritten bool) error {
+	code = NormalizeProcessExitCode(code)
+	if code == 0 {
+		return nil
+	}
+	if cause == nil {
+		cause = fmt.Errorf("robot command failed with exit code %d", code)
+	}
+	return &ProcessExitError{code: code, cause: cause, jsonWritten: jsonWritten}
+}
+
+// EncodeErrorJSON writes one canonical JSON failure envelope and returns its
+// typed process result. Validation and dispatch errors use this path even when
+// another robot output format was requested because JSON is the stable error
+// contract available before command-specific format resolution.
+func EncodeErrorJSON(err error, code, hint, command string) error {
+	resp := NewErrorResponse(err, code, hint)
+	exitCode := ExitCodeForResponse(resp)
+	if exitCode == 0 {
+		exitCode = 1
+	}
+	resp.Meta = NewResponseMeta(command).WithExitCode(exitCode)
+	if encodeErr := encodeRobotFailureJSON(&resp); encodeErr != nil {
+		return &ProcessExitError{
+			code:        1,
+			cause:       fmt.Errorf("encode robot error response: %w", encodeErr),
+			jsonWritten: false,
+		}
+	}
+	return &ProcessExitError{code: exitCode, cause: err, jsonWritten: true}
+}
+
 // ExitCodeForResponse maps a robot response envelope to the process exit code
 // documented in AGENTS.md ("Robot Command Exit Codes"):
 //
@@ -624,10 +742,10 @@ func NewErrorResponse(err error, code, hint string) RobotResponse {
 // embedded RobotResponse through this helper to derive the real exit code.
 //
 // When a command has already recorded a concrete exit code in its metadata
-// (via WithExitCode), that value wins so bespoke conventions are preserved.
+// (via WithExitCode), that value is normalized to the same 0/1/2 contract.
 func ExitCodeForResponse(resp RobotResponse) int {
 	if resp.Meta != nil && resp.Meta.ExitCode != 0 {
-		return resp.Meta.ExitCode
+		return NormalizeProcessExitCode(resp.Meta.ExitCode)
 	}
 	if resp.Success {
 		return 0
@@ -657,24 +775,21 @@ func RobotError(err error, code, hint string) error {
 	return err
 }
 
-// PrintRobotError outputs a standardized error response and exits with code 1.
-// Use this for actual errors that indicate something went wrong when you want
-// to exit immediately. For testable code, prefer RobotError instead.
+// PrintRobotError outputs a standardized error response and returns the typed
+// process result consumed by the CLI entry point. It never terminates the
+// process, so deferred audit and cleanup work still runs.
 //
 // Example usage:
 //
 //	if !tmux.SessionExists(session) {
-//	    PrintRobotError(
+//	    return PrintRobotError(
 //	        fmt.Errorf("session '%s' not found", session),
 //	        ErrCodeSessionNotFound,
 //	        "Use 'ntm list' to see available sessions",
 //	    )
-//	    return
 //	}
-func PrintRobotError(err error, code, hint string) {
-	resp := NewErrorResponse(err, code, hint)
-	outputJSON(resp)
-	os.Exit(1)
+func PrintRobotError(err error, code, hint string) error {
+	return EncodeErrorJSON(err, code, hint, "robot")
 }
 
 // NotImplementedResponse is the structured output for unavailable features.
@@ -684,34 +799,45 @@ type NotImplementedResponse struct {
 	PlannedVersion string `json:"planned_version,omitempty"` // Version where feature is planned
 }
 
-// PrintRobotUnavailable outputs a response for unavailable/unimplemented features
-// and exits with code 2. Use this when a feature doesn't exist yet or a
-// dependency is missing - it's not an error, just unavailable.
+// PrintRobotUnavailable outputs a response for unavailable or unimplemented
+// features and returns a typed exit-2 result. It never terminates the process.
 //
 // Exit code 2 signals "unavailable" to agents, distinct from error (1) or success (0).
 //
 // Example usage:
 //
-//	robot.PrintRobotUnavailable(
+//	return robot.PrintRobotUnavailable(
 //	    "robot-assign",
 //	    "Work assignment is planned for a future release",
 //	    "v1.3",
 //	    "Use manual work distribution in the meantime",
 //	)
-func PrintRobotUnavailable(feature, message, plannedVersion, hint string) {
+func PrintRobotUnavailable(feature, message, plannedVersion, hint string) error {
 	resp := NotImplementedResponse{
 		RobotResponse: RobotResponse{
-			Success:   false,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Error:     message,
-			ErrorCode: ErrCodeNotImplemented,
-			Hint:      hint,
+			Success:      false,
+			Timestamp:    time.Now().UTC().Format(time.RFC3339),
+			Error:        message,
+			ErrorCode:    ErrCodeNotImplemented,
+			Hint:         hint,
+			OutputFormat: string(FormatJSON),
+			Meta:         NewResponseMeta(feature).WithExitCode(2),
 		},
 		Feature:        feature,
 		PlannedVersion: plannedVersion,
 	}
-	outputJSON(resp)
-	os.Exit(2)
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		return &ProcessExitError{
+			code:        1,
+			cause:       fmt.Errorf("encode robot unavailable response: %w", err),
+			jsonWritten: false,
+		}
+	}
+	cause := errors.New(message)
+	if message == "" {
+		cause = errors.New("robot feature unavailable")
+	}
+	return ExitResultForCode(2, cause, true)
 }
 
 // ErrorResponse is a complete error output structure that can be embedded

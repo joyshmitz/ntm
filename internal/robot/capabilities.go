@@ -2,7 +2,13 @@
 // capabilities.go provides the --robot-capabilities command for programmatic discovery of robot mode features.
 package robot
 
-import "sort"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
 
 // CapabilitiesOutput represents the output for --robot-capabilities
 type CapabilitiesOutput struct {
@@ -12,22 +18,45 @@ type CapabilitiesOutput struct {
 	Surfaces   []RobotSurfaceDescriptor `json:"surfaces,omitempty"`
 	Categories []string                 `json:"categories"`
 	Attention  *AttentionCapabilities   `json:"attention,omitempty"`
+	Filter     *CapabilitiesFilter      `json:"filter,omitempty"`
+}
+
+// CapabilitiesOptions limits the discovery payload to the catalog slice an
+// agent needs. Filters are combined, and Compact removes verbose schema,
+// transport, parameter, example, and attention metadata.
+type CapabilitiesOptions struct {
+	Command  string
+	Category string
+	Query    string
+	Compact  bool
+}
+
+// CapabilitiesFilter records the normalized projection applied to a response.
+type CapabilitiesFilter struct {
+	Command  string `json:"command,omitempty"`
+	Category string `json:"category,omitempty"`
+	Query    string `json:"query,omitempty"`
+	Compact  bool   `json:"compact,omitempty"`
 }
 
 // RobotCommandInfo describes a single robot command
 type RobotCommandInfo struct {
-	Name        string               `json:"name"`
-	Flag        string               `json:"flag"`
-	Category    string               `json:"category"`
-	Summary     string               `json:"summary,omitempty"`
-	Description string               `json:"description"`
-	Note        string               `json:"note,omitempty"`
-	SchemaID    string               `json:"schema_id,omitempty"`
-	SchemaType  string               `json:"schema_type,omitempty"`
-	Sections    []string             `json:"sections,omitempty"`
-	Parameters  []RobotParameter     `json:"parameters"`
-	Examples    []string             `json:"examples"`
-	Transports  []RobotTransportInfo `json:"transports,omitempty"`
+	Name                    string               `json:"name"`
+	Flag                    string               `json:"flag"`
+	Category                string               `json:"category"`
+	Summary                 string               `json:"summary,omitempty"`
+	Description             string               `json:"description,omitempty"`
+	Note                    string               `json:"note,omitempty"`
+	OutputFormats           []string             `json:"output_formats"`
+	DefaultOutputFormat     string               `json:"default_output_format"`
+	SchemaID                string               `json:"schema_id,omitempty"`
+	SchemaType              string               `json:"schema_type,omitempty"`
+	SchemaSource            string               `json:"schema_source"`
+	SchemaUnavailableReason string               `json:"schema_unavailable_reason,omitempty"`
+	Sections                []string             `json:"sections,omitempty"`
+	Parameters              []RobotParameter     `json:"parameters,omitempty"`
+	Examples                []string             `json:"examples,omitempty"`
+	Transports              []RobotTransportInfo `json:"transports,omitempty"`
 }
 
 // RobotParameter describes a command parameter
@@ -57,28 +86,210 @@ var categoryOrder = []string{
 // GetCapabilities collects robot mode capabilities.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetCapabilities() (*CapabilitiesOutput, error) {
+	return GetCapabilitiesWithOptions(CapabilitiesOptions{})
+}
+
+// GetCapabilitiesWithOptions returns a deterministic filtered catalog.
+func GetCapabilitiesWithOptions(opts CapabilitiesOptions) (*CapabilitiesOutput, error) {
 	registry := GetRobotRegistry()
-	surfaces := cloneRobotSurfaceDescriptors(registry.Surfaces)
+	normalized, err := normalizeCapabilitiesOptions(registry, opts)
+	if err != nil {
+		return &CapabilitiesOutput{
+			RobotResponse: NewErrorResponse(err, ErrCodeInvalidFlag, "Use --robot-capabilities without filters to inspect valid commands and categories"),
+			Version:       Version,
+			Commands:      []RobotCommandInfo{},
+			Categories:    []string{},
+			Filter:        capabilitiesFilter(normalized),
+		}, nil
+	}
+
+	surfaces := filterCapabilitySurfaces(registry.Surfaces, normalized)
 	commands := buildCapabilitiesCommandCatalog(surfaces)
+	categories := capabilityCategories(registry.Categories, commands)
+	attention := DefaultAttentionCapabilities()
+	if normalized.Compact {
+		commands = compactCapabilitiesCommandCatalog(commands)
+		surfaces = nil
+		attention = nil
+	} else if hasCapabilitiesFilter(normalized) && !commandCatalogHasCategory(commands, "attention") {
+		attention = nil
+	}
 
 	return &CapabilitiesOutput{
 		RobotResponse: NewRobotResponse(true),
 		Version:       Version,
 		Commands:      commands,
 		Surfaces:      surfaces,
-		Categories:    cloneStrings(registry.Categories),
-		Attention:     DefaultAttentionCapabilities(),
+		Categories:    categories,
+		Attention:     attention,
+		Filter:        capabilitiesFilter(normalized),
 	}, nil
 }
 
 // PrintCapabilities outputs robot mode capabilities as JSON.
 // This is a thin wrapper around GetCapabilities() for CLI output.
 func PrintCapabilities() error {
-	output, err := GetCapabilities()
+	return PrintCapabilitiesWithOptions(CapabilitiesOptions{})
+}
+
+// PrintCapabilitiesWithOptions writes a filtered catalog and propagates a
+// typed non-zero process result for invalid exact filters.
+func PrintCapabilitiesWithOptions(opts CapabilitiesOptions) error {
+	output, err := GetCapabilitiesWithOptions(opts)
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	if !output.Success {
+		return EncodeErrorJSON(fmt.Errorf("%s", output.Error), output.ErrorCode, output.Hint, "robot-capabilities")
+	}
+	if opts.Compact && GetOutputFormat() != FormatTOON {
+		// Compact discovery is a context-budget contract, so indentation must
+		// not re-inflate the projection at the final stdout boundary.
+		if err := json.NewEncoder(os.Stdout).Encode(applyVerbosity(output, GetOutputVerbosity())); err != nil {
+			return fmt.Errorf("encode compact robot capabilities: %w", err)
+		}
+	} else {
+		if err := outputJSON(output); err != nil {
+			return err
+		}
+	}
+	return ExitResultForResponse(output.RobotResponse, nil, true)
+}
+
+func normalizeCapabilitiesOptions(registry *RobotRegistry, opts CapabilitiesOptions) (CapabilitiesOptions, error) {
+	opts.Command = normalizeRobotRegistryName(opts.Command)
+	opts.Category = strings.ToLower(strings.TrimSpace(opts.Category))
+	opts.Query = strings.ToLower(strings.TrimSpace(opts.Query))
+
+	if opts.Command != "" {
+		found := false
+		for _, surface := range registry.Surfaces {
+			if normalizeRobotRegistryName(surface.Name) == opts.Command || normalizeRobotRegistryName(surface.Flag) == opts.Command {
+				found = true
+				opts.Command = normalizeRobotRegistryName(surface.Name)
+				break
+			}
+		}
+		if !found {
+			return opts, fmt.Errorf("unknown robot command %q", opts.Command)
+		}
+	}
+	if opts.Category != "" {
+		found := false
+		for _, category := range registry.Categories {
+			if strings.EqualFold(category, opts.Category) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return opts, fmt.Errorf("unknown robot category %q", opts.Category)
+		}
+	}
+	return opts, nil
+}
+
+func hasCapabilitiesFilter(opts CapabilitiesOptions) bool {
+	return opts.Command != "" || opts.Category != "" || opts.Query != "" || opts.Compact
+}
+
+func capabilitiesFilter(opts CapabilitiesOptions) *CapabilitiesFilter {
+	if !hasCapabilitiesFilter(opts) {
+		return nil
+	}
+	return &CapabilitiesFilter{
+		Command:  opts.Command,
+		Category: opts.Category,
+		Query:    opts.Query,
+		Compact:  opts.Compact,
+	}
+}
+
+func filterCapabilitySurfaces(surfaces []RobotSurfaceDescriptor, opts CapabilitiesOptions) []RobotSurfaceDescriptor {
+	filtered := make([]RobotSurfaceDescriptor, 0, len(surfaces))
+	for _, surface := range surfaces {
+		if opts.Command != "" && normalizeRobotRegistryName(surface.Name) != opts.Command && normalizeRobotRegistryName(surface.Flag) != opts.Command {
+			continue
+		}
+		if opts.Category != "" && !strings.EqualFold(surface.Category, opts.Category) {
+			continue
+		}
+		if opts.Query != "" && !capabilitySurfaceContains(surface, opts.Query) {
+			continue
+		}
+		filtered = append(filtered, surface)
+	}
+	return cloneRobotSurfaceDescriptors(filtered)
+}
+
+func capabilitySurfaceContains(surface RobotSurfaceDescriptor, query string) bool {
+	values := []string{
+		surface.Name,
+		surface.Flag,
+		surface.Category,
+		surface.Summary,
+		surface.Description,
+		surface.Note,
+		strings.Join(surface.OutputFormats, " "),
+		surface.DefaultOutputFormat,
+		surface.SchemaID,
+		surface.SchemaType,
+		surface.SchemaSource,
+		surface.SchemaUnavailableReason,
+		strings.Join(surface.Sections, " "),
+		strings.Join(surface.Examples, " "),
+	}
+	for _, parameter := range surface.Parameters {
+		values = append(values, parameter.Name, parameter.Flag, parameter.Type, parameter.Description)
+	}
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(value), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func capabilityCategories(registryCategories []string, commands []RobotCommandInfo) []string {
+	present := make(map[string]struct{}, len(commands))
+	for _, command := range commands {
+		present[command.Category] = struct{}{}
+	}
+	categories := make([]string, 0, len(present))
+	for _, category := range registryCategories {
+		if _, ok := present[category]; ok {
+			categories = append(categories, category)
+		}
+	}
+	return categories
+}
+
+func commandCatalogHasCategory(commands []RobotCommandInfo, category string) bool {
+	for _, command := range commands {
+		if command.Category == category {
+			return true
+		}
+	}
+	return false
+}
+
+func compactCapabilitiesCommandCatalog(commands []RobotCommandInfo) []RobotCommandInfo {
+	compact := make([]RobotCommandInfo, 0, len(commands))
+	for _, command := range commands {
+		compact = append(compact, RobotCommandInfo{
+			Name:                    command.Name,
+			Flag:                    command.Flag,
+			Category:                command.Category,
+			Summary:                 firstNonEmptyString(command.Summary, command.Description),
+			OutputFormats:           cloneStrings(command.OutputFormats),
+			DefaultOutputFormat:     command.DefaultOutputFormat,
+			SchemaID:                command.SchemaID,
+			SchemaType:              command.SchemaType,
+			SchemaSource:            command.SchemaSource,
+			SchemaUnavailableReason: command.SchemaUnavailableReason,
+		})
+	}
+	return compact
 }
 
 func categoryIndex(cat string) int {
@@ -94,18 +305,22 @@ func buildCapabilitiesCommandCatalog(surfaces []RobotSurfaceDescriptor) []RobotC
 	commands := make([]RobotCommandInfo, 0, len(surfaces))
 	for _, surface := range surfaces {
 		commands = append(commands, RobotCommandInfo{
-			Name:        surface.Name,
-			Flag:        surface.Flag,
-			Category:    surface.Category,
-			Summary:     surface.Summary,
-			Description: surface.Description,
-			Note:        surface.Note,
-			SchemaID:    surface.SchemaID,
-			SchemaType:  surface.SchemaType,
-			Sections:    cloneStrings(surface.Sections),
-			Parameters:  cloneRobotParameters(surface.Parameters),
-			Examples:    cloneStrings(surface.Examples),
-			Transports:  cloneTransports(surface.Transports),
+			Name:                    surface.Name,
+			Flag:                    surface.Flag,
+			Category:                surface.Category,
+			Summary:                 surface.Summary,
+			Description:             surface.Description,
+			Note:                    surface.Note,
+			OutputFormats:           cloneStrings(surface.OutputFormats),
+			DefaultOutputFormat:     surface.DefaultOutputFormat,
+			SchemaID:                surface.SchemaID,
+			SchemaType:              surface.SchemaType,
+			SchemaSource:            surface.SchemaSource,
+			SchemaUnavailableReason: surface.SchemaUnavailableReason,
+			Sections:                cloneStrings(surface.Sections),
+			Parameters:              cloneRobotParameters(surface.Parameters),
+			Examples:                cloneStrings(surface.Examples),
+			Transports:              cloneTransports(surface.Transports),
 		})
 	}
 
@@ -233,11 +448,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-tail", Type: "string", Required: true, Description: "Session name"},
 				{Name: "lines", Flag: "--lines", Type: "int", Required: false, Default: "20", Description: "Lines per pane"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 			},
 			Examples: []string{
 				"ntm --robot-tail=myproject",
-				"ntm --robot-tail=myproject --lines=50 --panes=1,2",
+				"ntm --robot-tail=myproject --lines=50 --panes=0.1,%7",
 			},
 		},
 		{
@@ -247,12 +462,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Check if agents are actively working, idle, rate-limited, or safe to restart. Returns per-pane recommendations and an aggregate work-state summary.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-is-working", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 				{Name: "verbose", Flag: "--verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
 			},
 			Examples: []string{
 				"ntm --robot-is-working=myproject",
-				"ntm --robot-is-working=myproject --panes=2,3",
+				"ntm --robot-is-working=myproject --panes=0.1,%7",
 				"ntm --robot-is-working=myproject --verbose",
 			},
 		},
@@ -265,7 +480,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "session", Flag: "--robot-errors", Type: "string", Required: true, Description: "Session name"},
 				{Name: "errors-since", Flag: "--errors-since", Type: "string", Required: false, Description: "Filter to errors from the last duration"},
 				{Name: "lines", Flag: "--lines", Type: "int", Required: false, Default: "1000", Description: "Max lines captured per pane when no explicit value is provided"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 			},
 			Examples: []string{
@@ -280,14 +495,14 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Run a comprehensive per-agent health check using local state and provider data.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-agent-health", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 				{Name: "lines", Flag: "--lines", Type: "int", Required: false, Default: "20", Description: "Lines captured per pane for analysis"},
 				{Name: "no-caut", Flag: "--no-caut", Type: "bool", Required: false, Description: "Skip caut provider queries for faster local-only checks"},
 				{Name: "verbose", Flag: "--verbose", Type: "bool", Required: false, Description: "Include raw sample output in the response"},
 			},
 			Examples: []string{
 				"ntm --robot-agent-health=myproject",
-				"ntm --robot-agent-health=myproject --panes=2,3 --verbose",
+				"ntm --robot-agent-health=myproject --panes=0.1,%7 --verbose",
 			},
 		},
 		{
@@ -322,7 +537,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Start proactive JSONL monitoring for context and provider-usage limits.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-monitor", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 				{Name: "interval", Flag: "--interval", Type: "string", Required: false, Default: "30s", Description: "Polling interval"},
 				{Name: "warn-threshold", Flag: "--warn-threshold", Type: "string", Required: false, Default: "25", Description: "Context percentage for warning level"},
 				{Name: "crit-threshold", Flag: "--crit-threshold", Type: "string", Required: false, Default: "15", Description: "Context percentage for critical level"},
@@ -457,12 +672,12 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Get agent activity state (idle/busy/error) for all agents in a session.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-activity", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to filter"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors"},
 				{Name: "activity-type", Flag: "--activity-type", Type: "string", Required: false, Description: "Comma-separated agent types to filter: claude, codex, gemini"},
 			},
 			Examples: []string{
 				"ntm --robot-activity=myproject --activity-type=claude",
-				"ntm --robot-activity=myproject --panes=1,2 --activity-type=claude,codex",
+				"ntm --robot-activity=myproject --panes=0.1,%7 --activity-type=claude,codex",
 			},
 		},
 		{
@@ -651,8 +866,9 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "enter", Flag: "--enter", Type: "bool", Required: false, Description: "Send Enter after paste (default true). Alias: --submit"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type: claude|cc, codex|cod, gemini|gmi, cursor, windsurf, aider"},
 				{Name: "all", Flag: "--all", Type: "bool", Required: false, Description: "Include user pane (default: agents only)"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
-				{Name: "exclude", Flag: "--exclude", Type: "string", Required: false, Description: "Exclude pane indices"},
+				{Name: "pane", Flag: "--pane", Type: "string", Required: false, Description: "Resolve exactly one N, W.P, or %N pane selector (mutually exclusive with --panes)"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to a set of N, W.P, or %N pane selectors"},
+				{Name: "exclude", Flag: "--exclude", Type: "string", Required: false, Description: "Exclude N, W.P, or %N pane selectors"},
 				{Name: "delay-ms", Flag: "--delay-ms", Type: "int", Required: false, Description: "Delay between sends (ms)"},
 				{Name: "track", Flag: "--track", Type: "bool", Required: false, Description: "Combined send+ack: wait for response"},
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait time when --track is enabled"},
@@ -661,6 +877,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			},
 			Examples: []string{
 				"ntm --robot-send=proj --msg='Fix auth' --type=claude",
+				"ntm --robot-send=proj --msg='Fix auth' --pane=%3",
 				"ntm --robot-send=proj --msg-file=/tmp/prompt.txt --type=codex",
 				"ntm --robot-send=proj --msg='draft' --enter=false",
 				"ntm --robot-send=proj --msg='hello' --track --timeout=30s",
@@ -676,9 +893,9 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait time (e.g., 30s, 500ms, 1m)"},
 				{Name: "poll", Flag: "--poll", Type: "string", Required: false, Default: "500ms", Description: "Poll interval"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter by N, W.P, or %N pane selectors"},
 			},
-			Examples: []string{"ntm --robot-ack=proj --timeout=60s --type=claude"},
+			Examples: []string{"ntm --robot-ack=proj --panes=0.1,%7 --timeout=60s"},
 		},
 		{
 			Name:        "interrupt",
@@ -691,14 +908,14 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "all", Flag: "--all", Type: "bool", Required: false, Description: "Interrupt all panes including the user pane"},
 				{Name: "force", Flag: "--force", Type: "bool", Required: false, Description: "Send Ctrl+C even if an agent already appears ready"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter by N, W.P, or %N pane selectors"},
 				{Name: "no-wait", Flag: "--no-wait", Type: "bool", Required: false, Description: "Return immediately after Ctrl+C without closed-loop verification"},
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "10s", Description: "Max wait for ready state after interrupt"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
 			},
 			Examples: []string{
 				"ntm --robot-interrupt=proj --msg='Stop and fix bug'",
-				"ntm --robot-interrupt=proj --all --force --timeout=15s",
+				"ntm --robot-interrupt=proj --panes=1.0,%7 --force --timeout=15s",
 			},
 		},
 		{
@@ -723,7 +940,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Restart pane processes with tmux respawn-pane -k, optionally scoped by pane or agent type.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-restart-pane", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to restart"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors to restart"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter restart targets by agent type"},
 				{Name: "all", Flag: "--all", Type: "bool", Required: false, Description: "Include the user pane when no explicit pane filter is provided"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview restart targets without executing"},
@@ -743,7 +960,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Safely restart panes after checking whether agents are actively working.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-smart-restart", Type: "string", Required: true, Description: "Session name"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated pane indices to restart"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors to restart"},
 				{Name: "force", Flag: "--force", Type: "bool", Required: false, Description: "Force restart even if an agent appears to be working"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview the restart plan without executing"},
 				{Name: "prompt", Flag: "--prompt", Type: "string", Required: false, Description: "Prompt to send after the restart"},
@@ -753,7 +970,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "hard-kill-only", Flag: "--hard-kill-only", Type: "bool", Required: false, Description: "Skip the normal exit sequence and go straight to kill -9"},
 			},
 			Examples: []string{
-				"ntm --robot-smart-restart=myproject --panes=2,3",
+				"ntm --robot-smart-restart=myproject --panes=0.1,%7",
 				"ntm --robot-smart-restart=myproject --dry-run --prompt='resume work'",
 				"ntm --robot-smart-restart=myproject --panes=2 --hard-kill",
 			},
@@ -768,7 +985,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "wait-until", Flag: "--wait-until", Type: "string", Required: false, Default: "idle", Description: "Wait condition: idle, complete, generating, healthy, stalled, rate_limited, attention, action_required, mail_pending, mail_ack_required, context_hot, reservation_conflict, file_conflict, session_changed, pane_changed. bead_orphaned remains deliberately unsupported."},
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "5m", Description: "Maximum wait time"},
 				{Name: "poll", Flag: "--poll", Type: "string", Required: false, Default: "2s", Description: "Polling interval"},
-				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter to specific pane indices"},
+				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter by N, W.P, or %N pane selectors"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 				{Name: "attention-cursor", Flag: "--attention-cursor", Type: "int", Required: false, Default: "0", Description: "Cursor handoff for attention-feed wait conditions"},
 				{Name: "profile", Flag: "--profile", Type: "string", Required: false, Default: "operator", Description: "Attention profile for attention-feed wait conditions"},
@@ -779,7 +996,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{
 				"ntm --robot-wait=proj --wait-until=idle",
 				"ntm --robot-wait=proj --wait-until=action_required --attention-cursor=42 --profile=operator",
-				"ntm --robot-wait=proj --wait-until=idle --wait-transition --timeout=2m --panes=1,2",
+				"ntm --robot-wait=proj --wait-until=idle --wait-transition --timeout=2m --panes=0.1,%7",
 			},
 		},
 		{
@@ -817,13 +1034,13 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "from-bv", Flag: "--from-bv", Type: "bool", Required: false, Description: "Select beads from bv triage"},
 				{Name: "allocation", Flag: "--allocation", Type: "string", Required: false, Description: "Explicit pane-to-bead allocation JSON"},
 				{Name: "bulk-strategy", Flag: "--bulk-strategy", Type: "string", Required: false, Default: "impact", Description: "Selection strategy when using --from-bv"},
-				{Name: "skip-panes", Flag: "--skip-panes", Type: "string", Required: false, Description: "Comma-separated pane indices to skip"},
-				{Name: "prompt-template", Flag: "--prompt-template", Type: "string", Required: false, Description: "Custom prompt template file"},
+				{Name: "skip", Flag: "--skip", Type: "string", Required: false, Description: "Comma-separated N, W.P, or %N pane selectors to skip"},
+				{Name: "template", Flag: "--template", Type: "string", Required: false, Description: "Custom prompt template file"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview assignments without sending prompts"},
 			},
 			Examples: []string{
 				"ntm --robot-bulk-assign=proj --from-bv",
-				"ntm --robot-bulk-assign=proj --allocation='{\"2\":\"bd-abc\"}' --dry-run",
+				"ntm --robot-bulk-assign=proj --allocation='{\"0.1\":\"bd-abc\"}' --skip=%7 --dry-run",
 			},
 		},
 
@@ -1225,9 +1442,19 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "capabilities",
 			Flag:        "--robot-capabilities",
 			Category:    "utility",
-			Description: "Get complete list of robot mode commands and their parameters (this command).",
-			Parameters:  []RobotParameter{},
-			Examples:    []string{"ntm --robot-capabilities"},
+			Description: "Discover robot commands, optionally filtered or projected into a compact token-efficient catalog.",
+			Parameters: []RobotParameter{
+				{Name: "capability-command", Flag: "--capability-command", Type: "string", Required: false, Description: "Exact command name or flag"},
+				{Name: "capability-category", Flag: "--capability-category", Type: "string", Required: false, Description: "Exact category"},
+				{Name: "capability-search", Flag: "--capability-search", Type: "string", Required: false, Description: "Case-insensitive metadata search"},
+				{Name: "capability-compact", Flag: "--capability-compact", Type: "bool", Required: false, Default: "false", Description: "Omit verbose surface, parameter, example, transport, and attention metadata"},
+			},
+			Examples: []string{
+				"ntm --robot-capabilities --capability-compact",
+				"ntm --robot-capabilities --capability-command=send --capability-compact",
+				"ntm --robot-capabilities --capability-category=control",
+				"ntm --robot-capabilities --capability-search=interrupt",
+			},
 		},
 		{
 			Name:        "schema",
@@ -1751,7 +1978,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Get command history for a session.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-history", Type: "string", Required: true, Description: "Session name"},
-				{Name: "pane", Flag: "--pane", Type: "string", Required: false, Description: "Filter by pane ID"},
+				{Name: "pane", Flag: "--pane", Type: "string", Required: false, Description: "Filter by an N, W.P, or %N pane selector"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 				{Name: "last", Flag: "--last", Type: "int", Required: false, Description: "Show last N entries"},
 				{Name: "since", Flag: "--since", Type: "string", Required: false, Description: "Show entries since time"},

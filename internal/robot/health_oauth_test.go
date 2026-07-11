@@ -610,6 +610,11 @@ func TestExitCodeForResponse(t *testing.T) {
 			NewRobotResponseWithMeta(true, NewResponseMeta("x").WithExitCode(2)),
 			2,
 		},
+		{
+			"legacy_meta_exit_code_is_normalized",
+			NewRobotResponseWithMeta(false, NewResponseMeta("x").WithExitCode(3)),
+			1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -617,6 +622,40 @@ func TestExitCodeForResponse(t *testing.T) {
 				t.Errorf("ExitCodeForResponse(%s) = %d, want %d", tt.name, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeProcessExitCode(t *testing.T) {
+	tests := map[int]int{-10: 1, -1: 1, 0: 0, 1: 1, 2: 2, 3: 1, 50: 1}
+	for input, want := range tests {
+		if got := NormalizeProcessExitCode(input); got != want {
+			t.Errorf("NormalizeProcessExitCode(%d) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestEncodeErrorJSONReturnsTypedUnavailableResult(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	out, err := captureStdout(t, func() error {
+		return EncodeErrorJSON(errors.New("feature unavailable"), ErrCodeNotImplemented, "use another command", "robot-test")
+	})
+	var result *ProcessExitError
+	if !errors.As(err, &result) {
+		t.Fatalf("EncodeErrorJSON() error = %T, want *ProcessExitError", err)
+	}
+	if result.ExitCode() != 2 || !result.JSONWritten() {
+		t.Fatalf("process result = (exit=%d, JSONWritten=%v), want (2, true)", result.ExitCode(), result.JSONWritten())
+	}
+
+	var payload RobotResponse
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("EncodeErrorJSON() did not emit JSON: %v\noutput=%q", err, out)
+	}
+	if payload.Success || payload.ErrorCode != ErrCodeNotImplemented || payload.OutputFormat != string(FormatJSON) {
+		t.Fatalf("failure envelope = %+v, want NOT_IMPLEMENTED JSON response", payload)
 	}
 }
 

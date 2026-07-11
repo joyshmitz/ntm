@@ -11,6 +11,7 @@ import (
 
 	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -249,6 +250,10 @@ type ContextInjectResult struct {
 	Truncated     bool     `json:"truncated"`
 	PanesInjected []int    `json:"panes_injected"`
 	Error         string   `json:"error,omitempty"`
+}
+
+func init() {
+	robot.MustRegisterSchemaCommand("context_inject", ContextInjectResult{})
 }
 
 // defaultContextFiles returns the default files to inject.

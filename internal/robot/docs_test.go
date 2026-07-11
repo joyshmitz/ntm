@@ -170,7 +170,7 @@ func TestGetDocs_Examples(t *testing.T) {
 		case "smart_restart_hard_kill":
 			foundSmartRestartHardKill = strings.Contains(ex.Command, "--robot-smart-restart=proj") && strings.Contains(ex.Command, "--hard-kill")
 		case "activity_filtered":
-			foundActivityFiltered = strings.Contains(ex.Command, "--robot-activity=proj") && strings.Contains(ex.Command, "--panes=1,2")
+			foundActivityFiltered = strings.Contains(ex.Command, "--robot-activity=proj") && strings.Contains(ex.Command, "--panes=0.1,%7")
 		case "support_bundle_redacted":
 			foundSupportBundleRedacted = strings.Contains(ex.Command, "--robot-support-bundle=proj") && strings.Contains(ex.Command, "--bundle-since=1h") && strings.Contains(ex.Command, "--bundle-redact=redact")
 		}
@@ -217,6 +217,39 @@ func TestGetDocs_QuickstartMentionsJSONDocs(t *testing.T) {
 	if strings.Contains(discovery, "human-readable documentation") {
 		t.Fatalf("Discovery section should not describe --robot-docs as human-readable docs, got %q", discovery)
 	}
+	for _, canonical := range []string{"--capability-compact", "--capability-command=NAME", "--capability-category=NAME", "--robot-schema=TYPE"} {
+		if !strings.Contains(discovery, canonical) {
+			t.Errorf("Discovery section missing canonical discovery option %q: %q", canonical, discovery)
+		}
+	}
+}
+
+func TestGetDocs_ExamplesUseCanonicalPaneAndCapabilityDiscovery(t *testing.T) {
+	output, err := GetDocs("examples")
+	if err != nil {
+		t.Fatalf("GetDocs(examples): %v", err)
+	}
+	if output.Content == nil {
+		t.Fatal("examples content is nil")
+	}
+
+	var paneExample, discoveryExample *DocsExample
+	for i := range output.Content.Examples {
+		example := &output.Content.Examples[i]
+		switch example.Name {
+		case "send_to_panes":
+			paneExample = example
+		case "discover_one_command":
+			discoveryExample = example
+		}
+	}
+	if paneExample == nil || !strings.Contains(paneExample.Command, "--panes=0.1,%7") || !strings.Contains(paneExample.Notes, "N, W.P, or %N") {
+		t.Fatalf("canonical pane example = %+v", paneExample)
+	}
+	if discoveryExample == nil || !strings.Contains(discoveryExample.Command, "--capability-command=send") ||
+		!strings.Contains(discoveryExample.Command, "--capability-compact") {
+		t.Fatalf("one-command capability example = %+v", discoveryExample)
+	}
 }
 
 func TestGetDocs_ExitCodes(t *testing.T) {
@@ -233,23 +266,23 @@ func TestGetDocs_ExitCodes(t *testing.T) {
 		t.Fatal("expected content, got nil")
 	}
 
-	if len(output.Content.ExitCodes) == 0 {
-		t.Errorf("expected exit codes, got empty")
+	if len(output.Content.ExitCodes) != 3 {
+		t.Fatalf("exit code count = %d, want exactly 3", len(output.Content.ExitCodes))
 	}
 
-	// Verify exit code 0 is SUCCESS
-	found := false
-	for _, ec := range output.Content.ExitCodes {
-		if ec.Code == 0 {
-			found = true
-			if ec.Name != "SUCCESS" {
-				t.Errorf("expected exit code 0 name 'SUCCESS', got %q", ec.Name)
-			}
-			break
-		}
+	want := []struct {
+		code int
+		name string
+	}{
+		{code: 0, name: "SUCCESS"},
+		{code: 1, name: "ERROR"},
+		{code: 2, name: "UNAVAILABLE"},
 	}
-	if !found {
-		t.Errorf("expected exit code 0, not found")
+	for i, expected := range want {
+		got := output.Content.ExitCodes[i]
+		if got.Code != expected.code || got.Name != expected.name {
+			t.Errorf("exit_codes[%d] = (%d, %q), want (%d, %q)", i, got.Code, got.Name, expected.code, expected.name)
+		}
 	}
 }
 
@@ -312,14 +345,9 @@ func TestDocsExitCodeRecoverability(t *testing.T) {
 		t.Fatalf("GetDocs(exit-codes) failed: %v", err)
 	}
 
-	// Verify that certain codes are marked as non-recoverable
-	nonRecoverableCodes := []int{20, 30, 50} // TOOL_NOT_FOUND, TMUX_NOT_FOUND, INTERNAL_ERROR
-
 	for _, ec := range output.Content.ExitCodes {
-		for _, nrc := range nonRecoverableCodes {
-			if ec.Code == nrc && ec.Recoverable {
-				t.Errorf("exit code %d (%s) should be non-recoverable", ec.Code, ec.Name)
-			}
+		if !ec.Recoverable {
+			t.Errorf("exit code %d (%s) should direct consumers to inspect the structured error and retry or adapt", ec.Code, ec.Name)
 		}
 	}
 }

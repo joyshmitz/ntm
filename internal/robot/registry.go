@@ -26,18 +26,22 @@ type RobotRegistry struct {
 // RobotSurfaceDescriptor describes a robot surface and the metadata that
 // machine and human consumers need to reason about it.
 type RobotSurfaceDescriptor struct {
-	Name        string               `json:"name"`
-	Flag        string               `json:"flag"`
-	Category    string               `json:"category"`
-	Summary     string               `json:"summary"`
-	Description string               `json:"description"`
-	Note        string               `json:"note,omitempty"`
-	SchemaID    string               `json:"schema_id"`
-	SchemaType  string               `json:"schema_type,omitempty"`
-	Sections    []string             `json:"sections,omitempty"`
-	Parameters  []RobotParameter     `json:"parameters,omitempty"`
-	Examples    []string             `json:"examples,omitempty"`
-	Transports  []RobotTransportInfo `json:"transports,omitempty"`
+	Name                    string               `json:"name"`
+	Flag                    string               `json:"flag"`
+	Category                string               `json:"category"`
+	Summary                 string               `json:"summary"`
+	Description             string               `json:"description"`
+	Note                    string               `json:"note,omitempty"`
+	OutputFormats           []string             `json:"output_formats"`
+	DefaultOutputFormat     string               `json:"default_output_format"`
+	SchemaID                string               `json:"schema_id,omitempty"`
+	SchemaType              string               `json:"schema_type,omitempty"`
+	SchemaSource            string               `json:"schema_source"`
+	SchemaUnavailableReason string               `json:"schema_unavailable_reason,omitempty"`
+	Sections                []string             `json:"sections,omitempty"`
+	Parameters              []RobotParameter     `json:"parameters,omitempty"`
+	Examples                []string             `json:"examples,omitempty"`
+	Transports              []RobotTransportInfo `json:"transports,omitempty"`
 
 	// Consumer metadata for machine integrations
 	ConsumerGuidance *ConsumerGuidance   `json:"consumer_guidance,omitempty"`
@@ -202,27 +206,34 @@ type RobotTransportInfo struct {
 }
 
 type robotSurfaceMetadata struct {
-	SchemaID         string
-	SchemaType       string
-	Sections         []string
-	Transports       []RobotTransportInfo
-	ConsumerGuidance *ConsumerGuidance
-	Boundedness      *BoundednessInfo
-	FollowUp         *FollowUpInfo
-	ActionHandoff    *ActionHandoffInfo
-	RequestSemantics *RequestSemantics
-	AttentionOps     *AttentionOpsInfo
-	Explainability   *ExplainabilityInfo
-	Lifecycle        *LifecycleInfo
+	OutputFormats           []string
+	DefaultOutputFormat     string
+	SchemaID                string
+	SchemaType              string
+	SchemaSource            string
+	SchemaUnavailableReason string
+	Sections                []string
+	Transports              []RobotTransportInfo
+	ConsumerGuidance        *ConsumerGuidance
+	Boundedness             *BoundednessInfo
+	FollowUp                *FollowUpInfo
+	ActionHandoff           *ActionHandoffInfo
+	RequestSemantics        *RequestSemantics
+	AttentionOps            *AttentionOpsInfo
+	Explainability          *ExplainabilityInfo
+	Lifecycle               *LifecycleInfo
 }
 
 var (
-	robotRegistryOnce sync.Once
-	robotRegistry     *RobotRegistry
+	robotRegistryOnce    sync.Once
+	robotRegistryBuildMu sync.Mutex
+	robotRegistry        *RobotRegistry
 )
 
 // GetRobotRegistry returns a detached snapshot of the cached robot registry.
 func GetRobotRegistry() *RobotRegistry {
+	robotRegistryBuildMu.Lock()
+	defer robotRegistryBuildMu.Unlock()
 	robotRegistryOnce.Do(func() {
 		robotRegistry = buildRobotRegistry()
 	})
@@ -236,6 +247,7 @@ func (r *RobotRegistry) Surface(name string) (RobotSurfaceDescriptor, bool) {
 	}
 	surface, ok := r.surfaceByName[name]
 	if ok {
+		surface.OutputFormats = cloneStrings(surface.OutputFormats)
 		surface.Sections = cloneStrings(surface.Sections)
 		surface.Parameters = cloneRobotParameters(surface.Parameters)
 		surface.Examples = cloneStrings(surface.Examples)
@@ -285,27 +297,45 @@ func buildRobotRegistry() *RobotRegistry {
 
 	for _, command := range commands {
 		meta := metadata[command.Name]
+		outputFormats := cloneStrings(meta.OutputFormats)
+		if len(outputFormats) == 0 {
+			outputFormats = []string{"json"}
+		}
+		defaultOutputFormat := firstNonEmptyString(meta.DefaultOutputFormat, outputFormats[0])
+		schemaSource := firstNonEmptyString(meta.SchemaSource, "built_in")
+		schemaType := ""
+		if schemaSource != "none" {
+			schemaType = firstNonEmptyString(meta.SchemaType, schemaTypeForCommand(command.Name, schemaByType))
+		}
+		schemaID := meta.SchemaID
+		if schemaID == "" && schemaType != "" {
+			schemaID = defaultRobotSchemaID(command.Name)
+		}
 		surface := RobotSurfaceDescriptor{
-			Name:             command.Name,
-			Flag:             command.Flag,
-			Category:         command.Category,
-			Summary:          summarizeDescription(command.Description),
-			Description:      command.Description,
-			Note:             command.Note,
-			SchemaID:         firstNonEmptyString(meta.SchemaID, defaultRobotSchemaID(command.Name)),
-			SchemaType:       firstNonEmptyString(meta.SchemaType, schemaTypeForCommand(command.Name, schemaByType)),
-			Sections:         cloneStrings(meta.Sections),
-			Parameters:       cloneRobotParameters(command.Parameters),
-			Examples:         cloneStrings(command.Examples),
-			Transports:       cloneTransports(meta.Transports),
-			ConsumerGuidance: cloneConsumerGuidance(meta.ConsumerGuidance),
-			Boundedness:      cloneBoundednessInfo(meta.Boundedness),
-			FollowUp:         cloneFollowUpInfo(meta.FollowUp),
-			ActionHandoff:    cloneActionHandoffInfo(meta.ActionHandoff),
-			RequestSemantics: cloneRequestSemantics(meta.RequestSemantics),
-			AttentionOps:     cloneAttentionOpsInfo(meta.AttentionOps),
-			Explainability:   cloneExplainabilityInfo(meta.Explainability),
-			Lifecycle:        cloneLifecycleInfo(meta.Lifecycle),
+			Name:                    command.Name,
+			Flag:                    command.Flag,
+			Category:                command.Category,
+			Summary:                 summarizeDescription(command.Description),
+			Description:             command.Description,
+			Note:                    command.Note,
+			OutputFormats:           outputFormats,
+			DefaultOutputFormat:     defaultOutputFormat,
+			SchemaID:                schemaID,
+			SchemaType:              schemaType,
+			SchemaSource:            schemaSource,
+			SchemaUnavailableReason: meta.SchemaUnavailableReason,
+			Sections:                cloneStrings(meta.Sections),
+			Parameters:              cloneRobotParameters(command.Parameters),
+			Examples:                cloneStrings(command.Examples),
+			Transports:              cloneTransports(meta.Transports),
+			ConsumerGuidance:        cloneConsumerGuidance(meta.ConsumerGuidance),
+			Boundedness:             cloneBoundednessInfo(meta.Boundedness),
+			FollowUp:                cloneFollowUpInfo(meta.FollowUp),
+			ActionHandoff:           cloneActionHandoffInfo(meta.ActionHandoff),
+			RequestSemantics:        cloneRequestSemantics(meta.RequestSemantics),
+			AttentionOps:            cloneAttentionOpsInfo(meta.AttentionOps),
+			Explainability:          cloneExplainabilityInfo(meta.Explainability),
+			Lifecycle:               cloneLifecycleInfo(meta.Lifecycle),
 		}
 		if len(surface.Transports) == 0 {
 			surface.Transports = []RobotTransportInfo{
@@ -482,7 +512,9 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			},
 		},
 		"dashboard": {
-			Sections: []string{"summary", "sessions", "attention", "work", "alerts"},
+			OutputFormats:       []string{"markdown", "json"},
+			DefaultOutputFormat: "markdown",
+			Sections:            []string{"summary", "sessions", "attention", "work", "alerts"},
 			ConsumerGuidance: &ConsumerGuidance{
 				IntendedUse:           "Human-facing summary for dashboards and reports",
 				PollingRecommendation: "Suitable for 10-60 second intervals",
@@ -490,7 +522,11 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			},
 		},
 		"terse": {
-			Sections: []string{"summary", "attention"},
+			OutputFormats:           []string{"text"},
+			DefaultOutputFormat:     "text",
+			SchemaSource:            "none",
+			SchemaUnavailableReason: "Terse output is intentionally a compact single-line text protocol",
+			Sections:                []string{"summary", "attention"},
 			ConsumerGuidance: &ConsumerGuidance{
 				IntendedUse:           "Minimal-token output for constrained contexts",
 				PollingRecommendation: "Use when token budget is critical",
@@ -503,7 +539,11 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			},
 		},
 		"markdown": {
-			Sections: []string{"summary", "sessions", "work", "alerts", "attention"},
+			OutputFormats:           []string{"markdown"},
+			DefaultOutputFormat:     "markdown",
+			SchemaSource:            "none",
+			SchemaUnavailableReason: "Markdown projection is intentionally human-readable text",
+			Sections:                []string{"summary", "sessions", "work", "alerts", "attention"},
 			ConsumerGuidance: &ConsumerGuidance{
 				IntendedUse: "Human-readable markdown for reports and chat",
 				SummaryHint: "Rendered markdown; embed directly in documents",
@@ -661,8 +701,8 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 		"docs": {
 			Sections: []string{"command_catalog"},
 			ConsumerGuidance: &ConsumerGuidance{
-				IntendedUse: "Human-readable documentation for robot commands",
-				SummaryHint: "Markdown format suitable for rendering",
+				IntendedUse: "Topic-scoped JSON documentation for robot commands",
+				SummaryHint: "Parse the content sections, examples, and exit_codes fields from the JSON response",
 			},
 		},
 		"mail": {
@@ -708,10 +748,12 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			Sections: []string{"sessions"},
 		},
 		"controller-spawn": {
-			Sections: []string{"sessions", "next_actions"},
+			SchemaSource: "external",
+			Sections:     []string{"sessions", "next_actions"},
 		},
 		"context-inject": {
-			Sections: []string{"sessions", "next_actions"},
+			SchemaSource: "external",
+			Sections:     []string{"sessions", "next_actions"},
 		},
 		"env": {
 			Sections: []string{"source_health"},
@@ -732,13 +774,39 @@ func buildRobotSurfaceMetadata() map[string]robotSurfaceMetadata {
 			Sections: []string{"quota", "next_actions"},
 		},
 		"default-prompts": {
-			Sections: []string{"command_catalog"},
+			SchemaSource: "external",
+			Sections:     []string{"command_catalog"},
 		},
 		"profile-list": {
-			Sections: []string{"command_catalog"},
+			SchemaSource: "external",
+			Sections:     []string{"command_catalog"},
 		},
 		"profile-show": {
-			Sections: []string{"command_catalog"},
+			SchemaSource: "external",
+			Sections:     []string{"command_catalog"},
+		},
+		"pipeline-run": {
+			SchemaSource: "external",
+			Sections:     []string{"work", "next_actions"},
+		},
+		"pipeline-status": {
+			SchemaSource: "external",
+			Sections:     []string{"work", "next_actions"},
+		},
+		"pipeline-list": {
+			SchemaSource: "external",
+			Sections:     []string{"work"},
+		},
+		"pipeline-cancel": {
+			SchemaSource: "external",
+			Sections:     []string{"work", "next_actions"},
+		},
+		"help": {
+			OutputFormats:           []string{"text"},
+			DefaultOutputFormat:     "text",
+			SchemaSource:            "none",
+			SchemaUnavailableReason: "Robot help is intentionally human-readable text",
+			Sections:                []string{"command_catalog"},
 		},
 		"safety-simulate": {
 			Sections: []string{"source_health", "next_actions"},
@@ -1073,9 +1141,6 @@ func cloneSchemaBindings(src map[string]interface{}) map[string]interface{} {
 }
 
 func schemaTypeForCommand(name string, schemaByType map[string]interface{}) string {
-	if registrySurfaceOmitsSchemaType(name) {
-		return ""
-	}
 	if _, ok := schemaByType[name]; ok {
 		return name
 	}
@@ -1084,18 +1149,6 @@ func schemaTypeForCommand(name string, schemaByType map[string]interface{}) stri
 		return candidate
 	}
 	return ""
-}
-
-func registrySurfaceOmitsSchemaType(name string) bool {
-	switch name {
-	case "attention":
-		// The attention surface is versioned by the dedicated attention
-		// contract/capabilities metadata rather than the generic schema_type
-		// projection used by most robot surfaces.
-		return true
-	default:
-		return false
-	}
 }
 
 func sortedSchemaTypes(schemaByType map[string]interface{}) []string {
@@ -1223,6 +1276,7 @@ func cloneRobotSurfaceDescriptors(surfaces []RobotSurfaceDescriptor) []RobotSurf
 	cloned := make([]RobotSurfaceDescriptor, len(surfaces))
 	for i, surface := range surfaces {
 		cloned[i] = surface
+		cloned[i].OutputFormats = cloneStrings(surface.OutputFormats)
 		cloned[i].Sections = cloneStrings(surface.Sections)
 		cloned[i].Parameters = cloneRobotParameters(surface.Parameters)
 		cloned[i].Examples = cloneStrings(surface.Examples)
@@ -1279,6 +1333,7 @@ func cloneSurfaceDescriptorMap(src map[string]RobotSurfaceDescriptor) map[string
 	cloned := make(map[string]RobotSurfaceDescriptor, len(src))
 	for name, surface := range src {
 		copied := surface
+		copied.OutputFormats = cloneStrings(surface.OutputFormats)
 		copied.Sections = cloneStrings(surface.Sections)
 		copied.Parameters = cloneRobotParameters(surface.Parameters)
 		copied.Examples = cloneStrings(surface.Examples)
