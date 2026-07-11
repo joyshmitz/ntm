@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +16,120 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/process"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestShellDispatchOrdererPreservesSelectedOrder(t *testing.T) {
+	t.Parallel()
+	selected := []tmux.Pane{
+		{ID: "%3", Index: 2, WindowIndex: 0, Type: tmux.AgentCodex},
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 1, WindowIndex: 0, Type: tmux.AgentGemini},
+	}
+	planned := []dispatchsvc.Target{
+		{Pane: selected[1], Ref: selected[1].Ref(), Address: "0"},
+		{Pane: selected[2], Ref: selected[2].Ref(), Address: "1"},
+		{Pane: selected[0], Ref: selected[0].Ref(), Address: "2"},
+	}
+	ordered, err := shellDispatchOrderer(selected).OrderTargets(context.Background(), dispatchsvc.OrderInput{Session: "proj", Targets: planned})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{ordered[0].Ref.ID, ordered[1].Ref.ID, ordered[2].Ref.ID}
+	if want := []string{"%3", "%1", "%2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestShellDispatchProtocolMatchesLegacySendPromptBehavior(t *testing.T) {
+	t.Parallel()
+	planner := shellDispatchProtocolPlanner{}
+	for _, tc := range []struct {
+		name     string
+		paneType tmux.AgentType
+		submit   bool
+		want     dispatchsvc.ProtocolPlan
+	}{
+		{name: "user paste and enter", paneType: tmux.AgentUser, submit: true, want: dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolSingleEnter, EnterDelay: tmux.DefaultEnterDelay}},
+		{name: "claude double enter", paneType: tmux.AgentClaude, submit: true, want: dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolDoubleEnter, EnterDelay: tmux.DoubleEnterFirstDelay, SecondEnterDelay: tmux.DoubleEnterSecondDelay}},
+		{name: "unknown historically double enters", paneType: tmux.AgentUnknown, submit: true, want: dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolDoubleEnter, EnterDelay: tmux.DoubleEnterFirstDelay, SecondEnterDelay: tmux.DoubleEnterSecondDelay}},
+		{name: "stage only", paneType: tmux.AgentClaude, submit: false, want: dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolStageOnly}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := planner.PlanDelivery(context.Background(), dispatchsvc.Target{Pane: tmux.Pane{Type: tc.paneType}}, tc.submit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("plan = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShellFinalMessageRedactorParity(t *testing.T) {
+	t.Parallel()
+	message := "password=hunter2hunter2"
+	for _, mode := range []redaction.Mode{redaction.ModeOff, redaction.ModeWarn, redaction.ModeRedact, redaction.ModeBlock} {
+		t.Run(string(mode), func(t *testing.T) {
+			want := redaction.ScanAndRedact(message, redaction.Config{Mode: mode})
+			got, err := shellFinalMessageRedactor(redaction.Config{Mode: mode}).RedactFinalMessage(context.Background(), dispatchsvc.Target{}, message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Message != want.Output || got.Blocked != want.Blocked || got.Findings != len(want.Findings) || got.Mode != string(mode) {
+				t.Fatalf("result = %+v, scan = %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestShellDispatchRequestUsesStableSelectorsAndFailurePolicy(t *testing.T) {
+	t.Parallel()
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentClaude},
+		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentCodex},
+	}
+	req := shellDispatchRequest("proj", panes, []tmux.Pane{panes[1], panes[0]}, "work", true)
+	if req.Session != "proj" || req.Message != "work" || !req.Submit || !req.IncludeUser || !req.StopOnFailure {
+		t.Fatalf("request = %+v", req)
+	}
+	if want := []string{"%2", "%1"}; !reflect.DeepEqual(req.Selectors, want) {
+		t.Fatalf("selectors = %v, want %v", req.Selectors, want)
+	}
+}
+
+func TestExecuteShellDispatchDryRunPreflightsFinalRedaction(t *testing.T) {
+	oldCfg := cfg
+	cfg = config.Default()
+	cfg.Redaction.Mode = string(redaction.ModeBlock)
+	t.Cleanup(func() { cfg = oldCfg })
+
+	panes := []tmux.Pane{{ID: "%1", Index: 0, WindowIndex: 0, Type: tmux.AgentClaude}}
+	safeOutput := shellPromptForOutput("password=hunter2hunter2")
+	if strings.Contains(safeOutput, "hunter2hunter2") || !strings.Contains(safeOutput, "REDACTED") {
+		t.Fatalf("safe dry-run output leaked blocked prompt: %q", safeOutput)
+	}
+	result, err := executeShellDispatch(
+		context.Background(),
+		"proj",
+		panes,
+		panes,
+		"password=hunter2hunter2",
+		true,
+	)
+	var dispatchErr *dispatchsvc.Error
+	if !errors.As(err, &dispatchErr) || dispatchErr.Code != dispatchsvc.ErrRedactionBlocked {
+		t.Fatalf("dry-run error = %v, want %s", err, dispatchsvc.ErrRedactionBlocked)
+	}
+	if result.Success || result.Delivered != 0 || result.Blocked != 1 {
+		t.Fatalf("dry-run blocked result = %+v", result)
+	}
+}
 
 // TestSendRealSession tests sending a prompt to a real tmux session
 func TestSendRealSession(t *testing.T) {

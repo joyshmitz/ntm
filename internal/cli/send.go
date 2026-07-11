@@ -31,6 +31,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/codex"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
@@ -1145,109 +1146,16 @@ func parseShellPaneSelectors(raw string) ([]string, error) {
 }
 
 func validateShellPaneSelector(selector string) error {
-	selector = strings.TrimSpace(selector)
-	validNumber := func(value string) bool {
-		if value == "" {
-			return false
-		}
-		for _, char := range value {
-			if char < '0' || char > '9' {
-				return false
-			}
-		}
-		_, err := strconv.Atoi(value)
-		return err == nil
-	}
-
-	valid := false
-	switch {
-	case strings.HasPrefix(selector, "%"):
-		valid = validNumber(strings.TrimPrefix(selector, "%"))
-	case strings.Contains(selector, "."):
-		window, pane, ok := strings.Cut(selector, ".")
-		valid = ok && validNumber(window) && validNumber(pane)
-	default:
-		valid = validNumber(selector)
-	}
-	if !valid {
-		return fmt.Errorf("invalid pane selector %q: expected N, W.P, or %%N", selector)
-	}
-	return nil
+	_, err := tmux.ParsePaneSelector(selector)
+	return err
 }
 
 func sortPanesByTopology(panes []tmux.Pane) []tmux.Pane {
-	sorted := append([]tmux.Pane(nil), panes...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].WindowIndex != sorted[j].WindowIndex {
-			return sorted[i].WindowIndex < sorted[j].WindowIndex
-		}
-		if sorted[i].Index != sorted[j].Index {
-			return sorted[i].Index < sorted[j].Index
-		}
-		return sorted[i].ID < sorted[j].ID
-	})
-	return sorted
-}
-
-func shellPaneRefs(panes []tmux.Pane, multiWindow bool) []string {
-	refs := make([]string, 0, len(panes))
-	for _, pane := range panes {
-		ref := tmux.PaneTargetKey(pane, multiWindow)
-		if pane.ID != "" {
-			ref += " (" + pane.ID + ")"
-		}
-		refs = append(refs, ref)
-	}
-	return refs
+	return tmux.SortPanesByTopology(panes)
 }
 
 func resolveShellSendSelectors(panes []tmux.Pane, selectors []string, singular bool) ([]tmux.Pane, error) {
-	if len(selectors) == 0 {
-		return nil, fmt.Errorf("at least one pane selector is required")
-	}
-	ordered := sortPanesByTopology(panes)
-	multiWindow := tmux.PanesSpanMultipleWindows(ordered)
-	selectedIDs := make(map[string]struct{})
-
-	for _, selector := range selectors {
-		if err := validateShellPaneSelector(selector); err != nil {
-			return nil, err
-		}
-		var matches []tmux.Pane
-		for _, pane := range ordered {
-			if tmux.PaneMatchesSelector(pane, selector, multiWindow) {
-				matches = append(matches, pane)
-			}
-		}
-		if len(matches) == 0 {
-			return nil, fmt.Errorf("pane selector %q not found; available: %s", selector, strings.Join(shellPaneRefs(ordered, multiWindow), ", "))
-		}
-		if singular && len(matches) != 1 {
-			return nil, fmt.Errorf("pane selector %q matched %d panes (%s); use explicit W.P or %%N", selector, len(matches), strings.Join(shellPaneRefs(matches, true), ", "))
-		}
-		for _, pane := range matches {
-			key := pane.ID
-			if key == "" {
-				key = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
-			}
-			selectedIDs[key] = struct{}{}
-		}
-	}
-
-	selected := make([]tmux.Pane, 0, len(selectedIDs))
-	for _, pane := range ordered {
-		key := pane.ID
-		if key == "" {
-			key = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
-		}
-		if _, ok := selectedIDs[key]; ok {
-			selected = append(selected, pane)
-		}
-	}
-	if singular && len(selected) != 1 {
-		return nil, fmt.Errorf("pane selector resolved to %d panes; use exactly one W.P or %%N selector", len(selected))
-	}
-	return selected, nil
+	return tmux.ResolvePaneSelectors(panes, selectors, singular)
 }
 
 func runSendInternal(opts SendOptions) (err error) {
@@ -1738,7 +1646,34 @@ func runSendInternal(opts SendOptions) (err error) {
 		return outputError(err)
 	}
 
+	if len(selectedPanes) == 0 {
+		histErr = errors.New("no matching panes found")
+		fmt.Println("No matching panes found")
+		return nil
+	}
+
+	dispatchRedactCfg := activeShellDispatchRedactionConfig()
+	dispatchService, err := newShellDispatchService(session, selectedPanes, dispatchRedactCfg)
+	if err != nil {
+		return outputError(err)
+	}
+	dispatchRequest := shellDispatchRequest(session, panes, selectedPanes, prompt, !jsonOutput || explicitSingle)
+	dispatchRequest.DryRun = dryRun
+	preparedDispatch, err := dispatchService.Prepare(
+		context.Background(),
+		dispatchRequest,
+	)
+	if err != nil {
+		return outputError(err)
+	}
+	dispatchResult, dispatchErr := dispatchService.Dispatch(context.Background(), preparedDispatch)
 	if dryRun {
+		if dispatchErr != nil || !dispatchResult.Success {
+			if dispatchErr == nil {
+				dispatchErr = errors.New("dispatch preflight did not produce a successful preview")
+			}
+			return outputError(dispatchErr)
+		}
 		entries := buildSendDryRunEntries(selectedPanes, prompt, promptSource, multiWindow)
 		return printSendDryRunResult(SendDryRunResult{
 			Success:              true,
@@ -1755,16 +1690,30 @@ func runSendInternal(opts SendOptions) (err error) {
 			Message:              "use without --dry-run to execute",
 		})
 	}
+	delivered = dispatchResult.Delivered
+	failed = dispatchResult.Failed
+	var firstDeliveryErr error
+	var firstFailedPane string
+	for _, receipt := range dispatchResult.Receipts {
+		if receipt.Status != dispatchsvc.ReceiptFailed {
+			continue
+		}
+		failure := errors.New(receipt.Error)
+		if firstDeliveryErr == nil {
+			firstDeliveryErr = failure
+			firstFailedPane = receipt.Target.Address
+		}
+		histErr = failure
+	}
+	if dispatchErr != nil && firstDeliveryErr == nil {
+		firstDeliveryErr = dispatchErr
+		histErr = dispatchErr
+	}
 
-	// If specific pane requested
+	// Preserve the explicit single-pane command's receipt and lifecycle: it has
+	// historically returned before broadcast post-hooks and prompt-send events.
 	if explicitSingle {
-		p := selectedPanes[0]
-		// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op when
-		// the semantic feature is off, so the dispatched prompt is unchanged.
-		promptForPane := stampMarchingOrders(prompt, session, p.WindowIndex, p.Index)
-		if err := sendPromptToPane(session, p, promptForPane); err != nil {
-			failed++
-			histErr = err
+		if firstDeliveryErr != nil {
 			if jsonOutput {
 				result := SendResult{
 					Success:              false,
@@ -1780,16 +1729,13 @@ func runSendInternal(opts SendOptions) (err error) {
 					Failed:               failed,
 					RoutedTo:             opts.routingResult,
 					DispatchPacing:       dispatchPacing,
-					Error:                err.Error(),
+					Error:                firstDeliveryErr.Error(),
 				}
-				// bd-oqwmf: signal non-zero exit after the success:false envelope.
 				return emitJSONFailureEnvelope(result)
 			}
-			return err
+			return firstDeliveryErr
 		}
-		delivered++
 		histSuccess = true
-
 		if jsonOutput {
 			result := SendResult{
 				Success:              true,
@@ -1811,26 +1757,8 @@ func runSendInternal(opts SendOptions) (err error) {
 		fmt.Printf("Sent to pane %s\n", targetPanes[0])
 		return nil
 	}
-
-	if len(selectedPanes) == 0 {
-		histErr = errors.New("no matching panes found")
-		fmt.Println("No matching panes found")
-		return nil
-	}
-
-	for _, p := range selectedPanes {
-		// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op when
-		// the semantic feature is off, so the dispatched prompt is unchanged.
-		promptForPane := stampMarchingOrders(prompt, session, p.WindowIndex, p.Index)
-		if err := sendPromptToPane(session, p, promptForPane); err != nil {
-			failed++
-			histErr = err
-			if !jsonOutput {
-				return fmt.Errorf("sending to pane %s: %w", tmux.PaneTargetKey(p, multiWindow), err)
-			}
-		} else {
-			delivered++
-		}
+	if firstDeliveryErr != nil && !jsonOutput {
+		return fmt.Errorf("sending to pane %s: %w", firstFailedPane, firstDeliveryErr)
 	}
 
 	// Update hook context with delivery results
@@ -3109,6 +3037,153 @@ func sendPromptToPane(session string, p tmux.Pane, prompt string) error {
 	return nil
 }
 
+type shellDispatchProtocolPlanner struct{}
+
+func (shellDispatchProtocolPlanner) PlanDelivery(_ context.Context, target dispatchsvc.Target, submit bool) (dispatchsvc.ProtocolPlan, error) {
+	if !submit {
+		return dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolStageOnly}, nil
+	}
+	if target.Pane.Type == tmux.AgentUser {
+		return dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolSingleEnter, EnterDelay: tmux.DefaultEnterDelay}, nil
+	}
+	return dispatchsvc.ProtocolPlan{
+		Protocol:         dispatchsvc.ProtocolDoubleEnter,
+		EnterDelay:       tmux.DoubleEnterFirstDelay,
+		SecondEnterDelay: tmux.DoubleEnterSecondDelay,
+	}, nil
+}
+
+func shellDispatchOrderer(selected []tmux.Pane) dispatchsvc.TargetOrderer {
+	keys := make([]string, len(selected))
+	for i := range selected {
+		keys[i] = selected[i].Ref().StableKey()
+	}
+	return dispatchsvc.TargetOrdererFunc(func(_ context.Context, input dispatchsvc.OrderInput) ([]dispatchsvc.Target, error) {
+		byKey := make(map[string]dispatchsvc.Target, len(input.Targets))
+		for _, target := range input.Targets {
+			byKey[target.Ref.StableKey()] = target
+		}
+		ordered := make([]dispatchsvc.Target, 0, len(keys))
+		for _, key := range keys {
+			target, ok := byKey[key]
+			if !ok {
+				return nil, fmt.Errorf("selected shell pane %q is absent from dispatch plan", key)
+			}
+			ordered = append(ordered, target)
+		}
+		return ordered, nil
+	})
+}
+
+func shellDispatchSelectors(selected []tmux.Pane) []string {
+	selectors := make([]string, 0, len(selected))
+	for _, pane := range selected {
+		if pane.ID != "" {
+			selectors = append(selectors, pane.ID)
+		} else {
+			selectors = append(selectors, pane.Ref().Physical())
+		}
+	}
+	return selectors
+}
+
+func shellFinalMessageRedactor(redactCfg redaction.Config) dispatchsvc.FinalMessageRedactor {
+	return dispatchsvc.FinalMessageRedactorFunc(func(_ context.Context, _ dispatchsvc.Target, message string) (dispatchsvc.RedactionResult, error) {
+		result := redaction.ScanAndRedact(message, redactCfg)
+		categories := make(map[string]int, len(result.Findings))
+		for _, finding := range result.Findings {
+			categories[string(finding.Category)]++
+		}
+		if len(categories) == 0 {
+			categories = nil
+		}
+		return dispatchsvc.RedactionResult{
+			Message:    result.Output,
+			Mode:       string(result.Mode),
+			Findings:   len(result.Findings),
+			Categories: categories,
+			Blocked:    result.Blocked,
+		}, nil
+	})
+}
+
+func newShellDispatchService(session string, selected []tmux.Pane, redactCfg redaction.Config) (*dispatchsvc.Service, error) {
+	return dispatchsvc.NewService(dispatchsvc.Ports{
+		Builder: dispatchsvc.FinalMessageBuilderFunc(func(_ context.Context, input dispatchsvc.BuildInput) (string, error) {
+			return stampMarchingOrders(input.BaseMessage, session, input.Target.Pane.WindowIndex, input.Target.Pane.Index), nil
+		}),
+		Redactor:  shellFinalMessageRedactor(redactCfg),
+		Orderer:   shellDispatchOrderer(selected),
+		Protocols: shellDispatchProtocolPlanner{},
+		Deliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			target := delivery.Target.Pane
+			if target.ID == "" {
+				target.ID = fmt.Sprintf("%s:%s", session, target.Ref().Physical())
+			}
+			switch delivery.Protocol {
+			case dispatchsvc.ProtocolSingleEnter:
+				return tmux.PasteKeysWithDelay(target.ID, delivery.Message, true, delivery.EnterDelay)
+			case dispatchsvc.ProtocolDoubleEnter:
+				return sendPromptWithDoubleEnterForAgent(target.ID, delivery.Message, target.Type)
+			default:
+				return fmt.Errorf("unsupported shell send protocol %q", delivery.Protocol)
+			}
+		}),
+		Lifecycle: dispatchsvc.LifecycleHooks{
+			AfterReceipt: func(_ context.Context, delivery dispatchsvc.Delivery, receipt dispatchsvc.Receipt) {
+				if receipt.Status == dispatchsvc.ReceiptDelivered {
+					addTimelinePromptMarker(session, delivery.Target.Pane, delivery.Message)
+				}
+			},
+		},
+	})
+}
+
+func activeShellDispatchRedactionConfig() redaction.Config {
+	if cfg == nil {
+		return redaction.Config{Mode: redaction.ModeOff}
+	}
+	return cfg.Redaction.ToRedactionLibConfig()
+}
+
+func shellPromptForOutput(prompt string) string {
+	redactCfg := activeShellDispatchRedactionConfig()
+	result := redaction.ScanAndRedact(prompt, redactCfg)
+	if !result.Blocked {
+		return result.Output
+	}
+	redactCfg.Mode = redaction.ModeRedact
+	return redaction.ScanAndRedact(prompt, redactCfg).Output
+}
+
+func executeShellDispatch(
+	ctx context.Context,
+	session string,
+	allPanes, selected []tmux.Pane,
+	prompt string,
+	dryRun bool,
+) (dispatchsvc.Result, error) {
+	service, err := newShellDispatchService(session, selected, activeShellDispatchRedactionConfig())
+	if err != nil {
+		return dispatchsvc.Result{}, err
+	}
+	request := shellDispatchRequest(session, allPanes, selected, prompt, false)
+	request.DryRun = dryRun
+	return service.Execute(ctx, request)
+}
+
+func shellDispatchRequest(session string, panes, selected []tmux.Pane, prompt string, stopOnFailure bool) dispatchsvc.Request {
+	return dispatchsvc.Request{
+		Session:       session,
+		Panes:         panes,
+		Selectors:     shellDispatchSelectors(selected),
+		IncludeUser:   true,
+		Message:       prompt,
+		Submit:        true,
+		StopOnFailure: stopOnFailure,
+	}
+}
+
 // CodexGoalSendResult is the JSON receipt for `ntm send --codex-goal` (#165).
 type CodexGoalSendResult struct {
 	robot.RobotResponse
@@ -4080,14 +4155,22 @@ func runSendBatch(opts SendOptions) error {
 				targetPanes = []tmux.Pane{agentPanes[currentAgent%len(agentPanes)]}
 				currentAgent++
 			}
+			preview, err := executeShellDispatch(context.Background(), opts.Session, panes, targetPanes, bp.Text, true)
+			if err != nil {
+				return fmt.Errorf("preflighting batch prompt %q: %w", bp.Source, err)
+			}
+			if !preview.Success {
+				return fmt.Errorf("preflighting batch prompt %q did not produce a successful preview", bp.Source)
+			}
+			outputPrompt := shellPromptForOutput(bp.Text)
 
 			for _, pane := range targetPanes {
 				entries = append(entries, SendDryRunEntry{
 					Pane:          tmux.PaneTargetKey(pane, multiWindow),
 					PaneID:        pane.ID,
 					Agent:         paneAgentLabel(pane),
-					Prompt:        bp.Text,
-					PromptPreview: truncateForPreview(bp.Text, 80),
+					Prompt:        outputPrompt,
+					PromptPreview: truncateForPreview(outputPrompt, 80),
 					Source:        bp.Source,
 					Priority:      bp.Priority,
 				})
@@ -4172,7 +4255,7 @@ func runSendBatch(opts SendOptions) error {
 		default:
 		}
 
-		preview := truncateForPreview(promptText, 60)
+		preview := truncateForPreview(shellPromptForOutput(promptText), 60)
 		result := BatchPromptResult{
 			Index:         i,
 			PromptPreview: preview,
@@ -4207,19 +4290,14 @@ func runSendBatch(opts SendOptions) error {
 			currentAgent++
 		}
 
-		// Send to each target pane
-		var paneDelivered, paneFailed int
-		var sendErr error
-		for _, pane := range targetPanes {
-			// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op
-			// when the semantic feature is off (prompt unchanged).
-			promptForPane := stampMarchingOrders(promptText, opts.Session, pane.WindowIndex, pane.Index)
-			if err := sendPromptToPane(opts.Session, pane, promptForPane); err != nil {
-				paneFailed++
-				sendErr = err
-			} else {
-				paneDelivered++
-			}
+		dispatchResult, sendErr := executeShellDispatch(ctx, opts.Session, panes, targetPanes, promptText, false)
+		paneDelivered := dispatchResult.Delivered
+		paneFailed := dispatchResult.Failed + dispatchResult.Blocked + dispatchResult.Skipped
+		if sendErr != nil && paneFailed == 0 {
+			paneFailed = len(targetPanes)
+		}
+		if sendErr == nil && paneFailed > 0 {
+			sendErr = fmt.Errorf("%d pane dispatch(es) did not complete", paneFailed)
 		}
 
 		result.Targets = make([]string, 0, len(targetPanes))
