@@ -1738,9 +1738,11 @@ func ValidateSessionName(name string) error {
 	return nil
 }
 
-// GetPaneActivity returns the last activity time for a pane
+// GetPaneActivity returns the last activity time for the pane's window. tmux
+// does not expose a pane-level activity timestamp; window_activity is the
+// narrowest supported signal and is conservative when a window has many panes.
 func (c *Client) GetPaneActivity(paneID string) (time.Time, error) {
-	output, err := c.Run("display-message", "-p", "-t", paneID, "#{pane_last_activity}")
+	output, err := c.Run("display-message", "-p", "-t", paneID, "#{window_activity}")
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -1766,7 +1768,7 @@ type PaneActivity struct {
 // GetPanesWithActivityContext returns all panes in a session with their activity times with cancellation support.
 func (c *Client) GetPanesWithActivityContext(ctx context.Context, session string) ([]PaneActivity, error) {
 	sep := FieldSeparator
-	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_last_activity}%[1]s#{pane_pid}%[1]s#{window_index}", sep)
+	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{window_activity}%[1]s#{pane_pid}%[1]s#{window_index}", sep)
 	output, err := c.RunContext(ctx, "list-panes", "-s", "-t", session, "-F", format)
 	if err != nil {
 		return nil, err
