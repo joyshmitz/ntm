@@ -308,22 +308,22 @@ func (c *SessionCoordinator) recoverPendingAssignments(ctx context.Context, stor
 		if target == "" {
 			target = strings.TrimSpace(recorded.DispatchTarget)
 		}
-			candidate, eligible := eligibleTargets[target]
-			if !eligible {
-				results = append(results, AssignmentResult{
+		candidate, eligible := eligibleTargets[target]
+		if !eligible {
+			results = append(results, AssignmentResult{
 				Assignment: work, ClaimActor: recorded.ClaimActor, IdempotencyKey: recorded.IdempotencyKey,
 				Error: fmt.Sprintf("assignment recovery target %q is not freshly eligible", target),
-				})
-				continue
-			}
-			if identityErr := pendingRecoveryIdentityError(recorded, candidate); identityErr != nil {
-				results = append(results, AssignmentResult{
-					Assignment: work, ClaimActor: recorded.ClaimActor, IdempotencyKey: recorded.IdempotencyKey,
-					Error: identityErr.Error(),
-				})
-				continue
-			}
-			results = append(results, c.recoverPendingAssignment(ctx, store, recorded, work))
+			})
+			continue
+		}
+		if identityErr := pendingRecoveryIdentityError(recorded, candidate); identityErr != nil {
+			results = append(results, AssignmentResult{
+				Assignment: work, ClaimActor: recorded.ClaimActor, IdempotencyKey: recorded.IdempotencyKey,
+				Error: identityErr.Error(),
+			})
+			continue
+		}
+		results = append(results, c.recoverPendingAssignment(ctx, store, recorded, work))
 	}
 	return results
 }
@@ -659,8 +659,7 @@ func filterOccupiedAgents(agents []*AgentState, activeAssignments []*assignments
 // findBestMatch finds the best work recommendation for an agent.
 func (c *SessionCoordinator) findBestMatch(agent *AgentState, recommendations []bv.TriageRecommendation) (*WorkAssignment, *bv.TriageRecommendation) {
 	for _, rec := range recommendations {
-		// Skip if blocked (status indicates blocked state)
-		if rec.Status == "blocked" {
+		if !recommendationPassesSemanticGates(rec) {
 			continue
 		}
 
@@ -813,6 +812,7 @@ func (p *coordinatorAgentMailReservationPort) Reserve(ctx context.Context, req a
 	}
 	seenPaths := make(map[string]struct{}, len(reserved.Granted))
 	seenIDs := make(map[int]struct{}, len(reserved.Granted))
+	expectedReason := fmt.Sprintf("bead assignment: %s", req.BeadID)
 	now := time.Now().UTC()
 	for _, granted := range reserved.Granted {
 		if granted.ID > 0 {
@@ -824,7 +824,7 @@ func (p *coordinatorAgentMailReservationPort) Reserve(ctx context.Context, req a
 			lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
 		}
 		expiresAt := granted.ExpiresTS.Time
-		if granted.ID <= 0 || granted.ProjectID != projectID || granted.AgentName != req.AgentName || !granted.Exclusive ||
+		if granted.ID <= 0 || granted.ProjectID != projectID || granted.AgentName != req.AgentName || granted.Reason != expectedReason || !granted.Exclusive ||
 			granted.ReleasedTS != nil || expiresAt.IsZero() || !expiresAt.After(now) {
 			sort.Ints(lease.ReservationIDs)
 			return lease, fmt.Errorf("agent mail returned invalid reservation receipt for %q", granted.PathPattern)
@@ -1153,15 +1153,11 @@ func (c *SessionCoordinator) GetAssignableWork(ctx context.Context) ([]bv.Triage
 		return nil, nil
 	}
 
-	// Filter to unblocked items
-	var assignable []bv.TriageRecommendation
-	for _, rec := range triage.Triage.Recommendations {
-		if rec.Status != "blocked" {
-			assignable = append(assignable, rec)
-		}
+	assignable, terminalRecommendation, err := c.filterActionableRecommendations(ctx, triage.Triage.Recommendations, nil)
+	if terminalRecommendation {
+		bv.InvalidateTriageCache()
 	}
-
-	return assignable, nil
+	return assignable, err
 }
 
 // SuggestAssignment suggests the best work for a specific agent without assigning.

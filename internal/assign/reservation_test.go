@@ -68,7 +68,7 @@ func newAssignMCPServer(t *testing.T, handlers map[string]assignToolHandler) *ht
 				resultJSON, _ := json.Marshal(agentmail.Project{ID: 1, HumanKey: humanKey})
 				_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
 					JSONRPC: "2.0", ID: req.ID,
-					Result: agentmail.ToolCallResult{Content: []agentmail.ContentBlock{{Type: "text", Text: string(resultJSON)}}},
+					Result: json.RawMessage(resultJSON),
 				})
 				return
 			}
@@ -331,10 +331,11 @@ func TestCollectGrantedReservationsValidatesDispatchAuthority(t *testing.T) {
 	valid := agentmail.FileReservation{
 		ID: 71, ProjectID: 9, AgentName: "TestAgent", PathPattern: "src/api/handler.go", Exclusive: true,
 		ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+		Reason:    "bead assignment: bd-test",
 	}
 	result := &FileReservationResult{}
 	now := time.Now().UTC()
-	if err := collectGrantedReservations(result, []agentmail.FileReservation{valid}, []string{"src/api/handler.go"}, "TestAgent", 9, now, false); err != nil {
+	if err := collectGrantedReservations(result, []agentmail.FileReservation{valid}, []string{"src/api/handler.go"}, "TestAgent", "bead assignment: bd-test", 9, now, false); err != nil {
 		t.Fatalf("valid grant: %v", err)
 	}
 	if !reflect.DeepEqual(result.ReservationIDs, []int{71}) || !reflect.DeepEqual(result.GrantedPaths, []string{"src/api/handler.go"}) {
@@ -363,6 +364,11 @@ func TestCollectGrantedReservationsValidatesDispatchAuthority(t *testing.T) {
 		}()}, requested: []string{"src/api/handler.go"}},
 		{name: "nonexclusive", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.Exclusive = false; return grant }()}, requested: []string{"src/api/handler.go"}},
 		{name: "wrong agent", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.AgentName = "OtherAgent"; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "wrong reason", grants: []agentmail.FileReservation{func() agentmail.FileReservation {
+			grant := valid
+			grant.Reason = "bead assignment: bd-other"
+			return grant
+		}()}, requested: []string{"src/api/handler.go"}},
 		{name: "unexpected path", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.PathPattern = "src/api/other.go"; return grant }()}, requested: []string{"src/api/handler.go"}},
 		{name: "duplicate id", grants: []agentmail.FileReservation{valid, valid}, requested: []string{"src/api/handler.go"}},
 		{name: "duplicate path", grants: []agentmail.FileReservation{valid, func() agentmail.FileReservation { grant := valid; grant.ID = 72; return grant }()}, requested: []string{"src/api/handler.go"}},
@@ -371,7 +377,7 @@ func TestCollectGrantedReservationsValidatesDispatchAuthority(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := &FileReservationResult{}
-			if err := collectGrantedReservations(got, test.grants, test.requested, "TestAgent", 9, now, false); err == nil {
+			if err := collectGrantedReservations(got, test.grants, test.requested, "TestAgent", "bead assignment: bd-test", 9, now, false); err == nil {
 				t.Fatalf("collectGrantedReservations() result=%+v, want validation error", got)
 			}
 		})
@@ -550,7 +556,9 @@ func TestReconcileForBeadReturnsMalformedHandlesForFailClosedCleanup(t *testing.
 		{name: "wrong project", mutate: func(reservation *agentmail.FileReservation) { reservation.ProjectID = 2 }},
 		{name: "nonexclusive", mutate: func(reservation *agentmail.FileReservation) { reservation.Exclusive = false }},
 		{name: "missing expiry", mutate: func(reservation *agentmail.FileReservation) { reservation.ExpiresTS = agentmail.FlexTime{} }},
-		{name: "expired", mutate: func(reservation *agentmail.FileReservation) { reservation.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)} }},
+		{name: "expired", mutate: func(reservation *agentmail.FileReservation) {
+			reservation.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reservation := reconcileReservation(51, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1")

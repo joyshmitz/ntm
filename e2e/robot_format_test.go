@@ -456,7 +456,7 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 	t.Run("attention_timeout_under_toon", func(t *testing.T) {
 		process := run(t, fixture.env,
 			"--robot-attention",
-			"--attention-condition=action_required",
+			"--attention-condition=mail_pending",
 			"--attention-timeout=20ms",
 			"--attention-poll=5ms",
 			"--robot-format=toon",

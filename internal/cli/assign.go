@@ -2964,17 +2964,29 @@ func (p *cliAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignment
 	}
 	result, dispatchErr := service.Dispatch(ctx, prepared)
 	receipt := assignment.DispatchReceipt{Duration: time.Since(started)}
-	if len(result.Receipts) == 1 {
-		delivery := result.Receipts[0]
-		receipt.DeliveryID = assignment.DispatchDeliveryID(delivery.Target.Ref.StableKey(), string(delivery.Protocol), req.IdempotencyKey)
-	}
 	if dispatchErr != nil {
 		return receipt, dispatchErr
 	}
-	if result.Delivered != 1 || len(result.Receipts) != 1 || result.Receipts[0].Status != dispatchsvc.ReceiptDelivered {
-		return receipt, fmt.Errorf("dispatch delivered %d panes, want 1", result.Delivered)
+	delivery, err := validateSinglePaneDispatchResult(result, req.Target)
+	if err != nil {
+		return receipt, err
 	}
+	receipt.DeliveryID = assignment.DispatchDeliveryID(delivery.Target.Ref.StableKey(), string(delivery.Protocol), req.IdempotencyKey)
 	return receipt, nil
+}
+
+func validateSinglePaneDispatchResult(result dispatchsvc.Result, requestedTarget string) (dispatchsvc.Receipt, error) {
+	if result.Delivered != 1 || len(result.Receipts) != 1 || result.Receipts[0].Status != dispatchsvc.ReceiptDelivered {
+		return dispatchsvc.Receipt{}, fmt.Errorf("dispatch delivered %d panes, want 1", result.Delivered)
+	}
+	delivery := result.Receipts[0]
+	actualTarget := strings.TrimSpace(delivery.Target.Ref.StableKey())
+	if actualTarget != strings.TrimSpace(requestedTarget) {
+		// A delivered receipt proves actuation happened, but not on the pane this
+		// assignment owns. Leave dispatch in the durable unknown state.
+		return dispatchsvc.Receipt{}, fmt.Errorf("dispatch receipt target %s does not match requested pane %s", actualTarget, requestedTarget)
+	}
+	return delivery, nil
 }
 
 func promptTemplateSource(templateName, templateFile string) string {
@@ -4215,7 +4227,11 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if !assignQuiet {
 		fmt.Printf("Reassigned %s to pane %s (%s)\n", beadID, assignmentPaneTarget(*targetPane), targetAgentType)
 		fmt.Printf("  Previous: pane %d (%s)\n", currentAssignment.Pane, currentAssignment.AgentType)
-		fmt.Printf("  Prompt sent: %s...\n", truncateString(prompt, 50))
+		displayPrompt := durable.PromptSent
+		if displayPrompt == "" {
+			displayPrompt = durable.PendingPrompt
+		}
+		fmt.Printf("  Prompt sent: %s...\n", truncateString(displayPrompt, 50))
 		if data.FileReservationsTransferred {
 			fmt.Println("  File reservations transferred")
 		}
@@ -5355,7 +5371,7 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		if fileReservations != nil && len(fileReservations.Granted) > 0 {
 			fmt.Printf("  Reserved: %v\n", fileReservations.Granted)
 		}
-		fmt.Printf("  Prompt: %s\n", prompt)
+		fmt.Printf("  Prompt: %s\n", assignItem.Prompt)
 	}
 
 	return nil

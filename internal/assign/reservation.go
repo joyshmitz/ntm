@@ -219,7 +219,7 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 		// Check if it's a conflict error with partial results
 		if reservationResult != nil {
 			result.Conflicts = reservationResult.Conflicts
-			if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, expectedProjectID, time.Now().UTC(), false); validationErr != nil {
+			if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, fmt.Sprintf("bead assignment: %s", beadID), expectedProjectID, time.Now().UTC(), false); validationErr != nil {
 				result.Error = validationErr.Error()
 				return result, validationErr
 			}
@@ -235,7 +235,7 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 		return result, errors.New(result.Error)
 	}
 	// Process successful reservations
-	if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, expectedProjectID, time.Now().UTC(), false); validationErr != nil {
+	if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, fmt.Sprintf("bead assignment: %s", beadID), expectedProjectID, time.Now().UTC(), false); validationErr != nil {
 		result.Error = validationErr.Error()
 		return result, validationErr
 	}
@@ -351,7 +351,7 @@ func (m *FileReservationManager) ensureProject(ctx context.Context) (int, error)
 	return project.ID, nil
 }
 
-func collectGrantedReservations(result *FileReservationResult, granted []agentmail.FileReservation, requested []string, agentName string, expectedProjectID int, now time.Time, allowDuplicatePaths bool) error {
+func collectGrantedReservations(result *FileReservationResult, granted []agentmail.FileReservation, requested []string, agentName, expectedReason string, expectedProjectID int, now time.Time, allowDuplicatePaths bool) error {
 	wanted := make(map[string]struct{}, len(requested))
 	for _, raw := range requested {
 		if path := strings.TrimSpace(raw); path != "" {
@@ -384,6 +384,9 @@ func collectGrantedReservations(result *FileReservationResult, granted []agentma
 		}
 		if strings.TrimSpace(reservation.AgentName) != strings.TrimSpace(agentName) {
 			validationErrors = append(validationErrors, fmt.Errorf("reservation %d agent mismatch: got %q, want %q", reservation.ID, reservation.AgentName, agentName))
+		}
+		if strings.TrimSpace(reservation.Reason) != strings.TrimSpace(expectedReason) {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation %d reason mismatch: got %q, want %q", reservation.ID, reservation.Reason, expectedReason))
 		}
 		expiresAt := reservation.ExpiresTS.Time
 		if expiresAt.IsZero() || !expiresAt.After(now) {

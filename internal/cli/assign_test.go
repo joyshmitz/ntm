@@ -19,6 +19,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
@@ -1735,6 +1736,23 @@ func TestCLIAtomicDispatchReobservesAndRejectsBusyPaneBeforeActuation(t *testing
 	}
 	if receipt.DeliveryID != "" {
 		t.Fatalf("busy actuation boundary produced delivery ID %q", receipt.DeliveryID)
+	}
+}
+
+func TestValidateSinglePaneDispatchResultRequiresExactPhysicalTarget(t *testing.T) {
+	t.Parallel()
+	result := dispatchsvc.Result{
+		Success: true, Delivered: 1,
+		Receipts: []dispatchsvc.Receipt{{
+			Target: dispatchsvc.Target{Ref: tmux.PaneRef{ID: "%42", WindowIndex: 0, PaneIndex: 1}},
+			Status: dispatchsvc.ReceiptDelivered, Protocol: dispatchsvc.ProtocolSingleEnter,
+		}},
+	}
+	if _, err := validateSinglePaneDispatchResult(result, "%42"); err != nil {
+		t.Fatalf("matching target: %v", err)
+	}
+	if _, err := validateSinglePaneDispatchResult(result, "%43"); err == nil || !strings.Contains(err.Error(), "does not match requested pane") {
+		t.Fatalf("mismatched target error=%v", err)
 	}
 }
 

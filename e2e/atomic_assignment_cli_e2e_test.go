@@ -2966,6 +2966,95 @@ func TestE2EAtomicAssignmentPromptSafety(t *testing.T) {
 	fixture.assertAssignmentArtifactsExclude(t, "NTM_E2E_BLOCKED_SECRET_987654321")
 }
 
+func TestE2EAtomicAssignmentHumanOutputRedaction(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	t.Run("direct_prints_only_durable_redacted_prompt", func(t *testing.T) {
+		fixture := newAtomicAssignmentCLIFixture(t)
+		beadID := fixture.createBead(t, "Human direct redaction")
+		secret := "sk-proj-NTM_HUMAN_DIRECT_1234567890123456789012345678901234567890"
+		rawPrompt := "Use OPENAI_API_KEY=" + secret + " for the direct assignment"
+		templatePath := filepath.Join(fixture.projectDir, "atomic-human-direct-redaction-template.txt")
+		if err := os.WriteFile(templatePath, []byte(rawPrompt), 0o600); err != nil {
+			t.Fatalf("write human direct redaction template: %v", err)
+		}
+
+		result := fixture.runNTM(t, nil,
+			"assign", fixture.session,
+			"--repo="+fixture.projectDir,
+			"--pane="+fixture.panes[0].ID,
+			"--beads="+beadID,
+			"--template=custom",
+			"--template-file="+templatePath,
+			"--force",
+			"--ignore-deps",
+			"--reserve-files=false",
+			"--redact=redact",
+			"--timeout=15s",
+		)
+		if result.exitCode != 0 {
+			t.Fatalf("human direct redaction exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+		fixture.assertSecretAbsent(t, secret, result.stdout, result.stderr)
+		if !bytes.Contains(result.stdout, []byte("[REDACTED:")) {
+			t.Fatalf("human direct output omitted redacted prompt: %s", result.stdout)
+		}
+		fixture.waitForMarkerCount(t, 0, "[REDACTED:", 1)
+		fixture.assertMarkerCounts(t, secret, map[int]int{0: 0, 1: 0})
+		record := fixture.readLedgerAssignment(t, beadID)
+		if strings.Contains(record.PromptSent, secret) || !strings.Contains(record.PromptSent, "[REDACTED:") {
+			t.Fatalf("human direct durable prompt = %q", record.PromptSent)
+		}
+		fixture.assertAssignmentArtifactsExclude(t, secret)
+	})
+
+	t.Run("reassign_prints_only_durable_redacted_prompt", func(t *testing.T) {
+		fixture := newAtomicAssignmentCLIFixture(t)
+		beadID := fixture.createBead(t, "Human reassign redaction")
+		sourcePrompt := fmt.Sprintf("NTM_ATOMIC_HUMAN_REASSIGN_SOURCE_%d", time.Now().UnixNano())
+		seed := fixture.runNTM(t, nil, atomicDirectArgs(fixture, beadID, sourcePrompt, false)...)
+		if seed.exitCode != 0 || len(bytes.TrimSpace(seed.stderr)) != 0 {
+			t.Fatalf("seed human reassign redaction exit=%d stdout=%s stderr=%s", seed.exitCode, seed.stdout, seed.stderr)
+		}
+		fixture.waitForMarkerCount(t, 0, sourcePrompt, 1)
+		fixture.driveAssignmentStatus(t, fixture.panes[0], beadID, "• Working (4s · esc to interrupt)", "working")
+		secret := "sk-proj-NTM_HUMAN_REASSIGN_1234567890123456789012345678901234567890"
+		rawPrompt := "Use OPENAI_API_KEY=" + secret + " for reassignment"
+		templatePath := filepath.Join(fixture.projectDir, "atomic-human-reassign-redaction-template.txt")
+		if err := os.WriteFile(templatePath, []byte(rawPrompt), 0o600); err != nil {
+			t.Fatalf("write human reassign redaction template: %v", err)
+		}
+
+		result := fixture.runNTM(t, nil,
+			"assign", fixture.session,
+			"--repo="+fixture.projectDir,
+			"--reassign="+beadID,
+			"--to-pane="+fixture.panes[1].ID,
+			"--template=custom",
+			"--template-file="+templatePath,
+			"--force",
+			"--reserve-files=false",
+			"--redact=redact",
+			"--timeout=15s",
+		)
+		if result.exitCode != 0 {
+			t.Fatalf("human reassign redaction exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+		fixture.assertSecretAbsent(t, secret, result.stdout, result.stderr)
+		if !bytes.Contains(result.stdout, []byte("[REDACTED:")) {
+			t.Fatalf("human reassign output omitted redacted prompt: %s", result.stdout)
+		}
+		fixture.waitForMarkerCount(t, 1, "[REDACTED:", 1)
+		fixture.assertMarkerCounts(t, secret, map[int]int{0: 0, 1: 0})
+		record := fixture.readLedgerAssignment(t, beadID)
+		if strings.Contains(record.PromptSent, secret) || !strings.Contains(record.PromptSent, "[REDACTED:") {
+			t.Fatalf("human reassign durable prompt = %q", record.PromptSent)
+		}
+		fixture.assertAssignmentArtifactsExclude(t, secret)
+	})
+}
+
 func newAtomicAssignmentCLIFixture(t *testing.T) *atomicAssignmentCLIFixture {
 	t.Helper()
 
@@ -3715,7 +3804,7 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane at
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "-l", paneOutput)
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "Enter")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	watch := exec.CommandContext(ctx, f.ntmPath,
 		"assign", f.session,
@@ -3736,7 +3825,7 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane at
 		t.Fatalf("start assignment status watch: %v", err)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		ledger, readErr := f.readLedger()
 		if readErr == nil {

@@ -170,7 +170,9 @@ func TestFindBestMatch(t *testing.T) {
 	}
 
 	recs := []bv.TriageRecommendation{
-		{ID: "ntm-001", Title: "Blocked Task", Status: "blocked", Score: 0.9},
+		{ID: "ntm-001", Title: "Blocked Task", Status: "Blocked", Score: 0.9},
+		{ID: "ntm-dependency", Title: "Dependency gated", Status: "open", BlockedBy: []string{"ntm-prerequisite"}, Score: 0.9},
+		{ID: "ntm-operator", Title: "Operator gated", Status: "open", Labels: []string{"human-input"}, Score: 0.9},
 		{ID: "ntm-002", Title: "Ready Task", Status: "open", Priority: 1, Score: 0.8},
 		{ID: "ntm-003", Title: "Another Ready", Status: "open", Priority: 2, Score: 0.7},
 	}
@@ -200,8 +202,9 @@ func TestFindBestMatchAllBlocked(t *testing.T) {
 	}
 
 	recs := []bv.TriageRecommendation{
-		{ID: "ntm-001", Title: "Blocked 1", Status: "blocked"},
-		{ID: "ntm-002", Title: "Blocked 2", Status: "blocked"},
+		{ID: "ntm-001", Title: "Blocked 1", Status: "Blocked"},
+		{ID: "ntm-002", Title: "Dependency", Status: "open", BlockedBy: []string{"ntm-prerequisite"}},
+		{ID: "ntm-003", Title: "Operator", Status: "open", Labels: []string{"blocked-on-operator"}},
 	}
 
 	assignment, rec := c.findBestMatch(agent, recs)
@@ -339,6 +342,7 @@ func TestCoordinatorReservationPortPreservesPartialLeaseHandles(t *testing.T) {
 		Granted: []agentmail.FileReservation{{
 			ID: 71, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
 			ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+			Reason:    "bead assignment: ntm-partial",
 		}},
 		Conflicts: []agentmail.ReservationConflict{{Path: "internal/robot/**", Holders: []string{"OtherAgent"}}},
 	}}
@@ -364,16 +368,23 @@ func TestCoordinatorReservationPortPreservesMalformedReceiptHandle(t *testing.T)
 		{name: "wrong project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 10 }},
 		{name: "nonexclusive", mutate: func(row *agentmail.FileReservation) { row.Exclusive = false }},
 		{name: "wrong agent", mutate: func(row *agentmail.FileReservation) { row.AgentName = "OtherAgent" }},
+		{name: "wrong reason", mutate: func(row *agentmail.FileReservation) { row.Reason = "bead assignment: ntm-other" }},
 		{name: "unexpected path", mutate: func(row *agentmail.FileReservation) { row.PathPattern = "internal/unexpected/**" }},
 		{name: "missing expiry", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{} }},
-		{name: "expired", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)} }},
-		{name: "released", mutate: func(row *agentmail.FileReservation) { released := agentmail.FlexTime{Time: time.Now().UTC()}; row.ReleasedTS = &released }},
+		{name: "expired", mutate: func(row *agentmail.FileReservation) {
+			row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)}
+		}},
+		{name: "released", mutate: func(row *agentmail.FileReservation) {
+			released := agentmail.FlexTime{Time: time.Now().UTC()}
+			row.ReleasedTS = &released
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			row := agentmail.FileReservation{
 				ID: 79, ProjectID: 9, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", Exclusive: true,
 				ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+				Reason:    "bead assignment: ntm-malformed",
 			}
 			test.mutate(&row)
 			client := &fakeCoordinatorReservationClient{reserveResult: &agentmail.ReservationResult{Granted: []agentmail.FileReservation{row}}}
@@ -434,7 +445,9 @@ func TestCoordinatorReservationPortReconcileMalformedReceiptRetainsHandle(t *tes
 		{name: "wrong project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 10 }},
 		{name: "nonexclusive", mutate: func(row *agentmail.FileReservation) { row.Exclusive = false }},
 		{name: "missing expiry", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{} }},
-		{name: "expired", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)} }},
+		{name: "expired", mutate: func(row *agentmail.FileReservation) {
+			row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			row := agentmail.FileReservation{
@@ -785,7 +798,7 @@ func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
 	store.Assignments[beadID] = &assignmentstore.Assignment{
 		BeadID: beadID, BeadTitle: "Terminal lease", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
 		Status: assignmentstore.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "terminal-lease-key",
-		ClaimActor: "BlueLake/terminal-lease-key",
+		ClaimActor:     "BlueLake/terminal-lease-key",
 		DispatchTarget: "%93", OccupancyKey: "%93", DispatchState: assignmentstore.DispatchSent,
 		DispatchReceiptID: "mail-93", ReservationRequired: true, ReservationState: assignmentstore.ReservationReserved,
 		ReservationCompleted: true, ReservationAgent: "BlueLake", ReservationTarget: "%93",
@@ -1123,29 +1136,62 @@ func TestValidatedAgentMailDeliveryIDRequiresOneConcreteReceipt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, err := validatedAgentMailDeliveryID(tt.sent, "/project", "BlueFox"); err == nil || got != "" {
+			if got, err := validatedAgentMailDeliveryID(tt.sent, "/project", 9, "Coordinator", "BlueFox", "Work Assignment: ntm-1", "body"); err == nil || got != "" {
 				t.Fatalf("validatedAgentMailDeliveryID() = %q, %v; want empty error result", got, err)
 			}
 		})
 	}
 
-	got, err := validatedAgentMailDeliveryID(&agentmail.SendResult{
-		Count: 1, Deliveries: []agentmail.MessageDelivery{{Project: "/project", Payload: &agentmail.Message{ID: 73, To: []string{"BlueFox"}}}},
-	}, "/project", "BlueFox")
+	got, err := validatedAgentMailDeliveryID(validCoordinatorSendResult(), "/project", 9, "Coordinator", "BlueFox", "Work Assignment: ntm-1", "body")
 	if err != nil || got != "73" {
 		t.Fatalf("valid receipt = %q, %v; want 73", got, err)
 	}
 }
 
 func TestValidatedAgentMailDeliveryIDRejectsProjectAndRecipientMismatch(t *testing.T) {
-	base := &agentmail.SendResult{
-		Count: 1, Deliveries: []agentmail.MessageDelivery{{Project: "/project", Payload: &agentmail.Message{ID: 73, To: []string{"BlueFox"}}}},
-	}
-	if _, err := validatedAgentMailDeliveryID(base, "/other", "BlueFox"); err == nil || !strings.Contains(err.Error(), "project") {
+	base := validCoordinatorSendResult()
+	if _, err := validatedAgentMailDeliveryID(base, "/other", 9, "Coordinator", "BlueFox", "Work Assignment: ntm-1", "body"); err == nil || !strings.Contains(err.Error(), "project") {
 		t.Fatalf("project mismatch error = %v", err)
 	}
-	if _, err := validatedAgentMailDeliveryID(base, "/project", "RedSeal"); err == nil || !strings.Contains(err.Error(), "recipients") {
+	if _, err := validatedAgentMailDeliveryID(base, "/project", 9, "Coordinator", "RedSeal", "Work Assignment: ntm-1", "body"); err == nil || !strings.Contains(err.Error(), "recipients") {
 		t.Fatalf("recipient mismatch error = %v", err)
+	}
+}
+
+func TestValidatedAgentMailDeliveryIDRejectsPayloadMismatch(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*agentmail.Message)
+	}{
+		{name: "project id", mutate: func(message *agentmail.Message) { message.ProjectID = 10 }},
+		{name: "sender", mutate: func(message *agentmail.Message) { message.From = "OtherSender" }},
+		{name: "subject", mutate: func(message *agentmail.Message) { message.Subject = "stale subject" }},
+		{name: "body", mutate: func(message *agentmail.Message) { message.BodyMD = "stale body" }},
+		{name: "importance", mutate: func(message *agentmail.Message) { message.Importance = "low" }},
+		{name: "ack", mutate: func(message *agentmail.Message) { message.AckRequired = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			result := validCoordinatorSendResult()
+			test.mutate(result.Deliveries[0].Payload)
+			if got, err := validatedAgentMailDeliveryID(result, "/project", 9, "Coordinator", "BlueFox", "Work Assignment: ntm-1", "body"); err == nil || got != "" {
+				t.Fatalf("mismatch result=%q error=%v", got, err)
+			}
+		})
+	}
+}
+
+func validCoordinatorSendResult() *agentmail.SendResult {
+	return &agentmail.SendResult{
+		Count: 1,
+		Deliveries: []agentmail.MessageDelivery{{
+			Project: "/project",
+			Payload: &agentmail.Message{
+				ID: 73, ProjectID: 9, From: "Coordinator", To: []string{"BlueFox"},
+				Subject: "Work Assignment: ntm-1", BodyMD: "body", Importance: "normal", AckRequired: true,
+			},
+		}},
 	}
 }
 
@@ -1492,12 +1538,12 @@ func TestScoreAndSelectAssignments(t *testing.T) {
 
 	triage := &bv.TriageResponse{
 		Triage: bv.TriageData{
-				Recommendations: []bv.TriageRecommendation{
-					{ID: "ntm-001", Title: "Epic task", Type: "epic", Status: "open", Priority: 2, Score: 0.8},
-					{ID: "ntm-002", Title: "Quick fix", Type: "chore", Status: "open", Priority: 2, Score: 0.6},
-					{ID: "ntm-003", Title: "Blocked", Type: "task", Status: "blocked", Priority: 2, Score: 0.9},
-					{ID: "ntm-004", Title: "Dependency gated", Type: "task", Status: "open", Priority: 1, Score: 1, BlockedBy: []string{"ntm-prerequisite"}},
-					{ID: "ntm-005", Title: "Operator gated", Type: "task", Status: "open", Priority: 1, Score: 1, Labels: []string{"operator-action"}},
+			Recommendations: []bv.TriageRecommendation{
+				{ID: "ntm-001", Title: "Epic task", Type: "epic", Status: "open", Priority: 2, Score: 0.8},
+				{ID: "ntm-002", Title: "Quick fix", Type: "chore", Status: "open", Priority: 2, Score: 0.6},
+				{ID: "ntm-003", Title: "Blocked", Type: "task", Status: "blocked", Priority: 2, Score: 0.9},
+				{ID: "ntm-004", Title: "Dependency gated", Type: "task", Status: "open", Priority: 1, Score: 1, BlockedBy: []string{"ntm-prerequisite"}},
+				{ID: "ntm-005", Title: "Operator gated", Type: "task", Status: "open", Priority: 1, Score: 1, Labels: []string{"operator-action"}},
 			},
 		},
 	}
