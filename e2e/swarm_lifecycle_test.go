@@ -5,6 +5,8 @@
 package e2e
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -626,4 +628,229 @@ func TestE2E_SwarmProjectSorting(t *testing.T) {
 	}
 
 	suite.logger.Log("[E2E-SWARM] PASS: Projects correctly sorted by bead count")
+}
+
+type beadClaimProcessResult struct {
+	stdout   []byte
+	stderr   []byte
+	exitCode int
+}
+
+type beadClaimProcessEnvelope struct {
+	Success   bool   `json:"success"`
+	ErrorCode string `json:"error_code"`
+	BeadID    string `json:"bead_id"`
+	NewStatus string `json:"new_status"`
+	Claimed   bool   `json:"claimed"`
+	Actor     string `json:"actor"`
+}
+
+type beadClaimProcessState struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Assignee string `json:"assignee"`
+}
+
+func TestE2ERobotBeadClaimBuiltBinaryRealBR(t *testing.T) {
+	SkipIfShort(t)
+
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Skipf("br is required for robot bead-claim E2E: %v", err)
+	}
+
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	homeDir := filepath.Join(root, "home")
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	cacheDir := filepath.Join(root, "cache")
+	for _, dir := range []string{projectDir, homeDir, configDir, dataDir, cacheDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create isolated directory %s: %v", dir, err)
+		}
+	}
+
+	env := beadClaimProcessEnv(map[string]string{
+		"HOME":                homeDir,
+		"XDG_CONFIG_HOME":     configDir,
+		"XDG_DATA_HOME":       dataDir,
+		"XDG_CACHE_HOME":      cacheDir,
+		"PWD":                 projectDir,
+		"NO_COLOR":            "1",
+		"NTM_CONFIG":          "",
+		"NTM_OUTPUT_FORMAT":   "",
+		"NTM_ROBOT_FORMAT":    "json",
+		"TOON_DEFAULT_FORMAT": "",
+	})
+
+	mustRunBeadClaimBR(t, brPath, projectDir, env, "init", "--prefix=claim-e2e", "--json")
+	beadID := strings.TrimSpace(string(mustRunBeadClaimBR(
+		t, brPath, projectDir, env,
+		"create", "Robot bead claim process E2E", "--type=task", "--priority=1", "--silent",
+	)))
+	if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+		t.Fatalf("unexpected br create output %q", beadID)
+	}
+	assertBeadClaimProcessState(t, readBeadClaimProcessState(t, brPath, projectDir, env, beadID), beadID, "open", "")
+
+	const firstActor = "BlueLake"
+	first := runBeadClaimProcess(t, ntmPath, projectDir, env,
+		"--robot-bead-claim="+beadID, "--bead-assignee="+firstActor, "--robot-format=json")
+	if first.exitCode != 0 || len(bytes.TrimSpace(first.stderr)) != 0 {
+		t.Fatalf("initial claim exit=%d stdout=%s stderr=%s", first.exitCode, first.stdout, first.stderr)
+	}
+	firstEnvelope := decodeBeadClaimProcessEnvelope(t, first.stdout)
+	assertBeadClaimProcessSuccess(t, firstEnvelope, beadID, firstActor)
+	claimedState := readBeadClaimProcessState(t, brPath, projectDir, env, beadID)
+	assertBeadClaimProcessState(t, claimedState, beadID, "in_progress", firstActor)
+
+	repeat := runBeadClaimProcess(t, ntmPath, projectDir, env,
+		"--robot-bead-claim="+beadID, "--bead-assignee="+firstActor, "--robot-format=json")
+	if repeat.exitCode != 0 || len(bytes.TrimSpace(repeat.stderr)) != 0 {
+		t.Fatalf("same-actor repeat exit=%d stdout=%s stderr=%s", repeat.exitCode, repeat.stdout, repeat.stderr)
+	}
+	repeatEnvelope := decodeBeadClaimProcessEnvelope(t, repeat.stdout)
+	assertBeadClaimProcessSuccess(t, repeatEnvelope, beadID, firstActor)
+	repeatedState := readBeadClaimProcessState(t, brPath, projectDir, env, beadID)
+	assertBeadClaimProcessState(t, repeatedState, beadID, "in_progress", firstActor)
+	if repeatedState != claimedState {
+		t.Fatalf("same-actor repeat changed semantic bead state: before=%+v after=%+v", claimedState, repeatedState)
+	}
+
+	const otherActor = "RedStone"
+	conflict := runBeadClaimProcess(t, ntmPath, projectDir, env,
+		"--robot-bead-claim="+beadID, "--bead-assignee="+otherActor, "--robot-format=json")
+	if conflict.exitCode != 1 {
+		t.Errorf("other-actor conflict exit=%d, want 1; stdout=%s stderr=%s", conflict.exitCode, conflict.stdout, conflict.stderr)
+	}
+	if len(bytes.TrimSpace(conflict.stderr)) != 0 {
+		t.Errorf("other-actor conflict stderr=%q, want empty", conflict.stderr)
+	}
+	conflictEnvelope := decodeBeadClaimProcessEnvelope(t, conflict.stdout)
+	if conflictEnvelope.Success || conflictEnvelope.Claimed || conflictEnvelope.ErrorCode != "RESOURCE_BUSY" ||
+		conflictEnvelope.BeadID != beadID || conflictEnvelope.Actor != otherActor {
+		t.Errorf("other-actor conflict envelope=%+v", conflictEnvelope)
+	}
+	conflictState := readBeadClaimProcessState(t, brPath, projectDir, env, beadID)
+	assertBeadClaimProcessState(t, conflictState, beadID, "in_progress", firstActor)
+	if conflictState != claimedState {
+		t.Fatalf("other-actor conflict changed semantic bead state: before=%+v after=%+v", claimedState, conflictState)
+	}
+}
+
+func runBeadClaimProcess(t *testing.T, ntmPath, dir string, env []string, args ...string) beadClaimProcessResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ntmPath, args...)
+	cmd.Dir = dir
+	cmd.Env = append([]string(nil), env...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("ntm bead-claim timed out: args=%q stdout=%s stderr=%s", args, stdout.Bytes(), stderr.Bytes())
+	}
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("run ntm bead-claim %q: %v", args, err)
+		}
+	}
+	return beadClaimProcessResult{
+		stdout:   append([]byte(nil), stdout.Bytes()...),
+		stderr:   append([]byte(nil), stderr.Bytes()...),
+		exitCode: exitCode,
+	}
+}
+
+func decodeBeadClaimProcessEnvelope(t *testing.T, output []byte) beadClaimProcessEnvelope {
+	t.Helper()
+	var envelope beadClaimProcessEnvelope
+	if err := json.Unmarshal(output, &envelope); err != nil {
+		t.Fatalf("decode exactly one ntm bead-claim JSON document: %v; output=%q", err, output)
+	}
+	return envelope
+}
+
+func assertBeadClaimProcessSuccess(t *testing.T, envelope beadClaimProcessEnvelope, beadID, actor string) {
+	t.Helper()
+	if !envelope.Success || !envelope.Claimed || envelope.ErrorCode != "" || envelope.BeadID != beadID ||
+		envelope.NewStatus != "in_progress" || envelope.Actor != actor {
+		t.Fatalf("bead-claim success envelope=%+v", envelope)
+	}
+}
+
+func readBeadClaimProcessState(t *testing.T, brPath, dir string, env []string, beadID string) beadClaimProcessState {
+	t.Helper()
+	output := mustRunBeadClaimBR(t, brPath, dir, env, "show", beadID, "--json")
+	var rows []beadClaimProcessState
+	if err := json.Unmarshal(output, &rows); err != nil {
+		var row beadClaimProcessState
+		if objectErr := json.Unmarshal(output, &row); objectErr != nil {
+			t.Fatalf("decode br show state: array=%v object=%v output=%q", err, objectErr, output)
+		}
+		rows = []beadClaimProcessState{row}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("br show %s returned %d rows: %s", beadID, len(rows), output)
+	}
+	return rows[0]
+}
+
+func assertBeadClaimProcessState(t *testing.T, state beadClaimProcessState, beadID, status, assignee string) {
+	t.Helper()
+	if state.ID != beadID || state.Status != status || state.Assignee != assignee {
+		t.Fatalf("bead state=%+v, want id=%s status=%s assignee=%s", state, beadID, status, assignee)
+	}
+}
+
+func mustRunBeadClaimBR(t *testing.T, brPath, dir string, env []string, args ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, brPath, args...)
+	cmd.Dir = dir
+	cmd.Env = append([]string(nil), env...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("br command timed out: %q", args)
+	}
+	if err != nil {
+		t.Fatalf("br %q: %v output=%s", args, err, output)
+	}
+	return output
+}
+
+func beadClaimProcessEnv(overrides map[string]string) []string {
+	replaced := map[string]struct{}{
+		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CACHE_HOME": {}, "PWD": {}, "OLDPWD": {},
+		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "BR_DB": {}, "BD_DB": {}, "BEADS_DB": {},
+		"TMUX": {}, "TMUX_PANE": {}, "NTM_CONFIG": {}, "NTM_OUTPUT_FORMAT": {}, "NTM_ROBOT_FORMAT": {},
+		"TOON_DEFAULT_FORMAT": {}, "AGENT_NAME": {},
+	}
+	for key := range overrides {
+		replaced[key] = struct{}{}
+	}
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, skip := replaced[key]; !skip {
+			env = append(env, entry)
+		}
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
 }

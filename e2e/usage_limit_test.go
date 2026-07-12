@@ -500,29 +500,64 @@ func TestE2E_SessionNotFoundError(t *testing.T) {
 	suite := NewTestSuite(t, "session_not_found")
 	defer suite.Teardown()
 
-	// DON'T call Setup() - we want to test with non-existent session
-
-	// Call IsWorking on non-existent session
-	result, err := suite.CallIsWorking([]int{1})
-
-	// Should get a result (may have error in result)
+	// Do not call Setup: the unique harness session must remain absent. Exercise
+	// the built binary so the assertion includes Cobra, stdout/stderr routing,
+	// JSON serialization, and the process exit code.
+	ntmPath, err := ensureE2ENTMBin()
 	if err != nil {
-		// Parse error is OK if command failed
-		suite.Logger().Log("[E2E-NOT-FOUND] Command error (expected): %v", err)
-		return
+		t.Fatalf("[E2E-NOT-FOUND] Resolve built ntm binary: %v", err)
+	}
+	process := runBuiltRobotProcess(t, ntmPath, "", nil,
+		"--robot-is-working="+suite.Session(),
+		"--panes=1",
+		"--robot-format=json",
+	)
+	if process.exitCode != 1 {
+		t.Fatalf("[E2E-NOT-FOUND] exit=%d, want 1; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	if len(process.stderr) != 0 {
+		t.Fatalf("[E2E-NOT-FOUND] stderr must be empty, got %q", process.stderr)
 	}
 
-	// VERIFY: Success should be false
-	if result.Success {
-		t.Error("[E2E-NOT-FOUND] Expected success=false for non-existent session")
+	var envelope struct {
+		Success      bool   `json:"success"`
+		Timestamp    string `json:"timestamp"`
+		OutputFormat string `json:"output_format"`
+		Error        string `json:"error"`
+		ErrorCode    string `json:"error_code"`
+		Panes        map[string]struct {
+		} `json:"panes"`
+		Query struct {
+			PanesRequested []string `json:"panes_requested"`
+		} `json:"query"`
+		Summary struct {
+			ByRecommendation map[string][]string `json:"by_recommendation"`
+		} `json:"summary"`
+	}
+	decodeSingleRobotJSON(t, process.stdout, &envelope)
+	if envelope.Success {
+		t.Fatal("[E2E-NOT-FOUND] success=true, want false")
+	}
+	if envelope.ErrorCode != "SESSION_NOT_FOUND" || envelope.Error == "" {
+		t.Fatalf("[E2E-NOT-FOUND] error_code=%q error=%q", envelope.ErrorCode, envelope.Error)
+	}
+	if envelope.OutputFormat != "json" {
+		t.Fatalf("[E2E-NOT-FOUND] output_format=%q, want json", envelope.OutputFormat)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, envelope.Timestamp); err != nil {
+		t.Fatalf("[E2E-NOT-FOUND] timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
+	}
+	if envelope.Panes == nil || len(envelope.Panes) != 0 {
+		t.Fatalf("[E2E-NOT-FOUND] panes=%v, want present empty object", envelope.Panes)
+	}
+	if envelope.Query.PanesRequested == nil || len(envelope.Query.PanesRequested) != 0 {
+		t.Fatalf("[E2E-NOT-FOUND] query.panes_requested=%v, want []", envelope.Query.PanesRequested)
+	}
+	if envelope.Summary.ByRecommendation == nil || len(envelope.Summary.ByRecommendation) != 0 {
+		t.Fatalf("[E2E-NOT-FOUND] summary.by_recommendation=%v, want present empty object", envelope.Summary.ByRecommendation)
 	}
 
-	// VERIFY: Error should mention session not found
-	if result.Error == "" {
-		t.Error("[E2E-NOT-FOUND] Expected error message for non-existent session")
-	}
-
-	suite.Logger().Log("[E2E-NOT-FOUND] SUCCESS: Non-existent session correctly returns error: %s", result.Error)
+	suite.Logger().Log("[E2E-NOT-FOUND] SUCCESS: built process returned canonical SESSION_NOT_FOUND: %s", envelope.Error)
 }
 
 // =============================================================================

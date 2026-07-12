@@ -9,7 +9,9 @@
 #
 # CI mock mode:
 #   E2E_MOCK_MODE=1 go test -v -tags=e2e ./e2e/... \
-#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicBulkAssignmentCanonicalMultiWindow|TestE2EAtomicAssignmentPromptSafety|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2E_RobotBulkAssign_.*)$'
+#     -run '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomic.*|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess)$'
+#   E2E_MOCK_MODE=1 go test -v -tags=e2e ./e2e/... \
+#     -run '^TestE2E_RobotBulkAssign_.*$'
 
 name: E2E Tests
 
@@ -82,7 +84,7 @@ jobs:
   e2e-mock:
     name: Hermetic E2E Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -122,19 +124,26 @@ jobs:
           E2E_MOCK_MODE: ${{ (github.event_name != 'workflow_dispatch' || inputs.mock_mode) && '1' || '0' }}
           CAUT_MOCK_FILE: "e2e/fixtures/caut_mock.json"
           E2E_LOG_DIR: "/tmp/e2e-logs"
-          # The default set covers canonical targeting, direct/bulk/spawn atomic
-          # assignment, replay and prompt safety, capability budgets, and the
-          # repaired legacy bulk contract against isolated real tmux sessions.
-          E2E_TEST_FILTER: ${{ inputs.test_filter || '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomicAssignmentProductionCLI|TestE2EAtomicBulkAssignmentCanonicalMultiWindow|TestE2EAtomicAssignmentPromptSafety|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2E_RobotBulkAssign_.*)$' }}
+          E2E_TEST_FILTER: ${{ inputs.test_filter || '' }}
+          E2E_PRIMARY_FILTER: '^(TestRCHHookStdinProtocol|TestE2E_SessionNotFoundError|TestE2ECanonicalPaneContract|TestE2EAtomic.*|TestE2ESpawnAssignmentProductionCLI|TestE2ERobotCapabilitiesBuiltBinaryBudgets|TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce|TestE2ERobotInterruptFollowUpRedactionBuiltBinaryRealTmux|TestE2ERobotBeadClaimBuiltBinaryRealBR|TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess)$'
+          E2E_LEGACY_BULK_FILTER: '^TestE2E_RobotBulkAssign_.*$'
         run: |
-          # Create log directory
           mkdir -p "$E2E_LOG_DIR"
 
-          # The wider tagged suite contains live-agent scenarios. CI runs a
-          # hermetic smoke set by default; workflow_dispatch can supply a
-          # broader filter on a suitably provisioned runner.
-          go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 20m \
-            2>&1 | tee e2e-output.txt
+          if [ -n "$E2E_TEST_FILTER" ]; then
+            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_TEST_FILTER" -timeout 30m \
+              2>&1 | tee e2e-requested-output.txt
+          else
+            # New functionality crosses the built binary, real tmux, real br,
+            # concurrent processes, and durable assignment/replay state.
+            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_PRIMARY_FILTER" -timeout 18m \
+              2>&1 | tee e2e-primary-output.txt
+
+            # Keep the long legacy bulk contract independent so its failures
+            # and timeout budget cannot obscure the primary hardening matrix.
+            go test -v -count=1 -tags=e2e ./e2e/... -run "$E2E_LEGACY_BULK_FILTER" -timeout 20m \
+              2>&1 | tee e2e-legacy-bulk-output.txt
+          fi
 
       - name: Upload E2E Logs
         if: always()
@@ -143,7 +152,7 @@ jobs:
           name: e2e-logs-mock
           path: |
             /tmp/e2e-logs/
-            e2e-output.txt
+            e2e-*-output.txt
           retention-days: 7
 
   # ============================================================================

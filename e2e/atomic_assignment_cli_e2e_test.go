@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -37,6 +39,7 @@ type atomicAssignmentCLIFixture struct {
 	root       string
 	projectDir string
 	homeDir    string
+	tmuxConfig string
 	env        []string
 	panes      map[int]atomicAssignmentPane
 }
@@ -132,15 +135,20 @@ type atomicAssignmentRecord struct {
 	AgentName             string     `json:"agent_name"`
 	Status                string     `json:"status"`
 	AssignedAt            time.Time  `json:"assigned_at"`
+	RetryCount            int        `json:"retry_count"`
 	PromptSent            string     `json:"prompt_sent"`
 	IdempotencyKey        string     `json:"idempotency_key"`
 	ClaimActor            string     `json:"claim_actor"`
+	ClaimState            string     `json:"claim_state"`
 	ClaimStatus           string     `json:"claim_status"`
+	ClaimAttempts         int        `json:"claim_attempts"`
 	ClaimedAt             *time.Time `json:"claimed_at"`
 	ReservationRequired   bool       `json:"reservation_required"`
 	ReservationDiscovery  bool       `json:"reservation_discovery"`
 	ReservationInputPaths []string   `json:"reservation_input_paths"`
 	ReservationCompleted  bool       `json:"reservation_completed"`
+	ReservedPaths         []string   `json:"reserved_paths"`
+	ReservationIDs        []int      `json:"reservation_ids"`
 	DispatchState         string     `json:"dispatch_state"`
 	DispatchTarget        string     `json:"dispatch_target"`
 	OccupancyKey          string     `json:"occupancy_key"`
@@ -151,12 +159,58 @@ type atomicAssignmentRecord struct {
 	DispatchStartedAt     *time.Time `json:"dispatch_started_at"`
 	DispatchedAt          *time.Time `json:"dispatched_at"`
 	DispatchReceiptID     string     `json:"dispatch_receipt_id"`
+	LastDispatchError     string     `json:"last_dispatch_error"`
+	ClearState            string     `json:"clear_state"`
+	ClearError            string     `json:"clear_error"`
+}
+
+type atomicAssignmentRetryEnvelope struct {
+	Command    string `json:"command"`
+	Subcommand string `json:"subcommand"`
+	Session    string `json:"session"`
+	Success    bool   `json:"success"`
+	Data       *struct {
+		Retried []struct {
+			BeadID     string `json:"bead_id"`
+			Pane       int    `json:"pane"`
+			Status     string `json:"status"`
+			PromptSent bool   `json:"prompt_sent"`
+			RetryCount int    `json:"retry_count"`
+		} `json:"retried"`
+		Skipped []struct {
+			BeadID string `json:"bead_id"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
+		Summary struct {
+			TotalFailed  int `json:"total_failed"`
+			RetriedCount int `json:"retried_count"`
+			SkippedCount int `json:"skipped_count"`
+		} `json:"summary"`
+	} `json:"data"`
+	Error *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type atomicAssignmentBead struct {
 	ID       string `json:"id"`
 	Status   string `json:"status"`
 	Assignee string `json:"assignee"`
+}
+
+func TestE2EAtomicAssignmentIsolatedEnvScrubsHostOverrides(t *testing.T) {
+	for _, key := range []string{"BR_DB", "BD_DB", "BEADS_DB", "GIT_DIR", "GIT_WORK_TREE", "AGENT_NAME", "PWD", "OLDPWD"} {
+		t.Setenv(key, "/should/not/escape")
+	}
+	env := atomicAssignmentIsolatedEnv(map[string]string{"HOME": t.TempDir()})
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "BR_DB", "BD_DB", "BEADS_DB", "GIT_DIR", "GIT_WORK_TREE", "AGENT_NAME", "PWD", "OLDPWD":
+			t.Fatalf("isolated process environment retained %s", key)
+		}
+	}
 }
 
 func TestE2EAtomicAssignmentProductionCLI(t *testing.T) {
@@ -303,6 +357,407 @@ func TestE2EAtomicAssignmentProductionCLI(t *testing.T) {
 		t.Fatalf("bulk replay mutated durable delivery: before=%+v after=%+v", bulkRecord, reloadedBulk)
 	}
 	fixture.assertBead(t, bulkBead, "in_progress", bulkRecord.ClaimActor)
+}
+
+func TestE2EAtomicAssignmentCustomTemplateProcessIdentity(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	const title = "Custom template process identity"
+	beadID := fixture.createBead(t, title)
+	templatePath := filepath.Join(fixture.projectDir, "atomic-direct-template.txt")
+	marker := fmt.Sprintf("NTM_ATOMIC_TEMPLATE_%d", time.Now().UnixNano())
+	originalTemplate := marker + "::{BEAD_ID}::{TITLE}\n"
+	changedTemplate := marker + "::changed::{BEAD_ID}::{TITLE}\n"
+	originalPrompt := strings.ReplaceAll(strings.ReplaceAll(originalTemplate, "{BEAD_ID}", beadID), "{TITLE}", title)
+	changedPrompt := strings.ReplaceAll(strings.ReplaceAll(changedTemplate, "{BEAD_ID}", beadID), "{TITLE}", title)
+	if err := os.WriteFile(templatePath, []byte(originalTemplate), 0o600); err != nil {
+		t.Fatalf("write direct template: %v", err)
+	}
+	args := atomicDirectTemplateArgs(fixture, 0, beadID, templatePath)
+
+	firstResult := fixture.runNTM(t, nil, args...)
+	if firstResult.exitCode != 0 || len(bytes.TrimSpace(firstResult.stderr)) != 0 {
+		t.Fatalf("custom-template assignment exit=%d stdout=%s stderr=%s", firstResult.exitCode, firstResult.stdout, firstResult.stderr)
+	}
+	var first atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, firstResult.stdout, &first)
+	assertDirectAssignmentEnvelope(t, first, fixture.session, beadID, originalPrompt, fixture.panes[0])
+	fixture.waitForMarkerCount(t, 0, marker, 1)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	firstRecord := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecord(t, firstRecord, beadID, originalPrompt, fixture.panes[0], "codex")
+
+	replayResult := fixture.runNTM(t, nil, args...)
+	if replayResult.exitCode != 0 || len(bytes.TrimSpace(replayResult.stderr)) != 0 {
+		t.Fatalf("custom-template replay exit=%d stdout=%s stderr=%s", replayResult.exitCode, replayResult.stdout, replayResult.stderr)
+	}
+	var replay atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, replayResult.stdout, &replay)
+	assertDirectAssignmentEnvelope(t, replay, fixture.session, beadID, originalPrompt, fixture.panes[0])
+	assertSameDirectReceipt(t, first, replay)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+
+	if err := os.WriteFile(templatePath, []byte(changedTemplate), 0o600); err != nil {
+		t.Fatalf("change direct template: %v", err)
+	}
+	changedResult := fixture.runNTM(t, nil, args...)
+	if changedResult.exitCode == 0 || len(bytes.TrimSpace(changedResult.stderr)) != 0 {
+		t.Fatalf("changed-template intent exit=%d stdout=%s stderr=%s", changedResult.exitCode, changedResult.stdout, changedResult.stderr)
+	}
+	var changed atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, changedResult.stdout, &changed)
+	if changed.Success || changed.Error == nil || changed.Error.Code != "CLAIM_CONFLICT" {
+		t.Fatalf("changed-template intent envelope = %+v", changed)
+	}
+	fixture.assertMarkerCounts(t, changedPrompt, map[int]int{0: 0, 1: 0})
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	afterConflict := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentReceiptUnchanged(t, firstRecord, afterConflict)
+
+	if err := os.WriteFile(templatePath, []byte(originalTemplate), 0o600); err != nil {
+		t.Fatalf("restore direct template: %v", err)
+	}
+	restoredResult := fixture.runNTM(t, nil, args...)
+	if restoredResult.exitCode != 0 || len(bytes.TrimSpace(restoredResult.stderr)) != 0 {
+		t.Fatalf("restored-template replay exit=%d stdout=%s stderr=%s", restoredResult.exitCode, restoredResult.stdout, restoredResult.stderr)
+	}
+	var restored atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, restoredResult.stdout, &restored)
+	assertDirectAssignmentEnvelope(t, restored, fixture.session, beadID, originalPrompt, fixture.panes[0])
+	assertSameDirectReceipt(t, first, restored)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	assertAtomicAssignmentReceiptUnchanged(t, firstRecord, fixture.readLedgerAssignment(t, beadID))
+}
+
+func TestE2EAtomicAssignmentConcurrentBuiltProcesses(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	const title = "Concurrent built process assignment"
+	beadID := fixture.createBead(t, title)
+	templatePath := filepath.Join(fixture.projectDir, "atomic-contended-template.txt")
+	marker := fmt.Sprintf("NTM_ATOMIC_CONTENDED_%d", time.Now().UnixNano())
+	templateBody := marker + "::{BEAD_ID}::{TITLE}"
+	prompt := strings.ReplaceAll(strings.ReplaceAll(templateBody, "{BEAD_ID}", beadID), "{TITLE}", title)
+	if err := os.WriteFile(templatePath, []byte(templateBody), 0o600); err != nil {
+		t.Fatalf("write contended template: %v", err)
+	}
+	args := atomicDirectTemplateArgs(fixture, 0, beadID, templatePath)
+
+	results := fixture.runNTMConcurrent(t, 2, nil, args...)
+	envelopes := make([]atomicAssignmentDirectEnvelope, len(results))
+	for i, result := range results {
+		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
+			t.Fatalf("contender %d exit=%d stdout=%s stderr=%s", i, result.exitCode, result.stdout, result.stderr)
+		}
+		decodeAtomicAssignmentJSON(t, result.stdout, &envelopes[i])
+		assertDirectAssignmentEnvelope(t, envelopes[i], fixture.session, beadID, prompt, fixture.panes[0])
+	}
+	assertSameDirectReceipt(t, envelopes[0], envelopes[1])
+	fixture.waitForMarkerCount(t, 0, marker, 1)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	record := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecord(t, record, beadID, prompt, fixture.panes[0], "codex")
+	if record.ClaimAttempts != 1 {
+		t.Fatalf("contenders performed %d durable claim attempts, want 1: %+v", record.ClaimAttempts, record)
+	}
+
+	changedTemplate := templateBody + "::different"
+	if err := os.WriteFile(templatePath, []byte(changedTemplate), 0o600); err != nil {
+		t.Fatalf("change contended template: %v", err)
+	}
+	conflictResult := fixture.runNTM(t, nil, args...)
+	if conflictResult.exitCode == 0 || len(bytes.TrimSpace(conflictResult.stderr)) != 0 {
+		t.Fatalf("post-contention conflict exit=%d stdout=%s stderr=%s", conflictResult.exitCode, conflictResult.stdout, conflictResult.stderr)
+	}
+	var conflict atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, conflictResult.stdout, &conflict)
+	if conflict.Success || conflict.Error == nil || conflict.Error.Code != "CLAIM_CONFLICT" {
+		t.Fatalf("post-contention conflict envelope = %+v", conflict)
+	}
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	assertAtomicAssignmentReceiptUnchanged(t, record, fixture.readLedgerAssignment(t, beadID))
+}
+
+func TestE2EAtomicAssignmentTerminalGenerationBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	beadID := fixture.createBead(t, "Terminal assignment generation")
+	prompt := fmt.Sprintf("NTM_ATOMIC_TERMINAL_%d", time.Now().UnixNano())
+	args := atomicDirectArgs(fixture, beadID, prompt, false)
+
+	firstResult := fixture.runNTM(t, nil, args...)
+	if firstResult.exitCode != 0 || len(bytes.TrimSpace(firstResult.stderr)) != 0 {
+		t.Fatalf("initial generation exit=%d stdout=%s stderr=%s", firstResult.exitCode, firstResult.stdout, firstResult.stderr)
+	}
+	var first atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, firstResult.stdout, &first)
+	assertDirectAssignmentEnvelope(t, first, fixture.session, beadID, prompt, fixture.panes[0])
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
+	firstRecord := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecord(t, firstRecord, beadID, prompt, fixture.panes[0], "codex")
+
+	fixture.mustBR(t, "close", beadID, "--reason=terminal-generation-e2e", "--json")
+	fixture.assertBead(t, beadID, "closed", firstRecord.ClaimActor)
+	fixture.setLedgerAssignmentStatus(t, beadID, "completed")
+
+	closedResult := fixture.runNTM(t, nil, args...)
+	if closedResult.exitCode == 0 || len(bytes.TrimSpace(closedResult.stderr)) != 0 {
+		t.Fatalf("closed generation retry exit=%d stdout=%s stderr=%s", closedResult.exitCode, closedResult.stdout, closedResult.stderr)
+	}
+	var closed atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, closedResult.stdout, &closed)
+	if closed.Success || closed.Error == nil || closed.Error.Code != "ASSIGN_ERROR" || !strings.Contains(closed.Error.Message, "tracker status is \"closed\"") {
+		t.Fatalf("closed generation retry envelope = %+v", closed)
+	}
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+	assertAtomicAssignmentReceiptUnchanged(t, firstRecord, fixture.readLedgerAssignment(t, beadID))
+	fixture.assertBead(t, beadID, "closed", firstRecord.ClaimActor)
+
+	fixture.mustBR(t, "reopen", beadID, "--reason=terminal-generation-e2e", "--json")
+	fixture.assertBead(t, beadID, "open", firstRecord.ClaimActor)
+
+	secondResult := fixture.runNTM(t, nil, args...)
+	if secondResult.exitCode != 0 || len(bytes.TrimSpace(secondResult.stderr)) != 0 {
+		t.Fatalf("second generation exit=%d stdout=%s stderr=%s", secondResult.exitCode, secondResult.stdout, secondResult.stderr)
+	}
+	var second atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, secondResult.stdout, &second)
+	assertDirectAssignmentEnvelope(t, second, fixture.session, beadID, prompt, fixture.panes[0])
+	fixture.waitForMarkerCount(t, 0, prompt, 2)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 2, 1: 0})
+	secondRecord := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecordWithClaimIdentity(t, secondRecord, beadID, prompt, fixture.panes[0], "codex", false)
+	if secondRecord.IdempotencyKey == firstRecord.IdempotencyKey {
+		t.Fatalf("terminal generation reused idempotency key %q", secondRecord.IdempotencyKey)
+	}
+	if secondRecord.ClaimActor != firstRecord.ClaimActor {
+		t.Fatalf("terminal generation changed retained br actor: first=%q second=%q", firstRecord.ClaimActor, secondRecord.ClaimActor)
+	}
+	if secondRecord.DispatchReceiptID == firstRecord.DispatchReceiptID ||
+		(secondRecord.DispatchedAt != nil && firstRecord.DispatchedAt != nil && secondRecord.DispatchedAt.Equal(*firstRecord.DispatchedAt)) {
+		t.Fatalf("terminal generation reused delivery receipt: first=%+v second=%+v", firstRecord, secondRecord)
+	}
+	fixture.assertBead(t, beadID, "in_progress", firstRecord.ClaimActor)
+}
+
+func TestE2EAtomicAssignmentClearPaneLeaseFailureIsDurable(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	beadID := fixture.createBead(t, "Clear pane lease barrier")
+	prompt := fmt.Sprintf("NTM_ATOMIC_CLEAR_%d", time.Now().UnixNano())
+	assigned := fixture.runNTM(t, nil, atomicDirectArgs(fixture, beadID, prompt, false)...)
+	if assigned.exitCode != 0 || len(bytes.TrimSpace(assigned.stderr)) != 0 {
+		t.Fatalf("seed assignment exit=%d stdout=%s stderr=%s", assigned.exitCode, assigned.stdout, assigned.stderr)
+	}
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
+	before := fixture.readLedgerAssignment(t, beadID)
+	fixture.setLedgerAssignmentReservations(t, beadID, []string{"internal/cli/**"}, []int{987654})
+
+	cleared := fixture.runNTM(t, nil,
+		"--json", "assign", fixture.session,
+		"--clear-pane=0", "--timeout=2s",
+	)
+	if cleared.exitCode != 1 || len(bytes.TrimSpace(cleared.stderr)) != 0 {
+		t.Fatalf("clear-pane exit=%d stdout=%s stderr=%s", cleared.exitCode, cleared.stdout, cleared.stderr)
+	}
+	var envelope struct {
+		Success bool `json:"success"`
+		Error   *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Data struct {
+			Cleared []struct {
+				BeadID  string `json:"bead_id"`
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+			} `json:"cleared"`
+			Summary struct {
+				ClearedCount int `json:"cleared_count"`
+				FailedCount  int `json:"failed_count"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	decodeAtomicAssignmentJSON(t, cleared.stdout, &envelope)
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "CLEAR_FAILED" ||
+		envelope.Data.Summary.ClearedCount != 0 || envelope.Data.Summary.FailedCount != 1 || len(envelope.Data.Cleared) != 1 ||
+		envelope.Data.Cleared[0].BeadID != beadID || envelope.Data.Cleared[0].Success ||
+		!strings.Contains(envelope.Data.Cleared[0].Error, "Agent Mail is unavailable") {
+		t.Fatalf("clear-pane failure envelope = %+v", envelope)
+	}
+	after := fixture.readLedgerAssignment(t, beadID)
+	if after.ClearState != "reservation_releasing" || !strings.Contains(after.ClearError, "Agent Mail is unavailable") ||
+		!reflect.DeepEqual(after.ReservationIDs, []int{987654}) || !reflect.DeepEqual(after.ReservedPaths, []string{"internal/cli/**"}) {
+		t.Fatalf("clear-pane failure did not retain release barrier: %+v", after)
+	}
+	assertAtomicAssignmentReceiptUnchanged(t, before, after)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+}
+
+func TestE2EAtomicAssignmentAutoBuiltProcessRestart(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	const title = "Automatic built process assignment"
+	beadID := fixture.createBead(t, title)
+	templatePath := filepath.Join(fixture.projectDir, "atomic-auto-template.txt")
+	marker := fmt.Sprintf("NTM_ATOMIC_AUTO_%d", time.Now().UnixNano())
+	templateBody := marker + "::{BEAD_ID}::{TITLE}"
+	prompt := strings.ReplaceAll(strings.ReplaceAll(templateBody, "{BEAD_ID}", beadID), "{TITLE}", title)
+	if err := os.WriteFile(templatePath, []byte(templateBody), 0o600); err != nil {
+		t.Fatalf("write automatic assignment template: %v", err)
+	}
+	fixture.primePaneForSafeDispatch(t, 0)
+	// Production observation requires both an explicit agent prompt and five
+	// seconds without pane activity before authorizing an automatic dispatch.
+	time.Sleep(5500 * time.Millisecond)
+	args := []string{
+		"assign", fixture.session,
+		"--repo=" + fixture.projectDir,
+		"--auto",
+		"--beads=" + beadID,
+		"--limit=1",
+		"--cod-only",
+		"--template=custom",
+		"--template-file=" + templatePath,
+		"--reserve-files=false",
+		"--ignore-deps",
+		"--timeout=15s",
+		"--quiet",
+	}
+
+	first := fixture.runNTM(t, nil, args...)
+	if first.exitCode != 0 || len(bytes.TrimSpace(first.stderr)) != 0 {
+		t.Fatalf("automatic assignment exit=%d stdout=%s stderr=%s", first.exitCode, first.stdout, first.stderr)
+	}
+	fixture.waitForMarkerCount(t, 0, marker, 1)
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	firstRecord := fixture.readLedgerAssignment(t, beadID)
+	assertAtomicAssignmentRecord(t, firstRecord, beadID, prompt, fixture.panes[0], "cod")
+
+	second := fixture.runNTM(t, nil, args...)
+	if second.exitCode != 0 || len(bytes.TrimSpace(second.stderr)) != 0 {
+		t.Fatalf("automatic restart exit=%d stdout=%s stderr=%s", second.exitCode, second.stdout, second.stderr)
+	}
+	fixture.assertMarkerCounts(t, marker, map[int]int{0: 1, 1: 0})
+	assertAtomicAssignmentReceiptUnchanged(t, firstRecord, fixture.readLedgerAssignment(t, beadID))
+	fixture.assertBead(t, beadID, "in_progress", firstRecord.ClaimActor)
+}
+
+func TestE2EAtomicAssignmentClaimedPendingRetryBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	beadID := fixture.createBead(t, "Claimed pending built process retry")
+	prompt := fmt.Sprintf("NTM_ATOMIC_PENDING_RETRY_%d", time.Now().UnixNano())
+	originalPaneID := fixture.panes[0].ID
+
+	wrapperDir := filepath.Join(fixture.root, "claim-outage-bin")
+	if err := os.MkdirAll(wrapperDir, 0o700); err != nil {
+		t.Fatalf("create br outage wrapper directory: %v", err)
+	}
+	sentinel := filepath.Join(wrapperDir, "stop-private-tmux-after-claim")
+	fired := sentinel + ".fired"
+	if err := os.WriteFile(sentinel, []byte("armed\n"), 0o600); err != nil {
+		t.Fatalf("arm br outage wrapper: %v", err)
+	}
+	wrapper := strings.Join([]string{
+		"#!/bin/sh",
+		"real_br=" + tmux.ShellQuote(fixture.brPath),
+		"real_tmux=" + tmux.ShellQuote(fixture.tmuxPath),
+		"sentinel=" + tmux.ShellQuote(sentinel),
+		"fired=" + tmux.ShellQuote(fired),
+		`"$real_br" "$@"`,
+		"status=$?",
+		"claim=0",
+		`for arg in "$@"; do`,
+		`  if [ "$arg" = "--claim" ]; then claim=1; fi`,
+		"done",
+		`if [ "$status" -eq 0 ] && [ "$claim" -eq 1 ] && [ -e "$sentinel" ] && [ ! -e "$fired" ]; then`,
+		`  mv "$sentinel" "$fired"`,
+		`  "$real_tmux" kill-server >/dev/null 2>&1 || true`,
+		"fi",
+		`exit "$status"`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(wrapperDir, "br"), []byte(wrapper), 0o700); err != nil {
+		t.Fatalf("write br outage wrapper: %v", err)
+	}
+	path := wrapperDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH")
+
+	failed := fixture.runNTM(t, map[string]string{"PATH": path}, atomicDirectArgs(fixture, beadID, prompt, false)...)
+	if failed.exitCode == 0 || len(bytes.TrimSpace(failed.stderr)) != 0 {
+		t.Fatalf("post-claim outage exit=%d stdout=%s stderr=%s", failed.exitCode, failed.stdout, failed.stderr)
+	}
+	var failedEnvelope atomicAssignmentDirectEnvelope
+	decodeAtomicAssignmentJSON(t, failed.stdout, &failedEnvelope)
+	if failedEnvelope.Success || failedEnvelope.Error == nil || failedEnvelope.Error.Code != "SEND_ERROR" {
+		if failedEnvelope.Error == nil {
+			t.Fatalf("post-claim outage envelope has no error: %+v", failedEnvelope)
+		}
+		t.Fatalf("post-claim outage error code=%q message=%q", failedEnvelope.Error.Code, failedEnvelope.Error.Message)
+	}
+	pending := fixture.readLedgerAssignment(t, beadID)
+	if pending.Status != "claimed" || pending.ClaimState != "claimed" || pending.ClaimStatus != "in_progress" ||
+		pending.ClaimAttempts != 1 || pending.DispatchState != "pending" || pending.DispatchAttempts != 1 ||
+		pending.PendingPrompt != prompt || pending.PromptSent != "" || pending.LastDispatchError == "" ||
+		pending.DispatchedAt != nil || pending.DispatchReceiptID != "" {
+		t.Fatalf("post-claim outage was not durably recoverable: %+v", pending)
+	}
+	fixture.assertBead(t, beadID, "in_progress", pending.ClaimActor)
+	if _, err := os.Stat(fired); err != nil {
+		t.Fatalf("br outage wrapper did not fire: %v", err)
+	}
+
+	fixture.startAgentPanes(t)
+	if fixture.panes[0].ID != originalPaneID {
+		t.Fatalf("private tmux restart changed recovery pane ID: before=%s after=%s", originalPaneID, fixture.panes[0].ID)
+	}
+	fixture.primePaneForSafeDispatch(t, 0)
+	retry := fixture.runNTM(t, nil,
+		"assign", fixture.session,
+		"--repo="+fixture.projectDir,
+		"--retry="+beadID,
+		"--reserve-files=false",
+		"--timeout=15s",
+		"--json",
+	)
+	if retry.exitCode != 0 || len(bytes.TrimSpace(retry.stderr)) != 0 {
+		t.Fatalf("pending retry exit=%d stdout=%s stderr=%s", retry.exitCode, retry.stdout, retry.stderr)
+	}
+	var retryEnvelope atomicAssignmentRetryEnvelope
+	decodeAtomicAssignmentJSON(t, retry.stdout, &retryEnvelope)
+	if !retryEnvelope.Success || retryEnvelope.Command != "assign" || retryEnvelope.Subcommand != "retry" ||
+		retryEnvelope.Session != fixture.session || retryEnvelope.Error != nil || retryEnvelope.Data == nil ||
+		retryEnvelope.Data.Summary.TotalFailed != 1 || retryEnvelope.Data.Summary.RetriedCount != 1 ||
+		retryEnvelope.Data.Summary.SkippedCount != 0 || len(retryEnvelope.Data.Retried) != 1 ||
+		len(retryEnvelope.Data.Skipped) != 0 {
+		t.Fatalf("pending retry envelope = %+v", retryEnvelope)
+	}
+	retried := retryEnvelope.Data.Retried[0]
+	if retried.BeadID != beadID || retried.Pane != 0 || retried.Status != "assigned" || !retried.PromptSent || retried.RetryCount != 1 {
+		t.Fatalf("pending retry item = %+v", retried)
+	}
+	fixture.waitForMarkerCount(t, 0, prompt, 1)
+	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+	recovered := fixture.readLedgerAssignment(t, beadID)
+	if recovered.IdempotencyKey != pending.IdempotencyKey || recovered.ClaimActor != pending.ClaimActor ||
+		recovered.ClaimAttempts != 1 || recovered.DispatchState != "sent" || recovered.DispatchAttempts != 2 ||
+		recovered.PendingPrompt != "" || recovered.PromptSent != prompt || recovered.DispatchReceiptID == "" ||
+		recovered.DispatchedAt == nil || recovered.RetryCount != 1 {
+		t.Fatalf("pending retry did not preserve atomic identity: pending=%+v recovered=%+v", pending, recovered)
+	}
+	fixture.assertBead(t, beadID, "in_progress", pending.ClaimActor)
 }
 
 func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
@@ -596,7 +1051,7 @@ func newAtomicAssignmentCLIFixture(t *testing.T) *atomicAssignmentCLIFixture {
 
 	fixture.mustBR(t, "init", "--prefix=ate2e", "--json")
 
-	tmuxConfig := filepath.Join(root, "tmux.conf")
+	fixture.tmuxConfig = filepath.Join(root, "tmux.conf")
 	config := strings.Join([]string{
 		"set -g base-index 0",
 		"setw -g pane-base-index 0",
@@ -606,18 +1061,13 @@ func newAtomicAssignmentCLIFixture(t *testing.T) *atomicAssignmentCLIFixture {
 		"setw -g automatic-rename off",
 		"",
 	}, "\n")
-	if err := os.WriteFile(tmuxConfig, []byte(config), 0o600); err != nil {
+	if err := os.WriteFile(fixture.tmuxConfig, []byte(config), 0o600); err != nil {
 		t.Fatalf("write tmux config: %v", err)
 	}
-	agentCommand := "bash --noprofile --norc -c 'stty -echo; exec cat'"
-	fixture.mustTMUX(t, "-f", tmuxConfig, "new-session", "-d", "-s", fixture.session, "-x", "160", "-y", "48", "-c", fixture.projectDir, agentCommand)
 	t.Cleanup(func() {
 		_ = fixture.runTMUX(context.Background(), "kill-server")
 	})
-	fixture.mustTMUX(t, "split-window", "-d", "-t", fixture.session+":0", "-c", fixture.projectDir, agentCommand)
-	fixture.mustTMUX(t, "select-pane", "-t", fixture.session+":0.0", "-T", fixture.session+"__cod_1")
-	fixture.mustTMUX(t, "select-pane", "-t", fixture.session+":0.1", "-T", fixture.session+"__cc_2")
-	fixture.waitForPanes(t)
+	fixture.startAgentPanes(t)
 	return fixture
 }
 
@@ -638,13 +1088,29 @@ func atomicDirectArgsForSelector(f *atomicAssignmentCLIFixture, selector, beadID
 		"--prompt=" + prompt,
 		"--force",
 		"--ignore-deps",
-		"--timeout=5s",
+		"--timeout=15s",
 	}
 	if !requireReservation {
 		args = append(args, "--reserve-files=false")
 	}
 	args = append(args, "--json")
 	return args
+}
+
+func atomicDirectTemplateArgs(f *atomicAssignmentCLIFixture, pane int, beadID, templatePath string) []string {
+	return []string{
+		"assign", f.session,
+		"--repo=" + f.projectDir,
+		fmt.Sprintf("--pane=%d", pane),
+		"--beads=" + beadID,
+		"--template=custom",
+		"--template-file=" + templatePath,
+		"--reserve-files=false",
+		"--force",
+		"--ignore-deps",
+		"--timeout=15s",
+		"--json",
+	}
 }
 
 func atomicBulkArgs(f *atomicAssignmentCLIFixture, beadID, templatePath string) []string {
@@ -755,7 +1221,110 @@ func (f *atomicAssignmentCLIFixture) readLedger() (*atomicAssignmentLedger, erro
 	return &ledger, nil
 }
 
+func (f *atomicAssignmentCLIFixture) setLedgerAssignmentStatus(t *testing.T, beadID, status string) {
+	t.Helper()
+	data, err := os.ReadFile(f.ledgerPath())
+	if err != nil {
+		t.Fatalf("read assignment ledger for status update: %v", err)
+	}
+	var ledger map[string]json.RawMessage
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		t.Fatalf("decode assignment ledger for status update: %v", err)
+	}
+	var assignments map[string]json.RawMessage
+	if err := json.Unmarshal(ledger["assignments"], &assignments); err != nil {
+		t.Fatalf("decode assignments for status update: %v", err)
+	}
+	rawRecord, ok := assignments[beadID]
+	if !ok {
+		t.Fatalf("assignment ledger missing %s", beadID)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(rawRecord, &record); err != nil {
+		t.Fatalf("decode assignment %s for status update: %v", beadID, err)
+	}
+	encodedStatus, _ := json.Marshal(status)
+	completedAt, _ := json.Marshal(time.Now().UTC())
+	record["status"] = encodedStatus
+	record["completed_at"] = completedAt
+	assignments[beadID], err = json.Marshal(record)
+	if err != nil {
+		t.Fatalf("encode assignment %s status update: %v", beadID, err)
+	}
+	ledger["assignments"], err = json.Marshal(assignments)
+	if err != nil {
+		t.Fatalf("encode assignment map status update: %v", err)
+	}
+	updated, err := json.MarshalIndent(ledger, "", "  ")
+	if err != nil {
+		t.Fatalf("encode assignment ledger status update: %v", err)
+	}
+	if err := os.WriteFile(f.ledgerPath(), append(updated, '\n'), 0o600); err != nil {
+		t.Fatalf("write assignment ledger status update: %v", err)
+	}
+}
+
+func (f *atomicAssignmentCLIFixture) setLedgerAssignmentReservations(t *testing.T, beadID string, paths []string, ids []int) {
+	t.Helper()
+	data, err := os.ReadFile(f.ledgerPath())
+	if err != nil {
+		t.Fatalf("read assignment ledger for reservation update: %v", err)
+	}
+	var ledger map[string]json.RawMessage
+	if err := json.Unmarshal(data, &ledger); err != nil {
+		t.Fatalf("decode assignment ledger for reservation update: %v", err)
+	}
+	var assignments map[string]json.RawMessage
+	if err := json.Unmarshal(ledger["assignments"], &assignments); err != nil {
+		t.Fatalf("decode assignments for reservation update: %v", err)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(assignments[beadID], &record); err != nil {
+		t.Fatalf("decode assignment %s for reservation update: %v", beadID, err)
+	}
+	for key, value := range map[string]any{
+		"reservation_completed": true,
+		"reservation_state":     "granted",
+		"reservation_agent":     recordString(record["agent_name"]),
+		"reservation_target":    recordString(record["occupancy_key"]),
+		"reserved_paths":        paths,
+		"reservation_ids":       ids,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatalf("encode assignment %s field %s: %v", beadID, key, marshalErr)
+		}
+		record[key] = encoded
+	}
+	assignments[beadID], err = json.Marshal(record)
+	if err != nil {
+		t.Fatalf("encode assignment %s reservation update: %v", beadID, err)
+	}
+	ledger["assignments"], err = json.Marshal(assignments)
+	if err != nil {
+		t.Fatalf("encode assignment map reservation update: %v", err)
+	}
+	updated, err := json.MarshalIndent(ledger, "", "  ")
+	if err != nil {
+		t.Fatalf("encode assignment ledger reservation update: %v", err)
+	}
+	if err := os.WriteFile(f.ledgerPath(), append(updated, '\n'), 0o600); err != nil {
+		t.Fatalf("write assignment ledger reservation update: %v", err)
+	}
+}
+
+func recordString(raw json.RawMessage) string {
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	return value
+}
+
 func assertAtomicAssignmentRecord(t *testing.T, record *atomicAssignmentRecord, beadID, prompt string, pane atomicAssignmentPane, agentType string) {
+	t.Helper()
+	assertAtomicAssignmentRecordWithClaimIdentity(t, record, beadID, prompt, pane, agentType, true)
+}
+
+func assertAtomicAssignmentRecordWithClaimIdentity(t *testing.T, record *atomicAssignmentRecord, beadID, prompt string, pane atomicAssignmentPane, agentType string, requireKeyedClaimActor bool) {
 	t.Helper()
 	if record.BeadID != beadID || record.Pane != pane.Index || record.AgentType != agentType ||
 		record.Status != "assigned" || record.PromptSent != prompt {
@@ -768,7 +1337,7 @@ func assertAtomicAssignmentRecord(t *testing.T, record *atomicAssignmentRecord, 
 	if err != nil || len(decodedKey) != sha256.Size {
 		t.Fatalf("idempotency key %q is not a 256-bit hex key: decoded=%d err=%v", record.IdempotencyKey, len(decodedKey), err)
 	}
-	if !strings.HasSuffix(record.ClaimActor, "/ntm-"+record.IdempotencyKey[:12]) {
+	if requireKeyedClaimActor && !strings.HasSuffix(record.ClaimActor, "/ntm-"+record.IdempotencyKey[:12]) {
 		t.Fatalf("claim actor %q does not carry idempotency identity %q", record.ClaimActor, record.IdempotencyKey[:12])
 	}
 	if record.ClaimedAt == nil || record.DispatchStartedAt == nil || record.DispatchedAt == nil {
@@ -821,6 +1390,30 @@ func assertDirectAssignmentEnvelope(t *testing.T, envelope atomicAssignmentDirec
 	}
 }
 
+func assertSameDirectReceipt(t *testing.T, first, replay atomicAssignmentDirectEnvelope) {
+	t.Helper()
+	if first.Data == nil || first.Data.Receipt == nil || replay.Data == nil || replay.Data.Receipt == nil {
+		t.Fatalf("missing direct receipt: first=%+v replay=%+v", first.Data, replay.Data)
+	}
+	if first.Data.Receipt.WorkItemID != replay.Data.Receipt.WorkItemID ||
+		first.Data.Receipt.Pane != replay.Data.Receipt.Pane ||
+		first.Data.Receipt.Prompt != replay.Data.Receipt.Prompt ||
+		first.Data.Receipt.Transport != replay.Data.Receipt.Transport ||
+		first.Data.Receipt.Timestamp != replay.Data.Receipt.Timestamp {
+		t.Fatalf("direct replay receipt changed: first=%+v replay=%+v", first.Data.Receipt, replay.Data.Receipt)
+	}
+}
+
+func assertAtomicAssignmentReceiptUnchanged(t *testing.T, first, replay *atomicAssignmentRecord) {
+	t.Helper()
+	if first.IdempotencyKey != replay.IdempotencyKey || first.ClaimActor != replay.ClaimActor ||
+		first.ClaimAttempts != replay.ClaimAttempts || first.DispatchAttempts != replay.DispatchAttempts ||
+		first.DispatchedAt == nil || replay.DispatchedAt == nil || !first.DispatchedAt.Equal(*replay.DispatchedAt) ||
+		first.DispatchReceiptID != replay.DispatchReceiptID || first.PromptSent != replay.PromptSent {
+		t.Fatalf("durable receipt changed: first=%+v replay=%+v", first, replay)
+	}
+}
+
 func assertBulkAssignmentEnvelope(t *testing.T, envelope atomicAssignmentBulkEnvelope, beadID, pane string) *struct {
 	Pane              string `json:"pane"`
 	PaneID            string `json:"pane_id"`
@@ -855,6 +1448,16 @@ func decodeAtomicAssignmentJSON(t *testing.T, data []byte, target any) {
 	if err := json.Unmarshal(bytes.TrimSpace(data), target); err != nil {
 		t.Fatalf("decode JSON: %v raw=%s", err, data)
 	}
+}
+
+func (f *atomicAssignmentCLIFixture) startAgentPanes(t *testing.T) {
+	t.Helper()
+	agentCommand := "bash --noprofile --norc -c 'stty -echo; exec cat'"
+	f.mustTMUX(t, "-f", f.tmuxConfig, "new-session", "-d", "-s", f.session, "-x", "160", "-y", "48", "-c", f.projectDir, agentCommand)
+	f.mustTMUX(t, "split-window", "-d", "-t", f.session+":0", "-c", f.projectDir, agentCommand)
+	f.mustTMUX(t, "select-pane", "-t", f.session+":0.0", "-T", f.session+"__cod_1")
+	f.mustTMUX(t, "select-pane", "-t", f.session+":0.1", "-T", f.session+"__cc_2")
+	f.waitForPanes(t)
 }
 
 func (f *atomicAssignmentCLIFixture) waitForPanes(t *testing.T) {
@@ -1090,6 +1693,95 @@ func (f *atomicAssignmentCLIFixture) runNTM(t *testing.T, env map[string]string,
 	return atomicAssignmentProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), exitCode: exitCode}
 }
 
+func (f *atomicAssignmentCLIFixture) runNTMConcurrent(t *testing.T, count int, env map[string]string, args ...string) []atomicAssignmentProcessResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	type runningProcess struct {
+		cmd         *exec.Cmd
+		stdout      bytes.Buffer
+		stderr      bytes.Buffer
+		gateReader  *os.File
+		gateWriter  *os.File
+		readyReader *os.File
+		readyWriter *os.File
+	}
+	processes := make([]runningProcess, count)
+	for i := range processes {
+		gateReader, gateWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("create contender %d gate: %v", i, err)
+		}
+		readyReader, readyWriter, err := os.Pipe()
+		if err != nil {
+			_ = gateReader.Close()
+			_ = gateWriter.Close()
+			t.Fatalf("create contender %d readiness pipe: %v", i, err)
+		}
+		processes[i].gateReader = gateReader
+		processes[i].gateWriter = gateWriter
+		processes[i].readyReader = readyReader
+		processes[i].readyWriter = readyWriter
+		barrierArgs := []string{"-c", `printf x >&4; IFS= read -r _ <&3; exec "$@"`, "ntm-e2e-barrier", f.ntmPath}
+		barrierArgs = append(barrierArgs, args...)
+		processes[i].cmd = exec.CommandContext(ctx, "/bin/sh", barrierArgs...)
+		processes[i].cmd.Dir = f.projectDir
+		processes[i].cmd.Env = atomicAssignmentMergeEnv(f.env, env)
+		processes[i].cmd.ExtraFiles = []*os.File{gateReader, readyWriter}
+		processes[i].cmd.Stdout = &processes[i].stdout
+		processes[i].cmd.Stderr = &processes[i].stderr
+	}
+	for i := range processes {
+		if err := processes[i].cmd.Start(); err != nil {
+			t.Fatalf("start ntm contender %d %q: %v", i, args, err)
+		}
+		_ = processes[i].gateReader.Close()
+		_ = processes[i].readyWriter.Close()
+	}
+	for i := range processes {
+		if err := processes[i].readyReader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set contender %d readiness deadline: %v", i, err)
+		}
+		var ready [1]byte
+		if _, err := io.ReadFull(processes[i].readyReader, ready[:]); err != nil {
+			t.Fatalf("wait for contender %d at start barrier: %v", i, err)
+		}
+		_ = processes[i].readyReader.Close()
+	}
+	for i := range processes {
+		if _, err := processes[i].gateWriter.Write([]byte("go\n")); err != nil {
+			t.Fatalf("release contender %d start barrier: %v", i, err)
+		}
+		_ = processes[i].gateWriter.Close()
+	}
+
+	results := make([]atomicAssignmentProcessResult, count)
+	for i := range processes {
+		err := processes[i].cmd.Wait()
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("concurrent ntm commands timed out: %q", args)
+		}
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			} else {
+				t.Fatalf("wait for ntm contender %d %q: %v", i, args, err)
+			}
+		}
+		results[i] = atomicAssignmentProcessResult{
+			stdout:   append([]byte(nil), processes[i].stdout.Bytes()...),
+			stderr:   append([]byte(nil), processes[i].stderr.Bytes()...),
+			exitCode: exitCode,
+		}
+		t.Logf("[E2E-ATOMIC] contender=%d exit=%d args=%q stdout=%s stderr=%s", i, exitCode, args,
+			truncateString(processes[i].stdout.String(), 500), truncateString(processes[i].stderr.String(), 500))
+	}
+	return results
+}
+
 func (f *atomicAssignmentCLIFixture) mustBR(t *testing.T, args ...string) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1138,7 +1830,8 @@ func (f *atomicAssignmentCLIFixture) tmuxOutput(ctx context.Context, args ...str
 
 func atomicAssignmentIsolatedEnv(overrides map[string]string) []string {
 	replaced := map[string]struct{}{
-		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {},
+		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {}, "XDG_CACHE_HOME": {}, "PWD": {}, "OLDPWD": {},
+		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "BR_DB": {}, "BD_DB": {}, "BEADS_DB": {}, "AGENT_NAME": {},
 		"TMUX": {}, "TMUX_PANE": {}, "TMUX_TMPDIR": {},
 		"NTM_CONFIG": {}, "NTM_OUTPUT_FORMAT": {}, "NTM_ROBOT_FORMAT": {}, "TOON_DEFAULT_FORMAT": {},
 		"AGENT_MAIL_URL": {}, "AGENT_MAIL_TOKEN": {},
@@ -1179,4 +1872,14 @@ func atomicAssignmentMergeEnv(base []string, overrides map[string]string) []stri
 	}
 	sort.Strings(result)
 	return result
+}
+
+func atomicAssignmentEnvValue(env []string, name string) string {
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		if key == name {
+			return value
+		}
+	}
+	return ""
 }

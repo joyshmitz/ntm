@@ -280,6 +280,94 @@ func TestE2E_RobotBulkAssign_Strategy(t *testing.T) {
 	}
 }
 
+func TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	brPath, err := exec.LookPath("br")
+	if err != nil {
+		t.Skipf("br is required for hermetic bulk strategy E2E: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		flags        []string
+		wantStrategy string
+	}{
+		{
+			name:         "deprecated_bulk_strategy_only",
+			flags:        []string{"--bulk-strategy=stale"},
+			wantStrategy: "stale",
+		},
+		{
+			name:         "deprecated_flag_wins_when_canonical_is_first",
+			flags:        []string{"--strategy=ready", "--bulk-strategy=balanced"},
+			wantStrategy: "balanced",
+		},
+		{
+			name:         "deprecated_flag_wins_when_canonical_is_last",
+			flags:        []string{"--bulk-strategy=balanced", "--strategy=ready"},
+			wantStrategy: "balanced",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRobotProcessFixture(t, "bulk-strategy")
+			runBR := func(args ...string) []byte {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, brPath, args...)
+				cmd.Dir = fixture.projectDir
+				cmd.Env = append([]string(nil), fixture.env...)
+				output, err := cmd.CombinedOutput()
+				if ctx.Err() == context.DeadlineExceeded {
+					t.Fatalf("br %q timed out", args)
+				}
+				if err != nil {
+					t.Fatalf("br %q: %v output=%s", args, err, output)
+				}
+				return output
+			}
+			runBR("init", "--prefix=rbe2e", "--json")
+			beadID := strings.TrimSpace(string(runBR("create", "Hermetic bulk strategy", "--type=task", "--priority=1", "--silent")))
+			if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+				t.Fatalf("unexpected br create output %q", beadID)
+			}
+			allocation, err := json.Marshal(map[string]string{fixture.paneID: beadID})
+			if err != nil {
+				t.Fatalf("marshal allocation: %v", err)
+			}
+			args := []string{
+				"--robot-bulk-assign=" + fixture.session,
+				"--allocation=" + string(allocation),
+				"--dry-run",
+				"--robot-format=json",
+			}
+			args = append(args, test.flags...)
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+			if process.exitCode != 0 {
+				t.Fatalf("bulk strategy process exit=%d, want 0; stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			if stderr := strings.TrimSpace(string(process.stderr)); stderr != "" &&
+				(!strings.Contains(stderr, "--bulk-strategy") || !strings.Contains(strings.ToLower(stderr), "deprecated")) {
+				t.Fatalf("unexpected bulk strategy stderr: %q", stderr)
+			}
+
+			var result BulkAssignOutput
+			decodeSingleRobotJSON(t, process.stdout, &result)
+			if !result.Success || !result.DryRun || result.Session != fixture.session {
+				t.Fatalf("bulk strategy envelope = %+v", result)
+			}
+			if result.Strategy != test.wantStrategy {
+				t.Fatalf("bulk strategy=%q, want %q for flags %q", result.Strategy, test.wantStrategy, test.flags)
+			}
+			if _, err := time.Parse(time.RFC3339Nano, result.Timestamp); err != nil {
+				t.Fatalf("bulk strategy timestamp %q is not RFC3339: %v", result.Timestamp, err)
+			}
+		})
+	}
+}
+
 func TestE2E_RobotBulkAssign_JSONStructure(t *testing.T) {
 	CommonE2EPrerequisites(t)
 

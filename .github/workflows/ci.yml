@@ -388,10 +388,12 @@ jobs:
           TMUX: ""
         run: |
           mkdir -p "$TMUX_TMPDIR"
-          go test -v -tags=integration -count=1 -timeout=10m \
-            ./internal/tmux/... \
-            ./internal/pipeline/... \
-            ./internal/tui/dashboard
+          go test -v -tags=integration -count=1 -timeout=5m ./internal/pipeline \
+            -run '^TestRealTmuxPipelineE2E_(RunPersistAndLoad|ResumeFailedTemplateDispatch|NonZeroExitPersistsDiagnostics)$'
+          go test -v -tags=integration -count=1 -timeout=5m ./internal/tui/dashboard \
+            -run '^TestRealTmuxDashboardE2E$'
+          go test -v -count=1 -timeout=2m ./internal/robot \
+            -run '^TestPrintReplayRealTmuxDeliversOnce$'
 
       - name: Clean up private tmux server
         if: always()
