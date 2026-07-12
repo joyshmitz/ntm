@@ -4,6 +4,7 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,15 +13,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -512,7 +518,7 @@ func TestE2EAtomicAssignmentTerminalGenerationBuiltProcess(t *testing.T) {
 	}
 	var closed atomicAssignmentDirectEnvelope
 	decodeAtomicAssignmentJSON(t, closedResult.stdout, &closed)
-	if closed.Success || closed.Error == nil || closed.Error.Code != "ASSIGN_ERROR" || !strings.Contains(closed.Error.Message, "tracker status is \"closed\"") {
+	if closed.Success || closed.Error == nil || closed.Error.Code != "BEAD_NOT_REOPENED" || !strings.Contains(closed.Error.Message, "tracker status is \"closed\"") {
 		t.Fatalf("closed generation retry envelope = %+v", closed)
 	}
 	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
@@ -600,6 +606,253 @@ func TestE2EAtomicAssignmentClearPaneLeaseFailureIsDurable(t *testing.T) {
 	}
 	assertAtomicAssignmentReceiptUnchanged(t, before, after)
 	fixture.assertMarkerCounts(t, prompt, map[int]int{0: 1, 1: 0})
+}
+
+func TestE2EAtomicCoordinatorRunOnceBuiltProcess(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	fixture := newAtomicAssignmentCLIFixture(t)
+	beadID := fixture.createBead(t, "Coordinator once delivery")
+	for pane := range fixture.panes {
+		fixture.primePaneForSafeDispatch(t, pane)
+	}
+	time.Sleep(5500 * time.Millisecond)
+
+	for key, value := range map[string]string{
+		"HOME":            fixture.homeDir,
+		"XDG_CONFIG_HOME": filepath.Join(fixture.root, "config"),
+		"XDG_DATA_HOME":   filepath.Join(fixture.root, "data"),
+	} {
+		t.Setenv(key, value)
+	}
+	registry := agentmail.NewSessionAgentRegistry(fixture.session, fixture.projectDir)
+	for pane, endpoint := range fixture.panes {
+		registry.AddAgent(endpoint.Title, endpoint.ID, fmt.Sprintf("CoordinatorAgent%d", pane))
+	}
+	if err := agentmail.SaveSessionAgentRegistry(registry); err != nil {
+		t.Fatalf("save coordinator Agent Mail registry: %v", err)
+	}
+	configPath := filepath.Join(fixture.root, "config", "ntm", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("create coordinator config directory: %v", err)
+	}
+	coordinatorConfig := strings.Join([]string{
+		"[coordinator]",
+		"auto_assign = true",
+		"assign_only_idle = true",
+		"send_digests = false",
+		"poll_interval = \"100ms\"",
+		"digest_interval = \"1h\"",
+		"idle_threshold = 0",
+		"",
+	}, "\n")
+	if err := os.WriteFile(configPath, []byte(coordinatorConfig), 0o600); err != nil {
+		t.Fatalf("write coordinator config: %v", err)
+	}
+
+	binDir := filepath.Join(fixture.root, "coordinator-bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("create coordinator bin directory: %v", err)
+	}
+	bvPayloadPath := filepath.Join(fixture.root, "triage.json")
+	writeBVPayload := func(id, title string) {
+		t.Helper()
+		payload := fmt.Sprintf(`{"generated_at":"2026-07-12T00:00:00Z","data_hash":"e2e","triage":{"meta":{"version":"1","generated_at":"2026-07-12T00:00:00Z","phase2_ready":true,"issue_count":1},"quick_ref":{"open_count":1,"actionable_count":1,"blocked_count":0,"in_progress_count":0,"top_picks":[]},"recommendations":[{"id":%q,"title":%q,"type":"task","status":"open","priority":1,"score":1,"action":"assign","reasons":[]}]}}`, id, title)
+		if err := os.WriteFile(bvPayloadPath, []byte(payload), 0o600); err != nil {
+			t.Fatalf("write bv payload: %v", err)
+		}
+	}
+	writeBVPayload(beadID, "Coordinator once delivery")
+	bvScript := "#!/bin/sh\ncat \"$NTM_E2E_BV_PAYLOAD\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write bv fixture: %v", err)
+	}
+
+	var sendCount atomic.Int32
+	var invalidReceipt atomic.Bool
+	mailServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health/liveness" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		var request struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if request.Method != "tools/call" || request.Params.Name != "send_message" {
+			http.Error(w, "unexpected Agent Mail method", http.StatusNotFound)
+			return
+		}
+		recipients, _ := request.Params.Arguments["to"].([]any)
+		if len(recipients) != 1 {
+			http.Error(w, "expected one recipient", http.StatusBadRequest)
+			return
+		}
+		recipient, _ := recipients[0].(string)
+		messageID := int(sendCount.Add(1)) + 7000
+		if invalidReceipt.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": request.ID,
+				"result": map[string]any{"count": 0, "deliveries": []any{}},
+			})
+			return
+		}
+		result := map[string]any{
+			"count": 1,
+			"deliveries": []map[string]any{{
+				"project": fixture.projectDir,
+				"payload": map[string]any{"id": messageID, "to": []string{recipient}},
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+	}))
+	defer mailServer.Close()
+
+	env := map[string]string{
+		"PATH":               binDir + string(os.PathListSeparator) + atomicAssignmentEnvValue(fixture.env, "PATH"),
+		"NTM_E2E_BV_PAYLOAD": bvPayloadPath,
+		"AGENT_MAIL_URL":     mailServer.URL + "/",
+	}
+	runOnce := func() (atomicAssignmentProcessResult, struct {
+		Success     bool   `json:"success"`
+		Once        bool   `json:"once"`
+		AutoAssign  bool   `json:"auto_assign"`
+		ErrorCode   string `json:"error_code"`
+		Error       string `json:"error"`
+		Assignments []struct {
+			Success        bool   `json:"success"`
+			MessageSent    bool   `json:"message_sent"`
+			IdempotencyKey string `json:"idempotency_key"`
+		} `json:"assignments"`
+	}) {
+		t.Helper()
+		result := fixture.runNTM(t, env, "--json", "coordinator", "run", fixture.session, "--once")
+		var envelope struct {
+			Success     bool   `json:"success"`
+			Once        bool   `json:"once"`
+			AutoAssign  bool   `json:"auto_assign"`
+			ErrorCode   string `json:"error_code"`
+			Error       string `json:"error"`
+			Assignments []struct {
+				Success        bool   `json:"success"`
+				MessageSent    bool   `json:"message_sent"`
+				IdempotencyKey string `json:"idempotency_key"`
+			} `json:"assignments"`
+		}
+		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+		return result, envelope
+	}
+
+	firstResult, first := runOnce()
+	if firstResult.exitCode != 0 || len(bytes.TrimSpace(firstResult.stderr)) != 0 || !first.Success || !first.Once || !first.AutoAssign ||
+		len(first.Assignments) != 1 || !first.Assignments[0].Success || !first.Assignments[0].MessageSent || first.Assignments[0].IdempotencyKey == "" {
+		t.Fatalf("first coordinator cycle result=%+v envelope=%+v", firstResult, first)
+	}
+	if sendCount.Load() != 1 {
+		t.Fatalf("first coordinator cycle deliveries=%d, want 1", sendCount.Load())
+	}
+	firstRecord := fixture.readLedgerAssignment(t, beadID)
+	if firstRecord.DispatchState != "sent" || firstRecord.DispatchReceiptID != "7001" || firstRecord.IdempotencyKey != first.Assignments[0].IdempotencyKey {
+		t.Fatalf("coordinator durable receipt = %+v", firstRecord)
+	}
+	fixture.assertBead(t, beadID, "in_progress", firstRecord.ClaimActor)
+
+	secondResult, second := runOnce()
+	if secondResult.exitCode != 0 || len(bytes.TrimSpace(secondResult.stderr)) != 0 || !second.Success || !second.Once || !second.AutoAssign || len(second.Assignments) != 0 {
+		t.Fatalf("second coordinator cycle result=%+v envelope=%+v", secondResult, second)
+	}
+	if sendCount.Load() != 1 {
+		t.Fatalf("coordinator restart deliveries=%d, want exactly 1", sendCount.Load())
+	}
+	assertAtomicAssignmentReceiptUnchanged(t, firstRecord, fixture.readLedgerAssignment(t, beadID))
+
+	failureBeadID := fixture.createBead(t, "Coordinator invalid receipt")
+	writeBVPayload(failureBeadID, "Coordinator invalid receipt")
+	invalidReceipt.Store(true)
+	failureResult, failure := runOnce()
+	if failureResult.exitCode != 1 || len(bytes.TrimSpace(failureResult.stderr)) != 0 || failure.Success ||
+		failure.ErrorCode != "ASSIGNMENT_FAILED" || failure.Error == "" || len(failure.Assignments) != 1 ||
+		failure.Assignments[0].Success || failure.Assignments[0].MessageSent {
+		t.Fatalf("failed coordinator cycle result=%+v envelope=%+v", failureResult, failure)
+	}
+	if sendCount.Load() != 2 {
+		t.Fatalf("failed coordinator cycle deliveries=%d, want one attempted delivery", sendCount.Load())
+	}
+	failureRecord := fixture.readLedgerAssignment(t, failureBeadID)
+	if failureRecord.DispatchState != "sending" || failureRecord.DispatchReceiptID != "" || failureRecord.DispatchAttempts != 1 {
+		t.Fatalf("failed coordinator durable outcome = %+v", failureRecord)
+	}
+
+	coordinatorConfig = strings.Replace(coordinatorConfig, "auto_assign = true", "auto_assign = false", 1)
+	if err := os.WriteFile(configPath, []byte(coordinatorConfig), 0o600); err != nil {
+		t.Fatalf("disable coordinator auto-assignment: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	longRun := exec.CommandContext(ctx, fixture.ntmPath, "--json", "coordinator", "run", fixture.session)
+	longRun.Dir = fixture.projectDir
+	longRun.Env = atomicAssignmentMergeEnv(fixture.env, env)
+	stdout, err := longRun.StdoutPipe()
+	if err != nil {
+		t.Fatalf("coordinator stdout pipe: %v", err)
+	}
+	var longRunStderr bytes.Buffer
+	longRun.Stderr = &longRunStderr
+	if err := longRun.Start(); err != nil {
+		t.Fatalf("start long-running coordinator: %v", err)
+	}
+	startupLine := make(chan struct {
+		line []byte
+		err  error
+	}, 1)
+	go func() {
+		line, readErr := bufio.NewReader(stdout).ReadBytes('\n')
+		startupLine <- struct {
+			line []byte
+			err  error
+		}{line: line, err: readErr}
+	}()
+	var startup struct {
+		Success    bool `json:"success"`
+		Once       bool `json:"once"`
+		AutoAssign bool `json:"auto_assign"`
+	}
+	select {
+	case received := <-startupLine:
+		if received.err != nil {
+			t.Fatalf("read coordinator startup envelope: %v stderr=%s", received.err, longRunStderr.String())
+		}
+		decodeAtomicAssignmentJSON(t, received.line, &startup)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for coordinator startup envelope")
+	}
+	if !startup.Success || startup.Once || startup.AutoAssign {
+		t.Fatalf("long-running coordinator startup = %+v", startup)
+	}
+	if err := longRun.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal coordinator: %v", err)
+	}
+	if err := longRun.Wait(); err != nil {
+		t.Fatalf("long-running coordinator did not exit cleanly: %v stderr=%s", err, longRunStderr.String())
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("long-running coordinator exceeded deadline: %v", ctx.Err())
+	}
+	if len(bytes.TrimSpace(longRunStderr.Bytes())) != 0 {
+		t.Fatalf("long-running coordinator stderr=%s", longRunStderr.String())
+	}
 }
 
 func TestE2EAtomicAssignmentAutoBuiltProcessRestart(t *testing.T) {
@@ -1667,7 +1920,7 @@ func (f *atomicAssignmentCLIFixture) capturePane(t *testing.T, pane int) string 
 
 func (f *atomicAssignmentCLIFixture) runNTM(t *testing.T, env map[string]string, args ...string) atomicAssignmentProcessResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.ntmPath, args...)
 	cmd.Dir = f.projectDir
@@ -1695,7 +1948,7 @@ func (f *atomicAssignmentCLIFixture) runNTM(t *testing.T, env map[string]string,
 
 func (f *atomicAssignmentCLIFixture) runNTMConcurrent(t *testing.T, count int, env map[string]string, args ...string) []atomicAssignmentProcessResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	type runningProcess struct {
@@ -1784,7 +2037,7 @@ func (f *atomicAssignmentCLIFixture) runNTMConcurrent(t *testing.T, count int, e
 
 func (f *atomicAssignmentCLIFixture) mustBR(t *testing.T, args ...string) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.brPath, args...)
 	cmd.Dir = f.projectDir

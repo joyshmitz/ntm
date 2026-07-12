@@ -4965,6 +4965,8 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		switch {
 		case errors.Is(assignErr, assignment.ErrClaimConflict):
 			code = "CLAIM_CONFLICT"
+		case errors.Is(assignErr, assignment.ErrTerminalAssignmentAttempt):
+			code = "BEAD_NOT_REOPENED"
 		case errors.Is(assignErr, assignment.ErrDispatchOutcomeUnknown):
 			code = "DISPATCH_UNKNOWN"
 		case atomicResult.Assignment != nil && atomicResult.Assignment.DispatchAttempts > 0:

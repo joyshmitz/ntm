@@ -113,6 +113,8 @@ func runAtomicStaleMutationHelper(t *testing.T, store *assignment.AssignmentStor
 		mutationErr = store.Clear()
 	case "reassign":
 		_, mutationErr = store.Reassign(beadID, 9, "claude", "ClaudeNine")
+	case "complete":
+		mutationErr = store.MarkCompleted(beadID)
 	default:
 		t.Fatalf("unknown stale mutation %q", operation)
 	}
@@ -898,6 +900,118 @@ func TestAtomicAssignmentE2E_StaleDestructiveProcessCannotEraseDispatchBarrier(t
 			}
 		})
 	}
+}
+
+func TestAtomicAssignmentE2E_StaleLifecycleCannotResurrectOrCrossGeneration(t *testing.T) {
+	t.Run("removed assignment", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		syncDir := t.TempDir()
+		ready := filepath.Join(syncDir, "stale-ready")
+		gate := filepath.Join(syncDir, "stale-gate")
+		const session = "atomic-e2e-stale-update-removed"
+		const beadID = "ntm-stale-update-removed"
+
+		seed := assignment.NewStore(session)
+		if _, err := seed.Assign(beadID, "Removed generation", 1, "codex", "CodexOne", "work"); err != nil {
+			t.Fatalf("Assign: %v", err)
+		}
+		if err := seed.MarkWorking(beadID); err != nil {
+			t.Fatalf("MarkWorking: %v", err)
+		}
+		stale := startAtomicHelper(t, map[string]string{
+			"HOME": home, "NTM_ATOMIC_E2E_OPERATION": "stale-mutation", "NTM_ATOMIC_E2E_SESSION": session,
+			"NTM_ATOMIC_E2E_BEAD": beadID, "NTM_ATOMIC_E2E_MUTATION": "complete",
+			"NTM_ATOMIC_E2E_READY": ready, "NTM_ATOMIC_E2E_GATE": gate,
+		})
+		waitForAtomicFiles(t, ready)
+		remover, err := assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("load remover: %v", err)
+		}
+		if err := remover.Remove(beadID); err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+		if err := os.WriteFile(gate, []byte("complete"), 0o600); err != nil {
+			t.Fatalf("release stale completion: %v", err)
+		}
+		result := stale.waitForFailure(t)
+		if result.ErrorKind != "concurrent_mutation" || !strings.Contains(result.Error, beadID) {
+			t.Fatalf("stale completion result=%+v, want concurrent mutation", result)
+		}
+		final, err := assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("reload removed ledger: %v", err)
+		}
+		if got := final.Get(beadID); got != nil {
+			t.Fatalf("stale child resurrected removed assignment: %+v", got)
+		}
+	})
+
+	t.Run("superseded generation", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		syncDir := t.TempDir()
+		ready := filepath.Join(syncDir, "stale-ready")
+		gate := filepath.Join(syncDir, "stale-gate")
+		const session = "atomic-e2e-stale-update-generation"
+		const beadID = "ntm-stale-update-generation"
+		now := time.Now().UTC()
+		oldRequest := assignment.AtomicRequest{
+			BeadID: beadID, BeadTitle: "Old generation", Target: "%91", OccupancyKey: "%91", Pane: 1,
+			AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne", Prompt: "old work", IdempotencyKey: "old-process-generation",
+		}
+		seed := assignment.NewStore(session)
+		oldActor := assignment.StableClaimActor(oldRequest.Actor, oldRequest.IdempotencyKey)
+		if _, err := seed.RecordAtomicIntent(oldRequest, oldActor, now); err != nil {
+			t.Fatalf("RecordAtomicIntent(old): %v", err)
+		}
+		if _, err := seed.RecordAtomicClaim(oldRequest, assignment.ClaimReceipt{BeadID: beadID, Actor: oldActor, Status: "in_progress", ClaimedAt: now}); err != nil {
+			t.Fatalf("RecordAtomicClaim(old): %v", err)
+		}
+		if err := seed.UpdateStatus(beadID, assignment.StatusAssigned); err != nil {
+			t.Fatalf("mark old assigned: %v", err)
+		}
+		if err := seed.MarkWorking(beadID); err != nil {
+			t.Fatalf("mark old working: %v", err)
+		}
+		stale := startAtomicHelper(t, map[string]string{
+			"HOME": home, "NTM_ATOMIC_E2E_OPERATION": "stale-mutation", "NTM_ATOMIC_E2E_SESSION": session,
+			"NTM_ATOMIC_E2E_BEAD": beadID, "NTM_ATOMIC_E2E_MUTATION": "complete",
+			"NTM_ATOMIC_E2E_READY": ready, "NTM_ATOMIC_E2E_GATE": gate,
+		})
+		waitForAtomicFiles(t, ready)
+		winner, err := assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("load winner: %v", err)
+		}
+		if err := winner.MarkCompleted(beadID); err != nil {
+			t.Fatalf("complete old generation: %v", err)
+		}
+		newRequest := oldRequest
+		newRequest.BeadTitle = "New generation"
+		newRequest.Prompt = "new work"
+		newRequest.IdempotencyKey = "new-process-generation"
+		newActor := assignment.StableClaimActor(newRequest.Actor, newRequest.IdempotencyKey)
+		if _, err := winner.RecordAtomicIntent(newRequest, newActor, now.Add(time.Minute)); err != nil {
+			t.Fatalf("RecordAtomicIntent(new): %v", err)
+		}
+		if err := os.WriteFile(gate, []byte("complete"), 0o600); err != nil {
+			t.Fatalf("release stale completion: %v", err)
+		}
+		result := stale.waitForFailure(t)
+		if result.ErrorKind != "concurrent_mutation" || !strings.Contains(result.Error, beadID) {
+			t.Fatalf("old-generation child result=%+v, want concurrent mutation", result)
+		}
+		final, err := assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("reload new generation: %v", err)
+		}
+		stored := final.Get(beadID)
+		if stored == nil || stored.IdempotencyKey != newRequest.IdempotencyKey || stored.Status != assignment.StatusClaiming || stored.PendingPrompt != newRequest.Prompt {
+			t.Fatalf("old-generation child corrupted durable winner: %+v", stored)
+		}
+	})
 }
 
 func TestAtomicAssignmentE2E_DurableRetryReplayAndCompletionTarget(t *testing.T) {
