@@ -227,6 +227,9 @@ func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context
 		if _, alreadyAssigned := activeBeads[recommendation.ID]; alreadyAssigned {
 			continue
 		}
+		if !recommendationPassesSemanticGates(recommendation) {
+			continue
+		}
 		trackerStatus, err := lookup(ctx, recommendation.ID)
 		if err != nil {
 			return nil, terminalRecommendation, fmt.Errorf("read recommendation %s status: %w", recommendation.ID, err)
@@ -239,6 +242,29 @@ func (c *SessionCoordinator) filterActionableRecommendations(ctx context.Context
 		}
 	}
 	return filtered, terminalRecommendation, nil
+}
+
+var operatorGatedLabels = map[string]struct{}{
+	"operator-gated":      {},
+	"operator-action":     {},
+	"needs-operator":      {},
+	"human-gated":         {},
+	"human-input":         {},
+	"business-input":      {},
+	"blocked-on-operator": {},
+	"blocked-on-ivan":     {},
+}
+
+func recommendationPassesSemanticGates(recommendation bv.TriageRecommendation) bool {
+	if strings.EqualFold(strings.TrimSpace(recommendation.Status), "blocked") || len(recommendation.BlockedBy) > 0 {
+		return false
+	}
+	for _, rawLabel := range recommendation.Labels {
+		if _, gated := operatorGatedLabels[strings.ToLower(strings.TrimSpace(rawLabel))]; gated {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *SessionCoordinator) recoverPendingAssignments(ctx context.Context, store *assignmentstore.AssignmentStore, candidates []*AgentState) []AssignmentResult {
@@ -282,16 +308,40 @@ func (c *SessionCoordinator) recoverPendingAssignments(ctx context.Context, stor
 		if target == "" {
 			target = strings.TrimSpace(recorded.DispatchTarget)
 		}
-		if _, eligible := eligibleTargets[target]; !eligible {
-			results = append(results, AssignmentResult{
+			candidate, eligible := eligibleTargets[target]
+			if !eligible {
+				results = append(results, AssignmentResult{
 				Assignment: work, ClaimActor: recorded.ClaimActor, IdempotencyKey: recorded.IdempotencyKey,
 				Error: fmt.Sprintf("assignment recovery target %q is not freshly eligible", target),
-			})
-			continue
-		}
-		results = append(results, c.recoverPendingAssignment(ctx, store, recorded, work))
+				})
+				continue
+			}
+			if identityErr := pendingRecoveryIdentityError(recorded, candidate); identityErr != nil {
+				results = append(results, AssignmentResult{
+					Assignment: work, ClaimActor: recorded.ClaimActor, IdempotencyKey: recorded.IdempotencyKey,
+					Error: identityErr.Error(),
+				})
+				continue
+			}
+			results = append(results, c.recoverPendingAssignment(ctx, store, recorded, work))
 	}
 	return results
+}
+
+func pendingRecoveryIdentityError(recorded *assignmentstore.Assignment, candidate *AgentState) error {
+	if recorded == nil || candidate == nil {
+		return errors.New("pending assignment recovery identity is unavailable")
+	}
+	recordedType := agent.AgentType(strings.TrimSpace(recorded.AgentType)).Canonical()
+	candidateType := agent.AgentType(strings.TrimSpace(candidate.AgentType)).Canonical()
+	if recordedType != candidateType {
+		return fmt.Errorf("pending assignment recovery target %s changed agent type from %s to %s", recorded.OccupancyKey, recordedType, candidateType)
+	}
+	recordedName := strings.TrimSpace(recorded.AgentName)
+	if recordedName != "" && strings.TrimSpace(candidate.AgentMailName) != recordedName {
+		return fmt.Errorf("pending assignment recovery target %s changed Agent Mail identity from %s to %s", recorded.OccupancyKey, recordedName, strings.TrimSpace(candidate.AgentMailName))
+	}
+	return nil
 }
 
 func coordinatorAssignmentIsRecoverable(recorded *assignmentstore.Assignment) bool {
@@ -400,9 +450,24 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s reservations: %w", active.BeadID, err))
 			continue
 		}
-		if _, err := store.RecordClearLeasesReleased(ctx, active.BeadID); err != nil {
+		leasesReleased, err := store.RecordClearLeasesReleased(ctx, active.BeadID)
+		if err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("record terminal assignment %s lease release: %w", active.BeadID, err))
 			continue
+		}
+		claimActor := strings.TrimSpace(leasesReleased.ClaimActor)
+		if claimActor != "" {
+			releaseClaim := c.releaseWorkItemClaimFn
+			if releaseClaim == nil {
+				releaseClaim = bv.ReleaseBeadClaim
+			}
+			if _, err := releaseClaim(ctx, c.projectKey, active.BeadID, claimActor); err != nil {
+				if persistErr := store.RecordClearReleaseFailed(ctx, active.BeadID, err); persistErr != nil {
+					err = errors.Join(err, persistErr)
+				}
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s Beads claim: %w", active.BeadID, err))
+				continue
+			}
 		}
 		if err := store.CompleteTerminalReconciliation(ctx, active.BeadID, terminalStatus, terminalReason); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("complete terminal reconciliation for %s: %w", active.BeadID, err))
@@ -690,6 +755,7 @@ func (c *SessionCoordinator) executeAtomicAssignment(ctx context.Context, store 
 }
 
 type coordinatorReservationClient interface {
+	EnsureProject(context.Context, string) (*agentmail.Project, error)
 	ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error)
 	ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error)
 	ReleaseReservations(context.Context, string, string, []string, []int) (*agentmail.ReleaseReservationsResult, error)
@@ -717,6 +783,10 @@ func (p *coordinatorAgentMailReservationPort) Reserve(ctx context.Context, req a
 		return lease, assignmentstore.GuaranteeNoReservation(err)
 	}
 	lease.Requested = append([]string(nil), requested...)
+	projectID, err := p.ensureProject(ctx)
+	if err != nil {
+		return lease, assignmentstore.GuaranteeNoReservation(err)
+	}
 
 	ttlSeconds := int(req.TTL.Seconds())
 	if ttlSeconds < 60 {
@@ -743,25 +813,33 @@ func (p *coordinatorAgentMailReservationPort) Reserve(ctx context.Context, req a
 	}
 	seenPaths := make(map[string]struct{}, len(reserved.Granted))
 	seenIDs := make(map[int]struct{}, len(reserved.Granted))
+	now := time.Now().UTC()
 	for _, granted := range reserved.Granted {
-		if granted.ID <= 0 || granted.ProjectID <= 0 || granted.AgentName != req.AgentName || !granted.Exclusive {
+		if granted.ID > 0 {
+			if _, duplicate := seenIDs[granted.ID]; duplicate {
+				sort.Ints(lease.ReservationIDs)
+				return lease, fmt.Errorf("agent mail repeated reservation ID %d", granted.ID)
+			}
+			seenIDs[granted.ID] = struct{}{}
+			lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
+		}
+		expiresAt := granted.ExpiresTS.Time
+		if granted.ID <= 0 || granted.ProjectID != projectID || granted.AgentName != req.AgentName || !granted.Exclusive ||
+			granted.ReleasedTS != nil || expiresAt.IsZero() || !expiresAt.After(now) {
+			sort.Ints(lease.ReservationIDs)
 			return lease, fmt.Errorf("agent mail returned invalid reservation receipt for %q", granted.PathPattern)
 		}
 		if _, expected := requestedSet[granted.PathPattern]; !expected {
+			sort.Ints(lease.ReservationIDs)
 			return lease, fmt.Errorf("agent mail granted unexpected path %q", granted.PathPattern)
 		}
 		if _, duplicate := seenPaths[granted.PathPattern]; duplicate {
+			sort.Ints(lease.ReservationIDs)
 			return lease, fmt.Errorf("agent mail granted path %q more than once", granted.PathPattern)
 		}
-		if _, duplicate := seenIDs[granted.ID]; duplicate {
-			return lease, fmt.Errorf("agent mail repeated reservation ID %d", granted.ID)
-		}
 		seenPaths[granted.PathPattern] = struct{}{}
-		seenIDs[granted.ID] = struct{}{}
 		lease.Granted = append(lease.Granted, granted.PathPattern)
-		lease.ReservationIDs = append(lease.ReservationIDs, granted.ID)
-		expiresAt := granted.ExpiresTS.Time
-		if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
+		if lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt) {
 			lease.ExpiresAt = &expiresAt
 		}
 	}
@@ -795,6 +873,10 @@ func (p *coordinatorAgentMailReservationPort) ReconcileReservation(ctx context.C
 	if err != nil {
 		return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationUnknown}, err
 	}
+	projectID, err := p.ensureProject(ctx)
+	if err != nil {
+		return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationUnknown}, err
+	}
 	reservations, err := p.client.ListReservations(ctx, p.projectKey, req.AgentName, false)
 	if err != nil {
 		return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationUnknown}, err
@@ -810,7 +892,9 @@ func (p *coordinatorAgentMailReservationPort) ReconcileReservation(ctx context.C
 		Requested: append([]string(nil), requested...),
 	}
 	seen := make(map[string]struct{}, len(requested))
+	seenIDs := make(map[int]struct{}, len(requested))
 	reason := fmt.Sprintf("bead assignment: %s", req.BeadID)
+	now := time.Now().UTC()
 	for _, reservation := range reservations {
 		if reservation.ReleasedTS != nil || reservation.AgentName != req.AgentName || reservation.Reason != reason {
 			continue
@@ -818,16 +902,25 @@ func (p *coordinatorAgentMailReservationPort) ReconcileReservation(ctx context.C
 		if _, wanted := requestedSet[reservation.PathPattern]; !wanted {
 			continue
 		}
-		if reservation.ID <= 0 || reservation.ProjectID <= 0 || !reservation.Exclusive {
+		if reservation.ID > 0 {
+			if _, duplicate := seenIDs[reservation.ID]; duplicate {
+				sort.Ints(lease.ReservationIDs)
+				return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationUnknown, Lease: lease}, nil
+			}
+			seenIDs[reservation.ID] = struct{}{}
+			lease.ReservationIDs = append(lease.ReservationIDs, reservation.ID)
+		}
+		expiresAt := reservation.ExpiresTS.Time
+		if reservation.ID <= 0 || reservation.ProjectID != projectID || !reservation.Exclusive ||
+			expiresAt.IsZero() || !expiresAt.After(now) {
+			sort.Ints(lease.ReservationIDs)
 			return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationUnknown, Lease: lease}, nil
 		}
 		if _, duplicate := seen[reservation.PathPattern]; !duplicate {
 			seen[reservation.PathPattern] = struct{}{}
 			lease.Granted = append(lease.Granted, reservation.PathPattern)
 		}
-		lease.ReservationIDs = append(lease.ReservationIDs, reservation.ID)
-		expiresAt := reservation.ExpiresTS.Time
-		if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
+		if lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt) {
 			lease.ExpiresAt = &expiresAt
 		}
 	}
@@ -839,6 +932,23 @@ func (p *coordinatorAgentMailReservationPort) ReconcileReservation(ctx context.C
 	// Any exact durable handle proves a lease exists. The atomic coordinator
 	// validates completeness and persists partial grants as release-required.
 	return assignmentstore.ReservationReconciliation{State: assignmentstore.ReservationReconciliationReserved, Lease: lease}, nil
+}
+
+func (p *coordinatorAgentMailReservationPort) ensureProject(ctx context.Context) (int, error) {
+	if p == nil || p.client == nil {
+		return 0, errors.New("agent mail reservation client is not configured")
+	}
+	project, err := p.client.EnsureProject(ctx, p.projectKey)
+	if err != nil {
+		return 0, fmt.Errorf("ensure Agent Mail project %q: %w", p.projectKey, err)
+	}
+	if project == nil || project.ID <= 0 {
+		return 0, fmt.Errorf("ensure Agent Mail project %q returned no durable project ID", p.projectKey)
+	}
+	if humanKey := strings.TrimSpace(project.HumanKey); humanKey != "" && humanKey != strings.TrimSpace(p.projectKey) {
+		return 0, fmt.Errorf("Agent Mail project binding mismatch: got %q, want %q", humanKey, p.projectKey)
+	}
+	return project.ID, nil
 }
 
 func validateCoordinatorReservationPaths(paths []string) ([]string, error) {
@@ -877,11 +987,23 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 	reservationPort := &coordinatorAgentMailReservationPort{client: c.reservationClient, projectKey: c.projectKey}
 	dispatchPort := assignmentstore.DispatchFunc(func(ctx context.Context, req assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
 		started := time.Now()
+		project, err := c.mailClient.EnsureProject(ctx, c.projectKey)
+		if err != nil {
+			return assignmentstore.DispatchReceipt{Duration: time.Since(started)}, assignmentstore.GuaranteeNoActuation(
+				fmt.Errorf("ensure Agent Mail dispatch project: %w", err),
+			)
+		}
+		if project == nil || project.ID <= 0 {
+			return assignmentstore.DispatchReceipt{Duration: time.Since(started)}, assignmentstore.GuaranteeNoActuation(
+				errors.New("Agent Mail dispatch project has no durable ID"),
+			)
+		}
+		subject := fmt.Sprintf("Work Assignment: %s", req.BeadID)
 		sent, err := c.mailClient.SendMessage(ctx, agentmail.SendMessageOptions{
 			ProjectKey:  c.projectKey,
 			SenderName:  c.agentName,
 			To:          []string{req.AgentName},
-			Subject:     fmt.Sprintf("Work Assignment: %s", req.BeadTitle),
+			Subject:     subject,
 			BodyMD:      req.Prompt,
 			Importance:  "normal",
 			AckRequired: true,
@@ -890,7 +1012,9 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 		if err != nil {
 			return receipt, err
 		}
-		deliveryID, receiptErr := validatedAgentMailDeliveryID(sent, c.projectKey, req.AgentName)
+		deliveryID, receiptErr := validatedAgentMailDeliveryID(
+			sent, c.projectKey, project.ID, c.agentName, req.AgentName, subject, req.Prompt,
+		)
 		if receiptErr != nil {
 			return receipt, receiptErr
 		}
@@ -921,7 +1045,7 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 		}))
 }
 
-func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey, agentName string) (string, error) {
+func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey string, projectID int, senderName, agentName, subject, body string) (string, error) {
 	if sent == nil {
 		return "", errors.New("agent mail returned no delivery result")
 	}
@@ -935,8 +1059,23 @@ func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey, agentN
 	if sent.Deliveries[0].Project != projectKey {
 		return "", fmt.Errorf("agent mail delivery project %q does not match %q", sent.Deliveries[0].Project, projectKey)
 	}
+	if payload.ProjectID != projectID {
+		return "", fmt.Errorf("agent mail delivery project ID %d does not match %d", payload.ProjectID, projectID)
+	}
+	if payload.From != senderName {
+		return "", fmt.Errorf("agent mail delivery sender %q does not match %q", payload.From, senderName)
+	}
 	if len(payload.To) != 1 || payload.To[0] != agentName {
 		return "", fmt.Errorf("agent mail delivery recipients %v do not match [%s]", payload.To, agentName)
+	}
+	if payload.Subject != subject {
+		return "", errors.New("agent mail delivery subject does not match the prepared assignment")
+	}
+	if payload.BodyMD != body {
+		return "", errors.New("agent mail delivery body does not match the prepared assignment")
+	}
+	if payload.Importance != "normal" || !payload.AckRequired {
+		return "", errors.New("agent mail delivery policy does not match the prepared assignment")
 	}
 	return fmt.Sprintf("%d", payload.ID), nil
 }
@@ -1064,8 +1203,9 @@ func ScoreAndSelectAssignments(
 		for i := range triage.Triage.Recommendations {
 			rec := &triage.Triage.Recommendations[i]
 
-			// Skip blocked items
-			if rec.Status == "blocked" {
+			// Skip dependency- or operator-gated items even when a stale triage
+			// payload ranked them highly.
+			if !recommendationPassesSemanticGates(*rec) {
 				continue
 			}
 

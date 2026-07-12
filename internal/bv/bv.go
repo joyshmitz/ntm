@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1394,6 +1395,122 @@ func GetBeadStatus(dir, beadID string) (string, error) {
 		return "", err
 	}
 	return parseBeadStatusOutput(output)
+}
+
+// BeadAssignmentDetails is the exact work-item state assignment gates need.
+// Unlike triage output, br show is keyed by the requested ID and is not capped
+// or ranking-dependent.
+type BeadAssignmentDetails struct {
+	ID        string
+	Title     string
+	Status    string
+	Labels    []string
+	BlockedBy []string
+}
+
+type beadShowDependency struct {
+	ID             string `json:"id"`
+	Status         string `json:"status"`
+	DependencyType string `json:"dependency_type"`
+}
+
+type beadShowAssignmentRow struct {
+	ID           string               `json:"id"`
+	Title        string               `json:"title"`
+	Status       string               `json:"status"`
+	Labels       []string             `json:"labels"`
+	Dependencies []beadShowDependency `json:"dependencies"`
+}
+
+// GetBeadAssignmentDetails returns exact title, status, labels, and unresolved
+// blocking dependencies for one bead using br show --json.
+func GetBeadAssignmentDetails(dir, beadID string) (*BeadAssignmentDetails, error) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil, errors.New("bead ID is required")
+	}
+	output, err := RunBd(dir, "show", beadID, "--json")
+	if err != nil {
+		return nil, err
+	}
+	details, err := parseBeadAssignmentDetailsOutput(output)
+	if err != nil {
+		return nil, err
+	}
+	if details.ID != beadID {
+		return nil, fmt.Errorf("br show returned bead %q, want %q", details.ID, beadID)
+	}
+	return details, nil
+}
+
+func parseBeadAssignmentDetailsOutput(output string) (*BeadAssignmentDetails, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return nil, errors.New("empty bead output")
+	}
+
+	var row beadShowAssignmentRow
+	var rows []beadShowAssignmentRow
+	if err := json.Unmarshal([]byte(trimmed), &rows); err == nil {
+		if len(rows) != 1 {
+			return nil, fmt.Errorf("br show returned %d beads, want exactly 1", len(rows))
+		}
+		row = rows[0]
+	} else if err := json.Unmarshal([]byte(trimmed), &row); err != nil {
+		return nil, fmt.Errorf("parse bead assignment details: %w", err)
+	}
+
+	row.ID = strings.TrimSpace(row.ID)
+	row.Title = strings.TrimSpace(row.Title)
+	row.Status = strings.TrimSpace(row.Status)
+	if row.ID == "" {
+		return nil, errors.New("bead ID field not found in br show response")
+	}
+	if row.Status == "" {
+		return nil, errors.New("bead status field not found in br show response")
+	}
+
+	blockedSet := make(map[string]struct{}, len(row.Dependencies))
+	for _, dependency := range row.Dependencies {
+		dependencyType := strings.ToLower(strings.TrimSpace(dependency.DependencyType))
+		if dependencyType != "" && dependencyType != "blocks" {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(dependency.Status))
+		if status == "closed" || status == "tombstone" {
+			continue
+		}
+		dependencyID := strings.TrimSpace(dependency.ID)
+		if dependencyID == "" {
+			return nil, errors.New("blocking dependency has no bead ID")
+		}
+		blockedSet[dependencyID] = struct{}{}
+	}
+	blockedBy := make([]string, 0, len(blockedSet))
+	for dependencyID := range blockedSet {
+		blockedBy = append(blockedBy, dependencyID)
+	}
+	sort.Strings(blockedBy)
+
+	labels := make([]string, 0, len(row.Labels))
+	seenLabels := make(map[string]struct{}, len(row.Labels))
+	for _, rawLabel := range row.Labels {
+		label := strings.TrimSpace(rawLabel)
+		if label == "" {
+			continue
+		}
+		if _, duplicate := seenLabels[label]; duplicate {
+			continue
+		}
+		seenLabels[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+
+	return &BeadAssignmentDetails{
+		ID: row.ID, Title: row.Title, Status: row.Status,
+		Labels: labels, BlockedBy: blockedBy,
+	}, nil
 }
 
 func parseBeadStatusOutput(output string) (string, error) {

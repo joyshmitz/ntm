@@ -749,6 +749,33 @@ func TestCheckAllEmptyStore(t *testing.T) {
 	}
 }
 
+func TestAssignmentEligibleForCompletionScanRequiresDispatchedLifecycle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		row  *assignment.Assignment
+		want bool
+	}{
+		{name: "nil"},
+		{name: "claiming", row: &assignment.Assignment{Status: assignment.StatusClaiming}},
+		{name: "claimed", row: &assignment.Assignment{Status: assignment.StatusClaimed}},
+		{name: "assigned", row: &assignment.Assignment{Status: assignment.StatusAssigned}, want: true},
+		{name: "working", row: &assignment.Assignment{Status: assignment.StatusWorking}, want: true},
+		{name: "assigned clearing", row: &assignment.Assignment{Status: assignment.StatusAssigned, ClearState: assignment.ClearStateReservationReleasing}},
+		{name: "working leases released", row: &assignment.Assignment{Status: assignment.StatusWorking, ClearState: assignment.ClearStateLeasesReleased}},
+		{name: "completed", row: &assignment.Assignment{Status: assignment.StatusCompleted}},
+		{name: "failed", row: &assignment.Assignment{Status: assignment.StatusFailed}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := assignmentEligibleForCompletionScan(test.row); got != test.want {
+				t.Fatalf("assignmentEligibleForCompletionScan(%+v) = %t, want %t", test.row, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCheckAllContextCancelled(t *testing.T) {
 	t.Parallel()
 

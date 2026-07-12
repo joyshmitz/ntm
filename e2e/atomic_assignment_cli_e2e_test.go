@@ -958,6 +958,47 @@ func TestE2EAtomicAssignmentFreshTerminalBeadsAreGuarded(t *testing.T) {
 			}
 		})
 	}
+
+	bulkClosedBeadID := fixture.createBead(t, "Fresh closed guarded bulk assignment")
+	bulkTombstonedBeadID := fixture.createBead(t, "Fresh tombstoned guarded bulk assignment")
+	fixture.mustBR(t, "close", bulkClosedBeadID, "--reason=fresh-terminal-bulk-e2e", "--json")
+	fixture.mustBR(t, "delete", bulkTombstonedBeadID, "--reason=fresh-terminal-bulk-e2e", "--json")
+	bulkTemplate := filepath.Join(fixture.projectDir, "atomic-fresh-terminal-bulk-template.txt")
+	bulkTemplateBody := fmt.Sprintf("NTM_ATOMIC_FRESH_TERMINAL_BULK_%d_{bead_id}", time.Now().UnixNano())
+	if err := os.WriteFile(bulkTemplate, []byte(bulkTemplateBody), 0o600); err != nil {
+		t.Fatalf("write fresh terminal bulk template: %v", err)
+	}
+	fixture.primePaneForSafeDispatch(t, 1)
+	time.Sleep(5500 * time.Millisecond)
+	for _, test := range []struct {
+		name   string
+		beadID string
+		status string
+	}{
+		{name: "closed_bulk", beadID: bulkClosedBeadID, status: "closed"},
+		{name: "tombstoned_bulk", beadID: bulkTombstonedBeadID, status: "tombstone"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prompt := strings.ReplaceAll(bulkTemplateBody, "{bead_id}", test.beadID)
+			result := fixture.runNTM(t, nil, atomicBulkArgs(fixture, test.beadID, bulkTemplate)...)
+			if result.exitCode != 1 || len(bytes.TrimSpace(result.stderr)) != 0 {
+				t.Fatalf("fresh %s assignment exit=%d stdout=%s stderr=%s", test.name, result.exitCode, result.stdout, result.stderr)
+			}
+			var envelope atomicAssignmentBulkEnvelope
+			decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
+			if envelope.Success || envelope.Summary.Assigned != 0 || envelope.Summary.Failed != 1 || len(envelope.Assignments) != 1 ||
+				envelope.Assignments[0].Bead != test.beadID || envelope.Assignments[0].Claimed || envelope.Assignments[0].PromptSent ||
+				!strings.Contains(strings.ToLower(envelope.Assignments[0].Error), test.status) {
+				t.Fatalf("fresh %s guarded bulk envelope = %+v", test.name, envelope)
+			}
+			fixture.assertBead(t, test.beadID, test.status, "")
+			fixture.assertMarkerCounts(t, prompt, map[int]int{0: 0, 1: 0})
+			record := fixture.readLedgerAssignment(t, test.beadID)
+			if record.Status != "failed" || record.ClaimState != "failed" || record.DispatchAttempts != 0 || record.DispatchReceiptID != "" {
+				t.Fatalf("fresh %s bulk refusal durable state = %+v", test.name, record)
+			}
+		})
+	}
 }
 
 func TestE2EAtomicAssignmentCloseForceClearReopenGeneration(t *testing.T) {
@@ -2317,6 +2358,8 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 	var grantCalls int
 	var releaseCalls int
 	var releasedIDs []int
+	var grantedAgents []string
+	var expectedReleaseAgent string
 	var activeReservations []map[string]any
 	mailServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/health/liveness" {
@@ -2367,6 +2410,7 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 			}
 			reservationMu.Lock()
 			grantCalls++
+			grantedAgents = append(grantedAgents, agentName)
 			baseID := 9600 + grantCalls*10
 			now := time.Now().UTC()
 			granted := make([]map[string]any, 0, len(paths))
@@ -2387,7 +2431,12 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 			writeResult(active)
 		case "release_file_reservations":
 			ids, idsOK := atomicAssignmentAnyIntSlice(request.Params.Arguments["file_reservation_ids"])
-			if request.Params.Arguments["project_key"] != fixture.projectDir || !idsOK || len(ids) != len(reservedPaths) {
+			agentName, _ := request.Params.Arguments["agent_name"].(string)
+			reservationMu.Lock()
+			wantAgent := expectedReleaseAgent
+			reservationMu.Unlock()
+			if request.Params.Arguments["project_key"] != fixture.projectDir || !idsOK || len(ids) != len(reservedPaths) ||
+				wantAgent == "" || agentName != wantAgent {
 				http.Error(w, fmt.Sprintf("unexpected reassign release args: %#v", request.Params.Arguments), http.StatusBadRequest)
 				return
 			}
@@ -2426,6 +2475,9 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 		!reflect.DeepEqual(before.ReservedPaths, reservedPaths) || len(before.ReservationIDs) != len(reservedPaths) || before.ReservationExpiresAt == nil {
 		t.Fatalf("seed reservation metadata = %+v", before)
 	}
+	reservationMu.Lock()
+	expectedReleaseAgent = before.AgentName
+	reservationMu.Unlock()
 	reassignedPrompt := fmt.Sprintf("NTM_ATOMIC_REASSIGN_RESERVED_TARGET_%d", time.Now().UnixNano())
 	result := fixture.runNTM(t, env,
 		"--json", "assign", fixture.session,
@@ -2464,10 +2516,12 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 	gotGrantCalls := grantCalls
 	gotReleaseCalls := releaseCalls
 	gotReleasedIDs := append([]int(nil), releasedIDs...)
+	gotGrantedAgents := append([]string(nil), grantedAgents...)
 	active := append([]map[string]any(nil), activeReservations...)
 	reservationMu.Unlock()
-	if gotGrantCalls != 2 || gotReleaseCalls != 1 || !reflect.DeepEqual(gotReleasedIDs, before.ReservationIDs) || len(active) != len(reservedPaths) {
-		t.Fatalf("reservation transfer calls grants=%d releases=%d released=%v active=%v", gotGrantCalls, gotReleaseCalls, gotReleasedIDs, active)
+	if gotGrantCalls != 2 || gotReleaseCalls != 1 || !reflect.DeepEqual(gotReleasedIDs, before.ReservationIDs) ||
+		!reflect.DeepEqual(gotGrantedAgents, []string{before.AgentName, after.AgentName}) || len(active) != len(reservedPaths) {
+		t.Fatalf("reservation transfer calls grants=%d releases=%d released=%v agents=%v active=%v", gotGrantCalls, gotReleaseCalls, gotReleasedIDs, gotGrantedAgents, active)
 	}
 	fixture.assertBead(t, beadID, "in_progress", before.ClaimActor)
 }
@@ -2561,9 +2615,11 @@ func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
 		}
 		var envelope atomicAssignmentDirectEnvelope
 		decodeAtomicAssignmentJSON(t, result.stdout, &envelope)
-		if envelope.Success || envelope.Error == nil || envelope.Error.Code != "ASSIGN_ERROR" ||
+		if envelope.Success || envelope.Error == nil || envelope.Error.Code != "TARGET_BUSY" ||
 			!strings.Contains(envelope.Error.Message, "target already has active work") ||
-			!strings.Contains(envelope.Error.Message, legacyBeadID) {
+			!strings.Contains(envelope.Error.Message, legacyBeadID) || envelope.Data == nil ||
+			envelope.Data.Assignment.BeadID != candidateBeadID || envelope.Data.Assignment.Prompt != "" ||
+			envelope.Data.Assignment.PromptSent || envelope.Data.Receipt != nil {
 			t.Fatalf("legacy duplicate-index occupancy envelope = %+v", envelope)
 		}
 		fixture.assertBead(t, candidateBeadID, "open", "")
@@ -3689,7 +3745,12 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane at
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("assignment detector did not mark %s %s: read_err=%v stdout=%s stderr=%s", beadID, wantStatus, readErr, stdout.String(), stderr.String())
+			var durable *atomicAssignmentRecord
+			if ledger != nil {
+				durable = ledger.Assignments[beadID]
+			}
+			t.Fatalf("assignment detector did not mark %s %s: durable=%+v pane_output=%q read_err=%v stdout=%s stderr=%s",
+				beadID, wantStatus, durable, f.captureEndpoint(t, pane), readErr, stdout.String(), stderr.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -2589,6 +2589,21 @@ func resolvePendingAssignmentPane(panes []tmux.Pane, pending assignment.Assignme
 	return tmux.Pane{}, fmt.Errorf("original physical pane %s is unavailable; refusing to transfer an atomic claim", physicalID)
 }
 
+func pendingCLIRecoveryIdentityError(session string, pane tmux.Pane, pending assignment.Assignment, multiWindow bool) error {
+	currentType := agentTypeForPane(pane)
+	if currentType == "user" || currentType == "unknown" {
+		return fmt.Errorf("pending atomic recovery target %s is not an agent pane (type: %s)", assignmentPaneTarget(pane), currentType)
+	}
+	if agent.AgentType(currentType).Canonical() != agent.AgentType(pending.AgentType).Canonical() {
+		return fmt.Errorf("pending atomic recovery target %s changed agent type from %s to %s", assignmentPaneTarget(pane), pending.AgentType, currentType)
+	}
+	currentAgentName := assignmentAgentNameForPane(session, currentType, pane, multiWindow)
+	if strings.TrimSpace(pending.AgentName) != "" && currentAgentName != pending.AgentName {
+		return fmt.Errorf("pending atomic recovery target %s changed Agent Mail identity from %s to %s", assignmentPaneTarget(pane), pending.AgentName, currentAgentName)
+	}
+	return nil
+}
+
 // executeAssignmentsEnhanced sends assignments to agents and tracks them
 func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts *AssignCommandOptions) error {
 	if !opts.Quiet {
@@ -2666,7 +2681,9 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 		observeCtx, observeCancel := context.WithTimeout(context.Background(), resolveAssignTimeout(opts.Timeout))
 		observation, observeErr := observer.Observe(observeCtx, session)
 		observeCancel()
-		if observeErr != nil || pn.ID == "" || !observation.SafeToDispatch(pn.ID) {
+		if observeErr != nil || pn.ID == "" ||
+			!statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) ||
+			!observation.SafeToDispatch(pn.ID) {
 			if observeErr == nil {
 				observeErr = fmt.Errorf("pane %s is not freshly and confidently idle", item.PaneTarget)
 			}
@@ -2741,7 +2758,7 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 		// Best-effort secondary attribution: tag the bead with this pane's label
 		// (gated + non-fatal; after delivery so it never blocks dispatch) (#199).
 		if !atomicResult.Replayed {
-			bestEffortStampBeadLabel(item.BeadID, session, pn.WindowIndex, pn.Index)
+			bestEffortStampBeadLabel(projectDir, item.BeadID, session, pn.WindowIndex, pn.Index)
 		}
 
 		if !opts.Quiet {
@@ -2935,7 +2952,7 @@ func (p *cliAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignment
 				fmt.Errorf("fresh dispatch observation for pane %s: %w", req.Target, observeErr),
 			)
 		}
-		if !observation.SafeToDispatch(req.Target) {
+		if !statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) || !observation.SafeToDispatch(req.Target) {
 			return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(
 				fmt.Errorf("pane %s is not freshly and confidently idle at dispatch", req.Target),
 			)
@@ -3303,11 +3320,10 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 				})
 				continue
 			}
-			resolvedAgentType := agentTypeForPane(resolvedPane)
-			if resolvedAgentType == "user" || resolvedAgentType == "unknown" {
+			if identityErr := pendingCLIRecoveryIdentityError(session, resolvedPane, failed, multiWindow); identityErr != nil {
 				skippedItems = append(skippedItems, RetrySkippedItem{
 					BeadID: failed.BeadID,
-					Reason: fmt.Sprintf("pending atomic recovery target %s is not an agent pane (type: %s)", assignmentPaneTarget(resolvedPane), resolvedAgentType),
+					Reason: identityErr.Error(),
 				})
 				continue
 			}
@@ -5238,26 +5254,33 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	cancel()
 	assignItem.PromptSent = atomicResult.Sent
 	durablePrompt := ""
-	if atomicResult.Assignment != nil {
-		assignItem.BeadTitle = atomicResult.Assignment.BeadTitle
-		assignItem.Pane = atomicResult.Assignment.Pane
-		assignItem.AgentType = atomicResult.Assignment.AgentType
-		assignItem.AssignedAt = atomicResult.Assignment.AssignedAt.UTC().Format(time.RFC3339)
-		if atomicResult.Assignment.OccupancyKey != "" {
-			assignItem.PaneID = atomicResult.Assignment.OccupancyKey
+	durableAssignment := atomicResult.Assignment
+	if durableAssignment != nil && (durableAssignment.BeadID != beadID || durableAssignment.IdempotencyKey != idempotencyKey) {
+		// ErrTargetOccupied returns the authoritative owner so callers can
+		// diagnose the conflict. That row is not the requested assignment and
+		// must never be projected as its prompt, lease, receipt, or pane state.
+		durableAssignment = nil
+	}
+	if durableAssignment != nil {
+		assignItem.BeadTitle = durableAssignment.BeadTitle
+		assignItem.Pane = durableAssignment.Pane
+		assignItem.AgentType = durableAssignment.AgentType
+		assignItem.AssignedAt = durableAssignment.AssignedAt.UTC().Format(time.RFC3339)
+		if durableAssignment.OccupancyKey != "" {
+			assignItem.PaneID = durableAssignment.OccupancyKey
 		}
-		durablePrompt = atomicResult.Assignment.PromptSent
+		durablePrompt = durableAssignment.PromptSent
 		if durablePrompt == "" {
-			durablePrompt = atomicResult.Assignment.PendingPrompt
+			durablePrompt = durableAssignment.PendingPrompt
 		}
 	}
 	assignItem.Prompt = durablePrompt
 
 	leaseRequested := atomicResult.Lease.Requested
 	leaseGranted := atomicResult.Lease.Granted
-	if atomicResult.Assignment != nil && len(leaseRequested) == 0 && len(leaseGranted) == 0 {
-		leaseRequested = atomicResult.Assignment.ReservationRequested
-		leaseGranted = atomicResult.Assignment.ReservedPaths
+	if durableAssignment != nil && len(leaseRequested) == 0 && len(leaseGranted) == 0 {
+		leaseRequested = durableAssignment.ReservationRequested
+		leaseGranted = durableAssignment.ReservedPaths
 	}
 	var fileReservations *DirectAssignFileReservations
 	if len(leaseRequested) > 0 || len(leaseGranted) > 0 {
@@ -5279,7 +5302,7 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	}
 	var receipt *DispatchReceipt
 	attemptedThisCall := prior == nil || prior.IdempotencyKey == "" || (sameIntent && prior.DispatchAttempts == 0)
-	if atomicResult.Assignment != nil && atomicResult.Assignment.IdempotencyKey == idempotencyKey && atomicResult.Assignment.DispatchAttempts > 0 &&
+	if durableAssignment != nil && durableAssignment.DispatchAttempts > 0 &&
 		(atomicResult.Replayed || atomicResult.Sent || attemptedThisCall) {
 		receipt = buildDispatchReceipt(
 			opts.Session, beadID, targetPane, assignItem.PaneTarget, durablePrompt, opts.Template, fileReservations,
@@ -5291,11 +5314,13 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		switch {
 		case errors.Is(assignErr, assignment.ErrClaimConflict):
 			code = "CLAIM_CONFLICT"
+		case errors.Is(assignErr, assignment.ErrTargetOccupied):
+			code = "TARGET_BUSY"
 		case errors.Is(assignErr, assignment.ErrTerminalAssignmentAttempt):
 			code = "BEAD_NOT_REOPENED"
 		case errors.Is(assignErr, assignment.ErrDispatchOutcomeUnknown):
 			code = "DISPATCH_UNKNOWN"
-		case atomicResult.Assignment != nil && atomicResult.Assignment.DispatchAttempts > 0:
+		case durableAssignment != nil && durableAssignment.DispatchAttempts > 0:
 			code = "SEND_ERROR"
 		}
 		if IsJSONOutput() {
@@ -5338,46 +5363,23 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 
 // getBeadBlockers returns the list of beads blocking the given bead
 func getBeadBlockers(projectDir, beadID string) ([]string, error) {
-	// Uncapped set (issue #197): the target bead can sit below triage's
-	// top-10 cut.
-	recommendations, err := bv.GetActionableRecommendations(projectDir, 100)
+	details, err := bv.GetBeadAssignmentDetails(projectDir, beadID)
 	if err != nil {
 		return nil, err
 	}
-
-	for _, rec := range recommendations {
-		if rec.ID == beadID {
-			return rec.BlockedBy, nil
-		}
-	}
-
-	return nil, nil
+	return append([]string(nil), details.BlockedBy...), nil
 }
 
 // getBeadTitle retrieves the title for a bead
 func getBeadTitle(projectDir, beadID string) (string, error) {
-	// Uncapped set (issue #197): the target bead can sit below triage's
-	// top-10 cut.
-	recommendations, err := bv.GetActionableRecommendations(projectDir, 100)
+	details, err := bv.GetBeadAssignmentDetails(projectDir, beadID)
 	if err != nil {
 		return "", err
 	}
-
-	for _, rec := range recommendations {
-		if rec.ID == beadID {
-			return rec.Title, nil
-		}
+	if strings.TrimSpace(details.Title) == "" {
+		return "", fmt.Errorf("br show returned an empty title for %s", beadID)
 	}
-
-	// Fallback to ready preview
-	readyBeads := bv.GetReadyPreview(projectDir, 50)
-	for _, b := range readyBeads {
-		if b.ID == beadID {
-			return b.Title, nil
-		}
-	}
-
-	return "", nil
+	return details.Title, nil
 }
 
 // reserveFilesForBead reserves files mentioned in a bead for an agent

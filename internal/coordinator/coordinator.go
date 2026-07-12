@@ -44,6 +44,7 @@ type SessionCoordinator struct {
 	assignWorkFn             func(context.Context) ([]AssignmentResult, error)
 	triageFn                 func(string) (*bv.TriageResponse, error)
 	workItemStatusFn         func(context.Context, string) (string, error)
+	releaseWorkItemClaimFn   func(context.Context, string, string, string) (bool, error)
 
 	// Agent tracking
 	agents     map[string]*AgentState

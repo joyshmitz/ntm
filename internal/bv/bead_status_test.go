@@ -59,6 +59,56 @@ func TestParseBeadStatusOutput_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestParseBeadAssignmentDetailsOutput(t *testing.T) {
+	t.Parallel()
+
+	details, err := parseBeadAssignmentDetailsOutput(`[{
+		"id":"ntm-target",
+		"title":"Exact assignment target",
+		"status":"open",
+		"labels":["operator-gated","backend","backend"],
+		"dependencies":[
+			{"id":"ntm-open-b","status":"in_progress","dependency_type":"blocks"},
+			{"id":"ntm-closed","status":"closed","dependency_type":"blocks"},
+			{"id":"ntm-parent","status":"open","dependency_type":"parent-child"},
+			{"id":"ntm-open-a","status":"open","dependency_type":"blocks"},
+			{"id":"ntm-open-a","status":"open","dependency_type":"blocks"}
+		]
+	}]`)
+	if err != nil {
+		t.Fatalf("parseBeadAssignmentDetailsOutput: %v", err)
+	}
+	if details.ID != "ntm-target" || details.Title != "Exact assignment target" || details.Status != "open" {
+		t.Fatalf("details=%+v", details)
+	}
+	if want := []string{"ntm-open-a", "ntm-open-b"}; !reflect.DeepEqual(details.BlockedBy, want) {
+		t.Fatalf("blocked_by=%v, want %v", details.BlockedBy, want)
+	}
+	if want := []string{"backend", "operator-gated"}; !reflect.DeepEqual(details.Labels, want) {
+		t.Fatalf("labels=%v, want %v", details.Labels, want)
+	}
+}
+
+func TestParseBeadAssignmentDetailsOutputRejectsAmbiguousOrMalformedRows(t *testing.T) {
+	t.Parallel()
+
+	for name, input := range map[string]string{
+		"empty array":           `[]`,
+		"multiple rows":         `[{"id":"a","status":"open"},{"id":"b","status":"open"}]`,
+		"missing id":            `{"status":"open"}`,
+		"missing status":        `{"id":"a"}`,
+		"missing dependency id": `{"id":"a","status":"open","dependencies":[{"status":"open","dependency_type":"blocks"}]}`,
+		"invalid json":          `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseBeadAssignmentDetailsOutput(input); err == nil {
+				t.Fatalf("parseBeadAssignmentDetailsOutput(%q) error=nil", input)
+			}
+		})
+	}
+}
+
 func TestParseBeadClaimOutput(t *testing.T) {
 	t.Parallel()
 

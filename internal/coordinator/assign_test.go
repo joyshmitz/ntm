@@ -19,6 +19,8 @@ import (
 )
 
 type fakeCoordinatorReservationClient struct {
+	project       *agentmail.Project
+	ensureErr     error
 	reserveResult *agentmail.ReservationResult
 	reserveErr    error
 	reservations  []agentmail.FileReservation
@@ -27,6 +29,17 @@ type fakeCoordinatorReservationClient struct {
 	releaseErr    error
 	releaseIDs    [][]int
 	releasePaths  [][]string
+}
+
+func (f *fakeCoordinatorReservationClient) EnsureProject(_ context.Context, projectKey string) (*agentmail.Project, error) {
+	if f.ensureErr != nil {
+		return nil, f.ensureErr
+	}
+	if f.project != nil {
+		copy := *f.project
+		return &copy, nil
+	}
+	return &agentmail.Project{ID: 9, HumanKey: projectKey}, nil
 }
 
 func (f *fakeCoordinatorReservationClient) ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
@@ -325,6 +338,7 @@ func TestCoordinatorReservationPortPreservesPartialLeaseHandles(t *testing.T) {
 	client := &fakeCoordinatorReservationClient{reserveResult: &agentmail.ReservationResult{
 		Granted: []agentmail.FileReservation{{
 			ID: 71, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
+			ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
 		}},
 		Conflicts: []agentmail.ReservationConflict{{Path: "internal/robot/**", Holders: []string{"OtherAgent"}}},
 	}}
@@ -341,10 +355,43 @@ func TestCoordinatorReservationPortPreservesPartialLeaseHandles(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReservationPortPreservesMalformedReceiptHandle(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*agentmail.FileReservation)
+	}{
+		{name: "missing project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 0 }},
+		{name: "wrong project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 10 }},
+		{name: "nonexclusive", mutate: func(row *agentmail.FileReservation) { row.Exclusive = false }},
+		{name: "wrong agent", mutate: func(row *agentmail.FileReservation) { row.AgentName = "OtherAgent" }},
+		{name: "unexpected path", mutate: func(row *agentmail.FileReservation) { row.PathPattern = "internal/unexpected/**" }},
+		{name: "missing expiry", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{} }},
+		{name: "expired", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)} }},
+		{name: "released", mutate: func(row *agentmail.FileReservation) { released := agentmail.FlexTime{Time: time.Now().UTC()}; row.ReleasedTS = &released }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := agentmail.FileReservation{
+				ID: 79, ProjectID: 9, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", Exclusive: true,
+				ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+			}
+			test.mutate(&row)
+			client := &fakeCoordinatorReservationClient{reserveResult: &agentmail.ReservationResult{Granted: []agentmail.FileReservation{row}}}
+			port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
+			lease, err := port.Reserve(t.Context(), assignmentstore.ReservationRequest{
+				BeadID: "ntm-malformed", AgentName: "BlueLake", Target: "%1", RequestedPaths: []string{"internal/coordinator/**"},
+			})
+			if err == nil || !reflect.DeepEqual(lease.ReservationIDs, []int{79}) {
+				t.Fatalf("Reserve() lease=%+v error=%v, want retained positive handle", lease, err)
+			}
+		})
+	}
+}
+
 func TestCoordinatorReservationPortReconcilesInterruptedLease(t *testing.T) {
 	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{
-		{ID: 81, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile"},
-		{ID: 82, PathPattern: "internal/robot/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile"},
+		{ID: 81, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}},
+		{ID: 82, PathPattern: "internal/robot/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}},
 	}}
 	port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
 	got, err := port.ReconcileReservation(t.Context(), assignmentstore.ReservationRequest{
@@ -362,7 +409,7 @@ func TestCoordinatorReservationPortReconcilesInterruptedLease(t *testing.T) {
 func TestCoordinatorReservationPortReconcilesPartialLeaseAsKnownReserved(t *testing.T) {
 	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
 		ID: 83, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
-		Reason: "bead assignment: ntm-partial-reconcile",
+		Reason: "bead assignment: ntm-partial-reconcile", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
 	}}}
 	port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
 	got, err := port.ReconcileReservation(t.Context(), assignmentstore.ReservationRequest{
@@ -375,6 +422,38 @@ func TestCoordinatorReservationPortReconcilesPartialLeaseAsKnownReserved(t *test
 	if got.State != assignmentstore.ReservationReconciliationReserved || !reflect.DeepEqual(got.Lease.ReservationIDs, []int{83}) ||
 		!reflect.DeepEqual(got.Lease.Granted, []string{"internal/coordinator/**"}) {
 		t.Fatalf("partial reconciliation = %+v, want known reserved handles", got)
+	}
+}
+
+func TestCoordinatorReservationPortReconcileMalformedReceiptRetainsHandle(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*agentmail.FileReservation)
+	}{
+		{name: "missing project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 0 }},
+		{name: "wrong project", mutate: func(row *agentmail.FileReservation) { row.ProjectID = 10 }},
+		{name: "nonexclusive", mutate: func(row *agentmail.FileReservation) { row.Exclusive = false }},
+		{name: "missing expiry", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{} }},
+		{name: "expired", mutate: func(row *agentmail.FileReservation) { row.ExpiresTS = agentmail.FlexTime{Time: time.Now().UTC().Add(-time.Second)} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			row := agentmail.FileReservation{
+				ID: 84, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
+				Reason: "bead assignment: ntm-malformed-reconcile", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+			}
+			test.mutate(&row)
+			client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{row}}
+			port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
+			got, err := port.ReconcileReservation(t.Context(), assignmentstore.ReservationRequest{
+				BeadID: "ntm-malformed-reconcile", AgentName: "BlueLake", Target: "%1", RequestedPaths: []string{"internal/coordinator/**"},
+			}, assignmentstore.LeaseReceipt{})
+			if err != nil {
+				t.Fatalf("ReconcileReservation: %v", err)
+			}
+			if got.State != assignmentstore.ReservationReconciliationUnknown || !reflect.DeepEqual(got.Lease.ReservationIDs, []int{84}) {
+				t.Fatalf("malformed reconciliation = %+v, want unknown with retained handle", got)
+			}
+		})
 	}
 }
 
@@ -638,6 +717,27 @@ func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
 	}
 }
 
+func TestPendingRecoveryIdentityErrorRejectsReusedPaneIdentity(t *testing.T) {
+	t.Parallel()
+	recorded := &assignmentstore.Assignment{OccupancyKey: "%91", AgentType: "cod", AgentName: "BlueLake"}
+	candidate := &AgentState{PaneID: "%91", AgentType: "codex", AgentMailName: "BlueLake"}
+	if err := pendingRecoveryIdentityError(recorded, candidate); err != nil {
+		t.Fatalf("matching identity: %v", err)
+	}
+
+	typeChanged := *candidate
+	typeChanged.AgentType = "claude"
+	if err := pendingRecoveryIdentityError(recorded, &typeChanged); err == nil || !strings.Contains(err.Error(), "changed agent type") {
+		t.Fatalf("type drift error=%v", err)
+	}
+
+	nameChanged := *candidate
+	nameChanged.AgentMailName = "NewAgent"
+	if err := pendingRecoveryIdentityError(recorded, &nameChanged); err == nil || !strings.Contains(err.Error(), "changed Agent Mail identity") {
+		t.Fatalf("name drift error=%v", err)
+	}
+}
+
 func TestAssignWorkKeepsUnknownDispatchFailClosed(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "coordinator-dispatch-unknown"
@@ -685,6 +785,7 @@ func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
 	store.Assignments[beadID] = &assignmentstore.Assignment{
 		BeadID: beadID, BeadTitle: "Terminal lease", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
 		Status: assignmentstore.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "terminal-lease-key",
+		ClaimActor: "BlueLake/terminal-lease-key",
 		DispatchTarget: "%93", OccupancyKey: "%93", DispatchState: assignmentstore.DispatchSent,
 		DispatchReceiptID: "mail-93", ReservationRequired: true, ReservationState: assignmentstore.ReservationReserved,
 		ReservationCompleted: true, ReservationAgent: "BlueLake", ReservationTarget: "%93",
@@ -695,12 +796,20 @@ func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
 	}
 	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
 		ID: 931, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true,
-		Reason: "bead assignment: " + beadID,
+		Reason: "bead assignment: " + beadID, ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
 	}}}
 	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 	c.reservationClient = client
 	c.config.AutoAssign = true
 	c.workItemStatusFn = func(context.Context, string) (string, error) { return "closed", nil }
+	claimReleaseCalls := 0
+	c.releaseWorkItemClaimFn = func(_ context.Context, projectKey, gotBeadID, actor string) (bool, error) {
+		claimReleaseCalls++
+		if projectKey != c.projectKey || gotBeadID != beadID || actor != "BlueLake/terminal-lease-key" {
+			t.Fatalf("claim release project=%q bead=%q actor=%q", projectKey, gotBeadID, actor)
+		}
+		return true, nil
+	}
 
 	results, err := c.AssignWork(t.Context())
 	if err != nil || len(results) != 0 {
@@ -708,6 +817,9 @@ func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
 	}
 	if len(client.releaseIDs) != 1 || !reflect.DeepEqual(client.releaseIDs[0], []int{931}) {
 		t.Fatalf("release IDs = %v", client.releaseIDs)
+	}
+	if claimReleaseCalls != 1 {
+		t.Fatalf("claim release calls=%d, want 1", claimReleaseCalls)
 	}
 	reloaded, err := assignmentstore.LoadStoreStrict(session)
 	if err != nil {
@@ -737,7 +849,7 @@ func TestAssignWorkRetainsTerminalBarrierUntilLeaseReleaseSucceeds(t *testing.T)
 		t.Fatalf("seed terminal lease retry: %v", err)
 	}
 	client := &fakeCoordinatorReservationClient{
-		reservations: []agentmail.FileReservation{{ID: 941, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true, Reason: "bead assignment: " + beadID}},
+		reservations: []agentmail.FileReservation{{ID: 941, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true, Reason: "bead assignment: " + beadID, ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}}},
 		releaseErr:   errors.New("Agent Mail release unavailable"),
 	}
 	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
@@ -790,7 +902,7 @@ func TestAssignWorkReconcilesAndReleasesUnknownTerminalLease(t *testing.T) {
 	}
 	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
 		ID: 951, AgentName: "BlueLake", PathPattern: "internal/coordinator/a.go", ProjectID: 9, Exclusive: true,
-		Reason: "bead assignment: " + beadID,
+		Reason: "bead assignment: " + beadID, ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
 	}}}
 	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 	c.reservationClient = client
@@ -883,6 +995,29 @@ func TestFilterActionableRecommendationsFailsClosedOnStatusError(t *testing.T) {
 	filtered, terminal, err := c.filterActionableRecommendations(t.Context(), []bv.TriageRecommendation{{ID: "ntm-unknown"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "read recommendation ntm-unknown status") || filtered != nil || terminal {
 		t.Fatalf("filtered=%+v terminal=%v error=%v", filtered, terminal, err)
+	}
+}
+
+func TestFilterActionableRecommendationsSkipsDependencyAndOperatorGatesBeforeTrackerLookup(t *testing.T) {
+	t.Parallel()
+	c := New("recommendation-semantic-gates", t.TempDir(), nil, "CoordinatorAgent")
+	lookups := make(map[string]int)
+	c.workItemStatusFn = func(_ context.Context, beadID string) (string, error) {
+		lookups[beadID]++
+		return "open", nil
+	}
+	source := []bv.TriageRecommendation{
+		{ID: "ntm-ready", Status: "open"},
+		{ID: "ntm-dependency", Status: "open", BlockedBy: []string{"ntm-prerequisite"}},
+		{ID: "ntm-operator", Status: "open", Labels: []string{"Backend", "Operator-Gated"}},
+		{ID: "ntm-blocked", Status: "blocked"},
+	}
+	filtered, terminal, err := c.filterActionableRecommendations(t.Context(), source, nil)
+	if err != nil || terminal || len(filtered) != 1 || filtered[0].ID != "ntm-ready" {
+		t.Fatalf("filtered=%+v terminal=%v error=%v", filtered, terminal, err)
+	}
+	if lookups["ntm-ready"] != 1 || lookups["ntm-dependency"] != 0 || lookups["ntm-operator"] != 0 || lookups["ntm-blocked"] != 0 {
+		t.Fatalf("status lookups=%v, want only ntm-ready", lookups)
 	}
 }
 
@@ -1357,10 +1492,12 @@ func TestScoreAndSelectAssignments(t *testing.T) {
 
 	triage := &bv.TriageResponse{
 		Triage: bv.TriageData{
-			Recommendations: []bv.TriageRecommendation{
-				{ID: "ntm-001", Title: "Epic task", Type: "epic", Status: "open", Priority: 2, Score: 0.8},
-				{ID: "ntm-002", Title: "Quick fix", Type: "chore", Status: "open", Priority: 2, Score: 0.6},
-				{ID: "ntm-003", Title: "Blocked", Type: "task", Status: "blocked", Priority: 2, Score: 0.9},
+				Recommendations: []bv.TriageRecommendation{
+					{ID: "ntm-001", Title: "Epic task", Type: "epic", Status: "open", Priority: 2, Score: 0.8},
+					{ID: "ntm-002", Title: "Quick fix", Type: "chore", Status: "open", Priority: 2, Score: 0.6},
+					{ID: "ntm-003", Title: "Blocked", Type: "task", Status: "blocked", Priority: 2, Score: 0.9},
+					{ID: "ntm-004", Title: "Dependency gated", Type: "task", Status: "open", Priority: 1, Score: 1, BlockedBy: []string{"ntm-prerequisite"}},
+					{ID: "ntm-005", Title: "Operator gated", Type: "task", Status: "open", Priority: 1, Score: 1, Labels: []string{"operator-action"}},
 			},
 		},
 	}
@@ -1383,8 +1520,8 @@ func TestScoreAndSelectAssignments(t *testing.T) {
 
 	// Verify blocked task not assigned
 	for _, r := range results {
-		if r.Assignment.BeadID == "ntm-003" {
-			t.Error("blocked task should not be assigned")
+		if r.Assignment.BeadID == "ntm-003" || r.Assignment.BeadID == "ntm-004" || r.Assignment.BeadID == "ntm-005" {
+			t.Errorf("gated task %s should not be assigned", r.Assignment.BeadID)
 		}
 	}
 }

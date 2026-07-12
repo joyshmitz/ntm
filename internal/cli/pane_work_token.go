@@ -64,7 +64,7 @@ func stampMarchingOrders(prompt, session string, window, pane int) string {
 // never on the critical path of getting work to the agent. It is only wired in
 // where a bead id is cleanly known (assign paths); the plain `ntm send` path has
 // no associated bead and therefore only gets the commit-trailer instruction.
-func bestEffortStampBeadLabel(beadID, session string, window, pane int) {
+func bestEffortStampBeadLabel(projectDir, beadID, session string, window, pane int) {
 	if !semanticStampEnabled() {
 		return
 	}
@@ -76,6 +76,7 @@ func bestEffortStampBeadLabel(beadID, session string, window, pane int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "br", "update", beadID, "--add-label", label)
+	cmd.Dir = strings.TrimSpace(projectDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Debug("semantic: best-effort bead label stamp failed (non-fatal)",
 			"bead", beadID, "label", label, "error", err, "output", strings.TrimSpace(string(out)))

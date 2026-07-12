@@ -223,6 +223,9 @@ func (d *CompletionDetector) checkAll(ctx context.Context, events chan<- Complet
 
 	assignments := d.Store.ListActive()
 	for _, a := range assignments {
+		if !assignmentEligibleForCompletionScan(a) {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -257,6 +260,13 @@ func (d *CompletionDetector) checkAll(ctx context.Context, events chan<- Complet
 			}
 		}
 	}
+}
+
+func assignmentEligibleForCompletionScan(a *assignment.Assignment) bool {
+	if a == nil || a.ClearState != assignment.ClearStateNone {
+		return false
+	}
+	return a.Status == assignment.StatusAssigned || a.Status == assignment.StatusWorking
 }
 
 // checkAssignment checks a single assignment for completion
