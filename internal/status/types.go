@@ -164,6 +164,12 @@ type PaneObservation struct {
 
 const minimumDispatchConfidence = 0.75
 
+// ObservationConfidenceIsActionable reports whether evidence is strong enough
+// to authorize a durable state transition or dispatch decision.
+func ObservationConfidenceIsActionable(confidence float64) bool {
+	return confidence >= minimumDispatchConfidence && confidence <= 1
+}
+
 // DispatchObservationMaxAge bounds how long an idle observation may authorize
 // a new side effect. FreshnessFresh describes capture quality at collection
 // time; this age check prevents cached evidence from remaining valid forever.
@@ -184,8 +190,7 @@ func DispatchObservationIsCurrent(observedAt, now time.Time) bool {
 func (p PaneObservation) SafeToDispatch() bool {
 	return p.Current.Freshness == FreshnessFresh &&
 		p.Current.Error == "" &&
-		p.Current.Confidence >= minimumDispatchConfidence &&
-		p.Current.Confidence <= 1 &&
+		ObservationConfidenceIsActionable(p.Current.Confidence) &&
 		p.Current.Status.State == StateIdle
 }
 

@@ -491,6 +491,58 @@ func TestResolveAssignmentPaneUsesDurableIdentityAcrossWindows(t *testing.T) {
 	}
 }
 
+func TestAssignmentObservationShowsWorkingRequiresFreshAssignedEvidence(t *testing.T) {
+	base := statuspkg.PaneObservation{Current: statuspkg.StateObservation{
+		Status:     statuspkg.AgentStatus{State: statuspkg.StateWorking},
+		Freshness:  statuspkg.FreshnessFresh,
+		Confidence: 0.95,
+	}}
+	if !assignmentObservationShowsWorking(&assignment.Assignment{Status: assignment.StatusAssigned}, base) {
+		t.Fatal("fresh working observation should promote an assigned row")
+	}
+
+	for _, test := range []struct {
+		name   string
+		status assignment.AssignmentStatus
+		mutate func(*statuspkg.PaneObservation)
+	}{
+		{name: "nil assignment", status: assignment.StatusAssigned},
+		{name: "already working", status: assignment.StatusWorking},
+		{name: "stale", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Freshness = statuspkg.FreshnessStale
+		}},
+		{name: "capture error", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Error = "capture failed"
+		}},
+		{name: "idle", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Status.State = statuspkg.StateIdle
+		}},
+		{name: "zero confidence", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Confidence = 0
+		}},
+		{name: "below actionable confidence", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Confidence = 0.74
+		}},
+		{name: "invalid confidence", status: assignment.StatusAssigned, mutate: func(observation *statuspkg.PaneObservation) {
+			observation.Current.Confidence = 1.1
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observation := base
+			if test.mutate != nil {
+				test.mutate(&observation)
+			}
+			var current *assignment.Assignment
+			if test.name != "nil assignment" {
+				current = &assignment.Assignment{Status: test.status}
+			}
+			if assignmentObservationShowsWorking(current, observation) {
+				t.Fatalf("assignmentObservationShowsWorking(%s) = true", test.name)
+			}
+		})
+	}
+}
+
 func TestResolveAssignmentPaneRejectsAmbiguousLegacyIndex(t *testing.T) {
 	panes := []tmux.Pane{
 		{ID: "%1", WindowIndex: 0, Index: 0},

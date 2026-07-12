@@ -327,6 +327,13 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 		}
 	}
 	paneObservation := d.observer.ObservePaneCapture(d.Session, paneActivity, output, nil)
+	if assignmentObservationShowsWorking(a, paneObservation) {
+		if err := d.Store.MarkWorking(a.BeadID); err != nil {
+			slog.Warn("completion detector failed to mark assignment working", "bead", a.BeadID, "pane_id", pane.ID, "error", err)
+		} else {
+			a.Status = assignment.StatusWorking
+		}
+	}
 
 	// 4. Check for failure patterns
 	if reason := d.matchFailurePatterns(output); reason != "" {
@@ -400,6 +407,14 @@ func (d *CompletionDetector) checkAssignment(ctx context.Context, a *assignment.
 	}
 
 	return nil
+}
+
+func assignmentObservationShowsWorking(a *assignment.Assignment, observation statuspkg.PaneObservation) bool {
+	return a != nil && a.Status == assignment.StatusAssigned &&
+		observation.Current.Freshness == statuspkg.FreshnessFresh &&
+		observation.Current.Error == "" &&
+		observation.Current.Status.State == statuspkg.StateWorking &&
+		statuspkg.ObservationConfidenceIsActionable(observation.Current.Confidence)
 }
 
 // checkIdleWhenSafe starts and advances the inactivity timer only while the
