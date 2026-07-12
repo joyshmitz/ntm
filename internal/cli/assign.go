@@ -2783,7 +2783,10 @@ func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projec
 		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
 	}
 	dispatchPort := &cliAtomicPaneDispatchPort{session: store.SessionName, redactionConfig: redactionConfig}
-	return assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort)
+	return assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
+		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
+			return bv.GetBeadStatus(projectDir, beadID)
+		}))
 }
 
 type cliAtomicPaneDispatchPort struct {
@@ -2838,7 +2841,7 @@ func (p *cliAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignment
 	receipt := assignment.DispatchReceipt{Duration: time.Since(started)}
 	if len(result.Receipts) == 1 {
 		delivery := result.Receipts[0]
-		receipt.DeliveryID = fmt.Sprintf("%s/%s", delivery.Target.Ref.StableKey(), delivery.Protocol)
+		receipt.DeliveryID = assignment.DispatchDeliveryID(delivery.Target.Ref.StableKey(), string(delivery.Protocol), req.IdempotencyKey)
 	}
 	if dispatchErr != nil {
 		return receipt, dispatchErr
@@ -3034,6 +3037,7 @@ type RetryData struct {
 
 // RetryError represents an error in the retry envelope.
 var releaseReservations = releaseFileReservations
+var releaseAssignmentLeases = releaseAssignmentReservationsForClear
 
 // makeRetryEnvelope creates a standard RetryEnvelope for JSON output.
 func makeRetryEnvelope(session string, success bool, data *RetryData, errCode, errMsg string, warnings []string) AssignEnvelope[RetryData] {
@@ -3429,6 +3433,31 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 	return err
 }
 
+func clearStoredAssignment(ctx context.Context, store *assignment.AssignmentStore, session string, current *assignment.Assignment) ([]string, error) {
+	if current == nil {
+		return nil, errors.New("assignment is required")
+	}
+	clearing, err := store.BeginClear(ctx, current.BeadID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	released, releaseErr := releaseAssignmentLeases(session, clearing)
+	if releaseErr != nil {
+		if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, releaseErr); persistErr != nil {
+			return nil, errors.Join(releaseErr, fmt.Errorf("persist clear failure: %w", persistErr))
+		}
+		return nil, releaseErr
+	}
+	if err := store.CompleteClear(ctx, current.BeadID); err != nil {
+		removalErr := fmt.Errorf("reservations released but assignment removal failed: %w", err)
+		if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, removalErr); persistErr != nil {
+			return released, errors.Join(removalErr, fmt.Errorf("persist clear failure: %w", persistErr))
+		}
+		return released, removalErr
+	}
+	return released, nil
+}
+
 // runClearSpecificBeads handles --clear flag (clear specific bead assignments)
 func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string) error {
 	beadIDs := strings.Split(clearBeads, ",")
@@ -3437,7 +3466,7 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 	}
 
 	// Load assignment store
-	store, err := assignment.LoadStore(session)
+	store, err := assignment.LoadStoreStrict(session)
 	if err != nil {
 		err = fmt.Errorf("failed to load assignment store: %w", err)
 		if IsJSONOutput() {
@@ -3487,17 +3516,16 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 			result.PreviousStatus = string(foundAssignment.Status)
 			result.AssignmentFound = true
 
-			// Release file reservations via Agent Mail
-			releasedFiles, releaseErr := releaseReservations(session, beadID, foundAssignment.AgentName)
-			if releaseErr != nil && assignVerbose {
-				fmt.Fprintf(os.Stderr, "[CLEAR] Warning: could not release file reservations for %s: %v\n", beadID, releaseErr)
+			releasedFiles, clearErr := clearStoredAssignment(cmd.Context(), store, session, foundAssignment)
+			if clearErr != nil {
+				result.Success = false
+				result.Error = clearErr.Error()
+			} else {
+				result.FilesReleased = releasedFiles
+				result.FileReservationsReleased = len(releasedFiles) > 0
+				result.Success = true
+				successCount++
 			}
-			result.FilesReleased = releasedFiles
-
-			// Clear the assignment in the store
-			store.Remove(beadID)
-			result.Success = true
-			successCount++
 		}
 
 		results = append(results, result)
@@ -3518,7 +3546,7 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 			Subcommand: "clear",
 			Session:    session,
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
-			Success:    successCount > 0 || len(beadIDs) == 0,
+			Success:    successCount == len(beadIDs),
 			Data: &ClearAssignmentsData{
 				Cleared: results,
 				Summary: ClearAssignmentsSummary{
@@ -3528,6 +3556,9 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 				},
 			},
 			Warnings: []string{},
+		}
+		if !envelope.Success {
+			envelope.Error = &ClearAssignmentsError{Code: "CLEAR_FAILED", Message: fmt.Sprintf("%d of %d assignments failed to clear", len(beadIDs)-successCount, len(beadIDs))}
 		}
 		// bd-oqwmf: clear-bulk is dynamic — envelope.Success may be false
 		// (zero of N cleared). Encode then route through jsonFailureExit on
@@ -3556,6 +3587,9 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 		}
 	}
 
+	if successCount != len(beadIDs) {
+		return fmt.Errorf("%d of %d assignments failed to clear", len(beadIDs)-successCount, len(beadIDs))
+	}
 	return nil
 }
 
@@ -3609,7 +3643,7 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	agentType := agentTypeForPane(*targetPane)
 
 	// Load assignment store
-	store, err := assignment.LoadStore(session)
+	store, err := assignment.LoadStoreStrict(session)
 	if err != nil {
 		err = fmt.Errorf("failed to load assignment store: %w", err)
 		if IsJSONOutput() {
@@ -3641,18 +3675,19 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 			PreviousAgent:     a.AgentName,
 			PreviousAgentType: a.AgentType,
 			AssignmentFound:   true,
+			PreviousStatus:    string(a.Status),
 		}
 
-		// Release file reservations
-		releasedFiles, releaseErr := releaseReservations(session, a.BeadID, a.AgentName)
-		if releaseErr != nil && assignVerbose {
-			fmt.Fprintf(os.Stderr, "[CLEAR] Warning: could not release file reservations for %s: %v\n", a.BeadID, releaseErr)
+		releasedFiles, clearErr := clearStoredAssignment(cmd.Context(), store, session, &a)
+		if clearErr != nil {
+			beadResult.Success = false
+			beadResult.Error = clearErr.Error()
+			result.Success = false
+		} else {
+			beadResult.FilesReleased = releasedFiles
+			beadResult.FileReservationsReleased = len(releasedFiles) > 0
+			beadResult.Success = true
 		}
-		beadResult.FilesReleased = releasedFiles
-
-		// Clear the assignment
-		store.Remove(a.BeadID)
-		beadResult.Success = true
 
 		result.ClearedBeads = append(result.ClearedBeads, beadResult)
 	}
@@ -3671,25 +3706,42 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 			}
 		}
 
+		successCount := 0
+		for _, cleared := range result.ClearedBeads {
+			if cleared.Success {
+				successCount++
+			}
+		}
+		failedCount := len(result.ClearedBeads) - successCount
 		panePtr := pane
 		envelope := ClearAssignmentsEnvelope{
 			Command:    "assign",
 			Subcommand: "clear-pane",
 			Session:    session,
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
-			Success:    true,
+			Success:    failedCount == 0,
 			Data: &ClearAssignmentsData{
 				Cleared:   result.ClearedBeads,
 				Pane:      &panePtr,
 				AgentType: agentType,
 				Summary: ClearAssignmentsSummary{
-					ClearedCount:         len(result.ClearedBeads),
+					ClearedCount:         successCount,
 					ReservationsReleased: reservationsReleased,
+					FailedCount:          failedCount,
 				},
 			},
 			Warnings: []string{},
 		}
-		return json.NewEncoder(os.Stdout).Encode(envelope)
+		if !envelope.Success {
+			envelope.Error = &ClearAssignmentsError{Code: "CLEAR_FAILED", Message: fmt.Sprintf("%d of %d pane assignments failed to clear", failedCount, len(result.ClearedBeads))}
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(envelope); err != nil {
+			return err
+		}
+		if !envelope.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	// Text output
@@ -3711,6 +3763,9 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 		}
 	}
 
+	if !result.Success {
+		return fmt.Errorf("one or more assignments for pane %d failed to clear", pane)
+	}
 	return nil
 }
 
@@ -4001,7 +4056,23 @@ func findAssignmentForPane(store *assignment.AssignmentStore, pane int) *assignm
 }
 
 // releaseFileReservationsWithIDs releases file reservations using stored reservation IDs
+func releaseAssignmentReservationsForClear(session string, current *assignment.Assignment) ([]string, error) {
+	if current == nil {
+		return nil, errors.New("assignment is required")
+	}
+	if len(current.ReservationIDs) > 0 {
+		return releaseFileReservationsWithIDs(session, current.BeadID, current.AgentName, current.ReservationIDs)
+	}
+	if len(current.ReservedPaths) > 0 {
+		return releaseFileReservationsByStoredPaths(session, current.BeadID, current.AgentName, current.ReservedPaths)
+	}
+	return releaseReservations(session, current.BeadID, current.AgentName)
+}
+
 func releaseFileReservationsWithIDs(session, beadID, agentName string, reservationIDs []int) ([]string, error) {
+	if len(reservationIDs) == 0 {
+		return nil, nil
+	}
 	projectKey, err := resolveAssignProjectDir(session)
 	if err != nil {
 		return nil, err
@@ -4010,7 +4081,7 @@ func releaseFileReservationsWithIDs(session, beadID, agentName string, reservati
 	// Create Agent Mail client
 	amClient := newAgentMailClient(projectKey)
 	if !amClient.IsAvailable() {
-		return nil, nil // No error if Agent Mail isn't available
+		return nil, fmt.Errorf("cannot release %d stored reservations for %s: Agent Mail is unavailable", len(reservationIDs), beadID)
 	}
 
 	// Create a reservation manager
@@ -4018,19 +4089,60 @@ func releaseFileReservationsWithIDs(session, beadID, agentName string, reservati
 	ctx, cancel := context.WithTimeout(context.Background(), resolveAssignTimeout(assignTimeout))
 	defer cancel()
 
-	// Release reservations by IDs
-	if len(reservationIDs) > 0 {
-		if err := manager.ReleaseForBead(ctx, agentName, reservationIDs); err != nil {
-			return nil, fmt.Errorf("failed to release reservations: %w", err)
+	releaseErr := manager.ReleaseForBead(ctx, agentName, reservationIDs)
+	if releaseErr != nil {
+		active, reconcileErr := amClient.ListReservations(ctx, projectKey, "", true)
+		if reconcileErr != nil {
+			return nil, errors.Join(fmt.Errorf("failed to release reservations: %w", releaseErr), fmt.Errorf("reconcile reservation release: %w", reconcileErr))
 		}
-		if assignVerbose {
-			fmt.Fprintf(os.Stderr, "[RESERVE] Released %d reservations for %s\n", len(reservationIDs), beadID)
+		wanted := make(map[int]struct{}, len(reservationIDs))
+		for _, id := range reservationIDs {
+			wanted[id] = struct{}{}
 		}
-		// Return the count as a string since we don't have the actual paths
-		return []string{fmt.Sprintf("%d reservations", len(reservationIDs))}, nil
+		for _, reservation := range active {
+			if _, stillActive := wanted[reservation.ID]; stillActive {
+				return nil, fmt.Errorf("failed to release reservations: %w", releaseErr)
+			}
+		}
 	}
+	if assignVerbose {
+		fmt.Fprintf(os.Stderr, "[RESERVE] Released %d reservations for %s\n", len(reservationIDs), beadID)
+	}
+	return []string{fmt.Sprintf("%d reservations", len(reservationIDs))}, nil
+}
 
-	return nil, nil
+func releaseFileReservationsByStoredPaths(session, beadID, agentName string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	projectKey, err := resolveAssignProjectDir(session)
+	if err != nil {
+		return nil, err
+	}
+	amClient := newAgentMailClient(projectKey)
+	if !amClient.IsAvailable() {
+		return nil, fmt.Errorf("cannot release stored reservation paths for %s: Agent Mail is unavailable", beadID)
+	}
+	manager := assign.NewFileReservationManager(amClient, projectKey)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveAssignTimeout(assignTimeout))
+	defer cancel()
+	releaseErr := manager.ReleaseByPaths(ctx, agentName, paths)
+	if releaseErr != nil {
+		active, reconcileErr := amClient.ListReservations(ctx, projectKey, agentName, false)
+		if reconcileErr != nil {
+			return nil, errors.Join(fmt.Errorf("failed to release reservation paths: %w", releaseErr), fmt.Errorf("reconcile reservation release: %w", reconcileErr))
+		}
+		wanted := make(map[string]struct{}, len(paths))
+		for _, path := range paths {
+			wanted[strings.TrimSpace(path)] = struct{}{}
+		}
+		for _, reservation := range active {
+			if _, stillActive := wanted[strings.TrimSpace(reservation.PathPattern)]; stillActive {
+				return nil, fmt.Errorf("failed to release reservation paths: %w", releaseErr)
+			}
+		}
+	}
+	return append([]string(nil), paths...), nil
 }
 
 // releaseFileReservations releases file reservations for a bead via Agent Mail
@@ -4658,6 +4770,20 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	}
 
 	prior := store.Get(beadID)
+	if prior != nil && prior.IdempotencyKey == idempotencyKey {
+		switch prior.Status {
+		case assignment.StatusCompleted, assignment.StatusFailed, assignment.StatusReassigned:
+			idempotencyKey, err = assignment.NewAssignmentIdempotencyKey()
+			if err != nil {
+				err = fmt.Errorf("generate reopened assignment identity: %w", err)
+				if IsJSONOutput() {
+					return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, nil, "STORE_ERROR", err.Error(), warnings))
+				}
+				return err
+			}
+			intent.idempotencyKey = idempotencyKey
+		}
+	}
 	sameIntent := prior != nil && prior.IdempotencyKey == idempotencyKey
 	activeDifferentIntent := false
 	if prior != nil && prior.IdempotencyKey != "" && !sameIntent {
@@ -4675,9 +4801,6 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	if executeBeforePreflight {
 		beadTitle = prior.BeadTitle
 		if sameIntent {
-			if prior.DispatchTarget != "" {
-				canonicalTarget = prior.DispatchTarget
-			}
 			if prior.AgentType != "" {
 				agentType = prior.AgentType
 			}
@@ -4750,7 +4873,7 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	request := assignment.AtomicRequest{
 		BeadID:                    beadID,
 		BeadTitle:                 beadTitle,
-		Target:                    canonicalTarget,
+		Target:                    targetPane.ID,
 		OccupancyKey:              targetPane.ID,
 		Pane:                      targetPane.Index,
 		AgentType:                 agentType,
@@ -4766,6 +4889,9 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		request.Pane = prior.Pane
 		if prior.OccupancyKey != "" {
 			request.OccupancyKey = prior.OccupancyKey
+			request.Target = prior.OccupancyKey
+		} else if prior.DispatchTarget != "" {
+			request.Target = prior.DispatchTarget
 		}
 	}
 
@@ -4791,9 +4917,6 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		assignItem.Pane = atomicResult.Assignment.Pane
 		assignItem.AgentType = atomicResult.Assignment.AgentType
 		assignItem.AssignedAt = atomicResult.Assignment.AssignedAt.UTC().Format(time.RFC3339)
-		if atomicResult.Assignment.DispatchTarget != "" {
-			assignItem.PaneTarget = atomicResult.Assignment.DispatchTarget
-		}
 		if atomicResult.Assignment.OccupancyKey != "" {
 			assignItem.PaneID = atomicResult.Assignment.OccupancyKey
 		}

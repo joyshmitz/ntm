@@ -3,6 +3,7 @@ package assignment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -401,6 +402,130 @@ func TestAtomicAssignmentSameIdempotencyReplaysWithoutSideEffects(t *testing.T) 
 	}
 	if claimer.calls != 1 || reserver.calls.Load() != 1 || dispatcher.calls.Load() != 1 {
 		t.Fatalf("side effects claim=%d reserve=%d dispatch=%d, want 1 each", claimer.calls, reserver.calls.Load(), dispatcher.calls.Load())
+	}
+}
+
+func TestAtomicAssignmentTerminalGenerationRequiresNewKeyAndReusesClaimActor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := NewStore("atomic-terminal-generation")
+	claimer := &atomicClaimLedger{}
+	var dispatchCalls atomic.Int32
+	dispatcher := DispatchFunc(func(context.Context, DispatchRequest) (DispatchReceipt, error) {
+		call := dispatchCalls.Add(1)
+		return DispatchReceipt{DeliveryID: fmt.Sprintf("delivery-%d", call)}, nil
+	})
+	trackerStatus := "closed"
+	coordinator := NewAtomicCoordinator(store, claimer, nil, dispatcher).
+		WithWorkItemStatusPort(WorkItemStatusFunc(func(context.Context, string) (string, error) {
+			return trackerStatus, nil
+		}))
+
+	firstRequest := atomicTestRequest("generation-one", "%73")
+	first, err := coordinator.Execute(t.Context(), firstRequest)
+	if err != nil || !first.Sent || first.Replayed || first.Assignment == nil {
+		t.Fatalf("first Execute=%+v err=%v", first, err)
+	}
+	firstActor := first.Assignment.ClaimActor
+	if err := store.MarkCompleted(firstRequest.BeadID); err != nil {
+		t.Fatalf("MarkCompleted: %v", err)
+	}
+
+	staleReplay, err := coordinator.Execute(t.Context(), firstRequest)
+	if !errors.Is(err, ErrTerminalAssignmentAttempt) || staleReplay.Sent || staleReplay.Replayed {
+		t.Fatalf("terminal same-key Execute=%+v err=%v", staleReplay, err)
+	}
+	if dispatchCalls.Load() != 1 {
+		t.Fatalf("terminal same-key retry dispatched %d times, want 1", dispatchCalls.Load())
+	}
+
+	secondRequest := firstRequest
+	secondRequest.IdempotencyKey = "generation-two"
+	closedAttempt, err := coordinator.Execute(t.Context(), secondRequest)
+	if !errors.Is(err, ErrTerminalAssignmentAttempt) || closedAttempt.Sent || closedAttempt.Replayed {
+		t.Fatalf("closed tracker generation Execute=%+v err=%v", closedAttempt, err)
+	}
+	if stored := store.Get(firstRequest.BeadID); stored == nil || stored.IdempotencyKey != firstRequest.IdempotencyKey || stored.Status != StatusCompleted {
+		t.Fatalf("closed tracker attempt replaced terminal receipt: %+v", stored)
+	}
+	if dispatchCalls.Load() != 1 || claimer.calls != 1 {
+		t.Fatalf("closed tracker attempt actuated claim=%d dispatch=%d", claimer.calls, dispatchCalls.Load())
+	}
+
+	trackerStatus = "open"
+	second, err := coordinator.Execute(t.Context(), secondRequest)
+	if err != nil || !second.Sent || second.Replayed || second.Assignment == nil {
+		t.Fatalf("second generation Execute=%+v err=%v", second, err)
+	}
+	if second.Assignment.IdempotencyKey != secondRequest.IdempotencyKey || second.Assignment.ClaimActor != firstActor {
+		t.Fatalf("second generation identity=%+v, want key %q and retained actor %q", second.Assignment, secondRequest.IdempotencyKey, firstActor)
+	}
+	if second.Dispatch.DeliveryID != "delivery-2" || dispatchCalls.Load() != 2 || claimer.calls != 2 {
+		t.Fatalf("second generation dispatch=%+v claim calls=%d dispatch calls=%d", second.Dispatch, claimer.calls, dispatchCalls.Load())
+	}
+}
+
+func TestAtomicTerminalGenerationFailsClosedWithoutReopenProof(t *testing.T) {
+	tests := []struct {
+		name string
+		port WorkItemStatusPort
+	}{
+		{name: "missing status port"},
+		{name: "status read error", port: WorkItemStatusFunc(func(context.Context, string) (string, error) {
+			return "", errors.New("tracker unavailable")
+		})},
+		{name: "terminal tracker status", port: WorkItemStatusFunc(func(context.Context, string) (string, error) {
+			return "tombstone", nil
+		})},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			store := NewStore("terminal-proof-" + strings.ReplaceAll(test.name, " ", "-"))
+			request := atomicTestRequest("new-generation", "%81")
+			store.Assignments[request.BeadID] = &Assignment{
+				BeadID: request.BeadID, BeadTitle: request.BeadTitle, Pane: request.Pane,
+				AgentType: request.AgentType, AgentName: request.AgentName,
+				Status: StatusCompleted, AssignedAt: time.Now().UTC(),
+				IdempotencyKey: "old-generation", ClaimActor: "retained-actor",
+				DispatchTarget: request.Target, OccupancyKey: request.OccupancyKey,
+				DispatchState: DispatchSent, DispatchReceiptID: "old-receipt",
+			}
+			if err := store.Save(); err != nil {
+				t.Fatalf("seed terminal assignment: %v", err)
+			}
+			claimer := &atomicClaimLedger{}
+			dispatcher := &atomicDispatchRecorder{}
+			coordinator := NewAtomicCoordinator(store, claimer, nil, dispatcher)
+			if test.port != nil {
+				coordinator.WithWorkItemStatusPort(test.port)
+			}
+
+			result, err := coordinator.Execute(t.Context(), request)
+			if !errors.Is(err, ErrTerminalAssignmentAttempt) || result.Sent || result.Replayed {
+				t.Fatalf("Execute=%+v err=%v, want terminal proof failure", result, err)
+			}
+			stored := store.Get(request.BeadID)
+			if stored == nil || stored.IdempotencyKey != "old-generation" || stored.DispatchReceiptID != "old-receipt" || stored.Status != StatusCompleted {
+				t.Fatalf("terminal proof failure mutated ledger: %+v", stored)
+			}
+			if claimer.calls != 0 || dispatcher.calls.Load() != 0 {
+				t.Fatalf("terminal proof failure actuated claim=%d dispatch=%d", claimer.calls, dispatcher.calls.Load())
+			}
+		})
+	}
+}
+
+func TestDispatchDeliveryIDIsStablePerGeneration(t *testing.T) {
+	first := DispatchDeliveryID("%7", "double_enter", "generation-one")
+	if first == "" || first != DispatchDeliveryID("%7", "double_enter", "generation-one") {
+		t.Fatalf("same generation receipt is not stable: %q", first)
+	}
+	if second := DispatchDeliveryID("%7", "double_enter", "generation-two"); second == first {
+		t.Fatalf("independent generations reused receipt %q", first)
+	}
+	if !strings.Contains(first, "%7") || !strings.Contains(first, "generation-one") {
+		t.Fatalf("receipt %q omitted route or generation identity", first)
 	}
 }
 

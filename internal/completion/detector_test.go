@@ -479,6 +479,16 @@ func TestResolveAssignmentPaneUsesDurableIdentityAcrossWindows(t *testing.T) {
 	if byAddress.ID != "%9" {
 		t.Fatalf("resolved by address=%+v", byAddress)
 	}
+
+	stable, err := resolveAssignmentPane("proj", &assignment.Assignment{
+		Pane: 1, DispatchTarget: "1", OccupancyKey: "%1",
+	}, panes)
+	if err != nil {
+		t.Fatalf("resolve stable identity after topology change: %v", err)
+	}
+	if stable.ID != "%1" {
+		t.Fatalf("stable identity resolved %+v, want original pane %%1", stable)
+	}
 }
 
 func TestResolveAssignmentPaneRejectsAmbiguousLegacyIndex(t *testing.T) {
@@ -749,12 +759,15 @@ func TestNewWithConfigCustomSettings(t *testing.T) {
 }
 
 func TestCheckNowWithActiveAssignment(t *testing.T) {
-	t.Parallel()
+	t.Setenv("HOME", t.TempDir())
 
-	store := assignment.NewStore("test-session")
-	store.Assign("bd-test", "Test Bead", 5, "claude", "agent-1", "test prompt")
+	session := fmt.Sprintf("completion-active-%d", time.Now().UnixNano())
+	store := assignment.NewStore(session)
+	if _, err := store.Assign("bd-test", "Test Bead", 5, "claude", "agent-1", "test prompt"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
 
-	d := New("test-session", store)
+	d := New(session, store)
 
 	// CheckNow will fail because we can't query real tmux panes,
 	// but it should find the assignment and attempt to check it

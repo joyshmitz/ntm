@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -809,6 +810,316 @@ func TestReassignExplicitlyReplacesAtomicRecord(t *testing.T) {
 		got.DispatchReceiptID != "" || got.DispatchAttempts != 0 || got.PromptSent != "" {
 		t.Fatalf("reassign retained stale atomic metadata: %+v", got)
 	}
+}
+
+func TestDestructiveStoreMutationsRejectStaleAtomicBarrier(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(*AssignmentStore, string) error
+	}{
+		{name: "remove", run: func(store *AssignmentStore, beadID string) error {
+			return store.Remove(beadID)
+		}},
+		{name: "clear", run: func(store *AssignmentStore, _ string) error {
+			return store.Clear()
+		}},
+		{name: "assign", run: func(store *AssignmentStore, beadID string) error {
+			_, err := store.Assign(beadID, "replacement", 9, "claude", "ClaudeNine", "replacement prompt")
+			return err
+		}},
+		{name: "reassign", run: func(store *AssignmentStore, beadID string) error {
+			_, err := store.Reassign(beadID, 9, "claude", "ClaudeNine")
+			return err
+		}},
+	}
+
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			session := "stale-destructive-" + operation.name
+			beadID := "ntm-stale-" + operation.name
+			key := "stale-key-" + operation.name
+			seed := NewStore(session)
+			req := AtomicRequest{
+				BeadID: beadID, BeadTitle: "Stale mutation", Target: "%17", OccupancyKey: "%17", Pane: 2,
+				AgentType: "codex", AgentName: "CodexTwo", Actor: "CodexTwo", Prompt: "continue", IdempotencyKey: key,
+			}
+			now := time.Now().UTC()
+			actor := StableClaimActor(req.Actor, key)
+			if _, err := seed.RecordAtomicIntent(req, actor, now); err != nil {
+				t.Fatalf("RecordAtomicIntent: %v", err)
+			}
+			if _, err := seed.RecordAtomicClaim(req, ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: now}); err != nil {
+				t.Fatalf("RecordAtomicClaim: %v", err)
+			}
+			seed.Assignments[beadID].Status = StatusWorking
+			if err := seed.Save(); err != nil {
+				t.Fatalf("persist working seed: %v", err)
+			}
+
+			stale, err := LoadStoreStrict(session)
+			if err != nil {
+				t.Fatalf("load stale writer: %v", err)
+			}
+			barrierWriter, err := LoadStoreStrict(session)
+			if err != nil {
+				t.Fatalf("load barrier writer: %v", err)
+			}
+			startedAt := now.Add(time.Second)
+			if err := barrierWriter.RecordAtomicDispatchStarted(beadID, key, startedAt); err != nil {
+				t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+			}
+
+			mutationErr := operation.run(stale, beadID)
+			var conflict *ConcurrentMutationError
+			if !errors.As(mutationErr, &conflict) || conflict.BeadID != beadID {
+				t.Fatalf("stale %s error=%v, want ConcurrentMutationError for %s", operation.name, mutationErr, beadID)
+			}
+			for label, stored := range map[string]*Assignment{
+				"stale writer": stale.Get(beadID),
+				"durable":      mustLoadAssignment(t, session, beadID),
+			} {
+				if stored == nil || stored.DispatchState != DispatchSending || stored.DispatchAttempts != 1 ||
+					stored.DispatchStartedAt == nil || !stored.DispatchStartedAt.Equal(startedAt) || stored.IdempotencyKey != key {
+					t.Fatalf("%s after stale %s = %+v", label, operation.name, stored)
+				}
+			}
+		})
+	}
+}
+
+func TestStaleLifecycleUpdateCannotResurrectRemovedAssignment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "stale-update-after-remove"
+	const beadID = "ntm-removed-generation"
+
+	seed := NewStore(session)
+	if _, err := seed.Assign(beadID, "Removed assignment", 2, "codex", "CodexTwo", "work"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	if err := seed.MarkWorking(beadID); err != nil {
+		t.Fatalf("MarkWorking: %v", err)
+	}
+	stale, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load stale writer: %v", err)
+	}
+	remover, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load remover: %v", err)
+	}
+	if err := remover.Remove(beadID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	updateErr := stale.MarkCompleted(beadID)
+	var conflict *ConcurrentMutationError
+	if !errors.As(updateErr, &conflict) || conflict.BeadID != beadID {
+		t.Fatalf("stale MarkCompleted error=%v, want ConcurrentMutationError", updateErr)
+	}
+	if got := stale.Get(beadID); got != nil {
+		t.Fatalf("losing store resurrected removed assignment in memory: %+v", got)
+	}
+	if got := mustLoadAssignment(t, session, beadID); got != nil {
+		t.Fatalf("stale lifecycle update resurrected durable assignment: %+v", got)
+	}
+}
+
+func TestStaleLifecycleUpdateCannotCrossAssignmentGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "stale-update-cross-generation"
+	const beadID = "ntm-cross-generation"
+	now := time.Now().UTC()
+	oldRequest := AtomicRequest{
+		BeadID: beadID, BeadTitle: "Old generation", Target: "%41", OccupancyKey: "%41", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne", Prompt: "old work", IdempotencyKey: "old-generation-key",
+	}
+	seed := NewStore(session)
+	oldActor := StableClaimActor(oldRequest.Actor, oldRequest.IdempotencyKey)
+	if _, err := seed.RecordAtomicIntent(oldRequest, oldActor, now); err != nil {
+		t.Fatalf("RecordAtomicIntent(old): %v", err)
+	}
+	if _, err := seed.RecordAtomicClaim(oldRequest, ClaimReceipt{BeadID: beadID, Actor: oldActor, Status: "in_progress", ClaimedAt: now}); err != nil {
+		t.Fatalf("RecordAtomicClaim(old): %v", err)
+	}
+	if err := seed.UpdateStatus(beadID, StatusAssigned); err != nil {
+		t.Fatalf("mark old assigned: %v", err)
+	}
+	if err := seed.MarkWorking(beadID); err != nil {
+		t.Fatalf("mark old working: %v", err)
+	}
+	stale, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load old-generation writer: %v", err)
+	}
+	winner, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load winner: %v", err)
+	}
+	if err := winner.MarkCompleted(beadID); err != nil {
+		t.Fatalf("complete old generation: %v", err)
+	}
+	newRequest := oldRequest
+	newRequest.BeadTitle = "New generation"
+	newRequest.Prompt = "new work"
+	newRequest.IdempotencyKey = "new-generation-key"
+	newActor := StableClaimActor(newRequest.Actor, newRequest.IdempotencyKey)
+	if _, err := winner.RecordAtomicIntent(newRequest, newActor, now.Add(time.Minute)); err != nil {
+		t.Fatalf("RecordAtomicIntent(new): %v", err)
+	}
+
+	updateErr := stale.MarkCompleted(beadID)
+	var conflict *ConcurrentMutationError
+	if !errors.As(updateErr, &conflict) || conflict.BeadID != beadID {
+		t.Fatalf("old-generation MarkCompleted error=%v, want ConcurrentMutationError", updateErr)
+	}
+	for label, stored := range map[string]*Assignment{
+		"losing store": stale.Get(beadID),
+		"durable":      mustLoadAssignment(t, session, beadID),
+	} {
+		if stored == nil || stored.IdempotencyKey != newRequest.IdempotencyKey || stored.Status != StatusClaiming || stored.PendingPrompt != newRequest.Prompt {
+			t.Fatalf("%s after generation conflict = %+v", label, stored)
+		}
+	}
+}
+
+func TestRecordAtomicIntentConflictKeepsDurableWinnerInMemory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "atomic-intent-concurrent-generation"
+	const beadID = "ntm-intent-winner"
+	now := time.Now().UTC()
+	seed := NewStore(session)
+	old := AtomicRequest{
+		BeadID: beadID, BeadTitle: "Terminal", Target: "%51", OccupancyKey: "%51", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne", Prompt: "old", IdempotencyKey: "terminal-key",
+	}
+	if _, err := seed.RecordAtomicIntent(old, StableClaimActor(old.Actor, old.IdempotencyKey), now); err != nil {
+		t.Fatalf("seed intent: %v", err)
+	}
+	seed.Assignments[beadID].Status = StatusCompleted
+	if err := seed.Save(); err != nil {
+		t.Fatalf("persist terminal seed: %v", err)
+	}
+	winner, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load winner: %v", err)
+	}
+	loser, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load loser: %v", err)
+	}
+	winnerRequest := old
+	winnerRequest.Prompt = "winner"
+	winnerRequest.IdempotencyKey = "winner-key"
+	if _, err := winner.RecordAtomicIntent(winnerRequest, StableClaimActor(winnerRequest.Actor, winnerRequest.IdempotencyKey), now.Add(time.Minute)); err != nil {
+		t.Fatalf("winner RecordAtomicIntent: %v", err)
+	}
+	loserRequest := old
+	loserRequest.Prompt = "loser"
+	loserRequest.IdempotencyKey = "loser-key"
+	_, loserErr := loser.RecordAtomicIntent(loserRequest, StableClaimActor(loserRequest.Actor, loserRequest.IdempotencyKey), now.Add(2*time.Minute))
+	var conflict *ConcurrentMutationError
+	if !errors.As(loserErr, &conflict) || conflict.BeadID != beadID {
+		t.Fatalf("loser RecordAtomicIntent error=%v, want ConcurrentMutationError", loserErr)
+	}
+	for label, stored := range map[string]*Assignment{
+		"loser memory": loser.Get(beadID),
+		"durable":      mustLoadAssignment(t, session, beadID),
+	} {
+		if stored == nil || stored.IdempotencyKey != winnerRequest.IdempotencyKey || stored.PendingPrompt != winnerRequest.Prompt {
+			t.Fatalf("%s did not retain durable winner: %+v", label, stored)
+		}
+	}
+}
+
+func TestAssignmentClearBarrierRetainsLeaseAndBlocksNewWork(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "assignment-clear-barrier"
+	const beadID = "ntm-clear-barrier"
+	now := time.Now().UTC()
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "Clear barrier", Pane: 3,
+		AgentType: "codex", AgentName: "CodexThree", Status: StatusAssigned, AssignedAt: now,
+		IdempotencyKey: "clear-generation", ClaimActor: "clear-actor",
+		DispatchTarget: "%63", OccupancyKey: "%63", DispatchState: DispatchSent,
+		DispatchReceiptID: "clear-receipt", ReservationCompleted: true,
+		ReservationAgent: "CodexThree", ReservationTarget: "%63",
+		ReservedPaths: []string{"internal/assignment/**"}, ReservationIDs: []int{631, 632},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed clear assignment: %v", err)
+	}
+	clearing, err := store.BeginClear(t.Context(), beadID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("BeginClear: %v", err)
+	}
+	if clearing.ClearState != ClearStateReservationReleasing || len(clearing.ReservationIDs) != 2 || clearing.DispatchReceiptID != "clear-receipt" {
+		t.Fatalf("clear barrier lost durable lease or receipt: %+v", clearing)
+	}
+
+	claimer := &atomicClaimLedger{}
+	dispatcher := &atomicDispatchRecorder{}
+	request := atomicTestRequest("replacement-generation", "%63")
+	request.BeadID = beadID
+	result, assignErr := NewAtomicCoordinator(store, claimer, nil, dispatcher).Execute(t.Context(), request)
+	if !errors.Is(assignErr, ErrClaimConflict) || result.Sent || claimer.calls != 0 || dispatcher.calls.Load() != 0 {
+		t.Fatalf("assignment crossed clear barrier: result=%+v err=%v claims=%d dispatch=%d", result, assignErr, claimer.calls, dispatcher.calls.Load())
+	}
+
+	releaseErr := errors.New("Agent Mail unavailable")
+	if err := store.RecordClearReleaseFailed(t.Context(), beadID, releaseErr); err != nil {
+		t.Fatalf("RecordClearReleaseFailed: %v", err)
+	}
+	reloaded, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload failed clear: %v", err)
+	}
+	failed := reloaded.Get(beadID)
+	if failed == nil || failed.ClearState != ClearStateReservationReleasing || failed.ClearError != releaseErr.Error() || len(failed.ReservationIDs) != 2 {
+		t.Fatalf("failed clear did not retain retry metadata: %+v", failed)
+	}
+	if err := reloaded.CompleteClear(t.Context(), beadID); err != nil {
+		t.Fatalf("CompleteClear: %v", err)
+	}
+	if got := mustLoadAssignment(t, session, beadID); got != nil {
+		t.Fatalf("confirmed clear left assignment: %+v", got)
+	}
+}
+
+func TestAssignmentClearRejectsUnknownDispatchOutcome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const beadID = "ntm-clear-sending"
+	store := NewStore("assignment-clear-sending")
+	request := AtomicRequest{
+		BeadID: beadID, BeadTitle: "Sending", Target: "%71", OccupancyKey: "%71", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Actor: "CodexOne", Prompt: "work", IdempotencyKey: "sending-key",
+	}
+	now := time.Now().UTC()
+	actor := StableClaimActor(request.Actor, request.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(request, actor, now); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(beadID, request.IdempotencyKey, now); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+	_, err := store.BeginClear(t.Context(), beadID, now.Add(time.Second))
+	if !errors.Is(err, ErrDispatchOutcomeUnknown) {
+		t.Fatalf("BeginClear error=%v, want ErrDispatchOutcomeUnknown", err)
+	}
+	stored := store.Get(beadID)
+	if stored == nil || stored.ClearState != ClearStateNone || stored.DispatchState != DispatchSending || stored.DispatchAttempts != 1 {
+		t.Fatalf("rejected clear mutated dispatch barrier: %+v", stored)
+	}
+}
+
+func mustLoadAssignment(t *testing.T, session, beadID string) *Assignment {
+	t.Helper()
+	store, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict(%s): %v", session, err)
+	}
+	return store.Get(beadID)
 }
 
 func TestLoadNormalizesLegacyFailureReason(t *testing.T) {

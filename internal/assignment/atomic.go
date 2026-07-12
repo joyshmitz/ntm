@@ -66,6 +66,10 @@ var (
 	// ErrTargetOccupied means another active assignment owns the exact pane or
 	// mail delivery target. It is detected before claiming or dispatching.
 	ErrTargetOccupied = errors.New("assignment target already has active work")
+	// ErrTerminalAssignmentAttempt means a completed assignment generation was
+	// retried with its old idempotency key. Reopened work must start a new
+	// generation so it receives a new durable dispatch receipt.
+	ErrTerminalAssignmentAttempt = errors.New("assignment generation is terminal; reopen the work item and use a new idempotency key")
 )
 
 type guaranteedNoActuationError struct {
@@ -265,6 +269,19 @@ func (f PromptPreflightFunc) Preflight(ctx context.Context, req DispatchRequest)
 	return f(ctx, req)
 }
 
+// WorkItemStatusPort proves that terminal work was reopened in the external
+// tracker before a new assignment generation replaces its durable receipt.
+type WorkItemStatusPort interface {
+	WorkItemStatus(context.Context, string) (string, error)
+}
+
+// WorkItemStatusFunc adapts a function to WorkItemStatusPort.
+type WorkItemStatusFunc func(context.Context, string) (string, error)
+
+func (f WorkItemStatusFunc) WorkItemStatus(ctx context.Context, beadID string) (string, error) {
+	return f(ctx, beadID)
+}
+
 // AtomicRequest describes one claim-reserve-dispatch transaction.
 type AtomicRequest struct {
 	BeadID    string
@@ -309,6 +326,7 @@ type AtomicCoordinator struct {
 	reserver   ReservationPort
 	dispatcher DispatchPort
 	preflight  PromptPreflightPort
+	workStatus WorkItemStatusPort
 	now        func() time.Time
 }
 
@@ -326,6 +344,13 @@ func NewAtomicCoordinator(store *AssignmentStore, claimer ClaimPort, reserver Re
 		coordinator.preflight = preflight[0]
 	}
 	return coordinator
+}
+
+// WithWorkItemStatusPort requires external reopen proof for terminal-to-new
+// assignment generations. Production adapters should always configure it.
+func (c *AtomicCoordinator) WithWorkItemStatusPort(port WorkItemStatusPort) *AtomicCoordinator {
+	c.workStatus = port
+	return c
 }
 
 // AssignmentIdempotencyKey returns a deterministic digest for callers that
@@ -354,6 +379,13 @@ func NewAssignmentIdempotencyKey() (string, error) {
 func PromptSHA256(prompt string) string {
 	sum := sha256.Sum256([]byte(prompt))
 	return hex.EncodeToString(sum[:])
+}
+
+// DispatchDeliveryID identifies one durable transport generation. Exact
+// retries reuse the idempotency key and therefore the receipt; independent or
+// reopened generations receive a different ID even on the same pane/protocol.
+func DispatchDeliveryID(target, protocol, idempotencyKey string) string {
+	return fmt.Sprintf("%s/%s/%s", strings.TrimSpace(target), strings.TrimSpace(protocol), strings.TrimSpace(idempotencyKey))
 }
 
 func normalizeOccupancyKey(target, occupancyKey string) string {
@@ -426,7 +458,15 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 	actor := StableClaimActor(req.Actor, req.IdempotencyKey)
 	prior := c.store.Get(req.BeadID)
 	if prior != nil {
+		if prior.ClearState == ClearStateReservationReleasing {
+			result.Assignment = prior
+			return result, fmt.Errorf("%w: %s is awaiting reservation release", ErrClaimConflict, req.BeadID)
+		}
 		if prior.IdempotencyKey == req.IdempotencyKey && prior.ClaimActor == actor {
+			if isTerminalAssignmentStatus(prior.Status) {
+				result.Assignment = prior
+				return result, fmt.Errorf("%w: %s", ErrTerminalAssignmentAttempt, req.BeadID)
+			}
 			if !matchesAtomicRawIntent(prior, req) {
 				result.Assignment = prior
 				return result, fmt.Errorf("idempotency key %s was reused for a different assignment intent", req.IdempotencyKey)
@@ -448,6 +488,27 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
 				result.Assignment = prior
 				return result, fmt.Errorf("%w: %s is recorded for %s", ErrClaimConflict, req.BeadID, prior.ClaimActor)
+			}
+		}
+		if isTerminalAssignmentStatus(prior.Status) && prior.IdempotencyKey != req.IdempotencyKey {
+			if c.workStatus == nil {
+				result.Assignment = prior
+				return result, fmt.Errorf("%w: cannot prove bead %s was reopened", ErrTerminalAssignmentAttempt, req.BeadID)
+			}
+			trackerStatus, statusErr := c.workStatus.WorkItemStatus(ctx, req.BeadID)
+			if statusErr != nil {
+				result.Assignment = prior
+				return result, fmt.Errorf("%w: verify bead %s reopen status: %v", ErrTerminalAssignmentAttempt, req.BeadID, statusErr)
+			}
+			if !workItemStatusAllowsNewGeneration(trackerStatus) {
+				result.Assignment = prior
+				return result, fmt.Errorf("%w: bead %s tracker status is %q", ErrTerminalAssignmentAttempt, req.BeadID, trackerStatus)
+			}
+			// `br reopen` retains the assignee. Reuse that actor for the new
+			// generation so the atomic claim remains valid, while the new key and
+			// ledger record still distinguish the new dispatch attempt.
+			if strings.TrimSpace(prior.ClaimActor) != "" {
+				actor = prior.ClaimActor
 			}
 		}
 	}
@@ -534,6 +595,15 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 	result.Assignment = c.store.Get(req.BeadID)
 	result.Sent = true
 	return result, nil
+}
+
+func workItemStatusAllowsNewGeneration(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "open", "in_progress":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *AtomicCoordinator) ensureClaim(ctx context.Context, req AtomicRequest, actor string, recorded *Assignment) (ClaimReceipt, *Assignment, error) {
@@ -777,6 +847,9 @@ func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey s
 		if candidate.DispatchState == DispatchSending {
 			return candidate
 		}
+		if candidate.ClearState == ClearStateReservationReleasing {
+			return candidate
+		}
 		switch candidate.Status {
 		case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
 			return candidate
@@ -926,9 +999,12 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 	defer s.mutex.Unlock()
 
 	existing := s.Assignments[req.BeadID]
+	if existing != nil && existing.ClearState == ClearStateReservationReleasing {
+		return nil, fmt.Errorf("%w: %s is awaiting reservation release", ErrClaimConflict, req.BeadID)
+	}
 	if existing != nil && existing.IdempotencyKey != "" && existing.IdempotencyKey != req.IdempotencyKey {
 		switch existing.Status {
-		case StatusClaimed, StatusAssigned, StatusWorking:
+		case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
 			return nil, fmt.Errorf("%w: %s is recorded for %s", ErrClaimConflict, req.BeadID, existing.ClaimActor)
 		}
 	}
@@ -966,11 +1042,21 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 	}
 	previous := existing
 	s.Assignments[req.BeadID] = assignment
+	if previous != nil {
+		if s.replace == nil {
+			s.replace = make(map[string]struct{})
+		}
+		s.replace[req.BeadID] = struct{}{}
+	}
 	if err := s.saveLocked(); err != nil {
-		if previous == nil {
-			delete(s.Assignments, req.BeadID)
-		} else {
-			s.Assignments[req.BeadID] = previous
+		var concurrentMutation *ConcurrentMutationError
+		if !errors.As(err, &concurrentMutation) {
+			if previous == nil {
+				delete(s.Assignments, req.BeadID)
+			} else {
+				s.Assignments[req.BeadID] = previous
+			}
+			delete(s.replace, req.BeadID)
 		}
 		return nil, err
 	}

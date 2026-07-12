@@ -436,6 +436,9 @@ func assignmentTargetKey(a *assignment.Assignment) string {
 	if a == nil {
 		return ""
 	}
+	if target := strings.TrimSpace(a.OccupancyKey); target != "" {
+		return target
+	}
 	if target := strings.TrimSpace(a.DispatchTarget); target != "" {
 		return target
 	}
@@ -446,7 +449,10 @@ func resolveAssignmentPane(session string, a *assignment.Assignment, panes []tmu
 	if a == nil {
 		return tmux.Pane{}, fmt.Errorf("assignment is required")
 	}
-	target := strings.TrimSpace(a.DispatchTarget)
+	target := strings.TrimSpace(a.OccupancyKey)
+	if target == "" {
+		target = strings.TrimSpace(a.DispatchTarget)
+	}
 	if prefix := strings.TrimSpace(session) + ":"; target != "" && strings.HasPrefix(target, prefix) {
 		target = strings.TrimPrefix(target, prefix)
 	}

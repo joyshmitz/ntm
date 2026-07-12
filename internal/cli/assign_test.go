@@ -343,6 +343,58 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 	}
 }
 
+func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("clear-release-barrier")
+	if _, err := store.Assign("ntm-clear", "Clear me", 2, "codex", "BlueLake", "work"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	store.Assignments["ntm-clear"].ReservationCompleted = true
+	store.Assignments["ntm-clear"].ReservedPaths = []string{"internal/cli/**"}
+	store.Assignments["ntm-clear"].ReservationIDs = []int{41, 42}
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist reservation metadata: %v", err)
+	}
+
+	originalRelease := releaseAssignmentLeases
+	t.Cleanup(func() { releaseAssignmentLeases = originalRelease })
+	releaseCalls := 0
+	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
+		releaseCalls++
+		if current.ClearState != assignment.ClearStateReservationReleasing || !reflect.DeepEqual(current.ReservationIDs, []int{41, 42}) {
+			t.Fatalf("release input lost clear barrier metadata: %+v", current)
+		}
+		return nil, errors.New("release unavailable")
+	}
+
+	current := store.Get("ntm-clear")
+	if _, err := clearStoredAssignment(t.Context(), store, "clear-release-barrier", current); err == nil || !strings.Contains(err.Error(), "release unavailable") {
+		t.Fatalf("first clear error=%v, want release failure", err)
+	}
+	failed := store.Get("ntm-clear")
+	if failed == nil || failed.ClearState != assignment.ClearStateReservationReleasing || failed.ClearError != "release unavailable" || !reflect.DeepEqual(failed.ReservationIDs, []int{41, 42}) {
+		t.Fatalf("release failure lost retryable ledger: %+v", failed)
+	}
+
+	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
+		releaseCalls++
+		if current.ClearState != assignment.ClearStateReservationReleasing || !reflect.DeepEqual(current.ReservationIDs, []int{41, 42}) {
+			t.Fatalf("retry input lost clear barrier metadata: %+v", current)
+		}
+		return []string{"2 reservations"}, nil
+	}
+	released, err := clearStoredAssignment(t.Context(), store, "clear-release-barrier", failed)
+	if err != nil {
+		t.Fatalf("clear retry: %v", err)
+	}
+	if releaseCalls != 2 || !reflect.DeepEqual(released, []string{"2 reservations"}) {
+		t.Fatalf("release calls=%d released=%v", releaseCalls, released)
+	}
+	if got := store.Get("ntm-clear"); got != nil {
+		t.Fatalf("confirmed lease release left assignment: %+v", got)
+	}
+}
+
 func TestReserveFilesForBeadUsesResolvedProjectDir(t *testing.T) {
 	root, nested := createAssignProjectRoot(t)
 
@@ -1573,7 +1625,7 @@ sleep 300
 	if durable == nil {
 		t.Fatal("direct assignment missing from durable ledger")
 	}
-	if durable.OccupancyKey != paneID || durable.DispatchTarget != first.Data.Receipt.Pane.Target || first.Data.Receipt.Pane.ID != paneID {
+	if durable.OccupancyKey != paneID || durable.DispatchTarget != paneID || first.Data.Receipt.Pane.ID != paneID || first.Data.Receipt.Pane.Target != "2.1" {
 		t.Fatalf("pane identity drift: ledger=%+v receipt=%+v", durable, first.Data.Receipt.Pane)
 	}
 }

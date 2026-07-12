@@ -70,10 +70,61 @@ func TestAtomicAssignmentProcessHelper(t *testing.T) {
 			t.Fatalf("save stale-baseline assignment: %v", err)
 		}
 		writeAtomicHelperResult(t, atomicHelperResult{})
+	case "dispatch-start":
+		runAtomicDispatchStartHelper(t, store)
+	case "stale-mutation":
+		runAtomicStaleMutationHelper(t, store)
 	case "execute":
 		runAtomicExecuteHelper(t, store)
 	default:
 		t.Fatalf("unknown helper operation %q", os.Getenv("NTM_ATOMIC_E2E_OPERATION"))
+	}
+}
+
+func runAtomicDispatchStartHelper(t *testing.T, store *assignment.AssignmentStore) {
+	beadID := mustAtomicEnv(t, "NTM_ATOMIC_E2E_BEAD")
+	key := mustAtomicEnv(t, "NTM_ATOMIC_E2E_KEY")
+	startedAt, err := time.Parse(time.RFC3339Nano, mustAtomicEnv(t, "NTM_ATOMIC_E2E_STARTED_AT"))
+	if err != nil {
+		t.Fatalf("parse dispatch start time: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(beadID, key, startedAt); err != nil {
+		t.Fatalf("record dispatch start: %v", err)
+	}
+	stored := store.Get(beadID)
+	if stored == nil {
+		t.Fatalf("dispatch-start assignment %s disappeared", beadID)
+	}
+	writeAtomicHelperResult(t, atomicHelperResult{
+		Status:           stored.Status,
+		DispatchState:    stored.DispatchState,
+		DispatchAttempts: stored.DispatchAttempts,
+	})
+}
+
+func runAtomicStaleMutationHelper(t *testing.T, store *assignment.AssignmentStore) {
+	beadID := mustAtomicEnv(t, "NTM_ATOMIC_E2E_BEAD")
+	operation := mustAtomicEnv(t, "NTM_ATOMIC_E2E_MUTATION")
+	var mutationErr error
+	switch operation {
+	case "remove":
+		mutationErr = store.Remove(beadID)
+	case "clear":
+		mutationErr = store.Clear()
+	case "reassign":
+		_, mutationErr = store.Reassign(beadID, 9, "claude", "ClaudeNine")
+	default:
+		t.Fatalf("unknown stale mutation %q", operation)
+	}
+
+	result := atomicHelperResult{}
+	if mutationErr != nil {
+		result.Error = mutationErr.Error()
+		result.ErrorKind = atomicErrorKind(mutationErr)
+	}
+	writeAtomicHelperResult(t, result)
+	if mutationErr != nil {
+		t.Errorf("stale %s rejected: %v", operation, mutationErr)
 	}
 }
 
@@ -362,7 +413,10 @@ func atomicCrashAt(configured, boundary string) {
 }
 
 func atomicErrorKind(err error) string {
+	var concurrentMutation *assignment.ConcurrentMutationError
 	switch {
+	case errors.As(err, &concurrentMutation):
+		return "concurrent_mutation"
 	case errors.Is(err, assignment.ErrClaimConflict):
 		return "claim_conflict"
 	case errors.Is(err, assignment.ErrTargetOccupied):
@@ -480,9 +534,26 @@ func runAtomicHelper(t *testing.T, env map[string]string) atomicHelperResult {
 
 func (p *atomicHelperProcess) wait(t *testing.T) atomicHelperResult {
 	t.Helper()
-	if err := p.cmd.Wait(); err != nil {
+	result, err := p.waitResult(t)
+	if err != nil {
 		t.Fatalf("atomic helper failed: %v\n%s", err, p.output.String())
 	}
+	return result
+}
+
+func (p *atomicHelperProcess) waitForFailure(t *testing.T) atomicHelperResult {
+	t.Helper()
+	result, err := p.waitResult(t)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+		t.Fatalf("atomic helper exit = %v, want nonzero\n%s", err, p.output.String())
+	}
+	return result
+}
+
+func (p *atomicHelperProcess) waitResult(t *testing.T) (atomicHelperResult, error) {
+	t.Helper()
+	processErr := p.cmd.Wait()
 	data, err := os.ReadFile(p.resultPath)
 	if err != nil {
 		t.Fatalf("read atomic helper result: %v\n%s", err, p.output.String())
@@ -491,7 +562,7 @@ func (p *atomicHelperProcess) wait(t *testing.T) atomicHelperResult {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatalf("decode atomic helper result: %v\nraw=%s\n%s", err, data, p.output.String())
 	}
-	return result
+	return result, processErr
 }
 
 func (p *atomicHelperProcess) waitForExit(t *testing.T, want int) {
@@ -755,6 +826,78 @@ func TestAtomicAssignmentE2E_ProcessContentionAndStaleBaselineMerge(t *testing.T
 			t.Fatalf("same-key external boundaries=%+v, want claims=1 reservations=0 dispatches=1 actuations=1", effects)
 		}
 	})
+}
+
+func TestAtomicAssignmentE2E_StaleDestructiveProcessCannotEraseDispatchBarrier(t *testing.T) {
+	mutations := []string{"remove", "clear", "reassign"}
+	for index, mutation := range mutations {
+		t.Run(mutation, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			syncDir := t.TempDir()
+			ready := filepath.Join(syncDir, "stale-ready")
+			gate := filepath.Join(syncDir, "stale-gate")
+			session := fmt.Sprintf("atomic-e2e-stale-destructive-%s", mutation)
+			beadID := fmt.Sprintf("ntm-stale-destructive-%s", mutation)
+			key := fmt.Sprintf("stale-destructive-key-%s", mutation)
+			startedAt := time.Date(2026, 7, 11, 15, index, 0, index+1, time.UTC)
+
+			request := assignment.AtomicRequest{
+				BeadID: beadID, BeadTitle: "stale destructive mutation", Target: "%17", OccupancyKey: "%17", Pane: 2,
+				AgentType: "codex", AgentName: "CodexTwo", Actor: "AtomicE2E", Prompt: "continue", IdempotencyKey: key,
+			}
+			actor := assignment.StableClaimActor(request.Actor, key)
+			store := assignment.NewStore(session)
+			if _, err := store.RecordAtomicIntent(request, actor, startedAt.Add(-time.Minute)); err != nil {
+				t.Fatalf("seed atomic intent: %v", err)
+			}
+			if _, err := store.RecordAtomicClaim(request, assignment.ClaimReceipt{
+				BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: startedAt.Add(-30 * time.Second),
+			}); err != nil {
+				t.Fatalf("seed atomic claim: %v", err)
+			}
+			if err := store.UpdateStatus(beadID, assignment.StatusAssigned); err != nil {
+				t.Fatalf("seed assigned status: %v", err)
+			}
+			if err := store.MarkWorking(beadID); err != nil {
+				t.Fatalf("seed working status: %v", err)
+			}
+
+			staleProcess := startAtomicHelper(t, map[string]string{
+				"HOME": home, "NTM_ATOMIC_E2E_OPERATION": "stale-mutation", "NTM_ATOMIC_E2E_SESSION": session,
+				"NTM_ATOMIC_E2E_BEAD": beadID, "NTM_ATOMIC_E2E_MUTATION": mutation,
+				"NTM_ATOMIC_E2E_READY": ready, "NTM_ATOMIC_E2E_GATE": gate,
+			})
+			waitForAtomicFiles(t, ready)
+
+			barrier := runAtomicHelper(t, map[string]string{
+				"HOME": home, "NTM_ATOMIC_E2E_OPERATION": "dispatch-start", "NTM_ATOMIC_E2E_SESSION": session,
+				"NTM_ATOMIC_E2E_BEAD": beadID, "NTM_ATOMIC_E2E_KEY": key,
+				"NTM_ATOMIC_E2E_STARTED_AT": startedAt.Format(time.RFC3339Nano),
+			})
+			if barrier.DispatchState != assignment.DispatchSending || barrier.DispatchAttempts != 1 || barrier.Status != assignment.StatusWorking {
+				t.Fatalf("dispatch barrier helper result=%+v, want working/sending attempt 1", barrier)
+			}
+
+			if err := os.WriteFile(gate, []byte("mutate"), 0o600); err != nil {
+				t.Fatalf("release stale mutation helper: %v", err)
+			}
+			staleResult := staleProcess.waitForFailure(t)
+			if staleResult.ErrorKind != "concurrent_mutation" || !strings.Contains(staleResult.Error, beadID) {
+				t.Fatalf("stale %s result=%+v, want typed concurrent mutation conflict", mutation, staleResult)
+			}
+
+			finalStore, err := assignment.LoadStoreStrict(session)
+			if err != nil {
+				t.Fatalf("reload ledger after stale %s: %v", mutation, err)
+			}
+			final := finalStore.Get(beadID)
+			if final == nil || final.IdempotencyKey != key || final.DispatchState != assignment.DispatchSending ||
+				final.DispatchAttempts != 1 || final.DispatchStartedAt == nil || !final.DispatchStartedAt.Equal(startedAt) {
+				t.Fatalf("ledger after stale %s=%+v, want key %q and original sending barrier", mutation, final, key)
+			}
+		})
+	}
 }
 
 func TestAtomicAssignmentE2E_DurableRetryReplayAndCompletionTarget(t *testing.T) {
