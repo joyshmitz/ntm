@@ -2,12 +2,14 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/archive"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
@@ -239,7 +241,12 @@ func TestResolveProjectDir_ExplicitUsesSavedSessionAgentProject(t *testing.T) {
 		_ = os.Chdir(origWd)
 	})
 
-	cfg = &config.Config{ProjectsBase: t.TempDir()}
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	session := fmt.Sprintf("saved-project-%d", time.Now().UnixNano())
+	if err := os.MkdirAll(filepath.Join(projectsBase, session+"-prefix"), 0o755); err != nil {
+		t.Fatalf("mkdir competing configured prefix: %v", err)
+	}
 
 	wd := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(wd, ".git"), 0o755); err != nil {
@@ -253,9 +260,13 @@ func TestResolveProjectDir_ExplicitUsesSavedSessionAgentProject(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(actualProject, ".git"), 0o755); err != nil {
 		t.Fatalf("mkdir actual git: %v", err)
 	}
-	saveSessionAgentForTest(t, "ntm", actualProject, "GreenCastle")
+	saveSessionAgentForTest(t, session, actualProject, "GreenCastle")
+	saved, err := agentmail.LoadBestSessionAgent(session)
+	if err != nil || saved == nil || saved.ProjectKey != actualProject {
+		t.Fatalf("saved session agent lookup = %+v, err=%v", saved, err)
+	}
 
-	got, err := resolveProjectDir("ntm", wd, true)
+	got, err := resolveProjectDir(session, wd, true)
 	if err != nil {
 		t.Fatalf("resolveProjectDir() error = %v", err)
 	}

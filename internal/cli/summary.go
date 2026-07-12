@@ -251,6 +251,15 @@ func parseSummaryFormat(format string) (summary.SummaryFormat, bool, error) {
 func resolveProjectDir(session, wd string, explicit bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
+		if explicit {
+			// A persisted mapping for the exact name is stronger than prefix
+			// convenience. Otherwise an exact offline session such as "foo"
+			// can silently drift to an unrelated live/configured "foo-*".
+			_, _, savedProject := projectDirCandidatesForSession(session, false)
+			if dir := bestUsableProjectDir(savedProject); dir != "" {
+				return dir, nil
+			}
+		}
 		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
 		if err != nil {
 			return "", err
