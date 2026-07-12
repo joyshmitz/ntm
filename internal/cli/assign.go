@@ -62,7 +62,7 @@ var (
 
 	// Clear assignment flags
 	assignClear       string // Clear specific bead assignments (comma-separated)
-	assignClearPane   int    // Clear all assignments for a pane (-1 = disabled)
+	assignClearPane   string // Clear all assignments for one canonical pane selector
 	assignClearFailed bool   // Clear all failed assignments
 
 	// Watch mode flags for continuous auto-assignment
@@ -74,7 +74,7 @@ var (
 
 	// Reassignment flags for moving beads between agents
 	assignReassign string // Bead ID to reassign
-	assignToPane   int    // Target pane for reassignment (-1 = not specified)
+	assignToPane   string // Target pane selector for reassignment/retry
 	assignToType   string // Target agent type (auto-select idle agent of this type)
 
 	// Retry flags for retrying failed assignments
@@ -92,8 +92,9 @@ const assignWatchOverlayKey = "F12"
 
 var collectAssignAllocationPressure = collectLiveAssignAllocationPressure
 var (
-	claimBeadForAssignment     = bv.ClaimBead
-	getBeadStatusForAssignment = bv.GetBeadStatus
+	claimBeadForAssignment        = bv.ClaimBead
+	releaseBeadClaimForAssignment = bv.ReleaseBeadClaim
+	getBeadStatusForAssignment    = bv.GetBeadStatus
 )
 
 type assignSessionObserver interface {
@@ -240,7 +241,7 @@ Examples:
 
 	// Clear assignment flags
 	cmd.Flags().StringVar(&assignClear, "clear", "", "Clear specific bead assignments (comma-separated bead IDs)")
-	cmd.Flags().IntVar(&assignClearPane, "clear-pane", -1, "Clear all assignments for a pane (use when agent crashed)")
+	cmd.Flags().StringVar(&assignClearPane, "clear-pane", "", "Clear all assignments for one pane (N, W.P, or %N; use when agent crashed)")
 	cmd.Flags().BoolVar(&assignClearFailed, "clear-failed", false, "Clear all failed assignments")
 
 	// Watch mode flags
@@ -252,7 +253,7 @@ Examples:
 
 	// Reassignment flags for moving beads between agents
 	cmd.Flags().StringVar(&assignReassign, "reassign", "", "Bead ID to reassign to a different agent")
-	cmd.Flags().IntVar(&assignToPane, "to-pane", -1, "Target pane for reassignment (use with --reassign)")
+	cmd.Flags().StringVar(&assignToPane, "to-pane", "", "Target pane N, W.P, or %N for reassignment/retry")
 	cmd.Flags().StringVar(&assignToType, "to-type", "", "Target agent type for reassignment: claude, codex, gemini (auto-selects idle agent)")
 
 	// Retry flags for retrying failed assignments
@@ -266,6 +267,21 @@ Examples:
 }
 
 func resolveAssignProjectDir(session string) (string, error) {
+	if explicit := strings.TrimSpace(assignRepoPath); explicit != "" {
+		abs, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", fmt.Errorf("--repo %q: %w", assignRepoPath, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return "", fmt.Errorf("--repo %q is not accessible: %w", assignRepoPath, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("--repo %q is not a directory", assignRepoPath)
+		}
+		return filepath.Clean(abs), nil
+	}
+
 	session = strings.TrimSpace(session)
 	if session != "" {
 		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
@@ -308,30 +324,8 @@ func runAssign(cmd *cobra.Command, args []string) error {
 	// daemon callers (launchd, cron, systemd) can guarantee a stable bead
 	// source regardless of where the watcher was launched from.
 	projectDir, err := resolveAssignProjectDir(session)
-	if err != nil && assignRepoPath == "" {
+	if err != nil {
 		return err
-	}
-	if assignRepoPath != "" {
-		abs, absErr := filepath.Abs(assignRepoPath)
-		if absErr != nil {
-			return fmt.Errorf("--repo %q: %w", assignRepoPath, absErr)
-		}
-		info, statErr := os.Stat(abs)
-		if statErr != nil {
-			return fmt.Errorf("--repo %q is not accessible: %w", assignRepoPath, statErr)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("--repo %q is not a directory", assignRepoPath)
-		}
-		projectDir = abs
-	}
-	// Bind every downstream bv/bd CWD-walk to the resolved project directory
-	// so the same `ntm assign <session>` call returns identical ready-bead
-	// sets regardless of the caller's shell location.
-	if projectDir != "" {
-		if chErr := os.Chdir(projectDir); chErr != nil {
-			return fmt.Errorf("chdir to project dir %q: %w", projectDir, chErr)
-		}
 	}
 	if cfg != nil {
 		redactCfg := cfg.Redaction.ToRedactionLibConfig()
@@ -358,7 +352,7 @@ func runAssign(cmd *cobra.Command, args []string) error {
 	}
 
 	// Handle clear operations first
-	if assignClear != "" || assignClearPane >= 0 || assignClearFailed {
+	if assignClear != "" || strings.TrimSpace(assignClearPane) != "" || assignClearFailed {
 		return runClearAssignments(cmd, session)
 	}
 
@@ -374,7 +368,7 @@ func runAssign(cmd *cobra.Command, args []string) error {
 
 	// Handle watch mode for continuous auto-assignment
 	if assignWatch {
-		return runWatchMode(cmd, session)
+		return runWatchMode(cmd, session, projectDir)
 	}
 
 	// BV is preferred for dependency-aware assignment, but we can fall back to bd-ready
@@ -400,6 +394,7 @@ func runAssign(cmd *cobra.Command, args []string) error {
 	// Build assign options
 	assignOpts := &AssignCommandOptions{
 		Session:         session,
+		ProjectDir:      projectDir,
 		BeadIDs:         beadIDs,
 		Strategy:        assignStrategy,
 		Limit:           assignLimit,
@@ -469,13 +464,14 @@ func runAssign(cmd *cobra.Command, args []string) error {
 // runWatchMode implements the --watch flag for continuous auto-assignment.
 // It monitors for task completions and automatically assigns newly unblocked
 // work to idle agents, with streaming output and graceful shutdown.
-func runWatchMode(cmd *cobra.Command, session string) error {
+func runWatchMode(cmd *cobra.Command, session, projectDir string) error {
 	// Resolve agent type filter from flags
 	agentTypeFilter := resolveAgentTypeFilter()
 
 	// Build auto-reassign options
 	opts := &AutoReassignOptions{
 		Session:         session,
+		ProjectDir:      projectDir,
 		Strategy:        assignStrategy,
 		Template:        assignTemplate,
 		TemplateFile:    assignTemplateFile,
@@ -533,6 +529,7 @@ func runWatchMode(cmd *cobra.Command, session string) error {
 
 	assignOpts := &AssignCommandOptions{
 		Session:         session,
+		ProjectDir:      projectDir,
 		Strategy:        assignStrategy,
 		Limit:           assignLimit,
 		AgentTypeFilter: agentTypeFilter,
@@ -878,6 +875,7 @@ func resolveAssignTimeout(timeout time.Duration) time.Duration {
 // AssignCommandOptions holds all options for the assign command
 type AssignCommandOptions struct {
 	Session         string
+	ProjectDir      string
 	BeadIDs         []string
 	Strategy        string
 	Limit           int
@@ -897,7 +895,7 @@ type AssignCommandOptions struct {
 
 	// Clear assignment options
 	Clear     string // Clear specific bead assignments (comma-separated)
-	ClearPane int    // Clear all assignments for a pane (-1 = disabled)
+	ClearPane string // Clear all assignments for one canonical pane selector
 }
 
 // AssignOutputEnhanced is the enhanced output structure matching the spec.
@@ -1052,8 +1050,14 @@ func getAssignOutput(opts robot.AssignOptions) (*robot.AssignOutput, error) {
 	}
 
 	// Get beads from bv
-	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 50)
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		projectDir, err = resolveAssignProjectDir(opts.Session)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve assignment project: %w", err)
+	}
+	readyBeads := bv.GetReadyPreview(projectDir, 50)
 
 	// Filter to specific beads if requested
 	if len(opts.Beads) > 0 {
@@ -1597,6 +1601,15 @@ func runAssignJSON(opts *AssignCommandOptions) error {
 
 // getAssignOutputEnhanced builds the enhanced assignment output
 func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced, error) {
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		var err error
+		projectDir, err = resolveAssignProjectDir(opts.Session)
+		if err != nil {
+			return nil, fmt.Errorf("resolve assignment project: %w", err)
+		}
+		opts.ProjectDir = projectDir
+	}
 	if !tmux.SessionExists(opts.Session) {
 		return nil, fmt.Errorf("session '%s' not found", opts.Session)
 	}
@@ -1653,8 +1666,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 	// large/heavily-gated backlogs whose top-ranked rows are epics/gated/blocked
 	// (issue #197). Triage still provides ordering and the rich BlockedBy/Labels
 	// fields the filters below rely on.
-	wd, _ := os.Getwd()
-	allRecs, err := bv.GetActionableRecommendations(wd, 100)
+	allRecs, err := bv.GetActionableRecommendations(projectDir, 100)
 
 	// Enhanced error handling for BV unavailability and stale graphs
 	var readyBeads []bv.BeadPreview
@@ -1672,7 +1684,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 		}
 
 		// Fallback 1: Try BV insights to at least get cycle information
-		cycles, cycleErr := CheckCycles(false)
+		cycles, cycleErr := CheckCycles(projectDir, false)
 		if cycleErr == nil && len(cycles) > 0 {
 			if opts.Verbose {
 				fmt.Fprintf(os.Stderr, "[DEP] Got cycle info from BV insights, filtering %d cycles\n", len(cycles))
@@ -1680,7 +1692,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 		}
 
 		// Fallback 2: Use GetReadyPreview (no dependency info)
-		readyBeads = bv.GetReadyPreview(wd, 50)
+		readyBeads = bv.GetReadyPreview(projectDir, 50)
 		if len(readyBeads) == 0 {
 			if opts.Verbose {
 				fmt.Fprintf(os.Stderr, "[DEP] No beads available from br list either\n")
@@ -1689,7 +1701,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 
 		// Apply cycle filtering to fallback beads if we have cycle info
 		if len(cycles) > 0 {
-			filteredBeads, excluded := FilterCyclicBeads(readyBeads, false)
+			filteredBeads, excluded := FilterCyclicBeads(projectDir, readyBeads, false)
 			for i := 0; i < excluded; i++ {
 				// Add excluded beads to skipped list
 				for _, bead := range readyBeads {
@@ -1760,7 +1772,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 	// Filter out beads in dependency cycles (with warning)
 	var cycleWarnings int
 	var cyclicBeads []SkippedItem
-	cycles, _ := CheckCycles(false)
+	cycles, _ := CheckCycles(projectDir, false)
 	if len(cycles) > 0 {
 		var nonCyclic []bv.BeadPreview
 		for _, bead := range readyBeads {
@@ -2561,6 +2573,22 @@ func resolveAssignmentItemPane(panes []tmux.Pane, item AssignmentItem) (tmux.Pan
 	return matches[0], nil
 }
 
+func resolvePendingAssignmentPane(panes []tmux.Pane, pending assignment.Assignment) (tmux.Pane, error) {
+	physicalID := strings.TrimSpace(pending.OccupancyKey)
+	if !strings.HasPrefix(physicalID, "%") {
+		physicalID = strings.TrimSpace(pending.DispatchTarget)
+	}
+	if !strings.HasPrefix(physicalID, "%") {
+		return tmux.Pane{}, fmt.Errorf("pending assignment has no canonical physical pane ID")
+	}
+	for _, pane := range panes {
+		if pane.ID == physicalID {
+			return pane, nil
+		}
+	}
+	return tmux.Pane{}, fmt.Errorf("original physical pane %s is unavailable; refusing to transfer an atomic claim", physicalID)
+}
+
 // executeAssignmentsEnhanced sends assignments to agents and tracks them
 func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts *AssignCommandOptions) error {
 	if !opts.Quiet {
@@ -2574,9 +2602,13 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 	if err != nil {
 		return fmt.Errorf("load assignment store: %w", err)
 	}
-	projectDir, err := resolveAssignProjectDir(session)
-	if err != nil {
-		return fmt.Errorf("resolve bead project for atomic claim: %w", err)
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		projectDir, err = resolveAssignProjectDir(session)
+		if err != nil {
+			return fmt.Errorf("resolve bead project for atomic claim: %w", err)
+		}
+		opts.ProjectDir = projectDir
 	}
 
 	// Set up file reservation manager if enabled
@@ -2597,7 +2629,7 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 			fmt.Println("  File reservation enabled via Agent Mail")
 		}
 	}
-	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr)
+	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr, opts.Force)
 
 	var successCount, failCount, reservedCount int
 
@@ -2736,7 +2768,7 @@ func executeAssignmentsEnhanced(session string, out *AssignOutputEnhanced, opts 
 	return nil
 }
 
-func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projectDir string, reservationMgr *assign.FileReservationManager) *assignment.AtomicCoordinator {
+func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projectDir string, reservationMgr *assign.FileReservationManager, allowBusy ...bool) *assignment.AtomicCoordinator {
 	claimPort := assignment.ClaimFunc(func(ctx context.Context, beadID, actor string) (assignment.ClaimReceipt, error) {
 		claim, err := claimBeadForAssignment(ctx, projectDir, beadID, actor)
 		if err != nil {
@@ -2755,46 +2787,102 @@ func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projec
 
 	var reservationPort assignment.ReservationPort
 	if reservationMgr != nil {
-		reservationPort = assignment.ReservationFunc(func(ctx context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
-			result, err := reservationMgr.ReserveForBead(ctx, req.BeadID, req.BeadTitle, "", req.AgentName)
-			lease := assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target}
-			if result != nil {
-				lease.Requested = append([]string(nil), result.RequestedPaths...)
-				lease.Granted = append([]string(nil), result.GrantedPaths...)
-				lease.ReservationIDs = append([]int(nil), result.ReservationIDs...)
-				if result.ExpiresAt != nil {
-					expiresAt := *result.ExpiresAt
-					lease.ExpiresAt = &expiresAt
-				}
-				if len(result.Conflicts) > 0 {
-					paths := make([]string, 0, len(result.Conflicts))
-					for _, conflict := range result.Conflicts {
-						paths = append(paths, conflict.Path)
-					}
-					return lease, fmt.Errorf("file reservation conflicts: %s", strings.Join(paths, ", "))
-				}
-				if !result.Success && strings.TrimSpace(result.Error) != "" {
-					return lease, errors.New(result.Error)
-				}
-			}
-			return lease, err
-		})
+		reservationPort = &cliAtomicReservationPort{manager: reservationMgr}
 	}
 
 	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
 	if cfg != nil {
 		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
 	}
-	dispatchPort := &cliAtomicPaneDispatchPort{session: store.SessionName, redactionConfig: redactionConfig}
+	bypassIdleGate := len(allowBusy) > 0 && allowBusy[0]
+	dispatchPort := &cliAtomicPaneDispatchPort{
+		session:         store.SessionName,
+		redactionConfig: redactionConfig,
+		observer:        newAssignSessionObserver(),
+		bypassIdleGate:  bypassIdleGate,
+	}
 	return assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
 		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
 			return getBeadStatusForAssignment(projectDir, beadID)
 		}))
 }
 
+type cliAtomicReservationPort struct {
+	manager *assign.FileReservationManager
+}
+
+func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+	if p == nil || p.manager == nil {
+		return assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target}, assignment.GuaranteeNoReservation(errors.New("file reservation manager is not configured"))
+	}
+	result, err := p.manager.ReserveForBead(ctx, req.BeadID, req.BeadTitle, "", req.AgentName)
+	return classifyCLIReservationAttempt(req, result, err)
+}
+
+func (p *cliAtomicReservationPort) ReconcileReservation(ctx context.Context, req assignment.ReservationRequest, _ assignment.LeaseReceipt) (assignment.ReservationReconciliation, error) {
+	requested := append([]string(nil), req.RequestedPaths...)
+	if len(requested) == 0 {
+		requested = assign.ExtractFilePaths(req.BeadTitle, "")
+	}
+	if p == nil || p.manager == nil {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, errors.New("file reservation manager is not configured")
+	}
+	result, err := p.manager.ReconcileForBead(ctx, req.BeadID, req.AgentName, requested)
+	lease, _ := classifyCLIReservationAttempt(req, result, err)
+	if err != nil {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, err
+	}
+	if len(lease.ReservationIDs) == 0 && len(lease.Granted) == 0 {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationAbsent, Lease: lease}, nil
+	}
+	// Any durable handle proves a lease exists. The atomic coordinator validates
+	// completeness and persists partial handles as release-required state.
+	return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationReserved, Lease: lease}, nil
+}
+
+func classifyCLIReservationAttempt(req assignment.ReservationRequest, result *assign.FileReservationResult, reservationErr error) (assignment.LeaseReceipt, error) {
+	lease := assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target}
+	var knownFailure error
+	if result != nil {
+		lease.Requested = append([]string(nil), result.RequestedPaths...)
+		lease.Granted = append([]string(nil), result.GrantedPaths...)
+		lease.ReservationIDs = append([]int(nil), result.ReservationIDs...)
+		if result.ExpiresAt != nil {
+			expiresAt := *result.ExpiresAt
+			lease.ExpiresAt = &expiresAt
+		}
+		if len(result.Conflicts) > 0 {
+			paths := make([]string, 0, len(result.Conflicts))
+			for _, conflict := range result.Conflicts {
+				paths = append(paths, conflict.Path)
+			}
+			knownFailure = fmt.Errorf("file reservation conflicts: %s", strings.Join(paths, ", "))
+		} else if !result.Success && reservationErr == nil {
+			message := strings.TrimSpace(result.Error)
+			if message == "" {
+				message = "file reservation was not granted"
+			}
+			knownFailure = errors.New(message)
+		}
+	}
+	hasHandles := len(lease.ReservationIDs) > 0 || len(lease.Granted) > 0
+	if knownFailure != nil {
+		if hasHandles {
+			return lease, assignment.RequireReservationRelease(knownFailure)
+		}
+		return lease, assignment.GuaranteeNoReservation(knownFailure)
+	}
+	if reservationErr != nil && hasHandles {
+		return lease, assignment.RequireReservationRelease(reservationErr)
+	}
+	return lease, reservationErr
+}
+
 type cliAtomicPaneDispatchPort struct {
 	session         string
 	redactionConfig redaction.Config
+	observer        assignSessionObserver
+	bypassIdleGate  bool
 }
 
 func (p *cliAtomicPaneDispatchPort) prepare(ctx context.Context, req assignment.DispatchRequest) (*dispatchsvc.Service, *dispatchsvc.Prepared, error) {
@@ -2836,6 +2924,23 @@ func (p *cliAtomicPaneDispatchPort) Preflight(ctx context.Context, req assignmen
 
 func (p *cliAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignment.DispatchRequest) (assignment.DispatchReceipt, error) {
 	started := time.Now()
+	if !p.bypassIdleGate {
+		observer := p.observer
+		if observer == nil {
+			observer = newAssignSessionObserver()
+		}
+		observation, observeErr := observer.Observe(ctx, p.session)
+		if observeErr != nil {
+			return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(
+				fmt.Errorf("fresh dispatch observation for pane %s: %w", req.Target, observeErr),
+			)
+		}
+		if !observation.SafeToDispatch(req.Target) {
+			return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(
+				fmt.Errorf("pane %s is not freshly and confidently idle at dispatch", req.Target),
+			)
+		}
+	}
 	service, prepared, prepareErr := p.prepare(ctx, req)
 	if prepareErr != nil {
 		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(prepareErr)
@@ -3174,10 +3279,11 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	if err != nil {
 		return fmt.Errorf("resolve bead project for atomic retry: %w", err)
 	}
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
 
 	// Process each failed assignment
-	var retriedItems []RetryItem
-	var skippedItems []RetrySkippedItem
+	retriedItems := make([]RetryItem, 0, len(failedAssignments))
+	skippedItems := make([]RetrySkippedItem, 0, len(failedAssignments))
 	var warnings []string
 
 	for _, failed := range failedAssignments {
@@ -3189,36 +3295,50 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			failed.IdempotencyKey != "" && failed.ClaimActor != "" && failed.PendingPrompt != ""
 
 		if recoverAtomic {
-			for i := range panes {
-				if panes[i].ID == failed.DispatchTarget || panes[i].Index == failed.Pane {
-					targetPane = &panes[i]
-					targetAgentType = failed.AgentType
-					break
-				}
-			}
-			if targetPane == nil {
+			resolvedPane, resolveErr := resolvePendingAssignmentPane(panes, failed)
+			if resolveErr != nil {
 				skippedItems = append(skippedItems, RetrySkippedItem{
 					BeadID: failed.BeadID,
-					Reason: fmt.Sprintf("original pane %d is unavailable; refusing to transfer an atomic claim", failed.Pane),
+					Reason: resolveErr.Error(),
 				})
 				continue
 			}
-		} else if assignToPane >= 0 {
-			// Specific pane requested
-			for i := range panes {
-				if panes[i].Index == assignToPane {
-					targetPane = &panes[i]
-					targetAgentType = string(panes[i].Type)
-					break
-				}
-			}
-			if targetPane == nil {
+			resolvedAgentType := agentTypeForPane(resolvedPane)
+			if resolvedAgentType == "user" || resolvedAgentType == "unknown" {
 				skippedItems = append(skippedItems, RetrySkippedItem{
 					BeadID: failed.BeadID,
-					Reason: fmt.Sprintf("target pane %d not found", assignToPane),
+					Reason: fmt.Sprintf("pending atomic recovery target %s is not an agent pane (type: %s)", assignmentPaneTarget(resolvedPane), resolvedAgentType),
 				})
 				continue
 			}
+			if selector := strings.TrimSpace(assignToPane); selector != "" {
+				requestedPane, _, selectorErr := resolveDirectAssignmentPane(panes, selector)
+				if selectorErr != nil {
+					skippedItems = append(skippedItems, RetrySkippedItem{BeadID: failed.BeadID, Reason: selectorErr.Error()})
+					continue
+				}
+				if requestedPane.ID != resolvedPane.ID {
+					skippedItems = append(skippedItems, RetrySkippedItem{
+						BeadID: failed.BeadID,
+						Reason: fmt.Sprintf("pending atomic recovery is bound to pane %s and cannot retarget to %s", assignmentPaneTarget(resolvedPane), assignmentPaneTarget(requestedPane)),
+					})
+					continue
+				}
+			}
+			targetPane = &resolvedPane
+			targetAgentType = failed.AgentType
+		} else if selector := strings.TrimSpace(assignToPane); selector != "" {
+			// Specific physical pane requested.
+			resolvedPane, _, resolveErr := resolveDirectAssignmentPane(panes, selector)
+			if resolveErr != nil {
+				skippedItems = append(skippedItems, RetrySkippedItem{
+					BeadID: failed.BeadID,
+					Reason: resolveErr.Error(),
+				})
+				continue
+			}
+			targetPane = &resolvedPane
+			targetAgentType = agentTypeForPane(resolvedPane)
 		} else if assignToType != "" {
 			// Specific agent type requested - find idle agent of that type
 			for i := range idleAgents {
@@ -3250,9 +3370,19 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			targetAgentType = idleAgents[0].agentType
 			idleAgents = idleAgents[1:]
 		}
+		if targetAgentType == "" {
+			targetAgentType = agentTypeForPane(*targetPane)
+		}
+		if targetAgentType == "user" || targetAgentType == "unknown" {
+			skippedItems = append(skippedItems, RetrySkippedItem{
+				BeadID: failed.BeadID,
+				Reason: fmt.Sprintf("pane %s is not an agent pane (type: %s)", assignmentPaneTarget(*targetPane), targetAgentType),
+			})
+			continue
+		}
 
 		// Check if target pane already has an active assignment
-		existingAssignment := findAssignmentForPane(store, targetPane.Index)
+		existingAssignment := findAssignmentForPhysicalPane(store, *targetPane, multiWindow)
 		if existingAssignment != nil && existingAssignment.BeadID != failed.BeadID {
 			skippedItems = append(skippedItems, RetrySkippedItem{
 				BeadID: failed.BeadID,
@@ -3264,12 +3394,16 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 		// Get bead title if not stored
 		beadTitle := failed.BeadTitle
 		if beadTitle == "" {
-			beadTitle = getBeadTitle(failed.BeadID)
+			beadTitle, err = getBeadTitle(projectDir, failed.BeadID)
+			if err != nil {
+				skippedItems = append(skippedItems, RetrySkippedItem{BeadID: failed.BeadID, Reason: fmt.Sprintf("look up bead title: %v", err)})
+				continue
+			}
 		}
 
 		// Recover known-unsent work with the original actor/key/target. Legacy
 		// failed records get a fresh intent and must win the same atomic claim.
-		newAgentName := fmt.Sprintf("%s-%d", targetAgentType, targetPane.Index)
+		newAgentName := assignmentAgentNameForPane(session, targetAgentType, *targetPane, multiWindow)
 		prompt := expandPromptTemplate(failed.BeadID, beadTitle, assignTemplate, assignTemplateFile)
 		actor := newAgentName
 		idempotencyKey := ""
@@ -3307,6 +3441,13 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 		}
 		atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, retryReservationMgr)
 		ctx, cancel := context.WithTimeout(context.Background(), resolveAssignTimeout(assignTimeout))
+		recoveredIntentSHA256 := ""
+		if recoverAtomic {
+			recoveredIntentSHA256 = failed.IntentSHA256
+			if recoveredIntentSHA256 == "" {
+				recoveredIntentSHA256 = failed.PromptSHA256
+			}
+		}
 		atomicResult, assignErr := atomicCoordinator.Execute(ctx, assignment.AtomicRequest{
 			BeadID:                    failed.BeadID,
 			BeadTitle:                 beadTitle,
@@ -3318,6 +3459,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			Actor:                     actor,
 			Prompt:                    prompt,
 			IdempotencyKey:            idempotencyKey,
+			RecoveredIntentSHA256:     recoveredIntentSHA256,
 			RequireReservation:        reservationRequired,
 			AllowReservationDiscovery: reservationDiscovery,
 			ReservationTTL:            time.Hour,
@@ -3361,19 +3503,29 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	if err := store.Save(); err != nil {
 		warnings = append(warnings, fmt.Sprintf("failed to save assignment store: %v", err))
 	}
+	var targetedRetryErr error
+	if assignRetry != "" && len(retriedItems) == 0 && len(skippedItems) == 1 {
+		targetedRetryErr = fmt.Errorf("retry %s was skipped: %s", assignRetry, skippedItems[0].Reason)
+	}
 
 	// Output results
 	if IsJSONOutput() {
+		data := &RetryData{
+			Summary: RetrySummary{
+				TotalFailed:  len(failedAssignments),
+				RetriedCount: len(retriedItems),
+				SkippedCount: len(skippedItems),
+			},
+			Retried: retriedItems,
+			Skipped: skippedItems,
+		}
+		if targetedRetryErr != nil {
+			return emitJSONFailureEnvelope(makeRetryEnvelope(
+				session, false, data, "RETRY_SKIPPED", targetedRetryErr.Error(), warnings,
+			))
+		}
 		return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
-			session, true, &RetryData{
-				Summary: RetrySummary{
-					TotalFailed:  len(failedAssignments),
-					RetriedCount: len(retriedItems),
-					SkippedCount: len(skippedItems),
-				},
-				Retried: retriedItems,
-				Skipped: skippedItems,
-			}, "", "", warnings,
+			session, true, data, "", "", warnings,
 		))
 	}
 
@@ -3392,11 +3544,14 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			fmt.Printf("  Warning: %s\n", w)
 		}
 	}
+	if targetedRetryErr != nil {
+		return targetedRetryErr
+	}
 
 	return nil
 }
 
-// runClearAssignments handles --clear and --clear-pane operations
+// runClearAssignments handles exactly one clear operation.
 func runClearAssignments(cmd *cobra.Command, session string) error {
 	makeClearErrorEnvelope := func(code, msg string) ClearAssignmentsEnvelope {
 		return ClearAssignmentsEnvelope{
@@ -3413,8 +3568,18 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 		}
 	}
 
-	if assignClear != "" && assignClearPane >= 0 {
-		err := fmt.Errorf("cannot use both --clear and --clear-pane at the same time")
+	operationCount := 0
+	if strings.TrimSpace(assignClear) != "" {
+		operationCount++
+	}
+	if strings.TrimSpace(assignClearPane) != "" {
+		operationCount++
+	}
+	if assignClearFailed {
+		operationCount++
+	}
+	if operationCount > 1 {
+		err := fmt.Errorf("use only one of --clear, --clear-pane, or --clear-failed")
 		if IsJSONOutput() {
 			return emitJSONFailureEnvelope(makeClearErrorEnvelope("INVALID_ARGS", err.Error()))
 		}
@@ -3425,8 +3590,12 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 		return runClearSpecificBeads(cmd, session, assignClear)
 	}
 
-	if assignClearPane >= 0 {
+	if strings.TrimSpace(assignClearPane) != "" {
 		return runClearPaneAssignments(cmd, session, assignClearPane)
+	}
+
+	if assignClearFailed {
+		return runClearFailedAssignments(cmd, session)
 	}
 
 	err := fmt.Errorf("no clear operation specified")
@@ -3437,19 +3606,54 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 }
 
 func clearStoredAssignment(ctx context.Context, store *assignment.AssignmentStore, session string, current *assignment.Assignment) ([]string, error) {
+	return clearStoredAssignmentIfStatus(ctx, store, session, current)
+}
+
+func clearStoredAssignmentIfStatus(ctx context.Context, store *assignment.AssignmentStore, session string, current *assignment.Assignment, expected ...assignment.AssignmentStatus) ([]string, error) {
 	if current == nil {
 		return nil, errors.New("assignment is required")
 	}
-	clearing, err := store.BeginClear(ctx, current.BeadID, time.Now().UTC())
+	var clearing *assignment.Assignment
+	var err error
+	if len(expected) == 0 {
+		clearing, err = store.BeginClear(ctx, current.BeadID, time.Now().UTC())
+	} else {
+		clearing, err = store.BeginClearIfStatus(ctx, current.BeadID, time.Now().UTC(), expected...)
+	}
 	if err != nil {
 		return nil, err
 	}
-	released, releaseErr := releaseAssignmentLeases(session, clearing)
-	if releaseErr != nil {
-		if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, releaseErr); persistErr != nil {
-			return nil, errors.Join(releaseErr, fmt.Errorf("persist clear failure: %w", persistErr))
+	var released []string
+	if clearing.ClearState != assignment.ClearStateLeasesReleased {
+		var releaseErr error
+		released, releaseErr = releaseAssignmentLeases(session, clearing)
+		if releaseErr != nil {
+			if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, releaseErr); persistErr != nil {
+				return nil, errors.Join(releaseErr, fmt.Errorf("persist clear failure: %w", persistErr))
+			}
+			return nil, releaseErr
 		}
-		return nil, releaseErr
+		clearing, err = store.RecordClearLeasesReleased(ctx, current.BeadID)
+		if err != nil {
+			return released, fmt.Errorf("persist completed reservation release: %w", err)
+		}
+	}
+	if strings.TrimSpace(clearing.ClaimActor) != "" {
+		projectDir, projectErr := resolveAssignProjectDir(session)
+		if projectErr != nil {
+			claimErr := fmt.Errorf("resolve project for Beads claim release: %w", projectErr)
+			if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, claimErr); persistErr != nil {
+				return released, errors.Join(claimErr, fmt.Errorf("persist clear failure: %w", persistErr))
+			}
+			return released, claimErr
+		}
+		if _, claimErr := releaseBeadClaimForAssignment(ctx, projectDir, clearing.BeadID, clearing.ClaimActor); claimErr != nil {
+			claimErr = fmt.Errorf("release Beads claim for %s: %w", clearing.BeadID, claimErr)
+			if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, claimErr); persistErr != nil {
+				return released, errors.Join(claimErr, fmt.Errorf("persist clear failure: %w", persistErr))
+			}
+			return released, claimErr
+		}
 	}
 	if err := store.CompleteClear(ctx, current.BeadID); err != nil {
 		removalErr := fmt.Errorf("reservations released but assignment removal failed: %w", err)
@@ -3467,31 +3671,52 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 	for i := range beadIDs {
 		beadIDs[i] = strings.TrimSpace(beadIDs[i])
 	}
+	return runClearSelectedAssignments(cmd, session, beadIDs, "clear")
+}
 
-	// Load assignment store
+func runClearFailedAssignments(cmd *cobra.Command, session string) error {
 	store, err := assignment.LoadStoreStrict(session)
 	if err != nil {
-		err = fmt.Errorf("failed to load assignment store: %w", err)
-		if IsJSONOutput() {
-			envelope := ClearAssignmentsEnvelope{
-				Command:    "assign",
-				Subcommand: "clear",
-				Session:    session,
-				Timestamp:  time.Now().UTC().Format(time.RFC3339),
-				Success:    false,
-				Warnings:   []string{},
-				Error: &ClearAssignmentsError{
-					Code:    "STORE_ERROR",
-					Message: err.Error(),
-				},
-			}
-			// bd-oqwmf: signal non-zero exit after the success:false envelope.
-			return emitJSONFailureEnvelope(envelope)
-		}
-		return err
+		return emitClearStoreError(session, "clear-failed", err)
 	}
+	beadIDs := make([]string, 0)
+	for _, current := range store.GetAll() {
+		if current.Status == assignment.StatusFailed {
+			beadIDs = append(beadIDs, current.BeadID)
+		}
+	}
+	return runClearSelectedAssignmentsFromStore(cmd, store, session, beadIDs, "clear-failed")
+}
 
-	var results []ClearAssignmentResult
+func emitClearStoreError(session, subcommand string, storeErr error) error {
+	err := fmt.Errorf("failed to load assignment store: %w", storeErr)
+	if IsJSONOutput() {
+		return emitJSONFailureEnvelope(ClearAssignmentsEnvelope{
+			Command:    "assign",
+			Subcommand: subcommand,
+			Session:    session,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			Success:    false,
+			Warnings:   []string{},
+			Error: &ClearAssignmentsError{
+				Code:    "STORE_ERROR",
+				Message: err.Error(),
+			},
+		})
+	}
+	return err
+}
+
+func runClearSelectedAssignments(cmd *cobra.Command, session string, beadIDs []string, subcommand string) error {
+	store, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		return emitClearStoreError(session, subcommand, err)
+	}
+	return runClearSelectedAssignmentsFromStore(cmd, store, session, beadIDs, subcommand)
+}
+
+func runClearSelectedAssignmentsFromStore(cmd *cobra.Command, store *assignment.AssignmentStore, session string, beadIDs []string, subcommand string) error {
+	results := make([]ClearAssignmentResult, 0, len(beadIDs))
 	successCount := 0
 
 	for _, beadID := range beadIDs {
@@ -3519,7 +3744,13 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 			result.PreviousStatus = string(foundAssignment.Status)
 			result.AssignmentFound = true
 
-			releasedFiles, clearErr := clearStoredAssignment(cmd.Context(), store, session, foundAssignment)
+			var releasedFiles []string
+			var clearErr error
+			if subcommand == "clear-failed" {
+				releasedFiles, clearErr = clearStoredAssignmentIfStatus(cmd.Context(), store, session, foundAssignment, assignment.StatusFailed)
+			} else {
+				releasedFiles, clearErr = clearStoredAssignment(cmd.Context(), store, session, foundAssignment)
+			}
 			if clearErr != nil {
 				result.Success = false
 				result.Error = clearErr.Error()
@@ -3546,7 +3777,7 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 
 		envelope := ClearAssignmentsEnvelope{
 			Command:    "assign",
-			Subcommand: "clear",
+			Subcommand: subcommand,
 			Session:    session,
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
 			Success:    successCount == len(beadIDs),
@@ -3596,11 +3827,35 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 	return nil
 }
 
-// runClearPaneAssignments handles --clear-pane flag (clear all assignments for a pane)
-func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error {
+func assignmentMatchesPhysicalPane(current assignment.Assignment, target tmux.Pane, multiWindow bool) bool {
+	stableKey := assignmentPaneStableKey(target)
+	physicalTarget := assignmentPaneTarget(target)
+	if occupancyKey := strings.TrimSpace(current.OccupancyKey); occupancyKey != "" {
+		return occupancyKey == stableKey || occupancyKey == physicalTarget
+	}
+	if dispatchTarget := strings.TrimSpace(current.DispatchTarget); dispatchTarget != "" {
+		return dispatchTarget == stableKey || dispatchTarget == physicalTarget
+	}
+	if multiWindow {
+		return false
+	}
+	return current.Pane == target.Index
+}
+
+func resolveClearPaneTarget(panes []tmux.Pane, selector string) (tmux.Pane, error) {
+	resolved, err := tmux.ResolvePaneSelectors(panes, []string{selector}, true)
+	if err != nil {
+		return tmux.Pane{}, err
+	}
+	return resolved[0], nil
+}
+
+// runClearPaneAssignments handles --clear-pane for one canonical physical pane.
+func runClearPaneAssignments(cmd *cobra.Command, session, selector string) error {
+	paneDisplay := -1
 	// Helper to create error envelope for clear-pane
 	makeClearPaneErrorEnvelope := func(code, msg string) ClearAssignmentsEnvelope {
-		panePtr := pane
+		panePtr := paneDisplay
 		return ClearAssignmentsEnvelope{
 			Command:    "assign",
 			Subcommand: "clear-pane",
@@ -3626,24 +3881,17 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 		return err
 	}
 
-	// Find the target pane
-	var targetPane *tmux.Pane
-	for i := range panes {
-		if panes[i].Index == pane {
-			targetPane = &panes[i]
-			break
-		}
-	}
-
-	if targetPane == nil {
-		err := fmt.Errorf("pane %d not found in session %s", pane, session)
+	targetPane, err := resolveClearPaneTarget(panes, selector)
+	if err != nil {
+		err = fmt.Errorf("resolve pane %q in session %s: %w", selector, session, err)
 		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeClearPaneErrorEnvelope("PANE_NOT_FOUND", err.Error()))
+			return emitJSONFailureEnvelope(makeClearPaneErrorEnvelope(directPaneSelectorErrorCode(err), err.Error()))
 		}
 		return err
 	}
+	paneDisplay = targetPane.Index
 
-	agentType := agentTypeForPane(*targetPane)
+	agentType := agentTypeForPane(targetPane)
 
 	// Load assignment store
 	store, err := assignment.LoadStoreStrict(session)
@@ -3658,14 +3906,15 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	// Find all assignments for this pane
 	assignments := store.GetAll()
 	var paneAssignments []assignment.Assignment
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
 	for _, a := range assignments {
-		if a.Pane == pane && (a.Status != assignment.StatusCompleted || assignForce) {
+		if assignmentMatchesPhysicalPane(a, targetPane, multiWindow) && (a.Status != assignment.StatusCompleted || assignForce) {
 			paneAssignments = append(paneAssignments, a)
 		}
 	}
 
 	result := ClearAllResult{
-		Pane:      pane,
+		Pane:      targetPane.Index,
 		AgentType: agentType,
 		Success:   true,
 	}
@@ -3716,7 +3965,7 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 			}
 		}
 		failedCount := len(result.ClearedBeads) - successCount
-		panePtr := pane
+		panePtr := targetPane.Index
 		envelope := ClearAssignmentsEnvelope{
 			Command:    "assign",
 			Subcommand: "clear-pane",
@@ -3750,9 +3999,9 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	// Text output
 	if !assignQuiet {
 		if len(paneAssignments) == 0 {
-			fmt.Printf("No active assignments found for pane %d (%s)\n", pane, agentType)
+			fmt.Printf("No active assignments found for pane %s (%s)\n", assignmentPaneTarget(targetPane), agentType)
 		} else {
-			fmt.Printf("Cleared all assignments for pane %d (%s):\n\n", pane, agentType)
+			fmt.Printf("Cleared all assignments for pane %s (%s):\n\n", assignmentPaneTarget(targetPane), agentType)
 			for _, beadResult := range result.ClearedBeads {
 				if beadResult.Success {
 					fmt.Printf("  ✓ %s\n", beadResult.BeadID)
@@ -3767,268 +4016,247 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	}
 
 	if !result.Success {
-		return fmt.Errorf("one or more assignments for pane %d failed to clear", pane)
+		return fmt.Errorf("one or more assignments for pane %s failed to clear", assignmentPaneTarget(targetPane))
 	}
 	return nil
 }
 
-// runReassignment handles the --reassign flag for moving a bead between agents
+// runReassignment handles the --reassign flag for moving a bead between agents.
 func runReassignment(cmd *cobra.Command, session string) error {
 	beadID := strings.TrimSpace(assignReassign)
 	if beadID == "" {
-		err := fmt.Errorf("bead ID required for --reassign")
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
-		}
-		return err
+		return emitReassignFailure(session, "INVALID_ARGS", "bead ID required for --reassign", nil)
+	}
+	paneSelector := strings.TrimSpace(assignToPane)
+	if paneSelector == "" && assignToType == "" {
+		return emitReassignFailure(session, "INVALID_ARGS", "either --to-pane or --to-type must be specified with --reassign", nil)
+	}
+	if paneSelector != "" && assignToType != "" {
+		return emitReassignFailure(session, "INVALID_ARGS", "cannot specify both --to-pane and --to-type", nil)
 	}
 
-	// Validate that either --to-pane or --to-type is specified
-	if assignToPane < 0 && assignToType == "" {
-		err := fmt.Errorf("either --to-pane or --to-type must be specified with --reassign")
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
-		}
-		return err
-	}
-
-	// Cannot specify both --to-pane and --to-type
-	if assignToPane >= 0 && assignToType != "" {
-		err := fmt.Errorf("cannot specify both --to-pane and --to-type")
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
-		}
-		return err
-	}
-
-	// Load assignment store
-	store, err := assignment.LoadStore(session)
+	store, err := assignment.LoadStoreStrict(session)
 	if err != nil {
-		err = fmt.Errorf("failed to load assignment store: %w", err)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "STORE_ERROR", err.Error(), nil))
-		}
-		return err
+		return emitReassignFailure(session, "STORE_ERROR", fmt.Sprintf("failed to load assignment store: %v", err), nil)
 	}
-
-	// Find the current assignment
+	projectDir, err := resolveAssignProjectDir(session)
+	if err != nil {
+		return emitReassignFailure(session, "PROJECT_ERROR", err.Error(), nil)
+	}
 	currentAssignment := store.Get(beadID)
 	if currentAssignment == nil {
-		err = fmt.Errorf("bead %s does not have an active assignment", beadID)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "NOT_ASSIGNED", err.Error(), nil))
-		}
-		return err
+		return emitReassignFailure(session, "NOT_ASSIGNED", fmt.Sprintf("bead %s does not have an active assignment", beadID), nil)
 	}
-
-	// Verify the assignment is in an active state (not completed)
 	if currentAssignment.Status != assignment.StatusWorking {
-		err = fmt.Errorf("bead %s assignment is not reassignable from status %s", beadID, currentAssignment.Status)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_STATE", err.Error(), map[string]interface{}{
-				"current_status": string(currentAssignment.Status),
-			}))
-		}
-		return err
+		return emitReassignFailure(session, "INVALID_STATE", fmt.Sprintf("bead %s assignment is not reassignable from status %s", beadID, currentAssignment.Status), map[string]interface{}{
+			"current_status": string(currentAssignment.Status),
+		})
 	}
 
-	// Get panes from tmux
 	panes, err := tmux.GetPanes(session)
 	if err != nil {
-		err = fmt.Errorf("failed to get panes: %w", err)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
-		}
-		return err
+		return emitReassignFailure(session, "TMUX_ERROR", fmt.Sprintf("failed to get panes: %v", err), nil)
 	}
-
 	var targetPane *tmux.Pane
 	var targetAgentType string
-
-	if assignToPane >= 0 {
-		// Direct pane assignment
-		for i := range panes {
-			if panes[i].Index == assignToPane {
-				targetPane = &panes[i]
-				break
-			}
+	if paneSelector != "" {
+		resolvedPane, _, resolveErr := resolveDirectAssignmentPane(panes, paneSelector)
+		if resolveErr != nil {
+			return emitReassignFailure(session, directPaneSelectorErrorCode(resolveErr), resolveErr.Error(), nil)
 		}
-		if targetPane == nil {
-			err = fmt.Errorf("pane %d not found in session %s", assignToPane, session)
-			if IsJSONOutput() {
-				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
-			}
-			return err
-		}
-		targetAgentType = agentTypeForPane(*targetPane)
+		targetPane = &resolvedPane
+		targetAgentType = agentTypeForPane(resolvedPane)
 		if targetAgentType == "user" || targetAgentType == "unknown" {
-			err = fmt.Errorf("pane %d is not an agent pane (type: %s)", assignToPane, targetAgentType)
-			if IsJSONOutput() {
-				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
-			}
-			return err
+			return emitReassignFailure(session, "PANE_NOT_FOUND", fmt.Sprintf("pane %s is not an agent pane (type: %s)", assignmentPaneTarget(resolvedPane), targetAgentType), nil)
 		}
 	} else {
-		// Find idle agent of specified type
-		idleAgents, err := getIdleAgents(session, assignToType, assignVerbose)
-		if err != nil {
-			if IsJSONOutput() {
-				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
-			}
-			return err
+		idleAgents, idleErr := getIdleAgents(session, assignToType, assignVerbose)
+		if idleErr != nil {
+			return emitReassignFailure(session, "TMUX_ERROR", idleErr.Error(), nil)
 		}
 		if len(idleAgents) == 0 {
-			err = fmt.Errorf("no idle %s agents available", assignToType)
-			if IsJSONOutput() {
-				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "NO_IDLE_AGENT", err.Error(), map[string]interface{}{
-					"agent_type": assignToType,
-				}))
-			}
-			return err
+			return emitReassignFailure(session, "NO_IDLE_AGENT", fmt.Sprintf("no idle %s agents available", assignToType), map[string]interface{}{"agent_type": assignToType})
 		}
-		// Pick the first idle agent
 		targetPane = &idleAgents[0].pane
 		targetAgentType = idleAgents[0].agentType
 	}
 
-	// Check if target pane is same as current
-	if targetPane.Index == currentAssignment.Pane {
-		err = fmt.Errorf("bead %s is already assigned to pane %d", beadID, targetPane.Index)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "ALREADY_ASSIGNED", err.Error(), nil))
-		}
-		return err
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	if assignmentMatchesPhysicalPane(*currentAssignment, *targetPane, multiWindow) {
+		return emitReassignFailure(session, "ALREADY_ASSIGNED", fmt.Sprintf("bead %s is already assigned to pane %s", beadID, assignmentPaneTarget(*targetPane)), nil)
 	}
-
-	// Check if target pane is busy (unless --force)
+	existingAssignment := findAssignmentForPhysicalPane(store, *targetPane, multiWindow)
+	if existingAssignment != nil && existingAssignment.BeadID != beadID {
+		return emitReassignFailure(session, "TARGET_BUSY", fmt.Sprintf("pane %s already has assignment %s", assignmentPaneTarget(*targetPane), existingAssignment.BeadID), map[string]interface{}{
+			"current_bead":   existingAssignment.BeadID,
+			"current_status": string(existingAssignment.Status),
+		})
+	}
 	scrollback, _ := tmux.CapturePaneOutput(targetPane.ID, 10)
 	state := determineAgentState(scrollback, targetAgentType)
-
 	if state != "idle" && !assignForce {
-		// Check if pane has an existing assignment
-		existingAssignment := findAssignmentForPane(store, targetPane.Index)
-		details := map[string]interface{}{
-			"pane_state": state,
-		}
-		if existingAssignment != nil {
-			details["current_bead"] = existingAssignment.BeadID
-			details["current_status"] = string(existingAssignment.Status)
-		}
-		err = fmt.Errorf("pane %d is busy (state: %s), use --force to override", targetPane.Index, state)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TARGET_BUSY", err.Error(), details))
-		}
-		return err
+		return emitReassignFailure(session, "TARGET_BUSY", fmt.Sprintf("pane %s is busy (state: %s), use --force to override", assignmentPaneTarget(*targetPane), state), map[string]interface{}{"pane_state": state})
 	}
 
-	// Prepare warnings
-	var warnings []string
-
-	// Release file reservations from old agent
-	oldAgentName := currentAssignment.AgentName
-	if oldAgentName == "" {
-		oldAgentName = fmt.Sprintf("%s_%s", session, currentAssignment.AgentType)
-	}
-	releasedFiles, releaseErr := releaseFileReservations(session, beadID, oldAgentName)
-	if releaseErr != nil {
-		warnings = append(warnings, fmt.Sprintf("failed to release file reservations: %v", releaseErr))
-	}
-
-	// Create file reservations for new agent
-	newAgentName := fmt.Sprintf("%s_%s", session, targetAgentType)
 	beadTitle := currentAssignment.BeadTitle
 	if beadTitle == "" {
-		beadTitle = getBeadTitle(beadID)
-	}
-	reservationResult := reserveFilesForBead(session, beadID, beadTitle, targetAgentType, assignVerbose, assignTimeout)
-
-	// Update assignment store using Reassign method
-	_, err = store.Reassign(beadID, targetPane.Index, targetAgentType, newAgentName)
-	if err != nil {
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "REASSIGN_ERROR", err.Error(), nil))
+		beadTitle, err = getBeadTitle(projectDir, beadID)
+		if err != nil {
+			return emitReassignFailure(session, "BEAD_LOOKUP_FAILED", err.Error(), nil)
 		}
-		return err
 	}
-
-	// Build prompt
-	var prompt string
-	if assignPrompt != "" {
-		prompt = assignPrompt
-	} else {
+	prompt := assignPrompt
+	if prompt == "" {
 		prompt = expandPromptTemplate(beadID, beadTitle, assignTemplate, assignTemplateFile)
 	}
-
-	// Send prompt to new agent
-	promptSent := true
-	if err := sendPromptWithDoubleEnter(targetPane.ID, prompt); err != nil {
-		promptSent = false
-		warnings = append(warnings, fmt.Sprintf("failed to send prompt: %v", err))
+	newAgentName := assignmentAgentNameForPane(session, targetAgentType, *targetPane, multiWindow)
+	idempotencyKey, err := assignment.NewAssignmentIdempotencyKey()
+	if err != nil {
+		return emitReassignFailure(session, "STORE_ERROR", fmt.Sprintf("generate reassignment identity: %v", err), nil)
 	}
 
-	if promptSent {
-		if err := store.Update(beadID, assignment.AssignmentUpdate{PromptSent: &prompt}); err != nil {
-			warnings = append(warnings, fmt.Sprintf("failed to update assignment metadata: %v", err))
+	reservationRequired := currentAssignment.ReservationRequired || assignReserveFiles
+	reservationDiscovery := currentAssignment.ReservationDiscovery || assignReserveFiles
+	requestedPaths := append([]string(nil), currentAssignment.ReservationRequested...)
+	if len(requestedPaths) == 0 {
+		requestedPaths = append(requestedPaths, currentAssignment.ReservationInputPaths...)
+	}
+	var reservationMgr *assign.FileReservationManager
+	if reservationRequired {
+		amClient := newAgentMailClient(projectDir)
+		if !amClient.IsAvailable() {
+			return emitReassignFailure(session, "RESERVATION_REQUIRED", "Agent Mail is unavailable; refusing to transfer a reservation-required assignment", nil)
 		}
+		reservationMgr = assign.NewFileReservationManager(amClient, projectDir)
+		reservationMgr.SetTTL(max(3600, int(resolveAssignTimeout(assignTimeout).Seconds())*2))
 	}
 
-	// Build result
-	now := time.Now().UTC()
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	ctx, cancel := context.WithTimeout(ctx, resolveAssignTimeout(assignTimeout))
+	defer cancel()
+	preparedAssignment, releasedFiles, err := prepareWorkingAssignmentReplacement(ctx, store, session, currentAssignment)
+	if err != nil {
+		return emitReassignFailure(session, "RESERVATION_RELEASE_FAILED", err.Error(), nil)
+	}
+	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr, assignForce)
+	atomicResult, reassignErr := atomicCoordinator.Execute(ctx, assignment.AtomicRequest{
+		BeadID:                    beadID,
+		BeadTitle:                 beadTitle,
+		Target:                    targetPane.ID,
+		OccupancyKey:              targetPane.ID,
+		Pane:                      targetPane.Index,
+		AgentType:                 targetAgentType,
+		AgentName:                 newAgentName,
+		Actor:                     preparedAssignment.ClaimActor,
+		Prompt:                    prompt,
+		IdempotencyKey:            idempotencyKey,
+		RequireReservation:        reservationRequired,
+		AllowReservationDiscovery: reservationDiscovery,
+		RequestedPaths:            requestedPaths,
+		ReservationTTL:            time.Hour,
+		ReplaceWorkingAssignment:  true,
+	})
+	if reassignErr != nil {
+		details := map[string]interface{}{"target": targetPane.ID}
+		if atomicResult.Assignment != nil {
+			details["durable_status"] = string(atomicResult.Assignment.Status)
+			details["dispatch_state"] = string(atomicResult.Assignment.DispatchState)
+			details["idempotency_key"] = atomicResult.Assignment.IdempotencyKey
+		}
+		return emitReassignFailure(session, classifyReassignError(reassignErr, atomicResult.Assignment), reassignErr.Error(), details)
+	}
+	if atomicResult.Assignment == nil || !atomicResult.Sent {
+		return emitReassignFailure(session, "SEND_ERROR", "reassignment completed without a durable dispatch receipt", nil)
+	}
+
+	durable := atomicResult.Assignment
 	data := &ReassignData{
-		BeadID:                      beadID,
-		BeadTitle:                   beadTitle,
-		Pane:                        targetPane.Index,
-		AgentType:                   targetAgentType,
-		AgentName:                   newAgentName,
-		Status:                      string(assignment.StatusAssigned),
-		PromptSent:                  promptSent,
-		AssignedAt:                  now.Format(time.RFC3339),
-		PreviousPane:                currentAssignment.Pane,
-		PreviousAgent:               currentAssignment.AgentName,
-		PreviousAgentType:           currentAssignment.AgentType,
-		PreviousStatus:              string(currentAssignment.Status),
-		FileReservationsTransferred: len(releasedFiles) > 0 || (reservationResult != nil && len(reservationResult.GrantedPaths) > 0),
+		BeadID:                       beadID,
+		BeadTitle:                    durable.BeadTitle,
+		Pane:                         durable.Pane,
+		AgentType:                    durable.AgentType,
+		AgentName:                    durable.AgentName,
+		Status:                       string(durable.Status),
+		PromptSent:                   atomicResult.Sent,
+		AssignedAt:                   durable.AssignedAt.UTC().Format(time.RFC3339),
+		PreviousPane:                 currentAssignment.Pane,
+		PreviousAgent:                currentAssignment.AgentName,
+		PreviousAgentType:            currentAssignment.AgentType,
+		PreviousStatus:               string(currentAssignment.Status),
+		FileReservationsTransferred:  len(releasedFiles) > 0 || len(atomicResult.Lease.Granted) > 0,
+		FileReservationsReleasedFrom: len(releasedFiles),
+		FileReservationsCreatedFor:   len(atomicResult.Lease.Granted),
 	}
-	if len(releasedFiles) > 0 {
-		data.FileReservationsReleasedFrom = len(releasedFiles)
-	}
-	if reservationResult != nil && len(reservationResult.GrantedPaths) > 0 {
-		data.FileReservationsCreatedFor = len(reservationResult.GrantedPaths)
-	}
-
-	// Output result
 	if IsJSONOutput() {
-		if warnings == nil {
-			warnings = []string{}
-		}
-		envelope := ReassignEnvelope{
-			Command:    "assign",
-			Subcommand: "reassign",
-			Session:    session,
-			Timestamp:  now.Format(time.RFC3339),
-			Success:    true,
-			Data:       data,
-			Warnings:   warnings,
-		}
-		return json.NewEncoder(os.Stdout).Encode(envelope)
+		return json.NewEncoder(os.Stdout).Encode(ReassignEnvelope{
+			Command: "assign", Subcommand: "reassign", Session: session,
+			Timestamp: time.Now().UTC().Format(time.RFC3339), Success: true, Data: data, Warnings: []string{},
+		})
 	}
-
-	// Text output
 	if !assignQuiet {
-		fmt.Printf("Reassigned %s to pane %d (%s)\n", beadID, targetPane.Index, targetAgentType)
+		fmt.Printf("Reassigned %s to pane %s (%s)\n", beadID, assignmentPaneTarget(*targetPane), targetAgentType)
 		fmt.Printf("  Previous: pane %d (%s)\n", currentAssignment.Pane, currentAssignment.AgentType)
-		if promptSent {
-			fmt.Printf("  Prompt sent: %s...\n", truncateString(prompt, 50))
-		}
+		fmt.Printf("  Prompt sent: %s...\n", truncateString(prompt, 50))
 		if data.FileReservationsTransferred {
-			fmt.Printf("  File reservations transferred\n")
-		}
-		for _, w := range warnings {
-			fmt.Printf("  Warning: %s\n", w)
+			fmt.Println("  File reservations transferred")
 		}
 	}
-
 	return nil
+}
+
+func prepareWorkingAssignmentReplacement(ctx context.Context, store *assignment.AssignmentStore, session string, current *assignment.Assignment) (*assignment.Assignment, []string, error) {
+	clearing, err := store.BeginClearIfStatus(ctx, current.BeadID, time.Now().UTC(), assignment.StatusWorking)
+	if err != nil {
+		return nil, nil, err
+	}
+	if clearing.ClearState == assignment.ClearStateLeasesReleased {
+		return clearing, nil, nil
+	}
+	released, releaseErr := releaseAssignmentLeases(session, clearing)
+	if releaseErr != nil {
+		if persistErr := store.RecordClearReleaseFailed(ctx, current.BeadID, releaseErr); persistErr != nil {
+			return nil, nil, errors.Join(releaseErr, fmt.Errorf("persist reassignment lease-release failure: %w", persistErr))
+		}
+		return nil, nil, releaseErr
+	}
+	clearing, err = store.RecordClearLeasesReleased(ctx, current.BeadID)
+	if err != nil {
+		return nil, released, fmt.Errorf("persist reassignment lease-release checkpoint: %w", err)
+	}
+	return clearing, released, nil
+}
+
+func emitReassignFailure(session, code, message string, details map[string]interface{}) error {
+	err := errors.New(message)
+	if IsJSONOutput() {
+		return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, code, message, details))
+	}
+	return err
+}
+
+func classifyReassignError(err error, durable *assignment.Assignment) string {
+	var dispatchErr *dispatchsvc.Error
+	switch {
+	case errors.Is(err, assignment.ErrTargetOccupied):
+		return "TARGET_BUSY"
+	case errors.Is(err, assignment.ErrClaimConflict):
+		return "CLAIM_CONFLICT"
+	case errors.Is(err, assignment.ErrReservationRequired), errors.Is(err, assignment.ErrReservationReleaseRequired):
+		return "RESERVATION_REQUIRED"
+	case errors.Is(err, assignment.ErrDispatchOutcomeUnknown):
+		return "DISPATCH_UNKNOWN"
+	case errors.Is(err, assignment.ErrWorkingReplacementNotAllowed), errors.Is(err, assignment.ErrAssignmentStatusMismatch):
+		return "INVALID_STATE"
+	case errors.As(err, &dispatchErr) && dispatchErr.Code == dispatchsvc.ErrRedactionBlocked:
+		return "REDACTION_BLOCKED"
+	case durable != nil && durable.DispatchAttempts > 0:
+		return "SEND_ERROR"
+	default:
+		return "REASSIGN_ERROR"
+	}
 }
 
 // makeReassignErrorEnvelope creates a standard error envelope for reassignment operations
@@ -4048,10 +4276,11 @@ func makeReassignErrorEnvelope(session, code, message string, details map[string
 	}
 }
 
-// findAssignmentForPane finds the assignment for a specific pane
-func findAssignmentForPane(store *assignment.AssignmentStore, pane int) *assignment.Assignment {
+// findAssignmentForPhysicalPane finds the active assignment occupying one
+// physical tmux pane, even when multiple windows reuse the same local index.
+func findAssignmentForPhysicalPane(store *assignment.AssignmentStore, pane tmux.Pane, multiWindow bool) *assignment.Assignment {
 	for _, a := range store.ListActive() {
-		if a.Pane == pane {
+		if a != nil && assignmentMatchesPhysicalPane(*a, pane, multiWindow) {
 			return a
 		}
 	}
@@ -4063,6 +4292,28 @@ func releaseAssignmentReservationsForClear(session string, current *assignment.A
 	if current == nil {
 		return nil, errors.New("assignment is required")
 	}
+	if current.ClearState == assignment.ClearStateLeasesReleased || current.ReservationState == assignment.ReservationReleased {
+		return nil, nil
+	}
+	// Atomic rows explicitly record whether reservation was part of the intent.
+	// With no requested reservation and no durable lease metadata, there is
+	// nothing external to release; clearing must remain a local operation.
+	if current.IdempotencyKey != "" && !current.ReservationRequired {
+		return nil, nil
+	}
+	if current.IdempotencyKey != "" && current.ReservationRequired {
+		if assignment.ReservationOutcomeNeedsReconciliation(current) {
+			return reconcileAndReleaseAssignmentReservationsForClear(session, current)
+		}
+		switch current.ReservationState {
+		case assignment.ReservationFailed:
+			return nil, nil
+		case assignment.ReservationPending:
+			if current.ReservationAttempts == 0 {
+				return nil, nil
+			}
+		}
+	}
 	if len(current.ReservationIDs) > 0 {
 		return releaseFileReservationsWithIDs(session, current.BeadID, current.AgentName, current.ReservationIDs)
 	}
@@ -4070,6 +4321,47 @@ func releaseAssignmentReservationsForClear(session string, current *assignment.A
 		return releaseFileReservationsByStoredPaths(session, current.BeadID, current.AgentName, current.ReservedPaths)
 	}
 	return releaseReservations(session, current.BeadID, current.AgentName)
+}
+
+func reconcileAndReleaseAssignmentReservationsForClear(session string, current *assignment.Assignment) ([]string, error) {
+	projectKey, err := resolveAssignProjectDir(session)
+	if err != nil {
+		return nil, err
+	}
+	amClient := newAgentMailClient(projectKey)
+	if !amClient.IsAvailable() {
+		return nil, fmt.Errorf("cannot reconcile reservation outcome for %s: Agent Mail is unavailable", current.BeadID)
+	}
+	requested := append([]string(nil), current.ReservationRequested...)
+	if len(requested) == 0 {
+		requested = append(requested, current.ReservationInputPaths...)
+	}
+	if len(requested) == 0 {
+		requested = assign.ExtractFilePaths(current.BeadTitle, "")
+	}
+	if len(requested) == 0 {
+		return nil, fmt.Errorf("cannot reconcile reservation outcome for %s without durable requested paths", current.BeadID)
+	}
+	manager := assign.NewFileReservationManager(amClient, projectKey)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveAssignTimeout(assignTimeout))
+	defer cancel()
+	result, err := manager.ReconcileForBead(ctx, current.BeadID, current.AgentName, requested)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile reservation outcome for %s: %w", current.BeadID, err)
+	}
+	if result == nil || (len(result.ReservationIDs) == 0 && len(result.GrantedPaths) == 0) {
+		return nil, nil
+	}
+	if len(result.ReservationIDs) > 0 {
+		if err := manager.ReleaseForBead(ctx, current.AgentName, result.ReservationIDs); err != nil {
+			return nil, fmt.Errorf("release reconciled reservations for %s: %w", current.BeadID, err)
+		}
+		return []string{fmt.Sprintf("%d reservations", len(result.ReservationIDs))}, nil
+	}
+	if err := manager.ReleaseByPaths(ctx, current.AgentName, result.GrantedPaths); err != nil {
+		return nil, fmt.Errorf("release reconciled reservation paths for %s: %w", current.BeadID, err)
+	}
+	return append([]string(nil), result.GrantedPaths...), nil
 }
 
 func releaseFileReservationsWithIDs(session, beadID, agentName string, reservationIDs []int) ([]string, error) {
@@ -4163,7 +4455,10 @@ func releaseFileReservations(session, beadID, agentName string) ([]string, error
 	}
 
 	// Get bead details to extract file paths
-	beadTitle := getBeadTitle(beadID)
+	beadTitle, titleErr := getBeadTitle(projectKey, beadID)
+	if titleErr != nil {
+		return nil, fmt.Errorf("look up bead %s title for reservation release: %w", beadID, titleErr)
+	}
 	if beadTitle == "" {
 		if assignVerbose {
 			fmt.Fprintf(os.Stderr, "[RESERVE] No bead title found for %s, cannot determine paths to release\n", beadID)
@@ -4223,13 +4518,16 @@ type DependencyAwareResult struct {
 // It refreshes the dependency graph from bv and identifies beads that:
 // 1. Were previously blocked by the completed bead
 // 2. Have no remaining blockers (all their dependencies are now completed)
-func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAwareResult, error) {
+func GetNewlyUnblockedBeads(projectDir, completedBeadID string, verbose bool) (*DependencyAwareResult, error) {
 	result := &DependencyAwareResult{
 		CompletedBeadID: completedBeadID,
 		NewlyUnblocked:  make([]UnblockedBead, 0),
 	}
 
-	wd, _ := os.Getwd()
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return nil, errors.New("assignment project directory is required")
+	}
 
 	// Force refresh the dependency graph by fetching fresh triage data
 	if verbose {
@@ -4247,7 +4545,7 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Uncapped actionable set (issue #197): a bead unblocked by the
 		// completed work can sit below triage's top-10 cut.
-		recommendations, lastErr = bv.GetActionableRecommendations(wd, 100)
+		recommendations, lastErr = bv.GetActionableRecommendations(projectDir, 100)
 		if lastErr == nil {
 			break
 		}
@@ -4273,7 +4571,7 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 
 		// Alternative: Check if we can at least validate that the completed bead exists
 		// and try to infer potential unblocks from available data
-		fallbackBeads := bv.GetReadyPreview(wd, 50)
+		fallbackBeads := bv.GetReadyPreview(projectDir, 50)
 		if len(fallbackBeads) > 0 {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "[DEP] Found %d ready beads, but cannot determine dependencies\n", len(fallbackBeads))
@@ -4370,7 +4668,7 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 
 	// Check for cycles using BV insights
 	client := bv.NewBVClient()
-	client.WorkspacePath = wd
+	client.WorkspacePath = projectDir
 	insights, err := client.GetInsights()
 	if err == nil && insights != nil && len(insights.Cycles) > 0 {
 		result.CyclesDetected = insights.Cycles
@@ -4389,7 +4687,11 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 // - Watch mode polling
 // - Manual completion notification
 func OnBeadCompletion(session string, completedBeadID string, verbose bool) ([]bv.BeadPreview, error) {
-	result, err := GetNewlyUnblockedBeads(completedBeadID, verbose)
+	projectDir, err := resolveAssignProjectDir(session)
+	if err != nil {
+		return nil, err
+	}
+	result, err := GetNewlyUnblockedBeads(projectDir, completedBeadID, verbose)
 	if err != nil {
 		return nil, err
 	}
@@ -4410,10 +4712,13 @@ func OnBeadCompletion(session string, completedBeadID string, verbose bool) ([]b
 // CheckCycles returns any dependency cycles detected in the current project.
 // Beads in cycles should be excluded from automatic assignment.
 // Enhanced with retry logic and comprehensive error handling.
-func CheckCycles(verbose bool) ([][]string, error) {
-	wd, _ := os.Getwd()
+func CheckCycles(projectDir string, verbose bool) ([][]string, error) {
+	projectDir = strings.TrimSpace(projectDir)
+	if projectDir == "" {
+		return nil, errors.New("assignment project directory is required")
+	}
 	client := bv.NewBVClient()
-	client.WorkspacePath = wd
+	client.WorkspacePath = projectDir
 
 	maxRetries := 2 // Lower than default for non-critical cycle check
 	var insights *bv.Insights
@@ -4506,8 +4811,8 @@ func IsBeadInCycle(beadID string, cycles [][]string) bool {
 }
 
 // FilterCyclicBeads removes beads that are part of dependency cycles from the list.
-func FilterCyclicBeads(beads []bv.BeadPreview, verbose bool) ([]bv.BeadPreview, int) {
-	cycles, err := CheckCycles(false) // Don't log twice if verbose
+func FilterCyclicBeads(projectDir string, beads []bv.BeadPreview, verbose bool) ([]bv.BeadPreview, int) {
+	cycles, err := CheckCycles(projectDir, false) // Don't log twice if verbose
 	if err != nil || len(cycles) == 0 {
 		return beads, 0
 	}
@@ -4665,7 +4970,7 @@ type directAssignmentIntent struct {
 	explicitPrompt bool
 }
 
-func snapshotDirectAssignmentIntent(opts *AssignCommandOptions, beadID, paneID string) directAssignmentIntent {
+func snapshotDirectAssignmentIntent(opts *AssignCommandOptions, beadID, paneID string, clearedGeneration ...uint64) directAssignmentIntent {
 	intent := directAssignmentIntent{
 		promptSource:   opts.Prompt,
 		explicitPrompt: opts.Prompt != "",
@@ -4673,7 +4978,7 @@ func snapshotDirectAssignmentIntent(opts *AssignCommandOptions, beadID, paneID s
 	if !intent.explicitPrompt {
 		intent.promptSource = promptTemplateSource(opts.Template, opts.TemplateFile)
 	}
-	intent.idempotencyKey = assignment.AssignmentIdempotencyKey(
+	keyParts := []string{
 		"ntm/direct-assign/v3",
 		opts.Session,
 		beadID,
@@ -4684,12 +4989,16 @@ func snapshotDirectAssignmentIntent(opts *AssignCommandOptions, beadID, paneID s
 		fmt.Sprintf("force=%t", opts.Force),
 		fmt.Sprintf("ignore-deps=%t", opts.IgnoreDeps),
 		fmt.Sprintf("reserve-files=%t", opts.ReserveFiles),
-	)
+	}
+	if len(clearedGeneration) > 0 && clearedGeneration[0] > 0 {
+		keyParts = append(keyParts, fmt.Sprintf("cleared-generation=%d", clearedGeneration[0]))
+	}
+	intent.idempotencyKey = assignment.AssignmentIdempotencyKey(keyParts...)
 	return intent
 }
 
-func directAssignmentIdempotencyKey(opts *AssignCommandOptions, beadID, paneID string) string {
-	return snapshotDirectAssignmentIntent(opts, beadID, paneID).idempotencyKey
+func directAssignmentIdempotencyKey(opts *AssignCommandOptions, beadID, paneID string, clearedGeneration ...uint64) string {
+	return snapshotDirectAssignmentIntent(opts, beadID, paneID, clearedGeneration...).idempotencyKey
 }
 
 func (intent directAssignmentIntent) prompt(beadID, beadTitle string) string {
@@ -4752,9 +5061,6 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		}
 		return err
 	}
-	intent := snapshotDirectAssignmentIntent(opts, beadID, targetPane.ID)
-	idempotencyKey := intent.idempotencyKey
-
 	store, err := assignment.LoadStoreStrict(opts.Session)
 	if err != nil {
 		err = fmt.Errorf("load assignment store: %w", err)
@@ -4763,13 +5069,19 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		}
 		return err
 	}
-	projectDir, err := resolveAssignProjectDir(opts.Session)
-	if err != nil {
-		err = fmt.Errorf("resolve bead project for atomic claim: %w", err)
-		if IsJSONOutput() {
-			return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, nil, "PROJECT_ERROR", err.Error(), warnings))
+	intent := snapshotDirectAssignmentIntent(opts, beadID, targetPane.ID, store.ClearedGeneration(beadID))
+	idempotencyKey := intent.idempotencyKey
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		projectDir, err = resolveAssignProjectDir(opts.Session)
+		if err != nil {
+			err = fmt.Errorf("resolve bead project for atomic claim: %w", err)
+			if IsJSONOutput() {
+				return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, nil, "PROJECT_ERROR", err.Error(), warnings))
+			}
+			return err
 		}
-		return err
+		opts.ProjectDir = projectDir
 	}
 
 	prior := store.Get(beadID)
@@ -4850,10 +5162,14 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		assignItem.PaneWasBusy = state != "idle"
 
 		if !opts.IgnoreDeps {
-			blockers, blockersErr := getBeadBlockers(beadID)
-			if blockersErr != nil && opts.Verbose {
-				fmt.Fprintf(os.Stderr, "[DEP] Warning: could not check dependencies: %v\n", blockersErr)
-				warnings = append(warnings, fmt.Sprintf("could not check dependencies: %v", blockersErr))
+			blockers, blockersErr := getBeadBlockers(projectDir, beadID)
+			if blockersErr != nil {
+				errMsg := fmt.Sprintf("could not verify dependencies for %s: %v; use --ignore-deps to override", beadID, blockersErr)
+				if IsJSONOutput() {
+					data := &DirectAssignData{Assignment: assignItem}
+					return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, data, "DEPENDENCY_LOOKUP_FAILED", errMsg, nil))
+				}
+				return errors.New(errMsg)
 			}
 			if len(blockers) > 0 {
 				assignItem.BlockedByIDs = blockers
@@ -4867,7 +5183,14 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		}
 
 		if opts.Prompt == "" {
-			beadTitle = getBeadTitle(beadID)
+			beadTitle, err = getBeadTitle(projectDir, beadID)
+			if err != nil {
+				errMsg := fmt.Sprintf("look up bead %s title: %v", beadID, err)
+				if IsJSONOutput() {
+					return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, &DirectAssignData{Assignment: assignItem}, "BEAD_LOOKUP_FAILED", errMsg, nil))
+				}
+				return errors.New(errMsg)
+			}
 		}
 		prompt = intent.prompt(beadID, beadTitle)
 		assignItem.BeadTitle = beadTitle
@@ -4909,7 +5232,7 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 		}
 		return err
 	}
-	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr)
+	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr, opts.Force)
 	ctx, cancel := context.WithTimeout(context.Background(), resolveAssignTimeout(opts.Timeout))
 	atomicResult, assignErr := atomicCoordinator.Execute(ctx, request)
 	cancel()
@@ -5014,11 +5337,10 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 }
 
 // getBeadBlockers returns the list of beads blocking the given bead
-func getBeadBlockers(beadID string) ([]string, error) {
-	wd, _ := os.Getwd()
+func getBeadBlockers(projectDir, beadID string) ([]string, error) {
 	// Uncapped set (issue #197): the target bead can sit below triage's
 	// top-10 cut.
-	recommendations, err := bv.GetActionableRecommendations(wd, 100)
+	recommendations, err := bv.GetActionableRecommendations(projectDir, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -5033,30 +5355,29 @@ func getBeadBlockers(beadID string) ([]string, error) {
 }
 
 // getBeadTitle retrieves the title for a bead
-func getBeadTitle(beadID string) string {
-	wd, _ := os.Getwd()
+func getBeadTitle(projectDir, beadID string) (string, error) {
 	// Uncapped set (issue #197): the target bead can sit below triage's
 	// top-10 cut.
-	recommendations, err := bv.GetActionableRecommendations(wd, 100)
+	recommendations, err := bv.GetActionableRecommendations(projectDir, 100)
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	for _, rec := range recommendations {
 		if rec.ID == beadID {
-			return rec.Title
+			return rec.Title, nil
 		}
 	}
 
 	// Fallback to ready preview
-	readyBeads := bv.GetReadyPreview(wd, 50)
+	readyBeads := bv.GetReadyPreview(projectDir, 50)
 	for _, b := range readyBeads {
 		if b.ID == beadID {
-			return b.Title
+			return b.Title, nil
 		}
 	}
 
-	return ""
+	return "", nil
 }
 
 // reserveFilesForBead reserves files mentioned in a bead for an agent
@@ -5100,6 +5421,7 @@ func reserveFilesForBead(session, beadID, beadTitle, agentType string, verbose b
 // AutoReassignOptions contains options for auto-reassignment
 type AutoReassignOptions struct {
 	Session         string
+	ProjectDir      string
 	Strategy        string
 	Template        string
 	TemplateFile    string
@@ -5144,8 +5466,17 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 		fmt.Fprintf(os.Stderr, "[AUTO] Auto-reassignment triggered by completion of %s\n", completedBeadID)
 	}
 
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		var err error
+		projectDir, err = resolveAssignProjectDir(opts.Session)
+		if err != nil {
+			return nil, fmt.Errorf("resolve auto-reassignment project: %w", err)
+		}
+		opts.ProjectDir = projectDir
+	}
 	// Step 1: Get newly unblocked beads
-	depResult, err := GetNewlyUnblockedBeads(completedBeadID, opts.Verbose)
+	depResult, err := GetNewlyUnblockedBeads(projectDir, completedBeadID, opts.Verbose)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("failed to check unblocked beads: %v", err))
 		return result, nil // Return partial result, not error
@@ -5211,7 +5542,7 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 	}
 
 	// Step 4: Filter out beads in dependency cycles
-	filteredBeads, excluded := FilterCyclicBeads(unblockedBeads, opts.Verbose)
+	filteredBeads, excluded := FilterCyclicBeads(projectDir, unblockedBeads, opts.Verbose)
 	for i := 0; i < excluded; i++ {
 		// Find the excluded bead to add to skipped
 		for _, unblocked := range result.NewlyUnblocked {
@@ -5235,6 +5566,7 @@ func PerformAutoReassignment(completedBeadID string, opts *AutoReassignOptions) 
 	// Step 5: Generate assignments using strategy
 	assignOpts := &AssignCommandOptions{
 		Session:         opts.Session,
+		ProjectDir:      projectDir,
 		Strategy:        opts.Strategy,
 		Template:        opts.Template,
 		TemplateFile:    opts.TemplateFile,
@@ -5490,6 +5822,7 @@ func NewWatchLoop(session string, store *assignment.AssignmentStore, opts *AutoR
 		scanInterval: scanInterval,
 		scanOpts: &AssignCommandOptions{
 			Session:         session,
+			ProjectDir:      opts.ProjectDir,
 			Strategy:        opts.Strategy,
 			Limit:           assignLimit,
 			AgentTypeFilter: opts.AgentTypeFilter,
@@ -5758,8 +6091,18 @@ func (w *WatchLoop) shouldStop() bool {
 	}
 
 	// Check if there are ready beads
-	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 10)
+	projectDir := ""
+	if w.scanOpts != nil {
+		projectDir = strings.TrimSpace(w.scanOpts.ProjectDir)
+	}
+	if projectDir == "" {
+		var err error
+		projectDir, err = resolveAssignProjectDir(w.session)
+		if err != nil {
+			return false
+		}
+	}
+	readyBeads := bv.GetReadyPreview(projectDir, 10)
 	if len(readyBeads) > 0 {
 		return false // Still have work available
 	}

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1018,7 +1019,15 @@ func newCanonicalPaneFixture(t *testing.T) *canonicalPaneFixture {
 	shell := fmt.Sprintf("env PATH=%q PS1='NTM_E2E> ' bash --noprofile --norc", fakeAgentPath)
 	fixture.mustTMUX(t, "-f", configPath, "new-session", "-d", "-s", fixture.session, "-x", "160", "-y", "48", "-n", "w0", shell)
 	t.Cleanup(func() {
-		_ = fixture.runTMUX(context.Background(), "kill-server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		panePIDs := fixture.listPanePIDs(shutdownCtx)
+		if err := fixture.runTMUX(shutdownCtx, "kill-server"); err != nil && shutdownCtx.Err() == nil {
+			t.Errorf("stop canonical tmux server: %v", err)
+		}
+		if err := waitForProcessExit(shutdownCtx, panePIDs); err != nil {
+			t.Errorf("canonical tmux pane shutdown: %v", err)
+		}
 	})
 	fixture.mustTMUX(t, "split-window", "-d", "-t", fixture.session+":0", "-v", shell)
 	fixture.mustTMUX(t, "new-window", "-d", "-t", fixture.session+":1", "-n", "w1", shell)
@@ -1138,6 +1147,44 @@ func (f *canonicalPaneFixture) tmuxOutput(ctx context.Context, args ...string) (
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
 	}
 	return nil, err
+}
+
+func (f *canonicalPaneFixture) listPanePIDs(ctx context.Context) []int {
+	output, err := f.tmuxOutput(ctx, "list-panes", "-s", "-t", f.session, "-F", "#{pane_pid}")
+	if err != nil {
+		return nil
+	}
+	var result []int
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(line))
+		if parseErr == nil && pid > 0 {
+			result = append(result, pid)
+		}
+	}
+	return result
+}
+
+func waitForProcessExit(ctx context.Context, pids []int) error {
+	remaining := append([]int(nil), pids...)
+	for len(remaining) > 0 {
+		alive := remaining[:0]
+		for _, pid := range remaining {
+			process, err := os.FindProcess(pid)
+			if err == nil && process.Signal(syscall.Signal(0)) == nil {
+				alive = append(alive, pid)
+			}
+		}
+		if len(alive) == 0 {
+			return nil
+		}
+		remaining = alive
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pane processes %v remained after tmux shutdown: %w", remaining, ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 func (f *canonicalPaneFixture) listPhysicalPanes(ctx context.Context) (map[string]canonicalPaneEndpoint, error) {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignpkg "github.com/Dicklesworthstone/ntm/internal/assign"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -292,6 +296,36 @@ func TestResolveAssignProjectDirUsesSavedSessionAgentProjectKey(t *testing.T) {
 	}
 }
 
+func TestResolveAssignProjectDirExplicitRepoOverridesSavedSessionProject(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	savedProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(savedProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir saved project git dir: %v", err)
+	}
+	overrideProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(overrideProject, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir override project git dir: %v", err)
+	}
+	saveSessionAgentForTest(t, "demo", savedProject, "GreenCastle")
+
+	previousRepo := assignRepoPath
+	assignRepoPath = overrideProject
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	got, err := resolveAssignProjectDir("demo")
+	if err != nil {
+		t.Fatalf("resolveAssignProjectDir() error = %v", err)
+	}
+	want, err := filepath.Abs(overrideProject)
+	if err != nil {
+		t.Fatalf("filepath.Abs(): %v", err)
+	}
+	if got != want {
+		t.Fatalf("resolveAssignProjectDir() = %q, want explicit repo %q instead of saved project %q", got, want, savedProject)
+	}
+}
+
 func TestResolveAssignProjectDirResolvesProjectScopedPrefix(t *testing.T) {
 	root, nested := createAssignProjectRoot(t)
 
@@ -345,6 +379,10 @@ func TestReleaseFileReservationsWithIDsUsesResolvedProjectDir(t *testing.T) {
 
 func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	previousRepo := assignRepoPath
+	assignRepoPath = projectDir
+	t.Cleanup(func() { assignRepoPath = previousRepo })
 	store := assignment.NewStore("clear-release-barrier")
 	if _, err := store.Assign("ntm-clear", "Clear me", 2, "codex", "BlueLake", "work"); err != nil {
 		t.Fatalf("Assign: %v", err)
@@ -352,13 +390,30 @@ func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testin
 	store.Assignments["ntm-clear"].ReservationCompleted = true
 	store.Assignments["ntm-clear"].ReservedPaths = []string{"internal/cli/**"}
 	store.Assignments["ntm-clear"].ReservationIDs = []int{41, 42}
+	store.Assignments["ntm-clear"].ClaimActor = "BlueLake/ntm-clear"
 	if err := store.Save(); err != nil {
 		t.Fatalf("persist reservation metadata: %v", err)
 	}
 
 	originalRelease := releaseAssignmentLeases
-	t.Cleanup(func() { releaseAssignmentLeases = originalRelease })
+	originalClaimRelease := releaseBeadClaimForAssignment
+	t.Cleanup(func() {
+		releaseAssignmentLeases = originalRelease
+		releaseBeadClaimForAssignment = originalClaimRelease
+	})
 	releaseCalls := 0
+	claimReleaseCalls := 0
+	claimReleaseErr := errors.New("Beads sync unavailable")
+	releaseBeadClaimForAssignment = func(_ context.Context, projectDir, beadID, actor string) (bool, error) {
+		claimReleaseCalls++
+		if projectDir != assignRepoPath || beadID != "ntm-clear" || actor != "BlueLake/ntm-clear" {
+			t.Fatalf("claim release args project=%q bead=%q actor=%q", projectDir, beadID, actor)
+		}
+		if claimReleaseErr != nil {
+			return false, claimReleaseErr
+		}
+		return true, nil
+	}
 	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
 		releaseCalls++
 		if current.ClearState != assignment.ClearStateReservationReleasing || !reflect.DeepEqual(current.ReservationIDs, []int{41, 42}) {
@@ -375,6 +430,9 @@ func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testin
 	if failed == nil || failed.ClearState != assignment.ClearStateReservationReleasing || failed.ClearError != "release unavailable" || !reflect.DeepEqual(failed.ReservationIDs, []int{41, 42}) {
 		t.Fatalf("release failure lost retryable ledger: %+v", failed)
 	}
+	if claimReleaseCalls != 0 {
+		t.Fatalf("tracker claim released before reservation proof: calls=%d", claimReleaseCalls)
+	}
 
 	releaseAssignmentLeases = func(_ string, current *assignment.Assignment) ([]string, error) {
 		releaseCalls++
@@ -384,14 +442,213 @@ func TestClearStoredAssignmentRetainsBarrierUntilLeaseReleaseConfirmed(t *testin
 		return []string{"2 reservations"}, nil
 	}
 	released, err := clearStoredAssignment(t.Context(), store, "clear-release-barrier", failed)
-	if err != nil {
-		t.Fatalf("clear retry: %v", err)
+	if err == nil || !strings.Contains(err.Error(), claimReleaseErr.Error()) {
+		t.Fatalf("clear after lease success error=%v, want claim-release failure", err)
 	}
-	if releaseCalls != 2 || !reflect.DeepEqual(released, []string{"2 reservations"}) {
-		t.Fatalf("release calls=%d released=%v", releaseCalls, released)
+	checkpoint := store.Get("ntm-clear")
+	if checkpoint == nil || checkpoint.ClearState != assignment.ClearStateLeasesReleased || len(checkpoint.ReservationIDs) != 0 || checkpoint.ClearError == "" {
+		t.Fatalf("claim-release failure lost durable lease checkpoint: %+v", checkpoint)
+	}
+	if releaseCalls != 2 || claimReleaseCalls != 1 || !reflect.DeepEqual(released, []string{"2 reservations"}) {
+		t.Fatalf("post-release failure calls: lease=%d claim=%d released=%v", releaseCalls, claimReleaseCalls, released)
+	}
+
+	claimReleaseErr = nil
+	released, err = clearStoredAssignment(t.Context(), store, "clear-release-barrier", checkpoint)
+	if err != nil {
+		t.Fatalf("clear after durable lease checkpoint: %v", err)
+	}
+	if releaseCalls != 2 || claimReleaseCalls != 2 || len(released) != 0 {
+		t.Fatalf("checkpoint retry repeated lease release: lease=%d claim=%d released=%v", releaseCalls, claimReleaseCalls, released)
 	}
 	if got := store.Get("ntm-clear"); got != nil {
 		t.Fatalf("confirmed lease release left assignment: %+v", got)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearSkipsDiscoveryForAtomicNoLeaseIntent(t *testing.T) {
+	originalRelease := releaseReservations
+	t.Cleanup(func() { releaseReservations = originalRelease })
+	discoveryCalls := 0
+	releaseReservations = func(_, _, _ string) ([]string, error) {
+		discoveryCalls++
+		return []string{"legacy"}, nil
+	}
+
+	atomicNoLease := &assignment.Assignment{
+		BeadID:           "ntm-no-lease",
+		AgentName:        "BlueLake",
+		IdempotencyKey:   "intent-1",
+		ReservationState: assignment.ReservationPending,
+	}
+	released, err := releaseAssignmentReservationsForClear("demo", atomicNoLease)
+	if err != nil {
+		t.Fatalf("atomic no-lease clear: %v", err)
+	}
+	if len(released) != 0 || discoveryCalls != 0 {
+		t.Fatalf("atomic no-lease clear released=%v discoveryCalls=%d, want local-only clear", released, discoveryCalls)
+	}
+
+	legacyUnknown := &assignment.Assignment{BeadID: "ntm-legacy", AgentName: "BlueLake"}
+	released, err = releaseAssignmentReservationsForClear("demo", legacyUnknown)
+	if err != nil {
+		t.Fatalf("legacy reservation discovery: %v", err)
+	}
+	if !reflect.DeepEqual(released, []string{"legacy"}) || discoveryCalls != 1 {
+		t.Fatalf("legacy release=%v discoveryCalls=%d, want one discovery", released, discoveryCalls)
+	}
+}
+
+func TestCLIAtomicReservationReconciliationClassifiesAbsentCompleteAndPartial(t *testing.T) {
+	expires := agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)}
+	request := assignment.ReservationRequest{
+		BeadID:         "ntm-reconcile",
+		AgentName:      "BlueLake",
+		Target:         "%42",
+		RequestedPaths: []string{"internal/cli/a.go", "internal/cli/b.go"},
+	}
+
+	for _, test := range []struct {
+		name         string
+		reservations []agentmail.FileReservation
+		wantState    assignment.ReservationReconciliationState
+		wantIDs      []int
+	}{
+		{name: "absent", wantState: assignment.ReservationReconciliationAbsent},
+		{
+			name: "complete",
+			reservations: []agentmail.FileReservation{
+				{ID: 51, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/a.go", Exclusive: true, Reason: "bead assignment: ntm-reconcile", ExpiresTS: expires},
+				{ID: 52, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/b.go", Exclusive: true, Reason: "bead assignment: ntm-reconcile", ExpiresTS: expires},
+			},
+			wantState: assignment.ReservationReconciliationReserved,
+			wantIDs:   []int{51, 52},
+		},
+		{
+			name: "partial is known reserved",
+			reservations: []agentmail.FileReservation{
+				{ID: 53, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/a.go", Exclusive: true, Reason: "bead assignment: ntm-reconcile", ExpiresTS: expires},
+			},
+			wantState: assignment.ReservationReconciliationReserved,
+			wantIDs:   []int{53},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := newMailStub(t, nil)
+			defer stub.Close()
+			stub.reservations = test.reservations
+			port := &cliAtomicReservationPort{manager: assignpkg.NewFileReservationManager(
+				agentmail.NewClient(agentmail.WithBaseURL(stub.server.URL+"/")), "/test/project",
+			)}
+
+			got, err := port.ReconcileReservation(t.Context(), request, assignment.LeaseReceipt{})
+			if err != nil {
+				t.Fatalf("ReconcileReservation() error = %v", err)
+			}
+			if got.State != test.wantState || !reflect.DeepEqual(got.Lease.ReservationIDs, test.wantIDs) {
+				t.Fatalf("ReconcileReservation() = %+v, want state=%s IDs=%v", got, test.wantState, test.wantIDs)
+			}
+		})
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearReconcilesUnknownLease(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	previousTimeout := assignTimeout
+	assignRepoPath = project
+	assignTimeout = 2 * time.Second
+	t.Cleanup(func() {
+		assignRepoPath = previousRepo
+		assignTimeout = previousTimeout
+	})
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	stub.reservations = []agentmail.FileReservation{{
+		ID: 61, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/reconcile.go", Exclusive: true,
+		Reason: "bead assignment: ntm-unknown", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}}
+	current := &assignment.Assignment{
+		BeadID: "ntm-unknown", BeadTitle: "Fix internal/cli/reconcile.go", AgentName: "BlueLake",
+		IdempotencyKey: "intent-unknown", ReservationRequired: true,
+		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
+		ReservationRequested: []string{"internal/cli/reconcile.go"},
+	}
+
+	released, err := releaseAssignmentReservationsForClear("demo", current)
+	if err != nil {
+		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
+	}
+	if len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{61}) {
+		t.Fatalf("release calls = %+v", stub.releaseCalls)
+	}
+	if len(released) != 1 || released[0] != "1 reservations" {
+		t.Fatalf("released = %v", released)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearProvesUnknownLeaseAbsent(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	current := &assignment.Assignment{
+		BeadID: "ntm-absent", BeadTitle: "Fix internal/cli/absent.go", AgentName: "BlueLake",
+		IdempotencyKey: "intent-absent", ReservationRequired: true,
+		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
+		ReservationRequested: []string{"internal/cli/absent.go"},
+	}
+
+	released, err := releaseAssignmentReservationsForClear("demo", current)
+	if err != nil {
+		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
+	}
+	if len(released) != 0 || len(stub.releaseCalls) != 0 {
+		t.Fatalf("absent reconciliation released=%v calls=%+v", released, stub.releaseCalls)
+	}
+}
+
+func TestReleaseAssignmentReservationsForClearRetainsUnknownLeaseOnReleaseFailure(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project marker: %v", err)
+	}
+	previousRepo := assignRepoPath
+	assignRepoPath = project
+	t.Cleanup(func() { assignRepoPath = previousRepo })
+
+	stub := newMailStub(t, nil)
+	defer stub.Close()
+	t.Setenv("AGENT_MAIL_URL", stub.server.URL)
+	stub.releaseResult = agentmail.ReleaseReservationsResult{Released: 0}
+	stub.reservations = []agentmail.FileReservation{{
+		ID: 71, ProjectID: 1, AgentName: "BlueLake", PathPattern: "internal/cli/fail.go", Exclusive: true,
+		Reason: "bead assignment: ntm-release-fail", ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+	}}
+	current := &assignment.Assignment{
+		BeadID: "ntm-release-fail", BeadTitle: "Fix internal/cli/fail.go", AgentName: "BlueLake",
+		IdempotencyKey: "intent-release-fail", ReservationRequired: true,
+		ReservationState: assignment.ReservationUnknown, ReservationAttempts: 1,
+		ReservationRequested: []string{"internal/cli/fail.go"},
+	}
+
+	if _, err := releaseAssignmentReservationsForClear("demo", current); err == nil || !strings.Contains(err.Error(), "released 0 of 1") {
+		t.Fatalf("releaseAssignmentReservationsForClear() error = %v", err)
+	}
+	if len(stub.releaseCalls) != 1 || !reflect.DeepEqual(stub.releaseCalls[0].IDs, []int{71}) {
+		t.Fatalf("release failure calls = %+v", stub.releaseCalls)
 	}
 }
 
@@ -1393,6 +1650,121 @@ func TestResolveAssignmentItemPaneCanonicalMultiWindow(t *testing.T) {
 	}
 }
 
+func TestResolvePendingAssignmentPaneNeverFallsBackToReusedLocalIndex(t *testing.T) {
+	pending := assignment.Assignment{
+		BeadID:         "ntm-pending",
+		Pane:           1,
+		OccupancyKey:   "%40",
+		DispatchTarget: "%40",
+	}
+	replacementTopology := []tmux.Pane{{ID: "%41", WindowIndex: 1, Index: 1}}
+	if _, err := resolvePendingAssignmentPane(replacementTopology, pending); err == nil || !strings.Contains(err.Error(), "%40 is unavailable") {
+		t.Fatalf("topology-changed retry did not fail closed: %v", err)
+	}
+
+	originalTopology := append(replacementTopology, tmux.Pane{ID: "%40", WindowIndex: 0, Index: 1})
+	resolved, err := resolvePendingAssignmentPane(originalTopology, pending)
+	if err != nil {
+		t.Fatalf("resolve original physical pane: %v", err)
+	}
+	if resolved.ID != "%40" {
+		t.Fatalf("resolved pane ID = %q, want %%40", resolved.ID)
+	}
+
+	pending.OccupancyKey = ""
+	pending.DispatchTarget = "0.1"
+	if _, err := resolvePendingAssignmentPane(originalTopology, pending); err == nil || !strings.Contains(err.Error(), "no canonical physical pane ID") {
+		t.Fatalf("index-only pending retry did not fail closed: %v", err)
+	}
+}
+
+type fixedAssignSessionObserver struct {
+	observation statuspkg.SessionObservation
+	err         error
+}
+
+func (o fixedAssignSessionObserver) Observe(context.Context, string) (statuspkg.SessionObservation, error) {
+	return o.observation, o.err
+}
+
+func TestCLIAtomicDispatchReobservesAndRejectsBusyPaneBeforeActuation(t *testing.T) {
+	port := &cliAtomicPaneDispatchPort{
+		session: "demo",
+		observer: fixedAssignSessionObserver{observation: statuspkg.SessionObservation{
+			Session: "demo",
+			Panes: []statuspkg.PaneObservation{{
+				Pane: tmux.PaneRef{ID: "%42", WindowIndex: 0, PaneIndex: 1},
+				Current: statuspkg.StateObservation{
+					Status:     statuspkg.AgentStatus{State: statuspkg.StateWorking},
+					ObservedAt: time.Now().UTC(),
+					Freshness:  statuspkg.FreshnessFresh,
+					Confidence: 0.99,
+				},
+			}},
+		}},
+	}
+
+	receipt, err := port.Dispatch(t.Context(), assignment.DispatchRequest{
+		BeadID: "ntm-busy-transition",
+		Target: "%42",
+		Prompt: "must not be delivered",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not freshly and confidently idle at dispatch") {
+		t.Fatalf("busy actuation boundary error = %v", err)
+	}
+	if receipt.DeliveryID != "" {
+		t.Fatalf("busy actuation boundary produced delivery ID %q", receipt.DeliveryID)
+	}
+}
+
+func TestClassifyCLIReservationAttemptMarksKnownAndPartialFailures(t *testing.T) {
+	req := assignment.ReservationRequest{AgentName: "BlueLake", Target: "%42"}
+
+	lease, err := classifyCLIReservationAttempt(req, &assignpkg.FileReservationResult{
+		RequestedPaths: []string{"internal/cli/**"},
+		Conflicts:      []agentmail.ReservationConflict{{Path: "internal/cli/**", Holders: []string{"GreenLake"}}},
+		Success:        false,
+	}, nil)
+	if !assignment.IsGuaranteedNoReservation(err) || assignment.IsReservationReleaseRequired(err) {
+		t.Fatalf("zero-grant conflict classification error = %v", err)
+	}
+	if !reflect.DeepEqual(lease.Requested, []string{"internal/cli/**"}) || len(lease.Granted) != 0 || len(lease.ReservationIDs) != 0 {
+		t.Fatalf("zero-grant conflict lease = %+v", lease)
+	}
+
+	lease, err = classifyCLIReservationAttempt(req, &assignpkg.FileReservationResult{
+		RequestedPaths: []string{"internal/cli/**", "internal/robot/**"},
+		GrantedPaths:   []string{"internal/cli/**"},
+		ReservationIDs: []int{73},
+		Success:        false,
+		Error:          "second path conflicted",
+	}, nil)
+	if !assignment.IsReservationReleaseRequired(err) || assignment.IsGuaranteedNoReservation(err) {
+		t.Fatalf("partial-grant classification error = %v", err)
+	}
+	if !reflect.DeepEqual(lease.Granted, []string{"internal/cli/**"}) || !reflect.DeepEqual(lease.ReservationIDs, []int{73}) {
+		t.Fatalf("partial-grant lease handles were lost: %+v", lease)
+	}
+
+	transportErr := errors.New("reservation transport disconnected")
+	_, err = classifyCLIReservationAttempt(req, nil, transportErr)
+	if !errors.Is(err, transportErr) || assignment.IsGuaranteedNoReservation(err) || assignment.IsReservationReleaseRequired(err) {
+		t.Fatalf("zero-handle ambiguous transport error was misclassified: %v", err)
+	}
+
+	lease, err = classifyCLIReservationAttempt(req, &assignpkg.FileReservationResult{
+		RequestedPaths: []string{"internal/cli/**"},
+		Success:        false,
+		Error:          transportErr.Error(),
+	}, transportErr)
+	if !errors.Is(err, transportErr) || assignment.IsGuaranteedNoReservation(err) || assignment.IsReservationReleaseRequired(err) {
+		t.Fatalf("result-bearing ambiguous transport error was misclassified: %v", err)
+	}
+	if !reflect.DeepEqual(lease.Requested, []string{"internal/cli/**"}) || len(lease.Granted) != 0 || len(lease.ReservationIDs) != 0 {
+		t.Fatalf("result-bearing transport lease = %+v", lease)
+	}
+}
+
 func TestGenerateAssignmentsLegacyPreservesMultiWindowPaneIdentity(t *testing.T) {
 	agents := []assignAgentInfo{
 		{pane: tmux.Pane{ID: "%50", WindowIndex: 0, Index: 1}, agentType: "codex", state: "idle"},
@@ -1473,6 +1845,13 @@ func TestDirectAssignmentIdempotencyKeyUsesRawIntentAndPhysicalPane(t *testing.T
 	if got := directAssignmentIdempotencyKey(base, "ntm-123", "%43"); got == first {
 		t.Fatal("changed physical pane reused the raw-intent key")
 	}
+	postClear := directAssignmentIdempotencyKey(base, "ntm-123", "%42", 1)
+	if postClear == first {
+		t.Fatal("post-clear generation reused the previous raw-intent key")
+	}
+	if got := directAssignmentIdempotencyKey(base, "ntm-123", "%42", 1); got != postClear {
+		t.Fatalf("same post-clear generation was not replay-stable: %s != %s", got, postClear)
+	}
 
 	templatePath := filepath.Join(t.TempDir(), "assign-template.txt")
 	custom := &AssignCommandOptions{
@@ -1524,19 +1903,37 @@ func TestDirectAssignCLIReplayIsDurableAndBypassesChangedPreflight(t *testing.T)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("NTM_DISABLE_INTERNAL_MONITOR", "1")
+	realBR, err := exec.LookPath("br")
+	if err != nil {
+		t.Skip("br is required for guarded-claim replay coverage")
+	}
+	beadID := ""
+	for _, args := range [][]string{
+		{"init", "--quiet"},
+		{"create", "--title", "Direct assignment", "--type", "task", "--priority", "2", "--json"},
+	} {
+		cmd := exec.Command(realBR, args...)
+		cmd.Dir = projectDir
+		output, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			t.Fatalf("br %s: %v\n%s", strings.Join(args, " "), runErr, output)
+		}
+		if args[0] == "create" {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(output, &created); err != nil || created.ID == "" {
+				t.Fatalf("parse br create output: id=%q err=%v output=%s", created.ID, err, output)
+			}
+			beadID = created.ID
+		}
+	}
 
 	claimLog := filepath.Join(root, "claims.log")
 	brScript := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %q
-if [ "${1:-}" = "--lock-timeout" ]; then
-  shift 2
-fi
-if [ "${1:-}" = update ]; then
-  printf '[{"id":"%%s","title":"Direct assignment","status":"in_progress"}]\n' "$2"
-  exit 0
-fi
-printf '[]\n'
-`, claimLog)
+exec %q "$@"
+`, claimLog, realBR)
 	if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(brScript), 0o755); err != nil {
 		t.Fatalf("write fake br: %v", err)
 	}
@@ -1573,7 +1970,7 @@ sleep 300
 	baseArgs := []string{
 		"--json", "assign", session,
 		"--pane=" + paneID,
-		"--beads=ntm-direct-replay",
+		"--beads=" + beadID,
 		"--prompt=inspect durable replay",
 		"--ignore-deps",
 		"--reserve-files=false",
@@ -1597,8 +1994,8 @@ sleep 300
 	if !reflect.DeepEqual(first.Data.Receipt, second.Data.Receipt) {
 		t.Fatalf("same-intent replay receipt changed:\nfirst=%+v\nsecond=%+v", first.Data.Receipt, second.Data.Receipt)
 	}
-	if got := countDirectAssignLogLines(t, claimLog); got != 1 {
-		t.Fatalf("same-intent replay claimed %d times, want 1", got)
+	if got := countDirectAssignLogMatches(t, claimLog, "sync --flush-only"); got != 1 {
+		t.Fatalf("same-intent replay finalized %d guarded claims, want 1", got)
 	}
 	if got := countDirectAssignLogLines(t, dispatchLog); got != 1 {
 		t.Fatalf("same-intent replay dispatched %d times, want 1", got)
@@ -1610,8 +2007,8 @@ sleep 300
 	if changedCode == 0 || changed.Success || changed.Error == nil || changed.Error.Code != "CLAIM_CONFLICT" {
 		t.Fatalf("changed intent did not conflict: code=%d stderr=%q error=%+v data=%+v", changedCode, changedStderr, changed.Error, changed.Data)
 	}
-	if got := countDirectAssignLogLines(t, claimLog); got != 1 {
-		t.Fatalf("changed-intent conflict actuated a claim; count=%d", got)
+	if got := countDirectAssignLogMatches(t, claimLog, "sync --flush-only"); got != 1 {
+		t.Fatalf("changed-intent conflict actuated a guarded claim; count=%d", got)
 	}
 	if got := countDirectAssignLogLines(t, dispatchLog); got != 1 {
 		t.Fatalf("changed-intent conflict actuated dispatch; count=%d", got)
@@ -1621,13 +2018,31 @@ sleep 300
 	if err != nil {
 		t.Fatalf("load durable ledger: %v", err)
 	}
-	durable := store.Get("ntm-direct-replay")
+	durable := store.Get(beadID)
 	if durable == nil {
 		t.Fatal("direct assignment missing from durable ledger")
 	}
 	if durable.OccupancyKey != paneID || durable.DispatchTarget != paneID || first.Data.Receipt.Pane.ID != paneID || first.Data.Receipt.Pane.Target != "2.1" {
 		t.Fatalf("pane identity drift: ledger=%+v receipt=%+v", durable, first.Data.Receipt.Pane)
 	}
+}
+
+func countDirectAssignLogMatches(t *testing.T, path, needle string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read %s: %v", path, err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, needle) {
+			count++
+		}
+	}
+	return count
 }
 
 func runDirectAssignCLIProcess(t *testing.T, args []string) (AssignEnvelope[DirectAssignData], int, string) {

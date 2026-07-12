@@ -19,6 +19,14 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
+var (
+	coordinatorSessionExists  = tmux.SessionExists
+	coordinatorGetPanes       = tmux.GetPanes
+	coordinatorPaneCurrentDir = func(paneID string) (string, error) {
+		return tmux.DefaultClient.Run("display-message", "-p", "-t", paneID, "#{pane_current_path}")
+	}
+)
+
 func newCoordinatorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "coordinator",
@@ -94,7 +102,7 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -295,7 +303,7 @@ func runCoordinatorDigest(cmd *cobra.Command, args []string, sendMail bool) erro
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
 	if err != nil {
 		return err
 	}
@@ -380,7 +388,7 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 	}
 	resolved.ExplainIfInferred(cmd.ErrOrStderr())
 	session = resolved.Session
-	projectKey, err := resolveAgentMailProjectKey(session)
+	projectKey, err := resolveCoordinatorProjectKey(session, resolved.Inferred)
 	if err != nil {
 		return err
 	}
@@ -456,6 +464,44 @@ func coordinatorRunFailure(assignments []coordinator.AssignmentResult, cycleErr 
 		return fmt.Errorf("%d coordinator assignment attempt(s) failed", failed)
 	}
 	return nil
+}
+
+func resolveCoordinatorProjectKey(session string, inferred bool) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", errors.New("session is required")
+	}
+	if coordinatorSessionExists(session) {
+		panes, err := coordinatorGetPanes(session)
+		if err != nil {
+			return "", fmt.Errorf("resolve live coordinator panes for %s: %w", session, err)
+		}
+		if len(panes) == 0 {
+			return "", fmt.Errorf("resolve live coordinator project for %s: session has no panes", session)
+		}
+		projectKey, err := robot.ResolveLiveSessionProject(session, panes, coordinatorPaneCurrentDir)
+		if err != nil {
+			return "", err
+		}
+		return projectKey, nil
+	}
+
+	var projectKey string
+	if inferred {
+		projectKey = resolveProjectDirForSession(session, false)
+	} else {
+		var err error
+		projectKey, err = resolveExplicitProjectDirForSession(session)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	projectKey = refineAgentMailProjectKey(session, projectKey)
+	if strings.TrimSpace(projectKey) == "" {
+		return "", errors.New("getting project root failed")
+	}
+	return projectKey, nil
 }
 
 func loadCoordinatorRuntimeConfig() coordinator.CoordinatorConfig {
@@ -557,7 +603,7 @@ func runCoordinatorConflicts(cmd *cobra.Command, args []string) error {
 	res.ExplainIfInferred(cmd.ErrOrStderr())
 	session = res.Session
 
-	projectKey, err := resolveAgentMailProjectKey(session)
+	projectKey, err := resolveCoordinatorProjectKey(session, res.Inferred)
 	if err != nil {
 		return err
 	}

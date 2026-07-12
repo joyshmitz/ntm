@@ -13,9 +13,10 @@ import (
 
 // AssignOptions configures work assignment analysis
 type AssignOptions struct {
-	Session  string   // tmux session name
-	Beads    []string // Specific bead IDs to assign (empty = all ready)
-	Strategy string   // balanced, speed, quality, dependency
+	Session    string   // tmux session name
+	ProjectDir string   // Explicit project directory for Beads reads
+	Beads      []string // Specific bead IDs to assign (empty = all ready)
+	Strategy   string   // balanced, speed, quality, dependency
 }
 
 // AssignOutput is the structured output for --robot-assign
@@ -335,7 +336,7 @@ func PrintAssign(opts AssignOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot assign failed")
 }
 
 // assignAgentInfo holds agent data for assignment processing

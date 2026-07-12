@@ -13,6 +13,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -23,7 +25,7 @@ type assignGlobalsSnapshot struct {
 	assignReassign     string
 	assignRetry        string
 	assignRetryFailed  bool
-	assignToPane       int
+	assignToPane       string
 	assignToType       string
 	assignForce        bool
 	assignPrompt       string
@@ -32,6 +34,8 @@ type assignGlobalsSnapshot struct {
 	assignTimeout      time.Duration
 	assignQuiet        bool
 	assignVerbose      bool
+	assignRepoPath     string
+	assignReserveFiles bool
 }
 
 func captureAssignGlobals() assignGlobalsSnapshot {
@@ -50,6 +54,8 @@ func captureAssignGlobals() assignGlobalsSnapshot {
 		assignTimeout:      assignTimeout,
 		assignQuiet:        assignQuiet,
 		assignVerbose:      assignVerbose,
+		assignRepoPath:     assignRepoPath,
+		assignReserveFiles: assignReserveFiles,
 	}
 }
 
@@ -68,6 +74,8 @@ func (s assignGlobalsSnapshot) restore() {
 	assignTimeout = s.assignTimeout
 	assignQuiet = s.assignQuiet
 	assignVerbose = s.assignVerbose
+	assignRepoPath = s.assignRepoPath
+	assignReserveFiles = s.assignReserveFiles
 }
 
 func setupReassignSession(t *testing.T, tmpDir string) (string, tmux.Pane, tmux.Pane) {
@@ -159,6 +167,11 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 
 	snapshot := captureAssignGlobals()
 	defer snapshot.restore()
+	previousClaim := claimBeadForAssignment
+	claimBeadForAssignment = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	t.Cleanup(func() { claimBeadForAssignment = previousClaim })
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
@@ -173,7 +186,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
 
 	store := assignment.NewStore(sessionName)
-	if _, err := store.Assign("bd-123", "Test bead", claudePane.Index, "claude", "", "Original prompt"); err != nil {
+	if _, err := store.Assign("bd-123", "Test bead", claudePane.Index, "claude", "LegacyClaude", "Original prompt"); err != nil {
 		t.Fatalf("Assign failed: %v", err)
 	}
 	if err := store.MarkWorking("bd-123"); err != nil {
@@ -181,7 +194,7 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	}
 
 	assignReassign = "bd-123"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = true
 	assignPrompt = "Continue work on bd-123"
@@ -230,6 +243,9 @@ func TestRunReassignment_ToPane_Success(t *testing.T) {
 	if assignmentAfter.PromptSent != assignPrompt {
 		t.Fatalf("expected persisted prompt %q, got %q", assignPrompt, assignmentAfter.PromptSent)
 	}
+	if assignmentAfter.ClaimActor != "LegacyClaude" || assignmentAfter.IdempotencyKey == "" || assignmentAfter.DispatchState != assignment.DispatchSent {
+		t.Fatalf("expected atomic reassignment metadata with reused actor: %+v", assignmentAfter)
+	}
 
 	time.Sleep(400 * time.Millisecond)
 	promptOutput, err := tmux.CapturePaneOutput(codexPane.ID, 20)
@@ -268,6 +284,22 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	jsonOutput = true
 
 	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+	previousObserver := newAssignSessionObserver
+	newAssignSessionObserver = func() assignSessionObserver {
+		return fixedAssignSessionObserver{observation: statuspkg.SessionObservation{
+			Session: sessionName,
+			Panes: []statuspkg.PaneObservation{{
+				Pane: tmux.PaneRef{ID: codexPane.ID, WindowIndex: codexPane.WindowIndex, PaneIndex: codexPane.Index},
+				Current: statuspkg.StateObservation{
+					Status:     statuspkg.AgentStatus{State: statuspkg.StateIdle},
+					ObservedAt: time.Now().UTC(),
+					Freshness:  statuspkg.FreshnessFresh,
+					Confidence: 0.99,
+				},
+			}},
+		}}
+	}
+	t.Cleanup(func() { newAssignSessionObserver = previousObserver })
 
 	store := assignment.NewStore(sessionName)
 	if _, err := store.Assign("bd-131", "Test bead 131", claudePane.Index, "claude", "", "Original prompt"); err != nil {
@@ -283,7 +315,7 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	assignRetry = "bd-131"
 	assignRetryFailed = false
 	assignReserveFiles = false
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignTemplate = "impl"
 	assignTemplateFile = ""
@@ -334,6 +366,79 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	}
 }
 
+func TestRunRetryAssignments_TargetedPendingMissingPhysicalPaneFailsAndPreservesLedger(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Agents.Claude = testAgentCatCommandTemplate
+	cfg.Agents.Codex = testAgentCatCommandTemplate
+	cfg.Agents.Gemini = testAgentCatCommandTemplate
+	jsonOutput = true
+
+	sessionName, claudePane, _ := setupReassignSession(t, tmpDir)
+	const beadID = "ntm-pending-missing-pane"
+	store := assignment.NewStore(sessionName)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID:         beadID,
+		BeadTitle:      "Pending retry",
+		Pane:           claudePane.Index,
+		AgentType:      "claude",
+		AgentName:      "BlueLake",
+		Status:         assignment.StatusClaimed,
+		AssignedAt:     time.Now().UTC(),
+		IdempotencyKey: "pending-key",
+		ClaimActor:     "BlueLake",
+		ClaimState:     assignment.ClaimClaimed,
+		DispatchState:  assignment.DispatchPending,
+		DispatchTarget: "%999999",
+		OccupancyKey:   "%999999",
+		PendingPrompt:  "do not transfer",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("save pending fixture: %v", err)
+	}
+
+	assignRetry = beadID
+	assignRetryFailed = false
+	assignToPane = ""
+	assignToType = ""
+	assignReserveFiles = false
+	assignRepoPath = tmpDir
+	assignQuiet = true
+	assignVerbose = false
+
+	output, err := captureStdout(t, func() error { return runRetryAssignments(nil, sessionName) })
+	if !errors.Is(err, errJSONFailure) {
+		t.Fatalf("targeted retry error = %v, want JSON failure exit", err)
+	}
+	var envelope AssignEnvelope[RetryData]
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode retry envelope: %v\noutput=%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "RETRY_SKIPPED" || envelope.Data == nil {
+		t.Fatalf("targeted retry envelope = %+v", envelope)
+	}
+	if envelope.Data.Summary.RetriedCount != 0 || envelope.Data.Summary.SkippedCount != 1 || len(envelope.Data.Skipped) != 1 ||
+		!strings.Contains(envelope.Data.Skipped[0].Reason, "%999999 is unavailable") {
+		t.Fatalf("targeted retry data = %+v", envelope.Data)
+	}
+
+	reloaded, err := assignment.LoadStoreStrict(sessionName)
+	if err != nil {
+		t.Fatalf("reload pending ledger: %v", err)
+	}
+	pending := reloaded.Get(beadID)
+	if pending == nil || pending.Status != assignment.StatusClaimed || pending.DispatchState != assignment.DispatchPending || pending.OccupancyKey != "%999999" {
+		t.Fatalf("targeted retry changed pending ledger: %+v", pending)
+	}
+}
+
 func TestRunReassignment_AlreadyAssigned(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
@@ -360,7 +465,7 @@ func TestRunReassignment_AlreadyAssigned(t *testing.T) {
 	}
 
 	assignReassign = "bd-124"
-	assignToPane = claudePane.Index
+	assignToPane = fmt.Sprintf("%d", claudePane.Index)
 	assignToType = ""
 	assignForce = true
 	assignPrompt = "noop"
@@ -408,7 +513,7 @@ func TestRunReassignment_NoIdleAgentForType(t *testing.T) {
 	}
 
 	assignReassign = "bd-125"
-	assignToPane = -1
+	assignToPane = ""
 	assignToType = "gemini"
 	assignForce = true
 
@@ -460,7 +565,7 @@ func TestRunReassignment_TargetBusyWithoutForce(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	assignReassign = "bd-126"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = false
 
@@ -499,7 +604,7 @@ func TestRunReassignment_NotAssigned(t *testing.T) {
 	sessionName, _, codexPane := setupReassignSession(t, tmpDir)
 
 	assignReassign = "bd-missing"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = true
 
@@ -548,7 +653,7 @@ func TestRunReassignment_ToPaneNotFound(t *testing.T) {
 	t.Logf("TEST: %s - starting with bead bd-127, targeting non-existent pane 999", t.Name())
 
 	assignReassign = "bd-127"
-	assignToPane = 999 // Non-existent pane
+	assignToPane = "999" // Non-existent pane
 	assignToType = ""
 	assignForce = true
 
@@ -604,7 +709,7 @@ func TestRunReassignment_CompletedBead(t *testing.T) {
 	t.Logf("TEST: %s - starting with completed bead bd-128", t.Name())
 
 	assignReassign = "bd-128"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = true
 
@@ -668,7 +773,7 @@ func TestRunReassignment_FailedBead(t *testing.T) {
 	t.Logf("TEST: %s - starting with failed bead bd-129", t.Name())
 
 	assignReassign = "bd-129"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = true
 
@@ -700,7 +805,7 @@ func TestRunReassignment_FailedBead(t *testing.T) {
 	}
 }
 
-func TestRunReassignment_FileReservationsGracefulDegradation(t *testing.T) {
+func TestRunReassignment_ReservationRequiredFailsClosedWhenAgentMailUnavailable(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
 	snapshot := captureAssignGlobals()
@@ -729,7 +834,7 @@ func TestRunReassignment_FileReservationsGracefulDegradation(t *testing.T) {
 	t.Logf("TEST: %s - starting with bead bd-130, Agent Mail disabled", t.Name())
 
 	assignReassign = "bd-130"
-	assignToPane = codexPane.Index
+	assignToPane = fmt.Sprintf("%d", codexPane.Index)
 	assignToType = ""
 	assignForce = true
 	assignPrompt = "Continue work on bd-130"
@@ -747,21 +852,130 @@ func TestRunReassignment_FileReservationsGracefulDegradation(t *testing.T) {
 		t.Fatalf("Failed to parse JSON output: %v\nOutput: %s", err, output)
 	}
 
-	t.Logf("TEST: %s - assertion: reassignment should succeed even with Agent Mail unavailable", t.Name())
-	if !envelope.Success {
-		t.Fatalf("expected success envelope, got error: %+v", envelope.Error)
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "RESERVATION_REQUIRED" {
+		t.Fatalf("expected reservation-required failure envelope, got: %+v", envelope)
 	}
-	if envelope.Data == nil {
-		t.Fatalf("expected data in success envelope")
+	reloaded, err := assignment.LoadStoreStrict(sessionName)
+	if err != nil {
+		t.Fatalf("reload assignment: %v", err)
 	}
-	if envelope.Data.Pane != codexPane.Index {
-		t.Fatalf("expected pane %d, got %d", codexPane.Index, envelope.Data.Pane)
+	durable := reloaded.Get("bd-130")
+	if durable == nil || durable.Status != assignment.StatusWorking || durable.ClearState != assignment.ClearStateNone || durable.Pane != claudePane.Index {
+		t.Fatalf("reservation preflight changed the original assignment: %+v", durable)
+	}
+}
+
+func TestRunReassignment_ForceDoesNotBypassDurableTargetOccupancy(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Agents.Claude = testAgentCatCommandTemplate
+	cfg.Agents.Codex = testAgentCatCommandTemplate
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-moving", "Moving bead", claudePane.Index, "claude", "LegacyClaude", "old prompt"); err != nil {
+		t.Fatalf("assign moving bead: %v", err)
+	}
+	if err := store.MarkWorking("bd-moving"); err != nil {
+		t.Fatalf("mark moving bead working: %v", err)
+	}
+	occupied, err := store.Assign("bd-occupied", "Occupied bead", codexPane.Index, "codex", "ExistingCodex", "occupied prompt")
+	if err != nil {
+		t.Fatalf("assign occupied bead: %v", err)
+	}
+	occupied.DispatchTarget = codexPane.ID
+	occupied.OccupancyKey = codexPane.ID
+	store.Assignments[occupied.BeadID] = occupied
+	if err := store.Save(); err != nil {
+		t.Fatalf("save occupied target: %v", err)
 	}
 
-	// File reservations should not be transferred (Agent Mail unavailable)
-	// but the reassignment itself should succeed
-	t.Logf("TEST: %s - assertion: file reservations should not be transferred (Agent Mail disabled)", t.Name())
-	if envelope.Data.FileReservationsTransferred {
-		t.Logf("TEST: %s - unexpected: file reservations marked as transferred despite Agent Mail being disabled", t.Name())
+	assignReassign = "bd-moving"
+	assignToPane = codexPane.ID
+	assignToType = ""
+	assignForce = true
+	assignReserveFiles = false
+	output, runErr := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runReassignment error = %v, want JSON failure", runErr)
+	}
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode reassignment output: %v\n%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "TARGET_BUSY" {
+		t.Fatalf("force occupancy envelope = %+v", envelope)
+	}
+	reloaded, err := assignment.LoadStoreStrict(sessionName)
+	if err != nil {
+		t.Fatalf("reload assignment store: %v", err)
+	}
+	moving := reloaded.Get("bd-moving")
+	if moving == nil || moving.Status != assignment.StatusWorking || moving.ClearState != assignment.ClearStateNone || moving.Pane != claudePane.Index {
+		t.Fatalf("occupied target changed source assignment: %+v", moving)
+	}
+}
+
+func TestRunReassignment_RedactionBlockLeavesRecoverableHandoffBarrier(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Agents.Claude = testAgentCatCommandTemplate
+	cfg.Agents.Codex = testAgentCatCommandTemplate
+	cfg.Redaction.Mode = string(redaction.ModeBlock)
+	jsonOutput = true
+
+	sessionName, claudePane, codexPane := setupReassignSession(t, tmpDir)
+	store := assignment.NewStore(sessionName)
+	if _, err := store.Assign("bd-redaction", "Redaction bead", claudePane.Index, "claude", "LegacyClaude", "old prompt"); err != nil {
+		t.Fatalf("assign redaction bead: %v", err)
+	}
+	if err := store.MarkWorking("bd-redaction"); err != nil {
+		t.Fatalf("mark redaction bead working: %v", err)
+	}
+
+	assignReassign = "bd-redaction"
+	assignToPane = codexPane.ID
+	assignToType = ""
+	assignForce = true
+	assignReserveFiles = false
+	assignPrompt = "password=hunter2hunter2"
+	output, runErr := captureStdout(t, func() error { return runReassignment(nil, sessionName) })
+	if !errors.Is(runErr, errJSONFailure) {
+		t.Fatalf("runReassignment error = %v, want JSON failure", runErr)
+	}
+	var envelope ReassignEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode reassignment output: %v\n%s", err, output)
+	}
+	if envelope.Success || envelope.Error == nil || envelope.Error.Code != "REDACTION_BLOCKED" {
+		t.Fatalf("redaction envelope = %+v", envelope)
+	}
+	reloaded, err := assignment.LoadStoreStrict(sessionName)
+	if err != nil {
+		t.Fatalf("reload assignment store: %v", err)
+	}
+	durable := reloaded.Get("bd-redaction")
+	if durable == nil || durable.Status != assignment.StatusWorking || durable.ClearState != assignment.ClearStateLeasesReleased || durable.Pane != claudePane.Index || durable.IdempotencyKey != "" {
+		t.Fatalf("redaction failure did not retain the recoverable handoff barrier: %+v", durable)
+	}
+	outputPane, err := tmux.CapturePaneOutput(codexPane.ID, 20)
+	if err != nil {
+		t.Fatalf("capture target pane: %v", err)
+	}
+	if strings.Contains(outputPane, "hunter2hunter2") {
+		t.Fatalf("blocked reassignment leaked prompt to target pane: %q", outputPane)
 	}
 }

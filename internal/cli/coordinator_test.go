@@ -2,11 +2,15 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestCoordinatorRunCommandExposesDeterministicOnceMode(t *testing.T) {
@@ -17,6 +21,27 @@ func TestCoordinatorRunCommandExposesDeterministicOnceMode(t *testing.T) {
 	if flag := cmd.Flags().Lookup("once"); flag == nil || flag.DefValue != "false" {
 		t.Fatalf("--once flag = %+v", flag)
 	}
+}
+
+func stubCoordinatorLiveTopology(t *testing.T, panes []tmux.Pane, paths map[string]string) {
+	t.Helper()
+	previousExists := coordinatorSessionExists
+	previousPanes := coordinatorGetPanes
+	previousPath := coordinatorPaneCurrentDir
+	coordinatorSessionExists = func(string) bool { return true }
+	coordinatorGetPanes = func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil }
+	coordinatorPaneCurrentDir = func(paneID string) (string, error) {
+		path, ok := paths[paneID]
+		if !ok {
+			return "", errors.New("missing pane path")
+		}
+		return path, nil
+	}
+	t.Cleanup(func() {
+		coordinatorSessionExists = previousExists
+		coordinatorGetPanes = previousPanes
+		coordinatorPaneCurrentDir = previousPath
+	})
 }
 
 func TestCoordinatorRunFailureIncludesAssignmentFailures(t *testing.T) {
@@ -37,6 +62,81 @@ func TestCoordinatorRunFailureIncludesAssignmentFailures(t *testing.T) {
 				t.Fatalf("coordinatorRunFailure()=%v, wantError=%t", got, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestResolveCoordinatorProjectKeyPreservesExactResolvedSession(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	originalConfig := cfg
+	t.Cleanup(func() { cfg = originalConfig })
+
+	projectsBase := t.TempDir()
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	session := "coordinator-exact-session"
+	competing := filepath.Join(projectsBase, session+"-prefixed")
+	if err := os.MkdirAll(filepath.Join(competing, ".git"), 0o755); err != nil {
+		t.Fatalf("create competing project: %v", err)
+	}
+	authoritative := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(authoritative, ".git"), 0o755); err != nil {
+		t.Fatalf("create authoritative project marker: %v", err)
+	}
+	saveSessionAgentForTest(t, session, authoritative, "GreenCastle")
+
+	got, err := resolveCoordinatorProjectKey(session, false)
+	if err != nil {
+		t.Fatalf("resolveCoordinatorProjectKey: %v", err)
+	}
+	if got != authoritative {
+		t.Fatalf("resolved project = %q, want exact session project %q (not %q)", got, authoritative, competing)
+	}
+}
+
+func TestResolveCoordinatorProjectKeyPrefersCommonLivePaneRoot(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const session = "coordinator-live-authority"
+	staleProject := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(staleProject, ".git"), 0o755); err != nil {
+		t.Fatalf("create stale project marker: %v", err)
+	}
+	liveProject := t.TempDir()
+	for _, dir := range []string{filepath.Join(liveProject, ".git"), filepath.Join(liveProject, ".beads"), filepath.Join(liveProject, "internal", "cli"), filepath.Join(liveProject, "internal", "coordinator")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create live project path: %v", err)
+		}
+	}
+	saveSessionAgentForTest(t, session, staleProject, "GreenCastle")
+	stubCoordinatorLiveTopology(t, []tmux.Pane{{ID: "%70"}, {ID: "%71"}}, map[string]string{
+		"%70": filepath.Join(liveProject, "internal", "cli"),
+		"%71": filepath.Join(liveProject, "internal", "coordinator"),
+	})
+
+	got, err := resolveCoordinatorProjectKey(session, false)
+	if err != nil {
+		t.Fatalf("resolveCoordinatorProjectKey: %v", err)
+	}
+	if got != liveProject {
+		t.Fatalf("resolved project = %q, want live root %q instead of stale registry %q", got, liveProject, staleProject)
+	}
+}
+
+func TestResolveCoordinatorProjectKeyRejectsMixedLiveRoots(t *testing.T) {
+	const session = "coordinator-mixed-roots"
+	first := t.TempDir()
+	second := t.TempDir()
+	for _, project := range []string{first, second} {
+		if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+			t.Fatalf("create project marker: %v", err)
+		}
+	}
+	stubCoordinatorLiveTopology(t, []tmux.Pane{{ID: "%80"}, {ID: "%81"}}, map[string]string{
+		"%80": first,
+		"%81": second,
+	})
+
+	_, err := resolveCoordinatorProjectKey(session, false)
+	if err == nil || !strings.Contains(err.Error(), "multiple project roots") {
+		t.Fatalf("mixed live roots error = %v", err)
 	}
 }
 

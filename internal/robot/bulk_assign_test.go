@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
@@ -838,7 +840,7 @@ func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 	}
 	output := BulkAssignOutput{Session: "bulk-conflict"}
 	applyBulkAssignPlan(BulkAssignOptions{RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}}, bulkAssignDeps(&deps), &output, plan)
-	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" || output.Assignments[0].PromptSent {
+	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" || output.Assignments[0].PromptSent || output.Assignments[0].Claimed {
 		t.Fatalf("output=%+v", output.Assignments)
 	}
 	if reserveCalls != 0 || deliverCalls != 0 {
@@ -1162,6 +1164,276 @@ func TestBulkAssignBVFailure(t *testing.T) {
 	}
 }
 
+func TestBulkAssignUsesAuthoritativeSessionProjectForBVPlanning(t *testing.T) {
+	authoritative := t.TempDir()
+	wrongCWD := t.TempDir()
+	var triageDir, inProgressDir string
+	cwdCalls := 0
+	deps := BulkAssignDependencies{
+		ResolveProject: func(session string, _ []tmux.Pane) (string, error) {
+			if session != "authoritative-session" {
+				t.Fatalf("ResolveProject session = %q", session)
+			}
+			return authoritative, nil
+		},
+		Cwd: func() (string, error) {
+			cwdCalls++
+			return wrongCWD, nil
+		},
+		FetchTriage: func(dir string) (*bv.TriageResponse, error) {
+			triageDir = dir
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-auth", Title: "Scoped work", Status: "open", Priority: 1}}, nil), nil
+		},
+		FetchInProgress: func(dir string, _ int) ([]bv.BeadInProgress, error) {
+			inProgressDir = dir
+			return nil, nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) {
+			return mockTmuxPanesForList([]int{1}), nil
+		},
+		Now: func() time.Time { return time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC) },
+	}
+
+	output, err := GetBulkAssign(BulkAssignOptions{
+		Session: "authoritative-session", FromBV: true, DryRun: true, Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	if !output.Success || len(output.Assignments) != 1 {
+		t.Fatalf("bulk assignment output = %+v", output)
+	}
+	if triageDir != authoritative || inProgressDir != authoritative {
+		t.Fatalf("planning dirs = triage %q in-progress %q, want %q", triageDir, inProgressDir, authoritative)
+	}
+	if cwdCalls != 0 {
+		t.Fatalf("caller CWD resolved %d time(s), want zero", cwdCalls)
+	}
+}
+
+func TestBulkAssignLiveSessionProjectOverridesCallerCWDWithoutSavedMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sessionProject := t.TempDir()
+	callerProject := t.TempDir()
+	for _, projectDir := range []string{sessionProject, callerProject} {
+		if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+			t.Fatalf("create project marker: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(projectDir, ".beads"), 0o755); err != nil {
+			t.Fatalf("create beads project marker: %v", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(sessionProject, "internal", "robot"), 0o755); err != nil {
+		t.Fatalf("create live pane subdirectory: %v", err)
+	}
+	var triageDir string
+	const session = "exact-live-session"
+	panes := mockTmuxPanesForList([]int{1})
+	deps := BulkAssignDependencies{
+		Cwd: func() (string, error) { return callerProject, nil },
+		PaneCurrentPath: func(paneID string) (string, error) {
+			if paneID != "%1" {
+				t.Fatalf("pane path lookup = %q, want %%1", paneID)
+			}
+			return filepath.Join(sessionProject, "internal", "robot"), nil
+		},
+		ListPanes: func(gotSession string) ([]tmux.Pane, error) {
+			if gotSession != session {
+				t.Fatalf("ListPanes session = %q, want exact %q", gotSession, session)
+			}
+			return panes, nil
+		},
+		FetchTriage: func(dir string) (*bv.TriageResponse, error) {
+			triageDir = dir
+			return mockTriage([]bv.TriageRecommendation{{ID: "bd-live", Title: "Live scoped work", Status: "open", Priority: 1}}, nil), nil
+		},
+		FetchInProgress: func(string, int) ([]bv.BeadInProgress, error) { return nil, nil },
+	}
+
+	output, err := GetBulkAssign(BulkAssignOptions{Session: session, FromBV: true, DryRun: true, Deps: &deps})
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	if !output.Success || len(output.Assignments) != 1 {
+		t.Fatalf("bulk assignment output = %+v", output)
+	}
+	if triageDir != sessionProject {
+		t.Fatalf("triage dir = %q, want live session project %q instead of caller CWD %q", triageDir, sessionProject, callerProject)
+	}
+}
+
+func TestBulkAssignRejectsLiveSessionWithMultipleProjectRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	firstProject := t.TempDir()
+	secondProject := t.TempDir()
+	for _, projectDir := range []string{firstProject, secondProject} {
+		if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+			t.Fatalf("create project marker: %v", err)
+		}
+	}
+	panes := mockTmuxPanesForList([]int{1, 2})
+	deps := BulkAssignDependencies{
+		Cwd: func() (string, error) { return secondProject, nil },
+		PaneCurrentPath: func(paneID string) (string, error) {
+			if paneID == "%1" {
+				return firstProject, nil
+			}
+			return secondProject, nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return panes, nil },
+		FetchTriage: func(string) (*bv.TriageResponse, error) {
+			t.Fatal("triage must not run for ambiguous live project roots")
+			return nil, nil
+		},
+	}
+
+	output, err := GetBulkAssign(BulkAssignOptions{Session: "mixed-live-session", FromBV: true, DryRun: true, Deps: &deps})
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	if output.Success || !strings.Contains(output.Error, "multiple project roots") {
+		t.Fatalf("bulk assignment output = %+v, want mixed-root failure", output)
+	}
+}
+
+func TestBulkAssignUsesAuthoritativeSessionProjectForActuation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	authoritative := t.TempDir()
+	wrongCWD := t.TempDir()
+	store := assignment.NewStore("authoritative-actuation")
+	var titleDir, claimDir, redactionDir string
+	cwdCalls := 0
+	panes := mockTmuxPanesForList([]int{1})
+	deps := BulkAssignDependencies{
+		ResolveProject: func(string, []tmux.Pane) (string, error) { return authoritative, nil },
+		Cwd: func() (string, error) {
+			cwdCalls++
+			return wrongCWD, nil
+		},
+		FetchBeadTitle: func(dir, beadID string) (string, error) {
+			titleDir = dir
+			return "Scoped " + beadID, nil
+		},
+		ListPanes: func(string) ([]tmux.Pane, error) { return panes, nil },
+		ReadFile:  func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ClaimBead: func(_ context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+			claimDir = dir
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: func() (string, error) { return "authoritative-key", nil },
+		ResolveAgentName: func(context.Context, string, string, string, string) (string, error) {
+			return "ScopedAgent", nil
+		},
+		ObserveSession:    bulkSafeObserver(panes),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error { return nil }),
+		LoadRedaction: func(dir string) (redaction.Config, error) {
+			redactionDir = dir
+			return redaction.Config{Mode: redaction.ModeOff}, nil
+		},
+	}
+
+	output, err := GetBulkAssign(BulkAssignOptions{
+		Session: "authoritative-actuation", AllocationJSON: `{"1":"bd-auth"}`, Deps: &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	if !output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "assigned" {
+		t.Fatalf("bulk assignment output = %+v", output)
+	}
+	if titleDir != authoritative || claimDir != authoritative || redactionDir != authoritative {
+		t.Fatalf("actuation dirs = title %q claim %q redaction %q, want %q", titleDir, claimDir, redactionDir, authoritative)
+	}
+	if cwdCalls != 0 {
+		t.Fatalf("caller CWD resolved %d time(s), want zero", cwdCalls)
+	}
+}
+
+func TestRobotReservationPreflightFailuresGuaranteeNoLease(t *testing.T) {
+	runtime := &robotAgentMailReservationRuntime{
+		client: &fakeRobotReservationClient{}, projectKey: "/project", projectID: 7,
+		registered: map[string]agentmail.Agent{"KnownAgent": {Name: "KnownAgent", ProjectID: 7}},
+	}
+	for _, test := range []struct {
+		name string
+		req  assignment.ReservationRequest
+	}{
+		{name: "unregistered recipient", req: assignment.ReservationRequest{AgentName: "MissingAgent", RequestedPaths: []string{"internal/**"}}},
+		{name: "invalid paths", req: assignment.ReservationRequest{AgentName: "KnownAgent", RequestedPaths: []string{"internal/**", "internal/**"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runtime.Reserve(t.Context(), test.req)
+			if err == nil || !assignment.IsGuaranteedNoReservation(err) {
+				t.Fatalf("Reserve() error = %v, want guaranteed no-reservation failure", err)
+			}
+		})
+	}
+}
+
+func TestRobotReservationPartialConflictPreservesLeaseHandles(t *testing.T) {
+	client := &fakeRobotReservationClient{reserveResult: &agentmail.ReservationResult{
+		Granted: []agentmail.FileReservation{{
+			ID: 41, PathPattern: "internal/robot/**", AgentName: "KnownAgent", ProjectID: 7, Exclusive: true,
+		}},
+		Conflicts: []agentmail.ReservationConflict{{Path: "internal/cli/**", Holders: []string{"OtherAgent"}}},
+	}}
+	runtime := &robotAgentMailReservationRuntime{
+		client: client, projectKey: "/project", projectID: 7,
+		registered: map[string]agentmail.Agent{"KnownAgent": {Name: "KnownAgent", ProjectID: 7}},
+	}
+	lease, err := runtime.Reserve(t.Context(), assignment.ReservationRequest{
+		BeadID: "bd-partial", AgentName: "KnownAgent", Target: "%1",
+		RequestedPaths: []string{"internal/robot/**", "internal/cli/**"},
+	})
+	if err == nil || assignment.IsGuaranteedNoReservation(err) {
+		t.Fatalf("Reserve() error = %v, want ambiguous partial-lease failure", err)
+	}
+	if !reflect.DeepEqual(lease.Granted, []string{"internal/robot/**"}) || !reflect.DeepEqual(lease.ReservationIDs, []int{41}) {
+		t.Fatalf("partial lease = %+v, want retained release handles", lease)
+	}
+}
+
+func TestRobotReservationReconciliationDistinguishesAbsentPartialAndReserved(t *testing.T) {
+	base := agentmail.FileReservation{
+		ID: 51, PathPattern: "internal/robot/**", AgentName: "KnownAgent", ProjectID: 7,
+		Exclusive: true, Reason: "bead assignment: bd-reconcile",
+	}
+	second := base
+	second.ID = 52
+	second.PathPattern = "internal/cli/**"
+	request := assignment.ReservationRequest{
+		BeadID: "bd-reconcile", AgentName: "KnownAgent", Target: "%1",
+		RequestedPaths: []string{"internal/robot/**", "internal/cli/**"},
+	}
+	for _, test := range []struct {
+		name         string
+		reservations []agentmail.FileReservation
+		want         assignment.ReservationReconciliationState
+	}{
+		{name: "absent", want: assignment.ReservationReconciliationAbsent},
+		{name: "partial", reservations: []agentmail.FileReservation{base}, want: assignment.ReservationReconciliationUnknown},
+		{name: "reserved", reservations: []agentmail.FileReservation{base, second}, want: assignment.ReservationReconciliationReserved},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &robotAgentMailReservationRuntime{
+				client:     &fakeRobotReservationClient{reservations: test.reservations},
+				projectKey: "/project", projectID: 7,
+			}
+			got, err := runtime.ReconcileReservation(t.Context(), request, assignment.LeaseReceipt{})
+			if err != nil {
+				t.Fatalf("ReconcileReservation: %v", err)
+			}
+			if got.State != test.want {
+				t.Fatalf("state = %q, want %q; lease=%+v", got.State, test.want, got.Lease)
+			}
+			if test.want == assignment.ReservationReconciliationReserved && len(got.Lease.ReservationIDs) != 2 {
+				t.Fatalf("reserved lease = %+v", got.Lease)
+			}
+		})
+	}
+}
+
 func TestBulkAssignPaneListMapsMissingSessionAndTimeout(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1225,6 +1497,29 @@ func TestBulkAssignConcurrentSafety(t *testing.T) {
 }
 
 // helpers
+
+type fakeRobotReservationClient struct {
+	reserveResult *agentmail.ReservationResult
+	reserveErr    error
+	reservations  []agentmail.FileReservation
+	listErr       error
+}
+
+func (f *fakeRobotReservationClient) EnsureProject(context.Context, string) (*agentmail.Project, error) {
+	return &agentmail.Project{ID: 7, HumanKey: "/project"}, nil
+}
+
+func (f *fakeRobotReservationClient) ListAgents(context.Context, string) ([]agentmail.Agent, error) {
+	return []agentmail.Agent{{Name: "KnownAgent", ProjectID: 7}}, nil
+}
+
+func (f *fakeRobotReservationClient) ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error) {
+	return append([]agentmail.FileReservation(nil), f.reservations...), f.listErr
+}
+
+func (f *fakeRobotReservationClient) ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+	return f.reserveResult, f.reserveErr
+}
 
 func mockTriage(recs []bv.TriageRecommendation, blockers []bv.BlockerToClear) *bv.TriageResponse {
 	return &bv.TriageResponse{

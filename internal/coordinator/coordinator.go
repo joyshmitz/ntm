@@ -6,6 +6,7 @@ package coordinator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -36,11 +37,13 @@ type SessionCoordinator struct {
 	projectKey string // Absolute path to working directory
 
 	// Clients
-	mailClient *agentmail.Client
+	mailClient        *agentmail.Client
+	reservationClient coordinatorReservationClient
 
 	atomicCoordinatorFactory func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator
 	assignWorkFn             func(context.Context) ([]AssignmentResult, error)
 	triageFn                 func(string) (*bv.TriageResponse, error)
+	workItemStatusFn         func(context.Context, string) (string, error)
 
 	// Agent tracking
 	agents     map[string]*AgentState
@@ -166,14 +169,15 @@ type busCoordinatorEvent struct {
 // New creates a new SessionCoordinator.
 func New(session, projectKey string, mailClient *agentmail.Client, agentName string) *SessionCoordinator {
 	return &SessionCoordinator{
-		session:    session,
-		agentName:  agentName,
-		projectKey: projectKey,
-		mailClient: mailClient,
-		agents:     make(map[string]*AgentState),
-		config:     DefaultCoordinatorConfig(),
-		events:     make(chan CoordinatorEvent, 100),
-		stopCh:     make(chan struct{}),
+		session:           session,
+		agentName:         agentName,
+		projectKey:        projectKey,
+		mailClient:        mailClient,
+		reservationClient: mailClient,
+		agents:            make(map[string]*AgentState),
+		config:            DefaultCoordinatorConfig(),
+		events:            make(chan CoordinatorEvent, 100),
+		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -216,8 +220,15 @@ func (c *SessionCoordinator) Start(ctx context.Context) error {
 	// Initialize monitor
 	c.monitor = NewAgentMonitor(c.session, c.mailClient, c.projectKey)
 
-	// Perform initial update synchronously to ensure state is ready.
-	c.updateAgentStatesContext(ctx)
+	// Perform initial update synchronously to ensure state is ready. A coordinator
+	// that cannot observe its target session must not announce a healthy runtime.
+	if err := c.updateAgentStatesContext(ctx); err != nil {
+		c.mu.Lock()
+		c.started = false
+		c.stopCh = nil
+		c.mu.Unlock()
+		return fmt.Errorf("initial coordinator observation: %w", err)
+	}
 
 	// Start monitoring goroutine
 	c.wg.Add(1)
@@ -308,6 +319,31 @@ func (c *SessionCoordinator) GetIdleAgents() []*AgentState {
 	return idle
 }
 
+// getAssignmentCandidates applies the configured queueing policy while always
+// requiring a current, healthy observation. When AssignOnlyIdle is false, busy
+// agents may receive queued Agent Mail work, but stale/error panes remain
+// ineligible.
+func (c *SessionCoordinator) getAssignmentCandidates() []*AgentState {
+	if c.config.AssignOnlyIdle {
+		return c.GetIdleAgents()
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	now := time.Now()
+	candidates := make([]*AgentState, 0, len(c.agents))
+	for _, agent := range c.agents {
+		if agent == nil || !agent.Healthy || agent.ObservationFreshness != status.FreshnessFresh ||
+			!status.DispatchObservationIsCurrent(agent.ObservedAt, now) || agent.Status == robot.StateError || agent.Status == robot.StateUnknown {
+			continue
+		}
+		agentCopy := *agent
+		candidates = append(candidates, &agentCopy)
+	}
+	return candidates
+}
+
 // monitorLoop periodically updates agent states.
 func (c *SessionCoordinator) monitorLoop(ctx context.Context, stopCh <-chan struct{}) {
 	defer c.wg.Done()
@@ -337,7 +373,9 @@ func (c *SessionCoordinator) RunCycle(ctx context.Context) ([]AssignmentResult, 
 	if c.monitor == nil {
 		c.monitor = NewAgentMonitor(c.session, c.mailClient, c.projectKey)
 	}
-	c.updateAgentStatesContext(ctx)
+	if err := c.updateAgentStatesContext(ctx); err != nil {
+		return nil, err
+	}
 	if !c.config.AutoAssign {
 		return nil, nil
 	}
@@ -350,6 +388,9 @@ func (c *SessionCoordinator) RunCycle(ctx context.Context) ([]AssignmentResult, 
 
 func (c *SessionCoordinator) reportAssignmentCycle(results []AssignmentResult, err error) {
 	if err != nil {
+		if assignmentCycleErrorIsExpectedShutdown(err) {
+			return
+		}
 		slog.Warn("coordinator auto-assignment failed", "session", c.session, "error", err)
 		return
 	}
@@ -364,19 +405,53 @@ func (c *SessionCoordinator) reportAssignmentCycle(results []AssignmentResult, e
 	}
 }
 
-// updateAgentStates refreshes the state of all agents.
-func (c *SessionCoordinator) updateAgentStates() {
-	c.updateAgentStatesContext(context.Background())
+func assignmentCycleErrorIsExpectedShutdown(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !assignmentCycleErrorIsExpectedShutdown(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		child := wrapped.Unwrap()
+		if child == nil {
+			return false
+		}
+		return assignmentCycleErrorIsExpectedShutdown(child)
+	}
+	return errors.Is(err, context.Canceled)
 }
 
-func (c *SessionCoordinator) updateAgentStatesContext(ctx context.Context) {
+func coordinatorPaneObservationError(paneID, message string) error {
+	cause := error(errors.New(message))
+	if message == context.Canceled.Error() {
+		cause = context.Canceled
+	}
+	return fmt.Errorf("pane %s: %w", paneID, cause)
+}
+
+// updateAgentStates refreshes the state of all agents.
+func (c *SessionCoordinator) updateAgentStates() {
+	_ = c.updateAgentStatesContext(context.Background())
+}
+
+func (c *SessionCoordinator) updateAgentStatesContext(ctx context.Context) error {
 	if c.monitor == nil {
-		return
+		return errors.New("agent monitor is not configured")
 	}
 	observation, err := c.monitor.ObserveSession(ctx)
 	if err != nil {
 		c.markAgentObservationsUnavailable(observation.ObservedAt, err)
-		return
+		return err
 	}
 
 	type agentUpdate struct {
@@ -387,17 +462,26 @@ func (c *SessionCoordinator) updateAgentStatesContext(ctx context.Context) {
 		status    AgentStatusResult
 	}
 	updates := make([]agentUpdate, 0, len(observation.Panes))
+	var observationErrors []error
 	for _, pane := range observation.Panes {
 		if pane.AgentType == string(tmux.AgentUser) || pane.AgentType == string(tmux.AgentUnknown) {
 			continue
 		}
+		state := c.monitor.resultFromPaneObservation(pane)
 		updates = append(updates, agentUpdate{
 			paneID:    pane.Pane.ID,
 			paneTitle: pane.Metadata.Title,
 			paneIndex: pane.Pane.PaneIndex,
 			agentType: pane.AgentType,
-			status:    c.monitor.resultFromPaneObservation(pane),
+			status:    state,
 		})
+		if state.Freshness != status.FreshnessFresh || state.ErrorMessage != "" {
+			message := state.ErrorMessage
+			if message == "" {
+				message = fmt.Sprintf("observation freshness is %s", state.Freshness)
+			}
+			observationErrors = append(observationErrors, coordinatorPaneObservationError(pane.Pane.ID, message))
+		}
 	}
 	registry, registryErr := agentmail.LoadSessionAgentRegistry(c.session, c.projectKey)
 	if registryErr != nil {
@@ -488,6 +572,7 @@ func (c *SessionCoordinator) updateAgentStatesContext(ctx context.Context) {
 	for _, transition := range transitions {
 		c.emitEvent(transition.agent, transition.prevStatus)
 	}
+	return errors.Join(observationErrors...)
 }
 
 // markAgentObservationsUnavailable makes a whole-session observation failure

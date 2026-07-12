@@ -2,7 +2,11 @@ package coordinator
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +17,54 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 )
+
+type fakeCoordinatorReservationClient struct {
+	reserveResult *agentmail.ReservationResult
+	reserveErr    error
+	reservations  []agentmail.FileReservation
+	listErr       error
+	releaseResult *agentmail.ReleaseReservationsResult
+	releaseErr    error
+	releaseIDs    [][]int
+	releasePaths  [][]string
+}
+
+func (f *fakeCoordinatorReservationClient) ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+	return f.reserveResult, f.reserveErr
+}
+
+func (f *fakeCoordinatorReservationClient) ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error) {
+	return append([]agentmail.FileReservation(nil), f.reservations...), f.listErr
+}
+
+func (f *fakeCoordinatorReservationClient) ReleaseReservations(_ context.Context, _ string, _ string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+	f.releaseIDs = append(f.releaseIDs, append([]int(nil), ids...))
+	f.releasePaths = append(f.releasePaths, append([]string(nil), paths...))
+	if f.releaseErr != nil {
+		return f.releaseResult, f.releaseErr
+	}
+	wantedIDs := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		wantedIDs[id] = struct{}{}
+	}
+	wantedPaths := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		wantedPaths[path] = struct{}{}
+	}
+	remaining := f.reservations[:0]
+	for _, reservation := range f.reservations {
+		_, byID := wantedIDs[reservation.ID]
+		_, byPath := wantedPaths[reservation.PathPattern]
+		if !byID && !byPath {
+			remaining = append(remaining, reservation)
+		}
+	}
+	f.reservations = remaining
+	if f.releaseResult != nil {
+		return f.releaseResult, nil
+	}
+	return &agentmail.ReleaseReservationsResult{Released: len(ids) + len(paths)}, nil
+}
 
 func TestWorkAssignmentStruct(t *testing.T) {
 	now := time.Now()
@@ -269,6 +321,73 @@ func TestAttemptAssignmentAtomicSuccessPersistsReceipt(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReservationPortPreservesPartialLeaseHandles(t *testing.T) {
+	client := &fakeCoordinatorReservationClient{reserveResult: &agentmail.ReservationResult{
+		Granted: []agentmail.FileReservation{{
+			ID: 71, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
+		}},
+		Conflicts: []agentmail.ReservationConflict{{Path: "internal/robot/**", Holders: []string{"OtherAgent"}}},
+	}}
+	port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
+	lease, err := port.Reserve(t.Context(), assignmentstore.ReservationRequest{
+		BeadID: "ntm-partial", AgentName: "BlueLake", Target: "%1",
+		RequestedPaths: []string{"internal/coordinator/**", "internal/robot/**"},
+	})
+	if err == nil || assignmentstore.IsGuaranteedNoReservation(err) {
+		t.Fatalf("Reserve() error = %v, want ambiguous partial-lease failure", err)
+	}
+	if !reflect.DeepEqual(lease.Granted, []string{"internal/coordinator/**"}) || !reflect.DeepEqual(lease.ReservationIDs, []int{71}) {
+		t.Fatalf("partial lease = %+v, want retained release handles", lease)
+	}
+}
+
+func TestCoordinatorReservationPortReconcilesInterruptedLease(t *testing.T) {
+	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{
+		{ID: 81, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile"},
+		{ID: 82, PathPattern: "internal/robot/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true, Reason: "bead assignment: ntm-reconcile"},
+	}}
+	port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
+	got, err := port.ReconcileReservation(t.Context(), assignmentstore.ReservationRequest{
+		BeadID: "ntm-reconcile", AgentName: "BlueLake", Target: "%1",
+		RequestedPaths: []string{"internal/coordinator/**", "internal/robot/**"},
+	}, assignmentstore.LeaseReceipt{})
+	if err != nil {
+		t.Fatalf("ReconcileReservation: %v", err)
+	}
+	if got.State != assignmentstore.ReservationReconciliationReserved || !reflect.DeepEqual(got.Lease.ReservationIDs, []int{81, 82}) {
+		t.Fatalf("reconciliation = %+v, want complete reserved lease", got)
+	}
+}
+
+func TestCoordinatorReservationPortReconcilesPartialLeaseAsKnownReserved(t *testing.T) {
+	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
+		ID: 83, PathPattern: "internal/coordinator/**", AgentName: "BlueLake", ProjectID: 9, Exclusive: true,
+		Reason: "bead assignment: ntm-partial-reconcile",
+	}}}
+	port := &coordinatorAgentMailReservationPort{client: client, projectKey: "/project"}
+	got, err := port.ReconcileReservation(t.Context(), assignmentstore.ReservationRequest{
+		BeadID: "ntm-partial-reconcile", AgentName: "BlueLake", Target: "%1",
+		RequestedPaths: []string{"internal/coordinator/**", "internal/robot/**"},
+	}, assignmentstore.LeaseReceipt{})
+	if err != nil {
+		t.Fatalf("ReconcileReservation: %v", err)
+	}
+	if got.State != assignmentstore.ReservationReconciliationReserved || !reflect.DeepEqual(got.Lease.ReservationIDs, []int{83}) ||
+		!reflect.DeepEqual(got.Lease.Granted, []string{"internal/coordinator/**"}) {
+		t.Fatalf("partial reconciliation = %+v, want known reserved handles", got)
+	}
+}
+
+func TestCoordinatorReservationPortPreflightFailureGuaranteesNoLease(t *testing.T) {
+	port := &coordinatorAgentMailReservationPort{client: &fakeCoordinatorReservationClient{}, projectKey: "/project"}
+	_, err := port.Reserve(t.Context(), assignmentstore.ReservationRequest{
+		AgentName: "BlueLake", RequestedPaths: []string{"internal/**", "internal/**"},
+	})
+	if err == nil || !assignmentstore.IsGuaranteedNoReservation(err) {
+		t.Fatalf("Reserve() error = %v, want guaranteed no-reservation failure", err)
+	}
+}
+
 func TestAssignWorkSkipsPersistedActiveRecommendation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "coordinator-active-filter"
@@ -290,12 +409,406 @@ func TestAssignWorkSkipsPersistedActiveRecommendation(t *testing.T) {
 			ID: "ntm-active", Title: "Already assigned", Status: "open", Priority: 1, Score: 1,
 		}}}}, nil
 	}
+	c.workItemStatusFn = func(context.Context, string) (string, error) {
+		return "in_progress", nil
+	}
 	results, err := c.AssignWork(t.Context())
 	if err != nil {
 		t.Fatalf("AssignWork: %v", err)
 	}
 	if len(results) != 0 {
 		t.Fatalf("active recommendation produced assignments: %+v", results)
+	}
+}
+
+func TestAssignmentCandidatesHonorAssignOnlyIdle(t *testing.T) {
+	c := New("coordinator-candidate-policy", t.TempDir(), nil, "CoordinatorAgent")
+	now := time.Now().UTC()
+	c.config.IdleThreshold = 0
+	c.agents["%1"] = &AgentState{
+		PaneID: "%1", Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
+		ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
+	}
+	c.agents["%2"] = &AgentState{
+		PaneID: "%2", Status: robot.StateGenerating, Healthy: true, SafeToDispatch: false,
+		ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
+	}
+
+	c.config.AssignOnlyIdle = true
+	idleOnly := c.getAssignmentCandidates()
+	if len(idleOnly) != 1 || idleOnly[0].PaneID != "%1" {
+		t.Fatalf("idle-only candidates = %+v, want only %%1", idleOnly)
+	}
+
+	c.config.AssignOnlyIdle = false
+	allHealthy := c.getAssignmentCandidates()
+	if len(allHealthy) != 2 {
+		t.Fatalf("queue-enabled candidates = %+v, want both healthy current panes", allHealthy)
+	}
+}
+
+func TestAssignWorkReconcilesClosedAssignmentAndReusesPane(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-terminal-reconciliation"
+	store := assignmentstore.NewStore(session)
+	if _, err := store.Assign("ntm-closed", "Already completed", 1, "cod", "BlueLake", "old work"); err != nil {
+		t.Fatalf("seed closed assignment: %v", err)
+	}
+
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	c.config.AutoAssign = true
+	c.config.AssignOnlyIdle = true
+	c.config.IdleThreshold = 0
+	now := time.Now().UTC()
+	c.agents["%1"] = &AgentState{
+		PaneID: "%1", PaneIndex: 1, AgentType: "cod", AgentMailName: "BlueLake",
+		Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
+		LastActivity: now.Add(-time.Minute), ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
+	}
+	c.workItemStatusFn = func(_ context.Context, beadID string) (string, error) {
+		if beadID == "ntm-closed" {
+			return "closed", nil
+		}
+		return "open", nil
+	}
+	c.triageFn = func(string) (*bv.TriageResponse, error) {
+		return &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+			ID: "ntm-new", Title: "Fresh work", Status: "open", Priority: 1, Score: 1,
+		}}}}, nil
+	}
+	c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
+			return assignmentstore.ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		})
+		reserve := assignmentstore.ReservationFunc(func(_ context.Context, request assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+			return assignmentstore.LeaseReceipt{AgentName: request.AgentName, Target: request.Target}, nil
+		})
+		dispatch := assignmentstore.DispatchFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+			if request.Target != "%1" || request.AgentName != "BlueLake" {
+				t.Fatalf("dispatch request = %+v", request)
+			}
+			return assignmentstore.DispatchReceipt{DeliveryID: "mail-reuse"}, nil
+		})
+		preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+			return assignmentstore.PromptPreflightResult{DispatchPrompt: request.Prompt, DurablePrompt: request.Prompt}, nil
+		})
+		return assignmentstore.NewAtomicCoordinator(store, claim, reserve, dispatch, preflight)
+	}
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil {
+		t.Fatalf("AssignWork: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success || results[0].Assignment == nil || results[0].Assignment.BeadID != "ntm-new" {
+		t.Fatalf("assignment results = %+v", results)
+	}
+
+	reloaded, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload assignment ledger: %v", err)
+	}
+	if closed := reloaded.Get("ntm-closed"); closed == nil || closed.Status != assignmentstore.StatusCompleted {
+		t.Fatalf("reconciled assignment = %+v, want completed", closed)
+	}
+	if fresh := reloaded.Get("ntm-new"); fresh == nil || fresh.Status != assignmentstore.StatusAssigned || fresh.DispatchReceiptID != "mail-reuse" {
+		t.Fatalf("fresh assignment = %+v", fresh)
+	}
+}
+
+func TestAssignWorkReconcilesClosedAssignmentBeforeCandidateGate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-terminal-before-candidates"
+	store := assignmentstore.NewStore(session)
+	if _, err := store.Assign("ntm-closed", "Already completed", 1, "cod", "BlueLake", "old work"); err != nil {
+		t.Fatalf("seed closed assignment: %v", err)
+	}
+
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	c.config.AutoAssign = true
+	c.workItemStatusFn = func(_ context.Context, beadID string) (string, error) {
+		if beadID != "ntm-closed" {
+			t.Fatalf("unexpected status lookup for %s", beadID)
+		}
+		return "closed", nil
+	}
+	c.triageFn = func(string) (*bv.TriageResponse, error) {
+		t.Fatal("triage must not run when there are no assignment candidates")
+		return nil, nil
+	}
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil || len(results) != 0 {
+		t.Fatalf("AssignWork results=%+v err=%v, want empty success", results, err)
+	}
+	reloaded, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload assignment ledger: %v", err)
+	}
+	if closed := reloaded.Get("ntm-closed"); closed == nil || closed.Status != assignmentstore.StatusCompleted || closed.CompletedAt == nil {
+		t.Fatalf("reconciled assignment = %+v, want completed before candidate gate", closed)
+	}
+}
+
+func addEligibleCoordinatorAgent(c *SessionCoordinator, paneID, agentName string) {
+	now := time.Now().UTC()
+	c.config.AutoAssign = true
+	c.config.AssignOnlyIdle = true
+	c.config.IdleThreshold = 0
+	c.agents[paneID] = &AgentState{
+		PaneID: paneID, PaneIndex: 1, AgentType: "cod", AgentMailName: agentName,
+		Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
+		LastActivity: now.Add(-time.Minute), ObservedAt: now, ObservationFreshness: status.FreshnessFresh,
+	}
+	c.workItemStatusFn = func(context.Context, string) (string, error) { return "in_progress", nil }
+	c.triageFn = func(string) (*bv.TriageResponse, error) { return &bv.TriageResponse{}, nil }
+}
+
+func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-recover-pending"
+	request := assignmentstore.AtomicRequest{
+		BeadID: "ntm-recover", BeadTitle: "Recover internal/coordinator/assign.go",
+		Target: "%91", OccupancyKey: "%91", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
+		Actor: "BlueLake", Prompt: "durable coordinator recovery prompt", IdempotencyKey: "coordinator-recovery-key",
+		RequireReservation: true, RequestedPaths: []string{"internal/coordinator/assign.go"}, ReservationTTL: time.Hour,
+	}
+	store := assignmentstore.NewStore(session)
+	actor := assignmentstore.StableClaimActor(request.Actor, request.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := store.RecordAtomicClaim(request, assignmentstore.ClaimReceipt{
+		BeadID: request.BeadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordAtomicClaim: %v", err)
+	}
+	if err := store.RecordAtomicReservation(request.BeadID, request.IdempotencyKey, assignmentstore.ReservationFailed,
+		assignmentstore.LeaseReceipt{AgentName: request.AgentName, Target: request.Target, Requested: request.RequestedPaths},
+		assignmentstore.GuaranteeNoReservation(errors.New("first reservation attempt was not granted"))); err != nil {
+		t.Fatalf("RecordAtomicReservation: %v", err)
+	}
+
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	addEligibleCoordinatorAgent(c, request.Target, request.AgentName)
+	claimCalls := 0
+	reserveCalls := 0
+	dispatchCalls := 0
+	c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		claim := assignmentstore.ClaimFunc(func(context.Context, string, string) (assignmentstore.ClaimReceipt, error) {
+			claimCalls++
+			return assignmentstore.ClaimReceipt{}, errors.New("claim must not repeat for a claimed row")
+		})
+		reserve := assignmentstore.ReservationFunc(func(_ context.Context, req assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+			reserveCalls++
+			return assignmentstore.LeaseReceipt{
+				AgentName: req.AgentName, Target: req.Target, Requested: append([]string(nil), req.RequestedPaths...),
+				Granted: append([]string(nil), req.RequestedPaths...), ReservationIDs: []int{911},
+			}, nil
+		})
+		dispatch := assignmentstore.DispatchFunc(func(_ context.Context, req assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+			dispatchCalls++
+			if req.IdempotencyKey != request.IdempotencyKey || req.Target != request.Target || req.AgentName != request.AgentName || req.Prompt != request.Prompt {
+				t.Fatalf("recovery dispatch request = %+v", req)
+			}
+			return assignmentstore.DispatchReceipt{DeliveryID: "mail-recovered"}, nil
+		})
+		preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, req assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+			return assignmentstore.PromptPreflightResult{DispatchPrompt: req.Prompt, DurablePrompt: req.Prompt}, nil
+		})
+		return assignmentstore.NewAtomicCoordinator(store, claim, reserve, dispatch, preflight)
+	}
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil {
+		t.Fatalf("AssignWork: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success || results[0].IdempotencyKey != request.IdempotencyKey || results[0].ClaimActor != actor {
+		t.Fatalf("recovery results = %+v", results)
+	}
+	if claimCalls != 0 || reserveCalls != 1 || dispatchCalls != 1 {
+		t.Fatalf("recovery side effects claim=%d reserve=%d dispatch=%d", claimCalls, reserveCalls, dispatchCalls)
+	}
+	recovered, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload recovery ledger: %v", err)
+	}
+	stored := recovered.Get(request.BeadID)
+	if stored == nil || stored.DispatchState != assignmentstore.DispatchSent || stored.DispatchReceiptID != "mail-recovered" || stored.IdempotencyKey != request.IdempotencyKey {
+		t.Fatalf("recovered ledger = %+v", stored)
+	}
+}
+
+func TestAssignWorkKeepsUnknownDispatchFailClosed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-dispatch-unknown"
+	request := assignmentstore.AtomicRequest{
+		BeadID: "ntm-sending", BeadTitle: "Sending", Target: "%92", OccupancyKey: "%92", Pane: 1,
+		AgentType: "cod", AgentName: "BlueLake", Actor: "BlueLake", Prompt: "ambiguous delivery",
+		IdempotencyKey: "coordinator-sending-key",
+	}
+	store := assignmentstore.NewStore(session)
+	actor := assignmentstore.StableClaimActor(request.Actor, request.IdempotencyKey)
+	if _, err := store.RecordAtomicIntent(request, actor, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicIntent: %v", err)
+	}
+	if _, err := store.RecordAtomicClaim(request, assignmentstore.ClaimReceipt{BeadID: request.BeadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("RecordAtomicClaim: %v", err)
+	}
+	if err := store.RecordAtomicDispatchStarted(request.BeadID, request.IdempotencyKey, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordAtomicDispatchStarted: %v", err)
+	}
+
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	addEligibleCoordinatorAgent(c, request.Target, request.AgentName)
+	c.atomicCoordinatorFactory = func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		t.Fatal("unknown dispatch must not reach an atomic retry")
+		return nil
+	}
+	results, err := c.AssignWork(t.Context())
+	if err != nil {
+		t.Fatalf("AssignWork: %v", err)
+	}
+	if len(results) != 1 || results[0].Success || !strings.Contains(results[0].Error, assignmentstore.ErrDispatchOutcomeUnknown.Error()) {
+		t.Fatalf("unknown dispatch results = %+v", results)
+	}
+	stored := store.Get(request.BeadID)
+	if stored == nil || stored.DispatchState != assignmentstore.DispatchSending || stored.DispatchAttempts != 1 {
+		t.Fatalf("unknown dispatch ledger changed = %+v", stored)
+	}
+}
+
+func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-terminal-lease-release"
+	const beadID = "ntm-terminal-lease"
+	store := assignmentstore.NewStore(session)
+	store.Assignments[beadID] = &assignmentstore.Assignment{
+		BeadID: beadID, BeadTitle: "Terminal lease", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
+		Status: assignmentstore.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "terminal-lease-key",
+		DispatchTarget: "%93", OccupancyKey: "%93", DispatchState: assignmentstore.DispatchSent,
+		DispatchReceiptID: "mail-93", ReservationRequired: true, ReservationState: assignmentstore.ReservationReserved,
+		ReservationCompleted: true, ReservationAgent: "BlueLake", ReservationTarget: "%93",
+		ReservationRequested: []string{"internal/coordinator/**"}, ReservedPaths: []string{"internal/coordinator/**"}, ReservationIDs: []int{931},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed terminal lease: %v", err)
+	}
+	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
+		ID: 931, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true,
+		Reason: "bead assignment: " + beadID,
+	}}}
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	c.reservationClient = client
+	c.config.AutoAssign = true
+	c.workItemStatusFn = func(context.Context, string) (string, error) { return "closed", nil }
+
+	results, err := c.AssignWork(t.Context())
+	if err != nil || len(results) != 0 {
+		t.Fatalf("AssignWork results=%+v error=%v", results, err)
+	}
+	if len(client.releaseIDs) != 1 || !reflect.DeepEqual(client.releaseIDs[0], []int{931}) {
+		t.Fatalf("release IDs = %v", client.releaseIDs)
+	}
+	reloaded, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload terminal ledger: %v", err)
+	}
+	terminal := reloaded.Get(beadID)
+	if terminal == nil || terminal.Status != assignmentstore.StatusCompleted || terminal.ReservationState != assignmentstore.ReservationReleased ||
+		len(terminal.ReservationIDs) != 0 || terminal.ClearState != assignmentstore.ClearStateNone || terminal.DispatchReceiptID != "mail-93" {
+		t.Fatalf("terminal lease ledger = %+v", terminal)
+	}
+}
+
+func TestAssignWorkRetainsTerminalBarrierUntilLeaseReleaseSucceeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-terminal-lease-retry"
+	const beadID = "ntm-terminal-lease-retry"
+	store := assignmentstore.NewStore(session)
+	store.Assignments[beadID] = &assignmentstore.Assignment{
+		BeadID: beadID, BeadTitle: "Terminal lease retry", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
+		Status: assignmentstore.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "terminal-retry-key",
+		DispatchTarget: "%94", OccupancyKey: "%94", DispatchState: assignmentstore.DispatchSent,
+		ReservationRequired: true, ReservationState: assignmentstore.ReservationReserved, ReservationCompleted: true,
+		ReservationAgent: "BlueLake", ReservationTarget: "%94", ReservationRequested: []string{"internal/coordinator/**"},
+		ReservedPaths: []string{"internal/coordinator/**"}, ReservationIDs: []int{941},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed terminal lease retry: %v", err)
+	}
+	client := &fakeCoordinatorReservationClient{
+		reservations: []agentmail.FileReservation{{ID: 941, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true, Reason: "bead assignment: " + beadID}},
+		releaseErr:   errors.New("Agent Mail release unavailable"),
+	}
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	c.reservationClient = client
+	c.config.AutoAssign = true
+	c.workItemStatusFn = func(context.Context, string) (string, error) { return "closed", nil }
+
+	if _, err := c.AssignWork(t.Context()); err == nil || !strings.Contains(err.Error(), "remains active") {
+		t.Fatalf("first terminal reconciliation error = %v", err)
+	}
+	failed, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload failed release ledger: %v", err)
+	}
+	barrier := failed.Get(beadID)
+	if barrier == nil || barrier.Status != assignmentstore.StatusAssigned || barrier.ClearState != assignmentstore.ClearStateReservationReleasing ||
+		barrier.ClearError == "" || !reflect.DeepEqual(barrier.ReservationIDs, []int{941}) {
+		t.Fatalf("failed release barrier = %+v", barrier)
+	}
+
+	client.releaseErr = nil
+	if results, err := c.AssignWork(t.Context()); err != nil || len(results) != 0 {
+		t.Fatalf("terminal reconciliation retry results=%+v error=%v", results, err)
+	}
+	completed, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload completed release ledger: %v", err)
+	}
+	terminal := completed.Get(beadID)
+	if terminal == nil || terminal.Status != assignmentstore.StatusCompleted || terminal.ClearState != assignmentstore.ClearStateNone || len(terminal.ReservationIDs) != 0 {
+		t.Fatalf("terminal reconciliation retry ledger = %+v", terminal)
+	}
+}
+
+func TestAssignWorkReconcilesAndReleasesUnknownTerminalLease(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "coordinator-terminal-unknown-lease"
+	const beadID = "ntm-terminal-unknown-lease"
+	store := assignmentstore.NewStore(session)
+	store.Assignments[beadID] = &assignmentstore.Assignment{
+		BeadID: beadID, BeadTitle: "Unknown lease", Pane: 1, AgentType: "cod", AgentName: "BlueLake",
+		Status: assignmentstore.StatusAssigned, AssignedAt: time.Now().UTC(), IdempotencyKey: "unknown-lease-key",
+		DispatchTarget: "%95", OccupancyKey: "%95", DispatchState: assignmentstore.DispatchSent,
+		ReservationRequired: true, ReservationState: assignmentstore.ReservationUnknown, ReservationAttempts: 1,
+		ReservationAgent: "BlueLake", ReservationTarget: "%95",
+		ReservationInputPaths: []string{"internal/coordinator/a.go", "internal/coordinator/b.go"},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed unknown terminal lease: %v", err)
+	}
+	client := &fakeCoordinatorReservationClient{reservations: []agentmail.FileReservation{{
+		ID: 951, AgentName: "BlueLake", PathPattern: "internal/coordinator/a.go", ProjectID: 9, Exclusive: true,
+		Reason: "bead assignment: " + beadID,
+	}}}
+	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+	c.reservationClient = client
+	c.config.AutoAssign = true
+	c.workItemStatusFn = func(context.Context, string) (string, error) { return "closed", nil }
+
+	if results, err := c.AssignWork(t.Context()); err != nil || len(results) != 0 {
+		t.Fatalf("unknown terminal reconciliation results=%+v error=%v", results, err)
+	}
+	if len(client.releaseIDs) != 1 || !reflect.DeepEqual(client.releaseIDs[0], []int{951}) {
+		t.Fatalf("unknown lease release IDs = %v", client.releaseIDs)
+	}
+	terminal, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload unknown terminal lease: %v", err)
+	}
+	if got := terminal.Get(beadID); got == nil || got.Status != assignmentstore.StatusCompleted || got.ReservationState != assignmentstore.ReservationReleased {
+		t.Fatalf("unknown terminal reconciliation ledger = %+v", got)
 	}
 }
 
@@ -317,6 +830,147 @@ func TestFilterOccupiedAgentsUsesCanonicalAndLegacyTargets(t *testing.T) {
 	got := filterOccupiedAgents(agents, []*assignmentstore.Assignment{{BeadID: "canonical", OccupancyKey: "%2"}})
 	if len(got) != 2 || got[0].PaneID != "%1" || got[1].PaneID != "%3" {
 		t.Fatalf("eligible agents = %+v", got)
+	}
+}
+
+func TestFilterActionableRecommendationsUsesAuthoritativeStatusWithoutMutatingCache(t *testing.T) {
+	c := New("recommendation-filter", t.TempDir(), nil, "CoordinatorAgent")
+	statuses := map[string]string{
+		"ntm-open":        "open",
+		"ntm-closed":      "closed",
+		"ntm-tombstone":   "tombstone",
+		"ntm-in-progress": "in_progress",
+		"ntm-blocked":     "blocked",
+	}
+	lookups := make(map[string]int)
+	c.workItemStatusFn = func(_ context.Context, beadID string) (string, error) {
+		lookups[beadID]++
+		return statuses[beadID], nil
+	}
+	source := []bv.TriageRecommendation{
+		{ID: "ntm-open", Title: "Open"},
+		{ID: "ntm-active", Title: "Already active"},
+		{ID: "ntm-closed", Title: "Closed"},
+		{ID: "ntm-tombstone", Title: "Tombstoned"},
+		{ID: "ntm-in-progress", Title: "Externally claimed"},
+		{ID: "ntm-blocked", Title: "Blocked"},
+	}
+	original := append([]bv.TriageRecommendation(nil), source...)
+	filtered, terminal, err := c.filterActionableRecommendations(t.Context(), source, map[string]struct{}{"ntm-active": {}})
+	if err != nil {
+		t.Fatalf("filterActionableRecommendations() error = %v", err)
+	}
+	if !terminal || len(filtered) != 1 || filtered[0].ID != "ntm-open" {
+		t.Fatalf("filtered=%+v terminal=%v", filtered, terminal)
+	}
+	if lookups["ntm-active"] != 0 {
+		t.Fatalf("active recommendation status was redundantly queried %d times", lookups["ntm-active"])
+	}
+	if !reflect.DeepEqual(source, original) {
+		t.Fatalf("cached recommendation source mutated: got=%+v want=%+v", source, original)
+	}
+	filtered[0].Title = "mutated result"
+	if source[0].Title != "Open" {
+		t.Fatalf("filtered result aliases cached source: %+v", source[0])
+	}
+}
+
+func TestFilterActionableRecommendationsFailsClosedOnStatusError(t *testing.T) {
+	c := New("recommendation-filter-error", t.TempDir(), nil, "CoordinatorAgent")
+	c.workItemStatusFn = func(context.Context, string) (string, error) {
+		return "", errors.New("tracker unavailable")
+	}
+	filtered, terminal, err := c.filterActionableRecommendations(t.Context(), []bv.TriageRecommendation{{ID: "ntm-unknown"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "read recommendation ntm-unknown status") || filtered != nil || terminal {
+		t.Fatalf("filtered=%+v terminal=%v error=%v", filtered, terminal, err)
+	}
+}
+
+func TestAssignWorkDoesNotMutateSharedTriageResponse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	shared := &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+		ID: "ntm-cached", Title: "Cached recommendation", Status: "open", Priority: 1, Score: 1,
+	}}}}
+	original := append([]bv.TriageRecommendation(nil), shared.Triage.Recommendations...)
+
+	for i, session := range []string{"coordinator-cache-first", "coordinator-cache-second"} {
+		c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+		addEligibleCoordinatorAgent(c, fmt.Sprintf("%%%d", i+1), fmt.Sprintf("BlueLake%d", i+1))
+		c.workItemStatusFn = func(context.Context, string) (string, error) { return "open", nil }
+		c.triageFn = func(string) (*bv.TriageResponse, error) { return shared, nil }
+		c.atomicCoordinatorFactory = successfulCoordinatorAtomicFactory(fmt.Sprintf("mail-cache-%d", i+1))
+
+		results, err := c.AssignWork(t.Context())
+		if err != nil || len(results) != 1 || !results[0].Success {
+			t.Fatalf("AssignWork cycle %d results=%+v error=%v", i+1, results, err)
+		}
+		if !reflect.DeepEqual(shared.Triage.Recommendations, original) {
+			t.Fatalf("shared triage response mutated after cycle %d: got=%+v want=%+v", i+1, shared.Triage.Recommendations, original)
+		}
+	}
+}
+
+func TestAssignWorkConcurrentCyclesDoNotRaceOnSharedTriageResponse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	shared := &bv.TriageResponse{Triage: bv.TriageData{Recommendations: []bv.TriageRecommendation{{
+		ID: "ntm-concurrent-cache", Title: "Shared concurrent recommendation", Status: "open", Priority: 1, Score: 1,
+	}}}}
+	original := append([]bv.TriageRecommendation(nil), shared.Triage.Recommendations...)
+
+	const workers = 8
+	type outcome struct {
+		results []AssignmentResult
+		err     error
+	}
+	outcomes := make(chan outcome, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		c := New(fmt.Sprintf("coordinator-cache-concurrent-%d", i), t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
+		addEligibleCoordinatorAgent(c, fmt.Sprintf("%%%d", i+20), fmt.Sprintf("BlueLake%d", i+20))
+		c.workItemStatusFn = func(context.Context, string) (string, error) { return "open", nil }
+		c.triageFn = func(string) (*bv.TriageResponse, error) { return shared, nil }
+		c.atomicCoordinatorFactory = successfulCoordinatorAtomicFactory(fmt.Sprintf("mail-concurrent-%d", i))
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results, err := c.AssignWork(t.Context())
+			outcomes <- outcome{results: results, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(outcomes)
+
+	cycle := 0
+	for got := range outcomes {
+		cycle++
+		if got.err != nil || len(got.results) != 1 || !got.results[0].Success {
+			t.Fatalf("concurrent AssignWork cycle %d results=%+v error=%v", cycle, got.results, got.err)
+		}
+	}
+	if !reflect.DeepEqual(shared.Triage.Recommendations, original) {
+		t.Fatalf("shared triage response mutated by concurrent cycles: got=%+v want=%+v", shared.Triage.Recommendations, original)
+	}
+}
+
+func successfulCoordinatorAtomicFactory(deliveryID string) func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+	return func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
+			return assignmentstore.ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		})
+		reserve := assignmentstore.ReservationFunc(func(_ context.Context, request assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+			return assignmentstore.LeaseReceipt{AgentName: request.AgentName, Target: request.Target}, nil
+		})
+		dispatch := assignmentstore.DispatchFunc(func(context.Context, assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+			return assignmentstore.DispatchReceipt{DeliveryID: deliveryID}, nil
+		})
+		preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+			return assignmentstore.PromptPreflightResult{DispatchPrompt: request.Prompt, DurablePrompt: request.Prompt}, nil
+		})
+		return assignmentstore.NewAtomicCoordinator(store, claim, reserve, dispatch, preflight)
 	}
 }
 

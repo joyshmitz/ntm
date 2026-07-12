@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // ============================================================================
@@ -279,9 +282,9 @@ func TestClearEnvelopeWithError(t *testing.T) {
 func TestClearAndClearPaneMutuallyExclusive(t *testing.T) {
 	// If both are set, it's an error
 	clearBeads := "bd-001"
-	clearPane := 3
+	clearPane := "0.3"
 
-	isInvalid := clearBeads != "" && clearPane >= 0
+	isInvalid := clearBeads != "" && clearPane != ""
 	if !isInvalid {
 		t.Error("Expected setting both --clear and --clear-pane to be invalid")
 	}
@@ -406,6 +409,141 @@ func TestClearFailedOnlyFlag(t *testing.T) {
 	}
 }
 
+func TestClearPaneSelectionAndFilteringUsePhysicalIdentity(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%40", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex},
+		{ID: "%41", WindowIndex: 1, Index: 1, Type: tmux.AgentClaude},
+	}
+	target, err := resolveClearPaneTarget(panes, "0.1")
+	if err != nil {
+		t.Fatalf("resolve explicit physical pane: %v", err)
+	}
+	if target.ID != "%40" {
+		t.Fatalf("resolved pane = %q, want %%40", target.ID)
+	}
+
+	targetAssignment := assignment.Assignment{BeadID: "ntm-target", Pane: 1, OccupancyKey: "%40", DispatchTarget: "%40"}
+	otherWindowAssignment := assignment.Assignment{BeadID: "ntm-other", Pane: 1, OccupancyKey: "%41", DispatchTarget: "%41"}
+	legacyIndexOnly := assignment.Assignment{BeadID: "ntm-legacy", Pane: 1}
+	if !assignmentMatchesPhysicalPane(targetAssignment, target, true) {
+		t.Fatal("target assignment did not match its physical pane")
+	}
+	if assignmentMatchesPhysicalPane(otherWindowAssignment, target, true) {
+		t.Fatal("same local index in another window matched the target pane")
+	}
+	if assignmentMatchesPhysicalPane(legacyIndexOnly, target, true) {
+		t.Fatal("ambiguous legacy index-only assignment matched in multi-window topology")
+	}
+	if !assignmentMatchesPhysicalPane(legacyIndexOnly, target, false) {
+		t.Fatal("unambiguous single-window legacy assignment should remain clearable")
+	}
+}
+
+func TestFindAssignmentForPhysicalPaneDisambiguatesDuplicateIndexes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store := assignment.NewStore("physical-pane-occupancy")
+	store.Assignments["ntm-first"] = &assignment.Assignment{
+		BeadID: "ntm-first", Pane: 1, Status: assignment.StatusAssigned,
+		OccupancyKey: "%40", DispatchTarget: "%40", AssignedAt: time.Now().UTC(),
+	}
+	store.Assignments["ntm-second"] = &assignment.Assignment{
+		BeadID: "ntm-second", Pane: 1, Status: assignment.StatusWorking,
+		OccupancyKey: "%41", DispatchTarget: "%41", AssignedAt: time.Now().UTC(),
+	}
+	firstPane := tmux.Pane{ID: "%40", WindowIndex: 0, Index: 1}
+	secondPane := tmux.Pane{ID: "%41", WindowIndex: 1, Index: 1}
+	if got := findAssignmentForPhysicalPane(store, firstPane, true); got == nil || got.BeadID != "ntm-first" {
+		t.Fatalf("first physical pane assignment = %+v", got)
+	}
+	if got := findAssignmentForPhysicalPane(store, secondPane, true); got == nil || got.BeadID != "ntm-second" {
+		t.Fatalf("second physical pane assignment = %+v", got)
+	}
+
+	legacy := assignment.NewStore("physical-pane-legacy")
+	legacy.Assignments["ntm-legacy"] = &assignment.Assignment{
+		BeadID: "ntm-legacy", Pane: 1, Status: assignment.StatusAssigned, AssignedAt: time.Now().UTC(),
+	}
+	if got := findAssignmentForPhysicalPane(legacy, firstPane, true); got != nil {
+		t.Fatalf("multi-window lookup guessed legacy local index: %+v", got)
+	}
+	if got := findAssignmentForPhysicalPane(legacy, firstPane, false); got == nil || got.BeadID != "ntm-legacy" {
+		t.Fatalf("single-window legacy lookup = %+v", got)
+	}
+}
+
+func TestRunClearFailedAssignmentsClearsOnlyFailedRows(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	const session = "clear-failed-production"
+	store := assignment.NewStore(session)
+	if _, err := store.Assign("ntm-working", "Working", 1, "codex", "BlueLake", "work"); err != nil {
+		t.Fatalf("assign working row: %v", err)
+	}
+	if err := store.MarkWorking("ntm-working"); err != nil {
+		t.Fatalf("mark working row: %v", err)
+	}
+	if _, err := store.Assign("ntm-failed", "Failed", 2, "claude", "GreenLake", "work"); err != nil {
+		t.Fatalf("assign failed row: %v", err)
+	}
+	if err := store.MarkWorking("ntm-failed"); err != nil {
+		t.Fatalf("mark failed row working: %v", err)
+	}
+	if err := store.MarkFailed("ntm-failed", "fixture failure"); err != nil {
+		t.Fatalf("mark failed row: %v", err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("save fixture store: %v", err)
+	}
+
+	previousJSON := jsonOutput
+	previousClear := assignClear
+	previousClearPane := assignClearPane
+	previousClearFailed := assignClearFailed
+	previousForce := assignForce
+	previousRelease := releaseAssignmentLeases
+	t.Cleanup(func() {
+		jsonOutput = previousJSON
+		assignClear = previousClear
+		assignClearPane = previousClearPane
+		assignClearFailed = previousClearFailed
+		assignForce = previousForce
+		releaseAssignmentLeases = previousRelease
+	})
+	jsonOutput = true
+	assignClear = ""
+	assignClearPane = ""
+	assignClearFailed = true
+	assignForce = false
+	releaseAssignmentLeases = func(string, *assignment.Assignment) ([]string, error) { return nil, nil }
+
+	output, err := captureStdout(t, func() error {
+		return runClearAssignments(&cobra.Command{}, session)
+	})
+	if err != nil {
+		t.Fatalf("runClearAssignments(--clear-failed): %v", err)
+	}
+	var envelope ClearAssignmentsEnvelope
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatalf("decode clear-failed envelope: %v\noutput=%s", err, output)
+	}
+	if !envelope.Success || envelope.Subcommand != "clear-failed" || envelope.Data == nil {
+		t.Fatalf("clear-failed envelope = %+v", envelope)
+	}
+	if envelope.Data.Summary.ClearedCount != 1 || envelope.Data.Summary.FailedCount != 0 || len(envelope.Data.Cleared) != 1 || envelope.Data.Cleared[0].BeadID != "ntm-failed" {
+		t.Fatalf("clear-failed result = %+v", envelope.Data)
+	}
+
+	loaded, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	if loaded.Get("ntm-failed") != nil {
+		t.Fatal("failed row remained after --clear-failed")
+	}
+	if current := loaded.Get("ntm-working"); current == nil || current.Status != assignment.StatusWorking {
+		t.Fatalf("working row was changed by --clear-failed: %+v", current)
+	}
+}
+
 // ============================================================================
 // CLI Flag Tests
 // ============================================================================
@@ -449,15 +587,15 @@ func TestClearFlagDefaultValue(t *testing.T) {
 	}
 }
 
-// TestClearPaneFlagDefaultValue tests that --clear-pane defaults to -1
+// TestClearPaneFlagDefaultValue tests that --clear-pane defaults to empty.
 func TestClearPaneFlagDefaultValue(t *testing.T) {
 	cmd := newAssignCmd()
 	flag := cmd.Flags().Lookup("clear-pane")
 	if flag == nil {
 		t.Fatal("Expected 'clear-pane' flag to exist")
 	}
-	if flag.DefValue != "-1" {
-		t.Errorf("Expected default value '-1', got %q", flag.DefValue)
+	if flag.DefValue != "" {
+		t.Errorf("Expected default value '', got %q", flag.DefValue)
 	}
 }
 

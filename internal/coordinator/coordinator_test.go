@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,33 @@ func TestNewSessionCoordinator(t *testing.T) {
 	}
 	if c.agents == nil {
 		t.Error("expected agents map to be initialized")
+	}
+}
+
+func TestCoordinatorCycleCancellationIsExpectedShutdown(t *testing.T) {
+	allCanceled := errors.Join(
+		coordinatorPaneObservationError("%0", context.Canceled.Error()),
+		coordinatorPaneObservationError("%1", context.Canceled.Error()),
+	)
+	if !assignmentCycleErrorIsExpectedShutdown(allCanceled) {
+		t.Fatal("joined context cancellation should be treated as expected shutdown")
+	}
+	mixed := errors.Join(coordinatorPaneObservationError("%0", context.Canceled.Error()), errors.New("pane %1: capture failed"))
+	if assignmentCycleErrorIsExpectedShutdown(mixed) {
+		t.Fatal("mixed cancellation and operational failure must still be reported")
+	}
+	if !assignmentCycleErrorIsExpectedShutdown(fmt.Errorf("wrapped shutdown: %w", allCanceled)) {
+		t.Fatal("wrapped joined cancellations should be treated as expected shutdown")
+	}
+	wrappedMixed := fmt.Errorf("wrapped cycle: %w", mixed)
+	if assignmentCycleErrorIsExpectedShutdown(wrappedMixed) {
+		t.Fatal("wrapped mixed cancellation and operational failure must still be reported")
+	}
+	if assignmentCycleErrorIsExpectedShutdown(errors.New("capture failed")) {
+		t.Fatal("ordinary coordinator errors must not be treated as shutdown cancellation")
+	}
+	if assignmentCycleErrorIsExpectedShutdown(context.DeadlineExceeded) {
+		t.Fatal("deadline exhaustion is operationally significant and must still be reported")
 	}
 }
 
@@ -503,6 +531,10 @@ func TestEmitEvent_PublishesToEventsBus(t *testing.T) {
 }
 
 func TestStartStop(t *testing.T) {
+	originalGetPanes := getPanesWithActivity
+	t.Cleanup(func() { getPanesWithActivity = originalGetPanes })
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) { return nil, nil }
+
 	c := New("test-session", "/tmp/test", nil, "TestAgent")
 	c.config.PollInterval = 100 * time.Millisecond
 
@@ -572,6 +604,10 @@ func TestAutoAssignCycleRunsAfterFreshMonitorUpdate(t *testing.T) {
 }
 
 func TestStart_DoubleStartRejected(t *testing.T) {
+	originalGetPanes := getPanesWithActivity
+	t.Cleanup(func() { getPanesWithActivity = originalGetPanes })
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) { return nil, nil }
+
 	c := New("test-session", "/tmp/test", nil, "TestAgent")
 	c.config.PollInterval = 100 * time.Millisecond
 
@@ -586,6 +622,45 @@ func TestStart_DoubleStartRejected(t *testing.T) {
 	if err := c.Start(ctx); err == nil {
 		t.Fatal("expected second Start to fail while coordinator is already running")
 	}
+}
+
+func TestRunCyclePropagatesTopologyObservationFailure(t *testing.T) {
+	originalGetPanes := getPanesWithActivity
+	t.Cleanup(func() { getPanesWithActivity = originalGetPanes })
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) {
+		return nil, errors.New("topology unavailable")
+	}
+
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	c.config.AutoAssign = false
+	results, err := c.RunCycle(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "topology unavailable") {
+		t.Fatalf("RunCycle() = %+v, %v; want topology observation error", results, err)
+	}
+	if results != nil {
+		t.Fatalf("RunCycle results = %+v, want nil on observation failure", results)
+	}
+}
+
+func TestStartObservationFailureCanBeRetried(t *testing.T) {
+	originalGetPanes := getPanesWithActivity
+	t.Cleanup(func() { getPanesWithActivity = originalGetPanes })
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) {
+		return nil, errors.New("initial topology unavailable")
+	}
+
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	if err := c.Start(t.Context()); err == nil || !strings.Contains(err.Error(), "initial topology unavailable") {
+		t.Fatalf("first Start() error = %v, want initial observation failure", err)
+	}
+
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) { return nil, nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("retry Start() failed: %v", err)
+	}
+	c.Stop()
 }
 
 func TestStop_WaitsForInFlightMonitorCycle(t *testing.T) {

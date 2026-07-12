@@ -2,6 +2,7 @@ package robot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -718,6 +719,28 @@ func TestAssignOptions_Defaults(t *testing.T) {
 	}
 	if len(opts.Beads) != 0 {
 		t.Error("Beads should default to empty")
+	}
+}
+
+func TestPrintAssignFailureForcesJSONAndNonzeroExitUnderTOON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	stdout, err := captureStdout(t, func() error {
+		return PrintAssign(AssignOptions{})
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintAssign error = %T %v, want written exit-1 ProcessExitError", err, err)
+	}
+
+	var output AssignOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("PrintAssign failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.OutputFormat != string(FormatJSON) {
+		t.Fatalf("PrintAssign response = %+v, want INVALID_FLAG JSON failure", output.RobotResponse)
 	}
 }
 

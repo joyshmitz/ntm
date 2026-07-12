@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,9 +24,10 @@ func TestLabelIntegration(t *testing.T) {
 	root := repoRoot(t)
 	projectsBase := t.TempDir()
 	cfgPath := writeLabelTestConfig(t, projectsBase)
+	ntmPath := buildLabelTestNTM(t, root)
 	run := func(args ...string) (stdout string, stderr string, exitCode int) {
 		all := append([]string{"--config", cfgPath}, args...)
-		return runNTM(t, root, all...)
+		return runNTMBinary(t, ntmPath, root, all...)
 	}
 
 	t.Run("spawn_label_names_session_and_uses_base_project_dir", func(t *testing.T) {
@@ -237,10 +239,15 @@ func runNTM(t *testing.T, root string, args ...string) (stdout string, stderr st
 	if testing.Short() {
 		t.Skip("skipping go-run process integration in short mode")
 	}
-	cmd := exec.Command("go", append([]string{"run", "./cmd/ntm"}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", append([]string{"run", "./cmd/ntm"}, args...)...)
 	cmd.Dir = root
 	cmd.Env = os.Environ()
 	out, errOut, err := cmdOutput(cmd)
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("go run ntm timed out after 5m: args=%q stdout=%s stderr=%s", args, out, errOut)
+	}
 	if err == nil {
 		return out, errOut, 0
 	}
@@ -249,6 +256,49 @@ func runNTM(t *testing.T, root string, args ...string) (stdout string, stderr st
 		return out, errOut, exitErr.ExitCode()
 	}
 	t.Fatalf("runNTM failed to start: %v", err)
+	return "", "", 1
+}
+
+func buildLabelTestNTM(t *testing.T, root string) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping built-process label integration in short mode")
+	}
+	path := filepath.Join(t.TempDir(), "ntm")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", path, "./cmd/ntm")
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("building label integration ntm binary timed out after 10m: %s", output)
+	}
+	if err != nil {
+		t.Fatalf("building label integration ntm binary: %v\n%s", err, output)
+	}
+	return path
+}
+
+func runNTMBinary(t *testing.T, ntmPath, root string, args ...string) (stdout string, stderr string, exitCode int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ntmPath, args...)
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+	out, errOut, err := cmdOutput(cmd)
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("ntm command timed out after 90s: args=%q stdout=%s stderr=%s", args, out, errOut)
+	}
+	if err == nil {
+		return out, errOut, 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return out, errOut, exitErr.ExitCode()
+	}
+	t.Fatalf("run ntm binary failed to start: %v", err)
 	return "", "", 1
 }
 

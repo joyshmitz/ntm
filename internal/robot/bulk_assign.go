@@ -22,6 +22,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 const defaultBulkAssignTemplate = "Read AGENTS.md, register with Agent Mail. Work on: {bead_id} - {bead_title}.\nUse br show {bead_id} for details. Mark in_progress when starting. Use ultrathink."
@@ -52,6 +53,7 @@ type BulkAssignOptions struct {
 	// nor DefaultTemplatePath resolves to content, and overrides the built-in const.
 	DefaultTemplate string
 	Deps            *BulkAssignDependencies
+	projectDir      string
 }
 
 // BulkAssignDependencies allows tests to stub external interactions.
@@ -66,6 +68,8 @@ type BulkAssignDependencies struct {
 	FetchBeadDetails  func(dir, beadID string) (BeadDetails, error)
 	Now               func() time.Time
 	Cwd               func() (string, error)
+	PaneCurrentPath   func(paneID string) (string, error)
+	ResolveProject    func(session string, panes []tmux.Pane) (string, error)
 	LoadStore         func(session string) (*assignment.AssignmentStore, error)
 	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
 	GetBeadStatus     func(string, string) (string, error)
@@ -198,6 +202,16 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeInvalidFlag, "Use N, W.P, or %N pane selectors; bare N must be unambiguous")
 		return output, nil
 	}
+	projectDir, err := deps.ResolveProject(opts.Session, panes)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("failed to resolve session project: %w", err),
+			ErrCodeInternalError,
+			"Ensure the session has a saved or configured project directory",
+		)
+		return output, nil
+	}
+	opts.projectDir = projectDir
 
 	if opts.AllocationJSON != "" {
 		allocation, err := parseBulkAssignAllocation(opts.AllocationJSON)
@@ -220,17 +234,7 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		return output, nil
 	}
 
-	wd, err := deps.Cwd()
-	if err != nil {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("failed to resolve working directory: %w", err),
-			ErrCodeInternalError,
-			"Run from a valid project directory",
-		)
-		return output, nil
-	}
-
-	triage, err := deps.FetchTriage(wd)
+	triage, err := deps.FetchTriage(opts.projectDir)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("bv triage failed: %w", err),
@@ -240,7 +244,7 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		return output, nil
 	}
 
-	inProgress, err := deps.FetchInProgress(wd, 200)
+	inProgress, err := deps.FetchInProgress(opts.projectDir, 200)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("fetch in-progress failed: %w", err),
@@ -282,16 +286,19 @@ func PrintBulkAssign(opts BulkAssignOptions) error {
 func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
 	deps := BulkAssignDependencies{
-		FetchTriage:       bv.GetTriage,
-		FetchInProgress:   func(dir string, limit int) ([]bv.BeadInProgress, error) { return bv.GetInProgressList(dir, limit), nil },
-		ListPanes:         tmux.GetPanes,
-		SendKeys:          tmux.SendKeys,
-		SendKeysForAgent:  tmux.SendKeysForAgent,
-		ReadFile:          os.ReadFile,
-		FetchBeadTitle:    fetchBeadTitle,
-		FetchBeadDetails:  fetchBeadDetails,
-		Now:               time.Now,
-		Cwd:               os.Getwd,
+		FetchTriage:      bv.GetTriage,
+		FetchInProgress:  func(dir string, limit int) ([]bv.BeadInProgress, error) { return bv.GetInProgressList(dir, limit), nil },
+		ListPanes:        tmux.GetPanes,
+		SendKeys:         tmux.SendKeys,
+		SendKeysForAgent: tmux.SendKeysForAgent,
+		ReadFile:         os.ReadFile,
+		FetchBeadTitle:   fetchBeadTitle,
+		FetchBeadDetails: fetchBeadDetails,
+		Now:              time.Now,
+		Cwd:              os.Getwd,
+		PaneCurrentPath: func(paneID string) (string, error) {
+			return tmux.DefaultClient.Run("display-message", "-p", "-t", paneID, "#{pane_current_path}")
+		},
 		LoadStore:         assignment.LoadStoreStrict,
 		ClaimBead:         bv.ClaimBead,
 		GetBeadStatus:     bv.GetBeadStatus,
@@ -318,6 +325,9 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 				return nil
 			}
 		},
+	}
+	deps.ResolveProject = func(session string, panes []tmux.Pane) (string, error) {
+		return resolveBulkAssignmentProject(session, panes, deps.PaneCurrentPath, deps.Cwd)
 	}
 
 	if custom == nil {
@@ -357,6 +367,16 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 	if custom.Cwd != nil {
 		deps.Cwd = custom.Cwd
+	}
+	if custom.PaneCurrentPath != nil {
+		deps.PaneCurrentPath = custom.PaneCurrentPath
+	}
+	if custom.ResolveProject != nil {
+		deps.ResolveProject = custom.ResolveProject
+	} else if custom.Cwd != nil && custom.PaneCurrentPath == nil {
+		deps.ResolveProject = func(string, []tmux.Pane) (string, error) {
+			return custom.Cwd()
+		}
 	}
 	if custom.LoadStore != nil {
 		deps.LoadStore = custom.LoadStore
@@ -405,6 +425,117 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 
 	return deps
+}
+
+func resolveBulkAssignmentProject(
+	session string,
+	panes []tmux.Pane,
+	paneCurrentPath func(string) (string, error),
+	cwd func() (string, error),
+) (string, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return "", errors.New("session is required")
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return "", err
+	}
+	if len(panes) > 0 {
+		projectDir, err := ResolveLiveSessionProject(session, panes, paneCurrentPath)
+		if err != nil {
+			return "", err
+		}
+		if projectDir != "" {
+			return projectDir, nil
+		}
+	}
+
+	usable := func(candidate string) string {
+		if util.ProjectDirScore(candidate) <= 0 {
+			return ""
+		}
+		return util.ResolveProjectDir(candidate)
+	}
+	var lookupErrors []error
+	if registry, err := agentmail.LoadBestSessionAgentRegistry(session); err != nil {
+		lookupErrors = append(lookupErrors, fmt.Errorf("load session agent registry: %w", err))
+	} else if registry != nil {
+		if projectDir := usable(registry.ProjectKey); projectDir != "" {
+			return projectDir, nil
+		}
+	}
+	if info, err := agentmail.LoadBestSessionAgent(session); err != nil {
+		lookupErrors = append(lookupErrors, fmt.Errorf("load session agent identity: %w", err))
+	} else if info != nil {
+		if projectDir := usable(info.ProjectKey); projectDir != "" {
+			return projectDir, nil
+		}
+	}
+	if cfg, err := config.Load(config.DefaultPath()); err != nil {
+		lookupErrors = append(lookupErrors, fmt.Errorf("load configuration: %w", err))
+	} else if cfg != nil {
+		if projectDir := usable(cfg.GetProjectDir(session)); projectDir != "" {
+			return projectDir, nil
+		}
+	}
+	if cwd != nil {
+		if currentDir, err := cwd(); err != nil {
+			lookupErrors = append(lookupErrors, fmt.Errorf("resolve caller working directory: %w", err))
+		} else if projectDir := usable(currentDir); projectDir != "" {
+			return projectDir, nil
+		}
+	}
+	if err := errors.Join(lookupErrors...); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("no usable project directory found for session %q", session)
+}
+
+// ResolveLiveSessionProject derives one authoritative project root from every
+// live pane in a tmux session and fails closed when the panes disagree.
+func ResolveLiveSessionProject(session string, panes []tmux.Pane, paneCurrentPath func(string) (string, error)) (string, error) {
+	if paneCurrentPath == nil {
+		return "", fmt.Errorf("resolve live project for session %q: pane current-path lookup is not configured", session)
+	}
+	roots := make(map[string][]string)
+	for _, pane := range panes {
+		paneID := strings.TrimSpace(pane.ID)
+		if paneID == "" {
+			return "", fmt.Errorf("resolve live project for session %q: pane has no stable ID", session)
+		}
+		currentPath, err := paneCurrentPath(paneID)
+		if err != nil {
+			return "", fmt.Errorf("resolve live project for session %q pane %s: %w", session, paneID, err)
+		}
+		currentPath = strings.TrimSpace(currentPath)
+		if !filepath.IsAbs(currentPath) {
+			return "", fmt.Errorf("resolve live project for session %q pane %s: current path %q is not absolute", session, paneID, currentPath)
+		}
+		projectDir := util.ResolveProjectDir(currentPath)
+		if util.ProjectDirScore(projectDir) <= 0 {
+			return "", fmt.Errorf("resolve live project for session %q pane %s: current path %q is not usable", session, paneID, currentPath)
+		}
+		projectDir = filepath.Clean(projectDir)
+		roots[projectDir] = append(roots[projectDir], paneID)
+	}
+	if len(roots) == 1 {
+		for projectDir := range roots {
+			return projectDir, nil
+		}
+	}
+
+	rootNames := make([]string, 0, len(roots))
+	for projectDir := range roots {
+		rootNames = append(rootNames, projectDir)
+	}
+	sort.Strings(rootNames)
+	parts := make([]string, 0, len(rootNames))
+	for _, projectDir := range rootNames {
+		paneIDs := append([]string(nil), roots[projectDir]...)
+		sort.Strings(paneIDs)
+		parts = append(parts, fmt.Sprintf("%s (%s)", projectDir, strings.Join(paneIDs, ",")))
+	}
+	return "", fmt.Errorf("resolve live project for session %q: panes span multiple project roots: %s", session, strings.Join(parts, "; "))
 }
 
 func normalizeBulkAssignStrategy(strategy string) string {
@@ -542,7 +673,7 @@ func planBulkAssignFromAllocation(opts BulkAssignOptions, deps BulkAssignDepende
 			continue
 		}
 
-		title, err := deps.FetchBeadTitle(getBulkAssignDir(deps), beadID)
+		title, err := deps.FetchBeadTitle(opts.projectDir, beadID)
 		if err != nil {
 			assignment.Status = "failed"
 			assignment.Error = err.Error()
@@ -809,7 +940,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		if assignment.Status == "failed" {
 			continue
 		}
-		prompt, err := buildBulkAssignPrompt(template, deps, assignment, output.Session, needsDetails)
+		prompt, err := buildBulkAssignPrompt(template, deps, assignment, output.Session, opts.projectDir, needsDetails)
 		if err != nil {
 			assignment.Status = "failed"
 			assignment.Error = err.Error()
@@ -828,7 +959,7 @@ func applyBulkAssignPlan(opts BulkAssignOptions, deps BulkAssignDependencies, ou
 		return
 	}
 
-	runtime, runtimeErr := newBulkAtomicRuntime(deps, output.Session)
+	runtime, runtimeErr := newBulkAtomicRuntime(deps, output.Session, opts.projectDir)
 	if runtimeErr != nil {
 		for i := range plan.Assignments {
 			if plan.Assignments[i].Status == "failed" {
@@ -917,6 +1048,7 @@ func finishBulkAssignOutput(output *BulkAssignOutput, plan bulkAssignPlan) {
 type robotAgentMailReservationClient interface {
 	EnsureProject(context.Context, string) (*agentmail.Project, error)
 	ListAgents(context.Context, string) ([]agentmail.Agent, error)
+	ListReservations(context.Context, string, string, bool) ([]agentmail.FileReservation, error)
 	ReservePaths(context.Context, agentmail.FileReservationOptions) (*agentmail.ReservationResult, error)
 }
 
@@ -1020,12 +1152,13 @@ func (r *robotAgentMailReservationRuntime) Reserve(ctx context.Context, req assi
 	lease := assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target, Requested: append([]string(nil), req.RequestedPaths...)}
 	registered, ok := r.registered[req.AgentName]
 	if !ok || registered.ProjectID != r.projectID {
-		return lease, fmt.Errorf("Agent Mail reservation recipient %s is not registered in project %s", req.AgentName, r.projectKey)
+		return lease, assignment.GuaranteeNoReservation(fmt.Errorf("Agent Mail reservation recipient %s is not registered in project %s", req.AgentName, r.projectKey))
 	}
 	requested, err := validateRobotReservationPaths(req.RequestedPaths)
 	if err != nil {
-		return lease, err
+		return lease, assignment.GuaranteeNoReservation(err)
 	}
+	lease.Requested = append([]string(nil), requested...)
 	ttlSeconds := int(req.TTL.Seconds())
 	if ttlSeconds < 60 {
 		ttlSeconds = 3600
@@ -1034,11 +1167,11 @@ func (r *robotAgentMailReservationRuntime) Reserve(ctx context.Context, req assi
 		ProjectKey: r.projectKey, AgentName: req.AgentName, Paths: requested,
 		TTLSeconds: ttlSeconds, Exclusive: true, Reason: fmt.Sprintf("bead assignment: %s", req.BeadID),
 	})
-	if reserveErr != nil {
-		return lease, reserveErr
-	}
-	if result == nil || len(result.Conflicts) != 0 {
-		return lease, errors.New("Agent Mail returned an invalid reservation result")
+	if result == nil {
+		if reserveErr != nil {
+			return lease, reserveErr
+		}
+		return lease, assignment.GuaranteeNoReservation(errors.New("Agent Mail returned no reservation result"))
 	}
 	requestedSet := make(map[string]struct{}, len(requested))
 	for _, path := range requested {
@@ -1074,12 +1207,82 @@ func (r *robotAgentMailReservationRuntime) Reserve(ctx context.Context, req assi
 			lease.ExpiresAt = &expiresAt
 		}
 	}
+	if reserveErr != nil {
+		return lease, reserveErr
+	}
+	if len(result.Conflicts) != 0 {
+		conflictErr := fmt.Errorf("Agent Mail reported %d reservation conflict(s)", len(result.Conflicts))
+		if len(lease.ReservationIDs) == 0 {
+			return lease, assignment.GuaranteeNoReservation(conflictErr)
+		}
+		return lease, conflictErr
+	}
 	if len(seenPaths) != len(requestedSet) {
-		return lease, fmt.Errorf("Agent Mail granted %d of %d requested paths", len(seenPaths), len(requestedSet))
+		grantErr := fmt.Errorf("Agent Mail granted %d of %d requested paths", len(seenPaths), len(requestedSet))
+		if len(lease.ReservationIDs) == 0 {
+			return lease, assignment.GuaranteeNoReservation(grantErr)
+		}
+		return lease, grantErr
 	}
 	sort.Strings(lease.Granted)
 	sort.Ints(lease.ReservationIDs)
 	return lease, nil
+}
+
+func (r *robotAgentMailReservationRuntime) ReconcileReservation(ctx context.Context, req assignment.ReservationRequest, _ assignment.LeaseReceipt) (assignment.ReservationReconciliation, error) {
+	if r == nil {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, errors.New("Agent Mail reservation runtime is nil")
+	}
+	requested, err := validateRobotReservationPaths(req.RequestedPaths)
+	if err != nil {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, err
+	}
+	reservations, err := r.client.ListReservations(ctx, r.projectKey, req.AgentName, false)
+	if err != nil {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, err
+	}
+
+	requestedSet := make(map[string]struct{}, len(requested))
+	for _, path := range requested {
+		requestedSet[path] = struct{}{}
+	}
+	lease := assignment.LeaseReceipt{
+		AgentName: req.AgentName,
+		Target:    req.Target,
+		Requested: append([]string(nil), requested...),
+	}
+	seen := make(map[string]struct{}, len(requested))
+	reason := fmt.Sprintf("bead assignment: %s", req.BeadID)
+	for _, reservation := range reservations {
+		if reservation.ReleasedTS != nil || reservation.AgentName != req.AgentName || reservation.Reason != reason {
+			continue
+		}
+		if _, wanted := requestedSet[reservation.PathPattern]; !wanted {
+			continue
+		}
+		if reservation.ID <= 0 || reservation.ProjectID != r.projectID || !reservation.Exclusive {
+			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
+		}
+		if _, duplicate := seen[reservation.PathPattern]; duplicate {
+			return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
+		}
+		seen[reservation.PathPattern] = struct{}{}
+		lease.Granted = append(lease.Granted, reservation.PathPattern)
+		lease.ReservationIDs = append(lease.ReservationIDs, reservation.ID)
+		expiresAt := reservation.ExpiresTS.Time
+		if !expiresAt.IsZero() && (lease.ExpiresAt == nil || expiresAt.Before(*lease.ExpiresAt)) {
+			lease.ExpiresAt = &expiresAt
+		}
+	}
+	if len(seen) == 0 {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationAbsent}, nil
+	}
+	if len(seen) != len(requestedSet) {
+		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown, Lease: lease}, nil
+	}
+	sort.Strings(lease.Granted)
+	sort.Ints(lease.ReservationIDs)
+	return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationReserved, Lease: lease}, nil
 }
 
 func validateRobotReservationPaths(paths []string) ([]string, error) {
@@ -1124,10 +1327,13 @@ func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) 
 	return r.observation, r.observeErr
 }
 
-func newBulkAtomicRuntime(deps BulkAssignDependencies, session string) (*bulkAtomicRuntime, error) {
-	workDir, err := deps.Cwd()
-	if err != nil {
-		return nil, fmt.Errorf("resolve bulk assignment project: %w", err)
+func newBulkAtomicRuntime(deps BulkAssignDependencies, session, workDir string) (*bulkAtomicRuntime, error) {
+	if strings.TrimSpace(workDir) == "" {
+		var err error
+		workDir, err = deps.ResolveProject(session, nil)
+		if err != nil {
+			return nil, fmt.Errorf("resolve bulk assignment project: %w", err)
+		}
 	}
 	store, err := deps.LoadStore(session)
 	if err != nil {
@@ -1236,7 +1442,7 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 		ReservationTTL:     time.Hour,
 	})
 	if result.Assignment != nil && result.Assignment.IdempotencyKey == idempotencyKey {
-		output.Claimed = true
+		output.Claimed = result.Assignment.ClaimState == assignment.ClaimClaimed
 		output.ClaimActor = result.Assignment.ClaimActor
 		output.ReservationIDs = append([]int(nil), result.Assignment.ReservationIDs...)
 		output.DispatchReceiptID = result.Assignment.DispatchReceiptID
@@ -1477,14 +1683,14 @@ func bulkAssignPaneTarget(session string, assignment *BulkAssignAssignment) stri
 	return assignment.Pane
 }
 
-func buildBulkAssignPrompt(template string, deps BulkAssignDependencies, assignment *BulkAssignAssignment, session string, needsDetails bool) (string, error) {
+func buildBulkAssignPrompt(template string, deps BulkAssignDependencies, assignment *BulkAssignAssignment, session, projectDir string, needsDetails bool) (string, error) {
 	beadType := ""
 	var beadDeps []string
 	if needsDetails {
 		if deps.FetchBeadDetails == nil {
 			return "", fmt.Errorf("bead details fetcher not configured")
 		}
-		details, err := deps.FetchBeadDetails(getBulkAssignDir(deps), assignment.Bead)
+		details, err := deps.FetchBeadDetails(projectDir, assignment.Bead)
 		if err != nil {
 			return "", err
 		}
@@ -1655,14 +1861,6 @@ func fetchBeadDetails(dir, beadID string) (BeadDetails, error) {
 		Type:         issues[0].IssueType,
 		Dependencies: deps,
 	}, nil
-}
-
-func getBulkAssignDir(deps BulkAssignDependencies) string {
-	wd, err := deps.Cwd()
-	if err != nil {
-		return ""
-	}
-	return wd
 }
 
 func parseBulkAssignSkipPanes(raw string) ([]string, error) {

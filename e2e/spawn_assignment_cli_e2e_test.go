@@ -670,7 +670,9 @@ func expectedSpawnWorkPrompt(beadID, title string) string {
 
 func spawnAssignmentIsolatedEnv(overrides map[string]string) []string {
 	replaced := map[string]struct{}{
-		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {}, "PATH": {},
+		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {}, "XDG_STATE_HOME": {}, "XDG_CACHE_HOME": {},
+		"PWD": {}, "OLDPWD": {}, "GIT_DIR": {}, "GIT_WORK_TREE": {}, "BR_DB": {}, "BD_DB": {}, "BEADS_DB": {}, "AGENT_NAME": {},
+		"PATH": {},
 		"TMUX": {}, "TMUX_PANE": {}, "TMUX_TMPDIR": {},
 		"NTM_CONFIG": {}, "NTM_OUTPUT_FORMAT": {}, "NTM_ROBOT_FORMAT": {}, "TOON_DEFAULT_FORMAT": {},
 		"AGENT_MAIL_URL": {}, "AGENT_MAIL_TOKEN": {},
