@@ -94,7 +94,8 @@ var (
 
 	// claudeActiveSpinnerLineRe matches a Claude Code *live* spinner line — the
 	// status line Claude renders just above its bottom-pinned input box while a
-	// turn is in flight. Derived from real captures in internal/cli/outputs/:
+	// turn is in flight. Derived from the scrubbed real-capture layouts tracked
+	// in internal/agent/testdata/:
 	//
 	//   ✻ Monitoring 17 agents… (ctrl+c to interrupt · … · 15m 52s · …)
 	//   ✻ Compacting conversation… (ctrl+c to interrupt · … · 17m 50s · …)

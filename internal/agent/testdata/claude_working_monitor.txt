@@ -1,0 +1,11 @@
+Running PreToolUse hook...
+Running...
+ctrl+b ctrl+b (twice) to run in background
+
+* Monitoring 17 agents... (ctrl+c to interrupt - ctrl+t to show todos - 15m 52s - 14.4k tokens - thought for 1s)
+  Tip: Ask Claude to create a todo list when working on complex tasks to track progress and remain on track
+
+----------------------------------------------------------------------------------------------------
+> 
+----------------------------------------------------------------------------------------------------
+  bypass permissions on (shift+tab to cycle) - 4 files +55 -10 - Context left until auto-compact: 2%

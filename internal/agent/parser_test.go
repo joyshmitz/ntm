@@ -1386,23 +1386,23 @@ func TestClaudeActivelyWorking_RealCaptures(t *testing.T) {
 		desc     string
 	}{
 		{
-			file:     "ntm_⠐_Account_Switch_20260119_212756.txt",
+			file:     "claude_working_monitor.txt",
 			wantWork: true, wantIdle: false,
-			desc: "active spinner '✻ Monitoring 17 agents… (ctrl+c to interrupt …)' above the bottom box ⇒ working",
+			desc: "active monitoring spinner above the bottom box is working",
 		},
 		{
-			file:     "ntm_ntm_cc_3_20260119_205748.txt",
+			file:     "claude_working_compacting.txt",
 			wantWork: true, wantIdle: false,
-			desc: "active spinner '✻ Compacting conversation… (ctrl+c to interrupt …)' above the bottom box ⇒ working",
+			desc: "active compacting spinner above the bottom box is working",
 		},
 		{
-			file:     "ntm_ntm_cc_1_20260119_042712.txt",
+			file:     "claude_idle_completed.txt",
 			wantWork: false, wantIdle: true,
-			desc: "completion line '✻ Cooked for 1m 42s' is the most-recent dynamic marker ⇒ idle",
+			desc: "completion line is the most-recent dynamic marker and is idle",
 		},
 	}
 
-	base := "../cli/outputs"
+	base := "testdata"
 	p := NewParser()
 	for _, c := range cases {
 		t.Run(c.file, func(t *testing.T) {

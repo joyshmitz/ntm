@@ -1,0 +1,9 @@
+* The background test run completed. The integration tests have some pre-existing failures
+  related to pane inspection, but all focused tests passed successfully.
+
+* Cooked for 1m 42s
+
+----------------------------------------------------------------------------------------------------
+> 
+----------------------------------------------------------------------------------------------------
+  bypass permissions on (shift+tab to cycle)
