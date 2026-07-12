@@ -241,6 +241,9 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 		return result
 	}
 	atomicCoordinator := c.newAtomicAssignmentCoordinator(store)
+	if c.atomicCoordinatorFactory != nil {
+		atomicCoordinator = c.atomicCoordinatorFactory(store)
+	}
 	atomicResult, err := atomicCoordinator.Execute(ctx, assignmentstore.AtomicRequest{
 		BeadID:             assignment.BeadID,
 		BeadTitle:          assignment.BeadTitle,
@@ -356,7 +359,10 @@ func (c *SessionCoordinator) newAtomicAssignmentCoordinator(store *assignmentsto
 			DurablePrompt:  durablePrompt,
 		}, nil
 	})
-	return assignmentstore.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, preflight)
+	return assignmentstore.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, preflight).
+		WithWorkItemStatusPort(assignmentstore.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
+			return bv.GetBeadStatus(c.projectKey, beadID)
+		}))
 }
 
 func validatedAgentMailDeliveryID(sent *agentmail.SendResult, projectKey, agentName string) (string, error) {

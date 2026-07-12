@@ -6,10 +6,12 @@ package coordinator
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -34,6 +36,9 @@ type SessionCoordinator struct {
 
 	// Clients
 	mailClient *agentmail.Client
+
+	atomicCoordinatorFactory func(*assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator
+	assignWorkFn             func(context.Context) ([]AssignmentResult, error)
 
 	// Agent tracking
 	agents     map[string]*AgentState
@@ -287,8 +292,11 @@ func (c *SessionCoordinator) GetIdleAgents() []*AgentState {
 	defer c.mu.RUnlock()
 
 	var idle []*AgentState
+	now := time.Now()
 	for _, agent := range c.agents {
-		if agent.Status == robot.StateWaiting && agent.Healthy && agent.SafeToDispatch {
+		if agent.Status == robot.StateWaiting && agent.Healthy && agent.SafeToDispatch &&
+			agent.ObservationFreshness == status.FreshnessFresh &&
+			status.DispatchObservationIsCurrent(agent.ObservedAt, now) {
 			if time.Since(agent.LastActivity).Seconds() >= c.config.IdleThreshold {
 				agentCopy := *agent
 				idle = append(idle, &agentCopy)
@@ -313,6 +321,30 @@ func (c *SessionCoordinator) monitorLoop(ctx context.Context, stopCh <-chan stru
 			return
 		case <-ticker.C:
 			c.updateAgentStates()
+			if c.config.AutoAssign {
+				c.runAssignmentCycle(ctx)
+			}
+		}
+	}
+}
+
+func (c *SessionCoordinator) runAssignmentCycle(ctx context.Context) {
+	assignWork := c.AssignWork
+	if c.assignWorkFn != nil {
+		assignWork = c.assignWorkFn
+	}
+	results, err := assignWork(ctx)
+	if err != nil {
+		slog.Warn("coordinator auto-assignment failed", "session", c.session, "error", err)
+		return
+	}
+	for _, result := range results {
+		if !result.Success {
+			beadID := ""
+			if result.Assignment != nil {
+				beadID = result.Assignment.BeadID
+			}
+			slog.Warn("coordinator work assignment failed", "session", c.session, "bead_id", beadID, "error", result.Error)
 		}
 	}
 }

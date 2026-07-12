@@ -136,14 +136,13 @@ func TestGetAgentByPaneID(t *testing.T) {
 func TestGetIdleAgents(t *testing.T) {
 	c := New("test-session", "/tmp/test", nil, "TestAgent")
 	c.config.IdleThreshold = 0 // Immediate idle for testing
+	now := time.Now()
 
 	c.mu.Lock()
 	c.agents["%0"] = &AgentState{
-		PaneID:         "%0",
-		Status:         robot.StateWaiting,
-		Healthy:        true,
-		SafeToDispatch: true,
-		LastActivity:   time.Now().Add(-1 * time.Minute),
+		PaneID: "%0", Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
+		LastActivity: now.Add(-time.Minute), ObservedAt: now,
+		ObservationFreshness: status.FreshnessFresh,
 	}
 	c.agents["%1"] = &AgentState{
 		PaneID:       "%1",
@@ -156,6 +155,11 @@ func TestGetIdleAgents(t *testing.T) {
 		Status:       robot.StateWaiting,
 		Healthy:      false, // Not healthy
 		LastActivity: time.Now().Add(-1 * time.Minute),
+	}
+	c.agents["%3"] = &AgentState{
+		PaneID: "%3", Status: robot.StateWaiting, Healthy: true, SafeToDispatch: true,
+		LastActivity: now.Add(-time.Minute), ObservedAt: now.Add(-status.DispatchObservationMaxAge - time.Second),
+		ObservationFreshness: status.FreshnessFresh,
 	}
 	c.mu.Unlock()
 
@@ -474,6 +478,54 @@ func TestStartStop(t *testing.T) {
 
 	// Verify stop completed without hanging
 	time.Sleep(50 * time.Millisecond)
+}
+
+func TestAutoAssignCycleRunsAfterFreshMonitorUpdate(t *testing.T) {
+	c := New("test-session", "/tmp/test", nil, "TestAgent")
+	c.config.PollInterval = MinPollInterval
+	c.config.AutoAssign = true
+	c.config.SendDigests = false
+
+	originalGetPanes := getPanesWithActivity
+	defer func() {
+		getPanesWithActivity = originalGetPanes
+	}()
+
+	var mu sync.Mutex
+	monitorCalls := 0
+	getPanesWithActivity = func(string) ([]tmux.PaneActivity, error) {
+		mu.Lock()
+		monitorCalls++
+		mu.Unlock()
+		return nil, nil
+	}
+	assignmentRan := make(chan int, 1)
+	c.assignWorkFn = func(context.Context) ([]AssignmentResult, error) {
+		mu.Lock()
+		calls := monitorCalls
+		mu.Unlock()
+		select {
+		case assignmentRan <- calls:
+		default:
+		}
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer c.Stop()
+
+	select {
+	case calls := <-assignmentRan:
+		if calls < 2 {
+			t.Fatalf("assignment ran after %d monitor calls, want initial plus tick refresh", calls)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-assignment cycle did not run")
+	}
 }
 
 func TestStart_DoubleStartRejected(t *testing.T) {

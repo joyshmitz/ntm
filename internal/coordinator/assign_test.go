@@ -1,11 +1,13 @@
 package coordinator
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -209,6 +211,60 @@ func TestAttemptAssignmentRequiresAgentMailIdentity(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "agent-mail identity") {
 		t.Fatalf("expected missing identity error, got %q", result.Error)
+	}
+}
+
+func TestAttemptAssignmentAtomicSuccessPersistsReceipt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	c := New("coordinator-atomic-success", projectDir, &agentmail.Client{}, "CoordinatorAgent")
+	var order []string
+	c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
+			order = append(order, "claim")
+			return assignmentstore.ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		})
+		reserve := assignmentstore.ReservationFunc(func(_ context.Context, request assignmentstore.ReservationRequest) (assignmentstore.LeaseReceipt, error) {
+			order = append(order, "reserve")
+			return assignmentstore.LeaseReceipt{
+				AgentName: request.AgentName, Target: request.Target,
+				Requested: append([]string(nil), request.RequestedPaths...),
+				Granted:   append([]string(nil), request.RequestedPaths...), ReservationIDs: []int{73},
+			}, nil
+		})
+		dispatch := assignmentstore.DispatchFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+			order = append(order, "dispatch")
+			if request.Target != "%9" || request.AgentName != "BlueFox" || !strings.Contains(request.Prompt, "ntm-success") {
+				t.Fatalf("dispatch request = %+v", request)
+			}
+			return assignmentstore.DispatchReceipt{DeliveryID: "mail-91"}, nil
+		})
+		preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+			return assignmentstore.PromptPreflightResult{DispatchPrompt: request.Prompt, DurablePrompt: request.Prompt}, nil
+		})
+		return assignmentstore.NewAtomicCoordinator(store, claim, reserve, dispatch, preflight)
+	}
+
+	work := &WorkAssignment{
+		BeadID: "ntm-success", BeadTitle: "Atomic coordinator success", AgentPaneID: "%9", AgentPaneIndex: 4,
+		AgentMailName: "BlueFox", AgentType: "cod", Priority: 1, Score: 0.9,
+		FilesToReserve: []string{"internal/coordinator/assign.go"},
+	}
+	result := c.attemptAssignment(t.Context(), work, &bv.TriageRecommendation{ID: work.BeadID, Title: work.BeadTitle})
+	if !result.Success || !result.MessageSent || result.Error != "" || result.ClaimActor == "" || result.IdempotencyKey == "" {
+		t.Fatalf("attemptAssignment result = %+v", result)
+	}
+	if strings.Join(order, ",") != "claim,reserve,dispatch" || len(result.Reservations) != 1 || result.Reservations[0] != "internal/coordinator/assign.go" {
+		t.Fatalf("assignment order=%v reservations=%v", order, result.Reservations)
+	}
+	store, err := assignmentstore.LoadStoreStrict(c.session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	stored := store.Get(work.BeadID)
+	if stored == nil || stored.DispatchState != assignmentstore.DispatchSent || stored.DispatchReceiptID != "mail-91" ||
+		stored.ClaimActor != result.ClaimActor || stored.IdempotencyKey != result.IdempotencyKey || stored.OccupancyKey != "%9" {
+		t.Fatalf("durable coordinator assignment = %+v", stored)
 	}
 }
 
