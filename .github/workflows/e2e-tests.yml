@@ -16,6 +16,43 @@
 name: E2E Tests
 
 on:
+  # Main is the only long-lived branch, so every landed change must run the
+  # same hardening matrix that pull requests and the nightly schedule run.
+  push:
+    branches: ["main"]
+    paths:
+      - 'e2e/**'
+      - 'cmd/ntm/**'
+      - 'internal/agent/**'
+      - 'internal/agentmail/**'
+      - 'internal/agentsession/**'
+      - 'internal/assign/**'
+      - 'internal/assignment/**'
+      - 'internal/bv/**'
+      - 'internal/cli/**'
+      - 'internal/completion/**'
+      - 'internal/config/**'
+      - 'internal/coordinator/**'
+      - 'internal/dispatch/**'
+      - 'internal/health/**'
+      - 'internal/history/**'
+      - 'internal/pipeline/**'
+      - 'internal/redaction/**'
+      - 'internal/robot/**'
+      - 'internal/serve/**'
+      - 'internal/session/**'
+      - 'internal/status/**'
+      - 'internal/tmux/**'
+      - 'internal/tui/**'
+      - 'internal/caut/**'
+      - 'internal/integrations/dcg/**'
+      - 'tests/**'
+      - 'Makefile'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/e2e-tests.yml'
+
   # Manual trigger for full E2E testing
   workflow_dispatch:
     inputs:
@@ -44,10 +81,13 @@ on:
       - 'internal/bv/**'
       - 'internal/cli/**'
       - 'internal/completion/**'
+      - 'internal/config/**'
       - 'internal/coordinator/**'
       - 'internal/dispatch/**'
       - 'internal/health/**'
+      - 'internal/history/**'
       - 'internal/pipeline/**'
+      - 'internal/redaction/**'
       - 'internal/robot/**'
       - 'internal/serve/**'
       - 'internal/session/**'
@@ -86,10 +126,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -163,10 +203,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -196,10 +236,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true

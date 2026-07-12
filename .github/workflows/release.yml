@@ -28,16 +28,16 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -138,7 +138,7 @@ jobs:
     needs: release
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -168,15 +168,15 @@ jobs:
         id: dockerfile
         run: |
           if [ -f Dockerfile ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No Dockerfile found, skipping Docker build"
           fi
 
       - name: Extract Docker build metadata
         id: docker_meta_args
-        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         if: steps.dockerfile.outputs.exists == 'true'
@@ -277,10 +277,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -322,30 +322,32 @@ jobs:
       - name: Get release info
         id: release
         run: |
-          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           echo "Released ${GITHUB_REF#refs/tags/}"
 
       - name: Create release summary
         run: |
-          echo "# Release ${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Installation" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "# Quick install" >> $GITHUB_STEP_SUMMARY
-          echo "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ntm/main/install.sh | bash -s -- --version=${{ steps.release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "# Homebrew" >> $GITHUB_STEP_SUMMARY
-          echo "brew install dicklesworthstone/tap/ntm" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "# Source build" >> $GITHUB_STEP_SUMMARY
-          echo "git clone --branch ${{ steps.release.outputs.tag }} --depth 1 https://github.com/Dicklesworthstone/ntm.git" >> $GITHUB_STEP_SUMMARY
-          echo "cd ntm && go install ./cmd/ntm" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Verification" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "All release artifacts have been verified:" >> $GITHUB_STEP_SUMMARY
-          echo "- SHA256 checksums validated" >> $GITHUB_STEP_SUMMARY
-          echo "- Upgrade command tested on Linux, macOS, and Windows" >> $GITHUB_STEP_SUMMARY
-          echo "- Docker images built with SBOM and provenance" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# Release ${{ steps.release.outputs.tag }}"
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo '```bash'
+            echo "# Quick install"
+            echo "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ntm/main/install.sh | bash -s -- --version=${{ steps.release.outputs.tag }}"
+            echo ""
+            echo "# Homebrew"
+            echo "brew install dicklesworthstone/tap/ntm"
+            echo ""
+            echo "# Source build"
+            echo "git clone --branch ${{ steps.release.outputs.tag }} --depth 1 https://github.com/Dicklesworthstone/ntm.git"
+            echo "cd ntm && go install ./cmd/ntm"
+            echo '```'
+            echo ""
+            echo "## Verification"
+            echo ""
+            echo "All release artifacts have been verified:"
+            echo "- SHA256 checksums validated"
+            echo "- Upgrade command tested on Linux, macOS, and Windows"
+            echo "- Docker images built with SBOM and provenance"
+          } >> "$GITHUB_STEP_SUMMARY"
