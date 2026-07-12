@@ -456,15 +456,7 @@ func PrintHealthOAuth(session string) int {
 		// GetHealthOAuth folds operational failures into the envelope and
 		// returns a nil error; a non-nil error is an unexpected internal fault.
 		response := NewErrorResponse(err, ErrCodeInternalError, "")
-		_ = encodeRobotFailureJSON(&response)
-		return 1
+		return printLegacyRobotOutput(&response, response, 1, "robot OAuth health failed")
 	}
-	if output.Success {
-		if err := encodeJSON(output); err != nil {
-			return 1
-		}
-	} else if err := encodeRobotFailureJSON(output); err != nil {
-		return 1
-	}
-	return ExitCodeForResponse(output.RobotResponse)
+	return printLegacyRobotOutput(output, output.RobotResponse, ExitCodeForResponse(output.RobotResponse), "robot OAuth health failed")
 }

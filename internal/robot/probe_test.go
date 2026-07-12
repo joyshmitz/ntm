@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,6 +18,44 @@ func TestGetProbeSessionFailureUsesGeneralErrorExit(t *testing.T) {
 	}
 	if output.Success || output.ErrorCode != ErrCodeInvalidFlag {
 		t.Fatalf("GetProbeSession() response = %+v, want INVALID_FLAG failure", output.RobotResponse)
+	}
+}
+
+func TestPrintProbeSessionUnresponsiveForcesCanonicalFailureJSON(t *testing.T) {
+	mock := setupMock(t)
+	mock.CaptureOutput = "static content"
+
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	var exitCode int
+	stdout, err := captureStdout(t, func() error {
+		exitCode = PrintProbeSession(ProbeSessionOptions{
+			Session: "proj",
+			Panes:   []int{0},
+			Flags: ProbeFlags{
+				Method:    ProbeMethodKeystrokeEcho,
+				TimeoutMs: 1,
+			},
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("capture PrintProbeSession: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("PrintProbeSession exit = %d, want 1", exitCode)
+	}
+	var output ProbeSessionOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("probe failure is not canonical JSON: %v\noutput=%q", err, stdout)
+	}
+	if output.Success || output.ErrorCode != ErrCodeTimeout || output.OutputFormat != string(FormatJSON) {
+		t.Fatalf("probe response = %+v, want TIMEOUT JSON failure", output.RobotResponse)
+	}
+	if output.Summary.TotalProbed != 1 || output.Summary.Unresponsive != 1 || len(output.Probes) != 1 {
+		t.Fatalf("probe failure lost aggregate details: %+v", output)
 	}
 }
 

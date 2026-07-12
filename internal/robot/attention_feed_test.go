@@ -4361,6 +4361,43 @@ func TestAttentionResponse_TimeoutWake(t *testing.T) {
 	}
 }
 
+func TestPrintAttentionTimeoutForcesCanonicalFailureJSON(t *testing.T) {
+	feed := newTestAttentionFeed(t)
+	oldFeed := GetAttentionFeed()
+	SetAttentionFeed(feed)
+	t.Cleanup(func() { SetAttentionFeed(oldFeed) })
+
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	var exitCode int
+	stdout, err := captureStdout(t, func() error {
+		exitCode = PrintAttention(AttentionOptions{
+			Timeout:      5 * time.Millisecond,
+			PollInterval: time.Millisecond,
+			Condition:    WaitConditionActionRequired,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("capture PrintAttention: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("PrintAttention exit = %d, want 1", exitCode)
+	}
+	var output AttentionResponse
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("attention timeout is not canonical JSON: %v\noutput=%q", err, stdout)
+	}
+	if output.Success || output.ErrorCode != ErrCodeTimeout || output.OutputFormat != string(FormatJSON) || output.WakeReason != "timeout" {
+		t.Fatalf("attention response = %+v, want TIMEOUT JSON failure", output)
+	}
+	if output.Digest == nil || output.CursorInfo.NextCommand == "" {
+		t.Fatalf("attention timeout lost recovery state: %+v", output)
+	}
+}
+
 func TestAttentionResponse_CursorExpired(t *testing.T) {
 	// Verify cursor expired response has correct structure
 	resp := AttentionResponse{

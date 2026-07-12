@@ -145,6 +145,7 @@ func PrintCapabilitiesWithOptions(opts CapabilitiesOptions) error {
 	if opts.Compact && GetOutputFormat() != FormatTOON {
 		// Compact discovery is a context-budget contract, so indentation must
 		// not re-inflate the projection at the final stdout boundary.
+		output.OutputFormat = string(FormatJSON)
 		if err := json.NewEncoder(os.Stdout).Encode(applyVerbosity(output, GetOutputVerbosity())); err != nil {
 			return fmt.Errorf("encode compact robot capabilities: %w", err)
 		}

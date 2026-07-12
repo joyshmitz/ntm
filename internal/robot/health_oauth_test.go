@@ -606,9 +606,18 @@ func TestExitCodeForResponse(t *testing.T) {
 			1,
 		},
 		{
-			"meta_exit_code_wins",
+			"success_ignores_nonzero_meta",
 			NewRobotResponseWithMeta(true, NewResponseMeta("x").WithExitCode(2)),
-			2,
+			0,
+		},
+		{
+			"dependency_missing_cannot_claim_unavailable_exit",
+			func() RobotResponse {
+				resp := NewErrorResponse(errors.New("missing"), ErrCodeDependencyMissing, "")
+				resp.Meta = NewResponseMeta("x").WithExitCode(2)
+				return resp
+			}(),
+			1,
 		},
 		{
 			"legacy_meta_exit_code_is_normalized",

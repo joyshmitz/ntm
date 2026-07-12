@@ -646,7 +646,7 @@ func probeEntryFromOutput(output *ProbeOutput) ProbeEntry {
 }
 
 // GetProbeSession probes panes in a session and returns aggregated output and exit code.
-// Exit code: 0 = all responsive, 1 = partial failures, 2 = complete failure.
+// Exit code: 0 = all responsive, 1 = partial or complete failure.
 func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 	output := &ProbeSessionOutput{
 		RobotResponse: NewRobotResponse(true),
@@ -739,9 +739,22 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 	if output.Summary.Responsive == output.Summary.TotalProbed {
 		return output, 0
 	}
-	if output.Summary.Responsive == 0 {
-		return output, 1
+	errorCode := ErrCodeTimeout
+	hint := "Inspect unresponsive panes with --robot-tail before retrying or restarting them"
+	for _, probe := range output.Probes {
+		if probe.ErrorCode != "" {
+			errorCode = probe.ErrorCode
+			if probe.Hint != "" {
+				hint = probe.Hint
+			}
+			break
+		}
 	}
+	output.RobotResponse = NewErrorResponse(
+		fmt.Errorf("%d of %d probed panes were unresponsive", output.Summary.Unresponsive, output.Summary.TotalProbed),
+		errorCode,
+		hint,
+	)
 	return output, 1
 }
 
@@ -749,14 +762,7 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 // Returns 0 on success and 1 for partial or complete failure.
 func PrintProbeSession(opts ProbeSessionOptions) int {
 	output, exitCode := GetProbeSession(opts)
-	if output.Success {
-		if err := encodeJSON(output); err != nil {
-			return 1
-		}
-	} else if err := encodeRobotFailureJSON(output); err != nil {
-		return 1
-	}
-	return NormalizeProcessExitCode(exitCode)
+	return printLegacyRobotOutput(output, output.RobotResponse, exitCode, "robot probe failed")
 }
 
 // FormatProbeDuration formats a probe duration in milliseconds

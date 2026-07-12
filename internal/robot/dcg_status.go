@@ -214,7 +214,7 @@ func GetDCGCheckWithOptions(opts DCGCheckOptions) (*DCGCheckOutput, error) {
 			Allowed:       false,
 			BinaryPath:    "",
 		}
-		output.Meta = meta.WithExitCode(2)
+		output.Meta = meta.WithExitCode(1)
 		if availability != nil {
 			output.BinaryPath = availability.Path
 			if availability.Version.Major > 0 || availability.Version.Minor > 0 || availability.Version.Patch > 0 {

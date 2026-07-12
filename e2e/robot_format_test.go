@@ -75,6 +75,20 @@ func runBuiltRobotProcess(t *testing.T, ntmPath, dir string, env []string, args 
 	return robotBoundaryProcessResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), exitCode: exitCode}
 }
 
+func mergeRobotProcessEnv(base []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, replaced := overrides[key]; !replaced {
+			result = append(result, entry)
+		}
+	}
+	for key, value := range overrides {
+		result = append(result, key+"="+value)
+	}
+	return result
+}
+
 func decodeSingleRobotJSON(t *testing.T, payload []byte, destination any) {
 	t.Helper()
 	trimmed := bytes.TrimSpace(payload)
@@ -308,9 +322,10 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 		Flag string `json:"flag"`
 	}
 	type capabilityEnvelope struct {
-		Success  bool                `json:"success"`
-		Commands []capabilityCommand `json:"commands"`
-		Filter   *struct {
+		Success      bool                `json:"success"`
+		OutputFormat string              `json:"output_format"`
+		Commands     []capabilityCommand `json:"commands"`
+		Filter       *struct {
 			Command string `json:"command,omitempty"`
 			Compact bool   `json:"compact,omitempty"`
 		} `json:"filter,omitempty"`
@@ -351,8 +366,8 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 	}
 
 	full := run(t, 400_000, "--robot-capabilities", "--robot-format=json")
-	compact := run(t, 50_000, "--robot-capabilities", "--capability-compact", "--robot-format=json")
-	exact := run(t, 4_000, "--robot-capabilities", "--capability-command=send", "--capability-compact", "--robot-format=json")
+	compact := run(t, 50_000, "--robot-capabilities", "--capability-compact")
+	exact := run(t, 4_000, "--robot-capabilities", "--capability-command=send", "--capability-compact")
 
 	if len(full.Commands) == 0 || len(compact.Commands) != len(full.Commands) {
 		t.Fatalf("capability command counts full=%d compact=%d", len(full.Commands), len(compact.Commands))
@@ -361,6 +376,124 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 		exact.Filter == nil || exact.Filter.Command != "send" || !exact.Filter.Compact {
 		t.Fatalf("exact compact capability projection = %+v", exact)
 	}
+	if compact.OutputFormat != "json" || exact.OutputFormat != "json" {
+		t.Fatalf("auto compact capability formats compact=%q exact=%q, want json", compact.OutputFormat, exact.OutputFormat)
+	}
+}
+
+func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "terminal-errors")
+
+	type terminalEnvelope struct {
+		Success      bool   `json:"success"`
+		Timestamp    string `json:"timestamp"`
+		OutputFormat string `json:"output_format"`
+		ErrorCode    string `json:"error_code"`
+	}
+	assertFailure := func(t *testing.T, process robotBoundaryProcessResult, wantExit int, wantCode string) terminalEnvelope {
+		t.Helper()
+		if process.exitCode != wantExit {
+			t.Fatalf("exit=%d, want %d; stdout=%s stderr=%s", process.exitCode, wantExit, process.stdout, process.stderr)
+		}
+		var envelope terminalEnvelope
+		decodeSingleRobotJSON(t, process.stdout, &envelope)
+		if envelope.Success || envelope.ErrorCode != wantCode || envelope.OutputFormat != "json" {
+			t.Fatalf("terminal envelope = %+v, want %s canonical JSON failure", envelope, wantCode)
+		}
+		if _, err := time.Parse(time.RFC3339, envelope.Timestamp); err != nil {
+			t.Fatalf("terminal timestamp %q is not RFC3339: %v", envelope.Timestamp, err)
+		}
+		return envelope
+	}
+	run := func(t *testing.T, env []string, args ...string) robotBoundaryProcessResult {
+		t.Helper()
+		return runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env, args...)
+	}
+
+	t.Run("markdown_validation_under_toon", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-markdown",
+			"--md-sections=not-a-section",
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("terse_dependency_failure_under_toon", func(t *testing.T) {
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": "/nonexistent"})
+		process := run(t, env, "--robot-terse", "--robot-format=toon")
+		assertFailure(t, process, 1, "DEPENDENCY_MISSING")
+	})
+
+	t.Run("save_write_failure_under_toon", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-save="+fixture.session,
+			"--save-output="+fixture.root,
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("restore_missing_state_under_toon", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-restore="+filepath.Join(fixture.root, "missing-state.json"),
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "INTERNAL_ERROR")
+	})
+
+	t.Run("dcg_dependency_is_error_not_unavailable", func(t *testing.T) {
+		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": "/usr/bin:/bin"})
+		process := run(t, env,
+			"--robot-dcg-check",
+			"--command=echo safe",
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "DEPENDENCY_MISSING")
+	})
+
+	t.Run("attention_timeout_under_toon", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-attention",
+			"--attention-condition=action_required",
+			"--attention-timeout=20ms",
+			"--attention-poll=5ms",
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "TIMEOUT")
+	})
+
+	t.Run("not_implemented_is_the_only_unavailable_exit", func(t *testing.T) {
+		process := run(t, fixture.env,
+			"--robot-ensemble-spawn=terminal-contract",
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 2, "NOT_IMPLEMENTED")
+	})
+
+	t.Run("unresponsive_probe_under_toon", func(t *testing.T) {
+		fixture.mustTMUXOutput(t, "send-keys", "-t", fixture.paneID, "-l", "stty -echo; sleep 30")
+		fixture.mustTMUXOutput(t, "send-keys", "-t", fixture.paneID, "Enter")
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			command := strings.TrimSpace(fixture.mustTMUXOutput(t, "display-message", "-p", "-t", fixture.paneID, "#{pane_current_command}"))
+			if command == "sleep" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("pane command=%q, want sleep", command)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		process := run(t, fixture.env,
+			"--robot-probe="+fixture.session,
+			"--panes=0",
+			"--probe-timeout=100",
+			"--robot-format=toon",
+		)
+		assertFailure(t, process, 1, "TIMEOUT")
+	})
 }
 
 func TestE2ERobotReplayBuiltBinaryRealTmuxDeliversExactlyOnce(t *testing.T) {

@@ -124,7 +124,7 @@ func TestCapabilitiesSerializedSizeBudgets(t *testing.T) {
 func TestPrintCapabilitiesCompactStdoutBudget(t *testing.T) {
 	originalFormat := GetOutputFormat()
 	originalVerbosity := GetOutputVerbosity()
-	SetOutputFormat(FormatJSON)
+	SetOutputFormat(FormatAuto)
 	SetOutputVerbosity(VerbosityDefault)
 	t.Cleanup(func() {
 		SetOutputFormat(originalFormat)
@@ -142,6 +142,13 @@ func TestPrintCapabilitiesCompactStdoutBudget(t *testing.T) {
 	}
 	if size := len([]byte(stdout)); size >= 50_000 {
 		t.Fatalf("compact capabilities stdout = %d bytes, require < 50000", size)
+	}
+	var output CapabilitiesOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode compact capabilities: %v", err)
+	}
+	if output.OutputFormat != string(FormatJSON) {
+		t.Fatalf("compact capabilities output_format = %q, want json", output.OutputFormat)
 	}
 }
 

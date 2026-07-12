@@ -184,8 +184,7 @@ func PrintAgentHealth(opts AgentHealthOptions) int {
 		// JSON and the exit code agree.
 		if output == nil {
 			response := NewErrorResponse(err, ErrCodeInternalError, "")
-			_ = encodeRobotFailureJSON(&response)
-			return 1
+			return printLegacyRobotOutput(&response, response, 1, "robot agent health failed")
 		}
 		output.Success = false
 		if output.Error == "" {
@@ -194,17 +193,9 @@ func PrintAgentHealth(opts AgentHealthOptions) int {
 		if output.ErrorCode == "" {
 			output.ErrorCode = ErrCodeInternalError
 		}
-		_ = encodeRobotFailureJSON(output)
-		return 1
+		return printLegacyRobotOutput(output, output.RobotResponse, 1, "robot agent health failed")
 	}
-	if output.Success {
-		if err := encodeJSON(output); err != nil {
-			return 1
-		}
-	} else if err := encodeRobotFailureJSON(output); err != nil {
-		return 1
-	}
-	return ExitCodeForResponse(output.RobotResponse)
+	return printLegacyRobotOutput(output, output.RobotResponse, ExitCodeForResponse(output.RobotResponse), "robot agent health failed")
 }
 
 // GetAgentHealth returns the health state for specified panes in a session.

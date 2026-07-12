@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,24 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
+
+func TestRobotProcessExitContractReservesUnavailableForNotImplemented(t *testing.T) {
+	dependency := robot.NewErrorResponse(errors.New("missing dependency"), robot.ErrCodeDependencyMissing, "install it")
+	dependency.Meta = robot.NewResponseMeta("robot-test").WithExitCode(2)
+	if got := ExitCode(robot.ExitResultForResponse(dependency, errors.New("missing dependency"), true)); got != 1 {
+		t.Fatalf("dependency failure exit = %d, want 1", got)
+	}
+
+	unavailable := robot.NewErrorResponse(errors.New("not implemented"), robot.ErrCodeNotImplemented, "use another command")
+	if got := ExitCode(robot.ExitResultForResponse(unavailable, errors.New("not implemented"), true)); got != 2 {
+		t.Fatalf("NOT_IMPLEMENTED exit = %d, want 2", got)
+	}
+
+	success := robot.NewRobotResponseWithMeta(true, robot.NewResponseMeta("robot-test").WithExitCode(2))
+	if got := ExitCode(robot.ExitResultForResponse(success, nil, true)); got != 0 {
+		t.Fatalf("successful envelope exit = %d, want 0", got)
+	}
+}
 
 func TestRobotRegistryMatchesLiveCobraAndSchemaContracts(t *testing.T) {
 	registry := robot.GetRobotRegistry()

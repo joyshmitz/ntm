@@ -1086,16 +1086,7 @@ type AttentionCursorInfo struct {
 }
 
 func printAttentionResponse(output AttentionResponse, exitCode int) int {
-	if !output.Success {
-		if err := encodeRobotFailureJSON(&output); err != nil {
-			return 1
-		}
-		return ExitCodeForResponse(output.RobotResponse)
-	}
-	if err := encodeJSON(output); err != nil {
-		return 1
-	}
-	return NormalizeProcessExitCode(exitCode)
+	return printLegacyRobotOutput(&output, output.RobotResponse, exitCode, "robot attention failed")
 }
 
 // PrintAttention implements the --robot-attention command.
@@ -1258,18 +1249,21 @@ func PrintAttention(opts AttentionOptions) int {
 		NextCommand:  buildAttentionNextCommand(opts, endCursor),
 	}
 
+	response := NewRobotResponse(true)
+	response.Version = AttentionContractVersion
 	exitCode := 0
 	if wakeReason == "timeout" {
+		response = NewErrorResponse(
+			fmt.Errorf("attention condition %q was not met within %s", opts.Condition, opts.Timeout),
+			ErrCodeTimeout,
+			cursorInfo.NextCommand,
+		)
+		response.Version = AttentionContractVersion
 		exitCode = 1
 	}
 
 	return printAttentionResponse(AttentionResponse{
-		RobotResponse: RobotResponse{
-			Success:      true,
-			Timestamp:    time.Now().UTC().Format(time.RFC3339),
-			Version:      AttentionContractVersion,
-			OutputFormat: "json",
-		},
+		RobotResponse:    response,
 		WakeReason:       wakeReason,
 		MatchedCondition: matchedCondition,
 		TriggerEvent:     triggerEvent,

@@ -341,14 +341,7 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 // Returns exit code 0 on success and 1 for every wait failure.
 func PrintWait(opts WaitOptions) int {
 	resp, exitCode := GetWait(opts)
-	if resp.Success {
-		if err := encodeJSON(resp); err != nil {
-			return 1
-		}
-	} else if err := encodeRobotFailureJSON(resp); err != nil {
-		return 1
-	}
-	return NormalizeProcessExitCode(exitCode)
+	return printLegacyRobotOutput(resp, resp.RobotResponse, exitCode, "robot wait failed")
 }
 
 // isUnsupportedWaitCondition checks if the condition is a known unsupported

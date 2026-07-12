@@ -188,6 +188,36 @@ func TestPrintAttentionResponseFailureExitContract(t *testing.T) {
 	}
 }
 
+func TestLegacyRobotOutputRejectsNonzeroSuccessEnvelope(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	output := &AttentionResponse{
+		RobotResponse: NewRobotResponse(true),
+		WakeReason:    "timeout",
+		Digest:        &AttentionDigest{},
+	}
+	var exitCode int
+	stdout, err := captureStdout(t, func() error {
+		exitCode = printLegacyRobotOutput(output, output.RobotResponse, 1, "robot test failed")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("capture legacy robot output: %v", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("legacy output exit = %d, want 1", exitCode)
+	}
+	var response AttentionResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("legacy contract failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeInternalError || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("legacy response = %+v, want INTERNAL_ERROR JSON failure", response.RobotResponse)
+	}
+}
+
 func TestRobotPrinterFailureMatrixForcesCanonicalJSON(t *testing.T) {
 	originalFormat := GetOutputFormat()
 	SetOutputFormat(FormatTOON)
@@ -1359,7 +1389,21 @@ func TestRobotPrintersDoNotReturnRawEnvelopeEncoder(t *testing.T) {
 			if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Print") || allowed[fn.Name.Name] {
 				continue
 			}
+			returnsInt := fn.Type.Results != nil && len(fn.Type.Results.List) == 1
+			if returnsInt {
+				resultType, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
+				returnsInt = ok && resultType.Name == "int"
+			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if returnsInt {
+					if call, ok := node.(*ast.CallExpr); ok {
+						if ident, ok := call.Fun.(*ast.Ident); ok &&
+							(ident.Name == "encodeJSON" || ident.Name == "outputJSON" || ident.Name == "encodeRobotFailureJSON") {
+							position := fset.Position(call.Pos())
+							t.Errorf("integer printer %s calls %s directly at %s; use printLegacyRobotOutput", fn.Name.Name, ident.Name, position)
+						}
+					}
+				}
 				switch stmt := node.(type) {
 				case *ast.ReturnStmt:
 					if len(stmt.Results) != 1 {
@@ -1384,6 +1428,58 @@ func TestRobotPrintersDoNotReturnRawEnvelopeEncoder(t *testing.T) {
 						position := fset.Position(stmt.Pos())
 						t.Errorf("%s ignores %s at %s; terminal printers must propagate encoding and exit failures", fn.Name.Name, ident.Name, position)
 					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+func TestRobotSourcesReserveLiteralExitTwoForNotImplemented(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate robot test source")
+	}
+	packageDir := filepath.Dir(sourceFile)
+	entries, err := os.ReadDir(packageDir)
+	if err != nil {
+		t.Fatalf("read robot package: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, filepath.Join(packageDir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, declaration := range parsed.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || len(call.Args) == 0 || fn.Name.Name == "PrintRobotUnavailable" {
+					return true
+				}
+				literal, ok := call.Args[0].(*ast.BasicLit)
+				if !ok || literal.Kind != token.INT || literal.Value != "2" {
+					return true
+				}
+				called := ""
+				switch target := call.Fun.(type) {
+				case *ast.Ident:
+					called = target.Name
+				case *ast.SelectorExpr:
+					called = target.Sel.Name
+				}
+				if called == "WithExitCode" || called == "ExitResultForCode" {
+					position := fset.Position(call.Pos())
+					t.Errorf("%s uses literal exit 2 at %s; only PrintRobotUnavailable may author exit 2 directly", fn.Name.Name, position)
 				}
 				return true
 			})

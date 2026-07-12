@@ -741,12 +741,9 @@ func EncodeErrorJSON(err error, code, hint, command string) error {
 // and callers silently proceeded on bad data (ntm#207). CLI dispatch passes the
 // embedded RobotResponse through this helper to derive the real exit code.
 //
-// When a command has already recorded a concrete exit code in its metadata
-// (via WithExitCode), that value is normalized to the same 0/1/2 contract.
+// Metadata records the derived process result for observability, but it cannot
+// override envelope semantics or manufacture an unavailable result.
 func ExitCodeForResponse(resp RobotResponse) int {
-	if resp.Meta != nil && resp.Meta.ExitCode != 0 {
-		return NormalizeProcessExitCode(resp.Meta.ExitCode)
-	}
 	if resp.Success {
 		return 0
 	}
@@ -754,6 +751,42 @@ func ExitCodeForResponse(resp RobotResponse) int {
 		return 2
 	}
 	return 1
+}
+
+// printLegacyRobotOutput preserves integer-returning printer APIs while
+// enforcing the same envelope and exit-code contract as typed printers. A
+// nonzero process result must be represented by success:false, and exit 2 is
+// derived only from a NOT_IMPLEMENTED envelope.
+func printLegacyRobotOutput(output any, response RobotResponse, requestedExit int, fallback string) int {
+	requestedExit = NormalizeProcessExitCode(requestedExit)
+	if response.Success && requestedExit != 0 {
+		cause := fmt.Errorf("%s: nonzero exit %d with success response", fallback, requestedExit)
+		failure := NewErrorResponse(
+			cause,
+			ErrCodeInternalError,
+			"Retry the command and report this inconsistent robot result if it persists",
+		)
+		carrier, ok := output.(robotResponseCarrier)
+		if !ok || carrier.robotResponse() == nil {
+			if err := encodeRobotFailureJSON(&failure); err != nil {
+				return 1
+			}
+			return 1
+		}
+		*carrier.robotResponse() = failure
+		response = failure
+	}
+
+	if response.Success {
+		if err := encodeJSON(output); err != nil {
+			return 1
+		}
+		return 0
+	}
+	if err := encodeRobotFailureJSON(output); err != nil {
+		return 1
+	}
+	return ExitCodeForResponse(response)
 }
 
 // RobotError outputs a standardized error response as JSON and returns the original error.

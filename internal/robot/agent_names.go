@@ -234,8 +234,7 @@ func PrintAgentNames(sessionName string, customNames []string) int {
 	if err != nil {
 		if output == nil {
 			response := NewErrorResponse(err, ErrCodeInternalError, "")
-			_ = encodeRobotFailureJSON(&response)
-			return 1
+			return printLegacyRobotOutput(&response, response, 1, "robot agent names failed")
 		}
 		output.Success = false
 		if output.Error == "" {
@@ -244,17 +243,9 @@ func PrintAgentNames(sessionName string, customNames []string) int {
 		if output.ErrorCode == "" {
 			output.ErrorCode = ErrCodeInternalError
 		}
-		_ = encodeRobotFailureJSON(output)
-		return 1
+		return printLegacyRobotOutput(output, output.RobotResponse, 1, "robot agent names failed")
 	}
-	if output.Success {
-		if err := encodeJSON(output); err != nil {
-			return 1
-		}
-	} else if err := encodeRobotFailureJSON(output); err != nil {
-		return 1
-	}
-	return ExitCodeForResponse(output.RobotResponse)
+	return printLegacyRobotOutput(output, output.RobotResponse, ExitCodeForResponse(output.RobotResponse), "robot agent names failed")
 }
 
 // BuildNameMapFromSession inspects a tmux session and generates names for each agent pane.
