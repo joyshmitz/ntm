@@ -91,7 +91,10 @@ var (
 const assignWatchOverlayKey = "F12"
 
 var collectAssignAllocationPressure = collectLiveAssignAllocationPressure
-var claimBeadForAssignment = bv.ClaimBead
+var (
+	claimBeadForAssignment     = bv.ClaimBead
+	getBeadStatusForAssignment = bv.GetBeadStatus
+)
 
 type assignSessionObserver interface {
 	Observe(context.Context, string) (statuspkg.SessionObservation, error)
@@ -2785,7 +2788,7 @@ func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projec
 	dispatchPort := &cliAtomicPaneDispatchPort{session: store.SessionName, redactionConfig: redactionConfig}
 	return assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
 		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
-			return bv.GetBeadStatus(projectDir, beadID)
+			return getBeadStatusForAssignment(projectDir, beadID)
 		}))
 }
 

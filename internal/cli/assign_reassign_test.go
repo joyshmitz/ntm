@@ -247,10 +247,15 @@ func TestRunRetryAssignments_PreservesPreviousFailReasonAndMetadata(t *testing.T
 	snapshot := captureAssignGlobals()
 	defer snapshot.restore()
 	previousClaim := claimBeadForAssignment
+	previousStatus := getBeadStatusForAssignment
 	claimBeadForAssignment = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
 		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
 	}
-	t.Cleanup(func() { claimBeadForAssignment = previousClaim })
+	getBeadStatusForAssignment = func(_ string, _ string) (string, error) { return "open", nil }
+	t.Cleanup(func() {
+		claimBeadForAssignment = previousClaim
+		getBeadStatusForAssignment = previousStatus
+	})
 
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
