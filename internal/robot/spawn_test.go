@@ -1091,7 +1091,7 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 		}),
 		ObserveSession: func(_ context.Context, gotSession string) (statuspkg.SessionObservation, error) {
 			observeCalls++
-			if observeCalls > 1 {
+			if observeCalls > 2 {
 				t.Fatal("durable replay re-ran the fresh-idle observation gate")
 			}
 			if gotSession != "spawn-atomic" {
@@ -1120,7 +1120,7 @@ func TestAssignWorkUsesAtomicClaimReservationAndDispatchWithDurableReplay(t *tes
 	if !reflect.DeepEqual(order, []string{"claim", "reserve", "dispatch"}) {
 		t.Fatalf("side-effect order=%v", order)
 	}
-	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 1 {
+	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 2 {
 		t.Fatalf("calls claim=%d reserve=%d dispatch=%d key=%d observe=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, observeCalls)
 	}
 }

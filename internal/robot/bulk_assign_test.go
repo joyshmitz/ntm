@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -633,7 +634,7 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 		},
 		ObserveSession: func(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
 			observeCalls++
-			if observeCalls > 1 {
+			if observeCalls > 2 {
 				t.Fatal("durable replay re-ran the fresh-idle observation gate")
 			}
 			return bulkSafeObserver([]tmux.Pane{{ID: "%21", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}})(ctx, session)
@@ -657,8 +658,73 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 	if !reflect.DeepEqual(order, []string{"claim", "reserve", "dispatch"}) {
 		t.Fatalf("side-effect order=%v", order)
 	}
-	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 1 {
+	if claimCalls != 1 || reserveCalls != 1 || deliverCalls != 1 || keyCalls != 1 || observeCalls != 2 {
 		t.Fatalf("calls claim=%d reserve=%d dispatch=%d key=%d observe=%d", claimCalls, reserveCalls, deliverCalls, keyCalls, observeCalls)
+	}
+}
+
+func TestRobotAtomicPaneDispatchRevalidatesFreshIdleBeforeActuation(t *testing.T) {
+	pane := tmux.Pane{ID: "%31", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}
+	tests := []struct {
+		name    string
+		observe func(context.Context, string) (statuspkg.SessionObservation, error)
+	}{
+		{
+			name: "observation error",
+			observe: func(context.Context, string) (statuspkg.SessionObservation, error) {
+				return statuspkg.SessionObservation{}, errors.New("capture failed")
+			},
+		},
+		{
+			name: "stale observation",
+			observe: func(context.Context, string) (statuspkg.SessionObservation, error) {
+				observation := bulkSafeObservation("dispatch-guard", []tmux.Pane{pane})
+				observation.ObservedAt = time.Now().Add(-statuspkg.DispatchObservationMaxAge - time.Second)
+				return observation, nil
+			},
+		},
+		{
+			name: "pane became busy",
+			observe: func(context.Context, string) (statuspkg.SessionObservation, error) {
+				observedAt := time.Now().UTC()
+				return statuspkg.SessionObservation{
+					Session: "dispatch-guard", ObservedAt: observedAt, Complete: true,
+					Panes: []statuspkg.PaneObservation{{
+						Pane: pane.Ref(), Metadata: pane,
+						Current: statuspkg.StateObservation{
+							Status:     statuspkg.AgentStatus{PaneID: pane.ID, State: statuspkg.StateWorking, UpdatedAt: observedAt},
+							ObservedAt: observedAt, Freshness: statuspkg.FreshnessFresh, Confidence: 1,
+						},
+					}},
+				}, nil
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deliveries := 0
+			port := newRobotAtomicPaneDispatchPort(
+				"dispatch-guard",
+				func(string) ([]tmux.Pane, error) { return []tmux.Pane{pane}, nil },
+				test.observe,
+				redaction.Config{Mode: redaction.ModeOff},
+				dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					deliveries++
+					return nil
+				}),
+				nil,
+			)
+			_, err := port.Dispatch(t.Context(), assignment.DispatchRequest{
+				Target: pane.ID, Prompt: "work", IdempotencyKey: "dispatch-guard-key",
+			})
+			if err == nil || !assignment.IsGuaranteedNoActuation(err) {
+				t.Fatalf("Dispatch error=%v, want guaranteed no-actuation failure", err)
+			}
+			if deliveries != 0 {
+				t.Fatalf("deliveries=%d, want zero", deliveries)
+			}
+		})
 	}
 }
 
@@ -682,6 +748,59 @@ func TestRobotAtomicReplayMatchesRawIntentAgainstRedactedDurablePrompt(t *testin
 	}
 	if replay := robotAtomicReplayIntent(store, "bd-redacted", "%44", 1, "codex", rawPrompt, false, nil); replay == nil || replay.IdempotencyKey != key {
 		t.Fatalf("raw intent did not match redacted durable replay: %+v", replay)
+	}
+}
+
+func TestBulkAtomicRuntimeSharesFreshObservationAcrossConcurrentAssignments(t *testing.T) {
+	var calls atomic.Int32
+	panes := []tmux.Pane{
+		{ID: "%1", WindowIndex: 0, Index: 0, Type: tmux.AgentCodex},
+		{ID: "%2", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+	}
+	runtime := &bulkAtomicRuntime{deps: BulkAssignDependencies{
+		ObserveSession: func(context.Context, string) (statuspkg.SessionObservation, error) {
+			calls.Add(1)
+			time.Sleep(25 * time.Millisecond)
+			return bulkSafeObservation("bulk-observation", panes), nil
+		},
+	}}
+
+	start := make(chan struct{})
+	results := make(chan statuspkg.SessionObservation, 16)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			observation, err := runtime.observeSession(t.Context(), "bulk-observation")
+			if err != nil {
+				t.Errorf("observeSession: %v", err)
+				return
+			}
+			results <- observation
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	if calls.Load() != 1 {
+		t.Fatalf("whole-session observation calls = %d, want 1", calls.Load())
+	}
+	for observation := range results {
+		if !observation.SafeToDispatch("%1") || !observation.SafeToDispatch("%2") {
+			t.Fatalf("shared observation lost safe panes: %+v", observation)
+		}
+	}
+
+	runtime.observeMu.Lock()
+	runtime.observation.ObservedAt = time.Now().Add(-statuspkg.DispatchObservationMaxAge - time.Second)
+	runtime.observeMu.Unlock()
+	if _, err := runtime.observeSession(t.Context(), "bulk-observation"); err != nil {
+		t.Fatalf("refresh expired observation: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expired observation calls = %d, want refresh to 2", calls.Load())
 	}
 }
 
@@ -768,7 +887,8 @@ func TestRobotAtomicIdempotencyKeyDoesNotReplayTerminalAssignment(t *testing.T) 
 			store := assignment.NewStore("terminal-key-" + string(status))
 			store.Assignments["bd-terminal"] = &assignment.Assignment{
 				BeadID: "bd-terminal", Status: status, Pane: 1, AgentType: "codex", AgentName: "AgentOne",
-				IdempotencyKey: "old-key", DispatchTarget: "%8", PendingPrompt: "prompt",
+				IdempotencyKey: "old-key", DispatchTarget: "%8", OccupancyKey: "%8",
+				DispatchState: assignment.DispatchSent, IntentSHA256: assignment.PromptSHA256("prompt"), PromptSent: "prompt",
 			}
 			calls := 0
 			key, err := robotAtomicIdempotencyKey(
@@ -781,7 +901,66 @@ func TestRobotAtomicIdempotencyKeyDoesNotReplayTerminalAssignment(t *testing.T) 
 			if key != "new-key" || calls != 1 {
 				t.Fatalf("terminal status %s reused key %q calls=%d", status, key, calls)
 			}
+			if replay := robotAtomicReplayIntent(store, "bd-terminal", "%8", 1, "codex", "prompt", false, nil); replay != nil {
+				t.Fatalf("terminal status %s replayed stale receipt: %+v", status, replay)
+			}
 		})
+	}
+}
+
+func TestBulkAssignTerminalGenerationRequiresReopenedBead(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "bulk-terminal-closed"
+	const beadID = "bd-terminal-closed"
+	const oldKey = "terminal-closed-key"
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Closed terminal bead", Pane: 1,
+		AgentType: "codex", AgentName: "TerminalAgent", Status: assignment.StatusCompleted,
+		AssignedAt: time.Now().UTC(), IdempotencyKey: oldKey, ClaimActor: "retained-actor",
+		DispatchTarget: "%8", OccupancyKey: "%8", DispatchState: assignment.DispatchSent,
+		DispatchReceiptID: "terminal-receipt", PromptSent: "already delivered",
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed terminal store: %v", err)
+	}
+	plan := allocateBulkAssignBeads(
+		[]bulkPane{{Ref: tmux.PaneRef{ID: "%8", WindowIndex: 0, PaneIndex: 1}, AgentType: "codex"}},
+		[]bulkBead{{ID: beadID, Title: "Closed terminal bead"}},
+	)
+	claimCalls := 0
+	deliverCalls := 0
+	panes := []tmux.Pane{{ID: "%8", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}
+	deps := BulkAssignDependencies{
+		ReadFile:       func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		Cwd:            func() (string, error) { return t.TempDir(), nil },
+		ListPanes:      func(string) ([]tmux.Pane, error) { return append([]tmux.Pane(nil), panes...), nil },
+		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		GetBeadStatus:  func(string, string) (string, error) { return "closed", nil },
+		ObserveSession: bulkSafeObserver(panes),
+		ClaimBead: func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+			claimCalls++
+			return bv.BeadClaimResult{}, errors.New("closed bead must not be claimed")
+		},
+		NewIdempotencyKey: func() (string, error) { return "new-terminal-key", nil },
+		LoadRedaction:     func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliverCalls++
+			return nil
+		}),
+	}
+	output := BulkAssignOutput{Session: session}
+	applyBulkAssignPlan(BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" ||
+		!strings.Contains(output.Assignments[0].Error, "tracker status is \"closed\"") || output.Assignments[0].PromptSent {
+		t.Fatalf("closed terminal assignment output=%+v", output.Assignments)
+	}
+	if claimCalls != 0 || deliverCalls != 0 {
+		t.Fatalf("closed terminal assignment actuated claim=%d deliver=%d", claimCalls, deliverCalls)
+	}
+	stored := store.Get(beadID)
+	if stored == nil || stored.IdempotencyKey != oldKey || stored.DispatchReceiptID != "terminal-receipt" || stored.Status != assignment.StatusCompleted {
+		t.Fatalf("closed terminal assignment replaced durable generation: %+v", stored)
 	}
 }
 

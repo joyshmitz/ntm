@@ -68,6 +68,7 @@ type BulkAssignDependencies struct {
 	Cwd               func() (string, error)
 	LoadStore         func(session string) (*assignment.AssignmentStore, error)
 	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	GetBeadStatus     func(string, string) (string, error)
 	NewIdempotencyKey func() (string, error)
 	ReservationPort   assignment.ReservationPort
 	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
@@ -293,6 +294,7 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 		Cwd:               os.Getwd,
 		LoadStore:         assignment.LoadStoreStrict,
 		ClaimBead:         bv.ClaimBead,
+		GetBeadStatus:     bv.GetBeadStatus,
 		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
 		ObserveSession:    observer.Observe,
 		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
@@ -361,6 +363,9 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 	}
 	if custom.ClaimBead != nil {
 		deps.ClaimBead = custom.ClaimBead
+	}
+	if custom.GetBeadStatus != nil {
+		deps.GetBeadStatus = custom.GetBeadStatus
 	}
 	if custom.NewIdempotencyKey != nil {
 		deps.NewIdempotencyKey = custom.NewIdempotencyKey
@@ -1104,6 +1109,19 @@ type bulkAtomicRuntime struct {
 	deps         BulkAssignDependencies
 	workDir      string
 	newKey       func() (string, error)
+	observeMu    sync.Mutex
+	observation  statuspkg.SessionObservation
+	observeErr   error
+}
+
+func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
+	r.observeMu.Lock()
+	defer r.observeMu.Unlock()
+	if r.observeErr == nil && statuspkg.DispatchObservationIsCurrent(r.observation.ObservedAt, time.Now()) {
+		return r.observation, nil
+	}
+	r.observation, r.observeErr = r.deps.ObserveSession(ctx, session)
+	return r.observation, r.observeErr
 }
 
 func newBulkAtomicRuntime(deps BulkAssignDependencies, session string) (*bulkAtomicRuntime, error) {
@@ -1123,6 +1141,7 @@ func newBulkAtomicRuntime(deps BulkAssignDependencies, session string) (*bulkAto
 	dispatchPort := newRobotAtomicPaneDispatchPort(
 		session,
 		deps.ListPanes,
+		deps.ObserveSession,
 		redactionConfig,
 		deps.DispatchDeliverer,
 		deps.DispatchPacer,
@@ -1143,10 +1162,15 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 		agentName = replay.AgentName
 		idempotencyKey = replay.IdempotencyKey
 	} else {
-		observation, observeErr := r.deps.ObserveSession(ctx, session)
+		observation, observeErr := r.observeSession(ctx, session)
 		if observeErr != nil {
 			output.Status = "failed"
 			output.Error = fmt.Sprintf("observe pane %s before assignment: %v", output.Pane, observeErr)
+			return
+		}
+		if !statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) {
+			output.Status = "failed"
+			output.Error = fmt.Sprintf("pane %s (%s) observation is stale", output.Pane, target)
 			return
 		}
 		if !observation.SafeToDispatch(target) {
@@ -1192,7 +1216,10 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 	}
 	output.IdempotencyKey = idempotencyKey
 
-	coordinator := assignment.NewAtomicCoordinator(r.store, r.claimPort, reservationPort, r.dispatchPort, r.dispatchPort)
+	coordinator := assignment.NewAtomicCoordinator(r.store, r.claimPort, reservationPort, r.dispatchPort, r.dispatchPort).
+		WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
+			return r.deps.GetBeadStatus(r.workDir, beadID)
+		}))
 	result, executeErr := coordinator.Execute(ctx, assignment.AtomicRequest{
 		BeadID:             output.Bead,
 		BeadTitle:          output.BeadTitle,
@@ -1242,6 +1269,7 @@ func newRobotAtomicClaimPort(workDir string, claim func(context.Context, string,
 type robotAtomicPaneDispatchPort struct {
 	session         string
 	listPanes       func(string) ([]tmux.Pane, error)
+	observeSession  func(context.Context, string) (statuspkg.SessionObservation, error)
 	redactionConfig redaction.Config
 	deliverer       dispatchsvc.Deliverer
 	pacer           dispatchsvc.Pacer
@@ -1250,12 +1278,13 @@ type robotAtomicPaneDispatchPort struct {
 func newRobotAtomicPaneDispatchPort(
 	session string,
 	listPanes func(string) ([]tmux.Pane, error),
+	observeSession func(context.Context, string) (statuspkg.SessionObservation, error),
 	redactionConfig redaction.Config,
 	deliverer dispatchsvc.Deliverer,
 	pacer dispatchsvc.Pacer,
 ) *robotAtomicPaneDispatchPort {
 	return &robotAtomicPaneDispatchPort{
-		session: session, listPanes: listPanes, redactionConfig: redactionConfig,
+		session: session, listPanes: listPanes, observeSession: observeSession, redactionConfig: redactionConfig,
 		deliverer: deliverer, pacer: pacer,
 	}
 }
@@ -1304,11 +1333,24 @@ func (p *robotAtomicPaneDispatchPort) Dispatch(ctx context.Context, req assignme
 	if prepareErr != nil {
 		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(prepareErr)
 	}
+	if p.observeSession == nil {
+		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(errors.New("dispatch-time pane observation is unavailable"))
+	}
+	observation, observeErr := p.observeSession(ctx, p.session)
+	if observeErr != nil {
+		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(fmt.Errorf("re-observe pane %s before dispatch: %w", req.Target, observeErr))
+	}
+	if !statuspkg.DispatchObservationIsCurrent(observation.ObservedAt, time.Now()) {
+		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(fmt.Errorf("pane %s dispatch observation is stale", req.Target))
+	}
+	if !observation.SafeToDispatch(req.Target) {
+		return assignment.DispatchReceipt{Duration: time.Since(started)}, assignment.GuaranteeNoActuation(fmt.Errorf("pane %s is no longer safe to dispatch", req.Target))
+	}
 	result, dispatchErr := service.Dispatch(ctx, prepared)
 	receipt := assignment.DispatchReceipt{Duration: time.Since(started)}
 	if len(result.Receipts) == 1 {
 		delivery := result.Receipts[0]
-		receipt.DeliveryID = fmt.Sprintf("%s/%s", delivery.Target.Ref.StableKey(), delivery.Protocol)
+		receipt.DeliveryID = assignment.DispatchDeliveryID(delivery.Target.Ref.StableKey(), string(delivery.Protocol), req.IdempotencyKey)
 	}
 	if dispatchErr != nil {
 		return receipt, dispatchErr
@@ -1357,7 +1399,7 @@ func robotAtomicReplayIntent(
 		return nil
 	}
 	existing := store.Get(beadID)
-	if existing == nil || existing.IdempotencyKey == "" || existing.DispatchState != assignment.DispatchSent {
+	if existing == nil || robotAtomicAssignmentTerminal(existing.Status) || existing.IdempotencyKey == "" || existing.DispatchState != assignment.DispatchSent {
 		return nil
 	}
 	occupancyKey := strings.TrimSpace(existing.OccupancyKey)

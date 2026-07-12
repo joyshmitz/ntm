@@ -164,6 +164,20 @@ type PaneObservation struct {
 
 const minimumDispatchConfidence = 0.75
 
+// DispatchObservationMaxAge bounds how long an idle observation may authorize
+// a new side effect. FreshnessFresh describes capture quality at collection
+// time; this age check prevents cached evidence from remaining valid forever.
+const DispatchObservationMaxAge = 5 * time.Second
+
+// DispatchObservationIsCurrent reports whether dispatch evidence is recent
+// enough to use at now. Missing and future timestamps fail closed.
+func DispatchObservationIsCurrent(observedAt, now time.Time) bool {
+	if observedAt.IsZero() || now.IsZero() || observedAt.After(now) {
+		return false
+	}
+	return now.Sub(observedAt) <= DispatchObservationMaxAge
+}
+
 // SafeToDispatch fails closed. Only a fresh, confident idle classification can
 // receive new work; stale, unknown, working, error, and failed observations are
 // all rejected.

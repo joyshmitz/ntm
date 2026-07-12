@@ -62,6 +62,7 @@ type SpawnAssignmentDependencies struct {
 	ListPanes         func(session string) ([]tmux.Pane, error)
 	LoadStore         func(session string) (*assignment.AssignmentStore, error)
 	ClaimBead         func(context.Context, string, string, string) (bv.BeadClaimResult, error)
+	GetBeadStatus     func(string, string) (string, error)
 	NewIdempotencyKey func() (string, error)
 	ReservationPort   assignment.ReservationPort
 	ResolveAgentName  func(context.Context, string, string, string, string) (string, error)
@@ -864,7 +865,7 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 	if cfg != nil {
 		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
 	}
-	dispatchPort := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
+	dispatchPort := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, deps.ObserveSession, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
 	claimPort := newRobotAtomicClaimPort(workDir, deps.ClaimBead)
 	panes, err := deps.ListPanes(session)
 	if err != nil {
@@ -963,7 +964,10 @@ func assignWorkToAgents(output *SpawnOutput, workDir, session, strategy string, 
 			}
 		}
 		spawnAssignment.IdempotencyKey = idempotencyKey
-		coordinator := assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort)
+		coordinator := assignment.NewAtomicCoordinator(store, claimPort, reservationPort, dispatchPort, dispatchPort).
+			WithWorkItemStatusPort(assignment.WorkItemStatusFunc(func(_ context.Context, beadID string) (string, error) {
+				return deps.GetBeadStatus(workDir, beadID)
+			}))
 		result, executeErr := coordinator.Execute(context.Background(), spawnAtomicRequest(
 			item, target, pane.Index, agent.Type, agentName, prompt, idempotencyKey, requireReservation, reservationPaths,
 		))
@@ -1052,6 +1056,7 @@ func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDep
 		ListPanes:         tmux.GetPanes,
 		LoadStore:         assignment.LoadStoreStrict,
 		ClaimBead:         bv.ClaimBead,
+		GetBeadStatus:     bv.GetBeadStatus,
 		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
 		ObserveSession:    observer.Observe,
 		DispatchDeliverer: dispatchsvc.TMUXDeliverer{},
@@ -1070,6 +1075,9 @@ func spawnAssignmentDeps(custom *SpawnAssignmentDependencies) SpawnAssignmentDep
 	}
 	if custom.ClaimBead != nil {
 		deps.ClaimBead = custom.ClaimBead
+	}
+	if custom.GetBeadStatus != nil {
+		deps.GetBeadStatus = custom.GetBeadStatus
 	}
 	if custom.NewIdempotencyKey != nil {
 		deps.NewIdempotencyKey = custom.NewIdempotencyKey

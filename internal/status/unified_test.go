@@ -32,6 +32,27 @@ func TestNewDetector(t *testing.T) {
 	}
 }
 
+func TestDispatchObservationIsCurrent(t *testing.T) {
+	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		observedAt time.Time
+		want       bool
+	}{
+		{name: "current", observedAt: now, want: true},
+		{name: "boundary", observedAt: now.Add(-DispatchObservationMaxAge), want: true},
+		{name: "expired", observedAt: now.Add(-DispatchObservationMaxAge - time.Nanosecond)},
+		{name: "missing"},
+		{name: "future", observedAt: now.Add(time.Nanosecond)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := DispatchObservationIsCurrent(test.observedAt, now); got != test.want {
+				t.Fatalf("DispatchObservationIsCurrent(%s, %s) = %t, want %t", test.observedAt, now, got, test.want)
+			}
+		})
+	}
+}
+
 func TestNewDetectorWithConfig(t *testing.T) {
 	config := DetectorConfig{
 		ActivityThreshold:   10,
