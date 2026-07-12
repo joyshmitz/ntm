@@ -181,6 +181,7 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				for _, reservation := range stub.reservations {
 					rows = append(rows, map[string]interface{}{
 						"id":           reservation.ID,
+						"project_id":   reservation.ProjectID,
 						"agent":        reservation.AgentName,
 						"agent_name":   reservation.AgentName,
 						"path_pattern": reservation.PathPattern,

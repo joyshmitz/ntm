@@ -3,8 +3,10 @@ package assign
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -212,8 +214,9 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 		// Check if it's a conflict error with partial results
 		if reservationResult != nil {
 			result.Conflicts = reservationResult.Conflicts
-			for _, granted := range reservationResult.Granted {
-				recordGrantedReservation(result, granted)
+			if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, false); validationErr != nil {
+				result.Error = validationErr.Error()
+				return result, validationErr
 			}
 			result.Error = fmt.Sprintf("conflicts detected: %v", err)
 			return result, nil
@@ -222,13 +225,150 @@ func (m *FileReservationManager) ReserveForBead(ctx context.Context, beadID, bea
 		return result, err
 	}
 
+	if reservationResult == nil {
+		result.Error = "agent mail returned no reservation result"
+		return result, errors.New(result.Error)
+	}
 	// Process successful reservations
-	for _, granted := range reservationResult.Granted {
-		recordGrantedReservation(result, granted)
+	if validationErr := collectGrantedReservations(result, reservationResult.Granted, paths, agentName, false); validationErr != nil {
+		result.Error = validationErr.Error()
+		return result, validationErr
 	}
 	result.Success = true
 
 	return result, nil
+}
+
+// ReconcileForBead lists active Agent Mail leases created for one bead and
+// returns the durable handles that match the original agent and requested
+// paths. An empty successful result proves no matching lease remains.
+func (m *FileReservationManager) ReconcileForBead(ctx context.Context, beadID, agentName string, requestedPaths []string) (*FileReservationResult, error) {
+	result := &FileReservationResult{
+		BeadID:         beadID,
+		AgentName:      agentName,
+		RequestedPaths: append([]string(nil), requestedPaths...),
+	}
+	if m == nil || m.client == nil {
+		result.Error = "agent mail client not configured"
+		return result, errors.New(result.Error)
+	}
+	wanted := make(map[string]struct{}, len(requestedPaths))
+	for _, raw := range requestedPaths {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		wanted[path] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		result.Error = "reservation reconciliation requires the original requested paths"
+		return result, errors.New(result.Error)
+	}
+	reservations, err := m.client.ListReservations(ctx, m.projectKey, agentName, true)
+	if err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+	reason := fmt.Sprintf("bead assignment: %s", beadID)
+	seen := make(map[string]struct{}, len(wanted))
+	seenIDs := make(map[int]struct{})
+	var validationErrors []error
+	for _, reservation := range reservations {
+		if reservation.ReleasedTS != nil || reservation.AgentName != agentName || reservation.Reason != reason {
+			continue
+		}
+		path := strings.TrimSpace(reservation.PathPattern)
+		if _, ok := wanted[path]; !ok {
+			continue
+		}
+		if reservation.ID <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("active reservation for %s has no durable ID", path))
+			continue
+		}
+		if _, duplicate := seenIDs[reservation.ID]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("duplicate active reservation ID %d", reservation.ID))
+			continue
+		}
+		seenIDs[reservation.ID] = struct{}{}
+		if _, duplicate := seen[path]; !duplicate {
+			seen[path] = struct{}{}
+			result.GrantedPaths = append(result.GrantedPaths, path)
+		}
+		result.ReservationIDs = append(result.ReservationIDs, reservation.ID)
+		if reservation.ProjectID <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("active reservation %d for %s has no durable project ID", reservation.ID, path))
+		}
+		if !reservation.Exclusive {
+			validationErrors = append(validationErrors, fmt.Errorf("active reservation %d for %s is not exclusive", reservation.ID, path))
+		}
+		expiresAt := reservation.ExpiresTS.Time
+		if !expiresAt.IsZero() && (result.ExpiresAt == nil || expiresAt.Before(*result.ExpiresAt)) {
+			result.ExpiresAt = &expiresAt
+		}
+	}
+	sort.Strings(result.GrantedPaths)
+	sort.Ints(result.ReservationIDs)
+	result.Success = len(seen) == len(wanted) && len(validationErrors) == 0
+	if len(seen) > 0 && !result.Success {
+		result.Error = fmt.Sprintf("found %d of %d requested reservations", len(seen), len(wanted))
+	}
+	if validationErr := errors.Join(validationErrors...); validationErr != nil {
+		result.Error = validationErr.Error()
+		return result, validationErr
+	}
+	return result, nil
+}
+
+func collectGrantedReservations(result *FileReservationResult, granted []agentmail.FileReservation, requested []string, agentName string, allowDuplicatePaths bool) error {
+	wanted := make(map[string]struct{}, len(requested))
+	for _, raw := range requested {
+		if path := strings.TrimSpace(raw); path != "" {
+			wanted[path] = struct{}{}
+		}
+	}
+	seenPaths := make(map[string]struct{}, len(wanted))
+	seenIDs := make(map[int]struct{}, len(granted))
+	var validationErrors []error
+	for _, reservation := range granted {
+		path := strings.TrimSpace(reservation.PathPattern)
+		validHandle := true
+		if reservation.ID <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation for %q has no durable ID", path))
+			validHandle = false
+		} else if _, duplicate := seenIDs[reservation.ID]; duplicate {
+			validationErrors = append(validationErrors, fmt.Errorf("duplicate reservation ID %d", reservation.ID))
+			validHandle = false
+		} else {
+			seenIDs[reservation.ID] = struct{}{}
+		}
+		if reservation.ProjectID <= 0 {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation %d for %q has no durable project ID", reservation.ID, path))
+		}
+		if !reservation.Exclusive {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation %d for %q is not exclusive", reservation.ID, path))
+		}
+		if strings.TrimSpace(reservation.AgentName) != strings.TrimSpace(agentName) {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation %d agent mismatch: got %q, want %q", reservation.ID, reservation.AgentName, agentName))
+		}
+		if _, requestedPath := wanted[path]; !requestedPath {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation %d returned unexpected path %q", reservation.ID, path))
+		} else if _, duplicate := seenPaths[path]; duplicate && !allowDuplicatePaths {
+			validationErrors = append(validationErrors, fmt.Errorf("multiple reservations returned for path %q", path))
+		} else {
+			seenPaths[path] = struct{}{}
+		}
+		if validHandle {
+			recordGrantedReservation(result, reservation)
+		}
+	}
+	for path := range wanted {
+		if _, ok := seenPaths[path]; !ok {
+			validationErrors = append(validationErrors, fmt.Errorf("reservation response omitted requested path %q", path))
+		}
+	}
+	sort.Strings(result.GrantedPaths)
+	sort.Ints(result.ReservationIDs)
+	return errors.Join(validationErrors...)
 }
 
 func recordGrantedReservation(result *FileReservationResult, granted agentmail.FileReservation) {

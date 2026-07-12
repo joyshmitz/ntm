@@ -673,6 +673,7 @@ func (c *Client) ListReservations(ctx context.Context, projectKey, agentName str
 	// ]
 	var raw []struct {
 		ID          int       `json:"id"`
+		ProjectID   int       `json:"project_id"`
 		Agent       string    `json:"agent"`
 		AgentName   string    `json:"agent_name"`
 		PathPattern string    `json:"path_pattern"`
@@ -695,6 +696,7 @@ func (c *Client) ListReservations(ctx context.Context, projectKey, agentName str
 		}
 		reservations = append(reservations, FileReservation{
 			ID:          r.ID,
+			ProjectID:   r.ProjectID,
 			PathPattern: r.PathPattern,
 			AgentName:   name,
 			Exclusive:   r.Exclusive,

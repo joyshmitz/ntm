@@ -153,7 +153,7 @@ func TestListReservations_ResourcePathAndFiltering(t *testing.T) {
 					{
 						"uri": "resource://file_reservations/test",
 						"mimeType": "application/json",
-						"text": "[{\"id\":1,\"agent\":\"BlueLake\",\"path_pattern\":\"internal/agentmail/*\",\"exclusive\":true,\"reason\":\"bd-mthe9\",\"created_ts\":\"2026-01-01T00:00:00Z\",\"expires_ts\":\"2026-01-01T01:00:00Z\"},{\"id\":2,\"agent_name\":\"RedStone\",\"path_pattern\":\"internal/tui/*\",\"exclusive\":false,\"reason\":\"bd-zzz\",\"created_ts\":\"2026-01-01T00:00:00Z\",\"expires_ts\":\"2026-01-01T01:00:00Z\"}]"
+							"text": "[{\"id\":1,\"project_id\":17,\"agent\":\"BlueLake\",\"path_pattern\":\"internal/agentmail/*\",\"exclusive\":true,\"reason\":\"bd-mthe9\",\"created_ts\":\"2026-01-01T00:00:00Z\",\"expires_ts\":\"2026-01-01T01:00:00Z\"},{\"id\":2,\"project_id\":17,\"agent_name\":\"RedStone\",\"path_pattern\":\"internal/tui/*\",\"exclusive\":false,\"reason\":\"bd-zzz\",\"created_ts\":\"2026-01-01T00:00:00Z\",\"expires_ts\":\"2026-01-01T01:00:00Z\"}]"
 					}
 				]
 			}`),
@@ -172,7 +172,7 @@ func TestListReservations_ResourcePathAndFiltering(t *testing.T) {
 	if len(filtered) != 1 {
 		t.Fatalf("expected 1 reservation after filtering, got %d", len(filtered))
 	}
-	if filtered[0].ID != 1 || filtered[0].AgentName != "BlueLake" {
+	if filtered[0].ID != 1 || filtered[0].ProjectID != 17 || filtered[0].AgentName != "BlueLake" {
 		t.Fatalf("unexpected reservation: %+v", filtered[0])
 	}
 }

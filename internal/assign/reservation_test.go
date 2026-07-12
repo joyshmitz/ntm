@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -317,6 +318,42 @@ func TestReserveForBeadNoClient(t *testing.T) {
 	}
 }
 
+func TestCollectGrantedReservationsValidatesDispatchAuthority(t *testing.T) {
+	valid := agentmail.FileReservation{
+		ID: 71, ProjectID: 9, AgentName: "TestAgent", PathPattern: "src/api/handler.go", Exclusive: true,
+	}
+	result := &FileReservationResult{}
+	if err := collectGrantedReservations(result, []agentmail.FileReservation{valid}, []string{"src/api/handler.go"}, "TestAgent", false); err != nil {
+		t.Fatalf("valid grant: %v", err)
+	}
+	if !reflect.DeepEqual(result.ReservationIDs, []int{71}) || !reflect.DeepEqual(result.GrantedPaths, []string{"src/api/handler.go"}) {
+		t.Fatalf("valid grant result = %+v", result)
+	}
+
+	tests := []struct {
+		name      string
+		grants    []agentmail.FileReservation
+		requested []string
+	}{
+		{name: "missing id", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.ID = 0; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "missing project", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.ProjectID = 0; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "nonexclusive", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.Exclusive = false; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "wrong agent", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.AgentName = "OtherAgent"; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "unexpected path", grants: []agentmail.FileReservation{func() agentmail.FileReservation { grant := valid; grant.PathPattern = "src/api/other.go"; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "duplicate id", grants: []agentmail.FileReservation{valid, valid}, requested: []string{"src/api/handler.go"}},
+		{name: "duplicate path", grants: []agentmail.FileReservation{valid, func() agentmail.FileReservation { grant := valid; grant.ID = 72; return grant }()}, requested: []string{"src/api/handler.go"}},
+		{name: "missing requested path", grants: []agentmail.FileReservation{valid}, requested: []string{"src/api/handler.go", "src/api/other.go"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := &FileReservationResult{}
+			if err := collectGrantedReservations(got, test.grants, test.requested, "TestAgent", false); err == nil {
+				t.Fatalf("collectGrantedReservations() result=%+v, want validation error", got)
+			}
+		})
+	}
+}
+
 func TestReleaseForBeadNoClient(t *testing.T) {
 	m := NewFileReservationManager(nil, "/test/project")
 
@@ -377,6 +414,134 @@ func TestReleaseByPathsZeroRelease(t *testing.T) {
 	err := m.ReleaseByPaths(nil, "TestAgent", []string{"src/api/handler.go"})
 	if err == nil {
 		t.Fatal("expected zero-count path release to return an error")
+	}
+}
+
+func newReservationReconcileManager(t *testing.T, reservations []agentmail.FileReservation) *FileReservationManager {
+	t.Helper()
+	server := newAssignMCPServer(t, map[string]assignToolHandler{
+		"list_file_reservations": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			return reservations, nil
+		},
+	})
+	t.Cleanup(server.Close)
+	return NewFileReservationManager(agentmail.NewClient(agentmail.WithBaseURL(server.URL+"/")), "/test/project")
+}
+
+func reconcileReservation(id int, agentName, path, reason string) agentmail.FileReservation {
+	return agentmail.FileReservation{
+		ID:          id,
+		ProjectID:   1,
+		AgentName:   agentName,
+		PathPattern: path,
+		Exclusive:   true,
+		Reason:      reason,
+		ExpiresTS:   agentmail.FlexTime{Time: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+}
+
+func TestReconcileForBeadReturnsOnlyExactActiveLeases(t *testing.T) {
+	releasedAt := agentmail.FlexTime{Time: time.Now().UTC()}
+	manager := newReservationReconcileManager(t, []agentmail.FileReservation{
+		reconcileReservation(11, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1"),
+		reconcileReservation(12, "AgentOne", "internal/cli/b.go", "bead assignment: bd-1"),
+		reconcileReservation(13, "OtherAgent", "internal/cli/a.go", "bead assignment: bd-1"),
+		reconcileReservation(14, "AgentOne", "internal/cli/a.go", "bead assignment: bd-other"),
+		func() agentmail.FileReservation {
+			reservation := reconcileReservation(15, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1")
+			reservation.ReleasedTS = &releasedAt
+			return reservation
+		}(),
+	})
+
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go", "internal/cli/b.go"})
+	if err != nil {
+		t.Fatalf("ReconcileForBead() error = %v", err)
+	}
+	if !result.Success || len(result.ReservationIDs) != 2 || result.ReservationIDs[0] != 11 || result.ReservationIDs[1] != 12 {
+		t.Fatalf("ReconcileForBead() result = %+v", result)
+	}
+	if result.ExpiresAt == nil || result.ExpiresAt.Year() != 2030 {
+		t.Fatalf("ReconcileForBead() expiry = %v", result.ExpiresAt)
+	}
+}
+
+func TestReconcileForBeadProvesAbsence(t *testing.T) {
+	manager := newReservationReconcileManager(t, []agentmail.FileReservation{
+		reconcileReservation(21, "OtherAgent", "internal/cli/a.go", "bead assignment: bd-1"),
+	})
+
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go"})
+	if err != nil {
+		t.Fatalf("ReconcileForBead() error = %v", err)
+	}
+	if result.Success || len(result.ReservationIDs) != 0 || len(result.GrantedPaths) != 0 {
+		t.Fatalf("ReconcileForBead() absence result = %+v", result)
+	}
+}
+
+func TestReconcileForBeadPreservesPartialLeaseHandles(t *testing.T) {
+	manager := newReservationReconcileManager(t, []agentmail.FileReservation{
+		reconcileReservation(31, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1"),
+	})
+
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go", "internal/cli/b.go"})
+	if err != nil {
+		t.Fatalf("ReconcileForBead() error = %v", err)
+	}
+	if result.Success || len(result.ReservationIDs) != 1 || result.ReservationIDs[0] != 31 || result.Error == "" {
+		t.Fatalf("ReconcileForBead() partial result = %+v", result)
+	}
+}
+
+func TestReconcileForBeadCollectsDuplicateActiveLeaseHandlesForCleanup(t *testing.T) {
+	manager := newReservationReconcileManager(t, []agentmail.FileReservation{
+		reconcileReservation(41, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1"),
+		reconcileReservation(42, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1"),
+	})
+
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go"})
+	if err != nil || result == nil || !result.Success || !reflect.DeepEqual(result.ReservationIDs, []int{41, 42}) || !reflect.DeepEqual(result.GrantedPaths, []string{"internal/cli/a.go"}) {
+		t.Fatalf("ReconcileForBead() duplicate result=%+v error=%v", result, err)
+	}
+}
+
+func TestReconcileForBeadRejectsLeaseWithoutDurableID(t *testing.T) {
+	manager := newReservationReconcileManager(t, []agentmail.FileReservation{
+		reconcileReservation(0, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1"),
+	})
+
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go"})
+	if err == nil || result == nil || result.Error == "" {
+		t.Fatalf("ReconcileForBead() missing ID result=%+v error=%v", result, err)
+	}
+}
+
+func TestReconcileForBeadReturnsMalformedHandlesForFailClosedCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*agentmail.FileReservation)
+	}{
+		{name: "missing project", mutate: func(reservation *agentmail.FileReservation) { reservation.ProjectID = 0 }},
+		{name: "nonexclusive", mutate: func(reservation *agentmail.FileReservation) { reservation.Exclusive = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reservation := reconcileReservation(51, "AgentOne", "internal/cli/a.go", "bead assignment: bd-1")
+			test.mutate(&reservation)
+			manager := newReservationReconcileManager(t, []agentmail.FileReservation{reservation})
+			result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"internal/cli/a.go"})
+			if err == nil || result == nil || !reflect.DeepEqual(result.ReservationIDs, []int{51}) || result.Success {
+				t.Fatalf("ReconcileForBead() malformed result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestReconcileForBeadRequiresOriginalRequestedPaths(t *testing.T) {
+	manager := newReservationReconcileManager(t, nil)
+	result, err := manager.ReconcileForBead(t.Context(), "bd-1", "AgentOne", []string{"", "  "})
+	if err == nil || result == nil || result.Error == "" {
+		t.Fatalf("ReconcileForBead() empty paths result=%+v error=%v", result, err)
 	}
 }
 
