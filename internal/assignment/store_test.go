@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -412,7 +413,9 @@ func TestReassign(t *testing.T) {
 	// Must be working to reassign
 	_ = store.MarkWorking("bd-123")
 
-	newAssignment, err := store.Reassign("bd-123", 2, "codex", "Agent2")
+	newAssignment, err := store.Reassign("bd-123", ReassignmentTarget{
+		Pane: 2, AgentType: "codex", AgentName: "Agent2", DispatchTarget: "%22", OccupancyKey: "%22",
+	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -434,6 +437,9 @@ func TestReassign(t *testing.T) {
 	}
 	if newAssignment.RetryCount != retryCount {
 		t.Errorf("expected retry count %d to be preserved, got %d", retryCount, newAssignment.RetryCount)
+	}
+	if newAssignment.DispatchTarget != "%22" || newAssignment.OccupancyKey != "%22" {
+		t.Fatalf("reassignment lost physical target identity: %+v", newAssignment)
 	}
 }
 
@@ -794,7 +800,7 @@ func TestReassignExplicitlyReplacesAtomicRecord(t *testing.T) {
 	if err := store.MarkWorking(req.BeadID); err != nil {
 		t.Fatalf("MarkWorking: %v", err)
 	}
-	if _, err := store.Reassign(req.BeadID, 4, "claude", "ClaudeFour"); err != nil {
+	if _, err := store.Reassign(req.BeadID, ReassignmentTarget{Pane: 4, AgentType: "claude", AgentName: "ClaudeFour"}); err != nil {
 		t.Fatalf("Reassign: %v", err)
 	}
 
@@ -828,7 +834,7 @@ func TestDestructiveStoreMutationsRejectStaleAtomicBarrier(t *testing.T) {
 			return err
 		}},
 		{name: "reassign", run: func(store *AssignmentStore, beadID string) error {
-			_, err := store.Reassign(beadID, 9, "claude", "ClaudeNine")
+			_, err := store.Reassign(beadID, ReassignmentTarget{Pane: 9, AgentType: "claude", AgentName: "ClaudeNine"})
 			return err
 		}},
 	}
@@ -1032,6 +1038,37 @@ func TestRecordAtomicIntentConflictKeepsDurableWinnerInMemory(t *testing.T) {
 	}
 }
 
+func TestRecordAtomicIntentCannotReplaceTerminalLeaseHandles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "atomic-intent-terminal-lease"
+	const beadID = "ntm-terminal-lease"
+	now := time.Now().UTC()
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "Terminal with lease", Pane: 4,
+		AgentType: "codex", AgentName: "CodexFour", Status: StatusCompleted, AssignedAt: now,
+		IdempotencyKey: "old-generation", ClaimActor: "old-actor",
+		DispatchTarget: "%54", OccupancyKey: "%54", DispatchState: DispatchSent,
+		DispatchReceiptID: "old-receipt", ReservationState: ReservationReserved,
+		ReservationCompleted: true, ReservedPaths: []string{"internal/assignment/**"}, ReservationIDs: []int{541},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed terminal lease: %v", err)
+	}
+	request := AtomicRequest{
+		BeadID: beadID, BeadTitle: "Replacement", Target: "%54", OccupancyKey: "%54", Pane: 4,
+		AgentType: "codex", AgentName: "CodexFour", Actor: "CodexFour", Prompt: "new work", IdempotencyKey: "new-generation",
+	}
+	_, err := store.RecordAtomicIntent(request, StableClaimActor(request.Actor, request.IdempotencyKey), now.Add(time.Minute))
+	if !errors.Is(err, ErrReservationReleaseRequired) {
+		t.Fatalf("RecordAtomicIntent error=%v, want ErrReservationReleaseRequired", err)
+	}
+	stored := mustLoadAssignment(t, session, beadID)
+	if stored == nil || stored.IdempotencyKey != "old-generation" || len(stored.ReservationIDs) != 1 || stored.DispatchReceiptID != "old-receipt" {
+		t.Fatalf("refused replacement lost terminal lease: %+v", stored)
+	}
+}
+
 func TestAssignmentClearBarrierRetainsLeaseAndBlocksNewWork(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "assignment-clear-barrier"
@@ -1079,11 +1116,85 @@ func TestAssignmentClearBarrierRetainsLeaseAndBlocksNewWork(t *testing.T) {
 	if failed == nil || failed.ClearState != ClearStateReservationReleasing || failed.ClearError != releaseErr.Error() || len(failed.ReservationIDs) != 2 {
 		t.Fatalf("failed clear did not retain retry metadata: %+v", failed)
 	}
+	if err := reloaded.CompleteClear(t.Context(), beadID); err == nil || !strings.Contains(err.Error(), "has not durably completed reservation release") {
+		t.Fatalf("CompleteClear before durable release error = %v", err)
+	}
+	released, err := reloaded.RecordClearLeasesReleased(t.Context(), beadID)
+	if err != nil {
+		t.Fatalf("RecordClearLeasesReleased: %v", err)
+	}
+	if released.ClearState != ClearStateLeasesReleased || released.ReservationState != ReservationReleased || len(released.ReservationIDs) != 0 || len(released.ReservedPaths) != 0 {
+		t.Fatalf("durable lease release checkpoint = %+v", released)
+	}
 	if err := reloaded.CompleteClear(t.Context(), beadID); err != nil {
 		t.Fatalf("CompleteClear: %v", err)
 	}
 	if got := mustLoadAssignment(t, session, beadID); got != nil {
 		t.Fatalf("confirmed clear left assignment: %+v", got)
+	}
+	clearedStore, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload cleared generation: %v", err)
+	}
+	if generation := clearedStore.ClearedGeneration(beadID); generation != 1 {
+		t.Fatalf("cleared generation=%d, want 1", generation)
+	}
+}
+
+func TestCompleteTerminalReconciliationRetainsReceiptAndClearsLeaseHandles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "assignment-terminal-reconciliation"
+	const beadID = "ntm-terminal-reconciliation"
+	now := time.Now().UTC()
+	store := NewStore(session)
+	store.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "Completed work", Pane: 3,
+		AgentType: "codex", AgentName: "CodexThree", Status: StatusAssigned, AssignedAt: now,
+		IdempotencyKey: "terminal-generation", ClaimActor: "terminal-actor",
+		DispatchTarget: "%63", OccupancyKey: "%63", DispatchState: DispatchSent,
+		DispatchReceiptID: "receipt-63", ReservationRequired: true,
+		ReservationState: ReservationReserved, ReservationCompleted: true,
+		ReservationAgent: "CodexThree", ReservationTarget: "%63",
+		ReservationRequested: []string{"internal/assignment/**"},
+		ReservedPaths:        []string{"internal/assignment/**"}, ReservationIDs: []int{631},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed terminal assignment: %v", err)
+	}
+	if _, err := store.BeginClearIfStatus(t.Context(), beadID, now.Add(time.Minute), StatusAssigned); err != nil {
+		t.Fatalf("BeginClearIfStatus: %v", err)
+	}
+	if _, err := store.RecordClearLeasesReleased(t.Context(), beadID); err != nil {
+		t.Fatalf("RecordClearLeasesReleased: %v", err)
+	}
+	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, StatusCompleted, ""); err != nil {
+		t.Fatalf("CompleteTerminalReconciliation: %v", err)
+	}
+
+	stored := mustLoadAssignment(t, session, beadID)
+	if stored == nil || stored.Status != StatusCompleted || stored.CompletedAt == nil || stored.ClearState != ClearStateNone ||
+		stored.ReservationState != ReservationReleased || stored.ReservationCompleted || len(stored.ReservationIDs) != 0 ||
+		len(stored.ReservedPaths) != 0 || stored.DispatchReceiptID != "receipt-63" {
+		t.Fatalf("terminal reconciliation result = %+v", stored)
+	}
+	if generation := store.ClearedGeneration(beadID); generation != 0 {
+		t.Fatalf("terminal reconciliation incremented explicit clear generation to %d", generation)
+	}
+}
+
+func TestCompleteTerminalReconciliationRequiresBarrierAndTerminalStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const beadID = "ntm-terminal-barrier-required"
+	store := NewStore("assignment-terminal-barrier-required")
+	store.Assignments[beadID] = &Assignment{BeadID: beadID, Status: StatusClaimed, AssignedAt: time.Now().UTC()}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, StatusFailed, "closed early"); err == nil || !strings.Contains(err.Error(), "has not durably completed reservation release") {
+		t.Fatalf("missing barrier error = %v", err)
+	}
+	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, StatusWorking, ""); err == nil || !strings.Contains(err.Error(), "must be completed or failed") {
+		t.Fatalf("nonterminal status error = %v", err)
 	}
 }
 
@@ -1110,6 +1221,40 @@ func TestAssignmentClearRejectsUnknownDispatchOutcome(t *testing.T) {
 	stored := store.Get(beadID)
 	if stored == nil || stored.ClearState != ClearStateNone || stored.DispatchState != DispatchSending || stored.DispatchAttempts != 1 {
 		t.Fatalf("rejected clear mutated dispatch barrier: %+v", stored)
+	}
+}
+
+func TestBeginClearIfStatusRejectsConcurrentLifecycleChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "assignment-clear-status-guard"
+	const beadID = "ntm-clear-status-guard"
+	now := time.Now().UTC()
+	seed := NewStore(session)
+	seed.Assignments[beadID] = &Assignment{
+		BeadID: beadID, BeadTitle: "Failed assignment", Pane: 1,
+		AgentType: "codex", AgentName: "CodexOne", Status: StatusFailed, AssignedAt: now,
+	}
+	if err := seed.Save(); err != nil {
+		t.Fatalf("seed failed assignment: %v", err)
+	}
+	staleFilter, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load failed-only filter: %v", err)
+	}
+	retry, err := LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load concurrent retry: %v", err)
+	}
+	if err := retry.UpdateStatus(beadID, StatusAssigned); err != nil {
+		t.Fatalf("concurrent retry: %v", err)
+	}
+	_, clearErr := staleFilter.BeginClearIfStatus(t.Context(), beadID, now.Add(time.Minute), StatusFailed)
+	if !errors.Is(clearErr, ErrAssignmentStatusMismatch) {
+		t.Fatalf("BeginClearIfStatus error=%v, want ErrAssignmentStatusMismatch", clearErr)
+	}
+	stored := mustLoadAssignment(t, session, beadID)
+	if stored == nil || stored.Status != StatusAssigned || stored.ClearState != ClearStateNone {
+		t.Fatalf("failed-only clear crossed lifecycle guard: %+v", stored)
 	}
 }
 
@@ -1255,7 +1400,7 @@ func TestNonExistentAssignment(t *testing.T) {
 	}
 
 	// Try to reassign non-existent assignment
-	_, err = store.Reassign("bd-nonexistent", 2, "codex", "")
+	_, err = store.Reassign("bd-nonexistent", ReassignmentTarget{Pane: 2, AgentType: "codex"})
 	if err == nil {
 		t.Error("expected error for non-existent assignment")
 	}

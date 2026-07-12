@@ -112,7 +112,7 @@ func runAtomicStaleMutationHelper(t *testing.T, store *assignment.AssignmentStor
 	case "clear":
 		mutationErr = store.Clear()
 	case "reassign":
-		_, mutationErr = store.Reassign(beadID, 9, "claude", "ClaudeNine")
+		_, mutationErr = store.Reassign(beadID, assignment.ReassignmentTarget{Pane: 9, AgentType: "claude", AgentName: "ClaudeNine"})
 	case "complete":
 		mutationErr = store.MarkCompleted(beadID)
 	default:

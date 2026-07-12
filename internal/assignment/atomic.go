@@ -42,6 +42,7 @@ const (
 	ReservationReserved  ReservationState = "reserved"
 	ReservationFailed    ReservationState = "failed"
 	ReservationUnknown   ReservationState = "unknown"
+	ReservationReleased  ReservationState = "released"
 )
 
 var (
@@ -56,6 +57,10 @@ var (
 	// ErrReservationOutcomeUnknown means a process stopped while acquiring a
 	// lease and no reconciliation port could prove whether it was created.
 	ErrReservationOutcomeUnknown = errors.New("file reservation outcome is unknown")
+	// ErrReservationReleaseRequired means a reservation call returned durable
+	// lease handles but the lease is not valid for dispatch. The handles must be
+	// reconciled or released before retrying or replacing the assignment.
+	ErrReservationReleaseRequired = errors.New("file reservation must be reconciled or released")
 	// ErrClaimOutcomeUnknown means the durable claim barrier could not be
 	// reconciled with the external tracker.
 	ErrClaimOutcomeUnknown = errors.New("bead claim outcome is unknown")
@@ -70,6 +75,10 @@ var (
 	// retried with its old idempotency key. Reopened work must start a new
 	// generation so it receives a new durable dispatch receipt.
 	ErrTerminalAssignmentAttempt = errors.New("assignment generation is terminal; reopen the work item and use a new idempotency key")
+	// ErrWorkingReplacementNotAllowed means a caller requested an atomic
+	// reassignment without first establishing the exact durable handoff barrier:
+	// the same bead must still be working and its old leases must be released.
+	ErrWorkingReplacementNotAllowed = errors.New("atomic replacement requires the same working assignment with released leases")
 )
 
 type guaranteedNoActuationError struct {
@@ -77,6 +86,10 @@ type guaranteedNoActuationError struct {
 }
 
 type guaranteedNoReservationError struct {
+	err error
+}
+
+type reservationReleaseRequiredError struct {
 	err error
 }
 
@@ -115,6 +128,29 @@ func GuaranteeNoReservation(err error) error {
 func IsGuaranteedNoReservation(err error) bool {
 	var target *guaranteedNoReservationError
 	return errors.As(err, &target)
+}
+
+func (e *reservationReleaseRequiredError) Error() string { return e.err.Error() }
+func (e *reservationReleaseRequiredError) Unwrap() error { return e.err }
+
+// RequireReservationRelease marks a reservation failure that is known to
+// have created or retained an external lease. Adapters should return every
+// available lease handle alongside this marker so clear can release it.
+func RequireReservationRelease(err error) error {
+	if err == nil {
+		return &reservationReleaseRequiredError{err: ErrReservationReleaseRequired}
+	}
+	if IsReservationReleaseRequired(err) {
+		return err
+	}
+	return &reservationReleaseRequiredError{err: errors.Join(ErrReservationReleaseRequired, err)}
+}
+
+// IsReservationReleaseRequired reports whether retrying Reserve would risk
+// leaking or duplicating a known external lease.
+func IsReservationReleaseRequired(err error) bool {
+	var target *reservationReleaseRequiredError
+	return errors.Is(err, ErrReservationReleaseRequired) || errors.As(err, &target)
 }
 
 // ClaimReceipt is the durable result of br's atomic claim transaction.
@@ -282,6 +318,29 @@ func (f WorkItemStatusFunc) WorkItemStatus(ctx context.Context, beadID string) (
 	return f(ctx, beadID)
 }
 
+type nonTerminalClaimContextKey struct{}
+
+// WithNonTerminalClaimGuard marks a tracker claim that must compare-and-set
+// only a non-terminal work item. The marker survives crash recovery through
+// Assignment.ClaimRequiresNonTerminal and is consumed by Beads adapters.
+func WithNonTerminalClaimGuard(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, nonTerminalClaimContextKey{}, true)
+}
+
+// NonTerminalClaimGuardRequired reports whether a claim adapter must refuse a
+// closed or tombstoned work item instead of allowing a generic claim to reopen
+// it as a side effect.
+func NonTerminalClaimGuardRequired(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	required, _ := ctx.Value(nonTerminalClaimContextKey{}).(bool)
+	return required
+}
+
 // AtomicRequest describes one claim-reserve-dispatch transaction.
 type AtomicRequest struct {
 	BeadID    string
@@ -300,12 +359,21 @@ type AtomicRequest struct {
 	// IntentSHA256 is populated by AtomicCoordinator from the original prompt
 	// before preflight. Callers must not use it to bypass that calculation.
 	IntentSHA256 string
+	// RecoveredIntentSHA256 may carry the exact checksum from an existing same-key
+	// durable row when the original unredacted prompt is intentionally unavailable.
+	RecoveredIntentSHA256 string
 	// RequireReservation fails closed before a new claim or dispatch when the
 	// reservation port is unavailable. RequestedPaths also implies this flag.
 	RequireReservation        bool
 	AllowReservationDiscovery bool
 	RequestedPaths            []string
 	ReservationTTL            time.Duration
+	// ReplaceWorkingAssignment starts a new atomic generation in place of the
+	// same bead's working generation. It is accepted only after clear has
+	// durably reached ClearStateLeasesReleased. Exact retries of the newly
+	// persisted idempotency key remain ordinary recovery attempts.
+	ReplaceWorkingAssignment bool
+	claimRequiresNonTerminal bool
 }
 
 // AtomicResult reports the durable state reached by Execute.
@@ -425,6 +493,10 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 		req.RequireReservation = true
 	}
 	req.OccupancyKey = normalizeOccupancyKey(req.Target, req.OccupancyKey)
+	// A generic `br --claim` can reopen terminal work as a side effect. Every
+	// assignment generation must use the guarded nonterminal compare-and-set,
+	// including the first generation when no local ledger row exists yet.
+	req.claimRequiresNonTerminal = true
 	if err := validateAtomicRequest(req); err != nil {
 		return result, err
 	}
@@ -450,15 +522,60 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 	if err := c.store.LoadStrict(); err != nil {
 		return result, fmt.Errorf("refresh atomic assignment %s: %w", req.BeadID, err)
 	}
-	if occupied := activeAssignmentForTarget(c.store.List(), req.BeadID, req.OccupancyKey); occupied != nil {
+	if occupied := activeAssignmentForTarget(c.store.List(), req.BeadID, req.OccupancyKey, req.Pane); occupied != nil {
 		result.Assignment = occupied
 		return result, fmt.Errorf("%w: %s is owned by bead %s", ErrTargetOccupied, req.Target, occupied.BeadID)
 	}
 
-	actor := StableClaimActor(req.Actor, req.IdempotencyKey)
 	prior := c.store.Get(req.BeadID)
+	actor := StableClaimActor(req.Actor, req.IdempotencyKey)
+	if prior != nil && prior.IdempotencyKey == req.IdempotencyKey && strings.TrimSpace(prior.ClaimActor) != "" {
+		// The durable row is authoritative during same-key crash recovery. A
+		// replacement generation intentionally reuses its predecessor's actor,
+		// whose suffix may belong to an older idempotency key; stabilizing that
+		// value again would invent a different tracker owner and deadlock retry.
+		actor = prior.ClaimActor
+	}
+	replacementStart := false
+	if req.ReplaceWorkingAssignment {
+		if prior == nil {
+			return result, fmt.Errorf("%w: no durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
+		}
+		if prior.IdempotencyKey != req.IdempotencyKey {
+			if err := validateWorkingReplacement(prior, req); err != nil {
+				result.Assignment = prior
+				return result, err
+			}
+			actor, err = workingReplacementClaimActor(prior)
+			if err != nil {
+				result.Assignment = prior
+				return result, err
+			}
+			replacementStart = true
+			if strings.TrimSpace(req.BeadTitle) == "" {
+				req.BeadTitle = prior.BeadTitle
+			}
+		} else if strings.TrimSpace(prior.ClaimActor) != "" {
+			// A retry of a replacement generation must retain the actor copied
+			// from the old generation rather than derive one from the new agent.
+			actor = prior.ClaimActor
+		}
+	}
+	if recoveredIntent := strings.TrimSpace(req.RecoveredIntentSHA256); recoveredIntent != "" {
+		if prior == nil || prior.IdempotencyKey != req.IdempotencyKey {
+			return result, errors.New("recovered intent checksum requires an existing same-key assignment")
+		}
+		storedIntent := strings.TrimSpace(prior.IntentSHA256)
+		if storedIntent == "" {
+			storedIntent = strings.TrimSpace(prior.PromptSHA256)
+		}
+		if storedIntent == "" || recoveredIntent != storedIntent {
+			return result, errors.New("recovered intent checksum does not match the durable assignment")
+		}
+		req.IntentSHA256 = storedIntent
+	}
 	if prior != nil {
-		if prior.ClearState == ClearStateReservationReleasing {
+		if prior.ClearState != ClearStateNone && !replacementStart {
 			result.Assignment = prior
 			return result, fmt.Errorf("%w: %s is awaiting reservation release", ErrClaimConflict, req.BeadID)
 		}
@@ -483,7 +600,7 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 				return result, ErrDispatchOutcomeUnknown
 			}
 			result.Recovered = true
-		} else if prior.IdempotencyKey != "" {
+		} else if prior.IdempotencyKey != "" && !replacementStart {
 			switch prior.Status {
 			case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
 				result.Assignment = prior
@@ -491,6 +608,10 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			}
 		}
 		if isTerminalAssignmentStatus(prior.Status) && prior.IdempotencyKey != req.IdempotencyKey {
+			if assignmentHasUnresolvedReservation(prior) {
+				result.Assignment = prior
+				return result, fmt.Errorf("%w: reconcile and clear assignment %s before starting a new generation", ErrReservationReleaseRequired, req.BeadID)
+			}
 			if c.workStatus == nil {
 				result.Assignment = prior
 				return result, fmt.Errorf("%w: cannot prove bead %s was reopened", ErrTerminalAssignmentAttempt, req.BeadID)
@@ -510,6 +631,7 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			if strings.TrimSpace(prior.ClaimActor) != "" {
 				actor = prior.ClaimActor
 			}
+			req.claimRequiresNonTerminal = true
 		}
 	}
 
@@ -534,7 +656,7 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 		result.Assignment = prior
 		return result, fmt.Errorf("idempotency key %s was reused for a different durable assignment intent", req.IdempotencyKey)
 	}
-	if req.RequireReservation && c.reserver == nil {
+	if req.RequireReservation && c.reserver == nil && !replacementStart {
 		switch {
 		case prior != nil && prior.IdempotencyKey == req.IdempotencyKey && reservationOutcomeAmbiguous(prior):
 			return result, ErrReservationOutcomeUnknown
@@ -606,7 +728,48 @@ func workItemStatusAllowsNewGeneration(status string) bool {
 	}
 }
 
+func validateWorkingReplacement(prior *Assignment, req AtomicRequest) error {
+	if prior == nil || prior.BeadID != req.BeadID {
+		return fmt.Errorf("%w: no matching durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
+	}
+	if prior.Status != StatusWorking {
+		return fmt.Errorf("%w: %s is %s, expected %s", ErrWorkingReplacementNotAllowed, req.BeadID, prior.Status, StatusWorking)
+	}
+	if prior.ClearState != ClearStateLeasesReleased {
+		return fmt.Errorf("%w: %s clear state is %q, expected %q", ErrWorkingReplacementNotAllowed, req.BeadID, prior.ClearState, ClearStateLeasesReleased)
+	}
+	if prior.DispatchState == DispatchSending {
+		return fmt.Errorf("%w: %s has an unknown dispatch outcome", ErrWorkingReplacementNotAllowed, req.BeadID)
+	}
+	if assignmentHasUnresolvedReservation(prior) {
+		return fmt.Errorf("%w: %s still has unresolved reservation metadata", ErrWorkingReplacementNotAllowed, req.BeadID)
+	}
+	if strings.TrimSpace(prior.IdempotencyKey) == strings.TrimSpace(req.IdempotencyKey) {
+		return fmt.Errorf("%w: replacement generation must use a new idempotency key", ErrWorkingReplacementNotAllowed)
+	}
+	return nil
+}
+
+func workingReplacementClaimActor(prior *Assignment) (string, error) {
+	if prior == nil {
+		return "", ErrWorkingReplacementNotAllowed
+	}
+	if actor := strings.TrimSpace(prior.ClaimActor); actor != "" {
+		return actor, nil
+	}
+	// Pre-atomic ledgers did not persist ClaimActor. Their Agent Mail identity
+	// is the only conservative claim-owner identity available for an idempotent
+	// guarded claim; never derive a fresh actor from the replacement target.
+	if actor := strings.TrimSpace(prior.AgentName); actor != "" {
+		return actor, nil
+	}
+	return "", fmt.Errorf("%w: %s has no durable claim actor", ErrWorkingReplacementNotAllowed, prior.BeadID)
+}
+
 func (c *AtomicCoordinator) ensureClaim(ctx context.Context, req AtomicRequest, actor string, recorded *Assignment) (ClaimReceipt, *Assignment, error) {
+	if req.claimRequiresNonTerminal || (recorded != nil && recorded.ClaimRequiresNonTerminal) {
+		ctx = WithNonTerminalClaimGuard(ctx)
+	}
 	state := effectiveClaimState(recorded)
 	if state == ClaimClaimed {
 		return claimFromAssignment(recorded), recorded, nil
@@ -691,14 +854,26 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 		RequestedPaths: append([]string(nil), req.RequestedPaths...),
 		TTL:            req.ReservationTTL,
 	}
+	if strings.TrimSpace(reservationReq.BeadTitle) == "" {
+		reservationReq.BeadTitle = recorded.BeadTitle
+	}
+	if len(reservationReq.RequestedPaths) == 0 {
+		if len(recorded.ReservationRequested) > 0 {
+			reservationReq.RequestedPaths = append([]string(nil), recorded.ReservationRequested...)
+		} else if len(recorded.ReservationInputPaths) > 0 {
+			reservationReq.RequestedPaths = append([]string(nil), recorded.ReservationInputPaths...)
+		}
+	}
 	state := effectiveReservationState(recorded)
 	lease := leaseFromAssignment(recorded)
 
-	if state == ReservationReserved && !reservationExpired(recorded, c.now()) {
+	if state == ReservationReserved {
 		if recorded.ReservationError != "" {
-			return lease, recorded, fmt.Errorf("reserve files for %s: %s", req.BeadID, recorded.ReservationError)
+			return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, RequireReservationRelease(errors.New(recorded.ReservationError)))
 		}
-		return lease, recorded, nil
+		if !reservationExpired(recorded, c.now()) {
+			return lease, recorded, nil
+		}
 	}
 
 	if state == ReservationReserving || state == ReservationUnknown {
@@ -721,12 +896,13 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 			if validationErr == nil && req.RequireReservation {
 				validationErr = validateRequiredLease(req, lease)
 			}
-			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, ReservationReserved, lease, validationErr); persistErr != nil {
+			reservationState, reservationErr := classifyValidatedReservation(lease, validationErr)
+			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reservationErr); persistErr != nil {
 				return lease, recorded, persistErr
 			}
 			recorded = c.store.Get(req.BeadID)
-			if validationErr != nil {
-				return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, validationErr)
+			if reservationErr != nil {
+				return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, reservationErr)
 			}
 			return lease, recorded, nil
 		case ReservationReconciliationAbsent:
@@ -735,10 +911,14 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 			}
 			recorded = c.store.Get(req.BeadID)
 		case ReservationReconciliationUnknown, "":
-			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, ReservationUnknown, lease, ErrReservationOutcomeUnknown); persistErr != nil {
+			unknownLease := reconciliation.Lease
+			if !leaseHasReservationHandles(unknownLease) {
+				unknownLease = lease
+			}
+			if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, ReservationUnknown, unknownLease, ErrReservationOutcomeUnknown); persistErr != nil {
 				return lease, recorded, errors.Join(ErrReservationOutcomeUnknown, persistErr)
 			}
-			return lease, c.store.Get(req.BeadID), ErrReservationOutcomeUnknown
+			return unknownLease, c.store.Get(req.BeadID), ErrReservationOutcomeUnknown
 		default:
 			return lease, recorded, fmt.Errorf("reconcile reservation for %s: invalid state %q", req.BeadID, reconciliation.State)
 		}
@@ -755,13 +935,8 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 	}
 	lease, reserveErr := c.reserver.Reserve(ctx, reservationReq)
 	if reserveErr != nil {
-		reservationState := ReservationUnknown
-		returnedErr := errors.Join(ErrReservationOutcomeUnknown, reserveErr)
-		if IsGuaranteedNoReservation(reserveErr) {
-			reservationState = ReservationFailed
-			returnedErr = reserveErr
-		}
-		if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reserveErr); persistErr != nil {
+		reservationState, returnedErr := classifyReservationFailure(lease, reserveErr)
+		if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, returnedErr); persistErr != nil {
 			return lease, c.store.Get(req.BeadID), errors.Join(returnedErr, persistErr)
 		}
 		return lease, c.store.Get(req.BeadID), fmt.Errorf("reserve files for %s: %w", req.BeadID, returnedErr)
@@ -770,12 +945,13 @@ func (c *AtomicCoordinator) ensureReservation(ctx context.Context, req AtomicReq
 	if validationErr == nil && req.RequireReservation {
 		validationErr = validateRequiredLease(req, lease)
 	}
-	if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, ReservationReserved, lease, validationErr); persistErr != nil {
+	reservationState, reservationErr := classifyValidatedReservation(lease, validationErr)
+	if persistErr := c.store.RecordAtomicReservation(req.BeadID, req.IdempotencyKey, reservationState, lease, reservationErr); persistErr != nil {
 		return lease, c.store.Get(req.BeadID), persistErr
 	}
 	recorded = c.store.Get(req.BeadID)
-	if validationErr != nil {
-		return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, validationErr)
+	if reservationErr != nil {
+		return lease, recorded, fmt.Errorf("reserve files for %s: %w", req.BeadID, reservationErr)
 	}
 	return lease, recorded, nil
 }
@@ -831,23 +1007,16 @@ func validateAtomicRequest(req AtomicRequest) error {
 	return nil
 }
 
-func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey string) *Assignment {
+func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey string, pane int) *Assignment {
 	occupancyKey = strings.TrimSpace(occupancyKey)
 	for _, candidate := range assignments {
 		if candidate == nil || candidate.BeadID == beadID {
 			continue
 		}
-		candidateKey := strings.TrimSpace(candidate.OccupancyKey)
-		if candidateKey == "" {
-			candidateKey = strings.TrimSpace(candidate.DispatchTarget)
-		}
-		if candidateKey != occupancyKey {
+		if !assignmentOccupiesTarget(candidate, occupancyKey, pane) {
 			continue
 		}
-		if candidate.DispatchState == DispatchSending {
-			return candidate
-		}
-		if candidate.ClearState == ClearStateReservationReleasing {
+		if candidate.DispatchState == DispatchSending || candidate.ClearState != ClearStateNone {
 			return candidate
 		}
 		switch candidate.Status {
@@ -856,6 +1025,37 @@ func activeAssignmentForTarget(assignments []*Assignment, beadID, occupancyKey s
 		}
 	}
 	return nil
+}
+
+func assignmentOccupiesTarget(candidate *Assignment, occupancyKey string, pane int) bool {
+	if candidate == nil {
+		return false
+	}
+	canonicalKey := strings.TrimSpace(candidate.OccupancyKey)
+	comparisonKey := canonicalKey
+	if comparisonKey == "" {
+		comparisonKey = strings.TrimSpace(candidate.DispatchTarget)
+	}
+	if comparisonKey != "" && comparisonKey == occupancyKey {
+		return true
+	}
+	// Rows written before canonical pane IDs were durable cannot distinguish
+	// duplicate window-local indexes. Conservatively reserve every physical pane
+	// with that local index until the legacy row is cleared or migrated.
+	return !isPhysicalPaneOccupancyKey(canonicalKey) && candidate.Pane == pane
+}
+
+func isPhysicalPaneOccupancyKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || value[0] != '%' {
+		return false
+	}
+	for _, ch := range value[1:] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRequiredLease(req AtomicRequest, lease LeaseReceipt) error {
@@ -891,6 +1091,78 @@ func validateLeaseReceipt(req ReservationRequest, lease LeaseReceipt) error {
 		return fmt.Errorf("reservation receipt target mismatch: got %q, want %q", lease.Target, req.Target)
 	}
 	return nil
+}
+
+func leaseHasReservationHandles(lease LeaseReceipt) bool {
+	return len(lease.ReservationIDs) > 0 || len(lease.Granted) > 0
+}
+
+func assignmentHasReservationHandles(a *Assignment) bool {
+	return a != nil && (len(a.ReservationIDs) > 0 || len(a.ReservedPaths) > 0)
+}
+
+func assignmentHasUnresolvedReservation(a *Assignment) bool {
+	if a == nil {
+		return false
+	}
+	if assignmentHasReservationHandles(a) {
+		return true
+	}
+	switch effectiveReservationState(a) {
+	case ReservationReserving, ReservationUnknown:
+		return true
+	case ReservationReserved:
+		return !a.ReservationCompleted || strings.TrimSpace(a.ReservationError) != ""
+	default:
+		return false
+	}
+}
+
+// ReservationOutcomeNeedsReconciliation reports whether stored handles alone
+// are insufficient to prove the complete external lease set. Cleanup callers
+// must enumerate the original requested paths before releasing these outcomes.
+func ReservationOutcomeNeedsReconciliation(a *Assignment) bool {
+	if a == nil || !a.ReservationRequired {
+		return false
+	}
+	hasHandles := assignmentHasReservationHandles(a)
+	switch effectiveReservationState(a) {
+	case ReservationReleased:
+		return false
+	case ReservationPending:
+		return a.ReservationAttempts > 0 || hasHandles
+	case ReservationFailed:
+		return hasHandles
+	case ReservationReserved:
+		return !a.ReservationCompleted || strings.TrimSpace(a.ReservationError) != ""
+	case ReservationReserving, ReservationUnknown:
+		return true
+	default:
+		return a.ReservationAttempts > 0 || hasHandles || strings.TrimSpace(a.ReservationError) != ""
+	}
+}
+
+func classifyReservationFailure(lease LeaseReceipt, reservationErr error) (ReservationState, error) {
+	if leaseHasReservationHandles(lease) || IsReservationReleaseRequired(reservationErr) {
+		return ReservationReserved, RequireReservationRelease(reservationErr)
+	}
+	if IsGuaranteedNoReservation(reservationErr) {
+		return ReservationFailed, reservationErr
+	}
+	return ReservationUnknown, errors.Join(ErrReservationOutcomeUnknown, reservationErr)
+}
+
+func classifyValidatedReservation(lease LeaseReceipt, validationErr error) (ReservationState, error) {
+	if validationErr == nil {
+		return ReservationReserved, nil
+	}
+	if leaseHasReservationHandles(lease) {
+		return ReservationReserved, RequireReservationRelease(validationErr)
+	}
+	// A successful reservation response with no durable handles cannot leave a
+	// releasable lease. Validation failures such as an empty grant are therefore
+	// known, retryable failures rather than ambiguous outcomes.
+	return ReservationFailed, GuaranteeNoReservation(validationErr)
 }
 
 func reservationNeedsRefresh(a *Assignment, now time.Time) bool {
@@ -999,13 +1271,33 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 	defer s.mutex.Unlock()
 
 	existing := s.Assignments[req.BeadID]
-	if existing != nil && existing.ClearState == ClearStateReservationReleasing {
+	replacementStart := req.ReplaceWorkingAssignment && existing != nil && existing.IdempotencyKey != req.IdempotencyKey
+	if req.ReplaceWorkingAssignment && existing == nil {
+		return nil, fmt.Errorf("%w: no durable assignment exists for %s", ErrWorkingReplacementNotAllowed, req.BeadID)
+	}
+	if replacementStart {
+		if err := validateWorkingReplacement(existing, req); err != nil {
+			return nil, err
+		}
+		expectedActor, err := workingReplacementClaimActor(existing)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(actor) != expectedActor {
+			return nil, fmt.Errorf("%w: replacement claim actor changed from %s to %s", ErrClaimConflict, expectedActor, actor)
+		}
+		req.claimRequiresNonTerminal = true
+	}
+	if existing != nil && existing.ClearState != ClearStateNone && !replacementStart {
 		return nil, fmt.Errorf("%w: %s is awaiting reservation release", ErrClaimConflict, req.BeadID)
 	}
-	if existing != nil && existing.IdempotencyKey != "" && existing.IdempotencyKey != req.IdempotencyKey {
+	if existing != nil && existing.IdempotencyKey != "" && existing.IdempotencyKey != req.IdempotencyKey && !replacementStart {
 		switch existing.Status {
 		case StatusClaiming, StatusClaimed, StatusAssigned, StatusWorking:
 			return nil, fmt.Errorf("%w: %s is recorded for %s", ErrClaimConflict, req.BeadID, existing.ClaimActor)
+		}
+		if isTerminalAssignmentStatus(existing.Status) && assignmentHasUnresolvedReservation(existing) {
+			return nil, fmt.Errorf("%w: reconcile and clear assignment %s before starting a new generation", ErrReservationReleaseRequired, req.BeadID)
 		}
 	}
 	if existing != nil && existing.IdempotencyKey == req.IdempotencyKey {
@@ -1015,32 +1307,42 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 		if !matchesAtomicIntent(existing, req) {
 			return nil, fmt.Errorf("idempotency key %s was reused for a different assignment intent", req.IdempotencyKey)
 		}
+		if req.claimRequiresNonTerminal && !existing.ClaimRequiresNonTerminal {
+			existing.ClaimRequiresNonTerminal = true
+			if err := s.saveLocked(); err != nil {
+				return nil, err
+			}
+		}
 		return cloneAssignment(existing), nil
 	}
 
 	assignment := &Assignment{
-		BeadID:                req.BeadID,
-		BeadTitle:             req.BeadTitle,
-		Pane:                  req.Pane,
-		AgentType:             req.AgentType,
-		AgentName:             req.AgentName,
-		Status:                StatusClaiming,
-		AssignedAt:            createdAt,
-		IdempotencyKey:        req.IdempotencyKey,
-		ClaimActor:            actor,
-		ClaimState:            ClaimPending,
-		ReservationRequired:   req.RequireReservation,
-		ReservationDiscovery:  req.AllowReservationDiscovery,
-		ReservationInputPaths: append([]string(nil), req.RequestedPaths...),
-		ReservationState:      ReservationPending,
-		DispatchState:         DispatchPending,
-		DispatchTarget:        req.Target,
-		OccupancyKey:          normalizeOccupancyKey(req.Target, req.OccupancyKey),
-		PromptSHA256:          PromptSHA256(req.Prompt),
-		IntentSHA256:          req.IntentSHA256,
-		PendingPrompt:         req.Prompt,
+		BeadID:                   req.BeadID,
+		BeadTitle:                req.BeadTitle,
+		Pane:                     req.Pane,
+		AgentType:                req.AgentType,
+		AgentName:                req.AgentName,
+		Status:                   StatusClaiming,
+		AssignedAt:               createdAt,
+		IdempotencyKey:           req.IdempotencyKey,
+		ClaimActor:               actor,
+		ClaimState:               ClaimPending,
+		ClaimRequiresNonTerminal: req.claimRequiresNonTerminal,
+		ReservationRequired:      req.RequireReservation,
+		ReservationDiscovery:     req.AllowReservationDiscovery,
+		ReservationInputPaths:    append([]string(nil), req.RequestedPaths...),
+		ReservationState:         ReservationPending,
+		DispatchState:            DispatchPending,
+		DispatchTarget:           req.Target,
+		OccupancyKey:             normalizeOccupancyKey(req.Target, req.OccupancyKey),
+		PromptSHA256:             PromptSHA256(req.Prompt),
+		IntentSHA256:             req.IntentSHA256,
+		PendingPrompt:            req.Prompt,
 	}
 	previous := existing
+	if replacementStart {
+		assignment.RetryCount = existing.RetryCount
+	}
 	s.Assignments[req.BeadID] = assignment
 	if previous != nil {
 		if s.replace == nil {
@@ -1169,6 +1471,21 @@ func (s *AssignmentStore) RecordAtomicReservation(beadID, idempotencyKey string,
 	a, err := s.atomicAssignmentLocked(beadID, idempotencyKey)
 	if err != nil {
 		return err
+	}
+	if state == ReservationFailed && leaseHasReservationHandles(lease) {
+		state = ReservationReserved
+		reservationErr = RequireReservationRelease(reservationErr)
+	}
+	if state == ReservationReserved && reservationErr != nil {
+		if leaseHasReservationHandles(lease) || IsReservationReleaseRequired(reservationErr) {
+			reservationErr = RequireReservationRelease(reservationErr)
+		} else {
+			state = ReservationFailed
+			reservationErr = GuaranteeNoReservation(reservationErr)
+		}
+	}
+	if state == ReservationUnknown && reservationErr == nil {
+		reservationErr = ErrReservationOutcomeUnknown
 	}
 	a.ReservationAgent = lease.AgentName
 	a.ReservationTarget = lease.Target

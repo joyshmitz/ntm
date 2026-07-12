@@ -4,6 +4,7 @@ package assignment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,11 +18,15 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
+// ErrAssignmentStatusMismatch means a guarded mutation reloaded a different
+// lifecycle state than the caller selected before acquiring the bead lock.
+var ErrAssignmentStatusMismatch = errors.New("assignment status changed")
+
 const (
 	// assignmentsDirName is the directory name for assignment storage
 	assignmentsDirName     = "assignments"
 	fileExtension          = ".json"
-	assignmentStoreVersion = 5
+	assignmentStoreVersion = 7
 )
 
 // AssignmentStatus represents the current state of an assignment
@@ -41,6 +46,7 @@ const (
 
 	ClearStateNone                 AssignmentClearState = ""
 	ClearStateReservationReleasing AssignmentClearState = "reservation_releasing"
+	ClearStateLeasesReleased       AssignmentClearState = "leases_released"
 )
 
 // Assignment represents a bead assigned to an agent
@@ -62,43 +68,44 @@ type Assignment struct {
 
 	// Atomic assignment metadata is persisted before each external boundary so
 	// retries can distinguish completed, recoverable, and outcome-unknown work.
-	IdempotencyKey        string               `json:"idempotency_key,omitempty"`
-	ClaimActor            string               `json:"claim_actor,omitempty"`
-	ClaimState            ClaimState           `json:"claim_state,omitempty"`
-	ClaimStatus           string               `json:"claim_status,omitempty"`
-	ClaimAttempts         int                  `json:"claim_attempts,omitempty"`
-	ClaimStartedAt        *time.Time           `json:"claim_started_at,omitempty"`
-	ClaimError            string               `json:"claim_error,omitempty"`
-	ClaimedAt             *time.Time           `json:"claimed_at,omitempty"`
-	ReservationRequired   bool                 `json:"reservation_required,omitempty"`
-	ReservationDiscovery  bool                 `json:"reservation_discovery,omitempty"`
-	ReservationInputPaths []string             `json:"reservation_input_paths,omitempty"`
-	ReservationState      ReservationState     `json:"reservation_state,omitempty"`
-	ReservationAttempts   int                  `json:"reservation_attempts,omitempty"`
-	ReservationStartedAt  *time.Time           `json:"reservation_started_at,omitempty"`
-	ReservationCompleted  bool                 `json:"reservation_completed,omitempty"`
-	ReservationAgent      string               `json:"reservation_agent,omitempty"`
-	ReservationTarget     string               `json:"reservation_target,omitempty"`
-	ReservationRequested  []string             `json:"reservation_requested,omitempty"`
-	ReservedPaths         []string             `json:"reserved_paths,omitempty"`
-	ReservationIDs        []int                `json:"reservation_ids,omitempty"`
-	ReservationExpiresAt  *time.Time           `json:"reservation_expires_at,omitempty"`
-	ReservationError      string               `json:"reservation_error,omitempty"`
-	DispatchState         DispatchState        `json:"dispatch_state,omitempty"`
-	DispatchTarget        string               `json:"dispatch_target,omitempty"`
-	OccupancyKey          string               `json:"occupancy_key,omitempty"`
-	PromptSHA256          string               `json:"prompt_sha256,omitempty"`
-	IntentSHA256          string               `json:"intent_sha256,omitempty"`
-	PendingPrompt         string               `json:"pending_prompt,omitempty"`
-	DispatchAttempts      int                  `json:"dispatch_attempts,omitempty"`
-	DispatchStartedAt     *time.Time           `json:"dispatch_started_at,omitempty"`
-	DispatchedAt          *time.Time           `json:"dispatched_at,omitempty"`
-	DispatchReceiptID     string               `json:"dispatch_receipt_id,omitempty"`
-	DispatchDuration      time.Duration        `json:"dispatch_duration,omitempty"`
-	LastDispatchError     string               `json:"last_dispatch_error,omitempty"`
-	ClearState            AssignmentClearState `json:"clear_state,omitempty"`
-	ClearStartedAt        *time.Time           `json:"clear_started_at,omitempty"`
-	ClearError            string               `json:"clear_error,omitempty"`
+	IdempotencyKey           string               `json:"idempotency_key,omitempty"`
+	ClaimActor               string               `json:"claim_actor,omitempty"`
+	ClaimState               ClaimState           `json:"claim_state,omitempty"`
+	ClaimStatus              string               `json:"claim_status,omitempty"`
+	ClaimAttempts            int                  `json:"claim_attempts,omitempty"`
+	ClaimStartedAt           *time.Time           `json:"claim_started_at,omitempty"`
+	ClaimError               string               `json:"claim_error,omitempty"`
+	ClaimedAt                *time.Time           `json:"claimed_at,omitempty"`
+	ClaimRequiresNonTerminal bool                 `json:"claim_requires_non_terminal,omitempty"`
+	ReservationRequired      bool                 `json:"reservation_required,omitempty"`
+	ReservationDiscovery     bool                 `json:"reservation_discovery,omitempty"`
+	ReservationInputPaths    []string             `json:"reservation_input_paths,omitempty"`
+	ReservationState         ReservationState     `json:"reservation_state,omitempty"`
+	ReservationAttempts      int                  `json:"reservation_attempts,omitempty"`
+	ReservationStartedAt     *time.Time           `json:"reservation_started_at,omitempty"`
+	ReservationCompleted     bool                 `json:"reservation_completed,omitempty"`
+	ReservationAgent         string               `json:"reservation_agent,omitempty"`
+	ReservationTarget        string               `json:"reservation_target,omitempty"`
+	ReservationRequested     []string             `json:"reservation_requested,omitempty"`
+	ReservedPaths            []string             `json:"reserved_paths,omitempty"`
+	ReservationIDs           []int                `json:"reservation_ids,omitempty"`
+	ReservationExpiresAt     *time.Time           `json:"reservation_expires_at,omitempty"`
+	ReservationError         string               `json:"reservation_error,omitempty"`
+	DispatchState            DispatchState        `json:"dispatch_state,omitempty"`
+	DispatchTarget           string               `json:"dispatch_target,omitempty"`
+	OccupancyKey             string               `json:"occupancy_key,omitempty"`
+	PromptSHA256             string               `json:"prompt_sha256,omitempty"`
+	IntentSHA256             string               `json:"intent_sha256,omitempty"`
+	PendingPrompt            string               `json:"pending_prompt,omitempty"`
+	DispatchAttempts         int                  `json:"dispatch_attempts,omitempty"`
+	DispatchStartedAt        *time.Time           `json:"dispatch_started_at,omitempty"`
+	DispatchedAt             *time.Time           `json:"dispatched_at,omitempty"`
+	DispatchReceiptID        string               `json:"dispatch_receipt_id,omitempty"`
+	DispatchDuration         time.Duration        `json:"dispatch_duration,omitempty"`
+	LastDispatchError        string               `json:"last_dispatch_error,omitempty"`
+	ClearState               AssignmentClearState `json:"clear_state,omitempty"`
+	ClearStartedAt           *time.Time           `json:"clear_started_at,omitempty"`
+	ClearError               string               `json:"clear_error,omitempty"`
 }
 
 // AssignmentUpdate describes mutable assignment metadata that can be updated
@@ -106,6 +113,16 @@ type Assignment struct {
 type AssignmentUpdate struct {
 	PromptSent *string
 	RetryCount *int
+}
+
+// ReassignmentTarget identifies the physical pane and agent that will own the
+// replacement generation of an assignment.
+type ReassignmentTarget struct {
+	Pane           int
+	AgentType      string
+	AgentName      string
+	DispatchTarget string
+	OccupancyKey   string
 }
 
 func normalizeFailureReason(a *Assignment) {
@@ -153,10 +170,11 @@ func cloneAssignment(a *Assignment) *Assignment {
 
 // AssignmentStore manages bead-to-agent assignments for a session
 type AssignmentStore struct {
-	SessionName string                 `json:"session_name"`
-	Assignments map[string]*Assignment `json:"assignments"` // bead_id -> assignment
-	UpdatedAt   time.Time              `json:"updated_at"`
-	Version     int                    `json:"version"` // Schema version for migrations
+	SessionName        string                 `json:"session_name"`
+	Assignments        map[string]*Assignment `json:"assignments"`                   // bead_id -> active or terminal assignment
+	ClearedGenerations map[string]uint64      `json:"cleared_generations,omitempty"` // bead_id -> completed explicit clears
+	UpdatedAt          time.Time              `json:"updated_at"`
+	Version            int                    `json:"version"` // Schema version for migrations
 
 	mutex    sync.RWMutex
 	path     string                 // Path to persistence file
@@ -222,13 +240,14 @@ func NewStore(sessionName string) *AssignmentStore {
 	_ = os.MkdirAll(sessionDir, 0700)
 
 	return &AssignmentStore{
-		SessionName: sessionName,
-		Assignments: make(map[string]*Assignment),
-		UpdatedAt:   time.Now().UTC(),
-		Version:     assignmentStoreVersion,
-		path:        filepath.Join(sessionDir, assignmentsDirName+fileExtension),
-		baseline:    make(map[string]*Assignment),
-		replace:     make(map[string]struct{}),
+		SessionName:        sessionName,
+		Assignments:        make(map[string]*Assignment),
+		ClearedGenerations: make(map[string]uint64),
+		UpdatedAt:          time.Now().UTC(),
+		Version:            assignmentStoreVersion,
+		path:               filepath.Join(sessionDir, assignmentsDirName+fileExtension),
+		baseline:           make(map[string]*Assignment),
+		replace:            make(map[string]struct{}),
 	}
 }
 
@@ -290,6 +309,7 @@ func (s *AssignmentStore) LoadStrict() error {
 
 	s.SessionName = loaded.SessionName
 	s.Assignments = loaded.Assignments
+	s.ClearedGenerations = loaded.ClearedGenerations
 	s.UpdatedAt = loaded.UpdatedAt
 	s.Version = loaded.Version
 	if s.Version < assignmentStoreVersion {
@@ -297,6 +317,9 @@ func (s *AssignmentStore) LoadStrict() error {
 	}
 	if s.Assignments == nil {
 		s.Assignments = make(map[string]*Assignment)
+	}
+	if s.ClearedGenerations == nil {
+		s.ClearedGenerations = make(map[string]uint64)
 	}
 	for _, assignment := range s.Assignments {
 		normalizeFailureReason(assignment)
@@ -352,6 +375,7 @@ func (s *AssignmentStore) Load() error {
 
 	s.SessionName = loaded.SessionName
 	s.Assignments = loaded.Assignments
+	s.ClearedGenerations = loaded.ClearedGenerations
 	s.UpdatedAt = loaded.UpdatedAt
 	s.Version = loaded.Version
 	if s.Version < assignmentStoreVersion {
@@ -360,6 +384,9 @@ func (s *AssignmentStore) Load() error {
 
 	if s.Assignments == nil {
 		s.Assignments = make(map[string]*Assignment)
+	}
+	if s.ClearedGenerations == nil {
+		s.ClearedGenerations = make(map[string]uint64)
 	}
 	for _, assignment := range s.Assignments {
 		normalizeFailureReason(assignment)
@@ -391,25 +418,28 @@ func (s *AssignmentStore) saveLocked() error {
 	}
 	defer unlock()
 
-	latest, err := readAssignmentMapForMerge(s.path)
+	latest, latestClearedGenerations, err := readAssignmentStateForMerge(s.path)
 	if err != nil {
 		return &PersistenceError{Operation: "reload before save", Path: s.path, Cause: err}
 	}
 	merged, mergeErr := mergeAssignmentDeltas(latest, s.baseline, s.Assignments, s.replace)
 	if mergeErr != nil {
 		s.Assignments = cloneAssignmentMap(latest)
+		s.ClearedGenerations = cloneClearedGenerationMap(latestClearedGenerations)
 		s.baseline = cloneAssignmentMap(latest)
 		s.replace = make(map[string]struct{})
 		return &PersistenceError{Operation: "merge before save", Path: s.path, Cause: mergeErr}
 	}
+	mergedClearedGenerations := mergeClearedGenerations(latestClearedGenerations, s.ClearedGenerations)
 
 	updatedAt := time.Now().UTC()
 
 	snapshot := &AssignmentStore{
-		SessionName: s.SessionName,
-		Assignments: merged,
-		UpdatedAt:   updatedAt,
-		Version:     assignmentStoreVersion,
+		SessionName:        s.SessionName,
+		Assignments:        merged,
+		ClearedGenerations: mergedClearedGenerations,
+		UpdatedAt:          updatedAt,
+		Version:            assignmentStoreVersion,
 	}
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -488,6 +518,7 @@ func (s *AssignmentStore) saveLocked() error {
 		return &PersistenceError{Operation: "sync directory", Path: dir, Cause: err}
 	}
 	s.Assignments = merged
+	s.ClearedGenerations = mergedClearedGenerations
 	s.baseline = cloneAssignmentMap(merged)
 	s.replace = make(map[string]struct{})
 	s.UpdatedAt = updatedAt
@@ -504,27 +535,48 @@ func cloneAssignmentMap(input map[string]*Assignment) map[string]*Assignment {
 	return cloned
 }
 
-func readAssignmentMapForMerge(path string) (map[string]*Assignment, error) {
+func cloneClearedGenerationMap(input map[string]uint64) map[string]uint64 {
+	cloned := make(map[string]uint64, len(input))
+	for beadID, generation := range input {
+		cloned[beadID] = generation
+	}
+	return cloned
+}
+
+func mergeClearedGenerations(latest, current map[string]uint64) map[string]uint64 {
+	merged := cloneClearedGenerationMap(latest)
+	for beadID, generation := range current {
+		if generation > merged[beadID] {
+			merged[beadID] = generation
+		}
+	}
+	return merged
+}
+
+func readAssignmentStateForMerge(path string) (map[string]*Assignment, map[string]uint64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if _, backupErr := os.Stat(path + ".bak"); backupErr == nil {
-				return nil, fmt.Errorf("primary ledger is missing while backup %s exists", path+".bak")
+				return nil, nil, fmt.Errorf("primary ledger is missing while backup %s exists", path+".bak")
 			} else if !os.IsNotExist(backupErr) {
-				return nil, backupErr
+				return nil, nil, backupErr
 			}
-			return make(map[string]*Assignment), nil
+			return make(map[string]*Assignment), make(map[string]uint64), nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	var loaded AssignmentStore
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if loaded.Assignments == nil {
 		loaded.Assignments = make(map[string]*Assignment)
 	}
-	return cloneAssignmentMap(loaded.Assignments), nil
+	if loaded.ClearedGenerations == nil {
+		loaded.ClearedGenerations = make(map[string]uint64)
+	}
+	return cloneAssignmentMap(loaded.Assignments), cloneClearedGenerationMap(loaded.ClearedGenerations), nil
 }
 
 func mergeAssignmentDeltas(latest, baseline, current map[string]*Assignment, replacements map[string]struct{}) (map[string]*Assignment, error) {
@@ -731,6 +783,15 @@ func (s *AssignmentStore) Get(beadID string) *Assignment {
 	return cloneAssignment(s.Assignments[beadID])
 }
 
+// ClearedGeneration returns the number of completed explicit clears for a
+// bead. It is retained after the assignment row is removed so a deliberate
+// post-clear assignment can derive a fresh, replay-stable identity.
+func (s *AssignmentStore) ClearedGeneration(beadID string) uint64 {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return s.ClearedGenerations[beadID]
+}
+
 // GetAll returns all assignments as values
 func (s *AssignmentStore) GetAll() []Assignment {
 	s.mutex.RLock()
@@ -790,7 +851,7 @@ func (s *AssignmentStore) ListActive() []*Assignment {
 
 	var result []*Assignment
 	for _, a := range s.Assignments {
-		if a.ClearState == ClearStateReservationReleasing || a.Status == StatusClaiming || a.Status == StatusClaimed || a.Status == StatusAssigned || a.Status == StatusWorking {
+		if a.ClearState != ClearStateNone || a.Status == StatusClaiming || a.Status == StatusClaimed || a.Status == StatusAssigned || a.Status == StatusWorking {
 			result = append(result, cloneAssignment(a))
 		}
 	}
@@ -801,6 +862,21 @@ func (s *AssignmentStore) ListActive() []*Assignment {
 // release. The barrier retains exact reservation IDs and blocks new assignment
 // generations until CompleteClear removes the record.
 func (s *AssignmentStore) BeginClear(ctx context.Context, beadID string, startedAt time.Time) (*Assignment, error) {
+	return s.beginClear(ctx, beadID, startedAt, nil)
+}
+
+// BeginClearIfStatus establishes the clear barrier only if the status still
+// matches one of expected after acquiring the bead lock and reloading durable
+// state. This closes filter-then-clear races such as --clear-failed clearing a
+// concurrently retried assignment.
+func (s *AssignmentStore) BeginClearIfStatus(ctx context.Context, beadID string, startedAt time.Time, expected ...AssignmentStatus) (*Assignment, error) {
+	if len(expected) == 0 {
+		return nil, errors.New("at least one expected assignment status is required")
+	}
+	return s.beginClear(ctx, beadID, startedAt, expected)
+}
+
+func (s *AssignmentStore) beginClear(ctx context.Context, beadID string, startedAt time.Time, expected []AssignmentStatus) (*Assignment, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -819,10 +895,13 @@ func (s *AssignmentStore) BeginClear(ctx context.Context, beadID string, started
 	if assignment == nil {
 		return nil, fmt.Errorf("[ASSIGN] Assignment not found: %s", beadID)
 	}
+	if len(expected) > 0 && !assignmentStatusAllowed(assignment.Status, expected) {
+		return nil, fmt.Errorf("%w: %s is %s, expected %s", ErrAssignmentStatusMismatch, beadID, assignment.Status, formatAssignmentStatuses(expected))
+	}
 	if assignment.DispatchState == DispatchSending {
 		return nil, fmt.Errorf("%w: cannot clear %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, beadID)
 	}
-	if assignment.ClearState == ClearStateReservationReleasing {
+	if assignment.ClearState != ClearStateNone {
 		return cloneAssignment(assignment), nil
 	}
 	if startedAt.IsZero() {
@@ -835,6 +914,23 @@ func (s *AssignmentStore) BeginClear(ctx context.Context, beadID string, started
 		return nil, err
 	}
 	return cloneAssignment(assignment), nil
+}
+
+func assignmentStatusAllowed(actual AssignmentStatus, expected []AssignmentStatus) bool {
+	for _, status := range expected {
+		if actual == status {
+			return true
+		}
+	}
+	return false
+}
+
+func formatAssignmentStatuses(statuses []AssignmentStatus) string {
+	values := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		values = append(values, string(status))
+	}
+	return strings.Join(values, ",")
 }
 
 // RecordClearReleaseFailed preserves a retryable clear barrier and diagnostic.
@@ -857,7 +953,7 @@ func (s *AssignmentStore) RecordClearReleaseFailed(ctx context.Context, beadID s
 	if assignment == nil {
 		return nil
 	}
-	if assignment.ClearState != ClearStateReservationReleasing {
+	if assignment.ClearState == ClearStateNone {
 		return fmt.Errorf("assignment %s is not awaiting reservation release", beadID)
 	}
 	assignment.ClearError = ""
@@ -865,6 +961,48 @@ func (s *AssignmentStore) RecordClearReleaseFailed(ctx context.Context, beadID s
 		assignment.ClearError = releaseErr.Error()
 	}
 	return s.saveLocked()
+}
+
+// RecordClearLeasesReleased durably records that every matching external lease
+// is absent. Later clear retries can skip the non-idempotent release call while
+// still retrying tracker-claim release and local ledger completion.
+func (s *AssignmentStore) RecordClearLeasesReleased(ctx context.Context, beadID string) (*Assignment, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, s.path, beadID)
+	if err != nil {
+		return nil, fmt.Errorf("lock assignment lease-release completion %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return nil, fmt.Errorf("refresh assignment lease-release completion %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	assignment := s.Assignments[beadID]
+	if assignment == nil {
+		return nil, fmt.Errorf("[ASSIGN] Assignment not found: %s", beadID)
+	}
+	if assignment.ClearState == ClearStateLeasesReleased {
+		return cloneAssignment(assignment), nil
+	}
+	if assignment.ClearState != ClearStateReservationReleasing {
+		return nil, fmt.Errorf("assignment %s is not awaiting reservation release", beadID)
+	}
+	assignment.ClearState = ClearStateLeasesReleased
+	assignment.ClearError = ""
+	assignment.ReservationState = ReservationReleased
+	assignment.ReservationCompleted = false
+	assignment.ReservedPaths = nil
+	assignment.ReservationIDs = nil
+	assignment.ReservationExpiresAt = nil
+	assignment.ReservationError = ""
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	return cloneAssignment(assignment), nil
 }
 
 // CompleteClear removes an assignment only after its external reservations are
@@ -888,11 +1026,86 @@ func (s *AssignmentStore) CompleteClear(ctx context.Context, beadID string) erro
 	if assignment == nil {
 		return nil
 	}
-	if assignment.ClearState != ClearStateReservationReleasing {
-		return fmt.Errorf("assignment %s is not awaiting reservation release", beadID)
+	if assignment.ClearState != ClearStateLeasesReleased {
+		return fmt.Errorf("assignment %s has not durably completed reservation release", beadID)
 	}
+	if s.ClearedGenerations == nil {
+		s.ClearedGenerations = make(map[string]uint64)
+	}
+	s.ClearedGenerations[beadID]++
 	delete(s.Assignments, beadID)
 	return s.saveLocked()
+}
+
+// CompleteTerminalReconciliation retires tracker-terminal work only after the
+// caller has proven every external reservation released. BeginClearIfStatus
+// establishes the cross-process barrier consumed here.
+func (s *AssignmentStore) CompleteTerminalReconciliation(ctx context.Context, beadID string, terminalStatus AssignmentStatus, reason string) error {
+	if terminalStatus != StatusCompleted && terminalStatus != StatusFailed {
+		return fmt.Errorf("terminal reconciliation status must be completed or failed, got %s", terminalStatus)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationUnlock, err := acquireAtomicBeadOperationLock(ctx, s.path, beadID)
+	if err != nil {
+		return fmt.Errorf("lock terminal assignment reconciliation %s: %w", beadID, err)
+	}
+	defer operationUnlock()
+	if err := s.LoadStrict(); err != nil {
+		return fmt.Errorf("refresh terminal assignment reconciliation %s: %w", beadID, err)
+	}
+
+	s.mutex.Lock()
+	assignment := s.Assignments[beadID]
+	if assignment == nil {
+		s.mutex.Unlock()
+		return nil
+	}
+	if assignment.ClearState != ClearStateLeasesReleased {
+		s.mutex.Unlock()
+		return fmt.Errorf("assignment %s has not durably completed reservation release", beadID)
+	}
+	if assignment.DispatchState == DispatchSending {
+		s.mutex.Unlock()
+		return fmt.Errorf("%w: cannot retire %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, beadID)
+	}
+
+	previousStatus := assignment.Status
+	now := time.Now().UTC()
+	assignment.Status = terminalStatus
+	assignment.ReservationState = ReservationReleased
+	assignment.ReservationCompleted = false
+	assignment.ReservedPaths = nil
+	assignment.ReservationIDs = nil
+	assignment.ReservationExpiresAt = nil
+	assignment.ReservationError = ""
+	assignment.ClearState = ClearStateNone
+	assignment.ClearStartedAt = nil
+	assignment.ClearError = ""
+	assignment.CompletedAt = nil
+	assignment.FailedAt = nil
+	assignment.FailReason = ""
+	assignment.FailureReason = ""
+	if terminalStatus == StatusCompleted {
+		assignment.CompletedAt = &now
+	} else {
+		assignment.FailedAt = &now
+		assignment.FailReason = reason
+	}
+	if err := s.saveLocked(); err != nil {
+		s.mutex.Unlock()
+		return err
+	}
+	emitIdle := s.shouldEmitAgentIdleLocked(assignment, previousStatus, terminalStatus)
+	cloned := cloneAssignment(assignment)
+	s.mutex.Unlock()
+
+	emitAssignmentStatusEvent(s.SessionName, cloned, terminalStatus, reason)
+	if emitIdle {
+		emitAgentIdle(s.SessionName, cloned, previousStatus, terminalStatus)
+	}
+	return nil
 }
 
 // Update updates mutable assignment metadata while preserving snapshot semantics
@@ -1076,7 +1289,7 @@ func (s *AssignmentStore) MarkFailed(beadID, reason string) error {
 }
 
 // Reassign moves an assignment to a different agent
-func (s *AssignmentStore) Reassign(beadID string, newPane int, newAgentType, newAgentName string) (*Assignment, error) {
+func (s *AssignmentStore) Reassign(beadID string, target ReassignmentTarget) (*Assignment, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -1099,14 +1312,16 @@ func (s *AssignmentStore) Reassign(beadID string, newPane int, newAgentType, new
 	// Create new assignment
 	now := time.Now().UTC()
 	newAssignment := &Assignment{
-		BeadID:     beadID,
-		BeadTitle:  oldAssignment.BeadTitle,
-		Pane:       newPane,
-		AgentType:  newAgentType,
-		AgentName:  newAgentName,
-		Status:     StatusAssigned,
-		AssignedAt: now,
-		RetryCount: oldAssignment.RetryCount,
+		BeadID:         beadID,
+		BeadTitle:      oldAssignment.BeadTitle,
+		Pane:           target.Pane,
+		AgentType:      target.AgentType,
+		AgentName:      target.AgentName,
+		Status:         StatusAssigned,
+		AssignedAt:     now,
+		RetryCount:     oldAssignment.RetryCount,
+		DispatchTarget: target.DispatchTarget,
+		OccupancyKey:   target.OccupancyKey,
 	}
 
 	s.Assignments[beadID] = newAssignment

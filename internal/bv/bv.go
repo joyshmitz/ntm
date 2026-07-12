@@ -5,6 +5,7 @@ package bv
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
 )
 
 // ErrNotInstalled indicates bv is not available
@@ -795,6 +799,10 @@ func runBdContext(parent context.Context, dir string, allowNoDB bool, args ...st
 
 var ErrBeadAlreadyClaimed = errors.New("bead is already claimed")
 
+// ErrBeadTerminal means a guarded terminal-generation claim observed a closed
+// or tombstoned issue and refused to let br's generic --claim path reopen it.
+var ErrBeadTerminal = errors.New("bead is terminal")
+
 // BeadClaimResult is the validated output of br's atomic claim operation.
 type BeadClaimResult struct {
 	ID        string
@@ -802,6 +810,55 @@ type BeadClaimResult struct {
 	Actor     string
 	Status    string
 	ClaimedAt time.Time
+}
+
+// ReleaseBeadClaim releases the exact non-terminal claim owned by actor. It is
+// intentionally compare-and-set: a terminal issue or a claim now owned by a
+// different actor is left untouched, while the caller can still retire its
+// stale local assignment record safely.
+func ReleaseBeadClaim(ctx context.Context, dir, beadID, actor string) (bool, error) {
+	beadID = strings.TrimSpace(beadID)
+	actor = strings.TrimSpace(actor)
+	if beadID == "" {
+		return false, errors.New("bead ID is required")
+	}
+	if actor == "" {
+		return false, errors.New("claim actor is required")
+	}
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return false, err
+	}
+	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
+	if err != nil {
+		return false, fmt.Errorf("resolve Beads database for claim release: %w", err)
+	}
+	var info beadsWorkspaceInfo
+	if err := json.Unmarshal([]byte(infoOutput), &info); err != nil {
+		return false, fmt.Errorf("parse Beads workspace info for claim release: %w", err)
+	}
+	databasePath := strings.TrimSpace(info.DatabasePath)
+	if databasePath == "" {
+		return false, errors.New("claim release requires a SQLite Beads database")
+	}
+
+	mu := workspaceBDMutex(normalizedDir)
+	mu.Lock()
+	releaseResult, releaseErr := releaseBeadClaimTransaction(ctx, databasePath, beadID, actor)
+	mu.Unlock()
+	if releaseErr != nil || !releaseResult.NeedsFinalization {
+		return releaseResult.Released, releaseErr
+	}
+	if _, err := runBdContext(ctx, normalizedDir, false, "sync", "--flush-only", "--json", "--no-auto-import"); err != nil {
+		return false, fmt.Errorf("flush released Beads claim: %w", err)
+	}
+	mu.Lock()
+	hashErr := repairReleasedClaimContentHash(ctx, databasePath, beadID, releaseResult.Status)
+	mu.Unlock()
+	if hashErr != nil {
+		return false, hashErr
+	}
+	return releaseResult.Released, nil
 }
 
 // ClaimBead performs the cross-process compare-and-set used by every NTM
@@ -814,6 +871,9 @@ func ClaimBead(ctx context.Context, dir, beadID, actor string) (BeadClaimResult,
 	}
 	if actor == "" {
 		return BeadClaimResult{}, errors.New("claim actor is required")
+	}
+	if assignmentstore.NonTerminalClaimGuardRequired(ctx) {
+		return claimBeadNonTerminal(ctx, dir, beadID, actor)
 	}
 
 	output, err := runBdContext(ctx, dir, false, beadClaimArgs(beadID, actor)...)
@@ -833,6 +893,377 @@ func ClaimBead(ctx context.Context, dir, beadID, actor string) (BeadClaimResult,
 	result.Actor = actor
 	result.ClaimedAt = time.Now().UTC()
 	return result, nil
+}
+
+type beadsWorkspaceInfo struct {
+	DatabasePath string `json:"database_path"`
+}
+
+type guardedClaimIssue struct {
+	ContentHash sql.NullString
+	Title       string
+	Status      string
+	Assignee    sql.NullString
+}
+
+// claimBeadNonTerminal is the compare-and-set used only when a prior terminal
+// NTM assignment is starting a new generation. br 0.2.x's generic --claim
+// operation also reopens closed rows, so the ordinary CLI primitive cannot
+// enforce this precondition. This transaction mirrors the mutation invariants
+// maintained by Beads: audit events, dirty/export-hash tracking, and blocked
+// cache invalidation are committed with the guarded issue update. The installed
+// br then exports the dirty row and supplies its version-specific canonical
+// content hash, avoiding a second independent hash implementation in NTM.
+func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		return BeadClaimResult{}, err
+	}
+	infoOutput, err := runBdContext(ctx, normalizedDir, false, "info", "--json", "--no-auto-import", "--no-auto-flush")
+	if err != nil {
+		return BeadClaimResult{}, fmt.Errorf("resolve Beads database for guarded claim: %w", err)
+	}
+	var info beadsWorkspaceInfo
+	if err := json.Unmarshal([]byte(infoOutput), &info); err != nil {
+		return BeadClaimResult{}, fmt.Errorf("parse Beads workspace info for guarded claim: %w", err)
+	}
+	databasePath := strings.TrimSpace(info.DatabasePath)
+	if databasePath == "" {
+		return BeadClaimResult{}, errors.New("guarded claim requires a SQLite Beads database")
+	}
+
+	mu := workspaceBDMutex(normalizedDir)
+	mu.Lock()
+	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor)
+	mu.Unlock()
+	if claimErr != nil {
+		return BeadClaimResult{}, claimErr
+	}
+	if !changed {
+		return result, nil
+	}
+	if _, err := runBdContext(ctx, normalizedDir, false, "sync", "--flush-only", "--json", "--no-auto-import"); err != nil {
+		return BeadClaimResult{}, fmt.Errorf("flush guarded Beads claim: %w", err)
+	}
+	mu.Lock()
+	hashErr := repairGuardedClaimContentHash(ctx, databasePath, beadID, actor)
+	mu.Unlock()
+	if hashErr != nil {
+		return BeadClaimResult{}, hashErr
+	}
+	return result, nil
+}
+
+func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string) (BeadClaimResult, bool, error) {
+	dsn := sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
+	database, err := sql.Open(sqliteutil.DriverName, dsn)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("open Beads database for guarded claim: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("begin guarded Beads claim: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	issue, err := loadGuardedClaimIssue(ctx, tx, beadID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return BeadClaimResult{}, false, fmt.Errorf("bead %s not found", beadID)
+		}
+		return BeadClaimResult{}, false, err
+	}
+	status := strings.ToLower(strings.TrimSpace(issue.Status))
+	if status != "open" && status != "in_progress" {
+		return BeadClaimResult{}, false, errors.Join(ErrBeadAlreadyClaimed, fmt.Errorf("%w: %s has status %s", ErrBeadTerminal, beadID, issue.Status))
+	}
+	currentAssignee := strings.TrimSpace(issue.Assignee.String)
+	if issue.Assignee.Valid && currentAssignee != "" && currentAssignee != actor {
+		return BeadClaimResult{}, false, fmt.Errorf("%w: issue %s already assigned to %s", ErrBeadAlreadyClaimed, beadID, currentAssignee)
+	}
+	if status == "in_progress" && currentAssignee == actor {
+		if err := tx.Commit(); err != nil {
+			return BeadClaimResult{}, false, fmt.Errorf("commit idempotent guarded Beads claim: %w", err)
+		}
+		committed = true
+		return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, !issue.ContentHash.Valid, nil
+	}
+
+	claimedAt := time.Now().UTC()
+	update, err := tx.ExecContext(ctx, `
+		UPDATE issues
+		SET status = 'in_progress', assignee = ?, updated_at = ?, content_hash = NULL
+		WHERE id = ?
+		  AND status IN ('open', 'in_progress')
+		  AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?)`,
+		actor, claimedAt.Format(time.RFC3339Nano), beadID, actor)
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("compare-and-set guarded Beads claim: %w", err)
+	}
+	updatedRows, err := update.RowsAffected()
+	if err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("inspect guarded Beads claim result: %w", err)
+	}
+	if updatedRows != 1 {
+		return BeadClaimResult{}, false, fmt.Errorf("%w: guarded claim precondition changed for %s", ErrBeadAlreadyClaimed, beadID)
+	}
+	if status != "in_progress" {
+		if err := insertGuardedClaimEvent(ctx, tx, beadID, "status_changed", actor, issue.Status, "in_progress", claimedAt); err != nil {
+			return BeadClaimResult{}, false, err
+		}
+	}
+	if currentAssignee != actor {
+		if err := insertGuardedClaimEvent(ctx, tx, beadID, "assignee_changed", actor, currentAssignee, actor, claimedAt); err != nil {
+			return BeadClaimResult{}, false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM dirty_issues WHERE issue_id = ?", beadID); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("refresh guarded claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO dirty_issues (issue_id, marked_at) VALUES (?, ?)", beadID, claimedAt.Format(time.RFC3339Nano)); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("record guarded claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM export_hashes WHERE issue_id = ?", beadID); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("invalidate guarded claim export hash: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = 'blocked_cache_state'"); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("invalidate guarded claim blocked cache: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO metadata (key, value) VALUES ('blocked_cache_state', 'stale')"); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("record guarded claim blocked cache state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return BeadClaimResult{}, false, fmt.Errorf("commit guarded Beads claim: %w", err)
+	}
+	committed = true
+	return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: claimedAt}, true, nil
+}
+
+type releaseBeadClaimResult struct {
+	Released          bool
+	NeedsFinalization bool
+	Status            string
+}
+
+func releaseBeadClaimTransaction(ctx context.Context, databasePath, beadID, actor string) (releaseBeadClaimResult, error) {
+	dsn := sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
+	database, err := sql.Open(sqliteutil.DriverName, dsn)
+	if err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("open Beads database for claim release: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("begin Beads claim release: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	issue, err := loadGuardedClaimIssue(ctx, tx, beadID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return releaseBeadClaimResult{}, fmt.Errorf("bead %s not found", beadID)
+		}
+		return releaseBeadClaimResult{}, err
+	}
+	status := strings.ToLower(strings.TrimSpace(issue.Status))
+	currentAssignee := strings.TrimSpace(issue.Assignee.String)
+	result := releaseBeadClaimResult{Status: status}
+	if currentAssignee == "" {
+		var dirty int
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM dirty_issues WHERE issue_id = ?)", beadID).Scan(&dirty); err != nil {
+			return releaseBeadClaimResult{}, fmt.Errorf("inspect pending Beads claim release finalization: %w", err)
+		}
+		result.NeedsFinalization = dirty != 0 || !issue.ContentHash.Valid
+		if err := tx.Commit(); err != nil {
+			return releaseBeadClaimResult{}, fmt.Errorf("commit no-op Beads claim release: %w", err)
+		}
+		committed = true
+		return result, nil
+	}
+	if currentAssignee != actor {
+		if err := tx.Commit(); err != nil {
+			return releaseBeadClaimResult{}, fmt.Errorf("commit different-owner Beads claim release: %w", err)
+		}
+		committed = true
+		return result, nil
+	}
+	targetStatus := status
+	switch status {
+	case "open", "in_progress":
+		targetStatus = "open"
+	case "closed", "tombstone":
+		// Preserve terminal status while clearing the exact NTM claim actor.
+	default:
+		if err := tx.Commit(); err != nil {
+			return releaseBeadClaimResult{}, fmt.Errorf("commit unsupported-status Beads claim release: %w", err)
+		}
+		committed = true
+		return result, nil
+	}
+
+	releasedAt := time.Now().UTC()
+	update, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET status = ?, assignee = NULL, updated_at = ?, content_hash = NULL
+			WHERE id = ? AND status = ? AND assignee = ?`,
+		targetStatus, releasedAt.Format(time.RFC3339Nano), beadID, status, actor)
+	if err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("compare-and-set Beads claim release: %w", err)
+	}
+	updatedRows, err := update.RowsAffected()
+	if err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("inspect Beads claim release result: %w", err)
+	}
+	if updatedRows != 1 {
+		return releaseBeadClaimResult{}, fmt.Errorf("beads claim release precondition changed for %s", beadID)
+	}
+	if targetStatus != status {
+		if err := insertGuardedClaimEvent(ctx, tx, beadID, "status_changed", actor, issue.Status, targetStatus, releasedAt); err != nil {
+			return releaseBeadClaimResult{}, err
+		}
+	}
+	if err := insertGuardedClaimEvent(ctx, tx, beadID, "assignee_changed", actor, currentAssignee, "", releasedAt); err != nil {
+		return releaseBeadClaimResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM dirty_issues WHERE issue_id = ?", beadID); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("refresh released claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO dirty_issues (issue_id, marked_at) VALUES (?, ?)", beadID, releasedAt.Format(time.RFC3339Nano)); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("record released claim dirty marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM export_hashes WHERE issue_id = ?", beadID); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("invalidate released claim export hash: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM metadata WHERE key = 'blocked_cache_state'"); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("invalidate released claim blocked cache: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO metadata (key, value) VALUES ('blocked_cache_state', 'stale')"); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("record released claim blocked cache state: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return releaseBeadClaimResult{}, fmt.Errorf("commit Beads claim release: %w", err)
+	}
+	committed = true
+	return releaseBeadClaimResult{Released: true, NeedsFinalization: true, Status: targetStatus}, nil
+}
+
+func loadGuardedClaimIssue(ctx context.Context, tx *sql.Tx, beadID string) (guardedClaimIssue, error) {
+	var issue guardedClaimIssue
+	err := tx.QueryRowContext(ctx, `
+		SELECT content_hash, title, status, assignee
+		FROM issues WHERE id = ?`, beadID).Scan(
+		&issue.ContentHash, &issue.Title, &issue.Status, &issue.Assignee,
+	)
+	if err != nil {
+		return guardedClaimIssue{}, err
+	}
+	return issue, nil
+}
+
+func insertGuardedClaimEvent(ctx context.Context, tx *sql.Tx, beadID, eventType, actor, oldValue, newValue string, createdAt time.Time) error {
+	nullableOld := any(oldValue)
+	if strings.TrimSpace(oldValue) == "" {
+		nullableOld = nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO events
+			(issue_id, event_type, actor, old_value, new_value, comment, created_at, agent_name, harness, model)
+		VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+		beadID, eventType, actor, nullableOld, newValue, createdAt.Format(time.RFC3339Nano),
+		nullableEnvironment("BR_AGENT_NAME"), nullableEnvironment("BR_HARNESS"), nullableEnvironment("BR_MODEL"))
+	if err != nil {
+		return fmt.Errorf("record guarded claim %s event: %w", eventType, err)
+	}
+	return nil
+}
+
+func nullableEnvironment(name string) any {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func repairGuardedClaimContentHash(ctx context.Context, databasePath, beadID, actor string) error {
+	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+	if err != nil {
+		return fmt.Errorf("open Beads database to finalize guarded claim hash: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+	result, err := database.ExecContext(ctx, `
+		UPDATE issues
+		SET content_hash = (SELECT content_hash FROM export_hashes WHERE issue_id = ?)
+		WHERE id = ? AND status = 'in_progress' AND assignee = ? AND content_hash IS NULL
+		  AND EXISTS (SELECT 1 FROM export_hashes WHERE issue_id = ?)`,
+		beadID, beadID, actor, beadID)
+	if err != nil {
+		return fmt.Errorf("finalize guarded claim content hash: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect guarded claim content hash finalization: %w", err)
+	}
+	if updated == 0 {
+		var status string
+		var assignee, contentHash sql.NullString
+		if err := database.QueryRowContext(ctx, "SELECT status, assignee, content_hash FROM issues WHERE id = ?", beadID).Scan(&status, &assignee, &contentHash); err != nil {
+			return fmt.Errorf("verify guarded claim content hash finalization: %w", err)
+		}
+		if status == "in_progress" && strings.TrimSpace(assignee.String) == actor && !contentHash.Valid {
+			return errors.New("beads export did not produce a content hash for guarded claim")
+		}
+	}
+	return nil
+}
+
+func repairReleasedClaimContentHash(ctx context.Context, databasePath, beadID, expectedStatus string) error {
+	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+	if err != nil {
+		return fmt.Errorf("open Beads database to finalize released claim hash: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	defer database.Close()
+	result, err := database.ExecContext(ctx, `
+		UPDATE issues
+		SET content_hash = (SELECT content_hash FROM export_hashes WHERE issue_id = ?)
+			WHERE id = ? AND status = ? AND (assignee IS NULL OR TRIM(assignee) = '') AND content_hash IS NULL
+			  AND EXISTS (SELECT 1 FROM export_hashes WHERE issue_id = ?)`,
+		beadID, beadID, expectedStatus, beadID)
+	if err != nil {
+		return fmt.Errorf("finalize released claim content hash: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect released claim content hash finalization: %w", err)
+	}
+	if updated == 0 {
+		var actualStatus string
+		var assignee, contentHash sql.NullString
+		if err := database.QueryRowContext(ctx, "SELECT status, assignee, content_hash FROM issues WHERE id = ?", beadID).Scan(&actualStatus, &assignee, &contentHash); err != nil {
+			return fmt.Errorf("verify released claim content hash finalization: %w", err)
+		}
+		if strings.ToLower(strings.TrimSpace(actualStatus)) == strings.ToLower(strings.TrimSpace(expectedStatus)) && strings.TrimSpace(assignee.String) == "" && !contentHash.Valid {
+			return errors.New("beads export did not produce a content hash for released claim")
+		}
+	}
+	return nil
 }
 
 func beadClaimArgs(beadID, actor string) []string {
