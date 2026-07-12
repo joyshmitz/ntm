@@ -290,7 +290,7 @@ func PrintDiagnose(ctx context.Context, opts DiagnoseOptions) error {
 		return executeDiagnoseFix(ctx, *output, opts)
 	}
 
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot diagnose failed")
 }
 
 // determineOverallHealth calculates the overall session health
@@ -394,7 +394,7 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 				err, fixedCount+failedCount,
 			)
 			fixReport.Success = false
-			return encodeJSON(fixReport)
+			return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
 		}
 
 		if !rec.AutoFixable {
@@ -468,7 +468,7 @@ func executeDiagnoseFix(ctx context.Context, diag DiagnoseOutput, opts DiagnoseO
 		fixReport.Summary = "No auto-fixable issues found"
 	}
 
-	return encodeJSON(fixReport)
+	return encodeTerminalRobotOutput(&fixReport, fixReport.RobotResponse, "robot diagnose fix failed")
 }
 
 // =============================================================================
@@ -590,5 +590,5 @@ func PrintDiagnoseBrief(ctx context.Context, session string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot diagnose brief failed")
 }

@@ -116,7 +116,7 @@ func PrintDCGStatus() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot dcg status failed")
 }
 
 // DCGCheckOutput represents the response from --robot-dcg-check / --robot-guard.
@@ -281,7 +281,7 @@ func PrintDCGCheckWithOptions(opts DCGCheckOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot dcg check failed")
 }
 
 // getDefaultAuditLogPath returns the default audit log path

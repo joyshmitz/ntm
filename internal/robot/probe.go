@@ -522,7 +522,7 @@ func PrintProbeFlagError(err error) error {
 	output.ErrorCode = ErrCodeInvalidFlag
 	output.Hint = fmt.Sprintf("Valid methods: %v, timeout range: %d-%dms", validMethods, ProbeMinTimeoutMs, ProbeMaxTimeoutMs)
 
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot probe flag validation failed")
 }
 
 // GetProbe performs probe on a pane and returns the result.
@@ -624,7 +624,7 @@ func PrintProbe(opts ProbeOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot probe failed")
 }
 
 func probeEntryFromOutput(output *ProbeOutput) ProbeEntry {
@@ -749,8 +749,14 @@ func GetProbeSession(opts ProbeSessionOptions) (*ProbeSessionOutput, int) {
 // Returns 0 on success and 1 for partial or complete failure.
 func PrintProbeSession(opts ProbeSessionOptions) int {
 	output, exitCode := GetProbeSession(opts)
-	outputJSON(output)
-	return exitCode
+	if output.Success {
+		if err := encodeJSON(output); err != nil {
+			return 1
+		}
+	} else if err := encodeRobotFailureJSON(output); err != nil {
+		return 1
+	}
+	return NormalizeProcessExitCode(exitCode)
 }
 
 // FormatProbeDuration formats a probe duration in milliseconds

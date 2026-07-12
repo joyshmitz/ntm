@@ -129,7 +129,7 @@ func PrintRCHStatus() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot rch status failed")
 }
 
 func countRCHHealthyWorkers(workers []tools.RCHWorker) int {

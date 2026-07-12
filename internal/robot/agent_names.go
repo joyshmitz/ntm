@@ -233,7 +233,8 @@ func PrintAgentNames(sessionName string, customNames []string) int {
 	output, err := GetAgentNames(sessionName, customNames)
 	if err != nil {
 		if output == nil {
-			outputJSON(NewErrorResponse(err, ErrCodeInternalError, ""))
+			response := NewErrorResponse(err, ErrCodeInternalError, "")
+			_ = encodeRobotFailureJSON(&response)
 			return 1
 		}
 		output.Success = false
@@ -243,10 +244,14 @@ func PrintAgentNames(sessionName string, customNames []string) int {
 		if output.ErrorCode == "" {
 			output.ErrorCode = ErrCodeInternalError
 		}
-		_ = encodeJSON(output)
+		_ = encodeRobotFailureJSON(output)
 		return 1
 	}
-	if err := encodeJSON(output); err != nil {
+	if output.Success {
+		if err := encodeJSON(output); err != nil {
+			return 1
+		}
+	} else if err := encodeRobotFailureJSON(output); err != nil {
 		return 1
 	}
 	return ExitCodeForResponse(output.RobotResponse)

@@ -153,7 +153,7 @@ func PrintSwitchAccount(opts SwitchAccountOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot switch account failed")
 }
 
 // cooldownSeconds calculates seconds until cooldown expires

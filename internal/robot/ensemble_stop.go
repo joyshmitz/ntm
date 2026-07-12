@@ -213,5 +213,5 @@ func PrintEnsembleStop(session string, opts EnsembleStopOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble stop failed")
 }

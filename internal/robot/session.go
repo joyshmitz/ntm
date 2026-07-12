@@ -24,23 +24,21 @@ type RestoreOptions struct {
 
 // SaveResult represents the JSON output for robot-save.
 type SaveResult struct {
-	Success  bool                  `json:"success"`
+	RobotResponse
 	Session  string                `json:"session"`
 	SavedAs  string                `json:"saved_as"`
 	FilePath string                `json:"file_path"`
 	State    *session.SessionState `json:"state,omitempty"`
-	Error    string                `json:"error,omitempty"`
 }
 
 // RestoreResult represents the JSON output for robot-restore.
 type RestoreResult struct {
-	Success    bool                  `json:"success"`
+	RobotResponse
 	SavedName  string                `json:"saved_name"`
 	RestoredAs string                `json:"restored_as,omitempty"`
 	DryRun     bool                  `json:"dry_run"`
 	State      *session.SessionState `json:"state,omitempty"`
 	Preview    *RestorePreview       `json:"preview,omitempty"`
-	Error      string                `json:"error,omitempty"`
 }
 
 // RestorePreview describes what would happen during restore.
@@ -58,26 +56,31 @@ type RestorePreview struct {
 func GetSave(opts SaveOptions) (*SaveResult, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return &SaveResult{
-			Success: false,
-			Session: opts.Session,
-			Error:   err.Error(),
+			RobotResponse: NewErrorResponse(err, ErrCodeDependencyMissing, "Install tmux to save sessions"),
+			Session:       opts.Session,
 		}, nil
 	}
 
 	sessionName := opts.Session
 	if sessionName == "" {
 		return &SaveResult{
-			Success: false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("session name is required"),
+				ErrCodeInvalidFlag,
+				"Provide a session name with --robot-save",
+			),
 			Session: "",
-			Error:   "session name is required",
 		}, nil
 	}
 
 	if !tmux.SessionExists(sessionName) {
 		return &SaveResult{
-			Success: false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("session '%s' not found", sessionName),
+				ErrCodeSessionNotFound,
+				"Use --robot-status to list available sessions",
+			),
 			Session: sessionName,
-			Error:   fmt.Sprintf("session '%s' not found", sessionName),
 		}, nil
 	}
 
@@ -85,9 +88,12 @@ func GetSave(opts SaveOptions) (*SaveResult, error) {
 	state, err := session.Capture(sessionName)
 	if err != nil {
 		return &SaveResult{
-			Success: false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("failed to capture session state: %w", err),
+				ErrCodeInternalError,
+				"Check the tmux session and retry",
+			),
 			Session: sessionName,
-			Error:   fmt.Sprintf("failed to capture session state: %v", err),
 		}, nil
 	}
 
@@ -98,9 +104,12 @@ func GetSave(opts SaveOptions) (*SaveResult, error) {
 	path, err := session.Save(state, saveOpts)
 	if err != nil {
 		return &SaveResult{
-			Success: false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("failed to save session state: %w", err),
+				ErrCodeInternalError,
+				"Check session storage permissions and retry",
+			),
 			Session: sessionName,
-			Error:   fmt.Sprintf("failed to save session state: %v", err),
 		}, nil
 	}
 
@@ -109,27 +118,33 @@ func GetSave(opts SaveOptions) (*SaveResult, error) {
 		data, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {
 			return &SaveResult{
-				Success: false,
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("failed to marshal state: %w", err),
+					ErrCodeInternalError,
+					"Retry without a custom output file",
+				),
 				Session: sessionName,
-				Error:   fmt.Sprintf("failed to marshal state: %v", err),
 			}, nil
 		}
 		if err := os.WriteFile(opts.OutputFile, data, 0644); err != nil {
 			return &SaveResult{
-				Success: false,
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("failed to write to %s: %w", opts.OutputFile, err),
+					ErrCodeInternalError,
+					"Check output path permissions and retry",
+				),
 				Session: sessionName,
-				Error:   fmt.Sprintf("failed to write to %s: %v", opts.OutputFile, err),
 			}, nil
 		}
 		path = opts.OutputFile
 	}
 
 	return &SaveResult{
-		Success:  true,
-		Session:  sessionName,
-		SavedAs:  sessionName,
-		FilePath: path,
-		State:    state,
+		RobotResponse: NewRobotResponse(true),
+		Session:       sessionName,
+		SavedAs:       sessionName,
+		FilePath:      path,
+		State:         state,
 	}, nil
 }
 
@@ -140,7 +155,7 @@ func PrintSave(opts SaveOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(result)
+	return encodeTerminalRobotOutput(result, result.RobotResponse, "robot save failed")
 }
 
 // GetRestore restores a session from saved state and returns the result.
@@ -148,17 +163,19 @@ func PrintSave(opts SaveOptions) error {
 func GetRestore(opts RestoreOptions) (*RestoreResult, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return &RestoreResult{
-			Success:   false,
-			SavedName: opts.SavedName,
-			Error:     err.Error(),
+			RobotResponse: NewErrorResponse(err, ErrCodeDependencyMissing, "Install tmux to restore sessions"),
+			SavedName:     opts.SavedName,
 		}, nil
 	}
 
 	if opts.SavedName == "" {
 		return &RestoreResult{
-			Success:   false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("saved state name is required"),
+				ErrCodeInvalidFlag,
+				"Provide a saved state name with --robot-restore",
+			),
 			SavedName: "",
-			Error:     "saved state name is required",
 		}, nil
 	}
 
@@ -166,9 +183,12 @@ func GetRestore(opts RestoreOptions) (*RestoreResult, error) {
 	state, err := session.Load(opts.SavedName)
 	if err != nil {
 		return &RestoreResult{
-			Success:   false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("failed to load saved state: %w", err),
+				ErrCodeInternalError,
+				"Use the saved-session list to verify the state name",
+			),
 			SavedName: opts.SavedName,
-			Error:     fmt.Sprintf("failed to load saved state: %v", err),
 		}, nil
 	}
 
@@ -176,20 +196,23 @@ func GetRestore(opts RestoreOptions) (*RestoreResult, error) {
 	if opts.DryRun {
 		preview := buildRestorePreview(state)
 		return &RestoreResult{
-			Success:   true,
-			SavedName: opts.SavedName,
-			DryRun:    true,
-			State:     state,
-			Preview:   preview,
+			RobotResponse: NewRobotResponse(true),
+			SavedName:     opts.SavedName,
+			DryRun:        true,
+			State:         state,
+			Preview:       preview,
 		}, nil
 	}
 
 	// Check if session already exists
 	if tmux.SessionExists(state.Name) {
 		return &RestoreResult{
-			Success:   false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("session '%s' already exists", state.Name),
+				ErrCodeInvalidFlag,
+				"Choose a different session name or remove the existing session first",
+			),
 			SavedName: opts.SavedName,
-			Error:     fmt.Sprintf("session '%s' already exists (use 'ntm sessions restore' with --force to overwrite)", state.Name),
 		}, nil
 	}
 
@@ -199,18 +222,21 @@ func GetRestore(opts RestoreOptions) (*RestoreResult, error) {
 	}
 	if err := session.Restore(state, restoreOpts); err != nil {
 		return &RestoreResult{
-			Success:   false,
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("failed to restore session: %w", err),
+				ErrCodeInternalError,
+				"Check tmux health and retry the restore",
+			),
 			SavedName: opts.SavedName,
-			Error:     fmt.Sprintf("failed to restore session: %v", err),
 		}, nil
 	}
 
 	return &RestoreResult{
-		Success:    true,
-		SavedName:  opts.SavedName,
-		RestoredAs: state.Name,
-		DryRun:     false,
-		State:      state,
+		RobotResponse: NewRobotResponse(true),
+		SavedName:     opts.SavedName,
+		RestoredAs:    state.Name,
+		DryRun:        false,
+		State:         state,
 	}, nil
 }
 
@@ -221,7 +247,7 @@ func PrintRestore(opts RestoreOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(result)
+	return encodeTerminalRobotOutput(result, result.RobotResponse, "robot restore failed")
 }
 
 func buildRestorePreview(state *session.SessionState) *RestorePreview {

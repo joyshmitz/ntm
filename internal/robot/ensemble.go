@@ -208,7 +208,7 @@ func PrintEnsemble(session string) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble failed")
 }
 
 func resolveEnsembleBudget(preset string) ensemble.BudgetConfig {

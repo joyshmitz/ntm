@@ -108,7 +108,7 @@ func PrintProxyStatus() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot proxy status failed")
 }
 
 func buildProxyStatusInfo(status *tools.ProxyStatus, availability *tools.ProxyAvailability) ProxyStatusInfo {

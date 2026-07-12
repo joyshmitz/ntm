@@ -130,7 +130,7 @@ func PrintEnsemblePresets() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble presets failed")
 }
 
 // buildPresetsHints creates agent hints for the presets output.

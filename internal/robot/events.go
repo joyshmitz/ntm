@@ -111,7 +111,7 @@ type HistoricalBoundedness struct {
 // This is the raw replay/feed surface for robot clients.
 func PrintEvents(opts EventsOptions) error {
 	output, _ := BuildEventsOutput(opts)
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot events failed")
 }
 
 // BuildEventsOutput resolves a robot attention replay request and returns the JSON payload plus suggested HTTP status.
@@ -554,10 +554,14 @@ func newOverlayErrorOutput(opts OverlayOptions, err error, code, hint string) Ov
 	}
 }
 
+func printOverlayOutput(output OverlayOutput) error {
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot overlay failed")
+}
+
 // PrintOverlay launches the dashboard overlay and returns JSON status.
 func PrintOverlay(opts OverlayOptions) error {
 	if opts.Cursor < 0 {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			opts,
 			fmt.Errorf("overlay cursor must be >= 0"),
 			ErrCodeInvalidFlag,
@@ -565,7 +569,7 @@ func PrintOverlay(opts OverlayOptions) error {
 		))
 	}
 	if !overlayIsInstalled() {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			opts,
 			fmt.Errorf("tmux not installed"),
 			ErrCodeDependencyMissing,
@@ -574,7 +578,7 @@ func PrintOverlay(opts OverlayOptions) error {
 	}
 	session := resolveOverlaySession(opts.Session)
 	if session == "" {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			opts,
 			fmt.Errorf("session is required"),
 			ErrCodeInvalidFlag,
@@ -582,7 +586,7 @@ func PrintOverlay(opts OverlayOptions) error {
 		))
 	}
 	if !overlayInTmux() {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 			fmt.Errorf("overlay requires an attached tmux client"),
 			ErrCodeInternalError,
@@ -590,7 +594,7 @@ func PrintOverlay(opts OverlayOptions) error {
 		))
 	}
 	if !overlaySessionExists(session) {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 			fmt.Errorf("session %q not found", session),
 			ErrCodeSessionNotFound,
@@ -617,7 +621,7 @@ func PrintOverlay(opts OverlayOptions) error {
 
 	if opts.NoWait {
 		if err := cmd.Start(); err != nil {
-			return outputJSON(newOverlayErrorOutput(
+			return printOverlayOutput(newOverlayErrorOutput(
 				OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 				err,
 				ErrCodeInternalError,
@@ -630,7 +634,7 @@ func PrintOverlay(opts OverlayOptions) error {
 		select {
 		case err := <-waitCh:
 			if err != nil {
-				return outputJSON(newOverlayErrorOutput(
+				return printOverlayOutput(newOverlayErrorOutput(
 					OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 					err,
 					ErrCodeInternalError,
@@ -644,11 +648,11 @@ func PrintOverlay(opts OverlayOptions) error {
 		if cmd.Process != nil {
 			output.PID = cmd.Process.Pid
 		}
-		return outputJSON(output)
+		return printOverlayOutput(output)
 	}
 
 	if err := cmd.Run(); err != nil {
-		return outputJSON(newOverlayErrorOutput(
+		return printOverlayOutput(newOverlayErrorOutput(
 			OverlayOptions{Session: session, Cursor: opts.Cursor, NoWait: opts.NoWait},
 			err,
 			ErrCodeInternalError,
@@ -658,7 +662,7 @@ func PrintOverlay(opts OverlayOptions) error {
 
 	output.Launched = true
 	output.Dismissed = true
-	return outputJSON(output)
+	return printOverlayOutput(output)
 }
 
 // =============================================================================
@@ -741,12 +745,16 @@ type DigestResponse struct {
 	ReplayWindow *SnapshotReplayWindowInfo `json:"replay_window,omitempty"`
 }
 
+func printDigestResponse(output DigestResponse) error {
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot digest failed")
+}
+
 // PrintDigest outputs a token-efficient digest of what changed since a cursor.
 // This is the default delta surface for operators that don't need raw event replay.
 func PrintDigest(opts DigestOptions) error {
 	feed := GetAttentionFeed()
 	if feed == nil {
-		return outputJSON(DigestResponse{
+		return printDigestResponse(DigestResponse{
 			RobotResponse: NewErrorResponse(
 				errors.New("attention feed not initialized"),
 				"FEED_UNAVAILABLE",
@@ -791,7 +799,7 @@ func PrintDigest(opts DigestOptions) error {
 		var cursorErr *CursorExpiredError
 		if errors.As(err, &cursorErr) {
 			details := cursorErr.ToDetails()
-			return outputJSON(DigestResponse{
+			return printDigestResponse(DigestResponse{
 				RobotResponse: NewErrorResponse(
 					cursorErr,
 					ErrCodeCursorExpired,
@@ -814,7 +822,7 @@ func PrintDigest(opts DigestOptions) error {
 				},
 			})
 		}
-		return outputJSON(DigestResponse{
+		return printDigestResponse(DigestResponse{
 			RobotResponse:   NewErrorResponse(err, ErrCodeInternalError, ""),
 			ByCategory:      map[EventCategory]int{},
 			ByActionability: map[Actionability]int{},
@@ -842,7 +850,7 @@ func PrintDigest(opts DigestOptions) error {
 		activeIncidents = []SnapshotIncident{}
 	}
 
-	return outputJSON(DigestResponse{
+	return printDigestResponse(DigestResponse{
 		RobotResponse: RobotResponse{
 			Success:      true,
 			Timestamp:    time.Now().UTC().Format(time.RFC3339),
@@ -1077,6 +1085,19 @@ type AttentionCursorInfo struct {
 	NextCommand string `json:"next_command"`
 }
 
+func printAttentionResponse(output AttentionResponse, exitCode int) int {
+	if !output.Success {
+		if err := encodeRobotFailureJSON(&output); err != nil {
+			return 1
+		}
+		return ExitCodeForResponse(output.RobotResponse)
+	}
+	if err := encodeJSON(output); err != nil {
+		return 1
+	}
+	return NormalizeProcessExitCode(exitCode)
+}
+
 // PrintAttention implements the --robot-attention command.
 // This is the one obvious tending primitive: sleep until attention is needed,
 // then wake with a compact digest. Returns exit code 0 on attention, 1 on timeout.
@@ -1103,7 +1124,7 @@ func PrintAttention(opts AttentionOptions) int {
 
 	feed := GetAttentionFeed()
 	if feed == nil {
-		outputJSON(AttentionResponse{
+		return printAttentionResponse(AttentionResponse{
 			RobotResponse: NewErrorResponse(
 				errors.New("attention feed not initialized"),
 				"FEED_UNAVAILABLE",
@@ -1112,8 +1133,7 @@ func PrintAttention(opts AttentionOptions) int {
 			WakeReason: "error",
 			Digest:     &AttentionDigest{},
 			CursorInfo: AttentionCursorInfo{StartCursor: opts.SinceCursor},
-		})
-		return 2
+		}, 1)
 	}
 
 	startTime := time.Now()
@@ -1141,7 +1161,7 @@ func PrintAttention(opts AttentionOptions) int {
 		if result != nil && result.CursorExpired != nil {
 			cursorErr := result.CursorExpired
 			details := cursorErr.ToDetails()
-			outputJSON(AttentionResponse{
+			return printAttentionResponse(AttentionResponse{
 				RobotResponse: NewErrorResponse(
 					cursorErr,
 					ErrCodeCursorExpired,
@@ -1154,8 +1174,7 @@ func PrintAttention(opts AttentionOptions) int {
 					OldestCursor: details.EarliestCursor,
 					NextCommand:  details.ResyncCommand,
 				},
-			})
-			return 2
+			}, 1)
 		}
 
 		if result != nil && result.Met {
@@ -1188,7 +1207,7 @@ func PrintAttention(opts AttentionOptions) int {
 		var cursorErr *CursorExpiredError
 		if errors.As(err, &cursorErr) {
 			details := cursorErr.ToDetails()
-			outputJSON(AttentionResponse{
+			return printAttentionResponse(AttentionResponse{
 				RobotResponse: NewErrorResponse(
 					cursorErr,
 					ErrCodeCursorExpired,
@@ -1201,16 +1220,14 @@ func PrintAttention(opts AttentionOptions) int {
 					OldestCursor: details.EarliestCursor,
 					NextCommand:  details.ResyncCommand,
 				},
-			})
-			return 2
+			}, 1)
 		}
-		outputJSON(AttentionResponse{
+		return printAttentionResponse(AttentionResponse{
 			RobotResponse: NewErrorResponse(err, ErrCodeInternalError, ""),
 			WakeReason:    "error",
 			Digest:        &AttentionDigest{},
 			CursorInfo:    AttentionCursorInfo{StartCursor: opts.SinceCursor},
-		})
-		return 2
+		}, 1)
 	}
 
 	// Build replay window info
@@ -1246,7 +1263,7 @@ func PrintAttention(opts AttentionOptions) int {
 		exitCode = 1
 	}
 
-	outputJSON(AttentionResponse{
+	return printAttentionResponse(AttentionResponse{
 		RobotResponse: RobotResponse{
 			Success:      true,
 			Timestamp:    time.Now().UTC().Format(time.RFC3339),
@@ -1260,7 +1277,5 @@ func PrintAttention(opts AttentionOptions) int {
 		Digest:           digest,
 		CursorInfo:       cursorInfo,
 		ReplayWindow:     replayWindow,
-	})
-
-	return exitCode
+	}, exitCode)
 }

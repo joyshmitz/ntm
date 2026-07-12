@@ -147,13 +147,16 @@ func PrintEnsembleSuggest(question string, idOnly bool) error {
 	if err != nil {
 		return err
 	}
+	if !output.Success {
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble suggest failed")
+	}
 
 	// If idOnly, simplify output
 	if idOnly {
 		return outputIDOnly(*output)
 	}
 
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble suggest failed")
 }
 
 // ErrMissingQuestion is returned when no question is provided.

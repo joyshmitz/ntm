@@ -1716,7 +1716,7 @@ func PrintSummary(opts SummaryOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(resp)
+	return encodeTerminalRobotOutput(resp, resp.RobotResponse, "robot summary failed")
 }
 
 // paneInfo represents minimal pane data needed for summary.

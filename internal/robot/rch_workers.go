@@ -143,7 +143,7 @@ func PrintRCHWorkers(opts RCHWorkersOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot rch workers failed")
 }
 
 func rchWorkerStatus(worker tools.RCHWorker) string {

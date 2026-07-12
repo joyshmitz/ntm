@@ -100,5 +100,5 @@ func PrintAccountsList(opts AccountsListOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot accounts list failed")
 }

@@ -198,9 +198,12 @@ func PrintDashboard(jsonMode bool) error {
 	if err != nil {
 		return err
 	}
+	if !output.Success {
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "robot dashboard failed")
+	}
 
 	if jsonMode {
-		return encodeJSON(output)
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "robot dashboard failed")
 	}
 
 	return printDashboardMarkdown(*output)

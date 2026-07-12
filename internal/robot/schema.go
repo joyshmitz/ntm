@@ -250,10 +250,7 @@ func PrintSchema(schemaType string) error {
 	if err != nil {
 		return err
 	}
-	if err := encodeJSON(output); err != nil {
-		return err
-	}
-	return ExitResultForResponse(output.RobotResponse, nil, true)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot schema failed")
 }
 
 // getSchemaTypes returns available schema type names.

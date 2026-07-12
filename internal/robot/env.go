@@ -328,7 +328,7 @@ func PrintEnv(session string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot environment inspection failed")
 }
 
 // detectSessionStructure detects session window/pane structure

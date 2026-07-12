@@ -154,7 +154,7 @@ func PrintHealth() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot health failed")
 }
 
 // getSystemHealth returns system-level health metrics
@@ -878,7 +878,7 @@ func PrintSessionHealth(session string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot session health failed")
 }
 
 // detectAgentTypeFromPane determines the agent type from pane information
@@ -2271,7 +2271,7 @@ func PrintAutoRestartStuck(opts AutoRestartStuckOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot auto-restart-stuck failed")
 }
 
 // ParseStuckThreshold parses a duration string for the stuck threshold.

@@ -355,14 +355,14 @@ func PrintMonitor(config MonitorConfig) error {
 	// Validate session exists
 	if !tmux.SessionExists(config.Session) {
 		output := MonitorOutput{
-			RobotResponse: RobotResponse{
-				Success:   false,
-				Error:     fmt.Sprintf("session '%s' not found", config.Session),
-				ErrorCode: ErrCodeSessionNotFound,
-			},
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("session '%s' not found", config.Session),
+				ErrCodeSessionNotFound,
+				"Use --robot-status to list available sessions",
+			),
 			Session: config.Session,
 		}
-		return encodeJSON(output)
+		return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot monitor failed")
 	}
 
 	// Determine panes
@@ -371,14 +371,14 @@ func PrintMonitor(config MonitorConfig) error {
 		allPanes, err := tmux.GetPanes(config.Session)
 		if err != nil {
 			output := MonitorOutput{
-				RobotResponse: RobotResponse{
-					Success:   false,
-					Error:     fmt.Sprintf("failed to get panes: %v", err),
-					ErrorCode: ErrCodeInternalError,
-				},
+				RobotResponse: NewErrorResponse(
+					fmt.Errorf("failed to get panes: %w", err),
+					ErrCodeInternalError,
+					"Check tmux session health and retry",
+				),
 				Session: config.Session,
 			}
-			return encodeJSON(output)
+			return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot monitor failed")
 		}
 		panes = defaultMonitorPaneIndices(allPanes)
 	}
@@ -387,14 +387,14 @@ func PrintMonitor(config MonitorConfig) error {
 	monitor, err := NewMonitor(config)
 	if err != nil {
 		output := MonitorOutput{
-			RobotResponse: RobotResponse{
-				Success:   false,
-				Error:     fmt.Sprintf("failed to create monitor: %v", err),
-				ErrorCode: ErrCodeInternalError,
-			},
+			RobotResponse: NewErrorResponse(
+				fmt.Errorf("failed to create monitor: %w", err),
+				ErrCodeInternalError,
+				"Check monitor configuration and retry",
+			),
 			Session: config.Session,
 		}
-		return encodeJSON(output)
+		return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot monitor failed")
 	}
 	defer monitor.Close()
 

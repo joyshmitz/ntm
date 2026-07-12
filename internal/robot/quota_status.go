@@ -161,7 +161,7 @@ func PrintQuotaStatus() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot quota status failed")
 }
 
 // GetQuotaCheck returns quota check for a specific provider.
@@ -247,7 +247,7 @@ func PrintQuotaCheck(provider string) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot quota check failed")
 }
 
 // getQuotaStatus returns the status string based on usage percentage

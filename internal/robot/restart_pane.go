@@ -477,5 +477,5 @@ func PrintRestartPane(opts RestartPaneOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot restart-pane failed")
 }

@@ -279,7 +279,7 @@ func PrintEnsembleSpawn(opts EnsembleSpawnOptions, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble spawn failed")
 }
 
 func applyEnsembleSpawnDefaults(opts EnsembleSpawnOptions, cfg *config.Config) EnsembleSpawnOptions {

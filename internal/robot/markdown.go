@@ -56,6 +56,13 @@ func PrintMarkdown(cfg *config.Config, opts MarkdownOptions) error {
 	if err != nil {
 		return err
 	}
+	return printMarkdownSnapshot(snapshot, opts)
+}
+
+func printMarkdownSnapshot(snapshot *SnapshotOutput, opts MarkdownOptions) error {
+	if !snapshot.Success {
+		return encodeTerminalRobotOutput(snapshot, snapshot.RobotResponse, "robot markdown failed")
+	}
 	rendered, err := renderMarkdownFromSnapshot(snapshot, opts)
 	if err != nil {
 		return err

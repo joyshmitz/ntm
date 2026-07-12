@@ -50,5 +50,5 @@ func PrintEnsembleSpawn(opts EnsembleSpawnOptions, _ *config.Config) error {
 		Action:  "ensemble_spawn",
 		Session: strings.TrimSpace(opts.Session),
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot ensemble spawn unavailable")
 }

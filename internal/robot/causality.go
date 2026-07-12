@@ -114,7 +114,7 @@ func PrintCausality(opts CausalityOptions) error {
 
 func printCausality(opts CausalityOptions, loaders causalityLoaders) error {
 	output := buildCausalityOutput(opts, loaders)
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(&output, output.RobotResponse, "robot causality failed")
 }
 
 func buildCausalityOutput(opts CausalityOptions, loaders causalityLoaders) CausalityOutput {

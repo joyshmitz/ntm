@@ -212,7 +212,7 @@ func PrintLogs(opts LogsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot log inspection failed")
 }
 
 // AggregatedLogEntry represents a log entry with timing for aggregated view.

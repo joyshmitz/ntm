@@ -333,7 +333,7 @@ func PrintEnsembleSynthesize(opts EnsembleSynthesizeOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble synthesis failed")
 }
 
 // buildSynthesizeHints creates agent hints for the synthesize output.

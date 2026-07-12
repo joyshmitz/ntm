@@ -2,6 +2,7 @@ package robot
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -204,6 +205,7 @@ func TestAttachSnapshotResourcePressureEmitsRobotPressure(t *testing.T) {
 
 func TestBuildTerseOutputFromSnapshotUsesSharedProjection(t *testing.T) {
 	snapshot := &SnapshotOutput{
+		RobotResponse: NewRobotResponse(true),
 		Summary: StatusSummary{
 			MailUnread: 2,
 			ReadyWork:  3,
@@ -265,6 +267,21 @@ func TestBuildTerseOutputFromSnapshotUsesSharedProjection(t *testing.T) {
 	}
 	if got := output.TerseLines[0]; !strings.Contains(got, "S:proj|A:3/4|W:1|I:1|E:1") {
 		t.Fatalf("terse line = %q, want shared session counts", got)
+	}
+}
+
+func TestBuildTerseOutputFromSnapshotPropagatesFailure(t *testing.T) {
+	snapshot := &SnapshotOutput{
+		RobotResponse: NewErrorResponse(errors.New("snapshot unavailable"), ErrCodeInternalError, "retry snapshot"),
+		Sessions:      []SnapshotSession{},
+	}
+
+	output := buildTerseOutputFromSnapshot(snapshot)
+	if output.Success || output.ErrorCode != ErrCodeInternalError || output.Error != "snapshot unavailable" {
+		t.Fatalf("terse response = %+v, want propagated snapshot failure", output.RobotResponse)
+	}
+	if output.States == nil || output.TerseLines == nil || len(output.States) != 0 || len(output.TerseLines) != 0 {
+		t.Fatalf("terse failure collections = states:%v lines:%v, want non-nil empty slices", output.States, output.TerseLines)
 	}
 }
 

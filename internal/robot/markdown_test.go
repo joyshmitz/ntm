@@ -1,6 +1,8 @@
 package robot
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,32 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestPrintMarkdownSnapshotPropagatesTerminalFailure(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	snapshot := &SnapshotOutput{
+		RobotResponse: NewErrorResponse(errors.New("snapshot unavailable"), ErrCodeInternalError, "retry snapshot"),
+		Sessions:      []SnapshotSession{},
+	}
+	stdout, err := captureStdout(t, func() error {
+		return printMarkdownSnapshot(snapshot, DefaultMarkdownOptions())
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("markdown error = %T %v, want written exit-1 ProcessExitError", err, err)
+	}
+
+	var response SnapshotOutput
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("markdown failure is not JSON: %v\noutput=%q", err, stdout)
+	}
+	if response.Success || response.ErrorCode != ErrCodeInternalError || response.OutputFormat != string(FormatJSON) {
+		t.Fatalf("markdown failure response = %+v", response.RobotResponse)
+	}
+}
 
 func TestRenderAgentTable(t *testing.T) {
 	rows := []AgentTableRow{

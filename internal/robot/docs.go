@@ -99,10 +99,7 @@ func PrintDocs(topic string) error {
 	if err != nil {
 		return err
 	}
-	if err := outputJSON(output); err != nil {
-		return err
-	}
-	return ExitResultForResponse(output.RobotResponse, nil, true)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot docs failed")
 }
 
 // getDocsContent returns the content for a specific topic

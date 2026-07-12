@@ -63,6 +63,10 @@ func TestPrintSpawn(t *testing.T) {
 	cfg := config.Default()
 	// Override agent command to be fast
 	cfg.Agents.Claude = "echo test"
+	// Admission behavior has dedicated tests below. Keep this spawn/JSON smoke
+	// test independent of ambient agents and host pressure while still using a
+	// real tmux session.
+	cfg.SpawnPacing.Enabled = false
 
 	// Clean up potential session
 	defer tmux.KillSession(opts.Session)

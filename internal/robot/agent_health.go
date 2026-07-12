@@ -198,9 +198,11 @@ func PrintAgentHealth(opts AgentHealthOptions) int {
 		return 1
 	}
 	if output.Success {
-		_ = encodeJSON(output)
-	} else {
-		_ = encodeRobotFailureJSON(output)
+		if err := encodeJSON(output); err != nil {
+			return 1
+		}
+	} else if err := encodeRobotFailureJSON(output); err != nil {
+		return 1
 	}
 	return ExitCodeForResponse(output.RobotResponse)
 }

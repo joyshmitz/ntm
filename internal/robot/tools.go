@@ -108,7 +108,7 @@ func PrintTools() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot tools failed")
 }
 
 // GetToolsSummary returns a lightweight tools summary for inclusion in snapshots

@@ -3,6 +3,13 @@ package robot
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -136,6 +143,97 @@ func TestEncodeTerminalRobotOutputFailureForcesJSON(t *testing.T) {
 	}
 	if response.Success || response.ErrorCode != ErrCodePaneNotFound || response.OutputFormat != string(FormatJSON) {
 		t.Fatalf("terminal response = %+v, want PANE_NOT_FOUND JSON failure", response.RobotResponse)
+	}
+}
+
+func TestPrintAttentionResponseFailureExitContract(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	tests := []struct {
+		name     string
+		code     string
+		wantExit int
+	}{
+		{name: "normal command failure", code: ErrCodeInternalError, wantExit: 1},
+		{name: "unavailable functionality", code: ErrCodeNotImplemented, wantExit: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := AttentionResponse{
+				RobotResponse: NewErrorResponse(errors.New("attention failed"), tt.code, "retry"),
+				WakeReason:    "error",
+				Digest:        &AttentionDigest{},
+			}
+			var exitCode int
+			stdout, err := captureStdout(t, func() error {
+				exitCode = printAttentionResponse(response, 2)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("capture attention output: %v", err)
+			}
+			if exitCode != tt.wantExit {
+				t.Fatalf("exit code = %d, want %d", exitCode, tt.wantExit)
+			}
+			var output AttentionResponse
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("attention failure is not JSON: %v\noutput=%q", err, stdout)
+			}
+			if output.Success || output.ErrorCode != tt.code || output.OutputFormat != string(FormatJSON) {
+				t.Fatalf("attention response = %+v", output.RobotResponse)
+			}
+		})
+	}
+}
+
+func TestRobotPrinterFailureMatrixForcesCanonicalJSON(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
+	missingSession := "ntm-terminal-contract-session-that-does-not-exist"
+	tests := []struct {
+		name      string
+		print     func() error
+		errorCode string
+	}{
+		{name: "docs", print: func() error { return PrintDocs("not-a-topic") }, errorCode: ErrCodeInvalidFlag},
+		{name: "schema", print: func() error { return PrintSchema("not-a-schema") }, errorCode: ErrCodeInvalidFlag},
+		{name: "environment", print: func() error { return PrintEnv(missingSession) }, errorCode: ErrCodeSessionNotFound},
+		{name: "errors", print: func() error {
+			return PrintErrors(ErrorsOptions{Session: missingSession})
+		}, errorCode: ErrCodeSessionNotFound},
+		{name: "probe flags", print: func() error {
+			return PrintProbeFlagError(errors.New("invalid probe flags"))
+		}, errorCode: ErrCodeInvalidFlag},
+		{name: "causality", print: func() error {
+			return printCausality(CausalityOptions{}, causalityLoaders{})
+		}, errorCode: ErrCodeInternalError},
+		{name: "monitor", print: func() error {
+			return PrintMonitor(MonitorConfig{Session: missingSession})
+		}, errorCode: ErrCodeSessionNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, err := captureStdout(t, tt.print)
+			var exitErr *ProcessExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+				t.Fatalf("printer error = %T %v, want written exit-1 ProcessExitError", err, err)
+			}
+			var response RobotResponse
+			if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+				t.Fatalf("failure is not JSON: %v\noutput=%q", err, stdout)
+			}
+			if response.Success || response.ErrorCode != tt.errorCode || response.OutputFormat != string(FormatJSON) {
+				t.Fatalf("response = %+v, want %s JSON failure", response, tt.errorCode)
+			}
+			if response.Timestamp == "" {
+				t.Fatal("failure response is missing timestamp")
+			}
+		})
 	}
 }
 
@@ -1229,5 +1327,66 @@ func TestRobotResponseWithStructuredError(t *testing.T) {
 	}
 	if parsed["error_code"] != ErrCodeShellNotReturned {
 		t.Errorf("expected error_code for backward compatibility, got %v", parsed["error_code"])
+	}
+}
+
+func TestRobotPrintersDoNotReturnRawEnvelopeEncoder(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate robot test source")
+	}
+	packageDir := filepath.Dir(sourceFile)
+	entries, err := os.ReadDir(packageDir)
+	if err != nil {
+		t.Fatalf("read robot package: %v", err)
+	}
+
+	// PrintSessions intentionally emits a bare array and has no RobotResponse
+	// envelope from which a terminal exit can be derived.
+	allowed := map[string]bool{"PrintSessions": true}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, filepath.Join(packageDir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, declaration := range parsed.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Print") || allowed[fn.Name.Name] {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				switch stmt := node.(type) {
+				case *ast.ReturnStmt:
+					if len(stmt.Results) != 1 {
+						return true
+					}
+					call, ok := stmt.Results[0].(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					ident, ok := call.Fun.(*ast.Ident)
+					if ok && (ident.Name == "encodeJSON" || ident.Name == "outputJSON") {
+						position := fset.Position(stmt.Pos())
+						t.Errorf("%s returns %s directly at %s; use encodeTerminalRobotOutput for RobotResponse envelopes", fn.Name.Name, ident.Name, position)
+					}
+				case *ast.ExprStmt:
+					call, ok := stmt.X.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					ident, ok := call.Fun.(*ast.Ident)
+					if ok && (ident.Name == "encodeJSON" || ident.Name == "outputJSON") {
+						position := fset.Position(stmt.Pos())
+						t.Errorf("%s ignores %s at %s; terminal printers must propagate encoding and exit failures", fn.Name.Name, ident.Name, position)
+					}
+				}
+				return true
+			})
+		}
 	}
 }

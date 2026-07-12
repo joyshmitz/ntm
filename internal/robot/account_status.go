@@ -117,5 +117,5 @@ func PrintAccountStatus(opts AccountStatusOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot account status failed")
 }

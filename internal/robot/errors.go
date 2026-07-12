@@ -273,7 +273,7 @@ func PrintErrors(opts ErrorsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot error scan failed")
 }
 
 // parseErrorsIndex parses a string to int (helper).

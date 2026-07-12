@@ -537,7 +537,7 @@ func PrintMailCheck(opts MailCheckOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot mail check failed")
 }
 
 // truncateStringMail truncates a string to the specified rune length, then adds "..." if truncated.

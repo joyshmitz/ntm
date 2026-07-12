@@ -112,7 +112,7 @@ func PrintCASSStatus() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot CASS status failed")
 }
 
 // CASSSearchOutput represents the output for --robot-cass-search
@@ -217,7 +217,7 @@ func PrintCASSSearch(query, agent, workspace, since string, limit int) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot CASS search failed")
 }
 
 // CASSInsightsOutput represents the output for --robot-cass-insights
@@ -305,7 +305,7 @@ func PrintCASSInsights() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot CASS insights failed")
 }
 
 // CASSContextOutput represents output for --robot-cass-context
@@ -400,7 +400,7 @@ func PrintCASSContext(query string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot CASS context failed")
 }
 
 // ===========================================================================
@@ -524,7 +524,7 @@ func PrintACFSStatus() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ACFS status failed")
 }
 
 func buildSetupToolStatus(spec setupToolSpec) SetupToolStatus {
@@ -711,7 +711,7 @@ func PrintJFPStatus() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP status failed")
 }
 
 // JFPListOptions configures the GetJFPList operation.
@@ -782,7 +782,7 @@ func PrintJFPList(category, tag string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP list failed")
 }
 
 // GetJFPSearch returns search results.
@@ -845,7 +845,7 @@ func PrintJFPSearch(query string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP search failed")
 }
 
 // GetJFPShow returns a specific prompt by ID.
@@ -905,7 +905,7 @@ func PrintJFPShow(id string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP show failed")
 }
 
 // GetJFPSuggest returns prompt suggestions for a task.
@@ -961,7 +961,7 @@ func PrintJFPSuggest(task string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP suggest failed")
 }
 
 // GetJFPInstalled returns installed Claude Code skills.
@@ -1014,7 +1014,7 @@ func PrintJFPInstalled() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP installed failed")
 }
 
 // GetJFPCategories returns all categories with counts.
@@ -1067,7 +1067,7 @@ func PrintJFPCategories() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP categories failed")
 }
 
 // GetJFPTags returns all tags with counts.
@@ -1120,7 +1120,7 @@ func PrintJFPTags() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP tags failed")
 }
 
 // GetJFPBundles returns all bundles.
@@ -1173,7 +1173,7 @@ func PrintJFPBundles() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP bundles failed")
 }
 
 func parseJFPIDs(raw string) []string {
@@ -1253,7 +1253,7 @@ func PrintJFPInstall(rawIDs, project string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP install failed")
 }
 
 // GetJFPExport exports one or more prompts by ID.
@@ -1310,7 +1310,7 @@ func PrintJFPExport(rawIDs, format string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP export failed")
 }
 
 // GetJFPUpdate refreshes the local prompt registry/cache.
@@ -1355,7 +1355,7 @@ func PrintJFPUpdate() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP update failed")
 }
 
 // ===========================================================================
@@ -1439,7 +1439,7 @@ func PrintMSSearch(query string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot MS search failed")
 }
 
 // GetMSShow returns a specific skill by ID.
@@ -1499,7 +1499,7 @@ func PrintMSShow(id string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot MS show failed")
 }
 
 // Build info - these will be set by the caller from cli package
@@ -2779,7 +2779,7 @@ func PrintStatus() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot status failed")
 }
 
 // PrintStatusWithOptions outputs status with pagination options.
@@ -2788,7 +2788,7 @@ func PrintStatusWithOptions(opts PaginationOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot status failed")
 }
 
 func appendFileChanges(output *StatusOutput) {
@@ -3029,7 +3029,7 @@ func PrintMail(sessionName, projectKey string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot mail failed")
 }
 
 // AgentMailAgent is a per-agent view for --robot-mail.
@@ -3447,7 +3447,7 @@ func PrintVersion() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot version failed")
 }
 
 // GetSessions returns a minimal session list.
@@ -3568,7 +3568,7 @@ func PrintPlan() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot plan failed")
 }
 
 // getBeadRecommendations returns recommended bead actions from bv priority analysis
@@ -5807,7 +5807,7 @@ func PrintSnapshot(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot snapshot failed")
 }
 
 // PrintSnapshotWithOptions outputs snapshot with pagination options.
@@ -5816,7 +5816,7 @@ func PrintSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) error 
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot snapshot failed")
 }
 
 // agentTypeString converts AgentType to string for JSON
@@ -7209,7 +7209,7 @@ func PrintSnapshotDelta(since time.Time) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot snapshot delta failed")
 }
 
 // RecordStateChange records a state change to the global tracker.
@@ -8800,7 +8800,7 @@ func PrintGraph() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot graph failed")
 }
 
 // buildCorrelationGraph assembles a best-effort correlation map across agents, beads, and mail.
@@ -9250,7 +9250,7 @@ func PrintAlertsDetailed(includeResolved bool) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot alerts failed")
 }
 
 // RecipeInfo represents a recipe in JSON output
@@ -9334,7 +9334,7 @@ func PrintRecipes() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot recipes failed")
 }
 
 // TerseState represents the ultra-compact state for token-constrained scenarios.
@@ -9419,6 +9419,14 @@ func GetTerse(cfg *config.Config) (*TerseOutput, error) {
 }
 
 func buildTerseOutputFromSnapshot(snapshot *SnapshotOutput) *TerseOutput {
+	if snapshot != nil && !snapshot.Success {
+		return &TerseOutput{
+			RobotResponse: snapshot.RobotResponse,
+			States:        []TerseState{},
+			TerseLines:    []string{},
+		}
+	}
+
 	output := &TerseOutput{
 		RobotResponse: RobotResponse{
 			Success:   true,
@@ -9668,6 +9676,9 @@ func PrintTerse(cfg *config.Config) error {
 	output, err := GetTerse(cfg)
 	if err != nil {
 		return err
+	}
+	if !output.Success {
+		return encodeTerminalRobotOutput(output, output.RobotResponse, "robot terse failed")
 	}
 
 	// Output all sessions separated by semicolons (preserving original format)
@@ -10075,7 +10086,7 @@ func PrintContext(session string, lines int) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot context failed")
 }
 
 // =============================================================================
@@ -10730,7 +10741,7 @@ func PrintDiff(opts DiffOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot diff failed")
 }
 
 // TriageOptions configures the triage output
@@ -10838,7 +10849,7 @@ func PrintTriage(opts TriageOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot triage failed")
 }
 
 // Additional BV robot modes for comprehensive analysis
@@ -10917,7 +10928,7 @@ func PrintForecast(target string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot forecast failed")
 }
 
 // SuggestOutput is the JSON output for --robot-suggest
@@ -10969,7 +10980,7 @@ func PrintSuggest() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot suggest failed")
 }
 
 // ImpactOutput is the JSON output for --robot-impact
@@ -11023,7 +11034,7 @@ func PrintImpact(filePath string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot impact failed")
 }
 
 // SearchOutput is the JSON output for --robot-search
@@ -11077,7 +11088,7 @@ func PrintSearch(query string) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot search failed")
 }
 
 // LabelAttentionOutput is the JSON output for --robot-label-attention
@@ -11131,7 +11142,7 @@ func PrintLabelAttention(opts LabelAttentionOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot label attention failed")
 }
 
 // LabelFlowOutput is the JSON output for --robot-label-flow
@@ -11183,7 +11194,7 @@ func PrintLabelFlow() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot label flow failed")
 }
 
 // LabelHealthOutput is the JSON output for --robot-label-health
@@ -11235,7 +11246,7 @@ func PrintLabelHealth() error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot label health failed")
 }
 
 // FileBeadsOutput is the JSON output for --robot-file-beads
@@ -11291,7 +11302,7 @@ func PrintFileBeads(opts FileBeadsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot file beads failed")
 }
 
 // FileHotspotsOutput is the JSON output for --robot-file-hotspots
@@ -11345,7 +11356,7 @@ func PrintFileHotspots(opts FileHotspotsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot file hotspots failed")
 }
 
 // FileRelationsOutput is the JSON output for --robot-file-relations
@@ -11403,5 +11414,5 @@ func PrintFileRelations(opts FileRelationsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot file relations failed")
 }

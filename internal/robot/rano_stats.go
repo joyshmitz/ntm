@@ -199,7 +199,7 @@ func PrintRanoStats(opts RanoStatsOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot rano stats failed")
 }
 
 func normalizeRanoWindow(window string) (string, error) {

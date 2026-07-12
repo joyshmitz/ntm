@@ -2,6 +2,7 @@ package robot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"reflect"
@@ -416,6 +417,10 @@ func decodeOverlayOutput(t *testing.T, out string) OverlayOutput {
 }
 
 func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
 	tests := []struct {
 		name     string
 		opts     OverlayOptions
@@ -453,8 +458,9 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 			out, err := captureStdout(t, func() error {
 				return PrintOverlay(tt.opts)
 			})
-			if err != nil {
-				t.Fatalf("PrintOverlay returned error: %v", err)
+			var exitErr *ProcessExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+				t.Fatalf("PrintOverlay error = %T %v, want written exit-1 ProcessExitError", err, err)
 			}
 
 			resp := decodeOverlayOutput(t, out)
@@ -466,6 +472,9 @@ func TestPrintOverlayRejectsInvalidInput(t *testing.T) {
 			}
 			if resp.Hint != tt.wantHint {
 				t.Fatalf("hint = %q, want %q", resp.Hint, tt.wantHint)
+			}
+			if resp.OutputFormat != string(FormatJSON) {
+				t.Fatalf("output_format = %q, want json", resp.OutputFormat)
 			}
 		})
 	}
@@ -560,6 +569,10 @@ func TestPrintOverlayNoWaitReturnsLaunchStatus(t *testing.T) {
 }
 
 func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	SetOutputFormat(FormatTOON)
+	t.Cleanup(func() { SetOutputFormat(originalFormat) })
+
 	restore := restoreOverlayTestDeps()
 	defer restore()
 
@@ -581,8 +594,9 @@ func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
 	out, err := captureStdout(t, func() error {
 		return PrintOverlay(OverlayOptions{Session: "proj", Cursor: 19, NoWait: true})
 	})
-	if err != nil {
-		t.Fatalf("PrintOverlay returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintOverlay error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	resp := decodeOverlayOutput(t, out)
@@ -597,6 +611,9 @@ func TestPrintOverlayNoWaitReportsImmediateCommandFailure(t *testing.T) {
 	}
 	if resp.Cursor != 19 || !resp.NoWait {
 		t.Fatalf("response lost cursor/no-wait state: %+v", resp)
+	}
+	if resp.OutputFormat != string(FormatJSON) {
+		t.Fatalf("output_format = %q, want json", resp.OutputFormat)
 	}
 }
 

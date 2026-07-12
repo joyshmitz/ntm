@@ -93,7 +93,7 @@ func PrintXFSearch(opts XFSearchOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot xf search failed")
 }
 
 // GetXFStatus returns XF tool health information.
@@ -147,5 +147,5 @@ func PrintXFStatus() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot xf status failed")
 }

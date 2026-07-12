@@ -56,7 +56,7 @@ func PrintWatchBead(opts WatchBeadOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot watch-bead failed")
 }
 
 // GetWatchBead captures recent pane output and returns bead mention matches.

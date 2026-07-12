@@ -516,8 +516,9 @@ func TestPrintDismissAlertNoID(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintDismissAlert(nil, opts)
 	})
-	if err != nil {
-		t.Fatalf("PrintDismissAlert returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintDismissAlert error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result DismissAlertOutput
@@ -2453,8 +2454,9 @@ func TestPrintBeadCreateMissingTitle(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintBeadCreate(opts)
 	})
-	if err != nil {
-		t.Fatalf("PrintBeadCreate returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintBeadCreate error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result BeadCreateOutput
@@ -2505,8 +2507,9 @@ func TestPrintBeadShowMissingID(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintBeadShow(opts)
 	})
-	if err != nil {
-		t.Fatalf("PrintBeadShow returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintBeadShow error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result BeadShowOutput
@@ -2557,8 +2560,9 @@ func TestPrintBeadCloseMissingID(t *testing.T) {
 	output, err := captureStdout(t, func() error {
 		return PrintBeadClose(opts)
 	})
-	if err != nil {
-		t.Fatalf("PrintBeadClose returned error: %v", err)
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintBeadClose error = %T %v, want written exit-1 ProcessExitError", err, err)
 	}
 
 	var result BeadCloseOutput

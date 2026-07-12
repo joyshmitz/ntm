@@ -83,5 +83,5 @@ func PrintSafetySimulation(opts SafetySimulationOptions) error {
 	if err != nil {
 		return fmt.Errorf("safety simulation: %w", err)
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot safety simulation failed")
 }

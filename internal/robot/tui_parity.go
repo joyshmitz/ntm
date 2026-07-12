@@ -263,7 +263,7 @@ func PrintFiles(opts FilesOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot files failed")
 }
 
 // =============================================================================
@@ -764,7 +764,7 @@ func PrintInspectPane(opts InspectPaneOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect pane failed")
 }
 
 func newInspectSessionOutput(session string) *InspectSessionOutput {
@@ -2093,7 +2093,7 @@ func PrintInspectSession(opts InspectSessionOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect session failed")
 }
 
 // GetInspectAgent returns projection-backed agent detail.
@@ -2161,7 +2161,7 @@ func PrintInspectAgent(opts InspectAgentOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect agent failed")
 }
 
 // GetInspectWork returns projection-backed work detail.
@@ -2235,7 +2235,7 @@ func PrintInspectWork(opts InspectWorkOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect work failed")
 }
 
 // GetInspectCoordination returns projection-backed coordination detail.
@@ -2319,7 +2319,7 @@ func PrintInspectCoordination(opts InspectCoordinationOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect coordination failed")
 }
 
 // GetInspectQuota returns projection-backed quota detail.
@@ -2399,7 +2399,7 @@ func PrintInspectQuota(opts InspectQuotaOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect quota failed")
 }
 
 // GetInspectIncident returns store-backed incident detail.
@@ -2469,7 +2469,7 @@ func PrintInspectIncident(opts InspectIncidentOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot inspect incident failed")
 }
 
 // =============================================================================
@@ -2616,7 +2616,7 @@ func PrintMetrics(opts MetricsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot metrics failed")
 }
 
 // =============================================================================
@@ -3014,7 +3014,7 @@ func PrintPalette(cfg *config.Config, opts PaletteOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot palette failed")
 }
 
 // =============================================================================
@@ -3128,7 +3128,7 @@ func PrintAlertsTUI(cfg *config.Config, opts TUIAlertsOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot alerts failed")
 }
 
 // DismissAlertOutput represents the result of dismissing an alert
@@ -3274,7 +3274,7 @@ func PrintDismissAlert(cfg *config.Config, opts DismissAlertOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot dismiss alert failed")
 }
 
 // =============================================================================
@@ -3682,7 +3682,7 @@ func PrintBeadsList(opts BeadsListOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot beads list failed")
 }
 
 // =============================================================================
@@ -3940,7 +3940,7 @@ func PrintBeadCreate(opts BeadCreateOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot bead create failed")
 }
 
 // BeadShowOutput represents detailed bead information
@@ -4101,7 +4101,7 @@ func PrintBeadShow(opts BeadShowOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot bead show failed")
 }
 
 // BeadCloseOutput represents the result of closing a bead
@@ -4222,5 +4222,5 @@ func PrintBeadClose(opts BeadCloseOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot bead close failed")
 }

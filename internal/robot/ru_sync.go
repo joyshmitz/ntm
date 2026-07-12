@@ -134,7 +134,7 @@ func PrintRUSync(opts RUSyncOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ru sync failed")
 }
 
 func parseRUSyncPayload(data []byte) (RUSyncRepos, []string) {

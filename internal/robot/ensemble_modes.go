@@ -190,7 +190,7 @@ func PrintEnsembleModes(opts EnsembleModesOptions) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot ensemble modes failed")
 }
 
 // filterModesByCategory filters modes by category code or name.

@@ -342,11 +342,13 @@ func GetWait(opts WaitOptions) (*WaitResponse, int) {
 func PrintWait(opts WaitOptions) int {
 	resp, exitCode := GetWait(opts)
 	if resp.Success {
-		_ = outputJSON(resp)
-	} else {
-		_ = encodeRobotFailureJSON(resp)
+		if err := encodeJSON(resp); err != nil {
+			return 1
+		}
+	} else if err := encodeRobotFailureJSON(resp); err != nil {
+		return 1
 	}
-	return exitCode
+	return NormalizeProcessExitCode(exitCode)
 }
 
 // isUnsupportedWaitCondition checks if the condition is a known unsupported

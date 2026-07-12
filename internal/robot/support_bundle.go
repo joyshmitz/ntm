@@ -236,7 +236,7 @@ func PrintSupportBundle(opts SupportBundleOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot support bundle failed")
 }
 
 // collectSessionDataWithPrivacy adds session data to the bundle, respecting privacy mode.

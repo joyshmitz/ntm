@@ -253,8 +253,14 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 // Returns 0 on success, 1 on error.
 func PrintRoute(opts RouteOptions) int {
 	output, exitCode := GetRoute(opts)
-	outputJSON(output)
-	return exitCode
+	if output.Success {
+		if err := encodeJSON(output); err != nil {
+			return 1
+		}
+	} else if err := encodeRobotFailureJSON(output); err != nil {
+		return 1
+	}
+	return NormalizeProcessExitCode(exitCode)
 }
 
 func routePaneAgentType(pane tmux.Pane) string {

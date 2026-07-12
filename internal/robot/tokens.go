@@ -179,7 +179,7 @@ func PrintTokens(opts TokensOptions) error {
 	if err != nil {
 		return err
 	}
-	return encodeJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot token inspection failed")
 }
 
 // readTokenEvents reads and filters events for token analysis

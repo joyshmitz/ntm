@@ -75,7 +75,7 @@ func PrintSLBPending() error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot slb pending failed")
 }
 
 // GetSLBApprove approves a pending SLB request.
@@ -132,7 +132,7 @@ func PrintSLBApprove(requestID string) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot slb approve failed")
 }
 
 // GetSLBDeny denies a pending SLB request.
@@ -189,7 +189,7 @@ func PrintSLBDeny(requestID, reason string) error {
 	if err != nil {
 		return err
 	}
-	return outputJSON(output)
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot slb deny failed")
 }
 
 func countJSONArray(raw json.RawMessage) int {
