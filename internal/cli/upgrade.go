@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -476,6 +478,7 @@ func newUpgradeCmd() *cobra.Command {
 	var yes bool
 	var strict bool
 	var verbose bool
+	var releaseTag string
 
 	cmd := &cobra.Command{
 		Use:     "upgrade",
@@ -488,9 +491,16 @@ Examples:
   ntm upgrade --check   # Only check for updates, don't install
   ntm upgrade --yes     # Auto-confirm, skip confirmation prompt
   ntm upgrade --force   # Force reinstall even if already on latest
-  ntm upgrade --strict  # Only allow exact asset matches (CI/testing)`,
+  ntm upgrade --strict  # Only allow exact asset matches (CI/testing)
+  ntm upgrade --check --strict --release-tag=v1.2.3  # Verify a specific release`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUpgrade(checkOnly, force, yes, strict, verbose)
+			if jsonOutput {
+				if !checkOnly {
+					return errors.New("invalid argument: upgrade --json requires --check")
+				}
+				return runUpgradeCheckJSON(cmd.OutOrStdout(), strict, verbose, releaseTag)
+			}
+			return runUpgrade(checkOnly, force, yes, strict, verbose, releaseTag)
 		},
 	}
 
@@ -499,11 +509,76 @@ Examples:
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Auto-confirm upgrade without prompting")
 	cmd.Flags().BoolVar(&strict, "strict", false, "Require exact asset name matches (disable fallback)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed asset matching info")
+	cmd.Flags().StringVar(&releaseTag, "release-tag", "", "Use a specific GitHub release tag instead of latest")
 
 	return cmd
 }
 
-func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
+type upgradeCheckJSONOutput struct {
+	Success         bool     `json:"success"`
+	Timestamp       string   `json:"timestamp"`
+	OutputFormat    string   `json:"output_format"`
+	CurrentVersion  string   `json:"current_version"`
+	LatestVersion   string   `json:"latest_version"`
+	UpdateAvailable bool     `json:"update_available"`
+	ReleaseTag      string   `json:"release_tag"`
+	ReleaseURL      string   `json:"release_url,omitempty"`
+	AssetName       string   `json:"asset_name"`
+	AssetSize       int64    `json:"asset_size"`
+	MatchStrategy   string   `json:"match_strategy"`
+	Strict          bool     `json:"strict"`
+	TriedNames      []string `json:"tried_names,omitempty"`
+}
+
+func runUpgradeCheckJSON(writer io.Writer, strict, verbose bool, releaseTag string) error {
+	releaseTag = strings.TrimSpace(releaseTag)
+	currentVersion := Version
+	if currentVersion == "" {
+		currentVersion = "dev"
+	}
+
+	release, err := fetchReleaseForUpgrade(releaseTag)
+	if err != nil {
+		if releaseTag != "" {
+			return fmt.Errorf("check release tag %s: %w", releaseTag, err)
+		}
+		return fmt.Errorf("check latest release: %w", err)
+	}
+	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	match, triedNames := findUpgradeAsset(release.Assets, runtime.GOOS, runtime.GOARCH, latestVersion, strict)
+	if match == nil {
+		return newUpgradeError(
+			runtime.GOOS,
+			runtime.GOARCH,
+			latestVersion,
+			triedNames,
+			release.Assets,
+			release.HTMLURL,
+		)
+	}
+
+	output := upgradeCheckJSONOutput{
+		Success:         true,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		OutputFormat:    "json",
+		CurrentVersion:  currentVersion,
+		LatestVersion:   latestVersion,
+		UpdateAvailable: isNewerVersion(currentVersion, latestVersion),
+		ReleaseTag:      release.TagName,
+		ReleaseURL:      release.HTMLURL,
+		AssetName:       match.Asset.Name,
+		AssetSize:       match.Asset.Size,
+		MatchStrategy:   match.Strategy,
+		Strict:          strict,
+	}
+	if verbose {
+		output.TriedNames = append([]string(nil), triedNames...)
+	}
+	return json.NewEncoder(writer).Encode(output)
+}
+
+func runUpgrade(checkOnly, force, yes, strict, verbose bool, releaseTag string) error {
+	releaseTag = strings.TrimSpace(releaseTag)
 	// Styles for output
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89b4fa"))
 	successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))
@@ -524,7 +599,7 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 
 	// Fetch latest release info
 	fmt.Print("  Checking for updates... ")
-	release, err := fetchLatestRelease()
+	release, err := fetchReleaseForUpgrade(releaseTag)
 	if err != nil {
 		fmt.Println(errorStyle.Render("✗"))
 		fmt.Println()
@@ -532,6 +607,12 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 		fmt.Println()
 		fmt.Println(dimStyle.Render("  If this is a development build, releases may not exist yet."))
 		fmt.Println(dimStyle.Render("  Check: https://github.com/Dicklesworthstone/ntm/releases"))
+		if strict || releaseTag != "" {
+			if releaseTag != "" {
+				return fmt.Errorf("check release tag %s: %w", releaseTag, err)
+			}
+			return fmt.Errorf("check latest release: %w", err)
+		}
 		return nil
 	}
 	fmt.Println(successStyle.Render("✓"))
@@ -540,40 +621,9 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 	fmt.Printf("  Latest version:  %s\n", successStyle.Render(latestVersion))
 	fmt.Println()
 
-	// Compare versions
-	isNewer := isNewerVersion(currentVersion, latestVersion)
-	isSame := normalizeVersion(currentVersion) == normalizeVersion(latestVersion)
-
-	if isSame && !force {
-		fmt.Println(successStyle.Render("  ✓ You're already on the latest version!"))
-		return nil
-	}
-
-	if !isNewer && !force {
-		fmt.Printf("  %s Your version (%s) appears to be newer than the latest release (%s)\n",
-			warnStyle.Render("⚠"),
-			currentVersion,
-			latestVersion)
-		fmt.Println(dimStyle.Render("    Use --force to reinstall anyway"))
-		return nil
-	}
-
-	if checkOnly {
-		if isNewer {
-			fmt.Printf("  %s New version available: %s → %s\n",
-				warnStyle.Render("⬆"),
-				currentVersion,
-				successStyle.Render(latestVersion))
-			fmt.Println()
-			fmt.Println(dimStyle.Render("  Run 'ntm upgrade' to install"))
-		}
-		return nil
-	}
-
-	// Find the appropriate asset for this platform
-	// Try the versioned archive name first (e.g., ntm_1.4.1_darwin_all.tar.gz)
+	// Resolve the platform asset even in check-only mode. This makes --check a
+	// release-contract validation instead of merely a version comparison.
 	archiveAssetName := getArchiveAssetName(latestVersion)
-
 	match, triedNames := findUpgradeAsset(release.Assets, runtime.GOOS, runtime.GOARCH, latestVersion, strict)
 	if match == nil {
 		return newUpgradeError(
@@ -605,6 +655,40 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 		fmt.Println()
 	} else if verbose {
 		fmt.Println(dimStyle.Render("  Asset match: exact archive"))
+	}
+	if checkOnly {
+		fmt.Printf("  Asset available: %s\n", successStyle.Render(asset.Name))
+		fmt.Println()
+	}
+
+	// Compare versions
+	isNewer := isNewerVersion(currentVersion, latestVersion)
+	isSame := normalizeVersion(currentVersion) == normalizeVersion(latestVersion)
+
+	if isSame && !force {
+		fmt.Println(successStyle.Render("  ✓ You're already on the latest version!"))
+		return nil
+	}
+
+	if !isNewer && !force {
+		fmt.Printf("  %s Your version (%s) appears to be newer than the latest release (%s)\n",
+			warnStyle.Render("⚠"),
+			currentVersion,
+			latestVersion)
+		fmt.Println(dimStyle.Render("    Use --force to reinstall anyway"))
+		return nil
+	}
+
+	if checkOnly {
+		if isNewer {
+			fmt.Printf("  %s New version available: %s → %s\n",
+				warnStyle.Render("⬆"),
+				currentVersion,
+				successStyle.Render(latestVersion))
+			fmt.Println()
+			fmt.Println(dimStyle.Render("  Run 'ntm upgrade' to install"))
+		}
+		return nil
 	}
 
 	fmt.Printf("  Download: %s (%s)\n", asset.Name, formatSize(asset.Size))
@@ -772,17 +856,25 @@ func runUpgrade(checkOnly, force, yes, strict, verbose bool) error {
 	return nil
 }
 
-// fetchLatestRelease fetches the latest release info from GitHub
-func fetchLatestRelease() (*GitHubRelease, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest", githubAPI, githubOwner, githubRepo)
+var fetchReleaseForUpgrade = fetchRelease
+
+// fetchRelease fetches the requested release, or the latest stable release when tag is empty.
+func fetchRelease(tag string) (*GitHubRelease, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/releases/latest", githubAPI, githubOwner, githubRepo)
+	if tag != "" {
+		endpoint = fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s", githubAPI, githubOwner, githubRepo, url.PathEscape(tag))
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("User-Agent", "ntm-upgrade/"+Version)
+	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -791,6 +883,9 @@ func fetchLatestRelease() (*GitHubRelease, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
+		if tag != "" {
+			return nil, fmt.Errorf("release tag %q not found", tag)
+		}
 		return nil, fmt.Errorf("no releases found - this is a development version")
 	}
 	if resp.StatusCode != http.StatusOK {

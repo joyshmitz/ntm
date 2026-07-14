@@ -74,6 +74,9 @@ func runEnsembleSuggest(w io.Writer, question, format string, idOnly bool) error
 	if jsonOutput {
 		format = "json"
 	}
+	if format == "json" && idOnly {
+		return fmt.Errorf("invalid argument: --id-only cannot be combined with JSON output")
+	}
 
 	slog.Debug("ensemble suggest",
 		"question", question,

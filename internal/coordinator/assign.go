@@ -144,7 +144,7 @@ func (c *SessionCoordinator) AssignWork(ctx context.Context) ([]AssignmentResult
 	}
 	triage, err := getTriage(ctx, c.projectKey)
 	if err != nil {
-		return nil, fmt.Errorf("getting triage: %w", err)
+		return results, fmt.Errorf("getting triage: %w", err)
 	}
 
 	if triage == nil || len(triage.Triage.Recommendations) == 0 {
@@ -473,50 +473,12 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 			}
 		}
 
-		barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(ctx, active, terminalStatus, terminalReason)
+		completed, err := c.reconcileTerminalAssignment(ctx, store, active, terminalStatus, terminalReason)
 		if err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("begin terminal reconciliation for %s: %w", active.BeadID, err))
+			reconcileErrors = append(reconcileErrors, err)
 			continue
 		}
-		if !applied {
-			continue
-		}
-		if err := c.releaseTerminalAssignmentReservations(ctx, barrier); err != nil {
-			if persistErr := store.RecordClearReleaseFailed(ctx, active.BeadID, err); persistErr != nil {
-				err = errors.Join(err, persistErr)
-			}
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s reservations: %w", active.BeadID, err))
-			continue
-		}
-		leasesReleased, err := store.RecordClearLeasesReleased(ctx, active.BeadID)
-		if err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("record terminal assignment %s lease release: %w", active.BeadID, err))
-			continue
-		}
-		claimReleased := leasesReleased
-		if !leasesReleased.TerminalClaimReleased {
-			claimActor := strings.TrimSpace(leasesReleased.ClaimActor)
-			if claimActor != "" {
-				releaseClaim := c.releaseWorkItemClaimFn
-				if releaseClaim == nil {
-					releaseClaim = bv.ReleaseBeadClaim
-				}
-				if _, err := releaseClaim(ctx, c.projectKey, active.BeadID, claimActor); err != nil {
-					if persistErr := store.RecordClearReleaseFailed(ctx, active.BeadID, err); persistErr != nil {
-						err = errors.Join(err, persistErr)
-					}
-					reconcileErrors = append(reconcileErrors, fmt.Errorf("release terminal assignment %s Beads claim: %w", active.BeadID, err))
-					continue
-				}
-			}
-			claimReleased, err = store.RecordTerminalClaimReleased(ctx, active.BeadID)
-			if err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("record terminal assignment %s claim release: %w", active.BeadID, err))
-				continue
-			}
-		}
-		if err := store.CompleteTerminalReconciliation(ctx, active.BeadID, claimReleased.PendingTerminalStatus, claimReleased.PendingTerminalReason); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("complete terminal reconciliation for %s: %w", active.BeadID, err))
+		if !completed {
 			continue
 		}
 		// The cached recommendation can still point at the work item we just
@@ -526,6 +488,70 @@ func (c *SessionCoordinator) reconcileTerminalAssignments(ctx context.Context, s
 		bv.InvalidateTriageCache()
 	}
 	return errors.Join(reconcileErrors...)
+}
+
+func (c *SessionCoordinator) reconcileTerminalAssignment(ctx context.Context, store *assignmentstore.AssignmentStore, observed *assignmentstore.Assignment, terminalStatus assignmentstore.AssignmentStatus, terminalReason string) (bool, error) {
+	cleanupUnlock, err := store.AcquireExternalCleanupLock(ctx, observed.BeadID)
+	if err != nil {
+		return false, fmt.Errorf("lock terminal assignment %s external cleanup: %w", observed.BeadID, err)
+	}
+	defer cleanupUnlock()
+	if err := store.LoadStrict(); err != nil {
+		return false, fmt.Errorf("refresh terminal assignment %s external cleanup: %w", observed.BeadID, err)
+	}
+	current := store.Get(observed.BeadID)
+	if current == nil || !assignmentstore.SameAssignmentGeneration(observed, current) {
+		return false, nil
+	}
+	if current.ClearState == assignmentstore.ClearStateNone && (current.Status == assignmentstore.StatusCompleted || current.Status == assignmentstore.StatusFailed) {
+		return false, nil
+	}
+	if current.PendingTerminalStatus == assignmentstore.StatusCompleted || current.PendingTerminalStatus == assignmentstore.StatusFailed {
+		terminalStatus = current.PendingTerminalStatus
+		terminalReason = current.PendingTerminalReason
+	}
+
+	barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(ctx, current, terminalStatus, terminalReason)
+	if err != nil {
+		return false, fmt.Errorf("begin terminal reconciliation for %s: %w", observed.BeadID, err)
+	}
+	if !applied {
+		return false, nil
+	}
+	if err := c.releaseTerminalAssignmentReservations(ctx, barrier); err != nil {
+		if persistErr := store.RecordClearReleaseFailed(ctx, observed.BeadID, err); persistErr != nil {
+			err = errors.Join(err, persistErr)
+		}
+		return false, fmt.Errorf("release terminal assignment %s reservations: %w", observed.BeadID, err)
+	}
+	leasesReleased, err := store.RecordClearLeasesReleased(ctx, observed.BeadID)
+	if err != nil {
+		return false, fmt.Errorf("record terminal assignment %s lease release: %w", observed.BeadID, err)
+	}
+	claimReleased := leasesReleased
+	if !leasesReleased.TerminalClaimReleased {
+		claimActor := strings.TrimSpace(leasesReleased.ClaimActor)
+		if claimActor != "" {
+			releaseClaim := c.releaseWorkItemClaimFn
+			if releaseClaim == nil {
+				releaseClaim = bv.ReleaseBeadClaim
+			}
+			if _, err := releaseClaim(ctx, c.projectKey, observed.BeadID, claimActor); err != nil {
+				if persistErr := store.RecordClearReleaseFailed(ctx, observed.BeadID, err); persistErr != nil {
+					err = errors.Join(err, persistErr)
+				}
+				return false, fmt.Errorf("release terminal assignment %s Beads claim: %w", observed.BeadID, err)
+			}
+		}
+		claimReleased, err = store.RecordTerminalClaimReleased(ctx, observed.BeadID)
+		if err != nil {
+			return false, fmt.Errorf("record terminal assignment %s claim release: %w", observed.BeadID, err)
+		}
+	}
+	if err := store.CompleteTerminalReconciliation(ctx, observed.BeadID, claimReleased.PendingTerminalStatus, claimReleased.PendingTerminalReason); err != nil {
+		return false, fmt.Errorf("complete terminal reconciliation for %s: %w", observed.BeadID, err)
+	}
+	return true, nil
 }
 
 func (c *SessionCoordinator) releaseTerminalAssignmentReservations(ctx context.Context, current *assignmentstore.Assignment) error {

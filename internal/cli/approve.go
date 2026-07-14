@@ -14,10 +14,7 @@ import (
 )
 
 func newApproveCmd() *cobra.Command {
-	var (
-		reason    string
-		robotJSON bool
-	)
+	var reason string
 
 	cmd := &cobra.Command{
 		Use:   "approve [token]",
@@ -44,20 +41,18 @@ Examples:
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			return runApprove(args[0], robotJSON)
+			return runApprove(args[0], IsJSONOutput())
 		},
 	}
-	cmd.Flags().BoolVar(&robotJSON, "json", false, "Output in JSON format")
 
 	// list - list pending approvals
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all pending approvals",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runApproveList(robotJSON)
+			return runApproveList(IsJSONOutput())
 		},
 	}
-	listCmd.Flags().BoolVar(&robotJSON, "json", false, "Output in JSON format")
 
 	// deny <token> - deny a request
 	denyCmd := &cobra.Command{
@@ -65,11 +60,10 @@ Examples:
 		Short: "Deny a pending request",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runApproveDeny(args[0], reason, robotJSON)
+			return runApproveDeny(args[0], reason, IsJSONOutput())
 		},
 	}
 	denyCmd.Flags().StringVar(&reason, "reason", "", "Reason for denial")
-	denyCmd.Flags().BoolVar(&robotJSON, "json", false, "Output in JSON format")
 
 	// show <token> - show details
 	showCmd := &cobra.Command{
@@ -77,20 +71,18 @@ Examples:
 		Short: "Show details of an approval request",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runApproveShow(args[0], robotJSON)
+			return runApproveShow(args[0], IsJSONOutput())
 		},
 	}
-	showCmd.Flags().BoolVar(&robotJSON, "json", false, "Output in JSON format")
 
 	// history - show history
 	historyCmd := &cobra.Command{
 		Use:   "history",
 		Short: "Show approval history",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runApproveHistory(robotJSON)
+			return runApproveHistory(IsJSONOutput())
 		},
 	}
-	historyCmd.Flags().BoolVar(&robotJSON, "json", false, "Output in JSON format")
 
 	cmd.AddCommand(listCmd, denyCmd, showCmd, historyCmd)
 	return cmd
@@ -171,6 +163,9 @@ func runApproveList(jsonOutput bool) error {
 	pending, err := engine.ListPending(ctx)
 	if err != nil {
 		return outputError(err, jsonOutput)
+	}
+	if pending == nil {
+		pending = []state.Approval{}
 	}
 
 	if jsonOutput {

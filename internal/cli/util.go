@@ -161,7 +161,13 @@ type SessionResolution struct {
 }
 
 func (r SessionResolution) ExplainIfInferred(w io.Writer) {
-	if !r.Inferred || r.Session == "" || IsJSONOutput() {
+	r.ExplainIfInferredForOutput(w, IsJSONOutput())
+}
+
+// ExplainIfInferredForOutput reports automatic session selection only for
+// human output. Local --format=json commands must be as quiet as global JSON.
+func (r SessionResolution) ExplainIfInferredForOutput(w io.Writer, machineJSON bool) {
+	if !r.Inferred || r.Session == "" || machineJSON {
 		return
 	}
 	if w == nil {

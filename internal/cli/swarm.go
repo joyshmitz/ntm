@@ -147,7 +147,6 @@ func newSwarmCmd() *cobra.Command {
 		projects        []string
 		dryRun          bool
 		remote          string
-		jsonOutput      bool
 		sessionsPerType int
 		panesPerSession int
 		outputPath      string
@@ -181,7 +180,7 @@ Examples:
 				Projects:        projects,
 				DryRun:          dryRun,
 				Remote:          remote,
-				JSONOutput:      jsonOutput,
+				JSONOutput:      IsJSONOutput(),
 				SessionsPerType: sessionsPerType,
 				PanesPerSession: panesPerSession,
 				OutputPath:      outputPath,
@@ -213,7 +212,6 @@ Examples:
 	cmd.Flags().StringSliceVar(&projects, "projects", nil, "Explicit list of project paths (comma-separated)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview plan without creating sessions")
 	cmd.Flags().StringVar(&remote, "remote", "", "Remote host for SSH execution (user@host)")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output plan as JSON")
 	cmd.Flags().IntVar(&sessionsPerType, "sessions-per-type", defaultSessionsPerType, "Number of tmux sessions per agent type (default: 3)")
 	cmd.Flags().IntVar(&panesPerSession, "panes-per-session", 0, "Max panes per session (0 = auto-calculate from total agents)")
 	cmd.Flags().StringVar(&outputPath, "output", "", "Write swarm plan to JSON file (optional)")
@@ -251,6 +249,7 @@ type swarmOptions struct {
 
 // SwarmPlanOutput is the JSON output format for swarm plan
 type SwarmPlanOutput struct {
+	robot.RobotResponse
 	ScanDir         string             `json:"scan_dir"`
 	TotalCC         int                `json:"total_cc"`
 	TotalCod        int                `json:"total_cod"`
@@ -262,7 +261,6 @@ type SwarmPlanOutput struct {
 	Allocations     []AllocationOutput `json:"allocations"`
 	Sessions        []SessionOutput    `json:"sessions"`
 	DryRun          bool               `json:"dry_run"`
-	Error           string             `json:"error,omitempty"`
 }
 
 type AllocationOutput struct {
@@ -352,14 +350,24 @@ func runSwarm(ctx context.Context, opts swarmOptions) error {
 	}
 
 	if len(projects) == 0 {
+		cause := fmt.Errorf("no projects found in %s", opts.ScanDir)
 		if opts.JSONOutput {
-			return printSwarmJSON(SwarmPlanOutput{
-				ScanDir: opts.ScanDir,
-				DryRun:  opts.DryRun,
-				Error:   "no projects found",
-			})
+			response := robot.NewErrorResponse(
+				cause,
+				robot.ErrCodeNotFound,
+				"Add a project containing Beads data or pass it explicitly with --projects",
+			)
+			response.OutputFormat = robot.FormatJSON.String()
+			response.Meta = robot.NewResponseMeta("swarm").WithExitCode(1)
+			return emitJSONFailureEnvelopeWithCause(SwarmPlanOutput{
+				RobotResponse: response,
+				ScanDir:       opts.ScanDir,
+				Allocations:   []AllocationOutput{},
+				Sessions:      []SessionOutput{},
+				DryRun:        opts.DryRun,
+			}, cause)
 		}
-		return fmt.Errorf("no projects found in %s", opts.ScanDir)
+		return cause
 	}
 
 	// Calculate allocations
@@ -520,6 +528,7 @@ func discoverProjects(scanDir string, explicitProjects []string) ([]swarm.Projec
 
 func buildSwarmPlanOutput(plan *swarm.SwarmPlan, dryRun bool) SwarmPlanOutput {
 	out := SwarmPlanOutput{
+		RobotResponse:   robot.NewRobotResponse(true),
 		ScanDir:         plan.ScanDir,
 		TotalCC:         plan.TotalCC,
 		TotalCod:        plan.TotalCod,
@@ -532,6 +541,7 @@ func buildSwarmPlanOutput(plan *swarm.SwarmPlan, dryRun bool) SwarmPlanOutput {
 		Sessions:        make([]SessionOutput, 0, len(plan.Sessions)),
 		DryRun:          dryRun,
 	}
+	out.OutputFormat = robot.FormatJSON.String()
 
 	for _, alloc := range plan.Allocations {
 		out.Allocations = append(out.Allocations, AllocationOutput{
@@ -668,11 +678,11 @@ var swarmSessionRE = regexp.MustCompile(`^(cc|cod|gmi|agy)_agents_[0-9]+$`)
 
 // Subcommand: swarm status
 func newSwarmStatusCmd() *cobra.Command {
-
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show current swarm status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput()
 			if err := tmux.EnsureInstalled(); err != nil {
 				return err
 			}
@@ -689,11 +699,6 @@ func newSwarmStatusCmd() *cobra.Command {
 				}
 			}
 			sort.Strings(swarmSessions)
-
-			if len(swarmSessions) == 0 {
-				output.PrintInfo("No swarm sessions found")
-				return nil
-			}
 
 			type swarmSessionStatus struct {
 				Session string                `json:"session"`
@@ -713,6 +718,13 @@ func newSwarmStatusCmd() *cobra.Command {
 				Sessions:      make([]swarmSessionStatus, 0, len(swarmSessions)),
 				Summary:       health.HealthSummary{},
 				OverallStatus: health.StatusOK,
+			}
+			if len(swarmSessions) == 0 {
+				if machineJSON {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
+				}
+				output.PrintInfo("No swarm sessions found")
+				return nil
 			}
 
 			statusSeverity := func(s health.Status) int {
@@ -753,7 +765,7 @@ func newSwarmStatusCmd() *cobra.Command {
 				}
 			}
 
-			if jsonOutput {
+			if machineJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(out)
@@ -794,7 +806,6 @@ func newSwarmStopCmd() *cobra.Command {
 		force           bool
 		timeout         time.Duration
 		sessionPatterns []string
-		jsonOutput      bool
 		skipConfirm     bool
 	)
 
@@ -821,6 +832,14 @@ Examples:
 			if ctx == nil {
 				ctx = context.Background()
 			}
+			machineJSON := IsJSONOutput()
+			if machineJSON && !skipConfirm && !force {
+				return robot.RobotError(
+					fmt.Errorf("--json swarm stop requires explicit confirmation"),
+					robot.ErrCodeInvalidFlag,
+					"Pass --yes to confirm graceful shutdown or --force for immediate shutdown",
+				)
+			}
 
 			// Determine which sessions to stop
 			patterns := sessionPatterns
@@ -840,13 +859,18 @@ Examples:
 			}
 
 			if len(sessions) == 0 {
+				if machineJSON {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(&swarm.ShutdownResult{})
+				}
 				output.PrintInfo("No swarm sessions found matching the specified patterns")
 				return nil
 			}
 
-			output.PrintInfof("Found %d swarm session(s) to stop", len(sessions))
-			for _, sess := range sessions {
-				output.PrintInfof("  - %s", sess)
+			if !machineJSON {
+				output.PrintInfof("Found %d swarm session(s) to stop", len(sessions))
+				for _, sess := range sessions {
+					output.PrintInfof("  - %s", sess)
+				}
 			}
 
 			// Confirm before destructive action (unless --yes or --force)
@@ -889,7 +913,7 @@ Examples:
 			restoreClaudeModelAfterSwarmStop(slog.Default())
 
 			// Output results
-			if jsonOutput {
+			if machineJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(result)
@@ -915,7 +939,6 @@ Examples:
 	cmd.Flags().BoolVar(&force, "force", false, "Force stop without graceful exit")
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Second, "Timeout for graceful exit")
 	cmd.Flags().StringSliceVar(&sessionPatterns, "sessions", nil, "Session name patterns to stop")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output results as JSON")
 	cmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompt")
 
 	return cmd

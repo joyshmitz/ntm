@@ -116,6 +116,53 @@ func TestGetACFSStatus_MissingBinary(t *testing.T) {
 	}
 }
 
+func TestAdditionalBVSurfacesReportTypedMissingDependency(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	tests := []struct {
+		name string
+		get  func() (RobotResponse, error)
+	}{
+		{"forecast", func() (RobotResponse, error) { out, err := GetForecast("all"); return out.RobotResponse, err }},
+		{"suggest", func() (RobotResponse, error) { out, err := GetSuggest(); return out.RobotResponse, err }},
+		{"impact", func() (RobotResponse, error) {
+			out, err := GetImpact("internal/robot/robot.go")
+			return out.RobotResponse, err
+		}},
+		{"search", func() (RobotResponse, error) { out, err := GetSearch("assignment"); return out.RobotResponse, err }},
+		{"label-attention", func() (RobotResponse, error) {
+			out, err := GetLabelAttention(LabelAttentionOptions{})
+			return out.RobotResponse, err
+		}},
+		{"label-flow", func() (RobotResponse, error) { out, err := GetLabelFlow(); return out.RobotResponse, err }},
+		{"label-health", func() (RobotResponse, error) { out, err := GetLabelHealth(); return out.RobotResponse, err }},
+		{"file-beads", func() (RobotResponse, error) {
+			out, err := GetFileBeads(FileBeadsOptions{})
+			return out.RobotResponse, err
+		}},
+		{"file-hotspots", func() (RobotResponse, error) {
+			out, err := GetFileHotspots(FileHotspotsOptions{})
+			return out.RobotResponse, err
+		}},
+		{"file-relations", func() (RobotResponse, error) {
+			out, err := GetFileRelations(FileRelationsOptions{})
+			return out.RobotResponse, err
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := test.get()
+			if err != nil {
+				t.Fatalf("getter error: %v", err)
+			}
+			if response.Success || response.ErrorCode != ErrCodeDependencyMissing || strings.TrimSpace(response.Hint) == "" {
+				t.Fatalf("response=%+v, want typed dependency failure with remediation hint", response)
+			}
+		})
+	}
+}
+
 func TestGetACFSStatus_WithFakeTools(t *testing.T) {
 	cleanup := withFakeTools(t)
 	defer cleanup()

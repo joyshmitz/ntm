@@ -1180,11 +1180,48 @@ func (s *AssignmentStore) beginTerminalReconciliationIfCurrent(ctx context.Conte
 	if current.DispatchState == DispatchSending {
 		return nil, false, fmt.Errorf("%w: cannot retire %s while dispatch outcome is unknown", ErrDispatchOutcomeUnknown, observed.BeadID)
 	}
+	ensureCompletionEvent := func() (bool, error) {
+		if !createCompletionEvent || strings.TrimSpace(current.PendingCompletionEventID) != "" {
+			return true, nil
+		}
+		detectedAt := time.Now().UTC()
+		previous := cloneAssignment(current)
+		current.PendingCompletionEventID = terminalCompletionEventID(current, terminalStatus)
+		current.CompletionDetectedAt = cloneTimePtr(&detectedAt)
+		current.CompletionConsumerToken = ""
+		current.CompletionLeaseExpiresAt = nil
+		if s.replace == nil {
+			s.replace = make(map[string]struct{})
+		}
+		s.replace[observed.BeadID] = struct{}{}
+		if err := s.saveLocked(); err != nil {
+			var concurrentMutation *ConcurrentMutationError
+			if errors.As(err, &concurrentMutation) {
+				return false, nil
+			}
+			s.Assignments[observed.BeadID] = previous
+			delete(s.replace, observed.BeadID)
+			return false, err
+		}
+		return true, nil
+	}
 	if current.ClearState != ClearStateNone {
 		if current.PendingTerminalStatus == terminalStatus && current.PendingTerminalReason == reason {
+			if persisted, err := ensureCompletionEvent(); err != nil || !persisted {
+				return nil, false, err
+			}
 			return cloneAssignment(current), true, nil
 		}
 		return nil, false, nil
+	}
+	if createCompletionEvent && current.Status == terminalStatus {
+		if terminalStatus == StatusFailed && current.FailReason != reason {
+			return nil, false, nil
+		}
+		if persisted, err := ensureCompletionEvent(); err != nil || !persisted {
+			return nil, false, err
+		}
+		return cloneAssignment(current), true, nil
 	}
 	if current.Status != StatusClaiming && current.Status != StatusClaimed && current.Status != StatusAssigned && current.Status != StatusWorking {
 		return nil, false, nil

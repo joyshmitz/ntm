@@ -94,6 +94,11 @@ Examples:
 }
 
 func runAnalytics(days int, since, format string, showSessions bool) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if IsJSONOutput() {
+		format = "json"
+	}
+
 	// Determine the cutoff time
 	var cutoff time.Time
 	if since != "" {

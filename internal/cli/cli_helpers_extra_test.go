@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	hookspkg "github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -657,6 +659,7 @@ func TestDepsJSONMissingRequiredReturnsTerminalFailure(t *testing.T) {
 	stdout, runErr := captureStdout(t, func() error { return runDeps(false) })
 	assertTerminalJSONFailureContains(t, stdout, runErr, "required dependencies are missing")
 	document := decodeSingleTerminalJSONMap(t, stdout)
+	assertTypedTerminalJSONFailure(t, document, robot.ErrCodeDependencyMissing)
 	if installed, ok := document["all_installed"].(bool); !ok || installed {
 		t.Fatalf("all_installed = %#v, want false", document["all_installed"])
 	}
@@ -770,9 +773,10 @@ func TestBugsJSONUnavailableStatesAreTerminal(t *testing.T) {
 	projectDir := t.TempDir()
 
 	tests := []struct {
-		name string
-		run  func() error
-		want string
+		name          string
+		run           func() error
+		want          string
+		wantErrorCode string
 	}{
 		{
 			name: "list without UBS",
@@ -780,7 +784,8 @@ func TestBugsJSONUnavailableStatesAreTerminal(t *testing.T) {
 				cmd := newBugsListCmd()
 				return cmd.RunE(cmd, []string{projectDir})
 			},
-			want: "ubs is not installed",
+			want:          "ubs is not installed",
+			wantErrorCode: robot.ErrCodeDependencyMissing,
 		},
 		{
 			name: "notify without UBS",
@@ -805,10 +810,33 @@ func TestBugsJSONUnavailableStatesAreTerminal(t *testing.T) {
 			stdout, runErr := captureStdout(t, tt.run)
 			assertTerminalJSONFailureContains(t, stdout, runErr, tt.want)
 			document := decodeSingleTerminalJSONMap(t, stdout)
+			if tt.wantErrorCode != "" {
+				assertTypedTerminalJSONFailure(t, document, tt.wantErrorCode)
+			}
 			if available, ok := document["available"].(bool); !ok || available {
 				t.Fatalf("available = %#v, want false", document["available"])
 			}
 		})
+	}
+}
+
+func assertTypedTerminalJSONFailure(t *testing.T, document map[string]interface{}, wantCode string) {
+	t.Helper()
+	if code, ok := document["error_code"].(string); !ok || code != wantCode {
+		t.Fatalf("error_code = %#v, want %q", document["error_code"], wantCode)
+	}
+	if hint, ok := document["hint"].(string); !ok || strings.TrimSpace(hint) == "" {
+		t.Fatalf("hint = %#v, want non-empty remediation", document["hint"])
+	}
+	timestamp, ok := document["timestamp"].(string)
+	if !ok {
+		t.Fatalf("timestamp = %#v, want RFC3339 string", document["timestamp"])
+	}
+	if _, err := time.Parse(time.RFC3339, timestamp); err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", timestamp, err)
+	}
+	if format, ok := document["output_format"].(string); !ok || format != "json" {
+		t.Fatalf("output_format = %#v, want json", document["output_format"])
 	}
 }
 

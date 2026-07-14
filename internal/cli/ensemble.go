@@ -189,18 +189,19 @@ Formats:
 Use --show-contributions to include mode contribution scores (requires completed outputs).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(opts.Format), "json")
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
 			}
-			res, err := resolveEnsembleStateCommandSession(session, cmd.OutOrStdout())
+			res, err := resolveEnsembleStateCommandSessionForOutput(session, cmd.OutOrStdout(), machineJSON)
 			if err != nil {
 				return err
 			}
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(os.Stderr)
+			res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 			return runEnsembleStatus(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
@@ -260,18 +261,22 @@ Flags:
   ntm ensemble stop --no-collect --quiet`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(opts.Format), "json")
+			if machineJSON && !opts.Yes && !opts.Force {
+				return fmt.Errorf("invalid argument: JSON ensemble stop requires --yes or --force")
+			}
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
 			}
-			res, err := resolveEnsembleStateCommandSession(session, cmd.OutOrStdout())
+			res, err := resolveEnsembleStateCommandSessionForOutput(session, cmd.OutOrStdout(), machineJSON)
 			if err != nil {
 				return err
 			}
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(os.Stderr)
+			res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 			return runEnsembleStop(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
@@ -292,6 +297,9 @@ func runEnsembleStop(w io.Writer, session string, opts ensembleStopOptions) erro
 	}
 	if jsonOutput {
 		format = "json"
+	}
+	if format == "json" && !opts.Yes && !opts.Force {
+		return fmt.Errorf("invalid argument: JSON ensemble stop requires --yes or --force")
 	}
 
 	state, sessionLive, err := loadEnsembleStateWithRuntimePresence(session)
@@ -932,25 +940,26 @@ Use --force to synthesize even if some agents haven't completed.`,
 			if err := validateSynthesizeOptions(opts); err != nil {
 				return err
 			}
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(opts.Format), "json")
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
 			}
 			if opts.Resume && strings.TrimSpace(opts.RunID) != "" {
-				resumeSession, err := resolveSynthesisResumeSession(session, opts.RunID, cmd.OutOrStdout())
+				resumeSession, err := resolveSynthesisResumeSessionForOutput(session, opts.RunID, cmd.OutOrStdout(), machineJSON)
 				if err != nil {
 					return err
 				}
 				return runEnsembleSynthesize(cmd.OutOrStdout(), resumeSession, opts)
 			}
-			res, err := resolveEnsembleStateCommandSession(session, cmd.OutOrStdout())
+			res, err := resolveEnsembleStateCommandSessionForOutput(session, cmd.OutOrStdout(), machineJSON)
 			if err != nil {
 				return err
 			}
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(os.Stderr)
+			res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 			return runEnsembleSynthesize(cmd.OutOrStdout(), res.Session, opts)
 		},
 	}
@@ -1036,7 +1045,7 @@ func runEnsembleSynthesize(w io.Writer, session string, opts synthesizeOptions) 
 	var cacheContextHash string
 
 	if cacheEnabled {
-		projectDir, projErr := resolveEnsembleProjectDirForSession(session)
+		projectDir, projErr := resolveEnsembleProjectDirForSessionForOutput(session, format == "json")
 		if projErr != nil {
 			logger.Warn("mode output cache disabled (project dir)", "error", projErr)
 			cacheEnabled = false
@@ -1425,6 +1434,10 @@ func streamEnsembleSynthesis(
 }
 
 func resolveSynthesisResumeSession(session, runID string, _ io.Writer) (string, error) {
+	return resolveSynthesisResumeSessionForOutput(session, runID, io.Discard, IsJSONOutput())
+}
+
+func resolveSynthesisResumeSessionForOutput(session, runID string, _ io.Writer, machineJSON bool) (string, error) {
 	store, _, err := resolveEnsembleCheckpointStoreForRunID(runID)
 	if err != nil {
 		return "", fmt.Errorf("open checkpoint store: %w", err)
@@ -1448,7 +1461,7 @@ func resolveSynthesisResumeSession(session, runID string, _ io.Writer) (string, 
 	if requested == checkpointSession {
 		return checkpointSession, nil
 	}
-	resolvedRequested, err := normalizeOfflineCapableEnsembleSessionName(requested, !IsJSONOutput())
+	resolvedRequested, err := normalizeOfflineCapableEnsembleSessionName(requested, !machineJSON)
 	if err != nil {
 		return "", err
 	}
@@ -1547,11 +1560,10 @@ func writeSynthesisChunk(w io.Writer, chunk ensemble.SynthesisChunk, format stri
 }
 
 func printSynthesisResumeHint(session, runID, format string) {
-	formatFlag := ""
-	if format == "json" {
-		formatFlag = " --format json"
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return
 	}
-	fmt.Fprintf(os.Stderr, "Resume with: ntm ensemble synthesize %s --stream --resume --run-id %s%s\n", session, runID, formatFlag)
+	fmt.Fprintf(os.Stderr, "Resume with: ntm ensemble synthesize %s --stream --resume --run-id %s\n", session, runID)
 }
 
 type exportFindingsOptions struct {
@@ -1655,7 +1667,7 @@ func runEnsembleExportFindings(w io.Writer, session string, opts exportFindingsO
 		format = "json"
 	}
 
-	ctx, err := loadExportFindingsContext(w, session, opts)
+	ctx, err := loadExportFindingsContextForOutput(w, session, opts, format == "json")
 	if err != nil {
 		return err
 	}
@@ -1809,10 +1821,14 @@ func renderExportFindingsOutput(w io.Writer, payload exportFindingsOutput, forma
 }
 
 func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsOptions) (*exportFindingsContext, error) {
+	return loadExportFindingsContextForOutput(w, session, opts, IsJSONOutput())
+}
+
+func loadExportFindingsContextForOutput(w io.Writer, session string, opts exportFindingsOptions, machineJSON bool) (*exportFindingsContext, error) {
 	if opts.RunID != "" {
 		projectDir := ""
 		if strings.TrimSpace(session) != "" {
-			resolvedSession, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+			resolvedSession, err := normalizeProjectScopedSessionName(session, !machineJSON)
 			if err != nil {
 				return nil, err
 			}
@@ -1827,7 +1843,7 @@ func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsO
 			return nil, err
 		}
 		if ctx.ProjectDir == "" {
-			projectDir, err = resolveEnsembleProjectDirForSession(ctx.Session)
+			projectDir, err = resolveEnsembleProjectDirForSessionForOutput(ctx.Session, machineJSON)
 			if err != nil {
 				return nil, err
 			}
@@ -1836,16 +1852,16 @@ func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsO
 		return ctx, nil
 	}
 
-	res, err := resolveEnsembleStateCommandSession(session, w)
+	res, err := resolveEnsembleStateCommandSessionForOutput(session, w, machineJSON)
 	if err != nil {
 		return nil, err
 	}
 	if res.Session == "" {
 		return nil, nil
 	}
-	res.ExplainIfInferred(os.Stderr)
+	res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 	session = res.Session
-	projectDir, err := resolveEnsembleProjectDirForSession(session)
+	projectDir, err := resolveEnsembleProjectDirForSessionForOutput(session, machineJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -1859,6 +1875,10 @@ func loadExportFindingsContext(w io.Writer, session string, opts exportFindingsO
 }
 
 func resolveEnsembleProjectDirForSession(session string) (string, error) {
+	return resolveEnsembleProjectDirForSessionForOutput(session, IsJSONOutput())
+}
+
+func resolveEnsembleProjectDirForSessionForOutput(session string, machineJSON bool) (string, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
 		projectDir := GetProjectRoot()
@@ -1867,7 +1887,7 @@ func resolveEnsembleProjectDirForSession(session string) (string, error) {
 		}
 		return projectDir, nil
 	}
-	resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
+	resolved, err := normalizeProjectScopedSessionName(session, !machineJSON)
 	if err != nil {
 		return "", err
 	}
@@ -2377,15 +2397,16 @@ Formats:
   ntm ensemble provenance --all --format=json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(opts.Format), "json")
 			session := opts.Session
-			res, err := resolveEnsembleStateCommandSession(session, cmd.OutOrStdout())
+			res, err := resolveEnsembleStateCommandSessionForOutput(session, cmd.OutOrStdout(), machineJSON)
 			if err != nil {
 				return err
 			}
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(os.Stderr)
+			res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 			session = res.Session
 
 			findingID := ""
@@ -2406,15 +2427,23 @@ Formats:
 }
 
 func resolveEnsembleSession(session string, w io.Writer) (SessionResolution, error) {
-	return ResolveSessionWithOptions(session, w, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
+	return resolveEnsembleSessionForOutput(session, w, IsJSONOutput())
 }
 
 func resolveEnsembleStateCommandSession(session string, w io.Writer) (SessionResolution, error) {
+	return resolveEnsembleStateCommandSessionForOutput(session, w, IsJSONOutput())
+}
+
+func resolveEnsembleSessionForOutput(session string, w io.Writer, machineJSON bool) (SessionResolution, error) {
+	return ResolveSessionWithOptions(session, w, SessionResolveOptions{TreatAsJSON: machineJSON})
+}
+
+func resolveEnsembleStateCommandSessionForOutput(session string, w io.Writer, machineJSON bool) (SessionResolution, error) {
 	session = strings.TrimSpace(session)
 	if session == "" {
-		return resolveEnsembleSession("", w)
+		return resolveEnsembleSessionForOutput("", w, machineJSON)
 	}
-	resolved, err := normalizeOfflineCapableEnsembleSessionName(session, !IsJSONOutput())
+	resolved, err := normalizeOfflineCapableEnsembleSessionName(session, !machineJSON)
 	if err != nil {
 		return SessionResolution{}, err
 	}

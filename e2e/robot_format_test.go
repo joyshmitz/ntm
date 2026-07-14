@@ -16,12 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/history"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -50,6 +52,10 @@ func runBuiltRobotProcess(t *testing.T, ntmPath, dir string, env []string, args 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ntmPath, args...)
+	// A restarted pane may leave a descendant holding inherited output
+	// descriptors after CommandContext kills ntm. Bound the post-cancel pipe
+	// drain so a failed process assertion cannot hang the entire E2E package.
+	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -546,6 +552,39 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 		assertFailure(t, process, 1, "DEPENDENCY_MISSING")
 	})
 
+	t.Run("bv_runtime_failures_are_one_typed_document", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			body string
+		}{
+			{name: "command failure", body: "#!/bin/sh\nprintf 'bv exploded' >&2\nexit 7\n"},
+			{name: "malformed JSON", body: "#!/bin/sh\nprintf '{malformed'\n"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				fakeDir := t.TempDir()
+				fakeBV := filepath.Join(fakeDir, "bv")
+				if err := os.WriteFile(fakeBV, []byte(test.body), 0o700); err != nil {
+					t.Fatalf("write fake bv: %v", err)
+				}
+				env := mergeRobotProcessEnv(fixture.env, map[string]string{
+					"PATH": fakeDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				})
+				process := run(t, env, "--robot-forecast=all", "--robot-format=json")
+				assertFailure(t, process, 1, "INTERNAL_ERROR")
+				var detailed struct {
+					Error string `json:"error"`
+					Hint  string `json:"hint"`
+				}
+				if err := json.Unmarshal(process.stdout, &detailed); err != nil {
+					t.Fatalf("decode detailed bv failure: %v", err)
+				}
+				if strings.TrimSpace(detailed.Error) == "" || strings.TrimSpace(detailed.Hint) == "" {
+					t.Fatalf("bv failure missing remediation detail: %+v", detailed)
+				}
+			})
+		}
+	})
+
 	t.Run("attention_timeout_under_toon", func(t *testing.T) {
 		process := run(t, fixture.env,
 			"--robot-attention",
@@ -663,6 +702,379 @@ func TestE2ERobotTerminalErrorContractsBuiltBinary(t *testing.T) {
 		)
 		assertSuccess(t, process)
 	})
+}
+
+func TestE2EHealthAutoRestartUsesEffectiveAgentConfig(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "health-configured-restart")
+	markerPath := filepath.Join(fixture.root, "configured-codex-launched")
+	agentPath := filepath.Join(fixture.root, "configured-codex")
+	agentScript := fmt.Sprintf("#!/bin/sh\nprintf 'Codex> \\n100%%%% context left\\n'\nprintf 'configured\\n' > %q\nwhile IFS= read -r line; do\n  printf 'received: %%s\\nCodex> \\n100%%%% context left\\n' \"$line\"\ndone\n", markerPath)
+	if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
+		t.Fatalf("write configured Codex agent: %v", err)
+	}
+	configPath := filepath.Join(fixture.root, "configured-health.toml")
+	configBody := fmt.Sprintf("[agents]\ncodex = %q\n\n[spawn_pacing]\nenabled = false\n", agentPath)
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatalf("write configured health file: %v", err)
+	}
+	// The command intentionally enforces a 30-second minimum threshold. Keep
+	// the pane genuinely quiet long enough to exercise production detection.
+	time.Sleep(31 * time.Second)
+
+	tmuxWrapper := filepath.Join(fixture.root, "tmux")
+	tmuxWrapperScript := `#!/bin/sh
+if [ "${1:-}" = "respawn-pane" ]; then
+  printf 'injected respawn failure\n' >&2
+  exit 72
+fi
+exec "$NTM_E2E_REAL_TMUX" "$@"
+`
+	if err := os.WriteFile(tmuxWrapper, []byte(tmuxWrapperScript), 0o700); err != nil {
+		t.Fatalf("write failing tmux wrapper: %v", err)
+	}
+	failureEnv := mergeRobotProcessEnv(fixture.env, map[string]string{
+		"NTM_TMUX_BINARY":   tmuxWrapper,
+		"NTM_E2E_REAL_TMUX": fixture.tmuxPath,
+	})
+	failedProcess := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, failureEnv,
+		"--config="+configPath,
+		"--robot-health-restart-stuck="+fixture.session,
+		"--stuck-threshold=30s",
+		"--robot-format=json",
+	)
+	if failedProcess.exitCode != 1 || len(bytes.TrimSpace(failedProcess.stderr)) != 0 {
+		t.Fatalf("failed health restart exit=%d stdout=%s stderr=%s", failedProcess.exitCode, failedProcess.stdout, failedProcess.stderr)
+	}
+	var failedOutput struct {
+		Success      bool   `json:"success"`
+		OutputFormat string `json:"output_format"`
+		Error        string `json:"error"`
+		ErrorCode    string `json:"error_code"`
+		StuckPanes   []int  `json:"stuck_panes"`
+		Restarted    []int  `json:"restarted"`
+		Failed       []int  `json:"failed"`
+	}
+	decodeSingleRobotJSON(t, failedProcess.stdout, &failedOutput)
+	if failedOutput.Success || failedOutput.OutputFormat != "json" || failedOutput.ErrorCode != "INTERNAL_ERROR" || failedOutput.Error == "" ||
+		!slices.Equal(failedOutput.StuckPanes, []int{0}) || len(failedOutput.Restarted) != 0 || !slices.Equal(failedOutput.Failed, []int{0}) {
+		t.Fatalf("failed health restart output=%+v", failedOutput)
+	}
+
+	process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env,
+		"--config="+configPath,
+		"--robot-health-restart-stuck="+fixture.session,
+		"--stuck-threshold=30s",
+		"--robot-format=json",
+	)
+	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("configured health restart exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var output struct {
+		Success    bool  `json:"success"`
+		StuckPanes []int `json:"stuck_panes"`
+		Restarted  []int `json:"restarted"`
+		Failed     []int `json:"failed"`
+	}
+	decodeSingleRobotJSON(t, process.stdout, &output)
+	if !output.Success || !slices.Equal(output.StuckPanes, []int{0}) || !slices.Equal(output.Restarted, []int{0}) || len(output.Failed) != 0 {
+		t.Fatalf("configured health restart output=%+v", output)
+	}
+	fixture.waitForFileContents(t, markerPath, "configured")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		captured := fixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", fixture.paneID, "-S", "-")
+		if strings.Contains(captured, "Codex>") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("configured Codex agent did not reach ready state:\n%s", captured)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestE2EUpgradeJSONRequiresCheckBuiltBinary(t *testing.T) {
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+	process := runBuiltRobotProcess(t, ntmPath, t.TempDir(), os.Environ(), "--json", "upgrade")
+	if process.exitCode != 1 || len(bytes.TrimSpace(process.stderr)) != 0 {
+		t.Fatalf("upgrade JSON validation exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+	}
+	var output struct {
+		Success      bool   `json:"success"`
+		OutputFormat string `json:"output_format"`
+		Error        string `json:"error"`
+		ErrorCode    string `json:"error_code"`
+	}
+	decodeSingleRobotJSON(t, process.stdout, &output)
+	if output.Success || output.OutputFormat != "json" || output.ErrorCode != "INVALID_FLAG" || output.Error == "" {
+		t.Fatalf("upgrade JSON validation output=%+v", output)
+	}
+}
+
+func TestE2EGlobalJSONOverridesLocalFormatsBuiltBinary(t *testing.T) {
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+
+	root := t.TempDir()
+	homeDir := filepath.Join(root, "home")
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	fakeBin := filepath.Join(root, "bin")
+	repoDir := filepath.Join(root, "repo")
+	for _, dir := range []string{homeDir, configDir, dataDir, fakeBin, repoDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create precedence fixture directory %s: %v", dir, err)
+		}
+	}
+
+	scanDir := filepath.Join(root, "scan")
+	if err := os.MkdirAll(scanDir, 0o700); err != nil {
+		t.Fatalf("create scrub precedence directory: %v", err)
+	}
+	bvArgsPath := filepath.Join(root, "bv-args")
+	bvScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$NTM_E2E_BV_ARGS"
+case "${1:-}" in
+  --robot-triage)
+    printf '{"generated_at":"2026-07-14T00:00:00Z","data_hash":"fixture","triage":{"meta":{"version":"fixture","generated_at":"2026-07-14T00:00:00Z"},"quick_ref":{"open_count":0,"actionable_count":0,"blocked_count":0,"in_progress_count":0,"top_picks":[]},"recommendations":[]}}\n'
+    ;;
+  *)
+    printf '{"nodes":[],"edges":[]}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "bv"), []byte(bvScript), 0o700); err != nil {
+		t.Fatalf("write deterministic bv wrapper: %v", err)
+	}
+	brScript := "#!/bin/sh\nprintf '[]\\n'\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "br"), []byte(brScript), 0o700); err != nil {
+		t.Fatalf("write deterministic br wrapper: %v", err)
+	}
+	env := atomicAssignmentIsolatedEnv(map[string]string{
+		"HOME":            homeDir,
+		"XDG_CONFIG_HOME": configDir,
+		"XDG_DATA_HOME":   dataDir,
+		"NO_COLOR":        "1",
+		"PATH":            fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NTM_E2E_BV_ARGS": bvArgsPath,
+	})
+
+	initCmd := exec.Command("git", "init", "-b", "main")
+	initCmd.Dir = repoDir
+	initCmd.Env = append([]string(nil), env...)
+	if output, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("initialize precedence git fixture: %v: %s", err, output)
+	}
+	commitCmd := exec.Command(
+		"git", "-c", "user.name=NTM E2E", "-c", "user.email=ntm-e2e@example.invalid",
+		"commit", "--allow-empty", "-m", "fixture",
+	)
+	commitCmd.Dir = repoDir
+	commitCmd.Env = append([]string(nil), env...)
+	if output, err := commitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit precedence git fixture: %v: %s", err, output)
+	}
+
+	for _, test := range []struct {
+		name          string
+		args          []string
+		emptyArrays   []string
+		wantRootArray bool
+	}{
+		{name: "analytics_csv", args: []string{"--json", "analytics", "--format=csv"}},
+		{name: "analytics_prometheus", args: []string{"--json", "analytics", "--format=prometheus"}},
+		{name: "analytics_uppercase_json", args: []string{"analytics", "--format=JSON"}},
+		{name: "analytics_precommand_format", args: []string{"--format=json", "analytics"}},
+		{name: "approve_list", args: []string{"approve", "list", "--json"}, emptyArrays: []string{"pending"}},
+		{name: "audit_csv", args: []string{"--json", "audit", "export", "missing-session", "--format=csv"}},
+		{name: "audit_uppercase_json", args: []string{"audit", "export", "missing-session", "--format=JSON"}},
+		{name: "handoff_markdown", args: []string{"--json", "handoff", "create", "--goal=completed", "--now=continue", "--output=-", "--format=markdown", "--include-git=false"}},
+		{name: "handoff_uppercase_json", args: []string{"handoff", "create", "--goal=completed", "--now=continue", "--output=-", "--format=JSON", "--include-git=false"}},
+		{name: "metrics_prometheus", args: []string{"--json", "metrics", "export", "--format=prometheus"}},
+		{name: "metrics_uppercase_json", args: []string{"metrics", "export", "--format=JSON"}},
+		{name: "numeric_global_json", args: []string{"--json=1", "analytics", "--format=csv"}},
+		{name: "root_since_before_json_command", args: []string{"--since", "7d", "summary", "--all", "--format=json"}},
+		{name: "rotate_status", args: []string{"rotate", "status", "--data-dir=" + repoDir, "--json"}},
+		{name: "scrub_text", args: []string{"--json", "scrub", "--path=" + scanDir, "--format=text"}, emptyArrays: []string{"findings"}},
+		{name: "scrub_uppercase_json", args: []string{"scrub", "--path=" + scanDir, "--format=JSON"}, emptyArrays: []string{"findings"}},
+		{name: "scrub_zero_roots_local_json", args: []string{"scrub", "--format=json"}, emptyArrays: []string{"findings"}},
+		{name: "summary_empty", args: []string{"--json", "summary", "--all"}},
+		{name: "work_commit_ready_text", args: []string{"--json", "work", "commit-ready", "--format=text"}, emptyArrays: []string{"findings"}},
+		{name: "work_commit_readiness_alias_text", args: []string{"--json", "work", "commit-readiness", "--format=text"}, emptyArrays: []string{"findings"}},
+		{name: "work_commit_ready_uppercase_json", args: []string{"work", "commit-ready", "--format=JSON"}, emptyArrays: []string{"findings"}},
+		{name: "work_graph_dot", args: []string{"--json", "work", "graph", "--format=dot"}},
+		{name: "work_graph_mermaid", args: []string{"--json", "work", "graph", "--format=mermaid"}},
+		{name: "work_graph_uppercase_json", args: []string{"work", "graph", "--format=JSON"}},
+		{name: "work_queue_dry_text", args: []string{"--json", "work", "queue-dry", "--format=text"}},
+		{name: "work_queue_dry_markdown", args: []string{"--json", "work", "queue-dry", "--format=markdown"}},
+		{name: "work_queue_dry_uppercase_json", args: []string{"work", "queue-dry", "--format=JSON"}},
+		{name: "work_triage_markdown", args: []string{"--json", "work", "triage", "--format=markdown"}},
+		{name: "work_triage_uppercase_json", args: []string{"work", "triage", "--format=JSON"}},
+		{name: "worktree_table", args: []string{"--json", "worktree", "list", "--output=table"}, wantRootArray: true},
+		{name: "worktree_uppercase_json", args: []string{"worktree", "list", "--output=JSON"}, wantRootArray: true},
+		{name: "worktree_precommand_output", args: []string{"--output=json", "worktree", "list"}, wantRootArray: true},
+		{name: "support_bundle", args: []string{"support-bundle", "--output=" + filepath.Join(root, "support-bundle"), "--json"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"--profile-startup"}, test.args...)
+			process := runBuiltRobotProcess(t, ntmPath, repoDir, env, args...)
+			if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("global JSON precedence exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var document any
+			decodeSingleRobotJSON(t, process.stdout, &document)
+			if test.wantRootArray {
+				if _, ok := document.([]any); !ok {
+					t.Fatalf("root document = %#v, want JSON array", document)
+				}
+			}
+			if len(test.emptyArrays) > 0 {
+				object, ok := document.(map[string]any)
+				if !ok {
+					t.Fatalf("root document = %#v, want JSON object", document)
+				}
+				for _, field := range test.emptyArrays {
+					value, ok := object[field].([]any)
+					if !ok || len(value) != 0 {
+						t.Fatalf("%s = %#v, want empty JSON array", field, object[field])
+					}
+				}
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name         string
+		args         []string
+		errorCode    string
+		emptyArrays  []string
+		outputFormat string
+		exitMeta     int
+	}{
+		{name: "ensemble_id_only", args: []string{"--json", "ensemble", "suggest", "review architecture", "--id-only"}},
+		{name: "ensemble_stop_confirmation", args: []string{"--json", "ensemble", "stop"}},
+		{name: "handoff_missing_machine_inputs", args: []string{"--json", "handoff", "create", "--format=markdown"}},
+		{name: "invalid_json_boolean", args: []string{"--json=bogus", "version"}},
+		{name: "review_queue_send", args: []string{"--json", "review-queue", "--send"}},
+		{name: "root_nonpersistent_limit", args: []string{"--limit", "5", "ensemble", "presets", "--format=json"}},
+		{name: "swarm_empty_scan", args: []string{"--json", "swarm", "--dry-run", "--scan-dir=" + scanDir}, errorCode: robot.ErrCodeNotFound, emptyArrays: []string{"allocations", "sessions"}, outputFormat: "json", exitMeta: 1},
+		{name: "swarm_stop_confirmation", args: []string{"swarm", "stop", "--json"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"--profile-startup"}, test.args...)
+			process := runBuiltRobotProcess(t, ntmPath, repoDir, env, args...)
+			if process.exitCode == 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("machine incompatibility exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+			}
+			var document map[string]any
+			decodeSingleRobotJSON(t, process.stdout, &document)
+			wantCode := test.errorCode
+			if wantCode == "" {
+				wantCode = robot.ErrCodeInvalidFlag
+			}
+			if success, _ := document["success"].(bool); success || document["error"] == "" || document["error_code"] != wantCode {
+				t.Fatalf("machine incompatibility document=%+v", document)
+			}
+			if test.outputFormat != "" && document["output_format"] != test.outputFormat {
+				t.Fatalf("output_format = %#v, want %q", document["output_format"], test.outputFormat)
+			}
+			if test.exitMeta != 0 {
+				meta, ok := document["_meta"].(map[string]any)
+				if !ok || meta["exit_code"] != float64(test.exitMeta) {
+					t.Fatalf("_meta = %#v, want exit_code=%d", document["_meta"], test.exitMeta)
+				}
+			}
+			for _, field := range test.emptyArrays {
+				value, ok := document[field].([]any)
+				if !ok || len(value) != 0 {
+					t.Fatalf("%s = %#v, want empty JSON array", field, document[field])
+				}
+			}
+		})
+	}
+
+	t.Run("precommand_non_json_format_preserves_human_profile", func(t *testing.T) {
+		process := runBuiltRobotProcess(t, ntmPath, repoDir, env,
+			"--profile-startup", "--format=csv", "audit", "export", "missing-session",
+		)
+		if process.exitCode != 0 {
+			t.Fatalf("precommand human format exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
+		}
+		if json.Valid(bytes.TrimSpace(process.stdout)) {
+			t.Fatalf("precommand CSV format was incorrectly treated as JSON: %s", process.stdout)
+		}
+		if len(bytes.TrimSpace(process.stderr)) == 0 {
+			t.Fatalf("human startup profile was incorrectly suppressed: stdout=%s", process.stdout)
+		}
+	})
+
+	bvArgs, err := os.ReadFile(bvArgsPath)
+	if err != nil {
+		t.Fatalf("read bv precedence arguments: %v", err)
+	}
+	var graphCalls int
+	for _, call := range strings.Split(strings.TrimSpace(string(bvArgs)), "\n") {
+		if strings.HasPrefix(call, "--robot-graph") {
+			graphCalls++
+			if call != "--robot-graph --graph-format json" {
+				t.Fatalf("bv graph arguments=%q, want JSON override", call)
+			}
+		}
+	}
+	if graphCalls != 3 {
+		t.Fatalf("bv calls=%q, want three JSON graph calls", bvArgs)
+	}
+}
+
+func TestE2ELocalJSONSessionInferenceBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	fixture := newRobotProcessFixture(t, "local-json-inference")
+
+	for _, test := range []struct {
+		name        string
+		args        []string
+		emptyArrays []string
+	}{
+		{name: "ensemble_status", args: []string{"ensemble", "status", "--format=JSON"}},
+		{name: "ensemble_stop", args: []string{"ensemble", "stop", "--format=JSON", "--yes"}},
+		{name: "ensemble_synthesize", args: []string{"ensemble", "synthesize", "--format=JSON"}},
+		{name: "ensemble_export_findings", args: []string{"ensemble", "export-findings", "--format=JSON", "--all"}},
+		{name: "ensemble_provenance", args: []string{"ensemble", "provenance", "--format=JSON", "--all"}},
+		{name: "rebalance", args: []string{"rebalance", "--format=JSON"}},
+		{name: "review_queue", args: []string{"review-queue", "--format=JSON"}, emptyArrays: []string{"suggestions"}},
+		{name: "summary", args: []string{"summary", "--format=JSON"}},
+		{name: "dashboard", args: []string{"dashboard", fixture.session, "--json"}},
+		{name: "swarm_status", args: []string{"swarm", "status", "--json"}},
+		{name: "swarm_stop_empty", args: []string{"swarm", "stop", "--json", "--yes"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"--profile-startup"}, test.args...)
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
+			if len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("local JSON inference exit=%d stderr=%q stdout=%s", process.exitCode, process.stderr, process.stdout)
+			}
+			var document any
+			decodeSingleRobotJSON(t, process.stdout, &document)
+			if len(test.emptyArrays) > 0 {
+				object, ok := document.(map[string]any)
+				if !ok {
+					t.Fatalf("root document = %#v, want JSON object", document)
+				}
+				for _, field := range test.emptyArrays {
+					value, ok := object[field].([]any)
+					if !ok || len(value) != 0 {
+						t.Fatalf("%s = %#v, want empty JSON array", field, object[field])
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestE2ERobotAssignTerminalContractsBuiltBinary(t *testing.T) {
@@ -937,8 +1349,9 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 	fixture := newRobotProcessFixture(t, "json-command-terminal")
 
 	type failureEnvelope struct {
-		Success *bool  `json:"success"`
-		Error   string `json:"error"`
+		Success   *bool  `json:"success"`
+		Error     string `json:"error"`
+		ErrorCode string `json:"error_code"`
 	}
 	assertOneFailure := func(t *testing.T, process robotBoundaryProcessResult) failureEnvelope {
 		t.Helper()
@@ -968,8 +1381,9 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 		}
 
 		cases := []struct {
-			name string
-			args []string
+			name          string
+			args          []string
+			wantErrorCode string
 		}{
 			{name: "pipeline_lint", args: []string{"--json", "pipeline", "lint", invalidPipeline}},
 			{name: "persona_show", args: []string{"--json", "personas", "show", "missing-terminal-persona"}},
@@ -981,10 +1395,14 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 			{name: "hooks_status", args: []string{"--json", "hooks", "status"}},
 			{name: "policy_validate", args: []string{"--json", "policy", "validate", invalidPolicy}},
 			{name: "health_missing_session", args: []string{"--json", "health", fixture.session + "-missing"}},
+			{name: "codex_palette_state", args: []string{"--json", "codex", "palette-state"}, wantErrorCode: "INVALID_FLAG"},
 		}
 		for _, test := range cases {
 			t.Run(test.name, func(t *testing.T) {
-				runFailure(t, fixture.projectDir, fixture.env, test.args...)
+				envelope := runFailure(t, fixture.projectDir, fixture.env, test.args...)
+				if test.wantErrorCode != "" && envelope.ErrorCode != test.wantErrorCode {
+					t.Fatalf("error_code=%q, want %q; envelope=%+v", envelope.ErrorCode, test.wantErrorCode, envelope)
+				}
 			})
 		}
 	})
@@ -1033,17 +1451,21 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 		}
 		env := mergeRobotProcessEnv(fixture.env, map[string]string{"PATH": emptyPath})
 		for _, test := range []struct {
-			name string
-			args []string
+			name          string
+			args          []string
+			wantErrorCode string
 		}{
-			{name: "deps_without_tmux", args: []string{"--json", "deps"}},
-			{name: "scan_without_ubs", args: []string{"--json", "scan", fixture.projectDir}},
-			{name: "bugs_without_ubs", args: []string{"--json", "bugs", "list", fixture.projectDir}},
-			{name: "cass_status_without_cass", args: []string{"--json", "cass", "status"}},
+			{name: "deps_without_tmux", args: []string{"--json", "deps"}, wantErrorCode: "DEPENDENCY_MISSING"},
+			{name: "scan_without_ubs", args: []string{"--json", "scan", fixture.projectDir}, wantErrorCode: "DEPENDENCY_MISSING"},
+			{name: "bugs_without_ubs", args: []string{"--json", "bugs", "list", fixture.projectDir}, wantErrorCode: "DEPENDENCY_MISSING"},
+			{name: "cass_status_without_cass", args: []string{"--json", "cass", "status"}, wantErrorCode: "NOT_IMPLEMENTED"},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, env, test.args...)
-				assertOneFailure(t, process)
+				envelope := assertOneFailure(t, process)
+				if envelope.ErrorCode != test.wantErrorCode {
+					t.Fatalf("error_code=%q, want %q; envelope=%+v", envelope.ErrorCode, test.wantErrorCode, envelope)
+				}
 				if test.name == "cass_status_without_cass" && process.exitCode != 2 {
 					t.Fatalf("CASS unavailable exit=%d, want 2", process.exitCode)
 				}
@@ -1136,6 +1558,7 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 			{"ensemble", "compare", "missing-run-a", "missing-run-b", "--format=json"},
 			{"ensemble", "compare", "missing-run-a", "missing-run-b", "--format", "json"},
 			{"ensemble", "compare", "missing-run-a", "missing-run-b", "-f=json"},
+			{"ensemble", "compare", "missing-run-a", "missing-run-b", "-fjson"},
 			{"ensemble", "compare", "missing-run-a", "missing-run-b", "-f", "json"},
 		} {
 			runFailure(t, fixture.projectDir, fixture.env, args...)
@@ -1150,6 +1573,53 @@ func TestE2EJSONCommandTerminalContractsBuiltBinary(t *testing.T) {
 		}
 		env := mergeRobotProcessEnv(fixture.env, map[string]string{"XDG_CONFIG_HOME": configDir})
 		runFailure(t, fixture.projectDir, env, "ensemble", "presets", "--format=json")
+	})
+
+	t.Run("documented_local_json_spellings_are_machine_terminal", func(t *testing.T) {
+		for _, test := range []struct {
+			args        []string
+			wantNonzero bool
+		}{
+			{args: []string{"--profile-startup", "worktree", "list", "--output=json"}, wantNonzero: true},
+			{args: []string{"--profile-startup", "worktree", "list", "--output", "json"}, wantNonzero: true},
+			{args: []string{"--profile-startup", "worktree", "list", "-o=json"}, wantNonzero: true},
+			{args: []string{"--profile-startup", "worktree", "list", "-ojson"}, wantNonzero: true},
+			{args: []string{"--profile-startup", "ensemble", "compare", "missing-run-a", "missing-run-b", "-fjson"}, wantNonzero: true},
+			// commit-ready is intentionally advisory: an unsafe report remains a
+			// successful process result, but it must still be one clean JSON document.
+			{args: []string{"--profile-startup", "work", "commit-readiness", "--format=json"}},
+			{args: []string{"--profile-startup", "work", "commit-readiness", "--format", "json"}},
+		} {
+			process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, test.args...)
+			if len(bytes.TrimSpace(process.stderr)) != 0 {
+				t.Fatalf("machine invocation exit=%d stderr=%q, want empty stderr", process.exitCode, process.stderr)
+			}
+			if test.wantNonzero && process.exitCode == 0 {
+				t.Fatalf("machine failure args=%q exited zero: %s", test.args, process.stdout)
+			}
+			var document any
+			decodeSingleRobotJSON(t, process.stdout, &document)
+		}
+	})
+
+	t.Run("default_json_commands_suppress_startup_profile", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			args []string
+		}{
+			{name: "audit_export", args: []string{"--profile-startup", "audit", "export", fixture.session}},
+			{name: "metrics_export", args: []string{"--profile-startup", "metrics", "export"}},
+			{name: "work_graph", args: []string{"--profile-startup", "work", "graph"}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				process := runBuiltRobotProcess(t, fixture.ntmPath, fixture.projectDir, fixture.env, test.args...)
+				if len(bytes.TrimSpace(process.stderr)) != 0 {
+					t.Fatalf("default JSON command exit=%d stderr=%q, want empty machine stderr", process.exitCode, process.stderr)
+				}
+				var document any
+				decodeSingleRobotJSON(t, process.stdout, &document)
+			})
+		}
 	})
 
 	t.Run("profile_parse_error_is_one_document", func(t *testing.T) {
@@ -1627,12 +2097,15 @@ exec %q "$@"
 		), "TIMEOUT")
 		finished := time.Now()
 		wallElapsed := finished.Sub(started)
+		if !strings.Contains(envelope.Error, "500ms timeout") {
+			t.Fatalf("readiness error=%q, want exact subsecond timeout diagnostic", envelope.Error)
+		}
 		markerInfo, err := os.Stat(captureMarker)
 		if err != nil {
 			t.Fatalf("stat readiness capture marker: %v", err)
 		}
 		readinessElapsed := finished.Sub(markerInfo.ModTime())
-		if readinessElapsed < 350*time.Millisecond || readinessElapsed > 3*time.Second {
+		if readinessElapsed < 350*time.Millisecond || readinessElapsed > 12*time.Second {
 			t.Fatalf("500ms readiness timeout after launch=%s (total process time=%s)", readinessElapsed, wallElapsed)
 		}
 		if wallElapsed > 12*time.Second {

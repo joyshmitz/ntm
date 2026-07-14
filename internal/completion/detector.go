@@ -356,6 +356,12 @@ func (d *CompletionDetector) persistCompletionEvent(ctx context.Context, observe
 	if err != nil || !applied {
 		return false, err
 	}
+	if barrier != nil && barrier.ClearState == assignment.ClearStateNone && barrier.Status == terminalStatus && strings.TrimSpace(barrier.PendingCompletionEventID) != "" {
+		// Cleanup may have completed in an earlier process before it could create
+		// the outbox entry. The store has now durably backfilled that event; there
+		// is no external lease/claim work to repeat.
+		return true, nil
+	}
 	return d.reconcileTerminalBarrier(ctx, barrier)
 }
 

@@ -193,7 +193,7 @@ func runAuditShow(session, since, until, evTypes string, limit int) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
-	if jsonOutput {
+	if IsJSONOutput() {
 		return json.NewEncoder(os.Stdout).Encode(result)
 	}
 
@@ -329,6 +329,11 @@ func runAuditVerifyTo(w io.Writer, session string) error {
 }
 
 func runAuditExport(session, format, outputPath string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if IsJSONOutput() {
+		format = "json"
+	}
+
 	searcher, err := newAuditSearcherFunc()
 	if err != nil {
 		return fmt.Errorf("failed to create searcher: %w", err)

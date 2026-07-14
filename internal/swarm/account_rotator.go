@@ -341,7 +341,7 @@ type AccountRotator struct {
 	codexHomes *CodexHomeProvisioner
 
 	// caamCapProber probes caam for advertised capabilities (e.g. safe-restore).
-	// Injected for testability; nil uses the default `caam robot status --json`.
+	// Injected for testability; nil uses the default `caam robot status`.
 	caamCapProber caamCapabilityProber
 
 	// requireSafeRestore, when true, refuses a *global* caam switch unless caam

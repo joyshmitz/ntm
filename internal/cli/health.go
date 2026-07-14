@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -188,11 +189,12 @@ func runAutoRestartStuck(session string) error {
 		return err
 	}
 
-	opts := robot.AutoRestartStuckOptions{
-		Session:   session,
-		Threshold: threshold,
-		DryRun:    false, // dry-run handled via --json + robot flag path
-	}
+	opts := autoRestartStuckOptions(
+		session,
+		threshold,
+		false, // dry-run handled via --json + robot flag path
+		loadSelectedConfigOrDefault(),
+	)
 
 	if jsonOutput {
 		return robot.PrintAutoRestartStuck(opts)
@@ -218,6 +220,15 @@ func runAutoRestartStuck(session string) error {
 		fmt.Printf("  Failed:         %v\n", result.Failed)
 	}
 	return nil
+}
+
+func autoRestartStuckOptions(session string, threshold time.Duration, dryRun bool, cfg *config.Config) robot.AutoRestartStuckOptions {
+	return robot.AutoRestartStuckOptions{
+		Session:   session,
+		Threshold: threshold,
+		DryRun:    dryRun,
+		Config:    cfg,
+	}
 }
 
 // runHealthOnce performs a single health check and outputs the result

@@ -195,10 +195,9 @@ type CodexPreflightResult struct {
 
 func newCodexPreflightCmd() *cobra.Command {
 	var (
-		session    string
-		pane       int
-		jsonOutput bool
-		lines      int
+		session string
+		pane    int
+		lines   int
 	)
 
 	cmd := &cobra.Command{
@@ -236,7 +235,7 @@ Examples:
 				return err
 			}
 
-			emitJSON := jsonOutput || IsJSONOutput()
+			emitJSON := IsJSONOutput()
 
 			// Accept session positionally (consistent with other ntm commands)
 			// while still honoring --session. An explicit positional arg wins.
@@ -325,7 +324,6 @@ Examples:
 
 	cmd.Flags().StringVar(&session, "session", "", "Target tmux session name (or pass positionally)")
 	cmd.Flags().IntVar(&pane, "pane", 0, "Target pane index within the session")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	cmd.Flags().IntVar(&lines, "lines", tmux.LinesFullContext, "Number of pane lines to capture for classification")
 
 	return cmd
@@ -368,10 +366,9 @@ type PaletteStateResult struct {
 
 func newCodexPaletteStateCmd() *cobra.Command {
 	var (
-		session    string
-		pane       int
-		jsonOutput bool
-		lines      int
+		session string
+		pane    int
+		lines   int
 	)
 
 	cmd := &cobra.Command{
@@ -399,7 +396,7 @@ Examples:
 				return err
 			}
 
-			emitJSON := jsonOutput || IsJSONOutput()
+			emitJSON := IsJSONOutput()
 
 			if session == "" {
 				return robot.RobotError(
@@ -495,7 +492,6 @@ Examples:
 
 	cmd.Flags().StringVar(&session, "session", "", "Target tmux session name (required)")
 	cmd.Flags().IntVar(&pane, "pane", 0, "Target pane index within the session")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	cmd.Flags().IntVar(&lines, "lines", tmux.LinesFullContext, "Number of pane lines to capture for classification")
 
 	return cmd
@@ -530,11 +526,10 @@ type CodexReplaceGoalResult struct {
 
 func newCodexReplaceGoalCmd() *cobra.Command {
 	var (
-		session    string
-		pane       int
-		selectArg  string
-		jsonOutput bool
-		lines      int
+		session   string
+		pane      int
+		selectArg string
+		lines     int
 	)
 
 	cmd := &cobra.Command{
@@ -570,7 +565,7 @@ Examples:
 			if err := tmux.EnsureInstalled(); err != nil {
 				return err
 			}
-			emitJSON := jsonOutput || IsJSONOutput()
+			emitJSON := IsJSONOutput()
 			if len(args) == 1 && args[0] != "" {
 				session = args[0]
 			}
@@ -701,7 +696,6 @@ Examples:
 	cmd.Flags().StringVar(&session, "session", "", "Target tmux session name (or pass positionally)")
 	cmd.Flags().IntVar(&pane, "pane", 0, "Target pane index within the session")
 	cmd.Flags().StringVar(&selectArg, "select", "replace", "Dialog choice: 'replace' (option 1) or 'cancel' (option 2)")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	cmd.Flags().IntVar(&lines, "lines", tmux.LinesFullContext, "Number of pane lines to capture for classification")
 
 	return cmd
@@ -761,7 +755,6 @@ func newCodexWaitGoalEngagedCmd() *cobra.Command {
 	var (
 		session      string
 		pane         int
-		jsonOutput   bool
 		lines        int
 		timeoutSec   float64
 		intervalMs   int
@@ -795,7 +788,7 @@ Examples:
 			if err := tmux.EnsureInstalled(); err != nil {
 				return err
 			}
-			emitJSON := jsonOutput || IsJSONOutput()
+			emitJSON := IsJSONOutput()
 			_ = counterDelta // counter deltas are always computed; flag documents intent
 			if len(args) == 1 && args[0] != "" {
 				session = args[0]
@@ -891,7 +884,6 @@ Examples:
 
 	cmd.Flags().StringVar(&session, "session", "", "Target tmux session name (or pass positionally)")
 	cmd.Flags().IntVar(&pane, "pane", 0, "Target pane index within the session")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	cmd.Flags().IntVar(&lines, "lines", tmux.LinesFullContext, "Number of pane lines to capture for classification")
 	cmd.Flags().Float64Var(&timeoutSec, "timeout", 10, "Bounded wait timeout in seconds")
 	cmd.Flags().IntVar(&intervalMs, "interval-ms", 500, "Poll interval in milliseconds")

@@ -1142,6 +1142,7 @@ type guardedClaimIssue struct {
 	Title       string
 	Status      string
 	Assignee    sql.NullString
+	UpdatedAt   string
 	Deferred    bool
 	Pinned      bool
 	Ephemeral   bool
@@ -1157,6 +1158,28 @@ type guardedClaimIssue struct {
 // br then exports the dirty row and supplies its version-specific canonical
 // content hash, avoiding a second independent hash implementation in NTM.
 func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadClaimResult, error) {
+	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, time.Time{})
+}
+
+// ClaimStaleBeadForAssignment atomically adopts an unowned in-progress bead.
+// It never reopens terminal work and remains idempotent for the actor that won
+// the first compare-and-set, making it suitable for bulk stale-work recovery.
+func ClaimStaleBeadForAssignment(ctx context.Context, dir, beadID, actor string, expectedUpdatedAt time.Time) (BeadClaimResult, error) {
+	beadID = strings.TrimSpace(beadID)
+	actor = strings.TrimSpace(actor)
+	if beadID == "" {
+		return BeadClaimResult{}, errors.New("bead ID is required")
+	}
+	if actor == "" {
+		return BeadClaimResult{}, errors.New("claim actor is required")
+	}
+	if expectedUpdatedAt.IsZero() {
+		return BeadClaimResult{}, errors.New("expected stale update time is required")
+	}
+	return claimBeadNonTerminalMode(ctx, dir, beadID, actor, expectedUpdatedAt)
+}
+
+func claimBeadNonTerminalMode(ctx context.Context, dir, beadID, actor string, expectedStaleUpdatedAt time.Time) (BeadClaimResult, error) {
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
 		return BeadClaimResult{}, err
@@ -1178,7 +1201,7 @@ func claimBeadNonTerminal(ctx context.Context, dir, beadID, actor string) (BeadC
 	if err := mu.LockContext(ctx); err != nil {
 		return BeadClaimResult{}, err
 	}
-	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor)
+	result, changed, claimErr := claimBeadNonTerminalTransaction(ctx, databasePath, beadID, actor, expectedStaleUpdatedAt)
 	mu.Unlock()
 	if claimErr != nil {
 		return BeadClaimResult{}, claimErr
@@ -1384,7 +1407,7 @@ func loadAssignmentOperatorLabels(ctx context.Context, tx *sql.Tx, beadID string
 	return labels, nil
 }
 
-func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string) (BeadClaimResult, bool, error) {
+func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, actor string, expectedStaleUpdatedAt time.Time) (BeadClaimResult, bool, error) {
 	dsn := sqliteutil.ImmediateTransactionFileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)")
 	database, err := sql.Open(sqliteutil.DriverName, dsn)
 	if err != nil {
@@ -1412,6 +1435,10 @@ func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, 
 		return BeadClaimResult{}, false, err
 	}
 	status := strings.ToLower(strings.TrimSpace(issue.Status))
+	requireUnownedInProgress := !expectedStaleUpdatedAt.IsZero()
+	if requireUnownedInProgress && status != "in_progress" {
+		return BeadClaimResult{}, false, &AssignmentEligibilityError{BeadID: beadID, Status: issue.Status}
+	}
 	if status != "open" && status != "in_progress" {
 		return BeadClaimResult{}, false, errors.Join(ErrBeadAlreadyClaimed, fmt.Errorf("%w: %s has status %s", ErrBeadTerminal, beadID, issue.Status))
 	}
@@ -1426,15 +1453,49 @@ func claimBeadNonTerminalTransaction(ctx context.Context, databasePath, beadID, 
 		committed = true
 		return BeadClaimResult{ID: beadID, Title: issue.Title, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, !issue.ContentHash.Valid, nil
 	}
+	if requireUnownedInProgress {
+		observedUpdatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(issue.UpdatedAt))
+		if err != nil {
+			return BeadClaimResult{}, false, fmt.Errorf("parse stale bead %s update time %q: %w", beadID, issue.UpdatedAt, err)
+		}
+		if !observedUpdatedAt.Equal(expectedStaleUpdatedAt) {
+			return BeadClaimResult{}, false, fmt.Errorf("%w: stale bead %s changed after planning", ErrBeadAlreadyClaimed, beadID)
+		}
+		if observedUpdatedAt.After(time.Now().UTC().Add(-24 * time.Hour)) {
+			return BeadClaimResult{}, false, fmt.Errorf("%w: bead %s is not stale enough to adopt", ErrBeadAssignmentIneligible, beadID)
+		}
+		blockers, err := loadUnresolvedAssignmentBlockers(ctx, tx, beadID)
+		if err != nil {
+			return BeadClaimResult{}, false, err
+		}
+		operatorLabels, err := loadAssignmentOperatorLabels(ctx, tx, beadID, OperatorGatedLabels())
+		if err != nil {
+			return BeadClaimResult{}, false, err
+		}
+		wisp := strings.Contains(strings.ToLower(beadID), "-wisp-")
+		if len(blockers) > 0 || len(operatorLabels) > 0 || issue.Deferred || issue.Pinned || issue.Ephemeral || issue.Template || wisp {
+			return BeadClaimResult{}, false, &AssignmentEligibilityError{
+				BeadID: beadID, Status: issue.Status,
+				UnresolvedBlockers: blockers, OperatorLabels: operatorLabels,
+				Deferred: issue.Deferred, Pinned: issue.Pinned, Ephemeral: issue.Ephemeral,
+				Template: issue.Template, Wisp: wisp,
+			}
+		}
+	}
 
 	claimedAt := time.Now().UTC()
-	update, err := tx.ExecContext(ctx, `
+	updateSQL := `
 		UPDATE issues
 		SET status = 'in_progress', assignee = ?, updated_at = ?, content_hash = NULL
 		WHERE id = ?
 		  AND status IN ('open', 'in_progress')
-		  AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?)`,
-		actor, claimedAt.Format(time.RFC3339Nano), beadID, actor)
+		  AND (assignee IS NULL OR TRIM(assignee) = '' OR assignee = ?)`
+	updateArgs := []any{actor, claimedAt.Format(time.RFC3339Nano), beadID, actor}
+	if requireUnownedInProgress {
+		updateSQL += " AND updated_at = ?"
+		updateArgs = append(updateArgs, issue.UpdatedAt)
+	}
+	update, err := tx.ExecContext(ctx, updateSQL, updateArgs...)
 	if err != nil {
 		return BeadClaimResult{}, false, fmt.Errorf("compare-and-set guarded Beads claim: %w", err)
 	}
@@ -1595,13 +1656,13 @@ func releaseBeadClaimTransaction(ctx context.Context, databasePath, beadID, acto
 func loadGuardedClaimIssue(ctx context.Context, tx *sql.Tx, beadID string) (guardedClaimIssue, error) {
 	var issue guardedClaimIssue
 	err := tx.QueryRowContext(ctx, `
-		SELECT content_hash, title, status, assignee,
+		SELECT content_hash, title, status, assignee, updated_at,
 		       CASE WHEN defer_until IS NOT NULL AND (datetime(defer_until) IS NULL OR datetime(defer_until) > datetime('now')) THEN 1 ELSE 0 END,
 		       CASE WHEN COALESCE(pinned, 0) != 0 THEN 1 ELSE 0 END,
 		       CASE WHEN COALESCE(ephemeral, 0) != 0 THEN 1 ELSE 0 END,
 		       CASE WHEN COALESCE(is_template, 0) != 0 THEN 1 ELSE 0 END
 		FROM issues WHERE id = ?`, beadID).Scan(
-		&issue.ContentHash, &issue.Title, &issue.Status, &issue.Assignee,
+		&issue.ContentHash, &issue.Title, &issue.Status, &issue.Assignee, &issue.UpdatedAt,
 		&issue.Deferred, &issue.Pinned, &issue.Ephemeral, &issue.Template,
 	)
 	if err != nil {

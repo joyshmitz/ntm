@@ -260,6 +260,9 @@ func TestRobotPrinterFailureMatrixForcesCanonicalJSON(t *testing.T) {
 			if response.Success || response.ErrorCode != tt.errorCode || response.OutputFormat != string(FormatJSON) {
 				t.Fatalf("response = %+v, want %s JSON failure", response, tt.errorCode)
 			}
+			if strings.TrimSpace(response.Error) == "" {
+				t.Fatal("failure response is missing required error message")
+			}
 			if response.Timestamp == "" {
 				t.Fatal("failure response is missing timestamp")
 			}
@@ -464,14 +467,23 @@ func TestErrorCodes(t *testing.T) {
 }
 
 func TestRobotError(t *testing.T) {
-	// RobotError should output JSON and return the error
 	testErr := errors.New("test error message")
-
-	// Note: In a real test we'd capture stdout to verify JSON output
-	// For now, just verify it returns the error correctly
-	returnedErr := RobotError(testErr, ErrCodeSessionNotFound, "test hint")
-	if returnedErr != testErr {
-		t.Errorf("RobotError should return the original error, got %v", returnedErr)
+	stdout, returnedErr := captureStdout(t, func() error {
+		return RobotError(testErr, ErrCodeSessionNotFound, "test hint")
+	})
+	if !errors.Is(returnedErr, testErr) {
+		t.Fatalf("RobotError should unwrap to the original error, got %v", returnedErr)
+	}
+	var exitErr *ProcessExitError
+	if !errors.As(returnedErr, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("RobotError result = %T exit=%d json_written=%v", returnedErr, exitErr.ExitCode(), exitErr.JSONWritten())
+	}
+	var payload RobotResponse
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode RobotError payload: %v\n%s", err, stdout)
+	}
+	if payload.Success || payload.Error != testErr.Error() || payload.ErrorCode != ErrCodeSessionNotFound || payload.Hint != "test hint" {
+		t.Fatalf("RobotError payload = %+v", payload)
 	}
 }
 

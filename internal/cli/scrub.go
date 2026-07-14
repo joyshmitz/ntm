@@ -59,13 +59,28 @@ Examples:
   ntm scrub --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			outFormat := strings.ToLower(strings.TrimSpace(format))
+			if IsJSONOutput() {
+				outFormat = "json"
+			} else if outFormat == "" {
+				outFormat = "text"
+			}
+			switch outFormat {
+			case "text", "json":
+			default:
+				return fmt.Errorf("invalid --format %q: must be text or json", format)
+			}
+
 			roots, err := resolveScrubRoots(paths)
 			if err != nil {
 				return err
 			}
 			if len(roots) == 0 {
-				if jsonOutput {
-					return json.NewEncoder(os.Stdout).Encode(scrubResult{Roots: nil, FilesScanned: 0, Findings: nil})
+				if outFormat == "json" {
+					return json.NewEncoder(os.Stdout).Encode(scrubResult{
+						Roots:    []string{},
+						Findings: []scrubFinding{},
+					})
 				}
 				fmt.Println("No scrub roots found.")
 				return nil
@@ -79,20 +94,6 @@ Examples:
 				}
 				t := time.Now().Add(-d)
 				cutoff = &t
-			}
-
-			outFormat := format
-			if outFormat == "" {
-				if jsonOutput {
-					outFormat = "json"
-				} else {
-					outFormat = "text"
-				}
-			}
-			switch outFormat {
-			case "text", "json":
-			default:
-				return fmt.Errorf("invalid --format %q: must be text or json", outFormat)
 			}
 
 			if cfg == nil {
@@ -154,7 +155,8 @@ func resolveScrubRoots(paths []string) ([]string, error) {
 
 func runScrub(roots []string, cutoff *time.Time, cfg redaction.Config) scrubResult {
 	res := scrubResult{
-		Roots: roots,
+		Roots:    append([]string{}, roots...),
+		Findings: []scrubFinding{},
 	}
 
 	for _, root := range roots {

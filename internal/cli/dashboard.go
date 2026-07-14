@@ -20,7 +20,6 @@ import (
 
 func newDashboardCmd() *cobra.Command {
 	var noTUI bool
-	var jsonOutput bool
 	var debug bool
 	var popup bool
 	var attentionCursor int64
@@ -60,13 +59,14 @@ Examples:
   CI=1 ntm dashboard        # Auto-detects plain mode in CI`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput()
 			var session string
 			if len(args) > 0 {
 				session = args[0]
 			}
 
 			// JSON implies no-tui
-			if jsonOutput {
+			if machineJSON {
 				noTUI = true
 			}
 
@@ -80,7 +80,7 @@ Examples:
 				debug = true
 			}
 
-			if jsonOutput {
+			if machineJSON {
 				return runDashboardJSON(cmd.OutOrStdout(), cmd.ErrOrStderr(), session)
 			}
 			if noTUI {
@@ -91,7 +91,6 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Plain text output (no interactive UI)")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output (implies --no-tui)")
 	cmd.Flags().BoolVar(&debug, "debug", false, "Enable debug mode with state inspection")
 	cmd.Flags().BoolVar(&popup, "popup", false, "Run in popup/overlay mode (Esc closes, zoom focuses pane)")
 	cmd.Flags().Int64Var(&attentionCursor, "attention-cursor", 0, "Pre-focus the attention panel on this event cursor")

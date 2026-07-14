@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -61,6 +62,31 @@ func TestGetBulkAssignRejectsInvalidStrategyBeforeExternalWork(t *testing.T) {
 	}
 }
 
+func TestGetBulkAssignRejectsNegativeStaggerBeforeExternalWork(t *testing.T) {
+	listPanesCalled := false
+	deps := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			listPanesCalled = true
+			return nil, errors.New("must not be called")
+		},
+	}
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: "proj",
+		FromBV:  true,
+		Stagger: -time.Millisecond,
+		Deps:    &deps,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	if listPanesCalled {
+		t.Fatal("negative stagger reached external pane discovery")
+	}
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag || output.Assignments == nil || !strings.Contains(output.Error, "non-negative") {
+		t.Fatalf("negative stagger output = %+v", output)
+	}
+}
+
 func TestGetBulkAssignPreservesDependencyLocalDeadline(t *testing.T) {
 	deps := BulkAssignDependencies{
 		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
@@ -78,11 +104,62 @@ func TestGetBulkAssignPreservesDependencyLocalDeadline(t *testing.T) {
 	}
 }
 
+func TestBulkAssignMissingBVAndBRDependenciesAreTyped(t *testing.T) {
+	base := BulkAssignDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return []tmux.Pane{{ID: "%1", Index: 1, Title: "proj__cod_1", Type: tmux.AgentCodex}}, nil
+		},
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) { return t.TempDir(), nil },
+	}
+	tests := []struct {
+		name string
+		deps BulkAssignDependencies
+	}{
+		{
+			name: "bv",
+			deps: BulkAssignDependencies{
+				FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) {
+					return nil, fmt.Errorf("triage startup: %w", bv.ErrNotInstalled)
+				},
+			},
+		},
+		{
+			name: "br",
+			deps: BulkAssignDependencies{
+				FetchTriage: func(context.Context, string) (*bv.TriageResponse, error) { return &bv.TriageResponse{}, nil },
+				FetchInProgress: func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+					return nil, &exec.Error{Name: "br", Err: exec.ErrNotFound}
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deps := base
+			if test.deps.FetchTriage != nil {
+				deps.FetchTriage = test.deps.FetchTriage
+			}
+			if test.deps.FetchInProgress != nil {
+				deps.FetchInProgress = test.deps.FetchInProgress
+			}
+			output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+				Session: "proj", FromBV: true, Strategy: "impact", Deps: &deps,
+			})
+			if err != nil {
+				t.Fatalf("GetBulkAssign transport error: %v", err)
+			}
+			if output.Success || output.ErrorCode != ErrCodeDependencyMissing || strings.TrimSpace(output.Hint) == "" {
+				t.Fatalf("missing %s response=%+v", test.name, output)
+			}
+		})
+	}
+}
+
 func TestBulkAssignImpactStrategySorting(t *testing.T) {
 	triage := mockTriage(nil, []bv.BlockerToClear{
-		{ID: "bd-1", Title: "A", UnblocksCount: 2},
-		{ID: "bd-2", Title: "B", UnblocksCount: 5},
-		{ID: "bd-3", Title: "C", UnblocksCount: 3},
+		{ID: "bd-1", Title: "A", UnblocksCount: 2, Actionable: true},
+		{ID: "bd-2", Title: "B", UnblocksCount: 5, Actionable: true},
+		{ID: "bd-3", Title: "C", UnblocksCount: 3, Actionable: true},
 	})
 	panes := mockPanes("proj", []int{1, 2, 3})
 	plan := planBulkAssignFromBV(BulkAssignOptions{Strategy: "impact"}, BulkAssignDependencies{}, panes, triage, nil)
@@ -98,6 +175,28 @@ func TestBulkAssignImpactStrategySorting(t *testing.T) {
 
 	if !reflect.DeepEqual(expected, got) {
 		t.Fatalf("impact strategy order mismatch: got %v, want %v", got, expected)
+	}
+}
+
+func TestBulkAssignImpactStrategySkipsNonActionableBlockersBeforeAllocation(t *testing.T) {
+	triage := mockTriage(
+		[]bv.TriageRecommendation{{ID: "bd-ready", Title: "Ready fallback", Status: "ready", Priority: 1}},
+		[]bv.BlockerToClear{
+			{ID: "bd-not-actionable", Title: "Blocked candidate", UnblocksCount: 99},
+			{ID: "bd-blocked-by", Title: "Transitively blocked", UnblocksCount: 50, Actionable: true, BlockedBy: []string{"bd-parent"}},
+			{ID: "bd-actionable", Title: "Safe blocker", UnblocksCount: 3, Actionable: true},
+		},
+	)
+	panes := mockPanes("proj", []int{1})
+	plan := planBulkAssignFromBV(BulkAssignOptions{Strategy: "impact"}, BulkAssignDependencies{}, panes, triage, nil)
+	if len(plan.Assignments) != 1 || plan.Assignments[0].Bead != "bd-actionable" {
+		t.Fatalf("impact plan=%+v, want only actionable blocker to consume pane", plan)
+	}
+
+	triage.Triage.BlockersToClear[2].Actionable = false
+	plan = planBulkAssignFromBV(BulkAssignOptions{Strategy: "impact"}, BulkAssignDependencies{}, panes, triage, nil)
+	if len(plan.Assignments) != 1 || plan.Assignments[0].Bead != "bd-ready" {
+		t.Fatalf("impact fallback plan=%+v, want actionable ready work", plan)
 	}
 }
 
@@ -131,6 +230,7 @@ func TestBulkAssignStaleStrategy(t *testing.T) {
 		{ID: "bd-1", Title: "Recent", UpdatedAt: now.Add(-2 * time.Hour)},
 		{ID: "bd-2", Title: "Stale", UpdatedAt: now.Add(-48 * time.Hour)},
 		{ID: "bd-3", Title: "Oldest", UpdatedAt: now.Add(-72 * time.Hour)},
+		{ID: "bd-owned", Title: "Owned stale", Assignee: "ExistingAgent", UpdatedAt: now.Add(-96 * time.Hour)},
 	}
 	panes := mockPanes("proj", []int{1, 2, 3})
 	plan := planBulkAssignFromBV(BulkAssignOptions{Strategy: "stale"}, BulkAssignDependencies{}, panes, nil, inProgress)
@@ -147,6 +247,51 @@ func TestBulkAssignStaleStrategy(t *testing.T) {
 	if !reflect.DeepEqual(expected, got) {
 		t.Fatalf("stale strategy order mismatch: got %v, want %v", got, expected)
 	}
+	for _, beadID := range got {
+		if beadID == "bd-owned" {
+			t.Fatal("stale strategy must not plan an owner-assigned bead onto an arbitrary pane")
+		}
+	}
+}
+
+func TestBulkAssignStaleRecoveryPinsOwnedClaimIntentToOriginalPane(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const beadID = "bd-stale-recovery"
+	store := assignment.NewStore("stale-recovery")
+	store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Recover committed stale claim", Pane: 2,
+		AgentType: "codex", AgentName: "RecoveryAgent", Status: assignment.StatusClaiming,
+		AssignedAt: time.Now().UTC(), IdempotencyKey: "stale-recovery-key",
+		ClaimActor: "RecoveryAgent/ntm-stale-recove", ClaimState: assignment.ClaimUnknown,
+		PendingPrompt: "persisted recovery prompt", PromptSHA256: assignment.PromptSHA256("persisted recovery prompt"),
+		IntentSHA256:   assignment.PromptSHA256("original unredacted recovery prompt"),
+		DispatchTarget: "%42", OccupancyKey: "%42", DispatchState: assignment.DispatchPending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed recovery ledger: %v", err)
+	}
+	panes := []bulkPane{
+		{Ref: tmux.PaneRef{ID: "%41", WindowIndex: 0, PaneIndex: 1}, AgentType: "codex"},
+		{Ref: tmux.PaneRef{ID: "%42", WindowIndex: 0, PaneIndex: 2}, AgentType: "codex"},
+	}
+	inProgress := []bv.BeadInProgress{{
+		ID: beadID, Title: "Tracker title", Assignee: "RecoveryAgent/ntm-stale-recove", UpdatedAt: time.Now().UTC(),
+	}}
+	plan := planBulkAssignFromBV(BulkAssignOptions{Strategy: "stale"}, BulkAssignDependencies{}, panes, nil, inProgress, store)
+	if len(plan.Assignments) != 1 {
+		t.Fatalf("recovery assignments=%+v, want one", plan.Assignments)
+	}
+	recovered := plan.Assignments[0]
+	if recovered.Bead != beadID || recovered.PaneID != "%42" || !recovered.stale || recovered.Reason != "stale_recovery" {
+		t.Fatalf("recovered assignment=%+v", recovered)
+	}
+	if recovered.recovery == nil || recovered.recovery.IdempotencyKey != "stale-recovery-key" ||
+		recovered.recovery.PendingPrompt != "persisted recovery prompt" {
+		t.Fatalf("recovered durable intent=%+v", recovered.recovery)
+	}
+	if !reflect.DeepEqual(plan.UnassignedPanes, []string{"1"}) {
+		t.Fatalf("unassigned panes=%v, want remaining pane 1", plan.UnassignedPanes)
+	}
 }
 
 func TestBulkAssignBalancedStrategyMix(t *testing.T) {
@@ -156,8 +301,8 @@ func TestBulkAssignBalancedStrategyMix(t *testing.T) {
 			{ID: "bd-r2", Title: "Ready2", Status: "ready", Priority: 2},
 		},
 		[]bv.BlockerToClear{
-			{ID: "bd-i1", Title: "Impact1", UnblocksCount: 5},
-			{ID: "bd-i2", Title: "Impact2", UnblocksCount: 3},
+			{ID: "bd-i1", Title: "Impact1", UnblocksCount: 5, Actionable: true},
+			{ID: "bd-i2", Title: "Impact2", UnblocksCount: 3, Actionable: true},
 		},
 	)
 	inProgress := []bv.BeadInProgress{
@@ -438,6 +583,30 @@ func TestPlanBulkAssignFromAllocationRejectsConflictingPhysicalAliases(t *testin
 	for _, assignment := range plan.Assignments {
 		if assignment.Status != "failed" || !strings.Contains(assignment.Error, "same physical pane") {
 			t.Fatalf("conflicting alias was not rejected before execution: %+v", assignment)
+		}
+	}
+}
+
+func TestPlanBulkAssignFromAllocationRejectsDuplicateBeadAcrossPanes(t *testing.T) {
+	panes := []bulkPane{
+		{Ref: tmux.PaneRef{ID: "%10", WindowIndex: 0, PaneIndex: 0}, AgentType: "codex", Title: "proj__cod_1"},
+		{Ref: tmux.PaneRef{ID: "%11", WindowIndex: 0, PaneIndex: 1}, AgentType: "claude", Title: "proj__cc_2"},
+	}
+	deps := bulkAssignDeps(&BulkAssignDependencies{
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) { return "Title " + beadID, nil },
+	})
+
+	plan := planBulkAssignFromAllocation(t.Context(), BulkAssignOptions{}, deps, panes, map[string]string{
+		"%10": "bd-duplicate",
+		"%11": "bd-duplicate",
+	})
+
+	if len(plan.Assignments) != 2 || plan.failed != 2 {
+		t.Fatalf("duplicate bead plan = %+v failed=%d, want two failures", plan.Assignments, plan.failed)
+	}
+	for _, assignment := range plan.Assignments {
+		if assignment.Status != "failed" || assignment.failureCode != ErrCodeInvalidFlag || !strings.Contains(assignment.Error, "same bead") {
+			t.Fatalf("duplicate bead assignment was not rejected deterministically: %+v", assignment)
 		}
 	}
 }
@@ -874,6 +1043,42 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 	}
 }
 
+func TestBulkAssignStalePlanUsesGuardedStaleClaimer(t *testing.T) {
+	panes := []bulkPane{{Ref: tmux.PaneRef{ID: "%22", WindowIndex: 0, PaneIndex: 1}, AgentType: "codex"}}
+	plan := allocateBulkAssignBeads(panes, []bulkBead{{
+		ID: "bd-stale-adopt", Title: "Adopt abandoned work", Source: bulkSourceStale,
+		UpdatedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
+	}})
+	var ordinaryClaims, staleClaims int
+	deps := BulkAssignDependencies{
+		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		DispatchDeliverer: bulkTestDeliverer(t, func(dispatchsvc.Delivery) error {
+			return nil
+		}),
+	}
+	deps = bulkAtomicTestDeps(t, "bulk-stale-adopt", plan, deps)
+	deps.ClaimBead = func(context.Context, string, string, string) (bv.BeadClaimResult, error) {
+		ordinaryClaims++
+		return bv.BeadClaimResult{}, errors.New("ordinary ready-work claimer must not adopt stale work")
+	}
+	deps.ClaimStaleBead = func(_ context.Context, _ string, beadID, actor string, expectedUpdatedAt time.Time) (bv.BeadClaimResult, error) {
+		staleClaims++
+		if !expectedUpdatedAt.Equal(time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)) {
+			t.Fatalf("stale claim expected update=%s", expectedUpdatedAt)
+		}
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+
+	output := BulkAssignOutput{Session: "bulk-stale-adopt"}
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(&deps), &output, plan)
+	if ordinaryClaims != 0 || staleClaims != 1 {
+		t.Fatalf("claim calls ordinary=%d stale=%d, want guarded stale claimer exactly once", ordinaryClaims, staleClaims)
+	}
+	if len(output.Assignments) != 1 || output.Assignments[0].Status != "assigned" || !output.Assignments[0].Claimed {
+		t.Fatalf("stale assignment output=%+v", output.Assignments)
+	}
+}
+
 func TestRobotAtomicPaneDispatchRevalidatesFreshIdleBeforeActuation(t *testing.T) {
 	pane := tmux.Pane{ID: "%31", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}
 	tests := []struct {
@@ -1005,6 +1210,276 @@ func TestRobotAtomicReplayMatchesRawIntentAgainstRedactedDurablePrompt(t *testin
 	}
 	if replay := robotAtomicReplayIntent(store, "bd-redacted", "%44", 9, "codex", rawPrompt, false, nil); replay == nil || replay.IdempotencyKey != key || replay.Pane != 1 {
 		t.Fatalf("raw intent did not match redacted durable replay: %+v", replay)
+	}
+}
+
+func TestBulkDurableSentReplayIgnoresCurrentPolicyAndExternalServices(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "sent-replay"
+	recovery := &assignment.Assignment{
+		BeadID: "bd-sent-replay", BeadTitle: "title now blocked by policy", Pane: 1,
+		AgentType: "codex", AgentName: "ReplayAgent", Status: assignment.StatusAssigned,
+		IdempotencyKey: "sent-replay-key", ClaimActor: "ReplayAgent/ntm-sent-replay",
+		ClaimState: assignment.ClaimClaimed, ReservationRequired: true,
+		ReservationInputPaths: []string{"blocked/secret/**"}, DispatchTarget: "%91", OccupancyKey: "%91",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "receipt-sent-replay",
+		IntentSHA256: assignment.PromptSHA256("original prompt"), PromptSHA256: assignment.PromptSHA256("durable prompt"),
+		PromptSent: "durable prompt",
+	}
+	store := assignment.NewStore(session)
+	store.Assignments[recovery.BeadID] = recovery
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed durable sent replay: %v", err)
+	}
+	plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+		Pane: "1", PaneID: "%91", Bead: recovery.BeadID, BeadTitle: recovery.BeadTitle,
+		AgentType: recovery.AgentType, Status: "planned", recovery: recovery,
+	}}}
+	policyCalls := 0
+	deps := bulkAssignDeps(&BulkAssignDependencies{
+		LoadRedaction: func(string) (redaction.Config, error) {
+			policyCalls++
+			return redaction.Config{}, errors.New("current policy is unavailable")
+		},
+	})
+	output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true}, deps, &output, plan)
+	if policyCalls != 0 || len(output.Assignments) != 1 {
+		t.Fatalf("policy calls=%d assignments=%+v", policyCalls, output.Assignments)
+	}
+	replayed := output.Assignments[0]
+	if !output.Success || replayed.Status != "assigned" || !replayed.PromptSent || !replayed.Claimed ||
+		replayed.IdempotencyKey != recovery.IdempotencyKey || replayed.DispatchReceiptID != recovery.DispatchReceiptID {
+		t.Fatalf("durable sent replay output=%+v", output)
+	}
+}
+
+func TestBulkDurableSentReplayCoexistsWithFreshPlanOutcomes(t *testing.T) {
+	tests := []struct {
+		name            string
+		freshOutcome    string
+		wantSuccess     bool
+		wantFreshStatus string
+		wantErrorCode   string
+		wantDeliveries  int
+		wantSummary     BulkAssignSummary
+	}{
+		{
+			name: "fresh success", freshOutcome: "success", wantSuccess: true,
+			wantFreshStatus: "assigned", wantDeliveries: 1,
+			wantSummary: BulkAssignSummary{TotalPanes: 2, Assigned: 2},
+		},
+		{
+			name: "fresh setup failure", freshOutcome: "setup_failure",
+			wantFreshStatus: "failed", wantErrorCode: "ASSIGNMENT_FAILED",
+			wantSummary: BulkAssignSummary{TotalPanes: 2, Assigned: 1, Failed: 1},
+		},
+		{
+			name: "fresh cancellation", freshOutcome: "canceled",
+			wantFreshStatus: "failed", wantErrorCode: ErrCodeTimeout,
+			wantSummary: BulkAssignSummary{TotalPanes: 2, Assigned: 1, Failed: 1},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			const session = "mixed-sent-replay"
+			recovery := &assignment.Assignment{
+				BeadID: "bd-mixed-replay", BeadTitle: "Durable replay", Pane: 1,
+				AgentType: "codex", AgentName: "ReplayAgent", Status: assignment.StatusAssigned,
+				IdempotencyKey: "mixed-replay-key", ClaimActor: "ReplayAgent/ntm-mixed-repla",
+				ClaimState: assignment.ClaimClaimed, DispatchTarget: "%91", OccupancyKey: "%91",
+				DispatchState: assignment.DispatchSent, DispatchReceiptID: "mixed-replay-receipt",
+				IntentSHA256: assignment.PromptSHA256("original replay prompt"),
+				PromptSHA256: assignment.PromptSHA256("durable replay prompt"), PromptSent: "durable replay prompt",
+			}
+			store := assignment.NewStore(session)
+			store.Assignments[recovery.BeadID] = recovery
+			if err := store.Save(); err != nil {
+				t.Fatalf("seed mixed replay store: %v", err)
+			}
+			plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{
+				{
+					Pane: "1", PaneID: "%91", Bead: recovery.BeadID, BeadTitle: recovery.BeadTitle,
+					AgentType: recovery.AgentType, Status: "planned", paneIndex: 1, recovery: recovery,
+				},
+				{
+					Pane: "2", PaneID: "%92", Bead: "bd-mixed-fresh", BeadTitle: "Fresh work",
+					AgentType: "codex", Status: "planned", paneIndex: 2,
+				},
+			}}
+			panes := []tmux.Pane{
+				{ID: "%91", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex},
+				{ID: "%92", WindowIndex: 0, Index: 2, Type: tmux.AgentCodex},
+			}
+			ctx := t.Context()
+			var cancelFresh context.CancelFunc
+			if test.freshOutcome == "canceled" {
+				ctx, cancelFresh = context.WithCancel(ctx)
+				defer cancelFresh()
+			}
+			deliveries := 0
+			deps := bulkAssignDeps(&BulkAssignDependencies{
+				LoadStore: func(string) (*assignment.AssignmentStore, error) { return store, nil },
+				LoadRedaction: func(string) (redaction.Config, error) {
+					if test.freshOutcome == "setup_failure" {
+						return redaction.Config{}, errors.New("fresh redaction policy unavailable")
+					}
+					return redaction.Config{Mode: redaction.ModeOff}, nil
+				},
+				ReadFile: func(string) ([]byte, error) {
+					if test.freshOutcome == "canceled" {
+						cancelFresh()
+					}
+					return []byte(defaultBulkAssignTemplate), nil
+				},
+				ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+					return append([]tmux.Pane(nil), panes...), nil
+				},
+				ObserveSession: bulkSafeObserver(panes),
+				ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+					return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+				},
+				NewIdempotencyKey: func() (string, error) { return "mixed-fresh-key", nil },
+				DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+					deliveries++
+					return nil
+				}),
+			})
+			output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
+			applyBulkAssignPlan(ctx, BulkAssignOptions{
+				projectDir: t.TempDir(), PromptTemplatePath: "mixed-template.txt",
+			}, deps, &output, plan)
+
+			if output.Success != test.wantSuccess || output.ErrorCode != test.wantErrorCode ||
+				output.Summary != test.wantSummary || deliveries != test.wantDeliveries || len(output.Assignments) != 2 {
+				t.Fatalf("deliveries=%d output=%+v", deliveries, output)
+			}
+			replayed := output.Assignments[0]
+			fresh := output.Assignments[1]
+			if replayed.Status != "assigned" || !replayed.Claimed || !replayed.PromptSent ||
+				replayed.DispatchReceiptID != recovery.DispatchReceiptID || replayed.Error != "" {
+				t.Fatalf("durable replay was overwritten by fresh %s: %+v", test.freshOutcome, replayed)
+			}
+			if fresh.Status != test.wantFreshStatus {
+				t.Fatalf("fresh %s result=%+v", test.freshOutcome, fresh)
+			}
+			if test.wantFreshStatus == "failed" && (fresh.Claimed || fresh.PromptSent || strings.TrimSpace(fresh.Error) == "") {
+				t.Fatalf("fresh %s failure actuated or lacks detail: %+v", test.freshOutcome, fresh)
+			}
+		})
+	}
+}
+
+func TestBulkDurableSentReplayRejectsChangedGenerationAfterPlanning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "sent-replay-generation-change"
+	const beadID = "bd-sent-replay-generation-change"
+	old := &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Old generation", Pane: 1,
+		AgentType: "codex", AgentName: "OldAgent", Status: assignment.StatusAssigned,
+		IdempotencyKey: "old-generation-key", ClaimActor: "OldAgent/ntm-old-generati",
+		ClaimState: assignment.ClaimClaimed, DispatchTarget: "%93", OccupancyKey: "%93",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "old-generation-receipt",
+		IntentSHA256: assignment.PromptSHA256("old prompt"), PromptSHA256: assignment.PromptSHA256("old prompt"),
+		PromptSent: "old prompt",
+	}
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = old
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed old generation: %v", err)
+	}
+	plannedSnapshot := store.Get(beadID)
+	current := store.Assignments[beadID]
+	current.BeadTitle = "New generation"
+	current.AgentName = "NewAgent"
+	current.ClaimActor = "NewAgent/ntm-new-generati"
+	current.IdempotencyKey = "new-generation-key"
+	current.DispatchReceiptID = "new-generation-receipt"
+	current.IntentSHA256 = assignment.PromptSHA256("new prompt")
+	current.PromptSHA256 = assignment.PromptSHA256("new prompt")
+	current.PromptSent = "new prompt"
+	if err := store.Save(); err != nil {
+		t.Fatalf("persist replacement generation: %v", err)
+	}
+	plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+		Pane: "1", PaneID: "%93", Bead: beadID, BeadTitle: plannedSnapshot.BeadTitle,
+		AgentType: plannedSnapshot.AgentType, Status: "planned", recovery: plannedSnapshot,
+	}}}
+	output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{}, bulkAssignDeps(nil), &output, plan)
+	if output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" ||
+		output.Assignments[0].DispatchReceiptID == "old-generation-receipt" {
+		t.Fatalf("stale replay snapshot was accepted: %+v", output)
+	}
+}
+
+func TestBulkPendingRecoveryReusesValidReservationWithoutAgentMail(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "bulk-valid-reservation-recovery"
+	const beadID = "bd-valid-reservation-recovery"
+	const prompt = "persisted reserved recovery prompt"
+	const key = "valid-reservation-recovery-key"
+	const actor = "ReservedAgent/ntm-valid-reserv"
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Hour)
+	claimedAt := now.Add(-time.Minute)
+	recovery := &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Recover with durable lease", Pane: 1,
+		AgentType: "codex", AgentName: "ReservedAgent", Status: assignment.StatusClaimed,
+		AssignedAt: now.Add(-2 * time.Minute), IdempotencyKey: key, ClaimActor: actor,
+		ClaimState: assignment.ClaimClaimed, ClaimStatus: "in_progress", ClaimedAt: &claimedAt,
+		ReservationRequired: true, ReservationInputPaths: []string{"internal/robot/**"},
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservationAgent: "ReservedAgent", ReservationTarget: "%92",
+		ReservationRequested: []string{"internal/robot/**"}, ReservedPaths: []string{"internal/robot/**"},
+		ReservationIDs: []int{92}, ReservationExpiresAt: &expiresAt,
+		DispatchTarget: "%92", OccupancyKey: "%92", DispatchState: assignment.DispatchPending,
+		PendingPrompt: prompt, PromptSHA256: assignment.PromptSHA256(prompt),
+		IntentSHA256: assignment.PromptSHA256("original unredacted reserved prompt"),
+	}
+	store := assignment.NewStore(session)
+	store.Assignments[beadID] = recovery
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed valid reservation recovery: %v", err)
+	}
+	panes := []tmux.Pane{{ID: "%92", WindowIndex: 0, Index: 1, Type: tmux.AgentCodex}}
+	deliveries := 0
+	deps := bulkAssignDeps(&BulkAssignDependencies{
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) { return t.TempDir(), nil },
+		LoadStore:      func(string) (*assignment.AssignmentStore, error) { return store, nil },
+		ListPanes:      func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		ObserveSession: func(context.Context, string) (statuspkg.SessionObservation, error) {
+			return bulkSafeObservation(session, panes), nil
+		},
+		ClaimStaleBead: func(_ context.Context, _ string, gotBead, gotActor string, _ time.Time) (bv.BeadClaimResult, error) {
+			if gotBead != beadID || gotActor != actor {
+				t.Fatalf("stale claim bead=%q actor=%q", gotBead, gotActor)
+			}
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: now}, nil
+		},
+		GetBeadStatus: func(context.Context, string, string) (string, error) { return "in_progress", nil },
+		NewIdempotencyKey: func() (string, error) {
+			t.Fatal("recovery generated a new idempotency key")
+			return "", nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(context.Context, dispatchsvc.Delivery) error {
+			deliveries++
+			return nil
+		}),
+		LoadRedaction: func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
+	})
+	plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+		Pane: "1", PaneID: "%92", Bead: beadID, BeadTitle: recovery.BeadTitle,
+		AgentType: recovery.AgentType, Status: "planned", paneIndex: 1,
+		stale: true, staleUpdatedAt: now, recovery: recovery,
+	}}}
+	output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{projectDir: t.TempDir()}, deps, &output, plan)
+	if !output.Success || deliveries != 1 || len(output.Assignments) != 1 ||
+		output.Assignments[0].Status != "assigned" || output.Assignments[0].DispatchReceiptID == "" {
+		t.Fatalf("deliveries=%d output=%+v", deliveries, output)
 	}
 }
 
@@ -1789,6 +2264,70 @@ func TestBulkAssignLargeTriage(t *testing.T) {
 	t.Logf("assignments=%d unassigned=%d", len(plan.Assignments), len(plan.UnassignedBeads))
 }
 
+func TestBulkAssignBVSelectionDeduplicatesOverlappingCandidateLists(t *testing.T) {
+	triage := mockTriage(
+		[]bv.TriageRecommendation{
+			{ID: "bd-overlap", Title: "Ready duplicate", Status: "ready", Priority: 1},
+			{ID: "bd-ready", Title: "Ready only", Status: "ready", Priority: 2},
+		},
+		[]bv.BlockerToClear{{ID: "bd-overlap", Title: "Impact duplicate", UnblocksCount: 4, Actionable: true}},
+	)
+	inProgress := []bv.BeadInProgress{
+		{ID: "bd-overlap", Title: "Stale duplicate", UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "bd-stale", Title: "Stale only", UpdatedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+	}
+	selected := selectBulkAssignBeads("balanced", buildBulkAssignCandidates(triage, inProgress))
+
+	want := []string{"bd-ready", "bd-overlap", "bd-stale"}
+	got := make([]string, 0, len(selected))
+	for _, bead := range selected {
+		got = append(got, bead.ID)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("balanced selection IDs = %v, want unique stable order %v", got, want)
+	}
+	if selected[1].Source != bulkSourceStale || !selected[1].UpdatedAt.Equal(inProgress[0].UpdatedAt) {
+		t.Fatalf("overlap source=%q updated_at=%s, want newer stale state", selected[1].Source, selected[1].UpdatedAt)
+	}
+}
+
+func TestBulkAssignNewerInProgressSnapshotOverridesCachedTriageForEveryStrategy(t *testing.T) {
+	triage := mockTriage(
+		[]bv.TriageRecommendation{
+			{ID: "bd-overlap", Title: "Cached ready", Status: "ready", Priority: 0},
+			{ID: "bd-ready", Title: "Current ready", Status: "ready", Priority: 1},
+		},
+		[]bv.BlockerToClear{{ID: "bd-overlap", Title: "Cached impact", UnblocksCount: 99, Actionable: true}},
+	)
+	inProgress := []bv.BeadInProgress{{
+		ID: "bd-overlap", Title: "Current stale", UpdatedAt: time.Now().UTC().Add(-48 * time.Hour),
+	}}
+	candidates := buildBulkAssignCandidates(triage, inProgress)
+	tests := []struct {
+		strategy string
+		wantID   string
+		want     bulkBeadSource
+	}{
+		{strategy: "impact", wantID: "bd-ready", want: bulkSourceReady},
+		{strategy: "ready", wantID: "bd-ready", want: bulkSourceReady},
+		{strategy: "stale", wantID: "bd-overlap", want: bulkSourceStale},
+		{strategy: "balanced", wantID: "bd-ready", want: bulkSourceReady},
+	}
+	for _, test := range tests {
+		t.Run(test.strategy, func(t *testing.T) {
+			selected := selectBulkAssignBeads(test.strategy, candidates)
+			if len(selected) == 0 || selected[0].ID != test.wantID || selected[0].Source != test.want {
+				t.Fatalf("selection=%+v, want first %s via %s", selected, test.wantID, test.want)
+			}
+			for _, bead := range selected {
+				if bead.ID == "bd-overlap" && bead.Source != bulkSourceStale {
+					t.Fatalf("strategy %s routed overlap through %s", test.strategy, bead.Source)
+				}
+			}
+		})
+	}
+}
+
 func TestBulkAssignConcurrentSafety(t *testing.T) {
 	triage := mockTriage([]bv.TriageRecommendation{{ID: "bd-1", Title: "Test", Status: "ready", Priority: 1}}, nil)
 	inProgress := []bv.BeadInProgress{{ID: "bd-2", Title: "Stale", UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}}
@@ -1877,6 +2416,9 @@ func bulkAtomicTestDeps(t *testing.T, session string, plan bulkAssignPlan, deps 
 		}
 		owners[beadID] = actor
 		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	deps.ClaimStaleBead = func(ctx context.Context, dir, beadID, actor string, _ time.Time) (bv.BeadClaimResult, error) {
+		return deps.ClaimBead(ctx, dir, beadID, actor)
 	}
 	deps.NewIdempotencyKey = func() (string, error) {
 		mu.Lock()

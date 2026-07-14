@@ -83,12 +83,16 @@ Examples:
   ntm review-queue myproject --commits 10      # Include last 10 commits`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(formatOut), "json")
+			if machineJSON && send {
+				return fmt.Errorf("invalid argument: --send cannot be combined with JSON output")
+			}
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
 			}
 			res, err := ResolveSessionWithOptions(session, cmd.OutOrStdout(), SessionResolveOptions{
-				TreatAsJSON: IsJSONOutput() || strings.EqualFold(formatOut, "json"),
+				TreatAsJSON: machineJSON,
 			})
 			if err != nil {
 				return err
@@ -96,7 +100,7 @@ Examples:
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(cmd.ErrOrStderr())
+			res.ExplainIfInferredForOutput(cmd.ErrOrStderr(), machineJSON)
 			session = res.Session
 
 			return runReviewQueue(session, filter, idleThreshold, send, formatOut, commitLimit)
@@ -117,7 +121,10 @@ func runReviewQueue(session, filter string, idleThreshold time.Duration, send bo
 	// flag. Before this fix, `ntm review-queue --json` fell through to
 	// the human-readable report path, contaminating stdout with prose
 	// when downstream tools (flywheel L85) tried to `jq` the output.
-	isJSON := strings.EqualFold(formatOut, "json") || IsJSONOutput()
+	isJSON := strings.EqualFold(strings.TrimSpace(formatOut), "json") || IsJSONOutput()
+	if isJSON && send {
+		return fmt.Errorf("invalid argument: --send cannot be combined with JSON output")
+	}
 
 	// In JSON mode, suppress slog telemetry for the duration of this
 	// call so consumers that capture `2>&1` get a clean parseable
@@ -171,6 +178,12 @@ func runReviewQueue(session, filter string, idleThreshold time.Duration, send bo
 
 	// Generate review suggestions
 	suggestions := generateReviewSuggestions(store, idleAgents, commitLimit)
+	if idleAgents == nil {
+		idleAgents = []IdleAgent{}
+	}
+	if suggestions == nil {
+		suggestions = []ReviewSuggestion{}
+	}
 
 	slog.Info("[E2E-REVIEWQ] analysis",
 		"session", session,

@@ -3590,7 +3590,7 @@ func TestE2EAtomicAssignmentRetryFailedMixedRecoveryBuiltProcess(t *testing.T) {
 		fixture.waitForEndpointMarkerCount(t, seed.pane, seed.prompt, 1)
 	}
 
-	fixture.driveAssignmentStatus(t, fixture.panes[0], recoverableBeadID, "ERROR: fatal mixed retry recoverable failure", "failed")
+	fixture.driveAssignmentStatusWithCompletionEvent(t, fixture.panes[0], recoverableBeadID, "ERROR: fatal mixed retry recoverable failure", "failed")
 	failedBeforeRetry := fixture.readLedgerAssignment(t, recoverableBeadID)
 	if failedBeforeRetry.PendingCompletionEventID == "" {
 		t.Fatalf("mixed retry recoverable failure has no durable completion event: %+v", failedBeforeRetry)
@@ -5655,7 +5655,7 @@ func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
 		}
 		fixture.waitForEndpointMarkerCount(t, source, originalPrompt, 1)
 		before := fixture.readLedgerAssignment(t, beadID)
-		fixture.driveAssignmentStatus(t, source, beadID, "ERROR: fatal assignment failure", "failed")
+		fixture.driveAssignmentStatusWithCompletionEvent(t, source, beadID, "ERROR: fatal assignment failure", "failed")
 		fixture.primeEndpointForSafeDispatch(t, target)
 		time.Sleep(5500 * time.Millisecond)
 		failed := fixture.readLedgerAssignment(t, beadID)
@@ -7217,6 +7217,14 @@ func (f *atomicAssignmentCLIFixture) primeEndpointForSafeDispatch(t *testing.T, 
 }
 
 func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane atomicAssignmentPane, beadID, paneOutput, wantStatus string) {
+	f.driveAssignmentStatusUntil(t, pane, beadID, paneOutput, wantStatus, false)
+}
+
+func (f *atomicAssignmentCLIFixture) driveAssignmentStatusWithCompletionEvent(t *testing.T, pane atomicAssignmentPane, beadID, paneOutput, wantStatus string) {
+	f.driveAssignmentStatusUntil(t, pane, beadID, paneOutput, wantStatus, true)
+}
+
+func (f *atomicAssignmentCLIFixture) driveAssignmentStatusUntil(t *testing.T, pane atomicAssignmentPane, beadID, paneOutput, wantStatus string, requireCompletionEvent bool) {
 	t.Helper()
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "-l", paneOutput)
 	f.mustTMUX(t, "send-keys", "-t", pane.ID, "Enter")
@@ -7246,7 +7254,8 @@ func (f *atomicAssignmentCLIFixture) driveAssignmentStatus(t *testing.T, pane at
 	for {
 		ledger, readErr := f.readLedger()
 		if readErr == nil {
-			if record := ledger.Assignments[beadID]; record != nil && record.Status == wantStatus {
+			if record := ledger.Assignments[beadID]; record != nil && record.Status == wantStatus &&
+				(!requireCompletionEvent || strings.TrimSpace(record.PendingCompletionEventID) != "") {
 				break
 			}
 		}

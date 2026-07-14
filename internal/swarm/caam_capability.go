@@ -15,7 +15,8 @@ import (
 // to perform a *global* caam switch unless caam advertises this capability.
 const CapabilitySafeRestore = "safe-restore"
 
-// caamRobotStatus is the subset of `caam robot status --json` we care about. caam
+// caamRobotStatus is the subset of `caam robot status` we care about. caam's
+// robot subcommands emit JSON without an additional format flag.
 // exposes data.capabilities (e.g. ["safe-restore"]) since caam 0bdd715.
 type caamRobotStatus struct {
 	Data struct {
@@ -29,7 +30,7 @@ type caamRobotStatus struct {
 // gating logic is unit-testable without a live caam binary.
 type caamCapabilityProber func(ctx context.Context) ([]string, error)
 
-// defaultCaamCapabilityProber runs `caam robot status --json` and extracts the
+// defaultCaamCapabilityProber runs `caam robot status` and extracts the
 // advertised capabilities. A non-zero exit or unparseable output yields an error
 // (the caller fails closed).
 func defaultCaamCapabilityProber(caamPath string, timeout time.Duration) caamCapabilityProber {
@@ -38,7 +39,7 @@ func defaultCaamCapabilityProber(caamPath string, timeout time.Duration) caamCap
 		if path == "" {
 			path = "caam"
 		}
-		stdout, stderr, err := runCmdCapture(ctx, timeout, path, "robot", "status", "--json")
+		stdout, stderr, err := runCmdCapture(ctx, timeout, path, "robot", "status")
 		if err != nil {
 			return nil, fmt.Errorf("caam robot status: %w (%s)", err, strings.TrimSpace(stderr))
 		}

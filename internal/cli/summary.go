@@ -93,6 +93,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	if err != nil {
 		return err
 	}
+	machineJSON := forceJSON || IsJSONOutput()
 
 	wd, _ := os.Getwd()
 	projectDir, err := resolveProjectDir(sessionArg, wd, strings.TrimSpace(sessionArg) != "")
@@ -105,7 +106,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	}
 
 	if regenerate {
-		return regenerateSummaryFromArchive(sessionArg, sumFormat, forceJSON || IsJSONOutput(), projectDir, wd)
+		return regenerateSummaryFromArchive(sessionArg, sumFormat, machineJSON, projectDir, wd)
 	}
 
 	if recent {
@@ -113,7 +114,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 		if !ok {
 			return fmt.Errorf("no summaries found")
 		}
-		return outputSummaryFromFile(latest.Path, sumFormat, forceJSON || IsJSONOutput())
+		return outputSummaryFromFile(latest.Path, sumFormat, machineJSON)
 	}
 
 	if sessionArg != "" {
@@ -123,7 +124,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 		}
 		if ok {
 			if latest, found := latestSummaryForSession(summaryFiles, resolved); found {
-				return outputSummaryFromFile(latest.Path, sumFormat, forceJSON || IsJSONOutput())
+				return outputSummaryFromFile(latest.Path, sumFormat, machineJSON)
 			}
 		}
 	}
@@ -131,17 +132,17 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	if err := tmux.EnsureInstalled(); err != nil {
 		if sessionArg == "" && len(summaryFiles) > 0 {
 			if latest, ok := latestSummaryForSession(summaryFiles, ""); ok {
-				return outputSummaryFromFile(latest.Path, sumFormat, forceJSON || IsJSONOutput())
+				return outputSummaryFromFile(latest.Path, sumFormat, machineJSON)
 			}
 		}
 		return err
 	}
 
-	res, err := ResolveSession(sessionArg, os.Stdout)
+	res, err := ResolveSessionWithOptions(sessionArg, os.Stdout, SessionResolveOptions{TreatAsJSON: machineJSON})
 	if err != nil {
 		if sessionArg == "" && len(summaryFiles) > 0 {
 			if latest, ok := latestSummaryForSession(summaryFiles, ""); ok {
-				return outputSummaryFromFile(latest.Path, sumFormat, forceJSON || IsJSONOutput())
+				return outputSummaryFromFile(latest.Path, sumFormat, machineJSON)
 			}
 		}
 		return err
@@ -149,7 +150,7 @@ func runSummary(args []string, sinceStr, format string, recent, regenerate bool)
 	if res.Session == "" {
 		return nil
 	}
-	res.ExplainIfInferred(os.Stderr)
+	res.ExplainIfInferredForOutput(os.Stderr, machineJSON)
 	session := res.Session
 	projectDir, err = resolveProjectDir(session, wd, !res.Inferred)
 	if err != nil {
@@ -217,6 +218,9 @@ func runSummaryList(format string) error {
 	}
 
 	if len(files) == 0 {
+		if IsJSONOutput() || forceJSON {
+			return output.PrintJSON([]summaryFileInfo{})
+		}
 		fmt.Println("No summaries found.")
 		return nil
 	}

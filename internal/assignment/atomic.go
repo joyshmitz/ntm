@@ -722,6 +722,7 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			actor = prior.ClaimActor
 		}
 	}
+	recoveringDurableIntent := false
 	if recoveredIntent := strings.TrimSpace(req.RecoveredIntentSHA256); recoveredIntent != "" {
 		if prior == nil || prior.IdempotencyKey != req.IdempotencyKey {
 			return result, errors.New("recovered intent checksum requires an existing same-key assignment")
@@ -734,6 +735,15 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 			return result, errors.New("recovered intent checksum does not match the durable assignment")
 		}
 		req.IntentSHA256 = storedIntent
+		recoveringDurableIntent = true
+		if prior.DispatchState != DispatchSent && prior.DispatchState != DispatchSending {
+			if strings.TrimSpace(prior.PendingPrompt) == "" {
+				return result, errors.New("recovered unsent assignment has no durable pending prompt")
+			}
+			rawPrompt = prior.PendingPrompt
+			req.Prompt = prior.PendingPrompt
+			req.BeadTitle = prior.BeadTitle
+		}
 	}
 	if prior != nil {
 		if prior.ClearState != ClearStateNone && !replacementStart {
@@ -827,6 +837,12 @@ func (c *AtomicCoordinator) Execute(ctx context.Context, req AtomicRequest) (Ato
 		if strings.TrimSpace(preflightResult.DurableTitle) != "" {
 			durableTitle = preflightResult.DurableTitle
 		}
+	}
+	if recoveringDurableIntent {
+		if strings.TrimSpace(prior.PendingPrompt) != "" {
+			durablePrompt = prior.PendingPrompt
+		}
+		durableTitle = prior.BeadTitle
 	}
 	req.BeadTitle = durableTitle
 	persistedReq := req

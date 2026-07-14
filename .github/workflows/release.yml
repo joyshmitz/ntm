@@ -299,29 +299,17 @@ jobs:
           cache: true
 
       - name: Build ntm
-        run: go build -o ntm ./cmd/ntm
+        run: go build -trimpath -ldflags "-X github.com/Dicklesworthstone/ntm/internal/cli.Version=0.0.0" -o ntm ./cmd/ntm
 
-      - name: Verify upgrade --check finds assets
+      - name: Verify strict upgrade asset resolution
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "Testing upgrade --check on ${{ matrix.goos }}/${{ matrix.goarch }}"
-          # Run upgrade --check and capture output
-          if ./ntm upgrade --check 2>&1 | tee upgrade_output.txt; then
-            echo "Upgrade check passed"
-          else
-            echo "Upgrade check failed"
-            cat upgrade_output.txt
-            exit 1
-          fi
-
-          # Verify it found the correct asset (not "no suitable release asset")
-          if grep -q "no suitable release asset" upgrade_output.txt; then
-            echo "ERROR: upgrade --check could not find release asset for ${{ matrix.goos }}/${{ matrix.goarch }}"
-            echo "This indicates a mismatch between upgrade.go and .goreleaser.yaml"
-            exit 1
-          fi
-
-          echo "Asset naming contract verified for ${{ matrix.goos }}/${{ matrix.goarch }}"
+          ./ntm upgrade --check --strict --release-tag="${GITHUB_REF_NAME}" 2>&1 | tee upgrade_output.txt
+          grep -q "Asset available:" upgrade_output.txt
+          echo "Strict asset naming contract verified for ${{ matrix.goos }}/${{ matrix.goarch }}"
 
   # ============================================================================
   # ANNOUNCE - Post-release notifications

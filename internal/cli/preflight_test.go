@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/lint"
 )
@@ -31,13 +33,12 @@ func TestPreflightJSONBlockedReturnsOneTerminalFailure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			jsonOutput = tt.globalJSON
-			cmd := newPreflightCmd()
-			cmd.SilenceErrors = true
-			cmd.SilenceUsage = true
-			cmd.SetArgs(tt.args)
+			testRoot := &cobra.Command{Use: "ntm", SilenceErrors: true, SilenceUsage: true}
+			testRoot.PersistentFlags().BoolVar(&jsonOutput, "json", tt.globalJSON, "Output as JSON")
+			testRoot.AddCommand(newPreflightCmd())
+			testRoot.SetArgs(append([]string{"preflight"}, tt.args...))
 
-			stdout, runErr := captureStdout(t, cmd.Execute)
+			stdout, runErr := captureStdout(t, testRoot.Execute)
 			if !errors.Is(runErr, errJSONFailure) {
 				t.Fatalf("preflight error = %v, want errJSONFailure", runErr)
 			}

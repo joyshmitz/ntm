@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -264,6 +267,121 @@ func TestFindUpgradeAssetRejectsPackageArtifacts(t *testing.T) {
 	match, _ := findUpgradeAsset(assets, "linux", "amd64", "1.11.0", false)
 	if match != nil {
 		t.Fatalf("findUpgradeAsset() picked %q from package artifacts, want nil", match.Asset.Name)
+	}
+}
+
+func TestRunUpgradeCheckStrictRequiresReleaseAndExactPlatformAsset(t *testing.T) {
+	originalFetch := fetchReleaseForUpgrade
+	originalVersion := Version
+	t.Cleanup(func() {
+		fetchReleaseForUpgrade = originalFetch
+		Version = originalVersion
+	})
+	Version = "0.0.0"
+
+	fetchReleaseForUpgrade = func(string) (*GitHubRelease, error) {
+		return nil, errors.New("release service unavailable")
+	}
+	_, err := captureStdout(t, func() error {
+		return runUpgrade(true, false, false, true, false, "")
+	})
+	if err == nil || !strings.Contains(err.Error(), "release service unavailable") {
+		t.Fatalf("strict fetch error = %v, want propagated release-service failure", err)
+	}
+	_, err = captureStdout(t, func() error {
+		return runUpgrade(true, false, false, false, false, "v-does-not-exist")
+	})
+	if err == nil || !strings.Contains(err.Error(), "release service unavailable") {
+		t.Fatalf("explicit-tag fetch error = %v, want propagated release-service failure", err)
+	}
+
+	const latest = "1.2.3"
+	exactAsset := getArchiveAssetName(latest)
+	var requestedTag string
+	fetchReleaseForUpgrade = func(tag string) (*GitHubRelease, error) {
+		requestedTag = tag
+		return &GitHubRelease{
+			TagName: "v" + latest,
+			Assets:  []GitHubAsset{{Name: exactAsset, Size: 1024}},
+		}, nil
+	}
+	output, err := captureStdout(t, func() error {
+		return runUpgrade(true, false, false, true, false, "v"+latest)
+	})
+	if err != nil {
+		t.Fatalf("strict exact-asset check: %v", err)
+	}
+	if !strings.Contains(output, "Asset available:") || !strings.Contains(output, exactAsset) {
+		t.Fatalf("strict check output did not prove asset resolution: %q", output)
+	}
+	if requestedTag != "v"+latest {
+		t.Fatalf("release fetch tag = %q, want %q", requestedTag, "v"+latest)
+	}
+
+	fetchReleaseForUpgrade = func(string) (*GitHubRelease, error) {
+		return &GitHubRelease{TagName: "v" + latest}, nil
+	}
+	_, err = captureStdout(t, func() error {
+		return runUpgrade(true, false, false, true, false, "")
+	})
+	var assetErr *upgradeError
+	if !errors.As(err, &assetErr) {
+		t.Fatalf("strict missing-asset error = %v, want *upgradeError", err)
+	}
+}
+
+func TestRunUpgradeCheckJSONIsOneMachineDocument(t *testing.T) {
+	originalFetch := fetchReleaseForUpgrade
+	originalVersion := Version
+	t.Cleanup(func() {
+		fetchReleaseForUpgrade = originalFetch
+		Version = originalVersion
+	})
+	Version = "1.0.0"
+	const latest = "1.2.3"
+	exactAsset := getArchiveAssetName(latest)
+	fetchReleaseForUpgrade = func(tag string) (*GitHubRelease, error) {
+		if tag != "v"+latest {
+			t.Fatalf("release fetch tag = %q, want %q", tag, "v"+latest)
+		}
+		return &GitHubRelease{
+			TagName: "v" + latest,
+			HTMLURL: "https://example.invalid/releases/v" + latest,
+			Assets: []GitHubAsset{{
+				Name: exactAsset,
+				Size: 4096,
+			}},
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	if err := runUpgradeCheckJSON(&stdout, true, true, "v"+latest); err != nil {
+		t.Fatalf("runUpgradeCheckJSON: %v", err)
+	}
+	payload := bytes.TrimSpace(stdout.Bytes())
+	if !json.Valid(payload) {
+		t.Fatalf("machine check did not emit exactly one JSON document: %q", payload)
+	}
+	var output upgradeCheckJSONOutput
+	if err := json.Unmarshal(payload, &output); err != nil {
+		t.Fatalf("decode machine check: %v", err)
+	}
+	if !output.Success || output.OutputFormat != "json" || output.CurrentVersion != "1.0.0" ||
+		output.LatestVersion != latest || !output.UpdateAvailable || output.ReleaseTag != "v"+latest ||
+		output.AssetName != exactAsset || output.AssetSize != 4096 || output.MatchStrategy != "exact_archive" || !output.Strict {
+		t.Fatalf("machine check output = %+v", output)
+	}
+
+	stdout.Reset()
+	fetchReleaseForUpgrade = func(string) (*GitHubRelease, error) {
+		return nil, errors.New("release service unavailable")
+	}
+	if err := runUpgradeCheckJSON(&stdout, true, false, "v"+latest); err == nil ||
+		!strings.Contains(err.Error(), "release service unavailable") {
+		t.Fatalf("machine check fetch error = %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("machine check wrote partial success before failure: %q", stdout.Bytes())
 	}
 }
 

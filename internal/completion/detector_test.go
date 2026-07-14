@@ -540,6 +540,57 @@ func TestPersistCompletionEventAppliesExactGeneration(t *testing.T) {
 	}
 }
 
+func TestPersistCompletionEventBackfillsAlreadyTerminalGeneration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "completion-terminal-backfill"
+		beadID  = "ntm-completion-terminal-backfill"
+	)
+	store := assignment.NewStore(session)
+	observed, err := store.Assign(beadID, "Backfill", 1, "codex", "CodexOne", "work")
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, assignment.StatusCompleted, "")
+	if err != nil || !applied || barrier == nil {
+		t.Fatalf("begin terminal reconciliation barrier=%+v applied=%v error=%v", barrier, applied, err)
+	}
+	if _, err := store.RecordClearLeasesReleased(t.Context(), beadID); err != nil {
+		t.Fatalf("record leases released: %v", err)
+	}
+	if _, err := store.RecordTerminalClaimReleased(t.Context(), beadID); err != nil {
+		t.Fatalf("record claim released: %v", err)
+	}
+	if err := store.CompleteTerminalReconciliation(t.Context(), beadID, assignment.StatusCompleted, ""); err != nil {
+		t.Fatalf("complete terminal reconciliation: %v", err)
+	}
+	terminal := store.Get(beadID)
+	if terminal == nil || terminal.Status != assignment.StatusCompleted || terminal.PendingCompletionEventID != "" {
+		t.Fatalf("pre-backfill terminal row=%+v", terminal)
+	}
+
+	detector := New(session, store)
+	reconcileCalls := 0
+	detector.SetTerminalReconciler(func(context.Context, *assignment.Assignment) (bool, error) {
+		reconcileCalls++
+		return false, errors.New("terminal backfill repeated external cleanup")
+	})
+	applied, err = detector.persistCompletionEvent(t.Context(), observed, &CompletionEvent{
+		BeadID: beadID, Pane: observed.Pane, Method: MethodBeadClosed,
+	})
+	if err != nil || !applied {
+		t.Fatalf("backfill completion applied=%v error=%v", applied, err)
+	}
+	if reconcileCalls != 0 {
+		t.Fatalf("backfill invoked external reconciliation %d times", reconcileCalls)
+	}
+	backfilled := store.Get(beadID)
+	if backfilled == nil || backfilled.Status != assignment.StatusCompleted || backfilled.ClearState != assignment.ClearStateNone ||
+		strings.TrimSpace(backfilled.PendingCompletionEventID) == "" || backfilled.CompletionDetectedAt == nil {
+		t.Fatalf("backfilled terminal row=%+v", backfilled)
+	}
+}
+
 func TestPersistCompletionEventRejectsDifferentReasonFromDurableBarrier(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "completion-durable-reason-wins"

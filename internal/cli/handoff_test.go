@@ -191,11 +191,14 @@ func TestNewHandoffCreateCmd(t *testing.T) {
 	}
 
 	// Check flags exist
-	flags := []string{"goal", "now", "from-file", "auto", "description", "json"}
+	flags := []string{"goal", "now", "from-file", "auto", "description"}
 	for _, name := range flags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected flag %q to exist", name)
 		}
+	}
+	if cmd.Flags().Lookup("json") != nil {
+		t.Error("command-local json flag must not shadow the root persistent flag")
 	}
 }
 
@@ -209,11 +212,14 @@ func TestNewHandoffListCmd(t *testing.T) {
 	}
 
 	// Check flags exist
-	flags := []string{"limit", "json"}
+	flags := []string{"limit"}
 	for _, name := range flags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected flag %q to exist", name)
 		}
+	}
+	if cmd.Flags().Lookup("json") != nil {
+		t.Error("command-local json flag must not shadow the root persistent flag")
 	}
 }
 
@@ -226,9 +232,8 @@ func TestNewHandoffShowCmd(t *testing.T) {
 		t.Errorf("Use = %q, want %q", cmd.Use, "show <path>")
 	}
 
-	// Check flags exist
-	if cmd.Flags().Lookup("json") == nil {
-		t.Error("expected flag 'json' to exist")
+	if cmd.Flags().Lookup("json") != nil {
+		t.Error("command-local json flag must not shadow the root persistent flag")
 	}
 }
 
@@ -240,8 +245,8 @@ func TestNewHandoffLedgerCmd(t *testing.T) {
 	if cmd.Use != "ledger [session]" {
 		t.Errorf("Use = %q, want %q", cmd.Use, "ledger [session]")
 	}
-	if cmd.Flags().Lookup("json") == nil {
-		t.Error("expected flag 'json' to exist")
+	if cmd.Flags().Lookup("json") != nil {
+		t.Error("command-local json flag must not shadow the root persistent flag")
 	}
 }
 

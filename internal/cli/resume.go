@@ -73,15 +73,14 @@ type ResumeInjectInfo struct {
 
 func newResumeCmd() *cobra.Command {
 	var (
-		fromPath   string
-		spawn      bool
-		inject     bool
-		dryRun     bool
-		jsonFormat bool
-		ccCount    int
-		codCount   int
-		gmiCount   int
-		agyCount   int
+		fromPath string
+		spawn    bool
+		inject   bool
+		dryRun   bool
+		ccCount  int
+		codCount int
+		gmiCount int
+		agyCount int
 	)
 
 	cmd := &cobra.Command{
@@ -105,7 +104,7 @@ Examples:
 			if len(args) > 0 {
 				sessionName = args[0]
 			}
-			effectiveJSON := jsonFormat || IsJSONOutput()
+			effectiveJSON := IsJSONOutput()
 			err := runResume(cmd, sessionName, fromPath, spawn, inject, dryRun,
 				ccCount, codCount, gmiCount, agyCount, effectiveJSON)
 			return outputResumeCommandError(cmd, resumeAction(spawn, inject), effectiveJSON, err)
@@ -116,7 +115,6 @@ Examples:
 	cmd.Flags().BoolVar(&spawn, "spawn", false, "Spawn new agents with handoff context")
 	cmd.Flags().BoolVar(&inject, "inject", false, "Inject context into existing session")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 	cmd.Flags().IntVar(&ccCount, "cc", 0, "Number of Claude agents to spawn (requires --spawn)")
 	cmd.Flags().IntVar(&codCount, "cod", 0, "Number of Codex agents to spawn (requires --spawn)")
 	cmd.Flags().IntVar(&gmiCount, "gmi", 0, "Number of Gemini agents to spawn (requires --spawn)")

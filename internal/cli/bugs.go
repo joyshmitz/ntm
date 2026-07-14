@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/scanner"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -80,10 +81,19 @@ Examples:
 				if !scanner.IsAvailable() {
 					if jsonOutput {
 						cause := scanner.ErrNotInstalled
-						return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
-							"success":   false,
-							"error":     cause.Error(),
-							"available": false,
+						response := robot.NewErrorResponse(
+							cause,
+							robot.ErrCodeDependencyMissing,
+							"Install UBS from https://github.com/nightowlai/ubs, then rerun 'ntm bugs list --json'",
+						)
+						response.OutputFormat = string(robot.FormatJSON)
+						response.Meta = robot.NewResponseMeta("bugs list").WithExitCode(1)
+						return emitJSONFailureEnvelopeWithCause(struct {
+							robot.RobotResponse
+							Available bool `json:"available"`
+						}{
+							RobotResponse: response,
+							Available:     false,
 						}, cause)
 					}
 					fmt.Println("UBS not installed. Install: https://github.com/nightowlai/ubs")

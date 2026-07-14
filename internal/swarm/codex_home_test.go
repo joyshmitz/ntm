@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -245,6 +246,41 @@ func TestCaamCapability_TopLevelFallback(t *testing.T) {
 	}
 	if !hasCapability(caps, CapabilitySafeRestore) {
 		t.Errorf("expected safe-restore via top-level, got %v", caps)
+	}
+}
+
+func TestDefaultCaamCapabilityProberUsesRobotStatusJSONContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake caam shell script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "args")
+	caamPath := filepath.Join(dir, "caam")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" > %q
+if [ "$#" -ne 2 ] || [ "$1" != "robot" ] || [ "$2" != "status" ]; then
+  printf 'unexpected arguments: %%s\n' "$*" >&2
+  exit 64
+fi
+printf '{"data":{"capabilities":["safe-restore"]}}'
+`, marker)
+	if err := os.WriteFile(caamPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake caam: %v", err)
+	}
+
+	caps, err := defaultCaamCapabilityProber(caamPath, time.Second)(context.Background())
+	if err != nil {
+		t.Fatalf("probe caam capabilities: %v", err)
+	}
+	if !hasCapability(caps, CapabilitySafeRestore) {
+		t.Fatalf("capabilities = %v, want %q", caps, CapabilitySafeRestore)
+	}
+	args, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read caam arguments: %v", err)
+	}
+	if got := string(args); got != "robot status\n" {
+		t.Fatalf("caam arguments = %q, want robot status", got)
 	}
 }
 

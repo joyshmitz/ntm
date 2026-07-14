@@ -2527,19 +2527,36 @@ func TestAtomicAssignmentRecoveryUsesPersistedOriginalIntentChecksum(t *testing.
 		t.Fatalf("RecordAtomicClaim: %v", err)
 	}
 
-	dispatcher := &atomicDispatchRecorder{}
+	var dispatchCalls atomic.Int32
+	dispatchedPrompt := ""
+	dispatcher := DispatchFunc(func(_ context.Context, req DispatchRequest) (DispatchReceipt, error) {
+		dispatchCalls.Add(1)
+		dispatchedPrompt = req.Prompt
+		return DispatchReceipt{DeliveryID: "delivery-1", Duration: 5 * time.Millisecond}, nil
+	})
+	preflightPrompt := ""
 	preflight := PromptPreflightFunc(func(_ context.Context, req DispatchRequest) (PromptPreflightResult, error) {
-		return PromptPreflightResult{DispatchPrompt: req.Prompt, DurablePrompt: req.Prompt}, nil
+		preflightPrompt = req.Prompt
+		return PromptPreflightResult{
+			DispatchPrompt: "dispatch under changed policy: " + req.Prompt,
+			DurablePrompt:  "newly redacted durable prompt: " + req.Prompt,
+			DurableTitle:   "newly redacted title",
+		}, nil
 	})
 	recovery := request
 	recovery.IntentSHA256 = ""
 	recovery.RecoveredIntentSHA256 = request.IntentSHA256
+	recovery.Prompt = "attacker supplied replacement prompt"
 	result, err := NewAtomicCoordinator(store, &atomicClaimLedger{}, nil, dispatcher, preflight).Execute(t.Context(), recovery)
-	if err != nil || !result.Sent || !result.Recovered || dispatcher.calls.Load() != 1 {
-		t.Fatalf("recovered Execute result=%+v error=%v dispatches=%d", result, err, dispatcher.calls.Load())
+	if err != nil || !result.Sent || !result.Recovered || dispatchCalls.Load() != 1 {
+		t.Fatalf("recovered Execute result=%+v error=%v dispatches=%d", result, err, dispatchCalls.Load())
+	}
+	if preflightPrompt != request.Prompt || !strings.Contains(dispatchedPrompt, request.Prompt) || strings.Contains(dispatchedPrompt, recovery.Prompt) {
+		t.Fatalf("recovery preflight=%q dispatched=%q, want only persisted prompt %q", preflightPrompt, dispatchedPrompt, request.Prompt)
 	}
 	stored := store.Get(request.BeadID)
-	if stored == nil || stored.IntentSHA256 != request.IntentSHA256 || stored.DispatchState != DispatchSent {
+	if stored == nil || stored.IntentSHA256 != request.IntentSHA256 || stored.DispatchState != DispatchSent ||
+		stored.PromptSent != request.Prompt || stored.BeadTitle != request.BeadTitle {
 		t.Fatalf("recovered intent ledger = %+v", stored)
 	}
 
@@ -2549,8 +2566,8 @@ func TestAtomicAssignmentRecoveryUsesPersistedOriginalIntentChecksum(t *testing.
 		!strings.Contains(err.Error(), "does not match the durable assignment") {
 		t.Fatalf("wrong recovered checksum error = %v", err)
 	}
-	if dispatcher.calls.Load() != 1 {
-		t.Fatalf("wrong recovered checksum dispatched again: %d", dispatcher.calls.Load())
+	if dispatchCalls.Load() != 1 {
+		t.Fatalf("wrong recovered checksum dispatched again: %d", dispatchCalls.Load())
 	}
 }
 

@@ -94,13 +94,13 @@ func runEnsembleCompare(w io.Writer, runAID, runBID string, opts compareOptions)
 	)
 
 	// Load run A
-	inputA, err := loadCompareInput(runAID)
+	inputA, err := loadCompareInputForOutput(runAID, format == "json")
 	if err != nil {
 		return writeCompareError(w, runAID, runBID, fmt.Errorf("load run A (%s): %w", runAID, err), format)
 	}
 
 	// Load run B
-	inputB, err := loadCompareInput(runBID)
+	inputB, err := loadCompareInputForOutput(runBID, format == "json")
 	if err != nil {
 		return writeCompareError(w, runAID, runBID, fmt.Errorf("load run B (%s): %w", runBID, err), format)
 	}
@@ -133,10 +133,14 @@ func runEnsembleCompare(w io.Writer, runAID, runBID string, opts compareOptions)
 
 // loadCompareInput loads an ensemble session and constructs a CompareInput.
 func loadCompareInput(runID string) (*ensemble.CompareInput, error) {
-	return loadCompareInputResolved(runID, false)
+	return loadCompareInputForOutput(runID, IsJSONOutput())
 }
 
-func loadCompareInputResolved(runID string, retried bool) (*ensemble.CompareInput, error) {
+func loadCompareInputForOutput(runID string, machineJSON bool) (*ensemble.CompareInput, error) {
+	return loadCompareInputResolved(runID, false, machineJSON)
+}
+
+func loadCompareInputResolved(runID string, retried, machineJSON bool) (*ensemble.CompareInput, error) {
 	runID = strings.TrimSpace(runID)
 	store, _, storeErr := resolveEnsembleCheckpointStoreForRunID(runID)
 	checkpointExists := storeErr == nil && store.RunExists(runID)
@@ -152,9 +156,9 @@ func loadCompareInputResolved(runID string, retried bool) (*ensemble.CompareInpu
 	}
 
 	if !retried && !checkpointExists && !liveExists && !stateExists {
-		resolved, err := normalizeOfflineCapableEnsembleSessionName(runID, !IsJSONOutput())
+		resolved, err := normalizeOfflineCapableEnsembleSessionName(runID, !machineJSON)
 		if err == nil && resolved != "" && resolved != runID {
-			return loadCompareInputResolved(resolved, true)
+			return loadCompareInputResolved(resolved, true, machineJSON)
 		}
 	}
 

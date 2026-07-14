@@ -10946,6 +10946,14 @@ type FileRelationsOptions struct {
 	Threshold float64
 }
 
+func setBVRobotFailure(response *RobotResponse, message, code string) {
+	hint := "Check bv output and repository state"
+	if code == ErrCodeDependencyMissing {
+		hint = "Install bv to enable this analysis"
+	}
+	*response = NewErrorResponse(errors.New(message), code, hint)
+}
+
 // ForecastOutput is the JSON output for --robot-forecast
 type ForecastOutput struct {
 	RobotResponse
@@ -10968,7 +10976,7 @@ func GetForecast(target string) (*ForecastOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -10976,14 +10984,14 @@ func GetForecast(target string) (*ForecastOutput, error) {
 	raw, err := adapter.GetForecast(context.Background(), wd, target)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get forecast: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var forecast bv.ForecastResponse
 	if err := json.Unmarshal(raw, &forecast); err != nil {
 		output.Error = fmt.Sprintf("failed to parse forecast: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Forecast = &forecast
@@ -11020,7 +11028,7 @@ func GetSuggest() (*SuggestOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11028,14 +11036,14 @@ func GetSuggest() (*SuggestOutput, error) {
 	raw, err := adapter.GetSuggestions(context.Background(), wd)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get suggestions: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var suggestions bv.SuggestionsResponse
 	if err := json.Unmarshal(raw, &suggestions); err != nil {
 		output.Error = fmt.Sprintf("failed to parse suggestions: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Suggestions = &suggestions
@@ -11074,7 +11082,7 @@ func GetImpact(filePath string) (*ImpactOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11082,14 +11090,14 @@ func GetImpact(filePath string) (*ImpactOutput, error) {
 	raw, err := adapter.GetImpact(context.Background(), wd, filePath)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get impact analysis: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var impact bv.ImpactResponse
 	if err := json.Unmarshal(raw, &impact); err != nil {
 		output.Error = fmt.Sprintf("failed to parse impact analysis: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Impact = &impact
@@ -11128,7 +11136,7 @@ func GetSearch(query string) (*SearchOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11136,14 +11144,14 @@ func GetSearch(query string) (*SearchOutput, error) {
 	raw, err := adapter.GetSearch(context.Background(), wd, query)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to perform search: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var results bv.SearchResponse
 	if err := json.Unmarshal(raw, &results); err != nil {
 		output.Error = fmt.Sprintf("failed to parse search results: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Results = &results
@@ -11182,7 +11190,7 @@ func GetLabelAttention(opts LabelAttentionOptions) (*LabelAttentionOutput, error
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11190,14 +11198,14 @@ func GetLabelAttention(opts LabelAttentionOptions) (*LabelAttentionOutput, error
 	raw, err := adapter.GetLabelAttention(context.Background(), wd, opts.Limit)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get label attention: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var labels bv.LabelAttentionResponse
 	if err := json.Unmarshal(raw, &labels); err != nil {
 		output.Error = fmt.Sprintf("failed to parse label attention: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Labels = &labels
@@ -11234,7 +11242,7 @@ func GetLabelFlow() (*LabelFlowOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11242,14 +11250,14 @@ func GetLabelFlow() (*LabelFlowOutput, error) {
 	raw, err := adapter.GetLabelFlow(context.Background(), wd)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get label flow: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var flow bv.LabelFlowResponse
 	if err := json.Unmarshal(raw, &flow); err != nil {
 		output.Error = fmt.Sprintf("failed to parse label flow: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Flow = &flow
@@ -11286,7 +11294,7 @@ func GetLabelHealth() (*LabelHealthOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11294,14 +11302,14 @@ func GetLabelHealth() (*LabelHealthOutput, error) {
 	raw, err := adapter.GetLabelHealth(context.Background(), wd)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get label health: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var health bv.LabelHealthResponse
 	if err := json.Unmarshal(raw, &health); err != nil {
 		output.Error = fmt.Sprintf("failed to parse label health: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Health = &health
@@ -11342,7 +11350,7 @@ func GetFileBeads(opts FileBeadsOptions) (*FileBeadsOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11350,14 +11358,14 @@ func GetFileBeads(opts FileBeadsOptions) (*FileBeadsOutput, error) {
 	raw, err := adapter.GetFileBeads(context.Background(), wd, opts.FilePath, opts.Limit)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get file beads: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var beads bv.FileBeadsResponse
 	if err := json.Unmarshal(raw, &beads); err != nil {
 		output.Error = fmt.Sprintf("failed to parse file beads: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Beads = &beads
@@ -11396,7 +11404,7 @@ func GetFileHotspots(opts FileHotspotsOptions) (*FileHotspotsOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11404,14 +11412,14 @@ func GetFileHotspots(opts FileHotspotsOptions) (*FileHotspotsOutput, error) {
 	raw, err := adapter.GetFileHotspots(context.Background(), wd, opts.Limit)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get file hotspots: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var hotspots bv.FileHotspotsResponse
 	if err := json.Unmarshal(raw, &hotspots); err != nil {
 		output.Error = fmt.Sprintf("failed to parse file hotspots: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Hotspots = &hotspots
@@ -11454,7 +11462,7 @@ func GetFileRelations(opts FileRelationsOptions) (*FileRelationsOutput, error) {
 
 	if !installed {
 		output.Error = "bv (beads_viewer) is not installed"
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeDependencyMissing)
 		return output, nil
 	}
 
@@ -11462,14 +11470,14 @@ func GetFileRelations(opts FileRelationsOptions) (*FileRelationsOutput, error) {
 	raw, err := adapter.GetFileRelations(context.Background(), wd, opts.FilePath, opts.Limit, opts.Threshold)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get file relations: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 
 	var relations bv.FileRelationsResponse
 	if err := json.Unmarshal(raw, &relations); err != nil {
 		output.Error = fmt.Sprintf("failed to parse file relations: %v", err)
-		output.Success = false
+		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
 		return output, nil
 	}
 	output.Relations = &relations

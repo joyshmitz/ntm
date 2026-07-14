@@ -217,6 +217,24 @@ func TestRunMailInbox(t *testing.T) {
 	}
 }
 
+func TestRunMailInboxJSONEmptyArray(t *testing.T) {
+	client := &MockMailClient{
+		Available: true,
+		Agents:    []agentmail.Agent{{Name: "BlueLake"}},
+		Inboxes:   map[string][]agentmail.InboxMessage{},
+	}
+	cmd := &cobra.Command{}
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+
+	if err := runMailInbox(cmd, client, "", false, "", false, 10, true); err != nil {
+		t.Fatalf("runMailInbox() error = %v", err)
+	}
+	if got := strings.TrimSpace(output.String()); got != "[]" {
+		t.Fatalf("empty JSON inbox output = %q, want []", got)
+	}
+}
+
 func TestRunMailInboxSessionAgentsUsesSavedRegistryIdentity(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 	isolateSessionAgentStorage(t)

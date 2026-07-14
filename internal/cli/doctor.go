@@ -24,7 +24,6 @@ import (
 
 var (
 	doctorVerbose bool
-	doctorJSON    bool
 )
 
 func newDoctorCmd() *cobra.Command {
@@ -44,7 +43,6 @@ This command helps diagnose issues before spawning sessions.`,
 	}
 
 	cmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show detailed output")
-	cmd.Flags().BoolVar(&doctorJSON, "json", false, "Output as JSON")
 
 	return cmd
 }
@@ -129,7 +127,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	report := performDoctorCheck(ctx)
 
-	if doctorJSON {
+	if IsJSONOutput() {
 		return outputDoctorJSON(report)
 	}
 

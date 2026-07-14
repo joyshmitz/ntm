@@ -882,6 +882,16 @@ func TestApplyCommitLintReportCopiesFindings(t *testing.T) {
 	}
 }
 
+func TestApplyCommitLintReportKeepsEmptyFindingsArray(t *testing.T) {
+	report := CommitReadyResponse{Success: true}
+
+	applyCommitLintReport(&report, commitlint.Report{SafeToCommit: true})
+
+	if report.Findings == nil {
+		t.Fatal("Findings=nil, want empty machine-readable array")
+	}
+}
+
 func TestAppendCommitReadyFindingMarksCriticalUnsafe(t *testing.T) {
 	report := CommitReadyResponse{
 		Success:      true,

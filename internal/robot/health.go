@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -2163,9 +2164,10 @@ type AutoRestartStuckOutput struct {
 
 // AutoRestartStuckOptions configures the auto-restart-stuck operation.
 type AutoRestartStuckOptions struct {
-	Session   string        // Target session name
-	Threshold time.Duration // Duration of inactivity before considering stuck (default 5m)
-	DryRun    bool          // Preview mode: report but don't restart
+	Session   string         // Target session name
+	Threshold time.Duration  // Duration of inactivity before considering stuck (default 5m)
+	DryRun    bool           // Preview mode: report but don't restart
+	Config    *config.Config // Effective caller config forwarded to pane restarts
 }
 
 // DefaultStuckThreshold is the default idle duration before a pane is considered stuck.
@@ -2209,6 +2211,13 @@ func BuildAutoRestartStuckOutput(session string, stuckPanes []int, restarted []i
 	if len(restarted) == 0 {
 		output.Restarted = []int{}
 	}
+	if len(failed) > 0 {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("%d of %d stuck pane restarts failed", len(failed), len(stuckPanes)),
+			ErrCodeInternalError,
+			"Inspect failed pane state and retry the restart explicitly",
+		)
+	}
 	return output
 }
 
@@ -2249,10 +2258,7 @@ func GetAutoRestartStuck(opts AutoRestartStuckOptions) (*AutoRestartStuckOutput,
 	// Restart stuck panes
 	var restarted, failed []int
 	for _, paneIdx := range stuckPanes {
-		restartOpts := RestartPaneOptions{
-			Session: opts.Session,
-			Panes:   []string{fmt.Sprintf("%d", paneIdx)},
-		}
+		restartOpts := autoRestartStuckPaneOptions(opts, paneIdx)
 		restartOut, restartErr := GetRestartPane(restartOpts)
 		if restartErr != nil || len(restartOut.Failed) > 0 {
 			failed = append(failed, paneIdx)
@@ -2262,6 +2268,14 @@ func GetAutoRestartStuck(opts AutoRestartStuckOptions) (*AutoRestartStuckOutput,
 	}
 
 	return BuildAutoRestartStuckOutput(opts.Session, stuckPanes, restarted, failed, opts.Threshold, false), nil
+}
+
+func autoRestartStuckPaneOptions(opts AutoRestartStuckOptions, paneIdx int) RestartPaneOptions {
+	return RestartPaneOptions{
+		Session: opts.Session,
+		Panes:   []string{fmt.Sprintf("%d", paneIdx)},
+		Config:  opts.Config,
+	}
 }
 
 // PrintAutoRestartStuck outputs the auto-restart-stuck result as JSON.

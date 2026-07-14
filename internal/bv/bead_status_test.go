@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	assignmentstore "github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
@@ -426,6 +427,101 @@ func TestClaimBeadForAssignmentStatusConflictAndIdempotency(t *testing.T) {
 	})
 }
 
+func TestClaimStaleBeadForAssignmentAdoptsOnlyUnownedInProgressWork(t *testing.T) {
+	requireRealBR(t)
+	dir := t.TempDir()
+	runRealBR(t, dir, "init", "--quiet")
+	const actor = "StaleRecoveryActor"
+	staleUpdatedAt := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	openID := createRealBRBead(t, dir, "open work is not stale")
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, openID, actor, staleUpdatedAt); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("open stale claim error=%v, want assignment-ineligible", err)
+	}
+	assertRealBRStatusAndAssignee(t, dir, openID, "open", "")
+
+	ownedID := createRealBRBead(t, dir, "owned in-progress work")
+	if _, err := ClaimBeadForAssignment(t.Context(), dir, ownedID, "ExistingActor"); err != nil {
+		t.Fatalf("seed owned in-progress work: %v", err)
+	}
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, ownedID, actor, staleUpdatedAt); !errors.Is(err, ErrBeadAlreadyClaimed) {
+		t.Fatalf("owned stale claim error=%v, want ownership conflict", err)
+	}
+	assertRealBRStatusAndAssignee(t, dir, ownedID, "in_progress", "ExistingActor")
+
+	staleID := createRealBRBead(t, dir, "unowned in-progress work")
+	runRealBR(t, dir, "update", staleID, "--status", "in_progress", "--json")
+	databasePath := realBRDatabasePath(t, dir)
+	execDatabase := func(query string, args ...any) {
+		t.Helper()
+		database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+		if err != nil {
+			t.Fatalf("open Beads database: %v", err)
+		}
+		if _, err := database.Exec(query, args...); err != nil {
+			database.Close()
+			t.Fatalf("mutate Beads database: %v", err)
+		}
+		if err := database.Close(); err != nil {
+			t.Fatalf("close Beads database: %v", err)
+		}
+	}
+	setUpdatedAt := func(beadID string, updatedAt time.Time) {
+		t.Helper()
+		execDatabase("UPDATE issues SET updated_at = ? WHERE id = ?", updatedAt.Format(time.RFC3339Nano), beadID)
+	}
+	freshID := createRealBRBead(t, dir, "fresh in-progress work")
+	runRealBR(t, dir, "update", freshID, "--status", "in_progress", "--json")
+	freshUpdatedAt := time.Now().UTC().Add(-23 * time.Hour).Truncate(time.Microsecond)
+	setUpdatedAt(freshID, freshUpdatedAt)
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, freshID, actor, freshUpdatedAt); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("fresh stale claim error=%v, want assignment-ineligible", err)
+	}
+	assertRealBRStatusAndAssignee(t, dir, freshID, "in_progress", "")
+
+	setUpdatedAt(staleID, staleUpdatedAt)
+	activityAt := time.Now().UTC()
+	setUpdatedAt(staleID, activityAt)
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, staleID, actor, staleUpdatedAt); !errors.Is(err, ErrBeadAlreadyClaimed) {
+		t.Fatalf("changed stale claim error=%v, want compare-and-set conflict", err)
+	}
+	setUpdatedAt(staleID, staleUpdatedAt)
+	first, err := ClaimStaleBeadForAssignment(t.Context(), dir, staleID, actor, staleUpdatedAt)
+	if err != nil || first.ID != staleID || first.Actor != actor || first.Status != "in_progress" {
+		t.Fatalf("stale claim=%+v error=%v", first, err)
+	}
+	second, err := ClaimStaleBeadForAssignment(t.Context(), dir, staleID, actor, staleUpdatedAt)
+	if err != nil || second.ID != first.ID || second.Actor != first.Actor || second.Status != first.Status {
+		t.Fatalf("stale retry=%+v first=%+v error=%v", second, first, err)
+	}
+	assertRealBRStatusAndAssignee(t, dir, staleID, "in_progress", actor)
+
+	pinnedID := createRealBRBead(t, dir, "pinned stale work")
+	runRealBR(t, dir, "update", pinnedID, "--status", "in_progress", "--json")
+	execDatabase("UPDATE issues SET pinned = 1, updated_at = ? WHERE id = ?", staleUpdatedAt.Format(time.RFC3339Nano), pinnedID)
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, pinnedID, actor, staleUpdatedAt); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("pinned stale claim error=%v, want assignment-ineligible", err)
+	}
+
+	gatedID := createRealBRBead(t, dir, "operator-gated stale work")
+	runRealBR(t, dir, "update", gatedID, "--status", "in_progress", "--add-label", "operator-gated", "--json")
+	setUpdatedAt(gatedID, staleUpdatedAt)
+	if _, err := ClaimStaleBeadForAssignment(t.Context(), dir, gatedID, actor, staleUpdatedAt); !errors.Is(err, ErrBeadAssignmentIneligible) {
+		t.Fatalf("operator-gated stale claim error=%v, want assignment-ineligible", err)
+	}
+
+	blockedID := createRealBRBead(t, dir, "dependency-blocked stale work")
+	blockerID := createRealBRBead(t, dir, "stale work prerequisite")
+	runRealBR(t, dir, "update", blockedID, "--status", "in_progress", "--json")
+	runRealBR(t, dir, "dep", "add", blockedID, blockerID, "--type", "blocks", "--json")
+	setUpdatedAt(blockedID, staleUpdatedAt)
+	_, err = ClaimStaleBeadForAssignment(t.Context(), dir, blockedID, actor, staleUpdatedAt)
+	var blockedEligibility *AssignmentEligibilityError
+	if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &blockedEligibility) || !reflect.DeepEqual(blockedEligibility.UnresolvedBlockers, []string{blockerID}) {
+		t.Fatalf("dependency-blocked stale claim error=%v eligibility=%+v", err, blockedEligibility)
+	}
+}
+
 func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) {
 	requireRealBR(t)
 
@@ -483,6 +579,26 @@ func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) 
 				t.Fatalf("eligibility error=%+v changed=%v", eligibilityErr, changed)
 			}
 			assertAssignmentClaimDatabaseState(t, databasePath, beadID, "open", "")
+
+			staleUpdatedAt := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Microsecond)
+			database, err = sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+			if err != nil {
+				t.Fatalf("reopen Beads database: %v", err)
+			}
+			if _, err := database.Exec("UPDATE issues SET status = 'in_progress', updated_at = ? WHERE id = ?", staleUpdatedAt.Format(time.RFC3339Nano), beadID); err != nil {
+				_ = database.Close()
+				t.Fatalf("prepare stale readiness gate: %v", err)
+			}
+			_ = database.Close()
+			result, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt)
+			var staleEligibilityErr *AssignmentEligibilityError
+			if !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &staleEligibilityErr) || !test.wantReason(staleEligibilityErr) {
+				t.Fatalf("stale claim result=%+v changed=%v error=%v eligibility=%+v", result, changed, err, staleEligibilityErr)
+			}
+			if changed || staleEligibilityErr.Status != "in_progress" || len(staleEligibilityErr.UnresolvedBlockers) != 0 || len(staleEligibilityErr.OperatorLabels) != 0 {
+				t.Fatalf("stale eligibility error=%+v changed=%v", staleEligibilityErr, changed)
+			}
+			assertAssignmentClaimDatabaseState(t, databasePath, beadID, "in_progress", "")
 		})
 	}
 
@@ -509,6 +625,23 @@ func TestClaimBeadForAssignmentTransactionRejectsNonReadyOpenWork(t *testing.T) 
 			t.Fatalf("wisp changed=%v error=%v eligibility=%+v", changed, err, eligibilityErr)
 		}
 		assertAssignmentClaimDatabaseState(t, databasePath, beadID, "open", "")
+
+		staleUpdatedAt := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Microsecond)
+		database, err = sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+		if err != nil {
+			t.Fatalf("reopen Beads database: %v", err)
+		}
+		if _, err := database.Exec("UPDATE issues SET status = 'in_progress', updated_at = ? WHERE id = ?", staleUpdatedAt.Format(time.RFC3339Nano), beadID); err != nil {
+			_ = database.Close()
+			t.Fatalf("prepare stale wisp: %v", err)
+		}
+		_ = database.Close()
+		_, changed, err = claimBeadNonTerminalTransaction(t.Context(), databasePath, beadID, "StaleActor", staleUpdatedAt)
+		var staleEligibilityErr *AssignmentEligibilityError
+		if changed || !errors.Is(err, ErrBeadAssignmentIneligible) || !errors.As(err, &staleEligibilityErr) || !staleEligibilityErr.Wisp {
+			t.Fatalf("stale wisp changed=%v error=%v eligibility=%+v", changed, err, staleEligibilityErr)
+		}
+		assertAssignmentClaimDatabaseState(t, databasePath, beadID, "in_progress", "")
 	})
 }
 

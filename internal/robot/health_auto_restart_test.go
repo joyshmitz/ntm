@@ -3,6 +3,8 @@ package robot
 import (
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 // =============================================================================
@@ -204,6 +206,9 @@ func TestBuildAutoRestartStuckOutput(t *testing.T) {
 		if !intSlicesEqual(out.Restarted, []int{1}) {
 			t.Errorf("Restarted = %v, want [1]", out.Restarted)
 		}
+		if out.Success || out.ErrorCode != ErrCodeInternalError || out.Error == "" {
+			t.Fatalf("failed restart response = %+v, want typed terminal failure", out.RobotResponse)
+		}
 	})
 
 	t.Run("checked_at is populated", func(t *testing.T) {
@@ -338,6 +343,21 @@ func TestParseStuckThreshold(t *testing.T) {
 func TestDefaultStuckThreshold(t *testing.T) {
 	if DefaultStuckThreshold != 5*time.Minute {
 		t.Errorf("DefaultStuckThreshold = %v, want 5m", DefaultStuckThreshold)
+	}
+}
+
+func TestAutoRestartStuckPaneOptionsForwardsEffectiveConfig(t *testing.T) {
+	effectiveConfig := config.Default()
+	opts := autoRestartStuckPaneOptions(AutoRestartStuckOptions{
+		Session: "project",
+		Config:  effectiveConfig,
+	}, 7)
+
+	if opts.Session != "project" || len(opts.Panes) != 1 || opts.Panes[0] != "7" {
+		t.Fatalf("restart options target = session %q panes %v", opts.Session, opts.Panes)
+	}
+	if opts.Config != effectiveConfig {
+		t.Fatal("auto-restart discarded the caller's effective config")
 	}
 }
 

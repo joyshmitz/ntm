@@ -197,7 +197,6 @@ func newMailInboxCmdReal() *cobra.Command {
 		agent         string
 		urgent        bool
 		sessionAgents bool
-		jsonFormat    bool
 		limit         int
 	)
 
@@ -210,7 +209,7 @@ func newMailInboxCmdReal() *cobra.Command {
 			if len(args) > 0 {
 				session = args[0]
 			}
-			return runMailInbox(cmd, nil, session, sessionAgents, agent, urgent, limit, jsonFormat)
+			return runMailInbox(cmd, nil, session, sessionAgents, agent, urgent, limit, IsJSONOutput())
 		},
 	}
 
@@ -218,7 +217,6 @@ func newMailInboxCmdReal() *cobra.Command {
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "Show only urgent messages")
 	cmd.Flags().BoolVar(&sessionAgents, "session-agents", false, "Filter to agents currently in session")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Max messages to show")
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output in JSON format")
 
 	return cmd
 }
@@ -441,6 +439,9 @@ func runMailInbox(cmd *cobra.Command, client mailInboxClient, session string, se
 	}
 
 	if len(agg) == 0 {
+		if jsonFmt {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode([]aggregatedMessage{})
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "Inbox empty")
 		return nil
 	}

@@ -214,7 +214,6 @@ func newRotateUnlockCmd() *cobra.Command {
 
 func newRotateStatusCmd() *cobra.Command {
 	var dataDir string
-	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show account pins and caam safe-restore capability that gate automatic rotation",
@@ -247,7 +246,7 @@ func newRotateStatusCmd() *cobra.Command {
 				capErr = "caam not available"
 			}
 
-			if jsonOut {
+			if IsJSONOutput() {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				out := map[string]interface{}{
@@ -281,7 +280,6 @@ func newRotateStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Directory holding .ntm/account_pins.json (default: current directory)")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
 	return cmd
 }
 

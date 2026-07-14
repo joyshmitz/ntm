@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,17 +20,20 @@ import (
 )
 
 type fakeCoordinatorReservationClient struct {
-	project       *agentmail.Project
-	ensureErr     error
-	reserveResult *agentmail.ReservationResult
-	reserveErr    error
-	reservations  []agentmail.FileReservation
-	listErr       error
-	releaseResult *agentmail.ReleaseReservationsResult
-	releaseErr    error
-	releaseIDs    [][]int
-	releasePaths  [][]string
-	keepOnRelease bool
+	project        *agentmail.Project
+	ensureErr      error
+	reserveResult  *agentmail.ReservationResult
+	reserveErr     error
+	reservations   []agentmail.FileReservation
+	listErr        error
+	releaseResult  *agentmail.ReleaseReservationsResult
+	releaseErr     error
+	releaseIDs     [][]int
+	releasePaths   [][]string
+	keepOnRelease  bool
+	releaseStarted chan struct{}
+	allowRelease   chan struct{}
+	releaseOnce    sync.Once
 }
 
 func (f *fakeCoordinatorReservationClient) EnsureProject(_ context.Context, projectKey string) (*agentmail.Project, error) {
@@ -52,6 +56,10 @@ func (f *fakeCoordinatorReservationClient) ListReservations(context.Context, str
 }
 
 func (f *fakeCoordinatorReservationClient) ReleaseReservations(_ context.Context, _ string, _ string, paths []string, ids []int) (*agentmail.ReleaseReservationsResult, error) {
+	if f.releaseStarted != nil {
+		f.releaseOnce.Do(func() { close(f.releaseStarted) })
+		<-f.allowRelease
+	}
 	f.releaseIDs = append(f.releaseIDs, append([]int(nil), ids...))
 	f.releasePaths = append(f.releasePaths, append([]string(nil), paths...))
 	if f.releaseErr != nil {
@@ -942,6 +950,10 @@ func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
 
 	c := New(session, t.TempDir(), &agentmail.Client{}, "CoordinatorAgent")
 	addEligibleCoordinatorAgent(c, request.Target, request.AgentName)
+	triageErr := errors.New("triage unavailable after recovery")
+	c.triageFn = func(context.Context, string) (*bv.TriageResponse, error) {
+		return nil, triageErr
+	}
 	claimCalls := 0
 	reserveCalls := 0
 	dispatchCalls := 0
@@ -972,8 +984,8 @@ func TestAssignWorkRecoversKnownUnsentIntentWithOriginalIdentity(t *testing.T) {
 	}
 
 	results, err := c.AssignWork(t.Context())
-	if err != nil {
-		t.Fatalf("AssignWork: %v", err)
+	if !errors.Is(err, triageErr) {
+		t.Fatalf("AssignWork error = %v, want later triage error", err)
 	}
 	if len(results) != 1 || !results[0].Success || results[0].IdempotencyKey != request.IdempotencyKey || results[0].ClaimActor != actor {
 		t.Fatalf("recovery results = %+v", results)
@@ -1104,6 +1116,99 @@ func TestAssignWorkReleasesTerminalLeaseBeforePaneReuse(t *testing.T) {
 		len(terminal.ReservationIDs) != 0 || terminal.ClearState != assignmentstore.ClearStateNone || terminal.DispatchReceiptID != "mail-93" ||
 		terminal.PendingCompletionEventID != "" || terminal.CompletionDetectedAt != nil || len(reloaded.ListPendingCompletionEvents()) != 0 {
 		t.Fatalf("terminal lease ledger = %+v", terminal)
+	}
+}
+
+func TestTerminalReconciliationSerializesExternalCleanupAcrossCoordinators(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "coordinator-terminal-cleanup-lock"
+		beadID  = "ntm-coordinator-terminal-cleanup-lock"
+	)
+	seed := assignmentstore.NewStore(session)
+	seed.Assignments[beadID] = &assignmentstore.Assignment{
+		BeadID: beadID, BeadTitle: "Concurrent coordinator cleanup", Pane: 1,
+		AgentType: "cod", AgentName: "BlueLake", Status: assignmentstore.StatusAssigned,
+		AssignedAt: time.Now().UTC(), IdempotencyKey: "coordinator-cleanup-key",
+		ClaimActor: "BlueLake/coordinator-cleanup-key", DispatchTarget: "%97", OccupancyKey: "%97",
+		DispatchState: assignmentstore.DispatchSent, DispatchReceiptID: "mail-97", ReservationRequired: true,
+		ReservationState: assignmentstore.ReservationReserved, ReservationCompleted: true,
+		ReservationAgent: "BlueLake", ReservationTarget: "%97",
+		ReservationRequested: []string{"internal/coordinator/**"}, ReservedPaths: []string{"internal/coordinator/**"}, ReservationIDs: []int{971},
+	}
+	if err := seed.Save(); err != nil {
+		t.Fatalf("seed terminal cleanup assignment: %v", err)
+	}
+	stores := make([]*assignmentstore.AssignmentStore, 2)
+	for index := range stores {
+		var err error
+		stores[index], err = assignmentstore.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("load store %d: %v", index, err)
+		}
+	}
+	releaseStarted := make(chan struct{})
+	allowRelease := make(chan struct{})
+	client := &fakeCoordinatorReservationClient{
+		releaseStarted: releaseStarted,
+		allowRelease:   allowRelease,
+		reservations: []agentmail.FileReservation{{
+			ID: 971, AgentName: "BlueLake", PathPattern: "internal/coordinator/**", ProjectID: 9, Exclusive: true,
+			Reason: "bead assignment: " + beadID, ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Hour)},
+		}},
+	}
+	var claimReleaseCalls atomic.Int32
+	coordinators := make([]*SessionCoordinator, len(stores))
+	for index := range coordinators {
+		coordinator := New(session, t.TempDir(), &agentmail.Client{}, fmt.Sprintf("Coordinator%d", index))
+		coordinator.reservationClient = client
+		coordinator.workItemStatusFn = func(context.Context, string) (string, error) { return "closed", nil }
+		coordinator.releaseWorkItemClaimFn = func(context.Context, string, string, string) (bool, error) {
+			claimReleaseCalls.Add(1)
+			return true, nil
+		}
+		coordinators[index] = coordinator
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(stores))
+	for index := range stores {
+		go func(index int) {
+			<-start
+			results <- coordinators[index].reconcileTerminalAssignments(t.Context(), stores[index])
+		}(index)
+	}
+	close(start)
+	select {
+	case <-releaseStarted:
+	case <-time.After(5 * time.Second):
+		close(allowRelease)
+		t.Fatal("coordinator cleanup did not reach external release")
+	}
+	close(allowRelease)
+	for range stores {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("concurrent terminal reconciliation: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent terminal reconciliation remained blocked")
+		}
+	}
+	if len(client.releaseIDs) != 1 || !reflect.DeepEqual(client.releaseIDs[0], []int{971}) {
+		t.Fatalf("reservation releases=%v, want one exact release", client.releaseIDs)
+	}
+	if got := claimReleaseCalls.Load(); got != 1 {
+		t.Fatalf("claim release calls=%d, want 1", got)
+	}
+	terminal, err := assignmentstore.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("reload terminal result: %v", err)
+	}
+	current := terminal.Get(beadID)
+	if current == nil || current.Status != assignmentstore.StatusCompleted || current.ClearState != assignmentstore.ClearStateNone {
+		t.Fatalf("terminal cleanup result=%+v", current)
 	}
 }
 

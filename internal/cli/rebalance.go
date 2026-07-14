@@ -123,12 +123,13 @@ Examples:
   ntm rebalance myproject --format json    # Robot mode JSON output`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			machineJSON := IsJSONOutput() || strings.EqualFold(strings.TrimSpace(formatOut), "json")
 			session := ""
 			if len(args) > 0 {
 				session = args[0]
 			}
 			res, err := ResolveSessionWithOptions(session, cmd.OutOrStdout(), SessionResolveOptions{
-				TreatAsJSON: IsJSONOutput() || strings.EqualFold(formatOut, "json"),
+				TreatAsJSON: machineJSON,
 			})
 			if err != nil {
 				return err
@@ -136,7 +137,7 @@ Examples:
 			if res.Session == "" {
 				return nil
 			}
-			res.ExplainIfInferred(cmd.ErrOrStderr())
+			res.ExplainIfInferredForOutput(cmd.ErrOrStderr(), machineJSON)
 			session = res.Session
 
 			return runRebalance(cmd.Context(), session, dryRun, apply, filter, threshold, formatOut)

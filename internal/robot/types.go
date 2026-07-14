@@ -69,6 +69,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -646,6 +647,10 @@ func NewErrorResponse(err error, code, hint string) RobotResponse {
 	resp := NewRobotResponse(false)
 	if err != nil {
 		resp.Error = err.Error()
+	} else if normalizedCode := strings.TrimSpace(code); normalizedCode != "" {
+		resp.Error = strings.ToLower(strings.ReplaceAll(normalizedCode, "_", " "))
+	} else {
+		resp.Error = "robot command failed"
 	}
 	resp.ErrorCode = code
 	resp.Hint = hint
@@ -793,9 +798,10 @@ func printLegacyRobotOutput(output any, response RobotResponse, requestedExit in
 	return ExitCodeForResponse(response)
 }
 
-// RobotError outputs a standardized error response as JSON and returns the original error.
-// Use this when you want structured JSON output but need to return an error to the caller.
-// This is useful for testing and for callers that want to handle errors themselves.
+// RobotError outputs a standardized error response as JSON and returns the typed
+// process result consumed by the root command boundary. The result unwraps the
+// original error and records that JSON was written, preventing a second failure
+// envelope from being emitted by the caller.
 //
 // Example usage:
 //
@@ -807,9 +813,7 @@ func printLegacyRobotOutput(output any, response RobotResponse, requestedExit in
 //	    )
 //	}
 func RobotError(err error, code, hint string) error {
-	resp := NewErrorResponse(err, code, hint)
-	outputJSON(resp)
-	return err
+	return EncodeErrorJSON(err, code, hint, "robot")
 }
 
 // PrintRobotError outputs a standardized error response and returns the typed

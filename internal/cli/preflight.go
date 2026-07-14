@@ -252,7 +252,6 @@ func RunPreflightCheck(prompt string, strict bool) (bool, []string, error) {
 
 func newPreflightCmd() *cobra.Command {
 	var strict bool
-	var localJSONOutput bool
 	var showPreview bool
 
 	cmd := &cobra.Command{
@@ -304,7 +303,7 @@ Examples:
 				return err
 			}
 
-			machineJSON := localJSONOutput || IsJSONOutput()
+			machineJSON := IsJSONOutput()
 			if machineJSON {
 				if !result.Success {
 					return emitJSONFailureEnvelopeWithCause(result, preflightError{result: result})
@@ -357,7 +356,6 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&strict, "strict", false, "Use strict mode (all warnings become errors)")
-	cmd.Flags().BoolVar(&localJSONOutput, "json", false, "Output in JSON format")
 	cmd.Flags().BoolVar(&showPreview, "preview", false, "Show prompt preview")
 
 	return cmd

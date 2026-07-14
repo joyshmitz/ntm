@@ -6,7 +6,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
@@ -47,6 +49,18 @@ func TestStatusSeverityOrdering(t *testing.T) {
 	}
 	if warnSev >= errSev {
 		t.Errorf("Warning severity (%d) should be less than Error (%d)", warnSev, errSev)
+	}
+}
+
+func TestAutoRestartStuckOptionsPreserveEffectiveConfig(t *testing.T) {
+	effectiveConfig := config.Default()
+	opts := autoRestartStuckOptions("project", 11*time.Minute, true, effectiveConfig)
+
+	if opts.Session != "project" || opts.Threshold != 11*time.Minute || !opts.DryRun {
+		t.Fatalf("auto-restart options = %+v", opts)
+	}
+	if opts.Config != effectiveConfig {
+		t.Fatal("CLI auto-restart options discarded the effective config")
 	}
 }
 

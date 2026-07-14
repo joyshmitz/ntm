@@ -52,7 +52,6 @@ func newHandoffCreateCmd() *cobra.Command {
 		fromFile    string
 		auto        bool
 		description string
-		jsonFormat  bool
 		output      string
 		format      string
 		includeGit  bool
@@ -79,7 +78,7 @@ Examples:
 			if len(args) > 0 {
 				sessionName = args[0]
 			}
-			return runHandoffCreate(cmd, sessionName, goal, now, fromFile, auto, description, jsonFormat, output, format, includeGit)
+			return runHandoffCreate(cmd, sessionName, goal, now, fromFile, auto, description, false, output, format, includeGit)
 		},
 	}
 
@@ -88,7 +87,6 @@ Examples:
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "Create from YAML file")
 	cmd.Flags().BoolVar(&auto, "auto", false, "Generate from agent output")
 	cmd.Flags().StringVar(&description, "description", "", "Short description for filename")
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON (deprecated: use --format json)")
 	cmd.Flags().StringVarP(&output, "output", "o", "", "Output file path (use '-' for stdout)")
 	cmd.Flags().StringVar(&format, "format", "yaml", "Output format: yaml, json, or markdown")
 	cmd.Flags().BoolVar(&includeGit, "include-git", true, "Include git state in handoff")
@@ -98,8 +96,7 @@ Examples:
 
 func newHandoffListCmd() *cobra.Command {
 	var (
-		limit      int
-		jsonFormat bool
+		limit int
 	)
 
 	cmd := &cobra.Command{
@@ -119,19 +116,16 @@ Examples:
 			if len(args) > 0 {
 				sessionName = args[0]
 			}
-			return runHandoffList(cmd, sessionName, limit, jsonFormat)
+			return runHandoffList(cmd, sessionName, limit, false)
 		},
 	}
 
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of handoffs to list")
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 
 	return cmd
 }
 
 func newHandoffShowCmd() *cobra.Command {
-	var jsonFormat bool
-
 	cmd := &cobra.Command{
 		Use:   "show <path>",
 		Short: "Show a specific handoff",
@@ -144,18 +138,14 @@ Examples:
   ntm handoff show /full/path/to/handoff.yaml`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runHandoffShow(cmd, args[0], jsonFormat)
+			return runHandoffShow(cmd, args[0], false)
 		},
 	}
-
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 
 	return cmd
 }
 
 func newHandoffLedgerCmd() *cobra.Command {
-	var jsonFormat bool
-
 	cmd := &cobra.Command{
 		Use:   "ledger [session]",
 		Short: "Show continuity ledger for a session",
@@ -173,18 +163,18 @@ Examples:
 			if len(args) > 0 {
 				sessionName = args[0]
 			}
-			return runHandoffLedger(cmd, sessionName, jsonFormat)
+			return runHandoffLedger(cmd, sessionName, false)
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonFormat, "json", false, "Output as JSON")
 	return cmd
 }
 
 func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile string, auto bool, description string, jsonFormat bool, output, format string, includeGit bool) error {
-	// Check global JSON flag
-	if IsJSONOutput() {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if IsJSONOutput() || jsonFormat {
 		jsonFormat = true
+		format = "json"
 	}
 
 	if strings.TrimSpace(sessionName) != "" {
@@ -194,10 +184,8 @@ func runHandoffCreate(cmd *cobra.Command, sessionName, goal, now, fromFile strin
 		}
 		sessionName = normalizedSession
 	}
-
-	// Normalize format flag
-	if jsonFormat && format == "yaml" {
-		format = "json" // --json flag overrides default
+	if format == "json" && fromFile == "" && !auto && (goal == "" || now == "") {
+		return fmt.Errorf("invalid argument: JSON handoff creation requires --goal and --now, --auto, or --from-file")
 	}
 
 	projectDir, err := resolveWorkspaceBackedHandoffProjectDir(sessionName)

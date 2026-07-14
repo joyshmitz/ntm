@@ -161,29 +161,57 @@ func TestJSONInvocationFromArgsHonorsExplicitBooleanAndTerminator(t *testing.T) 
 	}{
 		{name: "global true", args: []string{"--json"}, want: true},
 		{name: "global explicit true", args: []string{"replay", "--json=true"}, want: true},
+		{name: "invalid json value preserves machine intent", args: []string{"--json=bogus", "version"}, want: true},
 		{name: "global false", args: []string{"--json=false", "status"}, want: false},
 		{name: "global last true wins", args: []string{"--json=false", "status", "--json"}, want: true},
 		{name: "global last false wins", args: []string{"--json", "status", "--json=false"}, want: false},
 		{name: "format equals", args: []string{"ensemble", "compare", "a", "b", "--format=json"}, want: true},
 		{name: "format separate", args: []string{"ensemble", "presets", "--format", "json"}, want: true},
 		{name: "short format equals", args: []string{"ensemble", "compare", "a", "b", "-f=json"}, want: true},
+		{name: "short format attached", args: []string{"ensemble", "compare", "a", "b", "-fjson"}, want: true},
 		{name: "short format separate", args: []string{"ensemble", "presets", "-f", "json"}, want: true},
 		{name: "format case insensitive", args: []string{"modes", "list", "--format=JSON"}, want: true},
+		{name: "format command alias", args: []string{"work", "commit-readiness", "--format=json"}, want: true},
 		{name: "format last non-json wins", args: []string{"ensemble", "compare", "a", "b", "--format=json", "--format", "yaml"}, want: false},
 		{name: "format last json wins", args: []string{"ensemble", "compare", "a", "b", "--format=yaml", "--format", "json"}, want: true},
 		{name: "mixed format last non-json wins", args: []string{"ensemble", "compare", "a", "b", "-f=json", "--format", "yaml"}, want: false},
 		{name: "mixed format last json wins", args: []string{"ensemble", "compare", "a", "b", "--format=yaml", "-f", "json"}, want: true},
 		{name: "global true forces yaml", args: []string{"--json=true", "ensemble", "compare", "a", "b", "--format=yaml"}, want: true},
+		{name: "pflag numeric bool", args: []string{"--json=1", "status"}, want: true},
+		{name: "inherited json last false wins across command", args: []string{"--json=true", "handoff", "list", "--json=false"}, want: false},
+		{name: "inherited json last false wins after command", args: []string{"handoff", "list", "--json=true", "--json=false"}, want: false},
+		{name: "inherited global last false wins", args: []string{"--json=true", "status", "--json=false"}, want: false},
 		{name: "global false does not negate format", args: []string{"--json=false", "ensemble", "compare", "a", "b", "--format=json"}, want: true},
 		{name: "trailing global false does not negate format", args: []string{"ensemble", "compare", "a", "b", "--format=json", "--json=false"}, want: true},
 		{name: "config value before command", args: []string{"--config", "/tmp/ntm.toml", "ensemble", "presets", "--format=json"}, want: true},
+		{name: "root integer value before command", args: []string{"--limit", "5", "ensemble", "presets", "--format=json"}, want: true},
+		{name: "root string value before command", args: []string{"--since", "7d", "summary", "--format=json"}, want: true},
+		{name: "format before command", args: []string{"--format=json", "analytics"}, want: true},
+		{name: "format before default json command overrides default", args: []string{"--format=csv", "audit", "export", "s"}, want: false},
+		{name: "output equals", args: []string{"worktree", "list", "--output=json"}, want: true},
+		{name: "output separate", args: []string{"worktree", "list", "--output", "json"}, want: true},
+		{name: "short output equals", args: []string{"worktree", "list", "-o=json"}, want: true},
+		{name: "short output attached", args: []string{"worktree", "list", "-ojson"}, want: true},
+		{name: "short output separate", args: []string{"worktree", "list", "-o", "json"}, want: true},
+		{name: "attached output last non-json wins", args: []string{"worktree", "list", "-ojson", "-otable"}, want: false},
+		{name: "output last non-json wins", args: []string{"worktree", "list", "--output=json", "-o", "table"}, want: false},
+		{name: "worktree output before command", args: []string{"--output=json", "worktree", "list"}, want: true},
+		{name: "unscoped output is not format", args: []string{"audit", "export", "s", "--output=json", "--format=csv"}, want: false},
+		{name: "audit export defaults json", args: []string{"audit", "export", "s"}, want: true},
+		{name: "audit export explicit csv", args: []string{"audit", "export", "s", "--format=csv"}, want: false},
+		{name: "metrics export defaults json", args: []string{"metrics", "export"}, want: true},
+		{name: "metrics export explicit prometheus", args: []string{"metrics", "export", "-f", "prometheus"}, want: false},
+		{name: "work graph defaults json", args: []string{"work", "graph"}, want: true},
+		{name: "work graph explicit dot", args: []string{"work", "graph", "--format=dot"}, want: false},
 		{name: "cass injection format is not output", args: []string{"cass", "preview", "--format=json"}, want: false},
 		{name: "cass injection short format is not output", args: []string{"cass", "preview", "-f=json"}, want: false},
 		{name: "checkpoint archive format is not output", args: []string{"checkpoint", "export", "s", "id", "--format=json"}, want: false},
-		{name: "short format requires real shorthand", args: []string{"audit", "export", "s", "-f=json"}, want: false},
+		{name: "short format requires real shorthand", args: []string{"analytics", "-f=json"}, want: false},
+		{name: "attached short format requires real shorthand", args: []string{"analytics", "-fjson"}, want: false},
 		{name: "unscoped format is not output", args: []string{"status", "--format=json"}, want: false},
 		{name: "terminator stops global scan", args: []string{"--", "--json"}, want: false},
 		{name: "terminator stops format scan", args: []string{"ensemble", "compare", "a", "b", "--", "--format=json"}, want: false},
+		{name: "terminator stops output scan", args: []string{"worktree", "list", "--", "--output=json"}, want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -192,6 +220,23 @@ func TestJSONInvocationFromArgsHonorsExplicitBooleanAndTerminator(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestJSONFlagIsDeclaredOnlyAsRootPersistentFlag(t *testing.T) {
+	if rootCmd.PersistentFlags().Lookup("json") == nil {
+		t.Fatal("root command is missing its persistent --json flag")
+	}
+
+	var inspect func(*cobra.Command)
+	inspect = func(cmd *cobra.Command) {
+		for _, child := range cmd.Commands() {
+			if child.LocalNonPersistentFlags().Lookup("json") != nil {
+				t.Errorf("command %q redeclares --json instead of inheriting the root persistent flag", child.CommandPath())
+			}
+			inspect(child)
+		}
+	}
+	inspect(rootCmd)
 }
 
 func TestExecuteRootWithSignalsSecondSignalHelper(t *testing.T) {

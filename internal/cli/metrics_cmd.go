@@ -317,6 +317,16 @@ func runMetricsCompare(sessionID, baselineName string) error {
 
 // runMetricsExport exports metrics in the specified format.
 func runMetricsExport(sessionID, format, outputFile string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if IsJSONOutput() {
+		format = "json"
+	}
+	switch format {
+	case "json", "csv", "prometheus", "prom":
+	default:
+		return fmt.Errorf("invalid --format %q: must be json, csv, or prometheus", format)
+	}
+
 	store, collector, err := getMetricsCollector(sessionID)
 	if err != nil {
 		return err
@@ -351,11 +361,11 @@ func runMetricsExport(sessionID, format, outputFile string) error {
 		_, err = fmt.Fprint(out, report.ExportPrometheus())
 		return err
 	case "json":
-		fallthrough
-	default:
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
+	default:
+		return fmt.Errorf("invalid --format %q: must be json, csv, or prometheus", format)
 	}
 }
 

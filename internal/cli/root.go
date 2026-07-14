@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,6 +70,7 @@ var (
 
 var robotStateStore *state.Store
 var robotProcessExit error
+var jsonArgumentRoot *cobra.Command
 
 func recordRobotProcessExit(err error) {
 	if err != nil && robotProcessExit == nil {
@@ -106,10 +108,12 @@ func robotInvocationFromArgs(args []string) (bool, string) {
 }
 
 func jsonInvocationFromArgs(args []string) bool {
-	globalJSONRequested := false
-	formatJSONRequested := false
+	jsonRequested := false
+	formatJSONRequested := hasDefaultJSONOutputCommand(args)
+	outputJSONRequested := false
 	formatIsOutput := hasJSONOutputFormatCommand(args)
 	shortFormatIsOutput := hasJSONShortOutputFormatCommand(args)
+	outputIsFormat := hasJSONOutputValueCommand(args)
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -117,30 +121,54 @@ func jsonInvocationFromArgs(args []string) bool {
 			break
 		}
 		normalized := strings.ToLower(strings.TrimSpace(arg))
-		switch normalized {
-		case "--json", "--json=true":
-			globalJSONRequested = true
-		case "--json=false":
-			globalJSONRequested = false
-		case "--format":
+		switch {
+		case normalized == "--json":
+			jsonRequested = true
+		case strings.HasPrefix(normalized, "--json="):
+			value, err := strconv.ParseBool(strings.TrimSpace(strings.TrimPrefix(normalized, "--json=")))
+			if err != nil {
+				// Preserve explicit machine intent so Cobra parse failures are
+				// returned as one JSON error document rather than human stderr.
+				jsonRequested = true
+				continue
+			}
+			jsonRequested = value
+		case normalized == "--format":
 			if formatIsOutput && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
 				formatJSONRequested = strings.EqualFold(strings.TrimSpace(args[i+1]), "json")
 				i++
 			}
-		case "-f":
+		case normalized == "-f":
 			if shortFormatIsOutput && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
 				formatJSONRequested = strings.EqualFold(strings.TrimSpace(args[i+1]), "json")
+				i++
+			}
+		case normalized == "--output" || normalized == "-o":
+			if outputIsFormat && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "-") {
+				outputJSONRequested = strings.EqualFold(strings.TrimSpace(args[i+1]), "json")
 				i++
 			}
 		default:
 			if formatIsOutput && strings.HasPrefix(normalized, "--format=") {
 				formatJSONRequested = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalized, "--format=")), "json")
-			} else if shortFormatIsOutput && strings.HasPrefix(normalized, "-f=") {
-				formatJSONRequested = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalized, "-f=")), "json")
+			} else if shortFormatIsOutput && strings.HasPrefix(normalized, "-f") && !strings.HasPrefix(normalized, "--") {
+				value := strings.TrimPrefix(normalized, "-f")
+				value = strings.TrimPrefix(value, "=")
+				if value != "" {
+					formatJSONRequested = strings.EqualFold(strings.TrimSpace(value), "json")
+				}
+			} else if outputIsFormat && strings.HasPrefix(normalized, "--output=") {
+				outputJSONRequested = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(normalized, "--output=")), "json")
+			} else if outputIsFormat && strings.HasPrefix(normalized, "-o") && !strings.HasPrefix(normalized, "--") {
+				value := strings.TrimPrefix(normalized, "-o")
+				value = strings.TrimPrefix(value, "=")
+				if value != "" {
+					outputJSONRequested = strings.EqualFold(strings.TrimSpace(value), "json")
+				}
 			}
 		}
 	}
-	return globalJSONRequested || formatJSONRequested
+	return jsonRequested || formatJSONRequested || outputJSONRequested
 }
 
 var jsonOutputFormatCommandPaths = [][]string{
@@ -170,9 +198,20 @@ var jsonOutputFormatCommandPaths = [][]string{
 	{"scrub"},
 	{"summary"},
 	{"work", "commit-ready"},
+	{"work", "commit-readiness"},
 	{"work", "graph"},
 	{"work", "queue-dry"},
 	{"work", "triage"},
+}
+
+var defaultJSONOutputCommandPaths = [][]string{
+	{"audit", "export"},
+	{"metrics", "export"},
+	{"work", "graph"},
+}
+
+var jsonOutputValueCommandPaths = [][]string{
+	{"worktree", "list"},
 }
 
 var jsonShortOutputFormatCommandPaths = [][]string{
@@ -214,7 +253,30 @@ func hasJSONShortOutputFormatCommand(args []string) bool {
 	return false
 }
 
+func hasDefaultJSONOutputCommand(args []string) bool {
+	for _, commandPath := range defaultJSONOutputCommandPaths {
+		if argsMatchCommandPath(args, commandPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasJSONOutputValueCommand(args []string) bool {
+	for _, commandPath := range jsonOutputValueCommandPaths {
+		if argsMatchCommandPath(args, commandPath) {
+			return true
+		}
+	}
+	return false
+}
+
 func argsMatchCommandPath(args, commandPath []string) bool {
+	_, ok := argsMatchCommandPathEnd(args, commandPath)
+	return ok
+}
+
+func argsMatchCommandPathEnd(args, commandPath []string) (int, bool) {
 	pathIndex := 0
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(args[i])
@@ -228,24 +290,56 @@ func argsMatchCommandPath(args, commandPath []string) bool {
 			continue
 		}
 		if pathIndex >= len(commandPath) || arg != commandPath[pathIndex] {
-			return false
+			return -1, false
 		}
 		pathIndex++
 		if pathIndex == len(commandPath) {
-			return true
+			return i, true
 		}
 	}
-	return false
+	return -1, false
 }
 
 func argumentFlagConsumesValue(arg string) bool {
-	name := strings.TrimLeft(strings.SplitN(arg, "=", 2)[0], "-")
+	token := strings.SplitN(strings.TrimSpace(arg), "=", 2)[0]
+	name := strings.TrimLeft(token, "-")
+	shorthand := strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--") && len(name) == 1
+	if consumes, found := commandTreeFlagConsumesValue(jsonArgumentRoot, name, shorthand); found {
+		return consumes
+	}
+
+	// Command-local format/output flags can occur between path components and
+	// are not present in the root flag set used by the pre-execution detector.
 	switch name {
-	case "config", "f", "format", "redact", "ssh":
+	case "config", "f", "format", "o", "output", "redact", "ssh":
 		return true
 	default:
 		return false
 	}
+}
+
+func commandTreeFlagConsumesValue(cmd *cobra.Command, name string, shorthand bool) (consumes, found bool) {
+	if cmd == nil {
+		return false, false
+	}
+	for _, flags := range []*pflag.FlagSet{cmd.LocalNonPersistentFlags(), cmd.PersistentFlags()} {
+		flag := flags.Lookup(name)
+		if shorthand {
+			flag = flags.ShorthandLookup(name)
+		}
+		if flag != nil {
+			found = true
+			if flag.NoOptDefVal == "" {
+				consumes = true
+			}
+		}
+	}
+	for _, child := range cmd.Commands() {
+		childConsumes, childFound := commandTreeFlagConsumesValue(child, name, shorthand)
+		found = found || childFound
+		consumes = consumes || childConsumes
+	}
+	return consumes, found
 }
 
 func machineJSONInvocation(cmd *cobra.Command) (bool, string) {
@@ -1739,11 +1833,7 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use a valid stuck-duration threshold", "robot-health-restart-stuck")
 				return
 			}
-			opts := robot.AutoRestartStuckOptions{
-				Session:   session,
-				Threshold: threshold,
-				DryRun:    robotDryRunEffective,
-			}
+			opts := autoRestartStuckOptions(session, threshold, robotDryRunEffective, cfg)
 			if err := robot.PrintAutoRestartStuck(opts); err != nil {
 				recordRobotProcessExit(err)
 			}
@@ -3543,6 +3633,7 @@ var (
 
 func init() {
 	robot.MustRegisterSchemaCommand("default_prompts", DefaultPromptsOutput{})
+	jsonArgumentRoot = rootCmd
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/ntm/config.toml)")
 

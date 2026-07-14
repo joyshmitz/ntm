@@ -71,7 +71,9 @@ Examples:
   ntm support-bundle --since 2h -o bundle.zip
   ntm support-bundle --include-sessions -o bundle.zip`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSupportBundle(cmd.Context(), opts)
+			effectiveOpts := opts
+			effectiveOpts.RobotMode = effectiveOpts.RobotMode || IsJSONOutput()
+			return runSupportBundle(cmd.Context(), effectiveOpts)
 		},
 	}
 
@@ -84,7 +86,6 @@ Examples:
 	cmd.Flags().BoolVar(&opts.NoRedact, "no-redact", false, "Skip redaction (unsafe)")
 	cmd.Flags().BoolVar(&opts.IncludeSessions, "include-sessions", opts.IncludeSessions, "Include session snapshots and pane output")
 	cmd.Flags().BoolVar(&opts.IncludeEvents, "include-events", opts.IncludeEvents, "Include events log")
-	cmd.Flags().BoolVar(&opts.RobotMode, "json", false, "Output result as JSON")
 
 	_ = cmd.MarkFlagRequired("output")
 

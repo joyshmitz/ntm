@@ -225,6 +225,9 @@ func TestBuildSwarmPlanOutput(t *testing.T) {
 
 	out := buildSwarmPlanOutput(plan, true)
 
+	if !out.Success || out.Timestamp == "" {
+		t.Fatalf("robot envelope = %+v, want successful timestamped response", out.RobotResponse)
+	}
 	if out.ScanDir != plan.ScanDir {
 		t.Errorf("ScanDir = %q, want %q", out.ScanDir, plan.ScanDir)
 	}
@@ -278,5 +281,8 @@ func TestBuildSwarmPlanOutput_EmptyPlan(t *testing.T) {
 	}
 	if len(out.Sessions) != 0 {
 		t.Errorf("Sessions length = %d, want 0", len(out.Sessions))
+	}
+	if out.Allocations == nil || out.Sessions == nil {
+		t.Fatalf("empty swarm arrays must encode as []: allocations=%#v sessions=%#v", out.Allocations, out.Sessions)
 	}
 }

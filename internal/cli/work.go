@@ -308,6 +308,9 @@ func runWorkTriage(byLabel, byTrack bool, limit int, showQuick, showHealth bool,
 
 	// Determine output format
 	outputFormat := resolveTriageFormat(format)
+	if IsJSONOutput() {
+		outputFormat = "json"
+	}
 
 	// Handle markdown output
 	if outputFormat == "markdown" {
@@ -332,7 +335,7 @@ func runWorkTriage(byLabel, byTrack bool, limit int, showQuick, showHealth bool,
 		return fmt.Errorf("getting triage: %w", err)
 	}
 
-	if jsonOutput || outputFormat == "json" {
+	if outputFormat == "json" {
 		return outputJSON(triage)
 	}
 
@@ -341,7 +344,7 @@ func runWorkTriage(byLabel, byTrack bool, limit int, showQuick, showHealth bool,
 
 // resolveTriageFormat determines the output format based on flags and context.
 func resolveTriageFormat(format string) string {
-	switch strings.ToLower(format) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "json":
 		return "json"
 	case "markdown", "md":
@@ -1073,7 +1076,7 @@ func runWorkCommitReady(format string, agentName string, syncLagMinutes int) err
 
 	report := collectCommitReadyReport(dir, agentName, time.Now().UTC(), time.Duration(syncLagMinutes)*time.Minute)
 	outputMode := strings.ToLower(strings.TrimSpace(format))
-	if outputMode == "" && jsonOutput {
+	if IsJSONOutput() {
 		outputMode = "json"
 	}
 	if outputMode == "json" {
@@ -1089,6 +1092,7 @@ func collectCommitReadyReport(dir string, agentName string, now time.Time, syncL
 		Success:             true,
 		Project:             dir,
 		Agent:               agentName,
+		Findings:            []commitlint.Finding{},
 	}
 
 	gitInfo, gitErr := getGitInfo(dir)
@@ -1392,7 +1396,7 @@ func applyCommitLintReport(report *CommitReadyResponse, lintReport commitlint.Re
 	}
 	report.SafeToCommit = lintReport.SafeToCommit
 	report.Summary = lintReport.Summary
-	report.Findings = append([]commitlint.Finding(nil), lintReport.Findings...)
+	report.Findings = append([]commitlint.Finding{}, lintReport.Findings...)
 	report.Notes = append([]string(nil), lintReport.Notes...)
 	for _, finding := range report.Findings {
 		appendCommitReadyStatus(report, finding)
@@ -1498,7 +1502,7 @@ func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, max
 	}
 
 	outputMode := strings.ToLower(strings.TrimSpace(format))
-	if outputMode == "" && jsonOutput {
+	if IsJSONOutput() {
 		outputMode = "json"
 	}
 	if outputMode == "json" {
@@ -2929,6 +2933,10 @@ func runWorkGraph(format string) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if IsJSONOutput() {
+		format = "json"
 	}
 
 	adapter := tools.NewBVAdapter()

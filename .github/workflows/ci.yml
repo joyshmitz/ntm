@@ -442,47 +442,16 @@ jobs:
           cache: true
 
       - name: Build ntm
-        run: go build -o ntm ./cmd/ntm
+        run: go build -trimpath -ldflags "-X github.com/Dicklesworthstone/ntm/internal/cli.Version=0.0.0" -o ntm ./cmd/ntm
 
-      - name: Verify upgrade --check works
+      - name: Verify strict upgrade asset resolution
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo "Testing upgrade --check against latest release..."
-          # Run upgrade --check - it should either:
-          # 1. Find the latest release and show version info, OR
-          # 2. Report "no releases found" for dev/new forks (acceptable)
-          # It should NOT report "no suitable release asset found" (naming mismatch)
-
-          if ./ntm upgrade --check 2>&1 | tee upgrade_output.txt; then
-            echo "Upgrade check succeeded"
-          else
-            # Check if it's a "no releases" error (acceptable for forks/new repos)
-            if grep -qi "no releases found\|development version" upgrade_output.txt; then
-              echo "No releases found (expected for dev builds)"
-              exit 0
-            fi
-            echo "Upgrade check failed"
-            cat upgrade_output.txt
-            exit 1
-          fi
-
-          # Critical check: "no suitable release asset found" means naming mismatch
-          if grep -q "no suitable release asset" upgrade_output.txt; then
-            echo ""
-            echo "========================================================================"
-            echo "  ERROR: Asset naming mismatch detected!"
-            echo ""
-            echo "  upgrade.go cannot find assets from the latest release."
-            echo "  This likely means:"
-            echo "  1. upgrade.go naming logic was changed, OR"
-            echo "  2. .goreleaser.yaml naming template was changed"
-            echo ""
-            echo "  Review: TestUpgradeAssetNamingContract in cli_test.go"
-            echo "========================================================================"
-            echo ""
-            exit 1
-          fi
-
-          echo "Upgrade asset naming contract verified"
+          ./ntm upgrade --check --strict 2>&1 | tee upgrade_output.txt
+          grep -q "Asset available:" upgrade_output.txt
+          echo "Strict upgrade asset naming contract verified"
 
   # ============================================================================
   # SUMMARY - Final status check

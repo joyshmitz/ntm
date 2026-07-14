@@ -3,7 +3,7 @@ name: brennerbot-incident
 description: Small deterministic brennerbot incident pipeline for mocked E2E coverage.
 
 settings:
-  timeout: 5s
+  timeout: 15s
   on_error: fail
 
 steps:

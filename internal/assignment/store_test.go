@@ -1861,6 +1861,99 @@ func TestCompleteTerminalReconciliationRetainsReceiptAndClearsLeaseHandles(t *te
 	}
 }
 
+func TestBeginTerminalReconciliationBackfillsCompletionEventOnMatchingBarrier(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const (
+		session = "assignment-terminal-event-backfill"
+		beadID  = "ntm-terminal-event-backfill"
+	)
+
+	store := NewStore(session)
+	if _, err := store.Assign(beadID, "Backfill completion event", 4, "codex", "CodexFour", "prompt"); err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+	observed := store.Get(beadID)
+	withoutEvent, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, StatusCompleted, "closed externally")
+	if err != nil || !applied {
+		t.Fatalf("begin no-event barrier row=%+v applied=%v error=%v", withoutEvent, applied, err)
+	}
+	if withoutEvent.PendingCompletionEventID != "" || withoutEvent.CompletionDetectedAt != nil {
+		t.Fatalf("no-event barrier unexpectedly created completion event: %+v", withoutEvent)
+	}
+
+	withEvent, applied, err := store.BeginTerminalReconciliationWithCompletionEventIfCurrent(t.Context(), observed, StatusCompleted, "closed externally")
+	if err != nil || !applied {
+		t.Fatalf("backfill completion event row=%+v applied=%v error=%v", withEvent, applied, err)
+	}
+	if withEvent.PendingCompletionEventID == "" || withEvent.CompletionDetectedAt == nil {
+		t.Fatalf("matching barrier did not receive completion event: %+v", withEvent)
+	}
+	durable := mustLoadAssignment(t, session, beadID)
+	if durable.PendingCompletionEventID != withEvent.PendingCompletionEventID || durable.CompletionDetectedAt == nil {
+		t.Fatalf("completion event was not durable: returned=%+v durable=%+v", withEvent, durable)
+	}
+
+	preserved, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, StatusCompleted, "closed externally")
+	if err != nil || !applied || preserved.PendingCompletionEventID != withEvent.PendingCompletionEventID {
+		t.Fatalf("no-event retry did not preserve backfilled event: row=%+v applied=%v error=%v", preserved, applied, err)
+	}
+}
+
+func TestBeginTerminalReconciliationBackfillsEventAfterNoEventCompletionWins(t *testing.T) {
+	tests := []struct {
+		name   string
+		status AssignmentStatus
+		reason string
+	}{
+		{name: "completed", status: StatusCompleted},
+		{name: "failed", status: StatusFailed, reason: "worker failed"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			session := "terminal-event-after-complete-" + test.name
+			beadID := "ntm-terminal-event-after-complete-" + test.name
+			store := NewStore(session)
+			if _, err := store.Assign(beadID, "Terminal event race", 5, "codex", "CodexFive", "prompt"); err != nil {
+				t.Fatalf("seed assignment: %v", err)
+			}
+			observed := store.Get(beadID)
+			barrier, applied, err := store.BeginTerminalReconciliationIfCurrent(t.Context(), observed, test.status, test.reason)
+			if err != nil || !applied || barrier == nil {
+				t.Fatalf("begin no-event barrier=%+v applied=%v error=%v", barrier, applied, err)
+			}
+			if _, err := store.RecordClearLeasesReleased(t.Context(), beadID); err != nil {
+				t.Fatalf("record leases released: %v", err)
+			}
+			if _, err := store.RecordTerminalClaimReleased(t.Context(), beadID); err != nil {
+				t.Fatalf("record claim released: %v", err)
+			}
+			if err := store.CompleteTerminalReconciliation(t.Context(), beadID, test.status, test.reason); err != nil {
+				t.Fatalf("complete no-event reconciliation: %v", err)
+			}
+			completed := mustLoadAssignment(t, session, beadID)
+			if completed.Status != test.status || completed.PendingCompletionEventID != "" {
+				t.Fatalf("no-event completion=%+v", completed)
+			}
+			if test.status == StatusFailed {
+				if row, applied, err := store.BeginTerminalReconciliationWithCompletionEventIfCurrent(t.Context(), observed, test.status, "different reason"); err != nil || applied || row != nil {
+					t.Fatalf("mismatched failed outcome row=%+v applied=%v error=%v", row, applied, err)
+				}
+			}
+
+			withEvent, applied, err := store.BeginTerminalReconciliationWithCompletionEventIfCurrent(t.Context(), observed, test.status, test.reason)
+			if err != nil || !applied || withEvent == nil || withEvent.PendingCompletionEventID == "" || withEvent.CompletionDetectedAt == nil {
+				t.Fatalf("post-completion event row=%+v applied=%v error=%v", withEvent, applied, err)
+			}
+			durable := mustLoadAssignment(t, session, beadID)
+			if durable.PendingCompletionEventID != withEvent.PendingCompletionEventID || durable.CompletionDetectedAt == nil {
+				t.Fatalf("post-completion event not durable: returned=%+v durable=%+v", withEvent, durable)
+			}
+		})
+	}
+}
+
 func TestListPendingCompletionEventsUsesDeterministicReplayOrder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store := NewStore("assignment-completion-outbox-order")

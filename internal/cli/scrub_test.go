@@ -111,6 +111,9 @@ func TestScrub_CommandSinceSkipsOldFiles(t *testing.T) {
 	if len(res.Findings) != 0 {
 		t.Fatalf("expected no findings, got %d", len(res.Findings))
 	}
+	if res.Findings == nil {
+		t.Fatal("expected empty findings array, got null")
+	}
 }
 
 func TestResolveScrubRootsUsesSelectedConfigDir(t *testing.T) {

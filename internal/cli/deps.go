@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -174,10 +175,8 @@ func runDeps(verbose bool) error {
 	result, err := kernel.Run(context.Background(), "core.deps", DepsInput{Verbose: verbose})
 	if err != nil {
 		if IsJSONOutput() {
-			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			}, err)
+			response := depsJSONErrorResponse(err, robot.ErrCodeInternalError, "Retry the dependency check or inspect ntm diagnostics")
+			return emitJSONFailureEnvelopeWithCause(response, err)
 		}
 		return err
 	}
@@ -185,10 +184,8 @@ func runDeps(verbose bool) error {
 	resp, err := coerceDepsResponse(result)
 	if err != nil {
 		if IsJSONOutput() {
-			return emitJSONFailureEnvelopeWithCause(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			}, err)
+			response := depsJSONErrorResponse(err, robot.ErrCodeInternalError, "Retry the dependency check or inspect ntm diagnostics")
+			return emitJSONFailureEnvelopeWithCause(response, err)
 		}
 		return err
 	}
@@ -197,14 +194,17 @@ func runDeps(verbose bool) error {
 	if IsJSONOutput() {
 		if !resp.AllInstalled {
 			cause := fmt.Errorf("required dependencies are missing")
+			failure := depsJSONErrorResponse(
+				cause,
+				robot.ErrCodeDependencyMissing,
+				"Install each required dependency listed with installed=false, then rerun 'ntm deps --json'",
+			)
 			return emitJSONFailureEnvelopeWithCause(struct {
-				Success bool `json:"success"`
+				robot.RobotResponse
 				output.DepsResponse
-				Error string `json:"error"`
 			}{
-				Success:      false,
-				DepsResponse: resp,
-				Error:        cause.Error(),
+				RobotResponse: failure,
+				DepsResponse:  resp,
 			}, cause)
 		}
 		return output.PrintJSON(resp)
@@ -320,6 +320,13 @@ func runDeps(verbose bool) error {
 
 	fmt.Println()
 	return nil
+}
+
+func depsJSONErrorResponse(err error, code, hint string) robot.RobotResponse {
+	response := robot.NewErrorResponse(err, code, hint)
+	response.OutputFormat = string(robot.FormatJSON)
+	response.Meta = robot.NewResponseMeta("deps").WithExitCode(1)
+	return response
 }
 
 func coerceDepsResponse(result any) (output.DepsResponse, error) {

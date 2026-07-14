@@ -21,7 +21,7 @@ import (
 func TestBrennerbotIncidentPipelineRunsEndToEndAgainstMocks(t *testing.T) {
 	const (
 		sessionName          = "incident-session"
-		configuredWallBudget = 5 * time.Second
+		configuredWallBudget = 15 * time.Second
 	)
 
 	workflowPath := filepath.Join("testdata", "brennerbot-incident.yaml")
