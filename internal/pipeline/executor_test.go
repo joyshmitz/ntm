@@ -3690,8 +3690,8 @@ func TestExecuteCommand_HeartbeatEmittedForLongRunningCommand(t *testing.T) {
 
 // TestExecuteCommand_HeartbeatStopsAfterCommandCompletes guards against a
 // goroutine leak: heartbeats must stop firing once waitCommand returns.
-// We disable the interval via the package var, run the command, and
-// confirm zero heartbeat events made it into the log.
+// A heavily loaded runner may keep even a trivial command alive long enough
+// for a legitimate in-flight heartbeat, so compare the count after return.
 func TestExecuteCommand_HeartbeatStopsAfterCommandCompletes(t *testing.T) {
 	prev := commandHeartbeatInterval
 	commandHeartbeatInterval = 50 * time.Millisecond
@@ -3705,13 +3705,16 @@ func TestExecuteCommand_HeartbeatStopsAfterCommandCompletes(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{ID: "fast", Command: "true"}
 	_ = e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+	heartbeatsAtCompletion := strings.Count(buf.String(), EventCommandHeartbeat)
 
 	// Wait long enough that an unbounded heartbeat goroutine would have
 	// fired several times.
 	time.Sleep(200 * time.Millisecond)
 
-	if strings.Contains(buf.String(), EventCommandHeartbeat) {
-		t.Fatalf("%q emitted after command completed — heartbeat goroutine leaked\nlog:\n%s", EventCommandHeartbeat, buf.String())
+	heartbeatsAfterWait := strings.Count(buf.String(), EventCommandHeartbeat)
+	if heartbeatsAfterWait != heartbeatsAtCompletion {
+		t.Fatalf("%q count increased after command completion: before=%d after=%d\nlog:\n%s",
+			EventCommandHeartbeat, heartbeatsAtCompletion, heartbeatsAfterWait, buf.String())
 	}
 }
 

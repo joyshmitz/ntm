@@ -5174,27 +5174,38 @@ func TestTriageOutputStructure(t *testing.T) {
 }
 
 func TestPrintTriageWhenBvNotInstalled(t *testing.T) {
-	// This test verifies behavior when bv is not installed
-	// We can't easily mock bv.IsInstalled, so we just test the output structure
-	if !bv.IsInstalled() {
-		output, err := captureStdout(t, func() error {
-			return PrintTriage(TriageOptions{Limit: 5})
-		})
-		if err != nil {
-			t.Fatalf("PrintTriage returned error: %v", err)
-		}
+	t.Setenv("PATH", "")
 
-		var result TriageOutput
-		if err := json.Unmarshal([]byte(output), &result); err != nil {
-			t.Fatalf("failed to parse output as JSON: %v", err)
-		}
+	output, err := captureStdout(t, func() error {
+		return PrintTriage(TriageOptions{Limit: 5})
+	})
+	var exitErr *ProcessExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || !exitErr.JSONWritten() {
+		t.Fatalf("PrintTriage error = %T %v, want written exit-1 ProcessExitError", err, err)
+	}
 
-		if result.Available {
-			t.Error("Available should be false when bv not installed")
-		}
-		if result.Error == "" {
-			t.Error("Error should be set when bv not installed")
-		}
+	var result TriageOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("failed to parse output as JSON: %v", err)
+	}
+
+	if result.Success {
+		t.Error("Success should be false when bv is not installed")
+	}
+	if result.Available {
+		t.Error("Available should be false when bv is not installed")
+	}
+	if result.Error != "bv (beads_viewer) is not installed" {
+		t.Errorf("Error = %q, want missing-bv diagnostic", result.Error)
+	}
+	if result.ErrorCode != ErrCodeDependencyMissing {
+		t.Errorf("ErrorCode = %q, want %q", result.ErrorCode, ErrCodeDependencyMissing)
+	}
+	if result.Hint != "Install bv to enable triage" {
+		t.Errorf("Hint = %q, want bv installation guidance", result.Hint)
+	}
+	if result.OutputFormat != string(FormatJSON) {
+		t.Errorf("OutputFormat = %q, want %q", result.OutputFormat, FormatJSON)
 	}
 }
 

@@ -127,6 +127,7 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 		Panes:   paneFilter,
 		Type:    agentType,
 		All:     all,
+		Config:  cfg,
 	})
 	if err != nil {
 		return err

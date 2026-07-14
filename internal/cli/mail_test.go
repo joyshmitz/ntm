@@ -1369,21 +1369,20 @@ func TestUpdateSessionActivityIgnoresCWDMatchedWrongProject(t *testing.T) {
 
 func TestResolveAgentMailScopeWithPreferenceNormalizesExplicitPrefix(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
+	isolateSessionAgentStorage(t)
 
 	fullSession := "mailscopeprefixsession"
 	prefix := "mailscopeprefix"
-	workDir := t.TempDir()
-	_ = tmux.KillSession(fullSession)
-	if err := tmux.CreateSession(fullSession, workDir); err != nil {
-		t.Fatalf("CreateSession(%q): %v", fullSession, err)
-	}
-	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
-
-	projectsBase := t.TempDir()
+	projectsBase := canonicalTempDir(t)
 	projectKey := filepath.Join(projectsBase, fullSession)
 	if err := os.MkdirAll(projectKey, 0o755); err != nil {
 		t.Fatalf("mkdir project: %v", err)
 	}
+	_ = tmux.KillSession(fullSession)
+	if err := tmux.CreateSession(fullSession, projectKey); err != nil {
+		t.Fatalf("CreateSession(%q): %v", fullSession, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(fullSession) })
 
 	oldCfg := cfg
 	cfg = &config.Config{ProjectsBase: projectsBase}

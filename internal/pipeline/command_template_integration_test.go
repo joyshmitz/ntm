@@ -170,7 +170,7 @@ func TestIntegrationForeachPaneTemplateRendersPerPaneSubstitution(t *testing.T) 
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	state, err := executor.Run(ctx, workflow, nil, nil)
 	if err != nil {

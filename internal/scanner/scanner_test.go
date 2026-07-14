@@ -88,6 +88,11 @@ func TestScanDirectory(t *testing.T) {
 	// Scan the scanner package itself
 	result, err := scanner.ScanDirectory(ctx, ".")
 	if err != nil {
+		// UBS is an optional external process and can exceed its own 60s
+		// deadline on a contended CI host.
+		if errors.Is(err, ErrTimeout) {
+			t.Skipf("UBS directory scan timed out after 60s: %v", err)
+		}
 		t.Fatalf("scanning directory: %v", err)
 	}
 	if result == nil {

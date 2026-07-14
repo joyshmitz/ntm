@@ -122,7 +122,7 @@ func TestRespawnDryRun(t *testing.T) {
 	}()
 
 	cfg = newTmuxIntegrationTestConfig(tmpDir)
-	cfg.Agents.Claude = "sleep 300"
+	cfg.Agents.Claude = "printf ready; sleep 300"
 
 	// Create unique session
 	sessionName := fmt.Sprintf("ntm-test-respawn-%d", time.Now().UnixNano())
@@ -183,7 +183,7 @@ func TestRespawnWithPaneFilter(t *testing.T) {
 	}()
 
 	cfg = newTmuxIntegrationTestConfig(tmpDir)
-	cfg.Agents.Claude = "sleep 300"
+	cfg.Agents.Claude = "printf ready; sleep 300"
 
 	// Create unique session
 	sessionName := fmt.Sprintf("ntm-test-respawn-filter-%d", time.Now().UnixNano())

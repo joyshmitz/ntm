@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/archive"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func TestParseSummaryFilename(t *testing.T) {
@@ -401,6 +402,8 @@ func TestOutputSummaryFromFile_InvalidJSON(t *testing.T) {
 }
 
 func TestRegenerateSummaryFromArchive_NormalizesProjectScopedPrefix(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
 	origCfg := cfg
 	origWD, _ := os.Getwd()
 	t.Cleanup(func() {

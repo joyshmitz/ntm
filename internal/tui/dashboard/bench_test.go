@@ -219,6 +219,9 @@ func TestUpdateLoopPerformance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping wall-clock update profile in -short mode")
 	}
+	if raceEnabled {
+		t.Skip("skipping wall-clock update profile under -race (instrumentation makes the microsecond target meaningless)")
+	}
 	configureDashboardPerfEnv(t)
 	m := newBenchModel(200, 50, 20)
 	tickMsg := DashboardTickMsg(time.Now())
@@ -272,6 +275,10 @@ func TestSpringAnimationOverhead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping spring overhead profile in -short mode")
 	}
+	if raceEnabled {
+		t.Skip("skipping wall-clock spring profile under -race (instrumentation makes the sub-millisecond delta meaningless)")
+	}
+	runningInCI := os.Getenv("CI") != ""
 	configureDashboardPerfEnv(t)
 
 	const (
@@ -310,7 +317,7 @@ func TestSpringAnimationOverhead(t *testing.T) {
 	// reports real perf regressions, not background-load jitter.
 	target := 1.0
 	threshold := "<1.0"
-	if os.Getenv("CI") != "" || runtime.GOOS == "darwin" {
+	if runningInCI || runtime.GOOS == "darwin" {
 		target = 10.0
 		threshold = "<10.0 (CI/darwin)"
 	}

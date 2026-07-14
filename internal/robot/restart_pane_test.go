@@ -276,9 +276,13 @@ func TestRestartPaneOptionsDefaults(t *testing.T) {
 	if len(opts.Panes) != 0 {
 		t.Error("Panes should default to empty")
 	}
+	if opts.Config != nil {
+		t.Error("Config should default to nil")
+	}
 }
 
 func TestRestartPaneOptionsAllFieldsSet(t *testing.T) {
+	effectiveConfig := config.Default()
 	opts := RestartPaneOptions{
 		Session: "proj",
 		Panes:   []string{"1", "2", "3"},
@@ -287,6 +291,7 @@ func TestRestartPaneOptionsAllFieldsSet(t *testing.T) {
 		DryRun:  true,
 		Bead:    "bd-abc12",
 		Prompt:  "Work on this task",
+		Config:  effectiveConfig,
 	}
 
 	if opts.Session != "proj" {
@@ -309,6 +314,9 @@ func TestRestartPaneOptionsAllFieldsSet(t *testing.T) {
 	}
 	if opts.Prompt != "Work on this task" {
 		t.Error("Prompt mismatch")
+	}
+	if opts.Config != effectiveConfig {
+		t.Error("Config mismatch")
 	}
 }
 

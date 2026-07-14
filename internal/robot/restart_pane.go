@@ -54,13 +54,14 @@ type RestartError struct {
 
 // RestartPaneOptions configures the PrintRestartPane operation
 type RestartPaneOptions struct {
-	Session string   // Target session name
-	Panes   []string // Specific pane indices to restart (empty = all agents)
-	Type    string   // Filter by agent type (e.g., "claude", "cc")
-	All     bool     // Include all panes (including user)
-	DryRun  bool     // Preview mode
-	Bead    string   // Bead ID to assign after restart (fetches info via br show --json)
-	Prompt  string   // Custom prompt to send after restart (overrides --bead template)
+	Session string         // Target session name
+	Panes   []string       // Specific pane indices to restart (empty = all agents)
+	Type    string         // Filter by agent type (e.g., "claude", "cc")
+	All     bool           // Include all panes (including user)
+	DryRun  bool           // Preview mode
+	Bead    string         // Bead ID to assign after restart (fetches info via br show --json)
+	Prompt  string         // Custom prompt to send after restart (overrides --bead template)
+	Config  *config.Config // Effective caller config; nil loads the merged config from disk
 }
 
 type restartPromptTarget struct {
@@ -185,9 +186,13 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	// prompt would be typed into zsh instead of an agent.
 	agentPaneReady := make(map[string]bool, len(output.Restarted))
 	if len(output.Restarted) > 0 {
-		cfg, cfgErr := config.LoadMerged(mustGetwd(), config.DefaultPath())
-		if cfgErr != nil {
-			cfg = config.Default()
+		cfg := opts.Config
+		if cfg == nil {
+			var cfgErr error
+			cfg, cfgErr = config.LoadMerged(mustGetwd(), config.DefaultPath())
+			if cfgErr != nil {
+				cfg = config.Default()
+			}
 		}
 
 		// Let fresh shells initialize before typing into them.

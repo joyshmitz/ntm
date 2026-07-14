@@ -2033,6 +2033,7 @@ Shell Integration:
 				DryRun:  robotDryRunEffective,
 				Bead:    robotRestartPaneBead,
 				Prompt:  robotRestartPanePrompt,
+				Config:  cfg,
 			}
 			if err := robot.PrintRestartPane(opts); err != nil {
 				recordRobotProcessExit(err)

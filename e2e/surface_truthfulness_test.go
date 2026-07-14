@@ -120,18 +120,66 @@ func runNTM(t *testing.T, bin string, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	workingDir, env := isolatedSurfaceRuntime(t)
 
 	cmd := exec.CommandContext(ctx, bin, args...)
-	// Provide a minimal HOME so config loading doesn't fail.
-	cmd.Env = append(os.Environ(),
-		"HOME="+t.TempDir(),
-		"NTM_DISABLE_UPDATE_CHECK=1",
-	)
+	cmd.Dir = workingDir
+	cmd.Env = env
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+func isolatedSurfaceRuntime(t *testing.T) (string, []string) {
+	t.Helper()
+
+	root := t.TempDir()
+	homeDir := filepath.Join(root, "home")
+	configDir := filepath.Join(root, "config")
+	configPath := filepath.Join(configDir, "ntm", "config.toml")
+	tmuxDir := filepath.Join(root, "tmux")
+	for _, dir := range []string{homeDir, filepath.Dir(configPath), tmuxDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create isolated surface directory %s: %v", dir, err)
+		}
+	}
+	configData := []byte("[agent_mail]\nenabled = false\n\n[cass]\nenabled = false\n\n[cass.context]\nenabled = false\n\n[recovery]\nenabled = false\n")
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatalf("write isolated surface config: %v", err)
+	}
+
+	replaced := map[string]struct{}{
+		"HOME": {}, "XDG_CONFIG_HOME": {}, "XDG_DATA_HOME": {}, "XDG_STATE_HOME": {}, "XDG_CACHE_HOME": {},
+		"PWD": {}, "OLDPWD": {}, "BR_DB": {}, "BD_DB": {}, "BEADS_DB": {}, "AGENT_NAME": {},
+		"TMUX": {}, "TMUX_PANE": {}, "TMUX_TMPDIR": {}, "NTM_CONFIG": {},
+		"AGENT_MAIL_URL": {}, "AGENT_MAIL_TOKEN": {}, "AGENT_MAIL_ENABLED": {},
+	}
+	env := make([]string, 0, len(os.Environ())+14)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, skip := replaced[key]; !skip {
+			env = append(env, entry)
+		}
+	}
+	env = append(env,
+		"HOME="+homeDir,
+		"XDG_CONFIG_HOME="+configDir,
+		"XDG_DATA_HOME="+filepath.Join(root, "data"),
+		"XDG_STATE_HOME="+filepath.Join(root, "state"),
+		"XDG_CACHE_HOME="+filepath.Join(root, "cache"),
+		"TMUX=",
+		"TMUX_PANE=",
+		"TMUX_TMPDIR="+tmuxDir,
+		"NTM_CONFIG="+configPath,
+		"NTM_DISABLE_UPDATE_CHECK=1",
+		"NTM_DISABLE_INTERNAL_MONITOR=1",
+		"NTM_TEST_MODE=1",
+		"NO_COLOR=1",
+		"TERM=xterm-256color",
+	)
+	return root, env
 }
 
 // --------------------------------------------------------------------------
@@ -141,21 +189,21 @@ func runNTM(t *testing.T, bin string, args ...string) (string, error) {
 func TestSurfaceTruthfulness_RobotStatus(t *testing.T) {
 	bin := ntmBinary(t, "")
 
-	out, _ := runNTM(t, bin, "--robot-status")
+	out, runErr := runNTM(t, bin, "--robot-status")
 	// robot-status should return JSON (even if success: false due to no tmux).
 	var parsed map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		t.Fatalf("--robot-status did not return valid JSON: %v\nOutput: %s", err, out)
+		t.Fatalf("--robot-status did not return valid JSON: %v\nCommand error: %v\nOutput: %s", err, runErr, out)
 	}
 }
 
 func TestSurfaceTruthfulness_RobotTerse(t *testing.T) {
 	bin := ntmBinary(t, "")
 
-	out, _ := runNTM(t, bin, "--robot-terse")
+	out, runErr := runNTM(t, bin, "--robot-terse")
 	trimmed := strings.TrimSpace(out)
 	if trimmed == "" {
-		t.Fatal("--robot-terse returned empty output")
+		t.Fatalf("--robot-terse returned empty output: %v", runErr)
 	}
 	lines := strings.Split(trimmed, "\n")
 	if len(lines) != 1 {
