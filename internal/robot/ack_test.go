@@ -65,7 +65,11 @@ func TestRobotSendSingularPaneRealTmux(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(captured, "dispatch-smoke") {
+	// capture-pane inserts line breaks when staged input wraps at the pane
+	// boundary. Remove only terminal row separators so the assertion still
+	// requires the exact message bytes in order.
+	capturedWithoutLineBreaks := strings.NewReplacer("\r", "", "\n", "").Replace(captured)
+	if !strings.Contains(capturedWithoutLineBreaks, "dispatch-smoke") {
 		t.Fatalf("target pane did not receive staged message: %q", captured)
 	}
 

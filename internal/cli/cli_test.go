@@ -535,7 +535,7 @@ func canonicalTempDir(t *testing.T) string {
 func createCLIWorkspaceProjectRoot(t *testing.T) (string, string) {
 	t.Helper()
 
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	cmd := exec.Command("git", "init", "-b", "main", root)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("initialize workspace git repository: %v\n%s", err, output)
@@ -1096,7 +1096,7 @@ func writePipelineLintWorkflow(t *testing.T, content string) string {
 func TestResolveRobotSessionProjectScopeNormalizesExplicitPrefix(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	projectsBase := t.TempDir()
+	projectsBase := canonicalTempDir(t)
 	fullSession := "robotrootsession"
 	projectDir := filepath.Join(projectsBase, fullSession)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -2286,7 +2286,7 @@ func TestResolveResumeScopeRejectsWorkspaceFallbackForExplicitSession(t *testing
 func TestResolveResumeScopeUsesCurrentWorkspaceOnlyForStoredHandoff(t *testing.T) {
 	isolateSessionAgentStorage(t)
 
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	handoffDir := filepath.Join(workspace, ".ntm", "handoffs", "mysession")
 	if err := os.MkdirAll(handoffDir, 0o755); err != nil {
 		t.Fatalf("mkdir handoff dir: %v", err)
