@@ -1614,11 +1614,22 @@ func TestHandleRobotHealth_KernelError(t *testing.T) {
 }
 
 // =============================================================================
-// handleAgentSpawnV1 — kernel error
+// handleAgentSpawnV1 — spawn dependency error
 // =============================================================================
 
-func TestHandleAgentSpawnV1_KernelError(t *testing.T) {
+func TestHandleAgentSpawnV1_SpawnError(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	called := false
+	srv.spawnAgents = func(_ context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		called = true
+		if opts.Session != "__nonexistent_session_12345__" {
+			t.Errorf("spawn session = %q, want __nonexistent_session_12345__", opts.Session)
+		}
+		if opts.CCCount != 1 {
+			t.Errorf("spawn cc count = %d, want 1", opts.CCCount)
+		}
+		return nil, errServeTestAgentSpawnDisabled
+	}
 
 	rec := httptest.NewRecorder()
 	body := `{"cc_count":1}`
@@ -1629,9 +1640,106 @@ func TestHandleAgentSpawnV1_KernelError(t *testing.T) {
 
 	srv.handleAgentSpawnV1(rec, req)
 
-	// Should error or succeed — just verify it doesn't panic and returns a valid response
-	if rec.Code == 0 {
-		t.Fatal("expected non-zero status code")
+	if !called {
+		t.Fatal("spawn dependency was not called")
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var resp APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("success = true, want false")
+	}
+	if resp.ErrorCode != ErrCodeInternalError {
+		t.Fatalf("error_code = %q, want %q", resp.ErrorCode, ErrCodeInternalError)
+	}
+	if !strings.Contains(resp.Error, errServeTestAgentSpawnDisabled.Error()) {
+		t.Fatalf("error = %q, want disabled-spawn error", resp.Error)
+	}
+}
+
+func TestHandleAgentSpawnV1_MissingDependencyFailsClosed(t *testing.T) {
+	srv := &Server{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/test/agents/spawn", strings.NewReader(`{"cc_count":1}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "test")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAgentSpawnV1(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	var resp APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Success || resp.ErrorCode != ErrCodeServiceUnavail {
+		t.Fatalf("response = %+v, want unavailable error", resp)
+	}
+}
+
+func TestHandleAgentSpawnV1_RobotFailurePreservesContract(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		return &robot.SpawnOutput{
+			RobotResponse: robot.NewErrorResponse(
+				errors.New("tmux is not installed"),
+				robot.ErrCodeDependencyMissing,
+				"Install tmux to spawn sessions",
+			),
+			Agents: []robot.SpawnedAgent{},
+		}, nil
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/test/agents/spawn", strings.NewReader(`{"cc_count":1}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "test")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAgentSpawnV1(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	var resp APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Success || resp.ErrorCode != robot.ErrCodeDependencyMissing {
+		t.Fatalf("response = %+v, want dependency failure", resp)
+	}
+	if resp.Hint != "Install tmux to spawn sessions" {
+		t.Fatalf("hint = %q, want install guidance", resp.Hint)
+	}
+}
+
+func TestHandleAgentSpawnV1_NilResultFailsClosed(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		return nil, nil
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/test/agents/spawn", strings.NewReader(`{"cc_count":1}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "test")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	srv.handleAgentSpawnV1(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var resp APIError
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Success || resp.ErrorCode != ErrCodeInternalError {
+		t.Fatalf("response = %+v, want internal error", resp)
 	}
 }
 

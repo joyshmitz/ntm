@@ -83,6 +83,7 @@ type Server struct {
 
 	// Pane output streaming
 	streamManager *tmux.StreamManager
+	spawnAgents   func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error)
 
 	// Agent Mail client (lazy-init)
 	mailClient *agentmail.Client
@@ -913,6 +914,9 @@ func New(cfg Config) *Server {
 		idempotencyStore:   NewIdempotencyStore(24 * time.Hour),
 		jobStore:           NewJobStore(),
 		wsHub:              NewWSHub(),
+		spawnAgents: func(ctx context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+			return robot.GetSpawn(ctx, opts, nil)
+		},
 	}
 
 	// Initialize pane output streaming
@@ -1695,6 +1699,27 @@ func writeSuccessResponse(w http.ResponseWriter, status int, data map[string]int
 		data["request_id"] = requestID
 	}
 	writeJSON(w, status, data)
+}
+
+func robotErrorHTTPStatus(code string) int {
+	switch code {
+	case robot.ErrCodeInvalidFlag:
+		return http.StatusBadRequest
+	case robot.ErrCodeSessionNotFound, robot.ErrCodePaneNotFound, robot.ErrCodeNotFound:
+		return http.StatusNotFound
+	case robot.ErrCodePermissionDenied:
+		return http.StatusForbidden
+	case robot.ErrCodeResourceBusy:
+		return http.StatusConflict
+	case robot.ErrCodeTimeout:
+		return http.StatusGatewayTimeout
+	case robot.ErrCodeNotImplemented:
+		return http.StatusNotImplemented
+	case robot.ErrCodeDependencyMissing:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // decodeOptionalJSONBody decodes an optional JSON request body into dst.
@@ -3642,9 +3667,26 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 		WaitReady: req.WaitReady,
 	}
 
-	result, err := robot.GetSpawn(r.Context(), opts, nil)
+	if s.spawnAgents == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "agent spawn service unavailable", nil, reqID)
+		return
+	}
+
+	result, err := s.spawnAgents(r.Context(), opts)
 	if err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		return
+	}
+	if result == nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, "agent spawn returned no result", nil, reqID)
+		return
+	}
+	if !result.Success {
+		details := map[string]interface{}{}
+		if result.Hint != "" {
+			details["hint"] = result.Hint
+		}
+		writeErrorResponse(w, robotErrorHTTPStatus(result.ErrorCode), result.ErrorCode, result.Error, details, reqID)
 		return
 	}
 

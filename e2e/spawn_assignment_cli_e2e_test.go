@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -92,6 +93,241 @@ func TestE2ESpawnAssignmentProductionCLI(t *testing.T) {
 		replayed.DispatchedAt == nil || !replayed.DispatchedAt.Equal(firstDispatchedAt) ||
 		replayed.ReservationExpiresAt == nil || !replayed.ReservationExpiresAt.Equal(firstReservationExpiresAt) {
 		t.Fatalf("spawn replay mutated durable side-effect receipts: before=%+v after=%+v", firstRecord, replayed)
+	}
+}
+
+// TestE2EServeRESTSpawnBuiltBinary proves the production HTTP server keeps
+// spawn responses truthful while launching only into its private tmux server.
+func TestE2EServeRESTSpawnBuiltBinary(t *testing.T) {
+	CommonE2EPrerequisites(t)
+	testutil.RequireTmuxThrottled(t)
+
+	ntmPath, err := ensureE2ENTMBin()
+	if err != nil {
+		t.Fatalf("resolve E2E ntm binary: %v", err)
+	}
+	tmuxPath, err := exec.LookPath(tmux.BinaryPath())
+	if err != nil {
+		t.Fatalf("resolve tmux: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate serve E2E port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release serve E2E port: %v", err)
+	}
+
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	homeDir := filepath.Join(root, "home")
+	configDir := filepath.Join(root, "config")
+	fakeBin := filepath.Join(root, "bin")
+	tmuxRoot := filepath.Join(root, "tmux")
+	for _, dir := range []string{projectDir, homeDir, configDir, fakeBin, tmuxRoot, filepath.Join(root, "data")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create REST spawn fixture directory %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".zshrc"), []byte("# isolated REST spawn E2E shell\n"), 0o600); err != nil {
+		t.Fatalf("create isolated shell config: %v", err)
+	}
+	launchMarker := filepath.Join(root, "fake-claude-launched")
+	writeSpawnLaunchMarkerAgent(t, filepath.Join(fakeBin, "claude"), launchMarker)
+
+	env := spawnAssignmentIsolatedEnv(map[string]string{
+		"HOME":                         homeDir,
+		"XDG_CONFIG_HOME":              configDir,
+		"XDG_DATA_HOME":                filepath.Join(root, "data"),
+		"TMUX_TMPDIR":                  tmuxRoot,
+		"PATH":                         fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"NTM_DISABLE_INTERNAL_MONITOR": "1",
+		"NTM_TEST_MODE":                "1",
+		"AGENT_MAIL_URL":               "http://127.0.0.1:1/mcp/",
+		"AGENT_MAIL_TOKEN":             "",
+		"HTTP_PROXY":                   "",
+		"HTTPS_PROXY":                  "",
+		"ALL_PROXY":                    "",
+		"NO_PROXY":                     "127.0.0.1,localhost",
+		"NO_COLOR":                     "1",
+		"TERM":                         "xterm-256color",
+	})
+
+	logPath := filepath.Join(root, "serve.log")
+	serverLog, err := os.Create(logPath)
+	if err != nil {
+		t.Fatalf("create serve log: %v", err)
+	}
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	serverCmd := exec.CommandContext(
+		serverCtx,
+		ntmPath,
+		"serve",
+		"--host=127.0.0.1",
+		fmt.Sprintf("--port=%d", port),
+	)
+	serverCmd.Dir = projectDir
+	serverCmd.Env = append([]string(nil), env...)
+	serverCmd.Stdout = serverLog
+	serverCmd.Stderr = serverLog
+	if err := serverCmd.Start(); err != nil {
+		_ = serverLog.Close()
+		t.Fatalf("start ntm serve: %v", err)
+	}
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serverCmd.Wait()
+	}()
+	t.Cleanup(func() {
+		stopServer()
+		select {
+		case <-serverDone:
+		case <-time.After(5 * time.Second):
+			if serverCmd.Process != nil {
+				_ = serverCmd.Process.Kill()
+			}
+			<-serverDone
+		}
+		_ = serverLog.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, tmuxPath, "kill-server")
+		cmd.Env = append([]string(nil), env...)
+		_ = cmd.Run()
+	})
+
+	readServerLog := func() string {
+		data, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return fmt.Sprintf("<read serve log: %v>", readErr)
+		}
+		return string(data)
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: transport,
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		request, requestErr := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/health", nil)
+		if requestErr != nil {
+			t.Fatalf("create serve readiness request: %v", requestErr)
+		}
+		resp, requestErr := client.Do(request)
+		if requestErr == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ntm serve did not become ready: %v log=%s", requestErr, readServerLog())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	type restSpawnAgent struct {
+		Pane  string `json:"pane"`
+		Type  string `json:"type"`
+		Ready bool   `json:"ready"`
+	}
+	type restSpawnEnvelope struct {
+		Success   bool             `json:"success"`
+		Timestamp string           `json:"timestamp"`
+		Session   string           `json:"session"`
+		Agents    []restSpawnAgent `json:"agents"`
+		Error     string           `json:"error"`
+		ErrorCode string           `json:"error_code"`
+		Hint      string           `json:"hint"`
+	}
+	postSpawn := func(t *testing.T, session string) (int, restSpawnEnvelope) {
+		t.Helper()
+		request, err := http.NewRequestWithContext(
+			t.Context(),
+			http.MethodPost,
+			baseURL+"/api/v1/sessions/"+url.PathEscape(session)+"/agents/spawn",
+			strings.NewReader(`{"cc_count":1,"wait_ready":true}`),
+		)
+		if err != nil {
+			t.Fatalf("create REST spawn request: %v", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("REST spawn request: %v log=%s", err, readServerLog())
+		}
+		body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		closeErr := response.Body.Close()
+		if err != nil {
+			t.Fatalf("read REST spawn response: %v", err)
+		}
+		if closeErr != nil {
+			t.Fatalf("close REST spawn response: %v", closeErr)
+		}
+		var envelope restSpawnEnvelope
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("decode REST spawn response: %v raw=%s", err, body)
+		}
+		return response.StatusCode, envelope
+	}
+
+	session := fmt.Sprintf("ntm-e2e-rest-spawn-%d-%d", os.Getpid(), time.Now().UnixNano())
+	status, spawned := postSpawn(t, session)
+	if status != http.StatusOK || !spawned.Success || spawned.Timestamp == "" || spawned.Session != session || spawned.Error != "" || spawned.ErrorCode != "" {
+		t.Fatalf("successful REST spawn status=%d envelope=%+v log=%s", status, spawned, readServerLog())
+	}
+	if len(spawned.Agents) != 2 {
+		t.Fatalf("spawned agents = %+v, want user and claude", spawned.Agents)
+	}
+	claudeReady := false
+	for _, agent := range spawned.Agents {
+		if agent.Pane == "" {
+			t.Fatalf("spawned agent missing pane: %+v", agent)
+		}
+		if agent.Type == "claude" && agent.Ready {
+			claudeReady = true
+		}
+	}
+	if !claudeReady {
+		t.Fatalf("spawned agents did not include ready fake claude: %+v", spawned.Agents)
+	}
+	if _, err := os.Stat(launchMarker); err != nil {
+		t.Fatalf("fake claude launch marker: %v", err)
+	}
+
+	checkSession := func(t *testing.T, commandEnv []string, target string) ([]byte, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, tmuxPath, "has-session", "-t", target)
+		if commandEnv != nil {
+			cmd.Env = append([]string(nil), commandEnv...)
+		}
+		return cmd.CombinedOutput()
+	}
+	if output, err := checkSession(t, env, session); err != nil {
+		t.Fatalf("private tmux session missing: %v output=%s", err, output)
+	}
+	if _, err := checkSession(t, nil, session); err == nil {
+		t.Fatalf("REST spawn leaked session %q onto the host tmux socket", session)
+	}
+
+	invalidSession := "invalid--reserved-label-separator"
+	status, failed := postSpawn(t, invalidSession)
+	if status != http.StatusBadRequest || failed.Success || failed.Timestamp == "" ||
+		failed.ErrorCode != "INVALID_FLAG" || failed.Error == "" || failed.Hint == "" {
+		t.Fatalf("invalid REST spawn status=%d envelope=%+v log=%s", status, failed, readServerLog())
+	}
+	if _, err := checkSession(t, env, invalidSession); err == nil {
+		t.Fatalf("invalid REST spawn created private session %q", invalidSession)
 	}
 }
 

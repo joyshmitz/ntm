@@ -35,8 +35,16 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
+var errServeTestAgentSpawnDisabled = errors.New("agent spawning disabled in serve unit tests")
+
 func setupTestServer(t *testing.T) (*Server, *state.Store) {
 	t.Helper()
+
+	// Handler tests must never inherit a developer's live tmux server. Tests
+	// that need real tmux own their lifecycle in the E2E suite instead.
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
 
 	// Most serve tests only exercise handler logic and do not need a file-backed
 	// database. Use an isolated in-memory store to avoid repeated disk-backed
@@ -61,12 +69,68 @@ func setupTestServer(t *testing.T) (*Server, *state.Store) {
 		EventBus:   eventBus,
 		StateStore: store,
 	})
+	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		return nil, errServeTestAgentSpawnDisabled
+	}
 
 	t.Cleanup(func() {
 		srv.Stop()
 	})
 
 	return srv, store
+}
+
+func TestSetupTestServerIsolatesTMUXAndAgentSpawn(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/live-tmux,123,0")
+	t.Setenv("TMUX_PANE", "%123")
+
+	srv, _ := setupTestServer(t)
+
+	if got := os.Getenv("TMUX"); got != "" {
+		t.Fatalf("TMUX = %q, want empty", got)
+	}
+	if got := os.Getenv("TMUX_PANE"); got != "" {
+		t.Fatalf("TMUX_PANE = %q, want empty", got)
+	}
+	if got := os.Getenv("TMUX_TMPDIR"); got == "" {
+		t.Fatal("TMUX_TMPDIR must identify an isolated socket root")
+	}
+
+	result, err := srv.spawnAgents(context.Background(), robot.SpawnOptions{Session: "must-not-launch", CCCount: 1})
+	if result != nil {
+		t.Fatalf("spawn result = %+v, want nil", result)
+	}
+	if !errors.Is(err, errServeTestAgentSpawnDisabled) {
+		t.Fatalf("spawn error = %v, want %v", err, errServeTestAgentSpawnDisabled)
+	}
+}
+
+func TestRobotErrorHTTPStatus(t *testing.T) {
+	tests := []struct {
+		code string
+		want int
+	}{
+		{code: robot.ErrCodeInvalidFlag, want: http.StatusBadRequest},
+		{code: robot.ErrCodeSessionNotFound, want: http.StatusNotFound},
+		{code: robot.ErrCodePaneNotFound, want: http.StatusNotFound},
+		{code: robot.ErrCodeNotFound, want: http.StatusNotFound},
+		{code: robot.ErrCodePermissionDenied, want: http.StatusForbidden},
+		{code: robot.ErrCodeResourceBusy, want: http.StatusConflict},
+		{code: robot.ErrCodeTimeout, want: http.StatusGatewayTimeout},
+		{code: robot.ErrCodeNotImplemented, want: http.StatusNotImplemented},
+		{code: robot.ErrCodeDependencyMissing, want: http.StatusServiceUnavailable},
+		{code: robot.ErrCodeInternalError, want: http.StatusInternalServerError},
+		{code: "", want: http.StatusInternalServerError},
+		{code: "UNKNOWN_CODE", want: http.StatusInternalServerError},
+	}
+
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			if got := robotErrorHTTPStatus(test.code); got != test.want {
+				t.Fatalf("robotErrorHTTPStatus(%q) = %d, want %d", test.code, got, test.want)
+			}
+		})
+	}
 }
 
 func requireRegisterWSClient(tb testing.TB, hub *WSHub, client *WSClient) {

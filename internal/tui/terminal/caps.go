@@ -4,6 +4,7 @@ package terminal
 import (
 	"os"
 	"strings"
+	"sync"
 )
 
 // Capabilities holds detected terminal capabilities
@@ -14,13 +15,28 @@ type Capabilities struct {
 	ColorTerm     string
 }
 
-var cachedCaps *Capabilities
+var capabilityCache struct {
+	sync.RWMutex
+	value Capabilities
+	valid bool
+}
 
 // Detect returns the current terminal's capabilities.
 // Results are cached for performance.
 func Detect() Capabilities {
-	if cachedCaps != nil {
-		return *cachedCaps
+	capabilityCache.RLock()
+	if capabilityCache.valid {
+		caps := capabilityCache.value
+		capabilityCache.RUnlock()
+		return caps
+	}
+	capabilityCache.RUnlock()
+
+	capabilityCache.Lock()
+	defer capabilityCache.Unlock()
+
+	if capabilityCache.valid {
+		return capabilityCache.value
 	}
 
 	caps := Capabilities{
@@ -31,7 +47,8 @@ func Detect() Capabilities {
 	caps.TrueColor = supportsTrueColor(caps.Term, caps.ColorTerm)
 	caps.UnicodeBlocks = supportsUnicodeBlocks(caps.Term)
 
-	cachedCaps = &caps
+	capabilityCache.value = caps
+	capabilityCache.valid = true
 	return caps
 }
 
@@ -114,5 +131,8 @@ func supportsUnicodeBlocks(term string) bool {
 
 // ResetCache clears the cached capabilities. Useful for testing.
 func ResetCache() {
-	cachedCaps = nil
+	capabilityCache.Lock()
+	capabilityCache.value = Capabilities{}
+	capabilityCache.valid = false
+	capabilityCache.Unlock()
 }
